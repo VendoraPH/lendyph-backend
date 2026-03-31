@@ -7,6 +7,8 @@ use App\Http\Controllers\Api\BranchController;
 use App\Http\Controllers\Api\CoMakerController;
 use App\Http\Controllers\Api\DocumentController;
 use App\Http\Controllers\Api\HealthController;
+use App\Http\Controllers\Api\LoanController;
+use App\Http\Controllers\Api\LoanProductController;
 use App\Http\Controllers\Api\RoleController;
 use App\Http\Controllers\Api\UserController;
 use App\Http\Middleware\CheckTokenExpiry;
@@ -56,6 +58,18 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::post('/co-makers/{coMaker}/documents', [DocumentController::class, 'store']);
     Route::get('/documents/{document}', [DocumentController::class, 'show']);
     Route::delete('/documents/{document}', [DocumentController::class, 'destroy']);
+
+    // Loan Products
+    Route::apiResource('loan-products', LoanProductController::class);
+
+    // Loans
+    Route::apiResource('loans', LoanController::class);
+    Route::patch('/loans/{loan}/submit', [LoanController::class, 'submit']);
+    Route::patch('/loans/{loan}/approve', [LoanController::class, 'approve']);
+    Route::patch('/loans/{loan}/reject', [LoanController::class, 'reject']);
+    Route::patch('/loans/{loan}/release', [LoanController::class, 'release']);
+    Route::patch('/loans/{loan}/void', [LoanController::class, 'void']);
+    Route::get('/loans/{loan}/amortization-preview', [LoanController::class, 'amortizationPreview']);
 
     // Roles (read-only)
     Route::get('/roles', [RoleController::class, 'index']);

@@ -74,6 +74,11 @@ class Borrower extends Model
         return $this->morphMany(Document::class, 'documentable');
     }
 
+    public function loans(): HasMany
+    {
+        return $this->hasMany(Loan::class);
+    }
+
     public function scopeActive($query)
     {
         return $query->where('status', 'active');

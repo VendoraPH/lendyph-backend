@@ -1521,6 +1521,723 @@
                 }
             }
         },
+        "/api/loans": {
+            "get": {
+                "tags": [
+                    "Loans"
+                ],
+                "summary": "List loans",
+                "operationId": "d4cdd78a98ab136ecff253f0e1c8b985",
+                "parameters": [
+                    {
+                        "name": "search",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "status",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "branch_id",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    },
+                    {
+                        "name": "borrower_id",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    },
+                    {
+                        "name": "per_page",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "integer",
+                            "default": 15
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Paginated loan list"
+                    },
+                    "401": {
+                        "description": "Unauthenticated"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            },
+            "post": {
+                "tags": [
+                    "Loans"
+                ],
+                "summary": "Create loan application",
+                "operationId": "07d308d6151ee408796ff0cb78c3ceee",
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "required": [
+                                    "borrower_id",
+                                    "loan_product_id",
+                                    "principal_amount",
+                                    "start_date"
+                                ],
+                                "properties": {
+                                    "borrower_id": {
+                                        "type": "integer",
+                                        "example": 1
+                                    },
+                                    "co_maker_ids": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "integer"
+                                        },
+                                        "example": [
+                                            1
+                                        ]
+                                    },
+                                    "loan_product_id": {
+                                        "type": "integer",
+                                        "example": 1
+                                    },
+                                    "principal_amount": {
+                                        "type": "number",
+                                        "example": 50000
+                                    },
+                                    "interest_rate": {
+                                        "type": "number",
+                                        "example": 3
+                                    },
+                                    "start_date": {
+                                        "type": "string",
+                                        "format": "date",
+                                        "example": "2026-04-01"
+                                    },
+                                    "deductions": {
+                                        "type": "array",
+                                        "items": {
+                                            "properties": {
+                                                "name": {
+                                                    "type": "string",
+                                                    "example": "Processing Fee"
+                                                },
+                                                "amount": {
+                                                    "type": "number",
+                                                    "example": 2
+                                                },
+                                                "type": {
+                                                    "type": "string",
+                                                    "example": "percentage",
+                                                    "enum": [
+                                                        "fixed",
+                                                        "percentage"
+                                                    ]
+                                                }
+                                            },
+                                            "type": "object"
+                                        }
+                                    }
+                                },
+                                "type": "object"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "201": {
+                        "description": "Loan application created"
+                    },
+                    "422": {
+                        "description": "Validation error"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
+        "/api/loans/{id}": {
+            "get": {
+                "tags": [
+                    "Loans"
+                ],
+                "summary": "Show loan",
+                "operationId": "823bb5bb6c937886f3815abede752ee5",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Loan details"
+                    },
+                    "404": {
+                        "description": "Not found"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            },
+            "put": {
+                "tags": [
+                    "Loans"
+                ],
+                "summary": "Update loan",
+                "description": "Update loan application (only if draft or for_review)",
+                "operationId": "323d15062bff42edc172ae0171a64768",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {}
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Loan updated"
+                    },
+                    "422": {
+                        "description": "Validation error or not editable"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            },
+            "delete": {
+                "tags": [
+                    "Loans"
+                ],
+                "summary": "Delete loan",
+                "description": "Delete loan application (only if draft)",
+                "operationId": "d871455248e30b94f5c4f8a341608ea5",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Loan deleted"
+                    },
+                    "422": {
+                        "description": "Cannot delete"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
+        "/api/loans/{id}/submit": {
+            "patch": {
+                "tags": [
+                    "Loans"
+                ],
+                "summary": "Submit loan for review",
+                "operationId": "6344b954f40db63f6c4b086988dc875d",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Loan submitted for review"
+                    },
+                    "422": {
+                        "description": "Invalid status transition"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
+        "/api/loans/{id}/approve": {
+            "patch": {
+                "tags": [
+                    "Loans"
+                ],
+                "summary": "Approve loan",
+                "operationId": "d26b03616c860be3e1746aa8be94e956",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "properties": {
+                                    "approval_remarks": {
+                                        "type": "string"
+                                    }
+                                },
+                                "type": "object"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Loan approved"
+                    },
+                    "422": {
+                        "description": "Invalid status transition"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
+        "/api/loans/{id}/reject": {
+            "patch": {
+                "tags": [
+                    "Loans"
+                ],
+                "summary": "Reject loan",
+                "operationId": "d158b97fefd4766b124f149444b139ec",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "properties": {
+                                    "approval_remarks": {
+                                        "type": "string"
+                                    }
+                                },
+                                "type": "object"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Loan rejected"
+                    },
+                    "422": {
+                        "description": "Invalid status transition"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
+        "/api/loans/{id}/release": {
+            "patch": {
+                "tags": [
+                    "Loans"
+                ],
+                "summary": "Release loan",
+                "description": "Release an approved loan — generates loan account number and amortization schedule",
+                "operationId": "a3164bd9b89a69ca6ef2ddc39bbd3636",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Loan released"
+                    },
+                    "422": {
+                        "description": "Invalid status transition"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
+        "/api/loans/{id}/void": {
+            "patch": {
+                "tags": [
+                    "Loans"
+                ],
+                "summary": "Void loan",
+                "operationId": "8921fa4181ded8db488890d6f293d2a1",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Loan voided"
+                    },
+                    "422": {
+                        "description": "Cannot void"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
+        "/api/loans/{id}/amortization-preview": {
+            "get": {
+                "tags": [
+                    "Loans"
+                ],
+                "summary": "Preview amortization schedule",
+                "description": "Compute and return amortization schedule without persisting",
+                "operationId": "1464c5e82897e8ee44aab6c1505daf06",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Amortization schedule preview"
+                    },
+                    "404": {
+                        "description": "Not found"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
+        "/api/loan-products": {
+            "get": {
+                "tags": [
+                    "Loan Products"
+                ],
+                "summary": "List loan products",
+                "operationId": "21e0edc7693aacafbc82302561d0367d",
+                "parameters": [
+                    {
+                        "name": "search",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "status",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "enum": [
+                                "active",
+                                "inactive"
+                            ]
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Loan product list"
+                    },
+                    "401": {
+                        "description": "Unauthenticated"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            },
+            "post": {
+                "tags": [
+                    "Loan Products"
+                ],
+                "summary": "Create loan product",
+                "operationId": "db7c6f77735afa0378517ccffc5b5fe7",
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "required": [
+                                    "name",
+                                    "interest_rate",
+                                    "interest_method",
+                                    "term",
+                                    "frequency"
+                                ],
+                                "properties": {
+                                    "name": {
+                                        "type": "string",
+                                        "example": "Personal Loan - 12 Months"
+                                    },
+                                    "interest_rate": {
+                                        "type": "number",
+                                        "example": 3
+                                    },
+                                    "interest_method": {
+                                        "type": "string",
+                                        "enum": [
+                                            "straight",
+                                            "diminishing",
+                                            "upon_maturity"
+                                        ]
+                                    },
+                                    "term": {
+                                        "type": "integer",
+                                        "example": 12
+                                    },
+                                    "frequency": {
+                                        "type": "string",
+                                        "enum": [
+                                            "daily",
+                                            "weekly",
+                                            "semi_monthly",
+                                            "monthly"
+                                        ]
+                                    },
+                                    "processing_fee": {
+                                        "type": "number",
+                                        "example": 2
+                                    },
+                                    "service_fee": {
+                                        "type": "number",
+                                        "example": 1
+                                    },
+                                    "penalty_rate": {
+                                        "type": "number",
+                                        "example": 3
+                                    },
+                                    "grace_period_days": {
+                                        "type": "integer",
+                                        "example": 3
+                                    },
+                                    "min_amount": {
+                                        "type": "number",
+                                        "example": 5000
+                                    },
+                                    "max_amount": {
+                                        "type": "number",
+                                        "example": 500000
+                                    }
+                                },
+                                "type": "object"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "201": {
+                        "description": "Loan product created"
+                    },
+                    "422": {
+                        "description": "Validation error"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
+        "/api/loan-products/{id}": {
+            "get": {
+                "tags": [
+                    "Loan Products"
+                ],
+                "summary": "Show loan product",
+                "operationId": "3ff2d1de7db172b0a497b3587ede651f",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Loan product details"
+                    },
+                    "404": {
+                        "description": "Not found"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            },
+            "put": {
+                "tags": [
+                    "Loan Products"
+                ],
+                "summary": "Update loan product",
+                "operationId": "0bc0cb4b15f69710c63ab7ab72a161fc",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {}
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Loan product updated"
+                    },
+                    "422": {
+                        "description": "Validation error"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            },
+            "delete": {
+                "tags": [
+                    "Loan Products"
+                ],
+                "summary": "Delete loan product",
+                "operationId": "dc35e4cc750acbb2e43345f87609354e",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Loan product deleted"
+                    },
+                    "409": {
+                        "description": "Cannot delete — loans reference this product"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
         "/api/roles": {
             "get": {
                 "tags": [
@@ -2020,6 +2737,14 @@
         {
             "name": "System",
             "description": "System"
+        },
+        {
+            "name": "Loans",
+            "description": "Loans"
+        },
+        {
+            "name": "Loan Products",
+            "description": "Loan Products"
         },
         {
             "name": "Roles",
