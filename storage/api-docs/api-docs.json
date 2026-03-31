@@ -2238,6 +2238,225 @@
                 ]
             }
         },
+        "/api/loans/{loan}/repayments": {
+            "get": {
+                "tags": [
+                    "Repayments"
+                ],
+                "summary": "List repayments for a loan",
+                "operationId": "76959087a90bbc817ff9496d9e7e5b42",
+                "parameters": [
+                    {
+                        "name": "loan",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    },
+                    {
+                        "name": "per_page",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "integer",
+                            "default": 15
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Paginated repayment list"
+                    },
+                    "401": {
+                        "description": "Unauthenticated"
+                    },
+                    "404": {
+                        "description": "Loan not found"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            },
+            "post": {
+                "tags": [
+                    "Repayments"
+                ],
+                "summary": "Record a repayment",
+                "operationId": "0bf862fa3984933f8d59748c47e2e6b8",
+                "parameters": [
+                    {
+                        "name": "loan",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "required": [
+                                    "payment_date",
+                                    "amount_paid"
+                                ],
+                                "properties": {
+                                    "payment_date": {
+                                        "type": "string",
+                                        "format": "date",
+                                        "example": "2026-04-15"
+                                    },
+                                    "amount_paid": {
+                                        "type": "number",
+                                        "example": 5000
+                                    },
+                                    "remarks": {
+                                        "type": "string",
+                                        "nullable": true
+                                    }
+                                },
+                                "type": "object"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "201": {
+                        "description": "Repayment recorded"
+                    },
+                    "422": {
+                        "description": "Validation error"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
+        "/api/repayments/{repayment}": {
+            "get": {
+                "tags": [
+                    "Repayments"
+                ],
+                "summary": "Show repayment / receipt details",
+                "operationId": "313f845cdbdd89737c5d5e6cbba1949a",
+                "parameters": [
+                    {
+                        "name": "repayment",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Repayment details"
+                    },
+                    "404": {
+                        "description": "Not found"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
+        "/api/repayments/{repayment}/void": {
+            "patch": {
+                "tags": [
+                    "Repayments"
+                ],
+                "summary": "Void a repayment",
+                "operationId": "74dd91c5d57bb19d0befd6820105b222",
+                "parameters": [
+                    {
+                        "name": "repayment",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "required": [
+                                    "void_reason"
+                                ],
+                                "properties": {
+                                    "void_reason": {
+                                        "type": "string",
+                                        "example": "Duplicate entry"
+                                    }
+                                },
+                                "type": "object"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Repayment voided"
+                    },
+                    "422": {
+                        "description": "Already voided or validation error"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
+        "/api/loans/{loan}/summary": {
+            "get": {
+                "tags": [
+                    "Repayments"
+                ],
+                "summary": "Loan balance summary",
+                "description": "Returns outstanding balance, overdue amounts, next due date, and payment totals",
+                "operationId": "505a160a90092bdd9b2d520367583220",
+                "parameters": [
+                    {
+                        "name": "loan",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Loan summary"
+                    },
+                    "404": {
+                        "description": "Loan not found"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
         "/api/roles": {
             "get": {
                 "tags": [
@@ -2745,6 +2964,10 @@
         {
             "name": "Loan Products",
             "description": "Loan Products"
+        },
+        {
+            "name": "Repayments",
+            "description": "Repayments"
         },
         {
             "name": "Roles",

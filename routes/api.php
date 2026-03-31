@@ -9,6 +9,7 @@ use App\Http\Controllers\Api\DocumentController;
 use App\Http\Controllers\Api\HealthController;
 use App\Http\Controllers\Api\LoanController;
 use App\Http\Controllers\Api\LoanProductController;
+use App\Http\Controllers\Api\RepaymentController;
 use App\Http\Controllers\Api\RoleController;
 use App\Http\Controllers\Api\UserController;
 use App\Http\Middleware\CheckTokenExpiry;
@@ -70,6 +71,13 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::patch('/loans/{loan}/release', [LoanController::class, 'release']);
     Route::patch('/loans/{loan}/void', [LoanController::class, 'void']);
     Route::get('/loans/{loan}/amortization-preview', [LoanController::class, 'amortizationPreview']);
+
+    // Repayments
+    Route::get('/loans/{loan}/repayments', [RepaymentController::class, 'index']);
+    Route::post('/loans/{loan}/repayments', [RepaymentController::class, 'store']);
+    Route::get('/loans/{loan}/summary', [RepaymentController::class, 'summary']);
+    Route::get('/repayments/{repayment}', [RepaymentController::class, 'show']);
+    Route::patch('/repayments/{repayment}/void', [RepaymentController::class, 'void']);
 
     // Roles (read-only)
     Route::get('/roles', [RoleController::class, 'index']);

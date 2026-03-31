@@ -116,6 +116,20 @@ class Loan extends Model
         return $this->hasMany(AmortizationSchedule::class)->orderBy('period_number');
     }
 
+    public function repayments(): HasMany
+    {
+        return $this->hasMany(Repayment::class)->orderBy('payment_date');
+    }
+
+    protected function outstandingBalance(): Attribute
+    {
+        return Attribute::get(function () {
+            return $this->amortizationSchedules()
+                ->selectRaw('SUM(principal_due - principal_paid) as balance')
+                ->value('balance') ?? 0;
+        });
+    }
+
     public function documents(): MorphMany
     {
         return $this->morphMany(Document::class, 'documentable');
