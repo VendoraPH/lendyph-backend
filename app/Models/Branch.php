@@ -29,4 +29,9 @@ class Branch extends Model
     {
         return $this->hasMany(User::class);
     }
+
+    public function borrowers(): HasMany
+    {
+        return $this->hasMany(Borrower::class);
+    }
 }
