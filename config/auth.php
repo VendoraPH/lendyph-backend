@@ -114,4 +114,16 @@ return [
 
     'password_timeout' => env('AUTH_PASSWORD_TIMEOUT', 10800),
 
+    /*
+    |--------------------------------------------------------------------------
+    | Token Timeout (Minutes)
+    |--------------------------------------------------------------------------
+    |
+    | This value defines the number of minutes of inactivity before a
+    | Sanctum token is considered expired. Set to 0 to disable.
+    |
+    */
+
+    'token_timeout' => env('AUTH_TOKEN_TIMEOUT', 30),
+
 ];
