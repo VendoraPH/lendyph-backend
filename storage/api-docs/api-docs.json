@@ -1,0 +1,58 @@
+{
+    "openapi": "3.0.0",
+    "info": {
+        "title": "LendyPH API",
+        "description": "REST API for LendyPH Lending Application",
+        "contact": {
+            "name": "LendyPH",
+            "email": "support@lendyph.com"
+        },
+        "version": "1.0.0"
+    },
+    "servers": [
+        {
+            "url": "/api",
+            "description": "API Server"
+        }
+    ],
+    "paths": {
+        "/api/health": {
+            "get": {
+                "tags": [
+                    "System"
+                ],
+                "summary": "Health check",
+                "description": "Returns the API health status",
+                "operationId": "86f59596b50693fd899d11bc931d8060",
+                "responses": {
+                    "200": {
+                        "description": "API is running",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "properties": {
+                                        "status": {
+                                            "type": "string",
+                                            "example": "ok"
+                                        },
+                                        "timestamp": {
+                                            "type": "string",
+                                            "format": "date-time"
+                                        }
+                                    },
+                                    "type": "object"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "tags": [
+        {
+            "name": "System",
+            "description": "System"
+        }
+    ]
+}
