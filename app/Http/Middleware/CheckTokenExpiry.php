@@ -13,7 +13,7 @@ class CheckTokenExpiry
         $token = $request->user()?->currentAccessToken();
         $timeout = config('auth.token_timeout', 30);
 
-        if ($token && $timeout > 0 && $token->last_used_at &&
+        if ($token && $timeout > 0 && property_exists($token, 'last_used_at') && $token->last_used_at &&
             $token->last_used_at->diffInMinutes(now()) > $timeout) {
             $token->delete();
 
