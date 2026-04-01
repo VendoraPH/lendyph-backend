@@ -308,7 +308,7 @@ class LoanController extends Controller
         path: '/api/loans/{id}/amortization-preview',
         summary: 'Preview amortization schedule',
         description: 'Compute and return amortization schedule without persisting',
-        tags: ['Loans'],
+        tags: ['Amortization Schedule'],
         security: [['sanctum' => []]],
         parameters: [
             new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
@@ -325,5 +325,54 @@ class LoanController extends Controller
         $schedule = $this->loanService->buildAmortizationPreview($loan);
 
         return response()->json(['data' => $schedule]);
+    }
+
+    #[OA\Get(
+        path: '/api/loans/{id}/amortization-schedule',
+        summary: 'View persisted amortization schedule with payment tracking',
+        description: 'Returns the saved amortization schedule with beginning balance, paid amounts, penalties, and status per installment. Includes summary totals.',
+        tags: ['Amortization Schedule'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
+        ],
+        responses: [
+            new OA\Response(response: 200, description: 'Amortization schedule with payment tracking'),
+            new OA\Response(response: 404, description: 'Not found'),
+            new OA\Response(response: 422, description: 'Loan has no schedule yet'),
+        ],
+    )]
+    public function amortizationSchedule(Loan $loan): JsonResponse
+    {
+        $this->authorize('loans.view');
+
+        $schedules = $loan->amortizationSchedules;
+
+        if ($schedules->isEmpty()) {
+            return response()->json([
+                'message' => 'No amortization schedule found. Loan may not have been released yet.',
+            ], 422);
+        }
+
+        $summary = [
+            'total_principal' => round($schedules->sum(fn ($s) => (float) $s->principal_due), 2),
+            'total_interest' => round($schedules->sum(fn ($s) => (float) $s->interest_due), 2),
+            'total_penalty' => round($schedules->sum(fn ($s) => (float) $s->penalty_amount), 2),
+            'total_due' => round($schedules->sum(fn ($s) => (float) $s->total_due + (float) $s->penalty_amount), 2),
+            'total_principal_paid' => round($schedules->sum(fn ($s) => (float) $s->principal_paid), 2),
+            'total_interest_paid' => round($schedules->sum(fn ($s) => (float) $s->interest_paid), 2),
+            'total_penalty_paid' => round($schedules->sum(fn ($s) => (float) $s->penalty_paid), 2),
+            'total_paid' => round($schedules->sum(fn ($s) => (float) $s->principal_paid + (float) $s->interest_paid + (float) $s->penalty_paid), 2),
+            'periods_total' => $schedules->count(),
+            'periods_paid' => $schedules->where('status', 'paid')->count(),
+            'periods_partial' => $schedules->where('status', 'partial')->count(),
+            'periods_overdue' => $schedules->where('status', 'overdue')->count(),
+            'periods_pending' => $schedules->where('status', 'pending')->count(),
+        ];
+
+        return response()->json([
+            'data' => \App\Http\Resources\AmortizationScheduleResource::collection($schedules),
+            'summary' => $summary,
+        ]);
     }
 }

@@ -1972,7 +1972,7 @@
         "/api/loans/{id}/amortization-preview": {
             "get": {
                 "tags": [
-                    "Loans"
+                    "Amortization Schedule"
                 ],
                 "summary": "Preview amortization schedule",
                 "description": "Compute and return amortization schedule without persisting",
@@ -1993,6 +1993,42 @@
                     },
                     "404": {
                         "description": "Not found"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
+        "/api/loans/{id}/amortization-schedule": {
+            "get": {
+                "tags": [
+                    "Amortization Schedule"
+                ],
+                "summary": "View persisted amortization schedule with payment tracking",
+                "description": "Returns the saved amortization schedule with beginning balance, paid amounts, penalties, and status per installment. Includes summary totals.",
+                "operationId": "f1f42a472a6c32e854ad20d6f0eee799",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Amortization schedule with payment tracking"
+                    },
+                    "404": {
+                        "description": "Not found"
+                    },
+                    "422": {
+                        "description": "Loan has no schedule yet"
                     }
                 },
                 "security": [
@@ -2960,6 +2996,10 @@
         {
             "name": "Loans",
             "description": "Loans"
+        },
+        {
+            "name": "Amortization Schedule",
+            "description": "Amortization Schedule"
         },
         {
             "name": "Loan Products",

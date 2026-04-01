@@ -311,8 +311,38 @@ class LoanService
         $term = $loan->term;
         $ppY = $this->periodsPerYear($loan->frequency);
 
-        $totalInterest = round($principal * $rate / $ppY * $term, 2);
-        $date = $this->computeMaturityDate(
+        $interestPerPeriod = round($principal * $rate / $ppY, 2);
+        $totalInterest = round($interestPerPeriod * $term, 2);
+
+        // If term > 1, generate interest-only periodic payments + principal at maturity
+        if ($term > 1) {
+            $schedule = [];
+            $date = Carbon::parse($loan->start_date);
+
+            for ($i = 1; $i <= $term; $i++) {
+                $date = $this->addPeriod($date, $loan->frequency);
+                $isLast = ($i === $term);
+
+                $pDue = $isLast ? $principal : 0;
+                $iDue = ($isLast) ? $totalInterest - ($interestPerPeriod * ($term - 1)) : $interestPerPeriod;
+                $balance = $isLast ? 0 : $principal;
+
+                $schedule[] = [
+                    'period_number' => $i,
+                    'due_date' => $date->toDateString(),
+                    'principal_due' => round($pDue, 2),
+                    'interest_due' => round($iDue, 2),
+                    'total_due' => round($pDue + $iDue, 2),
+                    'remaining_balance' => round($balance, 2),
+                    'status' => 'pending',
+                ];
+            }
+
+            return $schedule;
+        }
+
+        // Single-period: lump sum at maturity
+        $maturityDate = $this->computeMaturityDate(
             $loan->start_date->toDateString(),
             $term,
             $loan->frequency,
@@ -321,7 +351,7 @@ class LoanService
         return [
             [
                 'period_number' => 1,
-                'due_date' => $date->toDateString(),
+                'due_date' => $maturityDate->toDateString(),
                 'principal_due' => $principal,
                 'interest_due' => $totalInterest,
                 'total_due' => round($principal + $totalInterest, 2),
