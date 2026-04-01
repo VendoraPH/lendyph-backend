@@ -121,6 +121,11 @@ class Loan extends Model
         return $this->hasMany(Repayment::class)->orderBy('payment_date');
     }
 
+    public function adjustments(): HasMany
+    {
+        return $this->hasMany(LoanAdjustment::class)->latest();
+    }
+
     protected function outstandingBalance(): Attribute
     {
         return Attribute::get(function () {

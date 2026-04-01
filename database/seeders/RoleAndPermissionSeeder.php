@@ -26,6 +26,9 @@ class RoleAndPermissionSeeder extends Seeder
             // Repayments
             'repayments.view', 'repayments.create', 'repayments.void',
 
+            // Loan Adjustments
+            'loan-adjustments.view', 'loan-adjustments.create', 'loan-adjustments.approve',
+
             // Reports
             'reports.view', 'reports.export',
 
@@ -45,6 +48,7 @@ class RoleAndPermissionSeeder extends Seeder
         Role::create(['name' => 'loan-officer', 'guard_name' => $guard])->givePermissionTo([
             'customers.view', 'customers.create', 'customers.update',
             'loans.view', 'loans.create', 'loans.process',
+            'loan-adjustments.view', 'loan-adjustments.create',
             'repayments.view',
             'reports.view', 'reports.export',
         ]);
@@ -66,6 +70,7 @@ class RoleAndPermissionSeeder extends Seeder
         Role::create(['name' => 'viewer', 'guard_name' => $guard])->givePermissionTo([
             'customers.view',
             'loans.view',
+            'loan-adjustments.view',
             'repayments.view',
             'reports.view',
         ]);

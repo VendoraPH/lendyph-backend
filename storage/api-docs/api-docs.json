@@ -1234,6 +1234,42 @@
                 ]
             }
         },
+        "/api/loans/{loan}/disclosure": {
+            "get": {
+                "tags": [
+                    "Loan Documents"
+                ],
+                "summary": "Generate disclosure statement",
+                "description": "Returns all financial terms, deductions, and amortization schedule for printing/display",
+                "operationId": "70df6b76409ef5d70f5a9175cfeb4de2",
+                "parameters": [
+                    {
+                        "name": "loan",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Disclosure statement data"
+                    },
+                    "422": {
+                        "description": "Loan not eligible for disclosure"
+                    },
+                    "404": {
+                        "description": "Loan not found"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
         "/api/borrowers/{borrowerId}/documents": {
             "get": {
                 "tags": [
@@ -1519,6 +1555,259 @@
                         }
                     }
                 }
+            }
+        },
+        "/api/loans/{loan}/adjustments": {
+            "get": {
+                "tags": [
+                    "Loan Adjustments"
+                ],
+                "summary": "List adjustments for a loan",
+                "operationId": "cd61b220cb7239a7202f52f70a1c3a05",
+                "parameters": [
+                    {
+                        "name": "loan",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Loan adjustments list"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            },
+            "post": {
+                "tags": [
+                    "Loan Adjustments"
+                ],
+                "summary": "Create a loan adjustment",
+                "operationId": "41a031e4e636026d553ac2d4c79a9844",
+                "parameters": [
+                    {
+                        "name": "loan",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "required": [
+                                    "adjustment_type",
+                                    "new_values"
+                                ],
+                                "properties": {
+                                    "adjustment_type": {
+                                        "type": "string",
+                                        "enum": [
+                                            "restructure",
+                                            "penalty_waiver",
+                                            "balance_adjustment",
+                                            "term_extension"
+                                        ]
+                                    },
+                                    "new_values": {
+                                        "type": "object"
+                                    },
+                                    "description": {
+                                        "type": "string",
+                                        "nullable": true
+                                    },
+                                    "remarks": {
+                                        "type": "string",
+                                        "nullable": true
+                                    }
+                                },
+                                "type": "object"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "201": {
+                        "description": "Adjustment created"
+                    },
+                    "422": {
+                        "description": "Validation error"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
+        "/api/loan-adjustments/{loanAdjustment}": {
+            "get": {
+                "tags": [
+                    "Loan Adjustments"
+                ],
+                "summary": "Show adjustment details",
+                "operationId": "59ba34f0ac7eb02af4cfa65a2f8d3a49",
+                "parameters": [
+                    {
+                        "name": "loanAdjustment",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Adjustment details"
+                    },
+                    "404": {
+                        "description": "Not found"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
+        "/api/loan-adjustments/{loanAdjustment}/approve": {
+            "patch": {
+                "tags": [
+                    "Loan Adjustments"
+                ],
+                "summary": "Approve an adjustment",
+                "operationId": "93a14d2c0840a6bcea922d1fc9079383",
+                "parameters": [
+                    {
+                        "name": "loanAdjustment",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "properties": {
+                                    "remarks": {
+                                        "type": "string",
+                                        "nullable": true
+                                    }
+                                },
+                                "type": "object"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Adjustment approved"
+                    },
+                    "422": {
+                        "description": "Invalid status"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
+        "/api/loan-adjustments/{loanAdjustment}/reject": {
+            "patch": {
+                "tags": [
+                    "Loan Adjustments"
+                ],
+                "summary": "Reject an adjustment",
+                "operationId": "d388f8aadd696244deace5f03d56c284",
+                "parameters": [
+                    {
+                        "name": "loanAdjustment",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "properties": {
+                                    "remarks": {
+                                        "type": "string",
+                                        "nullable": true
+                                    }
+                                },
+                                "type": "object"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Adjustment rejected"
+                    },
+                    "422": {
+                        "description": "Invalid status"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
+        "/api/loan-adjustments/{loanAdjustment}/apply": {
+            "patch": {
+                "tags": [
+                    "Loan Adjustments"
+                ],
+                "summary": "Apply an approved adjustment to the loan",
+                "operationId": "14428d592f59bd336d528623fee6c9e2",
+                "parameters": [
+                    {
+                        "name": "loanAdjustment",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Adjustment applied"
+                    },
+                    "422": {
+                        "description": "Invalid status"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
             }
         },
         "/api/loans": {
@@ -2274,6 +2563,42 @@
                 ]
             }
         },
+        "/api/loans/{loan}/promissory-note": {
+            "get": {
+                "tags": [
+                    "Loan Documents"
+                ],
+                "summary": "Generate promissory note",
+                "description": "Returns borrower promise-to-pay data, co-maker details, loan terms, and signature fields",
+                "operationId": "5c1feed8efd9a3269edeb322514bf248",
+                "parameters": [
+                    {
+                        "name": "loan",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Promissory note data"
+                    },
+                    "422": {
+                        "description": "Loan not eligible"
+                    },
+                    "404": {
+                        "description": "Loan not found"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
         "/api/loans/{loan}/repayments": {
             "get": {
                 "tags": [
@@ -2484,6 +2809,341 @@
                     },
                     "404": {
                         "description": "Loan not found"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
+        "/api/reports/statement-of-account/{loan}": {
+            "get": {
+                "tags": [
+                    "Reports"
+                ],
+                "summary": "Statement of Account",
+                "description": "All transactions, schedule, and balance for a specific loan",
+                "operationId": "9e866c1734176752222a5433443d01c0",
+                "parameters": [
+                    {
+                        "name": "loan",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Statement of account data"
+                    },
+                    "404": {
+                        "description": "Loan not found"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
+        "/api/reports/subsidiary-ledger/{borrower}": {
+            "get": {
+                "tags": [
+                    "Reports"
+                ],
+                "summary": "Subsidiary Ledger",
+                "description": "All loans with balances and payment history for a borrower",
+                "operationId": "306a398c952543fb4c25b5ce4c876c20",
+                "parameters": [
+                    {
+                        "name": "borrower",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    },
+                    {
+                        "name": "date_from",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "format": "date"
+                        }
+                    },
+                    {
+                        "name": "date_to",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "format": "date"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Subsidiary ledger data"
+                    },
+                    "404": {
+                        "description": "Borrower not found"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
+        "/api/reports/releases": {
+            "get": {
+                "tags": [
+                    "Reports"
+                ],
+                "summary": "List of Releases",
+                "description": "Paginated list of released loans with filters",
+                "operationId": "4f24dc740dad100c59fdfe8509b477f5",
+                "parameters": [
+                    {
+                        "name": "date_from",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "format": "date"
+                        }
+                    },
+                    {
+                        "name": "date_to",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "format": "date"
+                        }
+                    },
+                    {
+                        "name": "branch_id",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    },
+                    {
+                        "name": "status",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "enum": [
+                                "released",
+                                "closed"
+                            ]
+                        }
+                    },
+                    {
+                        "name": "per_page",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "integer",
+                            "default": 15
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Paginated releases list"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
+        "/api/reports/repayments": {
+            "get": {
+                "tags": [
+                    "Reports"
+                ],
+                "summary": "List of Repayments",
+                "description": "Paginated list of repayments with filters",
+                "operationId": "4e1b7a165b55e99c3775c41356a45945",
+                "parameters": [
+                    {
+                        "name": "date_from",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "format": "date"
+                        }
+                    },
+                    {
+                        "name": "date_to",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "format": "date"
+                        }
+                    },
+                    {
+                        "name": "branch_id",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    },
+                    {
+                        "name": "loan_id",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    },
+                    {
+                        "name": "status",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "enum": [
+                                "posted",
+                                "voided"
+                            ]
+                        }
+                    },
+                    {
+                        "name": "per_page",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "integer",
+                            "default": 15
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Paginated repayments list"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
+        "/api/reports/due-past-due": {
+            "get": {
+                "tags": [
+                    "Reports"
+                ],
+                "summary": "List of Due / Past Due",
+                "description": "Schedules that are due or overdue as of today",
+                "operationId": "fc6cbccb7d964fb1bf62ce1f10675e46",
+                "parameters": [
+                    {
+                        "name": "date_from",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "format": "date"
+                        }
+                    },
+                    {
+                        "name": "date_to",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "format": "date"
+                        }
+                    },
+                    {
+                        "name": "branch_id",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    },
+                    {
+                        "name": "per_page",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "integer",
+                            "default": 15
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Paginated due/past-due schedules"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
+        "/api/reports/loan-balance-summary": {
+            "get": {
+                "tags": [
+                    "Reports"
+                ],
+                "summary": "Loan Balance Summary",
+                "description": "Aggregate portfolio, outstanding, and overdue amounts by branch",
+                "operationId": "8b3b4ff4d23f632217cc07995f41f4b8",
+                "parameters": [
+                    {
+                        "name": "date_from",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "format": "date"
+                        }
+                    },
+                    {
+                        "name": "date_to",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "format": "date"
+                        }
+                    },
+                    {
+                        "name": "branch_id",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Loan balance summary"
                     }
                 },
                 "security": [
@@ -2986,12 +3646,20 @@
             "description": "Co-makers"
         },
         {
+            "name": "Loan Documents",
+            "description": "Loan Documents"
+        },
+        {
             "name": "Documents",
             "description": "Documents"
         },
         {
             "name": "System",
             "description": "System"
+        },
+        {
+            "name": "Loan Adjustments",
+            "description": "Loan Adjustments"
         },
         {
             "name": "Loans",
@@ -3008,6 +3676,10 @@
         {
             "name": "Repayments",
             "description": "Repayments"
+        },
+        {
+            "name": "Reports",
+            "description": "Reports"
         },
         {
             "name": "Roles",

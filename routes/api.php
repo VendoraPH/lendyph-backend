@@ -9,7 +9,11 @@ use App\Http\Controllers\Api\DocumentController;
 use App\Http\Controllers\Api\HealthController;
 use App\Http\Controllers\Api\LoanController;
 use App\Http\Controllers\Api\LoanProductController;
+use App\Http\Controllers\Api\DisclosureController;
+use App\Http\Controllers\Api\LoanAdjustmentController;
+use App\Http\Controllers\Api\PromissoryNoteController;
 use App\Http\Controllers\Api\RepaymentController;
+use App\Http\Controllers\Api\ReportController;
 use App\Http\Controllers\Api\RoleController;
 use App\Http\Controllers\Api\UserController;
 use App\Http\Middleware\CheckTokenExpiry;
@@ -79,6 +83,28 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::get('/loans/{loan}/summary', [RepaymentController::class, 'summary']);
     Route::get('/repayments/{repayment}', [RepaymentController::class, 'show']);
     Route::patch('/repayments/{repayment}/void', [RepaymentController::class, 'void']);
+
+    // Loan Documents
+    Route::get('/loans/{loan}/disclosure', [DisclosureController::class, 'show']);
+    Route::get('/loans/{loan}/promissory-note', [PromissoryNoteController::class, 'show']);
+
+    // Loan Adjustments
+    Route::get('/loans/{loan}/adjustments', [LoanAdjustmentController::class, 'index']);
+    Route::post('/loans/{loan}/adjustments', [LoanAdjustmentController::class, 'store']);
+    Route::get('/loan-adjustments/{loanAdjustment}', [LoanAdjustmentController::class, 'show']);
+    Route::patch('/loan-adjustments/{loanAdjustment}/approve', [LoanAdjustmentController::class, 'approve']);
+    Route::patch('/loan-adjustments/{loanAdjustment}/reject', [LoanAdjustmentController::class, 'reject']);
+    Route::patch('/loan-adjustments/{loanAdjustment}/apply', [LoanAdjustmentController::class, 'apply']);
+
+    // Reports
+    Route::prefix('reports')->group(function () {
+        Route::get('/statement-of-account/{loan}', [ReportController::class, 'statementOfAccount']);
+        Route::get('/subsidiary-ledger/{borrower}', [ReportController::class, 'subsidiaryLedger']);
+        Route::get('/releases', [ReportController::class, 'listOfReleases']);
+        Route::get('/repayments', [ReportController::class, 'listOfRepayments']);
+        Route::get('/due-past-due', [ReportController::class, 'listOfDuePastDue']);
+        Route::get('/loan-balance-summary', [ReportController::class, 'loanBalanceSummary']);
+    });
 
     // Roles (read-only)
     Route::get('/roles', [RoleController::class, 'index']);
