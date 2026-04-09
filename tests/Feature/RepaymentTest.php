@@ -26,6 +26,7 @@ class RepaymentTest extends TestCase
         $response = $this->postJson("/api/loans/{$loan->id}/repayments", [
             'payment_date' => now()->toDateString(),
             'amount_paid' => $amount,
+            'method' => 'cash',
         ]);
 
         $response->assertCreated();
@@ -44,6 +45,7 @@ class RepaymentTest extends TestCase
         $response = $this->postJson("/api/loans/{$loan->id}/repayments", [
             'payment_date' => now()->toDateString(),
             'amount_paid' => 100,
+            'method' => 'cash',
         ]);
 
         $response->assertCreated();
@@ -62,6 +64,7 @@ class RepaymentTest extends TestCase
         $response = $this->postJson("/api/loans/{$loan->id}/repayments", [
             'payment_date' => now()->toDateString(),
             'amount_paid' => $payAmount,
+            'method' => 'cash',
         ]);
 
         $response->assertCreated()
@@ -76,6 +79,7 @@ class RepaymentTest extends TestCase
         $this->postJson("/api/loans/{$loan->id}/repayments", [
             'payment_date' => now()->toDateString(),
             'amount_paid' => $totalDue,
+            'method' => 'cash',
         ])->assertCreated();
 
         $this->assertDatabaseHas('loans', [
@@ -93,6 +97,7 @@ class RepaymentTest extends TestCase
         $response = $this->postJson("/api/loans/{$loan->id}/repayments", [
             'payment_date' => now()->toDateString(),
             'amount_paid' => $totalDue,
+            'method' => 'cash',
         ]);
 
         $repaymentId = $response->json('data.id');
@@ -115,6 +120,7 @@ class RepaymentTest extends TestCase
         $this->postJson("/api/loans/{$loan->id}/repayments", [
             'payment_date' => now()->toDateString(),
             'amount_paid' => 1000,
+            'method' => 'cash',
         ])->assertUnprocessable();
     }
 }

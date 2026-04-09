@@ -9,6 +9,7 @@ use App\Models\Borrower;
 use App\Models\Loan;
 use App\Services\ReportService;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use OpenApi\Attributes as OA;
 
 class ReportController extends Controller
@@ -83,7 +84,7 @@ class ReportController extends Controller
             new OA\Response(response: 200, description: 'Paginated releases list'),
         ],
     )]
-    public function listOfReleases(): \Illuminate\Http\Resources\Json\AnonymousResourceCollection
+    public function listOfReleases(): AnonymousResourceCollection
     {
         $this->authorize('reports.view');
 
@@ -112,7 +113,7 @@ class ReportController extends Controller
             new OA\Response(response: 200, description: 'Paginated repayments list'),
         ],
     )]
-    public function listOfRepayments(): \Illuminate\Http\Resources\Json\AnonymousResourceCollection
+    public function listOfRepayments(): AnonymousResourceCollection
     {
         $this->authorize('reports.view');
 
@@ -204,5 +205,95 @@ class ReportController extends Controller
                 request()->only('date_from', 'date_to', 'branch_id'),
             ),
         ]);
+    }
+
+    #[OA\Get(
+        path: '/api/reports/daily-collection',
+        summary: 'Daily collection report',
+        tags: ['Reports'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'date', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
+        ],
+        responses: [new OA\Response(response: 200, description: 'Daily collection summary')],
+    )]
+    public function dailyCollection(): JsonResponse
+    {
+        $this->authorize('reports.view');
+
+        return response()->json(['data' => $this->reportService->dailyCollection(request()->all())]);
+    }
+
+    #[OA\Get(
+        path: '/api/reports/income',
+        summary: 'Income report',
+        tags: ['Reports'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
+        ],
+        responses: [new OA\Response(response: 200, description: 'Income breakdown')],
+    )]
+    public function incomeReport(): JsonResponse
+    {
+        $this->authorize('reports.view');
+
+        return response()->json(['data' => $this->reportService->incomeReport(request()->only('date_from', 'date_to'))]);
+    }
+
+    #[OA\Get(
+        path: '/api/reports/aging',
+        summary: 'Aging report',
+        tags: ['Reports'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'as_of_date', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
+        ],
+        responses: [new OA\Response(response: 200, description: 'Aging buckets')],
+    )]
+    public function agingReport(): JsonResponse
+    {
+        $this->authorize('reports.view');
+
+        return response()->json(['data' => $this->reportService->agingReport(request()->only('as_of_date', 'branch_id'))]);
+    }
+
+    #[OA\Get(
+        path: '/api/reports/borrowers',
+        summary: 'Borrower report',
+        tags: ['Reports'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
+        ],
+        responses: [new OA\Response(response: 200, description: 'Borrower statistics')],
+    )]
+    public function borrowerReport(): JsonResponse
+    {
+        $this->authorize('reports.view');
+
+        return response()->json(['data' => $this->reportService->borrowerReport(request()->only('date_from', 'date_to'))]);
+    }
+
+    #[OA\Get(
+        path: '/api/reports/disbursements',
+        summary: 'Disbursement report',
+        tags: ['Reports'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
+        ],
+        responses: [new OA\Response(response: 200, description: 'Disbursement statistics')],
+    )]
+    public function disbursementReport(): JsonResponse
+    {
+        $this->authorize('reports.view');
+
+        return response()->json(['data' => $this->reportService->disbursementReport(request()->only('date_from', 'date_to', 'branch_id'))]);
     }
 }

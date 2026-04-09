@@ -16,6 +16,8 @@ class StoreRepaymentRequest extends FormRequest
         return [
             'payment_date' => ['required', 'date', 'before_or_equal:today'],
             'amount_paid' => ['required', 'numeric', 'min:0.01'],
+            'method' => ['required', 'in:cash,gcash,maya,bank_transfer,online'],
+            'reference_number' => ['nullable', 'string', 'max:100', 'required_unless:method,cash'],
             'remarks' => ['nullable', 'string', 'max:1000'],
         ];
     }

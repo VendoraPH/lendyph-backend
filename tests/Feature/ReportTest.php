@@ -23,6 +23,7 @@ class ReportTest extends TestCase
         $this->postJson("/api/loans/{$loan->id}/repayments", [
             'payment_date' => now()->toDateString(),
             'amount_paid' => 5000,
+            'method' => 'cash',
         ]);
 
         $response = $this->getJson("/api/reports/statement-of-account/{$loan->id}");
@@ -75,6 +76,7 @@ class ReportTest extends TestCase
         $this->postJson("/api/loans/{$loan->id}/repayments", [
             'payment_date' => now()->toDateString(),
             'amount_paid' => 1000,
+            'method' => 'cash',
         ]);
 
         $response = $this->getJson('/api/reports/repayments');
@@ -90,6 +92,7 @@ class ReportTest extends TestCase
         $this->postJson("/api/loans/{$loan->id}/repayments", [
             'payment_date' => now()->toDateString(),
             'amount_paid' => 1000,
+            'method' => 'cash',
         ]);
 
         $this->getJson("/api/reports/repayments?branch_id={$this->branch->id}")

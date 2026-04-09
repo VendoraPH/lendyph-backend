@@ -34,6 +34,16 @@ class RoleAndPermissionSeeder extends Seeder
 
             // Audit
             'audit-logs.view',
+
+            // Fees
+            'fees.view', 'fees.create', 'fees.update', 'fees.delete',
+
+            // Dashboard
+            'dashboard.view',
+
+            // Share Capital
+            'share-capital.view', 'share-capital.create', 'share-capital.update',
+            'auto-credit.process',
         ];
 
         $guard = 'web';
@@ -51,6 +61,10 @@ class RoleAndPermissionSeeder extends Seeder
             'loan-adjustments.view', 'loan-adjustments.create',
             'repayments.view',
             'reports.view', 'reports.export',
+            'fees.view', 'fees.create', 'fees.update', 'fees.delete',
+            'dashboard.view',
+            'share-capital.view', 'share-capital.create', 'share-capital.update',
+            'auto-credit.process',
         ]);
 
         Role::create(['name' => 'cashier', 'guard_name' => $guard])->givePermissionTo([
@@ -58,6 +72,9 @@ class RoleAndPermissionSeeder extends Seeder
             'loans.view', 'loans.release',
             'repayments.view', 'repayments.create',
             'reports.view',
+            'fees.view',
+            'dashboard.view',
+            'share-capital.view',
         ]);
 
         Role::create(['name' => 'collector', 'guard_name' => $guard])->givePermissionTo([
@@ -65,6 +82,9 @@ class RoleAndPermissionSeeder extends Seeder
             'loans.view',
             'repayments.view', 'repayments.create',
             'reports.view',
+            'fees.view',
+            'dashboard.view',
+            'share-capital.view',
         ]);
 
         Role::create(['name' => 'viewer', 'guard_name' => $guard])->givePermissionTo([
@@ -73,6 +93,9 @@ class RoleAndPermissionSeeder extends Seeder
             'loan-adjustments.view',
             'repayments.view',
             'reports.view',
+            'fees.view',
+            'dashboard.view',
+            'share-capital.view',
         ]);
     }
 }

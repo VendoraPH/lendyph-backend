@@ -21,6 +21,8 @@ class RepaymentService
         string $paymentDate,
         User $user,
         ?string $remarks = null,
+        string $method = 'cash',
+        ?string $referenceNumber = null,
     ): Repayment {
         if ($loan->status !== 'released') {
             throw ValidationException::withMessages([
@@ -30,9 +32,14 @@ class RepaymentService
 
         $paymentDate = Carbon::parse($paymentDate);
 
-        return DB::transaction(function () use ($loan, $amountPaid, $paymentDate, $user, $remarks) {
+        return DB::transaction(function () use ($loan, $amountPaid, $paymentDate, $user, $remarks, $method, $referenceNumber) {
             // Step 1: Compute penalties on overdue schedules
             $this->applyPenalties($loan, $paymentDate);
+
+            // Capture outstanding principal balance before payment
+            $balanceBefore = (float) $loan->amortizationSchedules()
+                ->whereIn('status', ['pending', 'partial', 'overdue'])
+                ->sum(DB::raw('principal_due - principal_paid'));
 
             // Step 2: Get all unpaid/partial schedules ordered by period
             $schedules = $loan->amortizationSchedules()
@@ -85,14 +92,20 @@ class RepaymentService
             }
 
             // Step 5: Persist repayment
+            $balanceAfter = max(0, $balanceBefore - round($principalApplied, 2));
+
             $repayment = Repayment::create([
                 'loan_id' => $loan->id,
                 'payment_date' => $paymentDate,
+                'method' => $method,
+                'reference_number' => $referenceNumber,
                 'amount_paid' => $amountPaid,
                 'principal_applied' => round($principalApplied, 2),
                 'interest_applied' => round($interestApplied, 2),
                 'penalty_applied' => round($penaltyApplied, 2),
                 'overpayment' => round($overpayment, 2),
+                'balance_before' => round($balanceBefore, 2),
+                'balance_after' => round($balanceAfter, 2),
                 'payment_type' => $paymentType,
                 'status' => 'posted',
                 'received_by' => $user->id,

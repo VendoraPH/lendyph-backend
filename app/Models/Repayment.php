@@ -15,11 +15,15 @@ class Repayment extends Model
         'receipt_number',
         'loan_id',
         'payment_date',
+        'method',
+        'reference_number',
         'amount_paid',
         'principal_applied',
         'interest_applied',
         'penalty_applied',
         'overpayment',
+        'balance_before',
+        'balance_after',
         'payment_type',
         'status',
         'void_reason',
@@ -38,6 +42,8 @@ class Repayment extends Model
             'interest_applied' => 'decimal:2',
             'penalty_applied' => 'decimal:2',
             'overpayment' => 'decimal:2',
+            'balance_before' => 'decimal:2',
+            'balance_after' => 'decimal:2',
             'voided_at' => 'datetime',
         ];
     }
@@ -47,7 +53,7 @@ class Repayment extends Model
         static::creating(function (Repayment $repayment) {
             $lastCode = static::query()->orderByDesc('id')->value('receipt_number');
             $nextNum = $lastCode ? (int) substr($lastCode, 4) + 1 : 1;
-            $repayment->receipt_number = 'RCP-' . str_pad($nextNum, 6, '0', STR_PAD_LEFT);
+            $repayment->receipt_number = 'RCP-'.str_pad($nextNum, 6, '0', STR_PAD_LEFT);
         });
     }
 

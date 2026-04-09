@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Models\AmortizationSchedule;
 use App\Models\Borrower;
 use App\Models\Loan;
 use App\Models\Repayment;
@@ -167,7 +168,7 @@ class ReportService
     {
         $today = Carbon::today();
 
-        return \App\Models\AmortizationSchedule::with('loan.borrower', 'loan.branch')
+        return AmortizationSchedule::with('loan.borrower', 'loan.branch')
             ->whereHas('loan', fn ($q) => $q->where('status', 'released'))
             ->whereIn('status', ['pending', 'partial', 'overdue'])
             ->where('due_date', '<=', $today)
@@ -265,6 +266,139 @@ class ReportService
                 'loan_count' => $overdueAgg->overdue_loan_count ?? 0,
             ],
             'by_branch' => $byBranch,
+            'generated_at' => now()->toDateTimeString(),
+        ];
+    }
+
+    public function dailyCollection(array $filters): array
+    {
+        $date = isset($filters['date']) ? Carbon::parse($filters['date']) : Carbon::today();
+
+        $totalDue = (float) AmortizationSchedule::whereDate('due_date', $date)
+            ->whereHas('loan', fn ($q) => $q->where('status', 'released'))
+            ->sum('total_due');
+
+        $totalCollected = (float) Repayment::where('status', 'posted')
+            ->whereDate('payment_date', $date)
+            ->sum('amount_paid');
+
+        $collectionRate = $totalDue > 0 ? round($totalCollected / $totalDue * 100, 1) : 0;
+
+        return [
+            'date' => $date->toDateString(),
+            'total_due' => round($totalDue, 2),
+            'total_collected' => round($totalCollected, 2),
+            'collection_rate' => $collectionRate,
+            'uncollected' => round(max(0, $totalDue - $totalCollected), 2),
+            'generated_at' => now()->toDateTimeString(),
+        ];
+    }
+
+    public function incomeReport(array $filters): array
+    {
+        $query = Repayment::where('status', 'posted')
+            ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->whereDate('payment_date', '>=', $d))
+            ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->whereDate('payment_date', '<=', $d));
+
+        $interestIncome = (float) (clone $query)->sum('interest_applied');
+        $penaltyIncome = (float) (clone $query)->sum('penalty_applied');
+
+        $processingFees = (float) DB::table('loans')
+            ->join('loan_products', 'loans.loan_product_id', '=', 'loan_products.id')
+            ->whereIn('loans.status', ['released', 'closed'])
+            ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->whereDate('loans.released_at', '>=', $d))
+            ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->whereDate('loans.released_at', '<=', $d))
+            ->selectRaw('SUM(loan_products.processing_fee / 100 * loans.principal_amount) as total')
+            ->value('total') ?? 0;
+
+        $total = $interestIncome + $processingFees + $penaltyIncome;
+
+        return [
+            'interest_income' => round($interestIncome, 2),
+            'processing_fees' => round($processingFees, 2),
+            'penalty_income' => round($penaltyIncome, 2),
+            'total' => round($total, 2),
+            'generated_at' => now()->toDateTimeString(),
+        ];
+    }
+
+    public function agingReport(array $filters): array
+    {
+        $asOf = isset($filters['as_of_date']) ? Carbon::parse($filters['as_of_date']) : Carbon::today();
+
+        $buckets = [
+            '1_30' => [1, 30],
+            '31_60' => [31, 60],
+            '61_90' => [61, 90],
+            'over_90' => [91, null],
+        ];
+
+        $result = [];
+        foreach ($buckets as $key => [$minDays, $maxDays]) {
+            $query = AmortizationSchedule::whereIn('status', ['pending', 'partial', 'overdue'])
+                ->when($filters['branch_id'] ?? null, fn ($q, $b) => $q->whereHas('loan', fn ($lq) => $lq->where('branch_id', $b)))
+                ->whereHas('loan', fn ($q) => $q->where('status', 'released'))
+                ->where('due_date', '<=', $asOf->copy()->subDays($minDays - 1));
+
+            if ($maxDays !== null) {
+                $query->where('due_date', '>=', $asOf->copy()->subDays($maxDays));
+            }
+
+            $result[$key] = [
+                'amount' => round((float) $query->sum(DB::raw('principal_due - principal_paid + (interest_due - interest_paid)')), 2),
+                'count' => $query->distinct('loan_id')->count('loan_id'),
+            ];
+        }
+
+        return [
+            'as_of_date' => $asOf->toDateString(),
+            'buckets' => $result,
+            'generated_at' => now()->toDateTimeString(),
+        ];
+    }
+
+    public function borrowerReport(array $filters): array
+    {
+        $totalActive = Borrower::whereHas('loans', fn ($q) => $q->whereIn('status', ['released', 'closed']))->count();
+
+        $newBorrowers = Borrower::query()
+            ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->whereDate('created_at', '>=', $d))
+            ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->whereDate('created_at', '<=', $d))
+            ->count();
+
+        $avgLoanSize = (float) Loan::whereIn('status', ['released', 'closed'])->avg('principal_amount') ?? 0;
+
+        $repeatBorrowers = Borrower::whereHas('loans', fn ($q) => $q->whereIn('status', ['released', 'closed']), '>=', 2)->count();
+
+        return [
+            'total_active_borrowers' => $totalActive,
+            'new_borrowers' => $newBorrowers,
+            'avg_loan_size' => round($avgLoanSize, 2),
+            'repeat_borrowers' => $repeatBorrowers,
+            'generated_at' => now()->toDateTimeString(),
+        ];
+    }
+
+    public function disbursementReport(array $filters): array
+    {
+        $query = Loan::whereIn('status', ['released', 'closed'])
+            ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->whereDate('released_at', '>=', $d))
+            ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->whereDate('released_at', '<=', $d))
+            ->when($filters['branch_id'] ?? null, fn ($q, $b) => $q->where('branch_id', $b));
+
+        $loansReleased = (clone $query)->count();
+        $totalDisbursed = (float) (clone $query)->sum('net_proceeds');
+        $avgDisbursement = $loansReleased > 0 ? round($totalDisbursed / $loansReleased, 2) : 0;
+
+        $pendingRelease = Loan::where('status', 'approved')
+            ->when($filters['branch_id'] ?? null, fn ($q, $b) => $q->where('branch_id', $b))
+            ->count();
+
+        return [
+            'loans_released' => $loansReleased,
+            'total_disbursed' => round($totalDisbursed, 2),
+            'avg_disbursement' => $avgDisbursement,
+            'pending_release' => $pendingRelease,
             'generated_at' => now()->toDateTimeString(),
         ];
     }

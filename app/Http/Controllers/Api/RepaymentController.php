@@ -10,11 +10,57 @@ use App\Models\Loan;
 use App\Models\Repayment;
 use App\Services\RepaymentService;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
+use Illuminate\Support\Facades\DB;
 use OpenApi\Attributes as OA;
 
 class RepaymentController extends Controller
 {
     public function __construct(private RepaymentService $repaymentService) {}
+
+    #[OA\Get(
+        path: '/api/repayments',
+        summary: 'List all repayments (global)',
+        tags: ['Repayments'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'search', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
+            new OA\Parameter(name: 'status', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['posted', 'voided'])),
+            new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15)),
+        ],
+        responses: [
+            new OA\Response(response: 200, description: 'Paginated global repayment list'),
+            new OA\Response(response: 401, description: 'Unauthenticated'),
+        ],
+    )]
+    public function listAll(): AnonymousResourceCollection
+    {
+        $this->authorize('repayments.view');
+
+        $repayments = Repayment::with('loan.borrower', 'receivedByUser', 'voidedByUser')
+            ->when(request('search'), function ($q, $search) {
+                $q->where(function ($q) use ($search) {
+                    $q->where('receipt_number', 'like', "%{$search}%")
+                        ->orWhereHas('loan', function ($lq) use ($search) {
+                            $lq->where('loan_account_number', 'like', "%{$search}%")
+                                ->orWhereHas('borrower', fn ($bq) => $bq->where(
+                                    DB::raw("CONCAT(first_name, ' ', last_name)"),
+                                    'like',
+                                    "%{$search}%"
+                                ));
+                        });
+                });
+            })
+            ->when(request('status'), fn ($q, $s) => $q->where('status', $s))
+            ->when(request('date_from'), fn ($q, $d) => $q->whereDate('payment_date', '>=', $d))
+            ->when(request('date_to'), fn ($q, $d) => $q->whereDate('payment_date', '<=', $d))
+            ->latest('payment_date')
+            ->paginate(request('per_page', 15));
+
+        return RepaymentResource::collection($repayments);
+    }
 
     #[OA\Get(
         path: '/api/loans/{loan}/repayments',
@@ -31,7 +77,7 @@ class RepaymentController extends Controller
             new OA\Response(response: 404, description: 'Loan not found'),
         ],
     )]
-    public function index(Loan $loan): \Illuminate\Http\Resources\Json\AnonymousResourceCollection
+    public function index(Loan $loan): AnonymousResourceCollection
     {
         $this->authorize('repayments.view');
 
@@ -75,6 +121,8 @@ class RepaymentController extends Controller
             $request->payment_date,
             $request->user(),
             $request->remarks,
+            $request->method,
+            $request->reference_number,
         );
 
         $repayment->load('receivedByUser', 'loan');

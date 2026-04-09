@@ -6,8 +6,10 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\Borrower\StoreBorrowerRequest;
 use App\Http\Requests\Borrower\UpdateBorrowerRequest;
 use App\Http\Resources\BorrowerResource;
+use App\Http\Resources\DocumentResource;
 use App\Models\Borrower;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use OpenApi\Attributes as OA;
@@ -32,7 +34,7 @@ class BorrowerController extends Controller
             new OA\Response(response: 403, description: 'Forbidden'),
         ],
     )]
-    public function index(): \Illuminate\Http\Resources\Json\AnonymousResourceCollection
+    public function index(): AnonymousResourceCollection
     {
         $this->authorize('customers.view');
 
@@ -321,5 +323,58 @@ class BorrowerController extends Controller
         }
 
         return response()->json(['message' => 'Photo deleted successfully.']);
+    }
+
+    #[OA\Post(
+        path: '/api/borrowers/{id}/valid-ids',
+        summary: 'Upload borrower valid ID',
+        tags: ['Borrowers'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
+        ],
+        requestBody: new OA\RequestBody(
+            required: true,
+            content: new OA\MediaType(
+                mediaType: 'multipart/form-data',
+                schema: new OA\Schema(
+                    required: ['file', 'type'],
+                    properties: [
+                        new OA\Property(property: 'file', type: 'string', format: 'binary'),
+                        new OA\Property(property: 'type', type: 'string', example: 'PhilSys ID'),
+                    ],
+                ),
+            ),
+        ),
+        responses: [
+            new OA\Response(response: 201, description: 'Valid ID uploaded'),
+            new OA\Response(response: 401, description: 'Unauthenticated'),
+            new OA\Response(response: 422, description: 'Validation error'),
+        ],
+    )]
+    public function uploadValidId(Borrower $borrower): JsonResponse
+    {
+        $this->authorize('customers.update');
+
+        request()->validate([
+            'file' => ['required', 'file', 'max:10240', 'mimes:jpg,jpeg,png,pdf'],
+            'type' => ['required', 'string', 'max:100'],
+        ]);
+
+        $file = request()->file('file');
+        $path = $file->store("documents/valid_id/borrower/{$borrower->id}", 'public');
+
+        $document = $borrower->documents()->create([
+            'type' => 'valid_id',
+            'label' => request()->input('type'),
+            'file_path' => $path,
+            'original_filename' => $file->getClientOriginalName(),
+            'mime_type' => $file->getMimeType(),
+            'file_size' => $file->getSize(),
+        ]);
+
+        return (new DocumentResource($document))
+            ->response()
+            ->setStatusCode(201);
     }
 }

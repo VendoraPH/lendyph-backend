@@ -2,19 +2,24 @@
 
 use App\Http\Controllers\Api\AuditLogController;
 use App\Http\Controllers\Api\AuthController;
+use App\Http\Controllers\Api\AutoCreditController;
 use App\Http\Controllers\Api\BorrowerController;
 use App\Http\Controllers\Api\BranchController;
 use App\Http\Controllers\Api\CoMakerController;
+use App\Http\Controllers\Api\DashboardController;
+use App\Http\Controllers\Api\DisclosureController;
 use App\Http\Controllers\Api\DocumentController;
+use App\Http\Controllers\Api\FeeController;
 use App\Http\Controllers\Api\HealthController;
+use App\Http\Controllers\Api\LoanAdjustmentController;
 use App\Http\Controllers\Api\LoanController;
 use App\Http\Controllers\Api\LoanProductController;
-use App\Http\Controllers\Api\DisclosureController;
-use App\Http\Controllers\Api\LoanAdjustmentController;
 use App\Http\Controllers\Api\PromissoryNoteController;
 use App\Http\Controllers\Api\RepaymentController;
 use App\Http\Controllers\Api\ReportController;
 use App\Http\Controllers\Api\RoleController;
+use App\Http\Controllers\Api\ShareCapitalLedgerController;
+use App\Http\Controllers\Api\ShareCapitalPledgeController;
 use App\Http\Controllers\Api\UserController;
 use App\Http\Middleware\CheckTokenExpiry;
 use App\Http\Middleware\EnsureUserIsActive;
@@ -48,6 +53,7 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::patch('/borrowers/{borrower}/reactivate', [BorrowerController::class, 'reactivate']);
     Route::post('/borrowers/{borrower}/photo', [BorrowerController::class, 'uploadPhoto']);
     Route::delete('/borrowers/{borrower}/photo', [BorrowerController::class, 'deletePhoto']);
+    Route::post('/borrowers/{borrower}/valid-ids', [BorrowerController::class, 'uploadValidId']);
 
     // Co-makers
     Route::get('/borrowers/{borrower}/co-makers', [CoMakerController::class, 'index']);
@@ -64,6 +70,17 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::get('/documents/{document}', [DocumentController::class, 'show']);
     Route::delete('/documents/{document}', [DocumentController::class, 'destroy']);
 
+    // Dashboard
+    Route::prefix('dashboard')->group(function () {
+        Route::get('/stats', [DashboardController::class, 'stats']);
+        Route::get('/collections-trend', [DashboardController::class, 'collectionsTrend']);
+        Route::get('/daily-dues', [DashboardController::class, 'dailyDues']);
+        Route::get('/recent-transactions', [DashboardController::class, 'recentTransactions']);
+    });
+
+    // Fees
+    Route::apiResource('fees', FeeController::class);
+
     // Loan Products
     Route::apiResource('loan-products', LoanProductController::class);
 
@@ -78,6 +95,7 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::get('/loans/{loan}/amortization-schedule', [LoanController::class, 'amortizationSchedule']);
 
     // Repayments
+    Route::get('/repayments', [RepaymentController::class, 'listAll']);
     Route::get('/loans/{loan}/repayments', [RepaymentController::class, 'index']);
     Route::post('/loans/{loan}/repayments', [RepaymentController::class, 'store']);
     Route::get('/loans/{loan}/summary', [RepaymentController::class, 'summary']);
@@ -104,6 +122,11 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
         Route::get('/repayments', [ReportController::class, 'listOfRepayments']);
         Route::get('/due-past-due', [ReportController::class, 'listOfDuePastDue']);
         Route::get('/loan-balance-summary', [ReportController::class, 'loanBalanceSummary']);
+        Route::get('/daily-collection', [ReportController::class, 'dailyCollection']);
+        Route::get('/income', [ReportController::class, 'incomeReport']);
+        Route::get('/aging', [ReportController::class, 'agingReport']);
+        Route::get('/borrowers', [ReportController::class, 'borrowerReport']);
+        Route::get('/disbursements', [ReportController::class, 'disbursementReport']);
     });
 
     // Roles (read-only)
@@ -113,4 +136,19 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     // Audit Logs (read-only)
     Route::get('/audit-logs', [AuditLogController::class, 'index']);
     Route::get('/audit-logs/{auditLog}', [AuditLogController::class, 'show']);
+
+    // Share Capital Ledger
+    Route::get('/share-capital/ledger', [ShareCapitalLedgerController::class, 'index']);
+    Route::post('/share-capital/ledger', [ShareCapitalLedgerController::class, 'store']);
+
+    // Share Capital Pledges
+    Route::get('/pledges', [ShareCapitalPledgeController::class, 'index']);
+    Route::put('/pledges/{pledge}', [ShareCapitalPledgeController::class, 'update']);
+    Route::patch('/pledges/{pledge}/auto-credit', [ShareCapitalPledgeController::class, 'toggleAutoCredit']);
+    Route::post('/pledges/{pledge}/entries', [ShareCapitalPledgeController::class, 'manualEntry']);
+    Route::post('/pledges/bulk-entries', [ShareCapitalPledgeController::class, 'bulkEntry']);
+
+    // Auto-Credit
+    Route::get('/auto-credit/status', [AutoCreditController::class, 'status']);
+    Route::post('/auto-credit/process', [AutoCreditController::class, 'process']);
 });

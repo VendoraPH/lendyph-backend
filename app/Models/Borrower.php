@@ -8,6 +8,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Database\Eloquent\Relations\MorphMany;
 
 class Borrower extends Model
@@ -45,7 +46,7 @@ class Borrower extends Model
         static::creating(function (Borrower $borrower) {
             $lastCode = static::query()->orderByDesc('id')->value('borrower_code');
             $nextNum = $lastCode ? (int) substr($lastCode, 4) + 1 : 1;
-            $borrower->borrower_code = 'BRW-' . str_pad($nextNum, 6, '0', STR_PAD_LEFT);
+            $borrower->borrower_code = 'BRW-'.str_pad($nextNum, 6, '0', STR_PAD_LEFT);
         });
     }
 
@@ -77,6 +78,16 @@ class Borrower extends Model
     public function loans(): HasMany
     {
         return $this->hasMany(Loan::class);
+    }
+
+    public function shareCapitalPledge(): HasOne
+    {
+        return $this->hasOne(ShareCapitalPledge::class);
+    }
+
+    public function shareCapitalLedger(): HasMany
+    {
+        return $this->hasMany(ShareCapitalLedger::class);
     }
 
     public function scopeActive($query)
