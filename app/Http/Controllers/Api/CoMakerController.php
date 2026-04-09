@@ -9,6 +9,7 @@ use App\Http\Resources\CoMakerResource;
 use App\Models\Borrower;
 use App\Models\CoMaker;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Support\Facades\Storage;
 use OpenApi\Attributes as OA;
 
@@ -29,9 +30,9 @@ class CoMakerController extends Controller
             new OA\Response(response: 404, description: 'Borrower not found'),
         ],
     )]
-    public function index(Borrower $borrower): \Illuminate\Http\Resources\Json\AnonymousResourceCollection
+    public function index(Borrower $borrower): AnonymousResourceCollection
     {
-        $this->authorize('customers.view');
+        $this->authorize('borrowers:view');
 
         return CoMakerResource::collection(
             $borrower->coMakers()->with('documents')->get()
@@ -96,7 +97,7 @@ class CoMakerController extends Controller
     )]
     public function show(CoMaker $coMaker): CoMakerResource
     {
-        $this->authorize('customers.view');
+        $this->authorize('borrowers:view');
 
         $coMaker->load('borrower', 'documents');
 
@@ -159,7 +160,7 @@ class CoMakerController extends Controller
     )]
     public function destroy(CoMaker $coMaker): JsonResponse
     {
-        $this->authorize('customers.delete');
+        $this->authorize('borrowers:delete');
 
         foreach ($coMaker->documents as $doc) {
             Storage::disk('public')->delete($doc->file_path);

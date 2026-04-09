@@ -37,7 +37,7 @@ class RepaymentController extends Controller
     )]
     public function listAll(): AnonymousResourceCollection
     {
-        $this->authorize('repayments.view');
+        $this->authorize('payments:view');
 
         $repayments = Repayment::with('loan.borrower', 'receivedByUser', 'voidedByUser')
             ->when(request('search'), function ($q, $search) {
@@ -79,7 +79,7 @@ class RepaymentController extends Controller
     )]
     public function index(Loan $loan): AnonymousResourceCollection
     {
-        $this->authorize('repayments.view');
+        $this->authorize('payments:view');
 
         $repayments = $loan->repayments()
             ->with('receivedByUser', 'voidedByUser')
@@ -147,7 +147,7 @@ class RepaymentController extends Controller
     )]
     public function show(Repayment $repayment): RepaymentResource
     {
-        $this->authorize('repayments.view');
+        $this->authorize('payments:view');
 
         $repayment->load('loan', 'receivedByUser', 'voidedByUser');
 
@@ -208,7 +208,7 @@ class RepaymentController extends Controller
     )]
     public function summary(Loan $loan): JsonResponse
     {
-        $this->authorize('loans.view');
+        $this->authorize('loans:view');
 
         return response()->json([
             'data' => $this->repaymentService->getLoanSummary($loan),

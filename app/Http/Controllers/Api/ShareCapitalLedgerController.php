@@ -31,7 +31,7 @@ class ShareCapitalLedgerController extends Controller
     )]
     public function index(): AnonymousResourceCollection
     {
-        $this->authorize('share-capital.view');
+        $this->authorize('share_capital:view');
 
         $entries = ShareCapitalLedger::with('borrower', 'createdByUser')
             ->when(request('borrower_id'), fn ($q, $id) => $q->where('borrower_id', $id))

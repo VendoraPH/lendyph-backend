@@ -25,7 +25,7 @@ class FeeController extends Controller
     )]
     public function index(): AnonymousResourceCollection
     {
-        $this->authorize('fees.view');
+        $this->authorize('fees:view');
 
         return FeeResource::collection(Fee::orderBy('name')->get());
     }
@@ -77,7 +77,7 @@ class FeeController extends Controller
     )]
     public function show(Fee $fee): FeeResource
     {
-        $this->authorize('fees.view');
+        $this->authorize('fees:view');
 
         return new FeeResource($fee);
     }
@@ -118,7 +118,7 @@ class FeeController extends Controller
     )]
     public function destroy(Fee $fee): JsonResponse
     {
-        $this->authorize('fees.delete');
+        $this->authorize('fees:delete');
 
         $fee->delete();
 

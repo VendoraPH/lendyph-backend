@@ -33,7 +33,7 @@ class ShareCapitalPledgeController extends Controller
     )]
     public function index(): AnonymousResourceCollection
     {
-        $this->authorize('share-capital.view');
+        $this->authorize('share_capital:view');
 
         $pledges = ShareCapitalPledge::with('borrower')
             ->when(request('schedule'), fn ($q, $s) => $q->where('schedule', $s))
@@ -76,7 +76,7 @@ class ShareCapitalPledgeController extends Controller
     )]
     public function toggleAutoCredit(ShareCapitalPledge $pledge): JsonResponse
     {
-        $this->authorize('share-capital.update');
+        $this->authorize('share_capital:update');
 
         $pledge->update(['auto_credit' => ! $pledge->auto_credit]);
 

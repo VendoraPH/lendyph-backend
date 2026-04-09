@@ -8,7 +8,7 @@ class UpdateShareCapitalPledgeRequest extends FormRequest
 {
     public function authorize(): bool
     {
-        return $this->user()->can('share-capital.update');
+        return $this->user()->can('share_capital:update');
     }
 
     public function rules(): array

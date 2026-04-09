@@ -8,7 +8,7 @@ class StoreCoMakerRequest extends FormRequest
 {
     public function authorize(): bool
     {
-        return $this->user()->can('customers.create');
+        return $this->user()->can('borrowers:create');
     }
 
     public function rules(): array

@@ -8,7 +8,7 @@ class ShareCapitalBulkEntryRequest extends FormRequest
 {
     public function authorize(): bool
     {
-        return $this->user()->can('share-capital.create');
+        return $this->user()->can('share_capital:create');
     }
 
     public function rules(): array

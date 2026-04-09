@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\AuditLogResource;
 use App\Models\AuditLog;
+use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use OpenApi\Attributes as OA;
 
 class AuditLogController extends Controller
@@ -29,9 +30,9 @@ class AuditLogController extends Controller
             new OA\Response(response: 403, description: 'Forbidden'),
         ],
     )]
-    public function index(): \Illuminate\Http\Resources\Json\AnonymousResourceCollection
+    public function index(): AnonymousResourceCollection
     {
-        $this->authorize('audit-logs.view');
+        $this->authorize('audit_logs:view');
 
         $logs = AuditLog::with('user')
             ->when(request('user_id'), fn ($q, $userId) => $q->where('user_id', $userId))
@@ -63,7 +64,7 @@ class AuditLogController extends Controller
     )]
     public function show(AuditLog $auditLog): AuditLogResource
     {
-        $this->authorize('audit-logs.view');
+        $this->authorize('audit_logs:view');
 
         $auditLog->load('user');
 

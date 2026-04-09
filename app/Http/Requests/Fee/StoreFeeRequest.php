@@ -8,7 +8,7 @@ class StoreFeeRequest extends FormRequest
 {
     public function authorize(): bool
     {
-        return $this->user()->can('fees.create');
+        return $this->user()->can('fees:create');
     }
 
     public function rules(): array

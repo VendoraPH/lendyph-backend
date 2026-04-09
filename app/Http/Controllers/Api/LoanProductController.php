@@ -8,6 +8,7 @@ use App\Http\Requests\LoanProduct\UpdateLoanProductRequest;
 use App\Http\Resources\LoanProductResource;
 use App\Models\LoanProduct;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use OpenApi\Attributes as OA;
 
 class LoanProductController extends Controller
@@ -26,9 +27,9 @@ class LoanProductController extends Controller
             new OA\Response(response: 401, description: 'Unauthenticated'),
         ],
     )]
-    public function index(): \Illuminate\Http\Resources\Json\AnonymousResourceCollection
+    public function index(): AnonymousResourceCollection
     {
-        $this->authorize('loans.view');
+        $this->authorize('loans:view');
 
         $products = LoanProduct::query()
             ->when(request('search'), fn ($q, $s) => $q->where('name', 'like', "%{$s}%"))
@@ -92,7 +93,7 @@ class LoanProductController extends Controller
     )]
     public function show(LoanProduct $loanProduct): LoanProductResource
     {
-        $this->authorize('loans.view');
+        $this->authorize('loans:view');
 
         return new LoanProductResource($loanProduct);
     }
@@ -105,7 +106,7 @@ class LoanProductController extends Controller
         parameters: [
             new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
         ],
-        requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent()),
+        requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent),
         responses: [
             new OA\Response(response: 200, description: 'Loan product updated'),
             new OA\Response(response: 422, description: 'Validation error'),
@@ -133,7 +134,7 @@ class LoanProductController extends Controller
     )]
     public function destroy(LoanProduct $loanProduct): JsonResponse
     {
-        $this->authorize('loans.create');
+        $this->authorize('loans:create');
 
         if ($loanProduct->loans()->exists()) {
             return response()->json(['message' => 'Cannot delete a loan product with existing loans.'], 409);

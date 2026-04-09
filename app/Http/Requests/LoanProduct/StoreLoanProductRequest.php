@@ -8,7 +8,7 @@ class StoreLoanProductRequest extends FormRequest
 {
     public function authorize(): bool
     {
-        return $this->user()->can('loans.create');
+        return $this->user()->can('loans:create');
     }
 
     public function rules(): array

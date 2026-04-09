@@ -23,7 +23,7 @@ class AutoCreditController extends Controller
     )]
     public function status(): JsonResponse
     {
-        $this->authorize('share-capital.view');
+        $this->authorize('share_capital:view');
 
         return response()->json(['data' => $this->shareCapitalService->getAutoCreditStatus()]);
     }
@@ -40,7 +40,7 @@ class AutoCreditController extends Controller
     )]
     public function process(): JsonResponse
     {
-        $this->authorize('auto-credit.process');
+        $this->authorize('auto_credit:process');
 
         $run = $this->shareCapitalService->processAutoCredit(request()->user());
 

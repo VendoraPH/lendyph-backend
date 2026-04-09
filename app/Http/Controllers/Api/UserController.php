@@ -10,6 +10,7 @@ use App\Http\Resources\UserResource;
 use App\Models\User;
 use App\Services\AuditLogService;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use OpenApi\Attributes as OA;
 
 class UserController extends Controller
@@ -22,7 +23,7 @@ class UserController extends Controller
         security: [['sanctum' => []]],
         parameters: [
             new OA\Parameter(name: 'search', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
-            new OA\Parameter(name: 'status', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['active', 'deactivated'])),
+            new OA\Parameter(name: 'status', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['active', 'inactive'])),
             new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
             new OA\Parameter(name: 'role', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15)),
@@ -33,9 +34,9 @@ class UserController extends Controller
             new OA\Response(response: 403, description: 'Forbidden'),
         ],
     )]
-    public function index(): \Illuminate\Http\Resources\Json\AnonymousResourceCollection
+    public function index(): AnonymousResourceCollection
     {
-        $this->authorize('users.view');
+        $this->authorize('users:view');
 
         $users = User::with('branch', 'roles')
             ->when(request('search'), function ($query, $search) {
@@ -115,7 +116,7 @@ class UserController extends Controller
     )]
     public function show(User $user): UserResource
     {
-        $this->authorize('users.view');
+        $this->authorize('users:view');
 
         $user->load('branch', 'roles', 'permissions');
 
@@ -183,9 +184,9 @@ class UserController extends Controller
     )]
     public function deactivate(User $user): JsonResponse
     {
-        $this->authorize('users.deactivate');
+        $this->authorize('users:delete');
 
-        $user->update(['status' => 'deactivated']);
+        $user->update(['status' => 'inactive']);
         $user->tokens()->delete();
 
         return response()->json(['message' => 'User deactivated successfully.']);
@@ -208,7 +209,7 @@ class UserController extends Controller
     )]
     public function reactivate(User $user): JsonResponse
     {
-        $this->authorize('users.deactivate');
+        $this->authorize('users:delete');
 
         $user->update(['status' => 'active']);
 

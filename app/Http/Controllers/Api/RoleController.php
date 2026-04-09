@@ -4,8 +4,9 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Http\Resources\RoleResource;
-use Spatie\Permission\Models\Role;
+use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use OpenApi\Attributes as OA;
+use Spatie\Permission\Models\Role;
 
 class RoleController extends Controller
 {
@@ -21,9 +22,9 @@ class RoleController extends Controller
             new OA\Response(response: 403, description: 'Forbidden'),
         ],
     )]
-    public function index(): \Illuminate\Http\Resources\Json\AnonymousResourceCollection
+    public function index(): AnonymousResourceCollection
     {
-        $this->authorize('users.view');
+        $this->authorize('users:view');
 
         return RoleResource::collection(
             Role::with('permissions')->orderBy('name')->get()
@@ -48,7 +49,7 @@ class RoleController extends Controller
     )]
     public function show(Role $role): RoleResource
     {
-        $this->authorize('users.view');
+        $this->authorize('users:view');
 
         $role->load('permissions');
 

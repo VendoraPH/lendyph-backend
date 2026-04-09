@@ -8,7 +8,7 @@ class VoidRepaymentRequest extends FormRequest
 {
     public function authorize(): bool
     {
-        return $this->user()->can('repayments.void');
+        return $this->user()->can('payments:void');
     }
 
     public function rules(): array

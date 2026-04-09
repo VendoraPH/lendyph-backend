@@ -54,7 +54,7 @@ class AuthController extends Controller
             return response()->json(['message' => 'Invalid credentials.'], 401);
         }
 
-        if ($user->status === 'deactivated') {
+        if ($user->status === 'inactive') {
             return response()->json(['message' => 'Your account has been deactivated.'], 403);
         }
 

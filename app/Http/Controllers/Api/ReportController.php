@@ -32,7 +32,7 @@ class ReportController extends Controller
     )]
     public function statementOfAccount(Loan $loan): JsonResponse
     {
-        $this->authorize('reports.view');
+        $this->authorize('reports:view');
 
         return response()->json([
             'data' => $this->reportService->statementOfAccount($loan),
@@ -57,7 +57,7 @@ class ReportController extends Controller
     )]
     public function subsidiaryLedger(Borrower $borrower): JsonResponse
     {
-        $this->authorize('reports.view');
+        $this->authorize('reports:view');
 
         return response()->json([
             'data' => $this->reportService->subsidiaryLedger(
@@ -86,7 +86,7 @@ class ReportController extends Controller
     )]
     public function listOfReleases(): AnonymousResourceCollection
     {
-        $this->authorize('reports.view');
+        $this->authorize('reports:view');
 
         $results = $this->reportService->listOfReleases(
             request()->only('date_from', 'date_to', 'branch_id', 'status', 'per_page'),
@@ -115,7 +115,7 @@ class ReportController extends Controller
     )]
     public function listOfRepayments(): AnonymousResourceCollection
     {
-        $this->authorize('reports.view');
+        $this->authorize('reports:view');
 
         $results = $this->reportService->listOfRepayments(
             request()->only('date_from', 'date_to', 'branch_id', 'loan_id', 'status', 'per_page'),
@@ -142,7 +142,7 @@ class ReportController extends Controller
     )]
     public function listOfDuePastDue(): JsonResponse
     {
-        $this->authorize('reports.view');
+        $this->authorize('reports:view');
 
         $results = $this->reportService->listOfDuePastDue(
             request()->only('date_from', 'date_to', 'branch_id', 'per_page'),
@@ -198,7 +198,7 @@ class ReportController extends Controller
     )]
     public function loanBalanceSummary(): JsonResponse
     {
-        $this->authorize('reports.view');
+        $this->authorize('reports:view');
 
         return response()->json([
             'data' => $this->reportService->loanBalanceSummary(
@@ -219,7 +219,7 @@ class ReportController extends Controller
     )]
     public function dailyCollection(): JsonResponse
     {
-        $this->authorize('reports.view');
+        $this->authorize('reports:view');
 
         return response()->json(['data' => $this->reportService->dailyCollection(request()->all())]);
     }
@@ -237,7 +237,7 @@ class ReportController extends Controller
     )]
     public function incomeReport(): JsonResponse
     {
-        $this->authorize('reports.view');
+        $this->authorize('reports:view');
 
         return response()->json(['data' => $this->reportService->incomeReport(request()->only('date_from', 'date_to'))]);
     }
@@ -255,7 +255,7 @@ class ReportController extends Controller
     )]
     public function agingReport(): JsonResponse
     {
-        $this->authorize('reports.view');
+        $this->authorize('reports:view');
 
         return response()->json(['data' => $this->reportService->agingReport(request()->only('as_of_date', 'branch_id'))]);
     }
@@ -273,7 +273,7 @@ class ReportController extends Controller
     )]
     public function borrowerReport(): JsonResponse
     {
-        $this->authorize('reports.view');
+        $this->authorize('reports:view');
 
         return response()->json(['data' => $this->reportService->borrowerReport(request()->only('date_from', 'date_to'))]);
     }
@@ -292,7 +292,7 @@ class ReportController extends Controller
     )]
     public function disbursementReport(): JsonResponse
     {
-        $this->authorize('reports.view');
+        $this->authorize('reports:view');
 
         return response()->json(['data' => $this->reportService->disbursementReport(request()->only('date_from', 'date_to', 'branch_id'))]);
     }

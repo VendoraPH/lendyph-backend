@@ -23,7 +23,7 @@ class DashboardController extends Controller
     )]
     public function stats(): JsonResponse
     {
-        $this->authorize('dashboard.view');
+        $this->authorize('dashboard:view');
 
         return response()->json(['data' => $this->dashboardService->stats()]);
     }
@@ -39,7 +39,7 @@ class DashboardController extends Controller
     )]
     public function collectionsTrend(): JsonResponse
     {
-        $this->authorize('dashboard.view');
+        $this->authorize('dashboard:view');
 
         return response()->json($this->dashboardService->collectionsTrend());
     }
@@ -58,7 +58,7 @@ class DashboardController extends Controller
     )]
     public function dailyDues(): JsonResponse
     {
-        $this->authorize('dashboard.view');
+        $this->authorize('dashboard:view');
 
         return response()->json($this->dashboardService->dailyDues(request('date')));
     }
@@ -74,7 +74,7 @@ class DashboardController extends Controller
     )]
     public function recentTransactions(): JsonResponse
     {
-        $this->authorize('dashboard.view');
+        $this->authorize('dashboard:view');
 
         return response()->json($this->dashboardService->recentTransactions());
     }

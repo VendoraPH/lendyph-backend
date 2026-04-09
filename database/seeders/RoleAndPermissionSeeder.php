@@ -14,88 +14,99 @@ class RoleAndPermissionSeeder extends Seeder
         app()[PermissionRegistrar::class]->forgetCachedPermissions();
 
         $permissions = [
+            // Dashboard
+            'dashboard:view',
+
             // User Management
-            'users.view', 'users.create', 'users.update', 'users.deactivate', 'users.reset-password',
+            'users:view', 'users:create', 'users:update', 'users:delete', 'users:reset_password',
 
-            // Customer Profiling
-            'customers.view', 'customers.create', 'customers.update', 'customers.delete',
+            // Borrowers (renamed from customers)
+            'borrowers:view', 'borrowers:create', 'borrowers:update', 'borrowers:delete',
 
-            // Loan Management
-            'loans.view', 'loans.create', 'loans.process', 'loans.approve', 'loans.release', 'loans.void',
+            // Loans
+            'loans:view', 'loans:create', 'loans:update', 'loans:delete',
+            'loans:approve', 'loans:reject', 'loans:release', 'loans:void',
 
-            // Repayments
-            'repayments.view', 'repayments.create', 'repayments.void',
+            // Payments (renamed from repayments)
+            'payments:view', 'payments:create', 'payments:update', 'payments:void',
 
             // Loan Adjustments
-            'loan-adjustments.view', 'loan-adjustments.create', 'loan-adjustments.approve',
+            'loan_adjustments:view', 'loan_adjustments:create', 'loan_adjustments:approve',
 
             // Reports
-            'reports.view', 'reports.export',
+            'reports:view', 'reports:export',
 
-            // Audit
-            'audit-logs.view',
+            // Audit Logs
+            'audit_logs:view', 'audit_logs:export',
 
             // Fees
-            'fees.view', 'fees.create', 'fees.update', 'fees.delete',
-
-            // Dashboard
-            'dashboard.view',
+            'fees:view', 'fees:create', 'fees:update', 'fees:delete',
 
             // Share Capital
-            'share-capital.view', 'share-capital.create', 'share-capital.update',
-            'auto-credit.process',
+            'share_capital:view', 'share_capital:create', 'share_capital:update',
+            'auto_credit:process',
+
+            // Collections
+            'collections:view', 'collections:mark_collected',
+
+            // Settings
+            'settings:view', 'settings:update',
         ];
 
         $guard = 'web';
 
         foreach ($permissions as $permission) {
-            Permission::create(['name' => $permission, 'guard_name' => $guard]);
+            Permission::firstOrCreate(['name' => $permission, 'guard_name' => $guard]);
         }
 
         // Admin — gets all permissions via Gate::before bypass
-        Role::create(['name' => 'admin', 'guard_name' => $guard]);
+        Role::firstOrCreate(['name' => 'admin', 'guard_name' => $guard]);
 
-        Role::create(['name' => 'loan-officer', 'guard_name' => $guard])->givePermissionTo([
-            'customers.view', 'customers.create', 'customers.update',
-            'loans.view', 'loans.create', 'loans.process',
-            'loan-adjustments.view', 'loan-adjustments.create',
-            'repayments.view',
-            'reports.view', 'reports.export',
-            'fees.view', 'fees.create', 'fees.update', 'fees.delete',
-            'dashboard.view',
-            'share-capital.view', 'share-capital.create', 'share-capital.update',
-            'auto-credit.process',
+        Role::firstOrCreate(['name' => 'loan_officer', 'guard_name' => $guard])->syncPermissions([
+            'dashboard:view',
+            'borrowers:view', 'borrowers:create', 'borrowers:update',
+            'loans:view', 'loans:create', 'loans:update',
+            'loans:approve', 'loans:reject', 'loans:release',
+            'loan_adjustments:view', 'loan_adjustments:create',
+            'payments:view',
+            'collections:view',
+            'reports:view', 'reports:export',
+            'share_capital:view', 'share_capital:create', 'share_capital:update',
+            'auto_credit:process',
+            'fees:view', 'fees:create', 'fees:update', 'fees:delete',
         ]);
 
-        Role::create(['name' => 'cashier', 'guard_name' => $guard])->givePermissionTo([
-            'customers.view',
-            'loans.view', 'loans.release',
-            'repayments.view', 'repayments.create',
-            'reports.view',
-            'fees.view',
-            'dashboard.view',
-            'share-capital.view',
+        Role::firstOrCreate(['name' => 'cashier', 'guard_name' => $guard])->syncPermissions([
+            'dashboard:view',
+            'borrowers:view',
+            'loans:view', 'loans:release',
+            'payments:view', 'payments:create', 'payments:update', 'payments:void',
+            'reports:view',
+            'fees:view',
+            'share_capital:view',
         ]);
 
-        Role::create(['name' => 'collector', 'guard_name' => $guard])->givePermissionTo([
-            'customers.view',
-            'loans.view',
-            'repayments.view', 'repayments.create',
-            'reports.view',
-            'fees.view',
-            'dashboard.view',
-            'share-capital.view',
+        Role::firstOrCreate(['name' => 'collector', 'guard_name' => $guard])->syncPermissions([
+            'dashboard:view',
+            'borrowers:view',
+            'loans:view',
+            'collections:view', 'collections:mark_collected',
+            'payments:view', 'payments:create',
+            'reports:view',
+            'fees:view',
+            'share_capital:view',
         ]);
 
-        Role::create(['name' => 'viewer', 'guard_name' => $guard])->givePermissionTo([
-            'customers.view',
-            'loans.view',
-            'loan-adjustments.view',
-            'repayments.view',
-            'reports.view',
-            'fees.view',
-            'dashboard.view',
-            'share-capital.view',
+        Role::firstOrCreate(['name' => 'viewer', 'guard_name' => $guard])->syncPermissions([
+            'dashboard:view',
+            'borrowers:view',
+            'loans:view',
+            'loan_adjustments:view',
+            'payments:view',
+            'reports:view',
+            'fees:view',
+            'share_capital:view',
+            'audit_logs:view',
         ]);
     }
 }

@@ -29,7 +29,7 @@ class PromissoryNoteController extends Controller
     )]
     public function show(Loan $loan): JsonResponse
     {
-        $this->authorize('loans.view');
+        $this->authorize('loans:view');
 
         if (! in_array($loan->status, ['approved', 'released', 'closed'])) {
             return response()->json([

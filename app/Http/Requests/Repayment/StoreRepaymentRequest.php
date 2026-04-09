@@ -8,7 +8,7 @@ class StoreRepaymentRequest extends FormRequest
 {
     public function authorize(): bool
     {
-        return $this->user()->can('repayments.create');
+        return $this->user()->can('payments:create');
     }
 
     public function rules(): array

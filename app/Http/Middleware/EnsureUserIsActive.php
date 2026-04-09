@@ -10,7 +10,7 @@ class EnsureUserIsActive
 {
     public function handle(Request $request, Closure $next): Response
     {
-        if ($request->user()?->status === 'deactivated') {
+        if ($request->user()?->status === 'inactive') {
             $request->user()->currentAccessToken()->delete();
 
             return response()->json(['message' => 'Your account has been deactivated.'], 403);

@@ -8,7 +8,7 @@ class RejectLoanRequest extends FormRequest
 {
     public function authorize(): bool
     {
-        return $this->user()->can('loans.approve');
+        return $this->user()->can('loans:reject');
     }
 
     public function rules(): array

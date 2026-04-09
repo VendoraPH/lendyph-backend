@@ -5,12 +5,11 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Document\StoreDocumentRequest;
 use App\Http\Resources\DocumentResource;
-use App\Models\Borrower;
-use App\Models\CoMaker;
 use App\Models\Document;
 use App\Services\AuditLogService;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Support\Facades\Storage;
 use OpenApi\Attributes as OA;
 
@@ -51,9 +50,9 @@ class DocumentController extends Controller
             new OA\Response(response: 401, description: 'Unauthenticated'),
         ],
     )]
-    public function index(): \Illuminate\Http\Resources\Json\AnonymousResourceCollection
+    public function index(): AnonymousResourceCollection
     {
-        $this->authorize('customers.view');
+        $this->authorize('borrowers:view');
 
         $parent = $this->resolveParent();
 
@@ -158,7 +157,7 @@ class DocumentController extends Controller
     )]
     public function show(Document $document): DocumentResource
     {
-        $this->authorize('customers.view');
+        $this->authorize('borrowers:view');
 
         return new DocumentResource($document);
     }
@@ -179,7 +178,7 @@ class DocumentController extends Controller
     )]
     public function destroy(Document $document): JsonResponse
     {
-        $this->authorize('customers.delete');
+        $this->authorize('borrowers:delete');
 
         Storage::disk('public')->delete($document->file_path);
 

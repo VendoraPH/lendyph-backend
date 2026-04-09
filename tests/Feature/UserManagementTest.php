@@ -35,7 +35,7 @@ class UserManagementTest extends TestCase
             'password' => 'password123',
             'password_confirmation' => 'password123',
             'branch_id' => $this->branch->id,
-            'role' => 'loan-officer',
+            'role' => 'loan_officer',
         ]);
 
         $response->assertCreated()
@@ -64,7 +64,7 @@ class UserManagementTest extends TestCase
         $this->patchJson("/api/users/{$user->id}/deactivate")
             ->assertOk();
 
-        $this->assertDatabaseHas('users', ['id' => $user->id, 'status' => 'deactivated']);
+        $this->assertDatabaseHas('users', ['id' => $user->id, 'status' => 'inactive']);
 
         $this->patchJson("/api/users/{$user->id}/reactivate")
             ->assertOk();

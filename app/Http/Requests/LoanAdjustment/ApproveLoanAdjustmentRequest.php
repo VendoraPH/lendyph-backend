@@ -8,7 +8,7 @@ class ApproveLoanAdjustmentRequest extends FormRequest
 {
     public function authorize(): bool
     {
-        return $this->user()->can('loan-adjustments.approve');
+        return $this->user()->can('loan_adjustments:approve');
     }
 
     public function rules(): array

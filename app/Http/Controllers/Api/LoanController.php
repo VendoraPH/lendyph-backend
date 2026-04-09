@@ -7,10 +7,12 @@ use App\Http\Requests\Loan\ApproveLoanRequest;
 use App\Http\Requests\Loan\RejectLoanRequest;
 use App\Http\Requests\Loan\StoreLoanRequest;
 use App\Http\Requests\Loan\UpdateLoanRequest;
+use App\Http\Resources\AmortizationScheduleResource;
 use App\Http\Resources\LoanResource;
 use App\Models\Loan;
 use App\Services\LoanService;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use OpenApi\Attributes as OA;
 
 class LoanController extends Controller
@@ -34,9 +36,9 @@ class LoanController extends Controller
             new OA\Response(response: 401, description: 'Unauthenticated'),
         ],
     )]
-    public function index(): \Illuminate\Http\Resources\Json\AnonymousResourceCollection
+    public function index(): AnonymousResourceCollection
     {
-        $this->authorize('loans.view');
+        $this->authorize('loans:view');
 
         $loans = Loan::with('borrower', 'loanProduct', 'branch', 'createdByUser')
             ->when(request('search'), function ($q, $search) {
@@ -119,7 +121,7 @@ class LoanController extends Controller
     )]
     public function show(Loan $loan): LoanResource
     {
-        $this->authorize('loans.view');
+        $this->authorize('loans:view');
 
         $loan->load(
             'borrower', 'loanProduct', 'branch', 'coMakers',
@@ -139,7 +141,7 @@ class LoanController extends Controller
         parameters: [
             new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
         ],
-        requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent()),
+        requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent),
         responses: [
             new OA\Response(response: 200, description: 'Loan updated'),
             new OA\Response(response: 422, description: 'Validation error or not editable'),
@@ -169,7 +171,7 @@ class LoanController extends Controller
     )]
     public function destroy(Loan $loan): JsonResponse
     {
-        $this->authorize('loans.void');
+        $this->authorize('loans:void');
 
         if ($loan->status !== 'draft') {
             return response()->json(['message' => 'Only draft loans can be deleted.'], 422);
@@ -195,7 +197,7 @@ class LoanController extends Controller
     )]
     public function submit(Loan $loan): JsonResponse
     {
-        $this->authorize('loans.process');
+        $this->authorize('loans:update');
 
         $this->loanService->submitForReview($loan);
 
@@ -273,7 +275,7 @@ class LoanController extends Controller
     )]
     public function release(Loan $loan): JsonResponse
     {
-        $this->authorize('loans.release');
+        $this->authorize('loans:release');
 
         $loan = $this->loanService->release($loan, auth()->user());
         $loan->load('borrower', 'loanProduct', 'branch', 'coMakers',
@@ -297,7 +299,7 @@ class LoanController extends Controller
     )]
     public function void(Loan $loan): JsonResponse
     {
-        $this->authorize('loans.void');
+        $this->authorize('loans:void');
 
         $this->loanService->voidLoan($loan);
 
@@ -320,7 +322,7 @@ class LoanController extends Controller
     )]
     public function amortizationPreview(Loan $loan): JsonResponse
     {
-        $this->authorize('loans.view');
+        $this->authorize('loans:view');
 
         $schedule = $this->loanService->buildAmortizationPreview($loan);
 
@@ -344,7 +346,7 @@ class LoanController extends Controller
     )]
     public function amortizationSchedule(Loan $loan): JsonResponse
     {
-        $this->authorize('loans.view');
+        $this->authorize('loans:view');
 
         $schedules = $loan->amortizationSchedules;
 
@@ -371,7 +373,7 @@ class LoanController extends Controller
         ];
 
         return response()->json([
-            'data' => \App\Http\Resources\AmortizationScheduleResource::collection($schedules),
+            'data' => AmortizationScheduleResource::collection($schedules),
             'summary' => $summary,
         ]);
     }

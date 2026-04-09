@@ -36,7 +36,7 @@ class BorrowerController extends Controller
     )]
     public function index(): AnonymousResourceCollection
     {
-        $this->authorize('customers.view');
+        $this->authorize('borrowers:view');
 
         $borrowers = Borrower::with('branch')
             ->when(request('search'), fn ($q, $search) => $q->search($search))
@@ -110,7 +110,7 @@ class BorrowerController extends Controller
     )]
     public function show(Borrower $borrower): BorrowerResource
     {
-        $this->authorize('customers.view');
+        $this->authorize('borrowers:view');
 
         $borrower->load('branch', 'coMakers.documents', 'documents');
 
@@ -178,7 +178,7 @@ class BorrowerController extends Controller
     )]
     public function destroy(Borrower $borrower): JsonResponse
     {
-        $this->authorize('customers.delete');
+        $this->authorize('borrowers:delete');
 
         DB::transaction(function () use ($borrower) {
             // Delete co-maker documents from disk
@@ -222,7 +222,7 @@ class BorrowerController extends Controller
     )]
     public function deactivate(Borrower $borrower): JsonResponse
     {
-        $this->authorize('customers.update');
+        $this->authorize('borrowers:update');
 
         $borrower->update(['status' => 'inactive']);
 
@@ -245,7 +245,7 @@ class BorrowerController extends Controller
     )]
     public function reactivate(Borrower $borrower): JsonResponse
     {
-        $this->authorize('customers.update');
+        $this->authorize('borrowers:update');
 
         $borrower->update(['status' => 'active']);
 
@@ -280,7 +280,7 @@ class BorrowerController extends Controller
     )]
     public function uploadPhoto(Borrower $borrower): JsonResponse
     {
-        $this->authorize('customers.update');
+        $this->authorize('borrowers:update');
 
         request()->validate([
             'photo' => ['required', 'image', 'max:5120'],
@@ -315,7 +315,7 @@ class BorrowerController extends Controller
     )]
     public function deletePhoto(Borrower $borrower): JsonResponse
     {
-        $this->authorize('customers.update');
+        $this->authorize('borrowers:update');
 
         if ($borrower->photo_path) {
             Storage::disk('public')->delete($borrower->photo_path);
@@ -354,7 +354,7 @@ class BorrowerController extends Controller
     )]
     public function uploadValidId(Borrower $borrower): JsonResponse
     {
-        $this->authorize('customers.update');
+        $this->authorize('borrowers:update');
 
         request()->validate([
             'file' => ['required', 'file', 'max:10240', 'mimes:jpg,jpeg,png,pdf'],

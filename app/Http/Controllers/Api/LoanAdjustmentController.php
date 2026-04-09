@@ -10,6 +10,7 @@ use App\Models\Loan;
 use App\Models\LoanAdjustment;
 use App\Services\LoanAdjustmentService;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use OpenApi\Attributes as OA;
 
 class LoanAdjustmentController extends Controller
@@ -28,9 +29,9 @@ class LoanAdjustmentController extends Controller
             new OA\Response(response: 200, description: 'Loan adjustments list'),
         ],
     )]
-    public function index(Loan $loan): \Illuminate\Http\Resources\Json\AnonymousResourceCollection
+    public function index(Loan $loan): AnonymousResourceCollection
     {
-        $this->authorize('loan-adjustments.view');
+        $this->authorize('loan_adjustments:view');
 
         $adjustments = $loan->adjustments()
             ->with('adjustedByUser', 'approvedByUser')
@@ -95,7 +96,7 @@ class LoanAdjustmentController extends Controller
     )]
     public function show(LoanAdjustment $loanAdjustment): LoanAdjustmentResource
     {
-        $this->authorize('loan-adjustments.view');
+        $this->authorize('loan_adjustments:view');
 
         $loanAdjustment->load('loan', 'adjustedByUser', 'approvedByUser');
 
@@ -181,7 +182,7 @@ class LoanAdjustmentController extends Controller
     )]
     public function apply(LoanAdjustment $loanAdjustment): JsonResponse
     {
-        $this->authorize('loan-adjustments.approve');
+        $this->authorize('loan_adjustments:approve');
 
         $adjustment = $this->adjustmentService->applyAdjustment($loanAdjustment);
         $adjustment->load('loan.amortizationSchedules');
