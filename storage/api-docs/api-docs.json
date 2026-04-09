@@ -279,6 +279,50 @@
                 ]
             }
         },
+        "/api/auto-credit/status": {
+            "get": {
+                "tags": [
+                    "Share Capital"
+                ],
+                "summary": "Get auto-credit status and member breakdown",
+                "operationId": "284bb46c1279c12cce943024df325974",
+                "responses": {
+                    "200": {
+                        "description": "Auto-credit status"
+                    },
+                    "401": {
+                        "description": "Unauthenticated"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
+        "/api/auto-credit/process": {
+            "post": {
+                "tags": [
+                    "Share Capital"
+                ],
+                "summary": "Execute auto-credit for all eligible members",
+                "operationId": "4418624a47da6368194d46a85d9abda2",
+                "responses": {
+                    "201": {
+                        "description": "Auto-credit processed"
+                    },
+                    "403": {
+                        "description": "Forbidden"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
         "/api/borrowers": {
             "get": {
                 "tags": [
@@ -304,7 +348,8 @@
                             "type": "string",
                             "enum": [
                                 "active",
-                                "inactive"
+                                "inactive",
+                                "blacklisted"
                             ]
                         }
                     },
@@ -755,6 +800,65 @@
                     },
                     "401": {
                         "description": "Unauthenticated"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
+        "/api/borrowers/{id}/valid-ids": {
+            "post": {
+                "tags": [
+                    "Borrowers"
+                ],
+                "summary": "Upload borrower valid ID",
+                "operationId": "f9695881f611e22e5b8a4faec9297db0",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "multipart/form-data": {
+                            "schema": {
+                                "required": [
+                                    "file",
+                                    "type"
+                                ],
+                                "properties": {
+                                    "file": {
+                                        "type": "string",
+                                        "format": "binary"
+                                    },
+                                    "type": {
+                                        "type": "string",
+                                        "example": "PhilSys ID"
+                                    }
+                                },
+                                "type": "object"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "201": {
+                        "description": "Valid ID uploaded"
+                    },
+                    "401": {
+                        "description": "Unauthenticated"
+                    },
+                    "422": {
+                        "description": "Validation error"
                     }
                 },
                 "security": [
@@ -1234,6 +1338,96 @@
                 ]
             }
         },
+        "/api/dashboard/stats": {
+            "get": {
+                "tags": [
+                    "Dashboard"
+                ],
+                "summary": "Dashboard KPI stats",
+                "operationId": "654e1617f74d2b9e0654ec77620d960b",
+                "responses": {
+                    "200": {
+                        "description": "Dashboard KPI metrics with sparklines"
+                    },
+                    "401": {
+                        "description": "Unauthenticated"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
+        "/api/dashboard/collections-trend": {
+            "get": {
+                "tags": [
+                    "Dashboard"
+                ],
+                "summary": "Collections trend (last 12 weeks)",
+                "operationId": "e220d4691cda15e93e687e55c8b84500",
+                "responses": {
+                    "200": {
+                        "description": "Weekly collections trend"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
+        "/api/dashboard/daily-dues": {
+            "get": {
+                "tags": [
+                    "Dashboard"
+                ],
+                "summary": "Daily dues with collection status",
+                "operationId": "606531e940919b752472d65e0ac68042",
+                "parameters": [
+                    {
+                        "name": "date",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "format": "date"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Daily dues list with summary"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
+        "/api/dashboard/recent-transactions": {
+            "get": {
+                "tags": [
+                    "Dashboard"
+                ],
+                "summary": "Recent transactions (payments + releases)",
+                "operationId": "ae8e71367a719b98197f4117c2270344",
+                "responses": {
+                    "200": {
+                        "description": "Recent transaction activity feed"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
         "/api/loans/{loan}/disclosure": {
             "get": {
                 "tags": [
@@ -1516,6 +1710,189 @@
                     },
                     "403": {
                         "description": "Forbidden"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
+        "/api/fees": {
+            "get": {
+                "tags": [
+                    "Fees"
+                ],
+                "summary": "List fees",
+                "operationId": "210ad8b88cf6a7f463ecc67014cbcbe0",
+                "responses": {
+                    "200": {
+                        "description": "Fee list"
+                    },
+                    "401": {
+                        "description": "Unauthenticated"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            },
+            "post": {
+                "tags": [
+                    "Fees"
+                ],
+                "summary": "Create fee",
+                "operationId": "5bebfed13fff8dba79ed03de47a69ba8",
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "required": [
+                                    "name",
+                                    "type",
+                                    "value"
+                                ],
+                                "properties": {
+                                    "name": {
+                                        "type": "string",
+                                        "example": "Processing Fee"
+                                    },
+                                    "type": {
+                                        "type": "string",
+                                        "enum": [
+                                            "fixed",
+                                            "percentage"
+                                        ]
+                                    },
+                                    "value": {
+                                        "type": "number",
+                                        "example": 500
+                                    },
+                                    "applicable_product_ids": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "integer"
+                                        }
+                                    },
+                                    "conditions": {
+                                        "type": "object"
+                                    }
+                                },
+                                "type": "object"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "201": {
+                        "description": "Fee created"
+                    },
+                    "422": {
+                        "description": "Validation error"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
+        "/api/fees/{id}": {
+            "get": {
+                "tags": [
+                    "Fees"
+                ],
+                "summary": "Show fee",
+                "operationId": "8b06349c901fe90c3b18bc249a75ce76",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Fee details"
+                    },
+                    "404": {
+                        "description": "Not found"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            },
+            "put": {
+                "tags": [
+                    "Fees"
+                ],
+                "summary": "Update fee",
+                "operationId": "f22d676e67ca2b6a42e645480f1e4e67",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {}
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Fee updated"
+                    },
+                    "422": {
+                        "description": "Validation error"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            },
+            "delete": {
+                "tags": [
+                    "Fees"
+                ],
+                "summary": "Delete fee",
+                "operationId": "69de83b23cd1d9eabf90480268a33ece",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Fee deleted"
+                    },
+                    "404": {
+                        "description": "Not found"
                     }
                 },
                 "security": [
@@ -2599,6 +2976,77 @@
                 ]
             }
         },
+        "/api/repayments": {
+            "get": {
+                "tags": [
+                    "Repayments"
+                ],
+                "summary": "List all repayments (global)",
+                "operationId": "ba9104548020912cfbd1b468f0100731",
+                "parameters": [
+                    {
+                        "name": "search",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "status",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "enum": [
+                                "posted",
+                                "voided"
+                            ]
+                        }
+                    },
+                    {
+                        "name": "date_from",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "format": "date"
+                        }
+                    },
+                    {
+                        "name": "date_to",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "format": "date"
+                        }
+                    },
+                    {
+                        "name": "per_page",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "integer",
+                            "default": 15
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Paginated global repayment list"
+                    },
+                    "401": {
+                        "description": "Unauthenticated"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
         "/api/loans/{loan}/repayments": {
             "get": {
                 "tags": [
@@ -3153,6 +3601,199 @@
                 ]
             }
         },
+        "/api/reports/daily-collection": {
+            "get": {
+                "tags": [
+                    "Reports"
+                ],
+                "summary": "Daily collection report",
+                "operationId": "f1b9447d8b3b547500cea0ebbe41a0b7",
+                "parameters": [
+                    {
+                        "name": "date",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "format": "date"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Daily collection summary"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
+        "/api/reports/income": {
+            "get": {
+                "tags": [
+                    "Reports"
+                ],
+                "summary": "Income report",
+                "operationId": "3c7a6acfbca194883c55f989b3f5b1f3",
+                "parameters": [
+                    {
+                        "name": "date_from",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "format": "date"
+                        }
+                    },
+                    {
+                        "name": "date_to",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "format": "date"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Income breakdown"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
+        "/api/reports/aging": {
+            "get": {
+                "tags": [
+                    "Reports"
+                ],
+                "summary": "Aging report",
+                "operationId": "d8a10df58e57164b4448a95f44dfccce",
+                "parameters": [
+                    {
+                        "name": "as_of_date",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "format": "date"
+                        }
+                    },
+                    {
+                        "name": "branch_id",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Aging buckets"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
+        "/api/reports/borrowers": {
+            "get": {
+                "tags": [
+                    "Reports"
+                ],
+                "summary": "Borrower report",
+                "operationId": "efd79102840c3359d598c297e4318bf4",
+                "parameters": [
+                    {
+                        "name": "date_from",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "format": "date"
+                        }
+                    },
+                    {
+                        "name": "date_to",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "format": "date"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Borrower statistics"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
+        "/api/reports/disbursements": {
+            "get": {
+                "tags": [
+                    "Reports"
+                ],
+                "summary": "Disbursement report",
+                "operationId": "bd5b0a5a64f49e899df7a334b67f8844",
+                "parameters": [
+                    {
+                        "name": "date_from",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "format": "date"
+                        }
+                    },
+                    {
+                        "name": "date_to",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "format": "date"
+                        }
+                    },
+                    {
+                        "name": "branch_id",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Disbursement statistics"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
         "/api/roles": {
             "get": {
                 "tags": [
@@ -3218,6 +3859,316 @@
                 ]
             }
         },
+        "/api/share-capital/ledger": {
+            "get": {
+                "tags": [
+                    "Share Capital"
+                ],
+                "summary": "List share capital ledger entries",
+                "operationId": "a82825debdeffbd705c75b45e7f4b336",
+                "parameters": [
+                    {
+                        "name": "borrower_id",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    },
+                    {
+                        "name": "date_from",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "format": "date"
+                        }
+                    },
+                    {
+                        "name": "date_to",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "format": "date"
+                        }
+                    },
+                    {
+                        "name": "search",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "per_page",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "integer",
+                            "default": 15
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Paginated ledger entries"
+                    },
+                    "401": {
+                        "description": "Unauthenticated"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            },
+            "post": {
+                "tags": [
+                    "Share Capital"
+                ],
+                "summary": "Create manual ledger entry",
+                "operationId": "279b80d1c99ff0a9b129bafbeab832b9",
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "required": [
+                                    "borrower_id",
+                                    "date",
+                                    "description",
+                                    "type",
+                                    "amount"
+                                ],
+                                "properties": {
+                                    "borrower_id": {
+                                        "type": "integer"
+                                    },
+                                    "date": {
+                                        "type": "string",
+                                        "format": "date"
+                                    },
+                                    "description": {
+                                        "type": "string"
+                                    },
+                                    "type": {
+                                        "type": "string",
+                                        "enum": [
+                                            "credit",
+                                            "debit"
+                                        ]
+                                    },
+                                    "amount": {
+                                        "type": "number"
+                                    }
+                                },
+                                "type": "object"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "201": {
+                        "description": "Ledger entry created"
+                    },
+                    "422": {
+                        "description": "Validation error"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
+        "/api/pledges": {
+            "get": {
+                "tags": [
+                    "Share Capital"
+                ],
+                "summary": "List share capital pledges",
+                "operationId": "847a0a756a3907ba9a29246b1e8e6a53",
+                "parameters": [
+                    {
+                        "name": "search",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "schedule",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "auto_credit",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "boolean"
+                        }
+                    },
+                    {
+                        "name": "per_page",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "integer",
+                            "default": 15
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Pledge list"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
+        "/api/pledges/{pledge}": {
+            "put": {
+                "tags": [
+                    "Share Capital"
+                ],
+                "summary": "Update pledge amount and schedule",
+                "operationId": "b117c4490b1c1ef33fee1e7d3a4b4d8d",
+                "parameters": [
+                    {
+                        "name": "pledge",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {}
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Pledge updated"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
+        "/api/pledges/{pledge}/auto-credit": {
+            "patch": {
+                "tags": [
+                    "Share Capital"
+                ],
+                "summary": "Toggle auto-credit status",
+                "operationId": "26f66c3eeafa7a13298f826b12636b5e",
+                "parameters": [
+                    {
+                        "name": "pledge",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Auto-credit toggled"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
+        "/api/pledges/{pledge}/entries": {
+            "post": {
+                "tags": [
+                    "Share Capital"
+                ],
+                "summary": "Create manual ledger entry for a pledge",
+                "operationId": "622f103296c9b8b1f9315e2d6ba90215",
+                "parameters": [
+                    {
+                        "name": "pledge",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {}
+                        }
+                    }
+                },
+                "responses": {
+                    "201": {
+                        "description": "Entry created"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
+        "/api/pledges/bulk-entries": {
+            "post": {
+                "tags": [
+                    "Share Capital"
+                ],
+                "summary": "Create bulk manual ledger entries",
+                "operationId": "44f551643193cb89dddf43b6fe0b18f8",
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {}
+                        }
+                    }
+                },
+                "responses": {
+                    "201": {
+                        "description": "Bulk entries created"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
         "/api/users": {
             "get": {
                 "tags": [
@@ -3243,7 +4194,7 @@
                             "type": "string",
                             "enum": [
                                 "active",
-                                "deactivated"
+                                "inactive"
                             ]
                         }
                     },
@@ -3634,6 +4585,10 @@
             "description": "Auth"
         },
         {
+            "name": "Share Capital",
+            "description": "Share Capital"
+        },
+        {
             "name": "Borrowers",
             "description": "Borrowers"
         },
@@ -3646,12 +4601,20 @@
             "description": "Co-makers"
         },
         {
+            "name": "Dashboard",
+            "description": "Dashboard"
+        },
+        {
             "name": "Loan Documents",
             "description": "Loan Documents"
         },
         {
             "name": "Documents",
             "description": "Documents"
+        },
+        {
+            "name": "Fees",
+            "description": "Fees"
         },
         {
             "name": "System",

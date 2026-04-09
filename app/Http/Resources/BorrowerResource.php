@@ -10,6 +10,8 @@ class BorrowerResource extends JsonResource
 {
     public function toArray(Request $request): array
     {
+        $photoUrl = $this->photo_path ? Storage::disk('public')->url($this->photo_path) : null;
+
         return [
             'id' => $this->id,
             'borrower_code' => $this->borrower_code,
@@ -23,10 +25,12 @@ class BorrowerResource extends JsonResource
             'gender' => $this->gender,
             'address' => $this->address,
             'contact_number' => $this->contact_number,
+            'phone' => $this->contact_number,
             'email' => $this->email,
             'employer_or_business' => $this->employer_or_business,
-            'monthly_income' => $this->monthly_income,
-            'photo_url' => $this->photo_path ? Storage::disk('public')->url($this->photo_path) : null,
+            'monthly_income' => $this->monthly_income !== null ? (float) $this->monthly_income : null,
+            'photo_url' => $photoUrl,
+            'photo' => $photoUrl,
             'status' => $this->status,
             'branch' => new BranchResource($this->whenLoaded('branch')),
             'co_makers' => CoMakerResource::collection($this->whenLoaded('coMakers')),
