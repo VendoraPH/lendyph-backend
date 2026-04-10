@@ -146,9 +146,9 @@ class LoanService
         $this->guardStatus($loan, 'for_review', 'reject');
         $loan->update([
             'status' => 'rejected',
-            'approved_by' => $approver->id,
-            'approved_at' => now(),
-            'approval_remarks' => $remarks,
+            'rejection_remarks' => $remarks,
+            'rejected_by' => $approver->id,
+            'rejected_at' => now(),
         ]);
 
         return $loan;

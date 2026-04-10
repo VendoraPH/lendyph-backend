@@ -37,6 +37,9 @@ class Loan extends Model
         'approval_remarks',
         'approved_by',
         'approved_at',
+        'rejection_remarks',
+        'rejected_by',
+        'rejected_at',
         'released_by',
         'released_at',
         'created_by',
@@ -55,6 +58,7 @@ class Loan extends Model
             'maturity_date' => 'date',
             'approved_at' => 'datetime',
             'released_at' => 'datetime',
+            'rejected_at' => 'datetime',
             'deductions' => 'array',
         ];
     }
@@ -111,6 +115,11 @@ class Loan extends Model
     public function createdByUser(): BelongsTo
     {
         return $this->belongsTo(User::class, 'created_by');
+    }
+
+    public function rejectedByUser(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'rejected_by');
     }
 
     public function accountOfficer(): BelongsTo

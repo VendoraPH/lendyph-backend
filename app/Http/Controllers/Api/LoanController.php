@@ -126,8 +126,8 @@ class LoanController extends Controller
 
         $loan->load(
             'borrower', 'loanProduct', 'branch', 'coMakers',
-            'approvedByUser', 'releasedByUser', 'createdByUser',
-            'amortizationSchedules',
+            'approvedByUser', 'releasedByUser', 'rejectedByUser',
+            'createdByUser', 'accountOfficer', 'amortizationSchedules',
         );
 
         return new LoanResource($loan);
