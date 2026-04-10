@@ -75,7 +75,7 @@ class UserController extends Controller
                     new OA\Property(property: 'password', type: 'string', example: 'password123'),
                     new OA\Property(property: 'password_confirmation', type: 'string', example: 'password123'),
                     new OA\Property(property: 'branch_id', type: 'integer', example: 1),
-                    new OA\Property(property: 'role', type: 'string', example: 'loan-officer'),
+                    new OA\Property(property: 'role', type: 'string', example: 'loan_officer'),
                 ],
             ),
         ),
