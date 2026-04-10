@@ -19,11 +19,56 @@ class LoanService
         $product = LoanProduct::findOrFail($validated['loan_product_id']);
         $borrower = Borrower::findOrFail($validated['borrower_id']);
 
-        $interestRate = $validated['interest_rate'] ?? $product->interest_rate;
-        $deductionResult = $this->computeDeductions(
-            (float) $validated['principal_amount'],
-            $validated['deductions'] ?? [],
-        );
+        $principal = (float) $validated['principal_amount'];
+        $interestRate = (float) ($validated['interest_rate'] ?? $product->interest_rate);
+        $term = (int) ($validated['term'] ?? $product->term);
+        $frequency = $validated['frequency'] ?? $product->frequency;
+
+        // Validate principal against product min/max
+        if ($product->min_amount > 0 && $principal < (float) $product->min_amount) {
+            throw ValidationException::withMessages([
+                'principal_amount' => ["Minimum loan amount for this product is {$product->min_amount}."],
+            ]);
+        }
+        if ($product->max_amount > 0 && $principal > (float) $product->max_amount) {
+            throw ValidationException::withMessages([
+                'principal_amount' => ["Maximum loan amount for this product is {$product->max_amount}."],
+            ]);
+        }
+
+        // Validate interest rate against product range
+        $minRate = (float) ($product->min_interest_rate ?? $product->interest_rate);
+        $maxRate = (float) $product->interest_rate;
+        if ($interestRate < $minRate || $interestRate > $maxRate) {
+            throw ValidationException::withMessages([
+                'interest_rate' => ["Interest rate must be between {$minRate}% and {$maxRate}% for this product."],
+            ]);
+        }
+
+        // Validate term against product range
+        $minTerm = (int) ($product->min_term ?? 1);
+        $maxTerm = (int) ($product->max_term ?? $product->term);
+        if ($term < $minTerm || $term > $maxTerm) {
+            throw ValidationException::withMessages([
+                'term' => ["Term must be between {$minTerm} and {$maxTerm} months for this product."],
+            ]);
+        }
+
+        // Auto-compute deductions from product fees when not sent by frontend
+        $deductions = $validated['deductions'] ?? [];
+        if (empty($deductions)) {
+            if ((float) $product->processing_fee > 0) {
+                $deductions[] = ['name' => 'Processing Fee', 'amount' => (float) $product->processing_fee, 'type' => 'percentage'];
+            }
+            if ((float) $product->service_fee > 0) {
+                $deductions[] = ['name' => 'Service Fee', 'amount' => (float) $product->service_fee, 'type' => 'percentage'];
+            }
+            if ((float) ($product->notarial_fee ?? 0) > 0) {
+                $deductions[] = ['name' => 'Notarial Fee', 'amount' => (float) $product->notarial_fee, 'type' => 'fixed'];
+            }
+        }
+
+        $deductionResult = $this->computeDeductions($principal, $deductions);
 
         $loan = Loan::create([
             'borrower_id' => $borrower->id,
@@ -31,15 +76,15 @@ class LoanService
             'branch_id' => $borrower->branch_id,
             'interest_rate' => $interestRate,
             'interest_method' => $product->interest_method,
-            'term' => $product->term,
-            'frequency' => $product->frequency,
-            'principal_amount' => $validated['principal_amount'],
+            'term' => $term,
+            'frequency' => $frequency,
+            'principal_amount' => $principal,
             'purpose' => $validated['purpose'] ?? null,
             'start_date' => $validated['start_date'],
             'maturity_date' => $this->computeMaturityDate(
                 $validated['start_date'],
-                $product->term,
-                $product->frequency,
+                $term,
+                $frequency,
             ),
             'deductions' => $deductionResult['items'],
             'total_deductions' => $deductionResult['total'],

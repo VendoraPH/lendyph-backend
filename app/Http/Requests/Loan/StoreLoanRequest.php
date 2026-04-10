@@ -21,6 +21,8 @@ class StoreLoanRequest extends FormRequest
             'principal_amount' => ['required', 'numeric', 'min:1'],
             'purpose' => ['nullable', 'string', 'max:500'],
             'interest_rate' => ['nullable', 'numeric', 'min:0', 'max:100'],
+            'term' => ['nullable', 'integer', 'min:1'],
+            'frequency' => ['nullable', 'in:daily,weekly,semi_monthly,monthly'],
             'start_date' => ['required', 'date'],
             'account_officer_id' => ['nullable', 'exists:users,id'],
             'deductions' => ['nullable', 'array'],
