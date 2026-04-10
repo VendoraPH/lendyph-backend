@@ -17,6 +17,7 @@ class UpdateLoanRequest extends FormRequest
             'co_maker_ids' => ['nullable', 'array'],
             'co_maker_ids.*' => ['exists:co_makers,id'],
             'principal_amount' => ['sometimes', 'numeric', 'min:1'],
+            'purpose' => ['nullable', 'string', 'max:500'],
             'interest_rate' => ['nullable', 'numeric', 'min:0', 'max:100'],
             'start_date' => ['sometimes', 'date'],
             'deductions' => ['nullable', 'array'],

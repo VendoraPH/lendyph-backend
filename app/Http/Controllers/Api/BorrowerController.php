@@ -387,4 +387,76 @@ class BorrowerController extends Controller
             ->response()
             ->setStatusCode(201);
     }
+
+    #[OA\Get(
+        path: '/api/borrowers/{id}/ledger',
+        summary: 'Borrower transactional ledger',
+        description: 'Returns chronological ledger entries (loan releases as debits, repayments as credits) with running balance.',
+        tags: ['Borrowers'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
+        ],
+        responses: [
+            new OA\Response(response: 200, description: 'Ledger entries with running balance'),
+            new OA\Response(response: 401, description: 'Unauthenticated'),
+            new OA\Response(response: 404, description: 'Borrower not found'),
+        ],
+    )]
+    public function ledger(Borrower $borrower): JsonResponse
+    {
+        $this->authorize('borrowers:view');
+
+        // Build chronological list of loan releases (debits) and repayments (credits)
+        $entries = collect();
+
+        $loans = $borrower->loans()
+            ->with(['repayments' => fn ($q) => $q->where('status', 'posted')])
+            ->whereIn('status', ['released', 'closed'])
+            ->whereNotNull('released_at')
+            ->get();
+
+        foreach ($loans as $loan) {
+            // Loan release as debit entry
+            $entries->push([
+                'date' => $loan->released_at?->toDateString(),
+                'sort_key' => $loan->released_at?->toDateTimeString().'-0-'.$loan->id,
+                'description' => 'Loan released'.($loan->purpose ? ' — '.$loan->purpose : ''),
+                'reference' => $loan->loan_account_number ?? $loan->application_number,
+                'debit' => (float) $loan->principal_amount,
+                'credit' => 0.0,
+            ]);
+
+            // Each repayment as credit entry
+            foreach ($loan->repayments as $repayment) {
+                $entries->push([
+                    'date' => $repayment->payment_date?->toDateString(),
+                    'sort_key' => $repayment->payment_date?->toDateTimeString().'-1-'.$repayment->id,
+                    'description' => 'Payment received'.($repayment->method ? ' via '.ucwords(str_replace('_', ' ', $repayment->method)) : ''),
+                    'reference' => $repayment->receipt_number,
+                    'debit' => 0.0,
+                    'credit' => (float) $repayment->amount_paid,
+                ]);
+            }
+        }
+
+        // Sort chronologically and compute running balance
+        $sorted = $entries->sortBy('sort_key')->values();
+        $runningBalance = 0.0;
+        $withBalance = $sorted->map(function ($entry, $index) use (&$runningBalance) {
+            $runningBalance += $entry['debit'] - $entry['credit'];
+
+            return [
+                'id' => $index + 1,
+                'date' => $entry['date'],
+                'description' => $entry['description'],
+                'reference' => $entry['reference'],
+                'debit' => round($entry['debit'], 2),
+                'credit' => round($entry['credit'], 2),
+                'balance' => round($runningBalance, 2),
+            ];
+        });
+
+        return response()->json(['data' => $withBalance->toArray()]);
+    }
 }

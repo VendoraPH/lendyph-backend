@@ -898,6 +898,42 @@
                 ]
             }
         },
+        "/api/borrowers/{id}/ledger": {
+            "get": {
+                "tags": [
+                    "Borrowers"
+                ],
+                "summary": "Borrower transactional ledger",
+                "description": "Returns chronological ledger entries (loan releases as debits, repayments as credits) with running balance.",
+                "operationId": "503c667dd047ae667f8b013b842dc306",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Ledger entries with running balance"
+                    },
+                    "401": {
+                        "description": "Unauthenticated"
+                    },
+                    "404": {
+                        "description": "Borrower not found"
+                    }
+                },
+                "security": [
+                    {
+                        "sanctum": []
+                    }
+                ]
+            }
+        },
         "/api/branches": {
             "get": {
                 "tags": [
@@ -2319,6 +2355,10 @@
                                     "principal_amount": {
                                         "type": "number",
                                         "example": 50000
+                                    },
+                                    "purpose": {
+                                        "type": "string",
+                                        "example": "Business expansion"
                                     },
                                     "interest_rate": {
                                         "type": "number",

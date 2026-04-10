@@ -19,6 +19,7 @@ class StoreLoanRequest extends FormRequest
             'co_maker_ids.*' => ['exists:co_makers,id'],
             'loan_product_id' => ['required', 'exists:loan_products,id'],
             'principal_amount' => ['required', 'numeric', 'min:1'],
+            'purpose' => ['nullable', 'string', 'max:500'],
             'interest_rate' => ['nullable', 'numeric', 'min:0', 'max:100'],
             'start_date' => ['required', 'date'],
             'deductions' => ['nullable', 'array'],

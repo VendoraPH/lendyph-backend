@@ -54,6 +54,7 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::post('/borrowers/{borrower}/photo', [BorrowerController::class, 'uploadPhoto']);
     Route::delete('/borrowers/{borrower}/photo', [BorrowerController::class, 'deletePhoto']);
     Route::post('/borrowers/{borrower}/valid-ids', [BorrowerController::class, 'uploadValidId']);
+    Route::get('/borrowers/{borrower}/ledger', [BorrowerController::class, 'ledger']);
 
     // Co-makers
     Route::get('/borrowers/{borrower}/co-makers', [CoMakerController::class, 'index']);

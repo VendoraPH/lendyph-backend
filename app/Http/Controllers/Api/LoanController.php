@@ -40,7 +40,7 @@ class LoanController extends Controller
     {
         $this->authorize('loans:view');
 
-        $loans = Loan::with('borrower', 'loanProduct', 'branch', 'createdByUser')
+        $loans = Loan::with('borrower', 'loanProduct', 'branch', 'createdByUser', 'amortizationSchedules')
             ->when(request('search'), function ($q, $search) {
                 $q->where(function ($query) use ($search) {
                     $query->where('application_number', 'like', "%{$search}%")
@@ -75,6 +75,7 @@ class LoanController extends Controller
                     new OA\Property(property: 'co_maker_ids', type: 'array', items: new OA\Items(type: 'integer'), example: [1]),
                     new OA\Property(property: 'loan_product_id', type: 'integer', example: 1),
                     new OA\Property(property: 'principal_amount', type: 'number', example: 50000),
+                    new OA\Property(property: 'purpose', type: 'string', example: 'Business expansion'),
                     new OA\Property(property: 'interest_rate', type: 'number', example: 3.0),
                     new OA\Property(property: 'start_date', type: 'string', format: 'date', example: '2026-04-01'),
                     new OA\Property(

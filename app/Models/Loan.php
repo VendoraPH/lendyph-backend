@@ -25,6 +25,7 @@ class Loan extends Model
         'term',
         'frequency',
         'principal_amount',
+        'purpose',
         'start_date',
         'maturity_date',
         'deductions',
@@ -62,7 +63,7 @@ class Loan extends Model
         static::creating(function (Loan $loan) {
             $lastCode = static::query()->orderByDesc('id')->value('application_number');
             $nextNum = $lastCode ? (int) substr($lastCode, 3) + 1 : 1;
-            $loan->application_number = 'LA-' . str_pad($nextNum, 6, '0', STR_PAD_LEFT);
+            $loan->application_number = 'LA-'.str_pad($nextNum, 6, '0', STR_PAD_LEFT);
         });
     }
 
