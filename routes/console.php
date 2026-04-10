@@ -10,3 +10,6 @@ Artisan::command('inspire', function () {
 
 // Check for defaulted loans daily at 6 AM
 Schedule::command('loans:check-defaulted')->dailyAt('06:00');
+
+// Apply penalties on overdue schedules daily at 6:05 AM
+Schedule::command('loans:apply-penalties')->dailyAt('06:05');

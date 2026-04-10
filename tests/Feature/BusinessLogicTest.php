@@ -298,6 +298,25 @@ class BusinessLogicTest extends TestCase
         $this->assertNotEquals('defaulted', $loan->status);
     }
 
+    // ── 9b. ApplyOverduePenalties command ─────────────────────────────────
+
+    public function test_penalty_command_applies_penalties_to_overdue_schedules(): void
+    {
+        $loan = $this->createReleasedLoan(['start_date' => now()->subMonths(2)->toDateString()]);
+
+        // Before penalties, penalty_amount should be 0 on first schedule
+        $firstSchedule = $loan->amortizationSchedules()->orderBy('period_number')->first();
+        $this->assertEquals(0, (float) $firstSchedule->penalty_amount);
+
+        // Run penalty command
+        Artisan::call('loans:apply-penalties');
+
+        // After, overdue schedules should have penalty > 0
+        $firstSchedule->refresh();
+        $this->assertGreaterThan(0, (float) $firstSchedule->penalty_amount);
+        $this->assertEquals('overdue', $firstSchedule->status);
+    }
+
     // ── 10. Borrower spouse fields ────────────────────────────────────────
 
     public function test_spouse_fields_saved_on_create(): void

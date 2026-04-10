@@ -4,7 +4,31 @@ namespace App\Http\Resources;
 
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
+use OpenApi\Attributes as OA;
 
+#[OA\Schema(
+    schema: 'LoanProduct',
+    properties: [
+        new OA\Property(property: 'id', type: 'integer'),
+        new OA\Property(property: 'name', type: 'string'),
+        new OA\Property(property: 'description', type: 'string', nullable: true),
+        new OA\Property(property: 'interest_rate', type: 'number'),
+        new OA\Property(property: 'min_interest_rate', type: 'number', nullable: true),
+        new OA\Property(property: 'max_interest_rate', type: 'number'),
+        new OA\Property(property: 'interest_method', type: 'string'),
+        new OA\Property(property: 'term', type: 'integer'),
+        new OA\Property(property: 'min_term', type: 'integer', nullable: true),
+        new OA\Property(property: 'max_term', type: 'integer', nullable: true),
+        new OA\Property(property: 'frequency', type: 'string'),
+        new OA\Property(property: 'frequencies', type: 'array', items: new OA\Items(type: 'string')),
+        new OA\Property(property: 'processing_fee', type: 'number'),
+        new OA\Property(property: 'notarial_fee', type: 'number', nullable: true),
+        new OA\Property(property: 'custom_fees', type: 'array', items: new OA\Items(type: 'object')),
+        new OA\Property(property: 'min_amount', type: 'number'),
+        new OA\Property(property: 'max_amount', type: 'number'),
+        new OA\Property(property: 'status', type: 'string', enum: ['active', 'inactive']),
+    ],
+)]
 class LoanProductResource extends JsonResource
 {
     public function toArray(Request $request): array

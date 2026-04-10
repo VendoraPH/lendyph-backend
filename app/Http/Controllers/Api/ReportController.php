@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Http\Controllers\Api\Traits\CsvExportTrait;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\LoanResource;
 use App\Http\Resources\RepaymentResource;
@@ -11,9 +12,12 @@ use App\Services\ReportService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use OpenApi\Attributes as OA;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class ReportController extends Controller
 {
+    use CsvExportTrait;
+
     public function __construct(private ReportService $reportService) {}
 
     #[OA\Get(
@@ -295,5 +299,93 @@ class ReportController extends Controller
         $this->authorize('reports:view');
 
         return response()->json(['data' => $this->reportService->disbursementReport(request()->only('date_from', 'date_to', 'branch_id'))]);
+    }
+
+    // ── CSV Exports ──────────────────────────────────────────────────────
+
+    #[OA\Get(
+        path: '/api/reports/releases/export',
+        summary: 'Export releases as CSV',
+        tags: ['Reports'],
+        security: [['sanctum' => []]],
+        responses: [new OA\Response(response: 200, description: 'CSV file download')],
+    )]
+    public function exportReleases(): StreamedResponse
+    {
+        $this->authorize('reports:export');
+
+        $loans = $this->reportService->listOfReleases(
+            request()->only('date_from', 'date_to', 'branch_id', 'status') + ['per_page' => 10000],
+        );
+
+        return $this->streamCsv('releases.csv', [
+            'Loan #', 'Borrower', 'Product', 'Principal', 'Interest Rate', 'Term', 'Released', 'Status',
+        ], $loans->map(fn ($l) => [
+            $l->loan_account_number ?? $l->application_number,
+            $l->borrower?->full_name ?? '',
+            $l->loanProduct?->name ?? '',
+            $l->principal_amount,
+            $l->interest_rate.'%',
+            $l->term.' months',
+            $l->released_at?->toDateString() ?? '',
+            $l->status,
+        ]));
+    }
+
+    #[OA\Get(
+        path: '/api/reports/repayments/export',
+        summary: 'Export repayments as CSV',
+        tags: ['Reports'],
+        security: [['sanctum' => []]],
+        responses: [new OA\Response(response: 200, description: 'CSV file download')],
+    )]
+    public function exportRepayments(): StreamedResponse
+    {
+        $this->authorize('reports:export');
+
+        $repayments = $this->reportService->listOfRepayments(
+            request()->only('date_from', 'date_to', 'branch_id', 'loan_id', 'status') + ['per_page' => 10000],
+        );
+
+        return $this->streamCsv('repayments.csv', [
+            'Receipt #', 'Borrower', 'Loan #', 'Date', 'Amount', 'Method', 'Status',
+        ], $repayments->map(fn ($r) => [
+            $r->receipt_number,
+            $r->loan?->borrower?->full_name ?? '',
+            $r->loan?->loan_account_number ?? '',
+            $r->payment_date?->toDateString() ?? '',
+            $r->amount_paid,
+            $r->method ?? 'cash',
+            $r->status,
+        ]));
+    }
+
+    #[OA\Get(
+        path: '/api/reports/due-past-due/export',
+        summary: 'Export due/past-due schedules as CSV',
+        tags: ['Reports'],
+        security: [['sanctum' => []]],
+        responses: [new OA\Response(response: 200, description: 'CSV file download')],
+    )]
+    public function exportDuePastDue(): StreamedResponse
+    {
+        $this->authorize('reports:export');
+
+        $schedules = $this->reportService->listOfDuePastDue(
+            request()->only('date_from', 'date_to', 'branch_id') + ['per_page' => 10000],
+        );
+
+        return $this->streamCsv('due-past-due.csv', [
+            'Borrower', 'Loan #', 'Due Date', 'Principal Due', 'Interest Due', 'Penalty', 'Total Due', 'Status',
+        ], $schedules->map(fn ($s) => [
+            $s->loan?->borrower?->full_name ?? '',
+            $s->loan?->loan_account_number ?? '',
+            $s->due_date?->toDateString() ?? '',
+            $s->principal_due,
+            $s->interest_due,
+            $s->penalty_amount ?? 0,
+            $s->total_due,
+            $s->status,
+        ]));
     }
 }

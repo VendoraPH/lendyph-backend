@@ -4,7 +4,29 @@ namespace App\Http\Resources;
 
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
+use OpenApi\Attributes as OA;
 
+#[OA\Schema(
+    schema: 'Repayment',
+    properties: [
+        new OA\Property(property: 'id', type: 'integer'),
+        new OA\Property(property: 'receipt_number', type: 'string'),
+        new OA\Property(property: 'loan_id', type: 'integer'),
+        new OA\Property(property: 'payment_date', type: 'string', format: 'date'),
+        new OA\Property(property: 'method', type: 'string', enum: ['cash', 'gcash', 'maya', 'bank_transfer', 'online']),
+        new OA\Property(property: 'reference_number', type: 'string', nullable: true),
+        new OA\Property(property: 'amount_paid', type: 'number'),
+        new OA\Property(property: 'amount', type: 'number', description: 'Alias for amount_paid'),
+        new OA\Property(property: 'principal_applied', type: 'number'),
+        new OA\Property(property: 'interest_applied', type: 'number'),
+        new OA\Property(property: 'penalty_applied', type: 'number'),
+        new OA\Property(property: 'balance_before', type: 'number'),
+        new OA\Property(property: 'balance_after', type: 'number'),
+        new OA\Property(property: 'status', type: 'string', enum: ['completed', 'voided']),
+        new OA\Property(property: 'collected_by', type: 'string', nullable: true),
+        new OA\Property(property: 'paid_at', type: 'string', format: 'date'),
+    ],
+)]
 class RepaymentResource extends JsonResource
 {
     public function toArray(Request $request): array

@@ -27,8 +27,8 @@ use Illuminate\Support\Facades\Route;
 
 Route::get('/health', HealthController::class);
 
-// Auth
-Route::post('/auth/login', [AuthController::class, 'login']);
+// Auth (stricter rate limit — 10/min per IP)
+Route::post('/auth/login', [AuthController::class, 'login'])->middleware('throttle:auth');
 
 // Protected routes
 Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::class])->group(function () {
@@ -128,6 +128,13 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
         Route::get('/aging', [ReportController::class, 'agingReport']);
         Route::get('/borrowers', [ReportController::class, 'borrowerReport']);
         Route::get('/disbursements', [ReportController::class, 'disbursementReport']);
+
+        // CSV Exports (stricter rate limit — 5/min)
+        Route::middleware('throttle:exports')->group(function () {
+            Route::get('/releases/export', [ReportController::class, 'exportReleases']);
+            Route::get('/repayments/export', [ReportController::class, 'exportRepayments']);
+            Route::get('/due-past-due/export', [ReportController::class, 'exportDuePastDue']);
+        });
     });
 
     // Roles (read-only)

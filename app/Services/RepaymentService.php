@@ -231,7 +231,7 @@ class RepaymentService
     /**
      * Compute and apply penalty_amount to overdue schedules (non-destructive on paid amount).
      */
-    private function applyPenalties(Loan $loan, Carbon $asOfDate): void
+    public function applyPenalties(Loan $loan, Carbon $asOfDate): void
     {
         $penaltyRate = (float) $loan->penalty_rate;
 

@@ -4,7 +4,27 @@ namespace App\Http\Resources;
 
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
+use OpenApi\Attributes as OA;
 
+#[OA\Schema(
+    schema: 'AmortizationSchedule',
+    properties: [
+        new OA\Property(property: 'id', type: 'integer'),
+        new OA\Property(property: 'loan_id', type: 'integer'),
+        new OA\Property(property: 'period_number', type: 'integer'),
+        new OA\Property(property: 'due_date', type: 'string', format: 'date'),
+        new OA\Property(property: 'principal_due', type: 'number'),
+        new OA\Property(property: 'interest_due', type: 'number'),
+        new OA\Property(property: 'total_due', type: 'number'),
+        new OA\Property(property: 'remaining_balance', type: 'number'),
+        new OA\Property(property: 'status', type: 'string', enum: ['pending', 'paid', 'partial', 'overdue']),
+        new OA\Property(property: 'principal', type: 'number', description: 'Alias for principal_due'),
+        new OA\Property(property: 'interest', type: 'number', description: 'Alias for interest_due'),
+        new OA\Property(property: 'amount_due', type: 'number', description: 'Alias for total_due'),
+        new OA\Property(property: 'amount_paid', type: 'number', description: 'Sum of paid amounts'),
+        new OA\Property(property: 'balance', type: 'number', description: 'Alias for remaining_balance'),
+    ],
+)]
 class AmortizationScheduleResource extends JsonResource
 {
     public function toArray(Request $request): array

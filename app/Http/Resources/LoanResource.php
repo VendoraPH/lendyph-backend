@@ -4,7 +4,36 @@ namespace App\Http\Resources;
 
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
+use OpenApi\Attributes as OA;
 
+#[OA\Schema(
+    schema: 'Loan',
+    properties: [
+        new OA\Property(property: 'id', type: 'integer'),
+        new OA\Property(property: 'application_number', type: 'string'),
+        new OA\Property(property: 'loan_account_number', type: 'string', nullable: true),
+        new OA\Property(property: 'interest_rate', type: 'number'),
+        new OA\Property(property: 'interest_method', type: 'string'),
+        new OA\Property(property: 'term', type: 'integer'),
+        new OA\Property(property: 'frequency', type: 'string'),
+        new OA\Property(property: 'principal_amount', type: 'number'),
+        new OA\Property(property: 'purpose', type: 'string', nullable: true),
+        new OA\Property(property: 'start_date', type: 'string', format: 'date'),
+        new OA\Property(property: 'maturity_date', type: 'string', format: 'date'),
+        new OA\Property(property: 'status', type: 'string'),
+        new OA\Property(property: 'outstanding_balance', type: 'number'),
+        new OA\Property(property: 'next_due_date', type: 'string', format: 'date', nullable: true),
+        new OA\Property(property: 'current_due', type: 'number'),
+        new OA\Property(property: 'overdue_amount', type: 'number'),
+        new OA\Property(property: 'penalty_amount', type: 'number'),
+        new OA\Property(property: 'total_payable', type: 'number'),
+        new OA\Property(property: 'borrower_name', type: 'string', nullable: true),
+        new OA\Property(property: 'loan_product_name', type: 'string', nullable: true),
+        new OA\Property(property: 'account_officer_id', type: 'integer', nullable: true),
+        new OA\Property(property: 'release_date', type: 'string', format: 'date', nullable: true),
+        new OA\Property(property: 'rejection_remarks', type: 'string', nullable: true),
+    ],
+)]
 class LoanResource extends JsonResource
 {
     public function toArray(Request $request): array
