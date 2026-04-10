@@ -119,7 +119,7 @@ class LoanAdjustmentTest extends TestCase
     public function test_cannot_adjust_non_released_loan(): void
     {
         $loan = $this->createReleasedLoan();
-        $loan->update(['status' => 'closed']);
+        $loan->update(['status' => 'completed']);
 
         $this->postJson("/api/loans/{$loan->id}/adjustments", [
             'adjustment_type' => 'penalty_waiver',

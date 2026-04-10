@@ -412,7 +412,7 @@ class BorrowerController extends Controller
 
         $loans = $borrower->loans()
             ->with(['repayments' => fn ($q) => $q->where('status', 'posted')])
-            ->whereIn('status', ['released', 'closed'])
+            ->whereIn('status', ['released', 'ongoing', 'completed'])
             ->whereNotNull('released_at')
             ->get();
 

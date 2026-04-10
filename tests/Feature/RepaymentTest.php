@@ -84,7 +84,7 @@ class RepaymentTest extends TestCase
 
         $this->assertDatabaseHas('loans', [
             'id' => $loan->id,
-            'status' => 'closed',
+            'status' => 'completed',
         ]);
     }
 
@@ -101,7 +101,7 @@ class RepaymentTest extends TestCase
         ]);
 
         $repaymentId = $response->json('data.id');
-        $this->assertDatabaseHas('loans', ['id' => $loan->id, 'status' => 'closed']);
+        $this->assertDatabaseHas('loans', ['id' => $loan->id, 'status' => 'completed']);
 
         // Void → loan reopens
         $this->patchJson("/api/repayments/{$repaymentId}/void", [

@@ -91,7 +91,7 @@ class ReportService
     {
         $loans = $borrower->loans()
             ->with('loanProduct', 'amortizationSchedules', 'repayments')
-            ->whereIn('status', ['released', 'closed'])
+            ->whereIn('status', ['released', 'ongoing', 'completed'])
             ->get();
 
         $loanSummaries = $loans->map(function ($loan) use ($filters) {
@@ -143,7 +143,7 @@ class ReportService
     public function listOfReleases(array $filters): LengthAwarePaginator
     {
         return Loan::with('borrower', 'branch', 'loanProduct')
-            ->whereIn('status', ['released', 'closed'])
+            ->whereIn('status', ['released', 'ongoing', 'completed'])
             ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->whereDate('released_at', '>=', $d))
             ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->whereDate('released_at', '<=', $d))
             ->when($filters['branch_id'] ?? null, fn ($q, $b) => $q->where('branch_id', $b))
@@ -182,7 +182,7 @@ class ReportService
     public function loanBalanceSummary(array $filters): array
     {
         $query = Loan::query()
-            ->whereIn('status', ['released', 'closed'])
+            ->whereIn('status', ['released', 'ongoing', 'completed'])
             ->when($filters['branch_id'] ?? null, fn ($q, $b) => $q->where('branch_id', $b))
             ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->whereDate('released_at', '>=', $d))
             ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->whereDate('released_at', '<=', $d));
@@ -219,7 +219,7 @@ class ReportService
         // Per-branch breakdown
         $byBranch = DB::table('loans')
             ->join('branches', 'loans.branch_id', '=', 'branches.id')
-            ->whereIn('loans.status', ['released', 'closed'])
+            ->whereIn('loans.status', ['released', 'ongoing', 'completed'])
             ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->whereDate('loans.released_at', '>=', $d))
             ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->whereDate('loans.released_at', '<=', $d))
             ->groupBy('branches.id', 'branches.name')
@@ -232,7 +232,7 @@ class ReportService
             ->get()
             ->map(function ($branch) {
                 $branchLoanIds = Loan::where('branch_id', $branch->branch_id)
-                    ->whereIn('status', ['released', 'closed'])
+                    ->whereIn('status', ['released', 'ongoing', 'completed'])
                     ->pluck('id');
 
                 $outstanding = DB::table('amortization_schedules')
@@ -305,7 +305,7 @@ class ReportService
 
         $processingFees = (float) DB::table('loans')
             ->join('loan_products', 'loans.loan_product_id', '=', 'loan_products.id')
-            ->whereIn('loans.status', ['released', 'closed'])
+            ->whereIn('loans.status', ['released', 'ongoing', 'completed'])
             ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->whereDate('loans.released_at', '>=', $d))
             ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->whereDate('loans.released_at', '<=', $d))
             ->selectRaw('SUM(loan_products.processing_fee / 100 * loans.principal_amount) as total')
@@ -359,16 +359,16 @@ class ReportService
 
     public function borrowerReport(array $filters): array
     {
-        $totalActive = Borrower::whereHas('loans', fn ($q) => $q->whereIn('status', ['released', 'closed']))->count();
+        $totalActive = Borrower::whereHas('loans', fn ($q) => $q->whereIn('status', ['released', 'ongoing', 'completed']))->count();
 
         $newBorrowers = Borrower::query()
             ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->whereDate('created_at', '>=', $d))
             ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->whereDate('created_at', '<=', $d))
             ->count();
 
-        $avgLoanSize = (float) Loan::whereIn('status', ['released', 'closed'])->avg('principal_amount') ?? 0;
+        $avgLoanSize = (float) Loan::whereIn('status', ['released', 'ongoing', 'completed'])->avg('principal_amount') ?? 0;
 
-        $repeatBorrowers = Borrower::whereHas('loans', fn ($q) => $q->whereIn('status', ['released', 'closed']), '>=', 2)->count();
+        $repeatBorrowers = Borrower::whereHas('loans', fn ($q) => $q->whereIn('status', ['released', 'ongoing', 'completed']), '>=', 2)->count();
 
         return [
             'total_active_borrowers' => $totalActive,
@@ -381,7 +381,7 @@ class ReportService
 
     public function disbursementReport(array $filters): array
     {
-        $query = Loan::whereIn('status', ['released', 'closed'])
+        $query = Loan::whereIn('status', ['released', 'ongoing', 'completed'])
             ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->whereDate('released_at', '>=', $d))
             ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->whereDate('released_at', '<=', $d))
             ->when($filters['branch_id'] ?? null, fn ($q, $b) => $q->where('branch_id', $b));

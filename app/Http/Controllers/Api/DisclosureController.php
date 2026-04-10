@@ -31,9 +31,9 @@ class DisclosureController extends Controller
     {
         $this->authorize('loans:view');
 
-        if (! in_array($loan->status, ['approved', 'released', 'closed'])) {
+        if (! in_array($loan->status, ['approved', 'released', 'ongoing', 'completed'])) {
             return response()->json([
-                'message' => 'Disclosure is only available for approved, released, or closed loans.',
+                'message' => 'Disclosure is only available for approved, released, ongoing, or completed loans.',
             ], 422);
         }
 

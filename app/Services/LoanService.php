@@ -135,7 +135,7 @@ class LoanService
                 ->orderByDesc('id')
                 ->value('loan_account_number');
             $nextNum = $lastLN ? (int) substr($lastLN, 3) + 1 : 1;
-            $loanAccountNumber = 'LN-' . str_pad($nextNum, 6, '0', STR_PAD_LEFT);
+            $loanAccountNumber = 'LN-'.str_pad($nextNum, 6, '0', STR_PAD_LEFT);
 
             $loan->update([
                 'status' => 'released',
@@ -159,9 +159,9 @@ class LoanService
 
     public function voidLoan(Loan $loan): Loan
     {
-        if (in_array($loan->status, ['released', 'closed'])) {
+        if (in_array($loan->status, ['released', 'ongoing', 'completed'])) {
             throw ValidationException::withMessages([
-                'status' => ['Released or closed loans cannot be voided.'],
+                'status' => ['Released, ongoing, or completed loans cannot be voided.'],
             ]);
         }
 

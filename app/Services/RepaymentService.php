@@ -112,13 +112,16 @@ class RepaymentService
                 'remarks' => $remarks,
             ]);
 
-            // Step 6: Auto-close loan if all schedules are paid
+            // Step 6: Loan status lifecycle
+            // released → ongoing on first payment, → completed when all schedules paid
             $unpaidCount = $loan->amortizationSchedules()
                 ->whereIn('status', ['pending', 'partial', 'overdue'])
                 ->count();
 
             if ($unpaidCount === 0) {
-                $loan->update(['status' => 'closed']);
+                $loan->update(['status' => 'completed']);
+            } elseif ($loan->status === 'released') {
+                $loan->update(['status' => 'ongoing']);
             }
 
             return $repayment;
@@ -151,9 +154,14 @@ class RepaymentService
                 'voided_at' => now(),
             ]);
 
-            // If loan was closed, revert to released
-            if ($loan->status === 'closed') {
-                $loan->update(['status' => 'released']);
+            // If loan was completed, revert appropriately based on remaining payments
+            if ($loan->status === 'completed') {
+                $remainingPayments = $loan->repayments()
+                    ->where('status', 'posted')
+                    ->where('id', '!=', $repayment->id)
+                    ->count();
+
+                $loan->update(['status' => $remainingPayments > 0 ? 'ongoing' : 'released']);
             }
 
             return $repayment;

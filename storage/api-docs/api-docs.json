@@ -3463,7 +3463,8 @@
                             "type": "string",
                             "enum": [
                                 "released",
-                                "closed"
+                                "ongoing",
+                                "completed"
                             ]
                         }
                     },

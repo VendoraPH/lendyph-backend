@@ -14,7 +14,7 @@ class DashboardService
         $today = Carbon::today();
         $monthStart = Carbon::now()->startOfMonth();
 
-        $totalPortfolio = (float) Loan::whereIn('status', ['released', 'closed'])
+        $totalPortfolio = (float) Loan::whereIn('status', ['released', 'ongoing', 'completed'])
             ->sum('principal_amount');
 
         $activeLoansCount = Loan::where('status', 'released')->count();
@@ -164,7 +164,7 @@ class DashboardService
     {
         return collect(range(6, 0))->map(function ($weeksAgo) {
             $end = Carbon::now()->startOfWeek()->subWeeks($weeksAgo)->endOfWeek();
-            $value = (float) Loan::whereIn('status', ['released', 'closed'])
+            $value = (float) Loan::whereIn('status', ['released', 'ongoing', 'completed'])
                 ->where('released_at', '<=', $end)
                 ->sum('principal_amount');
 

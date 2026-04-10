@@ -6,6 +6,7 @@ use App\Models\AmortizationSchedule;
 use App\Models\Loan;
 use App\Models\LoanAdjustment;
 use App\Models\User;
+use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
@@ -15,9 +16,9 @@ class LoanAdjustmentService
 
     public function createAdjustment(Loan $loan, array $validated, User $user): LoanAdjustment
     {
-        if ($loan->status !== 'released') {
+        if (! in_array($loan->status, ['released', 'ongoing'])) {
             throw ValidationException::withMessages([
-                'loan' => 'Adjustments can only be made on released loans.',
+                'loan' => 'Adjustments can only be made on released or ongoing loans.',
             ]);
         }
 
@@ -142,7 +143,7 @@ class LoanAdjustmentService
 
         // Update loan record
         $newMaturity = $this->loanService->computeMaturityDate(
-            $tempLoan->start_date instanceof \Carbon\Carbon
+            $tempLoan->start_date instanceof Carbon
                 ? $tempLoan->start_date->toDateString()
                 : $tempLoan->start_date,
             $newTerm,
@@ -154,6 +155,7 @@ class LoanAdjustmentService
             'term' => $lastPaidPeriod + $newTerm,
             'frequency' => $newFrequency,
             'maturity_date' => $newMaturity,
+            'status' => 'restructured',
         ]);
     }
 
@@ -282,7 +284,7 @@ class LoanAdjustmentService
         }
 
         $newMaturity = $this->loanService->computeMaturityDate(
-            $tempLoan->start_date instanceof \Carbon\Carbon
+            $tempLoan->start_date instanceof Carbon
                 ? $tempLoan->start_date->toDateString()
                 : $tempLoan->start_date,
             $newTerm,
