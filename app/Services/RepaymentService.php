@@ -24,9 +24,9 @@ class RepaymentService
         string $method = 'cash',
         ?string $referenceNumber = null,
     ): Repayment {
-        if ($loan->status !== 'released') {
+        if (! in_array($loan->status, ['released', 'ongoing'])) {
             throw ValidationException::withMessages([
-                'loan' => 'Repayments can only be recorded for released loans.',
+                'loan' => 'Repayments can only be recorded for released or ongoing loans.',
             ]);
         }
 

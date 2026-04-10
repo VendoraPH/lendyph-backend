@@ -20,6 +20,7 @@
 /storage/pail
 /storage/api-docs
 /storage/api-docs/api-docs.json
+/storage/backups
 /vendor
 Homestead.json
 Homestead.yaml

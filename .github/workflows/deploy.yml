@@ -30,4 +30,9 @@ jobs:
             php artisan route:cache
             php artisan l5-swagger:generate
             chown -R www-data:www-data storage bootstrap/cache
+
+            # Ensure Laravel scheduler cron is installed (idempotent)
+            CRON_CMD="* * * * * cd /var/www/api-lendyph && php artisan schedule:run >> /dev/null 2>&1"
+            (crontab -l 2>/dev/null | grep -qF "api-lendyph" || (crontab -l 2>/dev/null; echo "$CRON_CMD") | crontab -)
+
             echo "Deployed at $(date)"

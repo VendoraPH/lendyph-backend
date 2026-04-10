@@ -13,3 +13,6 @@ Schedule::command('loans:check-defaulted')->dailyAt('06:00');
 
 // Apply penalties on overdue schedules daily at 6:05 AM
 Schedule::command('loans:apply-penalties')->dailyAt('06:05');
+
+// Database backup daily at 2 AM, keep last 7
+Schedule::command('db:backup --keep=7')->dailyAt('02:00');
