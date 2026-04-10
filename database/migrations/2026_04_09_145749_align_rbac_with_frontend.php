@@ -14,10 +14,13 @@ return new class extends Migration
      */
     public function up(): void
     {
-        // 1. Update existing user status data first (before altering enum)
+        // 1a. Expand enum to include both 'inactive' (new) and 'deactivated' (old) so we can migrate data
+        DB::statement("ALTER TABLE users MODIFY status ENUM('active', 'inactive', 'deactivated') NOT NULL DEFAULT 'active'");
+
+        // 1b. Migrate existing data from old value to new
         DB::table('users')->where('status', 'deactivated')->update(['status' => 'inactive']);
 
-        // 2. Alter users.status enum
+        // 1c. Drop the old 'deactivated' value from the enum
         DB::statement("ALTER TABLE users MODIFY status ENUM('active', 'inactive') NOT NULL DEFAULT 'active'");
 
         // 3. Rename role
