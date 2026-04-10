@@ -37,10 +37,10 @@ class UserFactory extends Factory
         ]);
     }
 
-    public function deactivated(): static
+    public function inactive(): static
     {
         return $this->state(fn (array $attributes) => [
-            'status' => 'deactivated',
+            'status' => 'inactive',
         ]);
     }
 }
