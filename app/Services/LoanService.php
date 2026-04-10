@@ -303,12 +303,12 @@ class LoanService
     private function buildStraight(Loan $loan): array
     {
         $principal = (float) $loan->principal_amount;
-        $rate = (float) $loan->interest_rate / 100;
+        $rate = (float) $loan->interest_rate / 100; // Monthly rate (PH convention)
         $term = $loan->term;
-        $ppY = $this->periodsPerYear($loan->frequency);
 
-        $totalInterest = round($principal * $rate / $ppY * $term, 2);
-        $interestPerPeriod = round($totalInterest / $term, 2);
+        // PH lending: interest = principal × monthly rate (flat on original principal each period)
+        $interestPerPeriod = round($principal * $rate, 2);
+        $totalInterest = round($interestPerPeriod * $term, 2);
         $principalPerPeriod = round($principal / $term, 2);
 
         $schedule = [];
@@ -339,10 +339,9 @@ class LoanService
     private function buildDiminishing(Loan $loan): array
     {
         $principal = (float) $loan->principal_amount;
-        $annualRate = (float) $loan->interest_rate / 100;
         $term = $loan->term;
-        $ppY = $this->periodsPerYear($loan->frequency);
-        $ratePerPeriod = $annualRate / $ppY;
+        // PH lending: interest_rate is monthly rate (e.g., 3 = 3% per month)
+        $ratePerPeriod = (float) $loan->interest_rate / 100;
 
         // PMT formula
         if ($ratePerPeriod > 0) {
@@ -381,11 +380,11 @@ class LoanService
     private function buildUponMaturity(Loan $loan): array
     {
         $principal = (float) $loan->principal_amount;
-        $rate = (float) $loan->interest_rate / 100;
+        $rate = (float) $loan->interest_rate / 100; // Monthly rate (PH convention)
         $term = $loan->term;
-        $ppY = $this->periodsPerYear($loan->frequency);
 
-        $interestPerPeriod = round($principal * $rate / $ppY, 2);
+        // PH lending: interest = principal × monthly rate per period
+        $interestPerPeriod = round($principal * $rate, 2);
         $totalInterest = round($interestPerPeriod * $term, 2);
 
         // If term > 1, generate interest-only periodic payments + principal at maturity

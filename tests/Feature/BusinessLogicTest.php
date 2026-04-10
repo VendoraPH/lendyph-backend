@@ -408,4 +408,85 @@ class BusinessLogicTest extends TestCase
         $this->assertNotNull($data['borrower_name']);
         $this->assertNotNull($data['loan_product_name']);
     }
+
+    // ── 13. Interest calculation — PH convention ──────────────────────────
+
+    public function test_straight_interest_uses_monthly_rate_not_annual(): void
+    {
+        // PH convention: "3% interest" means 3% per month on original principal
+        // For 60,000 loan at 3% for 6 months:
+        //   Interest per period = 60,000 × 3% = 1,800
+        //   Total interest = 1,800 × 6 = 10,800
+        //   Monthly payment = 10,000 + 1,800 = 11,800
+
+        $product = LoanProduct::factory()->create([
+            'interest_rate' => 3.0,
+            'interest_method' => 'straight',
+            'term' => 6,
+            'frequency' => 'monthly',
+        ]);
+        $borrower = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+
+        $loan = $this->postJson('/api/loans', [
+            'borrower_id' => $borrower->id,
+            'loan_product_id' => $product->id,
+            'principal_amount' => 60000,
+            'start_date' => now()->toDateString(),
+        ])->json('data');
+
+        // Submit → approve → release to generate schedule
+        $this->patchJson("/api/loans/{$loan['id']}/submit");
+        $this->patchJson("/api/loans/{$loan['id']}/approve");
+        $response = $this->patchJson("/api/loans/{$loan['id']}/release");
+
+        $schedules = $response->json('data.amortization_schedules');
+        $this->assertCount(6, $schedules);
+
+        // First period: interest should be 1,800 (3% of 60,000), NOT 150 (annual/12)
+        $firstSchedule = $schedules[0];
+        $this->assertEquals(1800, (float) $firstSchedule['interest_due']);
+        $this->assertEquals(10000, (float) $firstSchedule['principal_due']);
+        $this->assertEquals(11800, (float) $firstSchedule['total_due']);
+
+        // Total interest across all periods = 10,800
+        $totalInterest = array_sum(array_column($schedules, 'interest_due'));
+        $this->assertEquals(10800, $totalInterest);
+    }
+
+    public function test_diminishing_interest_uses_monthly_rate(): void
+    {
+        // For diminishing at 3% monthly on 60,000 for 6 months:
+        //   PMT = 60000 * 0.03 / (1 - (1.03)^(-6)) ≈ 11,076
+        //   First period interest = 60,000 × 3% = 1,800
+
+        $product = LoanProduct::factory()->create([
+            'interest_rate' => 3.0,
+            'interest_method' => 'diminishing',
+            'term' => 6,
+            'frequency' => 'monthly',
+        ]);
+        $borrower = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+
+        $loan = $this->postJson('/api/loans', [
+            'borrower_id' => $borrower->id,
+            'loan_product_id' => $product->id,
+            'principal_amount' => 60000,
+            'start_date' => now()->toDateString(),
+        ])->json('data');
+
+        $this->patchJson("/api/loans/{$loan['id']}/submit");
+        $this->patchJson("/api/loans/{$loan['id']}/approve");
+        $response = $this->patchJson("/api/loans/{$loan['id']}/release");
+
+        $schedules = $response->json('data.amortization_schedules');
+
+        // First period interest = 60,000 × 3% = 1,800 (NOT 60,000 × 0.25% = 150)
+        $this->assertEquals(1800, (float) $schedules[0]['interest_due']);
+
+        // Interest should decrease each period (diminishing balance)
+        $this->assertGreaterThan(
+            (float) $schedules[1]['interest_due'],
+            (float) $schedules[0]['interest_due']
+        );
+    }
 }
