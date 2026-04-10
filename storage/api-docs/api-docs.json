@@ -462,6 +462,21 @@
                                         "type": "number",
                                         "example": 25000
                                     },
+                                    "spouse_first_name": {
+                                        "type": "string"
+                                    },
+                                    "spouse_middle_name": {
+                                        "type": "string"
+                                    },
+                                    "spouse_last_name": {
+                                        "type": "string"
+                                    },
+                                    "spouse_contact_number": {
+                                        "type": "string"
+                                    },
+                                    "spouse_occupation": {
+                                        "type": "string"
+                                    },
                                     "branch_id": {
                                         "type": "integer",
                                         "example": 1
@@ -590,6 +605,21 @@
                                     },
                                     "monthly_income": {
                                         "type": "number"
+                                    },
+                                    "spouse_first_name": {
+                                        "type": "string"
+                                    },
+                                    "spouse_middle_name": {
+                                        "type": "string"
+                                    },
+                                    "spouse_last_name": {
+                                        "type": "string"
+                                    },
+                                    "spouse_contact_number": {
+                                        "type": "string"
+                                    },
+                                    "spouse_occupation": {
+                                        "type": "string"
                                     },
                                     "branch_id": {
                                         "type": "integer"

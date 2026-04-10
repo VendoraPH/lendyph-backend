@@ -26,6 +26,11 @@ class StoreBorrowerRequest extends FormRequest
             'email' => ['nullable', 'email', 'max:255'],
             'employer_or_business' => ['nullable', 'string', 'max:255'],
             'monthly_income' => ['nullable', 'numeric', 'min:0'],
+            'spouse_first_name' => ['nullable', 'string', 'max:255'],
+            'spouse_middle_name' => ['nullable', 'string', 'max:255'],
+            'spouse_last_name' => ['nullable', 'string', 'max:255'],
+            'spouse_contact_number' => ['nullable', 'string', 'max:20'],
+            'spouse_occupation' => ['nullable', 'string', 'max:255'],
             'branch_id' => ['required', 'exists:branches,id'],
         ];
     }
