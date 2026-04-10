@@ -9,21 +9,54 @@ class LoanResource extends JsonResource
 {
     public function toArray(Request $request): array
     {
-        // Compute next due date and outstanding balance from loaded schedules to avoid N+1
+        // Compute payment-related fields from loaded schedules to avoid N+1
         $nextDueDate = null;
         $outstandingBalance = 0.0;
+        $currentDue = 0.0;
+        $overdueAmount = 0.0;
+        $totalPenalty = 0.0;
+        $totalPayable = 0.0;
 
         if ($this->relationLoaded('amortizationSchedules')) {
+            $today = now()->startOfDay();
             $unpaidSchedules = $this->amortizationSchedules
                 ->whereIn('status', ['pending', 'partial', 'overdue']);
 
-            $nextDueDate = $unpaidSchedules
-                ->sortBy('due_date')
-                ->first()
-                ?->due_date?->toDateString();
+            $nextSchedule = $unpaidSchedules->sortBy('due_date')->first();
+            $nextDueDate = $nextSchedule?->due_date?->toDateString();
 
+            // Current due = next unpaid schedule's remaining amount
+            if ($nextSchedule) {
+                $currentDue = round(
+                    max(0, (float) $nextSchedule->total_due - (float) $nextSchedule->principal_paid - (float) $nextSchedule->interest_paid)
+                    + max(0, (float) ($nextSchedule->penalty_amount ?? 0) - (float) ($nextSchedule->penalty_paid ?? 0)),
+                    2,
+                );
+            }
+
+            // Outstanding principal balance
             $outstandingBalance = round($this->amortizationSchedules->sum(function ($s) {
                 return max(0, (float) $s->principal_due - (float) $s->principal_paid);
+            }), 2);
+
+            // Overdue = sum of remaining amounts on schedules past due date
+            $overdueSchedules = $unpaidSchedules->filter(fn ($s) => $s->due_date->lt($today));
+            $overdueAmount = round($overdueSchedules->sum(function ($s) {
+                return max(0, (float) $s->principal_due - (float) $s->principal_paid)
+                    + max(0, (float) $s->interest_due - (float) $s->interest_paid)
+                    + max(0, (float) ($s->penalty_amount ?? 0) - (float) ($s->penalty_paid ?? 0));
+            }), 2);
+
+            // Total penalty remaining
+            $totalPenalty = round($this->amortizationSchedules->sum(function ($s) {
+                return max(0, (float) ($s->penalty_amount ?? 0) - (float) ($s->penalty_paid ?? 0));
+            }), 2);
+
+            // Total payable = all remaining amounts (principal + interest + penalty)
+            $totalPayable = round($this->amortizationSchedules->sum(function ($s) {
+                return max(0, (float) $s->principal_due - (float) $s->principal_paid)
+                    + max(0, (float) $s->interest_due - (float) $s->interest_paid)
+                    + max(0, (float) ($s->penalty_amount ?? 0) - (float) ($s->penalty_paid ?? 0));
             }), 2);
         }
 
@@ -47,6 +80,10 @@ class LoanResource extends JsonResource
             'status' => $this->status,
             'outstanding_balance' => $outstandingBalance,
             'next_due_date' => $nextDueDate,
+            'current_due' => $currentDue,
+            'overdue_amount' => $overdueAmount,
+            'penalty_amount' => $totalPenalty,
+            'total_payable' => $totalPayable,
             'approval_remarks' => $this->approval_remarks,
             'approved_at' => $this->approved_at,
             'rejection_remarks' => $this->rejection_remarks,
