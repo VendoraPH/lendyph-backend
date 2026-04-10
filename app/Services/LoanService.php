@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\AmortizationSchedule;
 use App\Models\Borrower;
+use App\Models\CoMaker;
 use App\Models\Loan;
 use App\Models\LoanProduct;
 use App\Models\User;
@@ -33,6 +34,7 @@ class LoanService
             'term' => $product->term,
             'frequency' => $product->frequency,
             'principal_amount' => $validated['principal_amount'],
+            'purpose' => $validated['purpose'] ?? null,
             'start_date' => $validated['start_date'],
             'maturity_date' => $this->computeMaturityDate(
                 $validated['start_date'],
@@ -46,10 +48,37 @@ class LoanService
             'grace_period_days' => $product->grace_period_days,
             'status' => 'draft',
             'created_by' => $user->id,
+            'account_officer_id' => $validated['account_officer_id'] ?? null,
         ]);
 
+        // Frontend sends borrower IDs as co-makers — resolve to CoMaker records
         if (! empty($validated['co_maker_ids'])) {
-            $loan->coMakers()->sync($validated['co_maker_ids']);
+            $coMakerIds = [];
+            foreach ($validated['co_maker_ids'] as $id) {
+                // Try as co_maker ID first, then as borrower ID
+                $coMaker = CoMaker::find($id);
+                if ($coMaker) {
+                    $coMakerIds[] = $coMaker->id;
+                } else {
+                    // Look up borrower and find/create a co-maker for them
+                    $cmBorrower = Borrower::find($id);
+                    if ($cmBorrower) {
+                        $coMaker = CoMaker::firstOrCreate(
+                            ['borrower_id' => $cmBorrower->id, 'first_name' => $cmBorrower->first_name, 'last_name' => $cmBorrower->last_name],
+                            [
+                                'address' => $cmBorrower->address,
+                                'contact_number' => $cmBorrower->contact_number,
+                                'relationship_to_borrower' => 'other',
+                                'status' => 'active',
+                            ],
+                        );
+                        $coMakerIds[] = $coMaker->id;
+                    }
+                }
+            }
+            if (! empty($coMakerIds)) {
+                $loan->coMakers()->sync($coMakerIds);
+            }
         }
 
         return $loan;

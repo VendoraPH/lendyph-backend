@@ -63,6 +63,8 @@ class LoanResource extends JsonResource
             'approved_by_user' => new UserResource($this->whenLoaded('approvedByUser')),
             'released_by_user' => new UserResource($this->whenLoaded('releasedByUser')),
             'created_by_user' => new UserResource($this->whenLoaded('createdByUser')),
+            'account_officer_id' => $this->account_officer_id,
+            'account_officer' => new UserResource($this->whenLoaded('accountOfficer')),
             'amortization_schedules' => AmortizationScheduleResource::collection(
                 $this->whenLoaded('amortizationSchedules')
             ),

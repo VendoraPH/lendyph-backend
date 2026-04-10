@@ -40,6 +40,7 @@ class Loan extends Model
         'released_by',
         'released_at',
         'created_by',
+        'account_officer_id',
     ];
 
     protected function casts(): array
@@ -110,6 +111,11 @@ class Loan extends Model
     public function createdByUser(): BelongsTo
     {
         return $this->belongsTo(User::class, 'created_by');
+    }
+
+    public function accountOfficer(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'account_officer_id');
     }
 
     public function amortizationSchedules(): HasMany
