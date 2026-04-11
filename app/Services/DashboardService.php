@@ -5,19 +5,19 @@ namespace App\Services;
 use App\Models\Loan;
 use App\Models\Repayment;
 use Carbon\Carbon;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 
 class DashboardService
 {
     public function stats(): array
     {
-        $today = Carbon::today();
         $monthStart = Carbon::now()->startOfMonth();
 
         $totalPortfolio = (float) Loan::whereIn('status', ['released', 'ongoing', 'completed'])
             ->sum('principal_amount');
 
-        $activeLoansCount = Loan::where('status', 'released')->count();
+        $activeLoansCount = Loan::whereIn('status', ['released', 'ongoing'])->count();
 
         $totalCollectedMtd = (float) Repayment::where('status', 'posted')
             ->whereDate('payment_date', '>=', $monthStart)
@@ -28,17 +28,20 @@ class DashboardService
             ->distinct('loan_id')
             ->count('loan_id');
 
+        // Cache sparklines for 10 minutes (28 queries → 0 on cache hit)
+        $sparklines = Cache::remember('dashboard:sparklines', 600, fn () => [
+            'portfolio' => $this->portfolioSparkline(),
+            'active_loans' => $this->activeLoansSparkline(),
+            'collected' => $this->collectionsSparkline(),
+            'overdue' => $this->overdueSparkline(),
+        ]);
+
         return [
             'total_portfolio' => round($totalPortfolio, 2),
             'active_loans_count' => $activeLoansCount,
             'total_collected_mtd' => round($totalCollectedMtd, 2),
             'overdue_loans_count' => $overdueLoansCount,
-            'sparklines' => [
-                'portfolio' => $this->portfolioSparkline(),
-                'active_loans' => $this->activeLoansSparkline(),
-                'collected' => $this->collectionsSparkline(),
-                'overdue' => $this->overdueSparkline(),
-            ],
+            'sparklines' => $sparklines,
         ];
     }
 

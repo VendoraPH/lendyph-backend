@@ -204,11 +204,12 @@ class LoanService
         $this->guardStatus($loan, 'approved', 'release');
 
         return DB::transaction(function () use ($loan, $releaser) {
-            // Generate loan account number
-            $lastLN = Loan::whereNotNull('loan_account_number')
+            // Generate loan account number with row-level lock to prevent race conditions
+            $lastLoan = Loan::whereNotNull('loan_account_number')
                 ->orderByDesc('id')
-                ->value('loan_account_number');
-            $nextNum = $lastLN ? (int) substr($lastLN, 3) + 1 : 1;
+                ->lockForUpdate()
+                ->first();
+            $nextNum = $lastLoan ? (int) substr($lastLoan->loan_account_number, 3) + 1 : 1;
             $loanAccountNumber = 'LN-'.str_pad($nextNum, 6, '0', STR_PAD_LEFT);
 
             $loan->update([

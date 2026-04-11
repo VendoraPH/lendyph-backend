@@ -66,8 +66,8 @@ class Loan extends Model
     protected static function booted(): void
     {
         static::creating(function (Loan $loan) {
-            $lastCode = static::query()->orderByDesc('id')->value('application_number');
-            $nextNum = $lastCode ? (int) substr($lastCode, 3) + 1 : 1;
+            $last = static::query()->orderByDesc('id')->lockForUpdate()->first();
+            $nextNum = $last ? (int) substr($last->application_number, 3) + 1 : 1;
             $loan->application_number = 'LA-'.str_pad($nextNum, 6, '0', STR_PAD_LEFT);
         });
     }
