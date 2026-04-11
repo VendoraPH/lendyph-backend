@@ -21,7 +21,7 @@ class StoreLoanAdjustmentRequest extends FormRequest
             // Restructure
             'new_values.interest_rate' => ['nullable', 'numeric', 'min:0'],
             'new_values.term' => ['nullable', 'integer', 'min:1'],
-            'new_values.frequency' => ['nullable', 'in:daily,weekly,semi_monthly,monthly'],
+            'new_values.frequency' => ['nullable', 'in:daily,weekly,bi_weekly,semi_monthly,monthly'],
 
             // Penalty waiver
             'new_values.schedule_ids' => ['nullable', 'array'],

@@ -286,6 +286,7 @@ class LoanService
         return match ($frequency) {
             'daily' => $date->addDays($term),
             'weekly' => $date->addWeeks($term),
+            'bi_weekly' => $date->addDays($term * 14),
             'semi_monthly' => $date->addDays($term * 15),
             'monthly' => $date->addMonths($term),
         };
@@ -439,6 +440,7 @@ class LoanService
         return match ($frequency) {
             'daily' => 365,
             'weekly' => 52,
+            'bi_weekly' => 26,
             'semi_monthly' => 24,
             'monthly' => 12,
         };
@@ -449,6 +451,7 @@ class LoanService
         return match ($frequency) {
             'daily' => $date->copy()->addDay(),
             'weekly' => $date->copy()->addWeek(),
+            'bi_weekly' => $date->copy()->addDays(14),
             'semi_monthly' => $date->copy()->addDays(15),
             'monthly' => $date->copy()->addMonth(),
         };
