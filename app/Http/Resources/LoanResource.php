@@ -54,10 +54,11 @@ class LoanResource extends JsonResource
             $nextSchedule = $unpaidSchedules->sortBy('due_date')->first();
             $nextDueDate = $nextSchedule?->due_date?->toDateString();
 
-            // Current due = next unpaid schedule's remaining amount
+            // Current due = next unpaid schedule's remaining amount (explicit per-field for consistency)
             if ($nextSchedule) {
                 $currentDue = round(
-                    max(0, (float) $nextSchedule->total_due - (float) $nextSchedule->principal_paid - (float) $nextSchedule->interest_paid)
+                    max(0, (float) $nextSchedule->principal_due - (float) $nextSchedule->principal_paid)
+                    + max(0, (float) $nextSchedule->interest_due - (float) $nextSchedule->interest_paid)
                     + max(0, (float) ($nextSchedule->penalty_amount ?? 0) - (float) ($nextSchedule->penalty_paid ?? 0)),
                     2,
                 );

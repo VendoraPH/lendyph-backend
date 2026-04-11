@@ -36,7 +36,7 @@ class LoanAdjustmentController extends Controller
         $adjustments = $loan->adjustments()
             ->with('adjustedByUser', 'approvedByUser')
             ->latest()
-            ->paginate(request('per_page', 15));
+            ->paginate(min((int) request('per_page', 15), 100));
 
         return LoanAdjustmentResource::collection($adjustments);
     }

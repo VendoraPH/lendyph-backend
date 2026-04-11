@@ -13,7 +13,16 @@ trait CsvExportTrait
             fputcsv($handle, $headers);
 
             foreach ($rows as $row) {
-                fputcsv($handle, $row);
+                // Sanitize CSV formula injection (=, +, -, @, \t, \r)
+                $sanitized = array_map(function ($value) {
+                    if (is_string($value) && isset($value[0]) && in_array($value[0], ['=', '+', '-', '@', "\t", "\r"])) {
+                        return "'\t".$value;
+                    }
+
+                    return $value;
+                }, is_array($row) ? $row : iterator_to_array($row));
+
+                fputcsv($handle, $sanitized);
             }
 
             fclose($handle);

@@ -23,18 +23,18 @@ class BackupDatabase extends Command
         $filename = 'lendyph-'.date('Y-m-d-His').'.sql.gz';
         $filepath = $backupDir.'/'.$filename;
 
-        $result = Process::run(sprintf(
-            'mysqldump -h%s -P%s -u%s -p%s %s | gzip > %s',
+        // Use MYSQL_PWD env var to avoid leaking password in process list (ps aux)
+        $result = Process::env(['MYSQL_PWD' => $db['password']])->run(sprintf(
+            'mysqldump -h%s -P%s -u%s %s | gzip > %s',
             escapeshellarg($db['host']),
             escapeshellarg($db['port']),
             escapeshellarg($db['username']),
-            escapeshellarg($db['password']),
             escapeshellarg($db['database']),
             escapeshellarg($filepath),
         ));
 
         if ($result->failed()) {
-            $this->error('Backup failed: '.$result->errorOutput());
+            $this->error('Backup failed. Check server logs for details.');
 
             return self::FAILURE;
         }

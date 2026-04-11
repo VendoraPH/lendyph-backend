@@ -57,7 +57,7 @@ class RepaymentController extends Controller
             ->when(request('date_from'), fn ($q, $d) => $q->whereDate('payment_date', '>=', $d))
             ->when(request('date_to'), fn ($q, $d) => $q->whereDate('payment_date', '<=', $d))
             ->latest('payment_date')
-            ->paginate(request('per_page', 15));
+            ->paginate(min((int) request('per_page', 15), 100));
 
         return RepaymentResource::collection($repayments);
     }
@@ -84,7 +84,7 @@ class RepaymentController extends Controller
         $repayments = $loan->repayments()
             ->with('receivedByUser', 'voidedByUser')
             ->latest('payment_date')
-            ->paginate(request('per_page', 15));
+            ->paginate(min((int) request('per_page', 15), 100));
 
         return RepaymentResource::collection($repayments);
     }

@@ -435,17 +435,6 @@ class LoanService
         ];
     }
 
-    private function periodsPerYear(string $frequency): int
-    {
-        return match ($frequency) {
-            'daily' => 365,
-            'weekly' => 52,
-            'bi_weekly' => 26,
-            'semi_monthly' => 24,
-            'monthly' => 12,
-        };
-    }
-
     private function addPeriod(Carbon $date, string $frequency): Carbon
     {
         return match ($frequency) {

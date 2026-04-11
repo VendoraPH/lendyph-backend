@@ -51,7 +51,7 @@ class UserController extends Controller
             ->when(request('branch_id'), fn ($query, $branchId) => $query->forBranch($branchId))
             ->when(request('role'), fn ($query, $role) => $query->role($role))
             ->latest()
-            ->paginate(request('per_page', 15));
+            ->paginate(min((int) request('per_page', 15), 100));
 
         return UserResource::collection($users);
     }

@@ -25,6 +25,12 @@ class DemoSeeder extends Seeder
      */
     public function run(): void
     {
+        if (app()->isProduction()) {
+            $this->command->error('DemoSeeder must not run in production.');
+
+            return;
+        }
+
         $this->command->info('Seeding demo data...');
 
         $loanService = app(LoanService::class);

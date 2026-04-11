@@ -47,7 +47,7 @@ class ShareCapitalLedgerController extends Controller
             })
             ->orderByDesc('date')
             ->orderByDesc('id')
-            ->paginate(request('per_page', 15));
+            ->paginate(min((int) request('per_page', 15), 100));
 
         return ShareCapitalLedgerResource::collection($entries);
     }

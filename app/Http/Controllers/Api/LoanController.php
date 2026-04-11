@@ -56,7 +56,7 @@ class LoanController extends Controller
             ->when(request('branch_id'), fn ($q, $b) => $q->forBranch($b))
             ->when(request('borrower_id'), fn ($q, $b) => $q->where('borrower_id', $b))
             ->latest()
-            ->paginate(request('per_page', 15));
+            ->paginate(min((int) request('per_page', 15), 100));
 
         return LoanResource::collection($loans);
     }

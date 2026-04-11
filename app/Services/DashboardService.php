@@ -71,7 +71,7 @@ class DashboardService
             ->join('loans', 'amortization_schedules.loan_id', '=', 'loans.id')
             ->join('borrowers', 'loans.borrower_id', '=', 'borrowers.id')
             ->whereDate('amortization_schedules.due_date', $targetDate)
-            ->where('loans.status', 'released')
+            ->whereIn('loans.status', ['released', 'ongoing'])
             ->select(
                 'amortization_schedules.id',
                 'amortization_schedules.loan_id',

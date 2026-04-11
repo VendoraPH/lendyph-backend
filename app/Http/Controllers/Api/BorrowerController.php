@@ -43,7 +43,7 @@ class BorrowerController extends Controller
             ->when(request('status'), fn ($q, $status) => $q->where('status', $status))
             ->when(request('branch_id'), fn ($q, $branchId) => $q->forBranch($branchId))
             ->latest()
-            ->paginate(request('per_page', 15));
+            ->paginate(min((int) request('per_page', 15), 100));
 
         return BorrowerResource::collection($borrowers);
     }

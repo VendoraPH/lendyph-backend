@@ -6,8 +6,10 @@ use App\Http\Controllers\Api\Traits\CsvExportTrait;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\LoanResource;
 use App\Http\Resources\RepaymentResource;
+use App\Models\AmortizationSchedule;
 use App\Models\Borrower;
 use App\Models\Loan;
+use App\Models\Repayment;
 use App\Services\ReportService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
@@ -225,7 +227,7 @@ class ReportController extends Controller
     {
         $this->authorize('reports:view');
 
-        return response()->json(['data' => $this->reportService->dailyCollection(request()->all())]);
+        return response()->json(['data' => $this->reportService->dailyCollection(request()->only('date'))]);
     }
 
     #[OA\Get(
@@ -314,13 +316,16 @@ class ReportController extends Controller
     {
         $this->authorize('reports:export');
 
-        $loans = $this->reportService->listOfReleases(
-            request()->only('date_from', 'date_to', 'branch_id', 'status') + ['per_page' => 10000],
-        );
+        $query = Loan::with('borrower', 'loanProduct')
+            ->whereIn('status', ['released', 'ongoing', 'completed'])
+            ->when(request('date_from'), fn ($q, $d) => $q->whereDate('released_at', '>=', $d))
+            ->when(request('date_to'), fn ($q, $d) => $q->whereDate('released_at', '<=', $d))
+            ->when(request('branch_id'), fn ($q, $b) => $q->where('branch_id', $b))
+            ->latest('released_at');
 
         return $this->streamCsv('releases.csv', [
             'Loan #', 'Borrower', 'Product', 'Principal', 'Interest Rate', 'Term', 'Released', 'Status',
-        ], $loans->map(fn ($l) => [
+        ], $query->cursor()->map(fn ($l) => [
             $l->loan_account_number ?? $l->application_number,
             $l->borrower?->full_name ?? '',
             $l->loanProduct?->name ?? '',
@@ -343,13 +348,16 @@ class ReportController extends Controller
     {
         $this->authorize('reports:export');
 
-        $repayments = $this->reportService->listOfRepayments(
-            request()->only('date_from', 'date_to', 'branch_id', 'loan_id', 'status') + ['per_page' => 10000],
-        );
+        $query = Repayment::with('loan.borrower')
+            ->when(request('date_from'), fn ($q, $d) => $q->whereDate('payment_date', '>=', $d))
+            ->when(request('date_to'), fn ($q, $d) => $q->whereDate('payment_date', '<=', $d))
+            ->when(request('status'), fn ($q, $s) => $q->where('status', $s))
+            ->when(request('loan_id'), fn ($q, $l) => $q->where('loan_id', $l))
+            ->latest('payment_date');
 
         return $this->streamCsv('repayments.csv', [
             'Receipt #', 'Borrower', 'Loan #', 'Date', 'Amount', 'Method', 'Status',
-        ], $repayments->map(fn ($r) => [
+        ], $query->cursor()->map(fn ($r) => [
             $r->receipt_number,
             $r->loan?->borrower?->full_name ?? '',
             $r->loan?->loan_account_number ?? '',
@@ -371,13 +379,17 @@ class ReportController extends Controller
     {
         $this->authorize('reports:export');
 
-        $schedules = $this->reportService->listOfDuePastDue(
-            request()->only('date_from', 'date_to', 'branch_id') + ['per_page' => 10000],
-        );
+        $query = AmortizationSchedule::with('loan.borrower')
+            ->whereHas('loan', fn ($q) => $q->whereIn('status', ['released', 'ongoing']))
+            ->whereIn('status', ['pending', 'partial', 'overdue'])
+            ->where('due_date', '<=', now())
+            ->when(request('date_from'), fn ($q, $d) => $q->whereDate('due_date', '>=', $d))
+            ->when(request('date_to'), fn ($q, $d) => $q->whereDate('due_date', '<=', $d))
+            ->orderBy('due_date');
 
         return $this->streamCsv('due-past-due.csv', [
             'Borrower', 'Loan #', 'Due Date', 'Principal Due', 'Interest Due', 'Penalty', 'Total Due', 'Status',
-        ], $schedules->map(fn ($s) => [
+        ], $query->cursor()->map(fn ($s) => [
             $s->loan?->borrower?->full_name ?? '',
             $s->loan?->loan_account_number ?? '',
             $s->due_date?->toDateString() ?? '',

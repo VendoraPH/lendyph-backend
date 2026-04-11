@@ -40,7 +40,7 @@ class ShareCapitalPledgeController extends Controller
             ->when(request()->has('auto_credit'), fn ($q) => $q->where('auto_credit', filter_var(request('auto_credit'), FILTER_VALIDATE_BOOLEAN)))
             ->when(request('search'), fn ($q, $search) => $q->whereHas('borrower', fn ($bq) => $bq->where('first_name', 'like', "%{$search}%")->orWhere('last_name', 'like', "%{$search}%")))
             ->orderBy('id')
-            ->paginate(request('per_page', 15));
+            ->paginate(min((int) request('per_page', 15), 100));
 
         return ShareCapitalPledgeResource::collection($pledges);
     }

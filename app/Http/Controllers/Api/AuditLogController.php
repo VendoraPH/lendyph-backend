@@ -41,7 +41,7 @@ class AuditLogController extends Controller
             ->when(request('date_from'), fn ($q, $date) => $q->where('created_at', '>=', $date))
             ->when(request('date_to'), fn ($q, $date) => $q->where('created_at', '<=', "{$date} 23:59:59"))
             ->latest('created_at')
-            ->paginate(request('per_page', 15));
+            ->paginate(min((int) request('per_page', 15), 100));
 
         return AuditLogResource::collection($logs);
     }
