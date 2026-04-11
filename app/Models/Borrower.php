@@ -53,6 +53,14 @@ class Borrower extends Model
             $nextNum = $lastCode ? (int) substr($lastCode, 4) + 1 : 1;
             $borrower->borrower_code = 'BRW-'.str_pad($nextNum, 6, '0', STR_PAD_LEFT);
         });
+
+        static::created(function (Borrower $borrower) {
+            $borrower->shareCapitalPledge()->create([
+                'amount' => 0,
+                'schedule' => '15/30',
+                'auto_credit' => false,
+            ]);
+        });
     }
 
     protected function fullName(): Attribute

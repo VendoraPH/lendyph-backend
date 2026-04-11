@@ -7,7 +7,6 @@ use App\Models\Branch;
 use App\Models\Fee;
 use App\Models\LoanProduct;
 use App\Models\ShareCapitalLedger;
-use App\Models\ShareCapitalPledge;
 use App\Models\User;
 use App\Services\LoanService;
 use App\Services\RepaymentService;
@@ -197,12 +196,12 @@ class DemoSeeder extends Seeder
         $loanService->approve($loan5, $admin, 'OK');
         $loanService->release($loan5, $admin);
 
-        // ── Share Capital Pledges ──
+        // ── Share Capital Pledges (defaults auto-created by Borrower model event) ──
         foreach ($borrowers->take(6) as $i => $borrower) {
-            ShareCapitalPledge::firstOrCreate(
-                ['borrower_id' => $borrower->id],
-                ['amount' => ($i + 1) * 250, 'schedule' => '15/30', 'auto_credit' => $i < 4],
-            );
+            $borrower->shareCapitalPledge->update([
+                'amount' => ($i + 1) * 250,
+                'auto_credit' => $i < 4,
+            ]);
         }
 
         // ── Share Capital Ledger Entries ──

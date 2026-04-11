@@ -210,6 +210,10 @@ class BorrowerController extends Controller
                 Storage::disk('public')->delete($borrower->photo_path);
             }
 
+            // Delete share capital records (FK uses restrictOnDelete)
+            $borrower->shareCapitalLedger()->delete();
+            $borrower->shareCapitalPledge()->delete();
+
             $borrower->delete();
         });
 

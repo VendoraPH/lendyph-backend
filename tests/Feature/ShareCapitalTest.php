@@ -3,7 +3,6 @@
 namespace Tests\Feature;
 
 use App\Models\Borrower;
-use App\Models\ShareCapitalPledge;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
@@ -92,8 +91,7 @@ class ShareCapitalTest extends TestCase
 
     public function test_list_pledges(): void
     {
-        $borrower = Borrower::factory()->create(['branch_id' => $this->branch->id]);
-        ShareCapitalPledge::factory()->create(['borrower_id' => $borrower->id]);
+        Borrower::factory()->create(['branch_id' => $this->branch->id]);
 
         $this->getJson('/api/pledges')
             ->assertOk()
@@ -103,7 +101,7 @@ class ShareCapitalTest extends TestCase
     public function test_update_pledge_amount_and_schedule(): void
     {
         $borrower = Borrower::factory()->create(['branch_id' => $this->branch->id]);
-        $pledge = ShareCapitalPledge::factory()->create(['borrower_id' => $borrower->id, 'amount' => 500]);
+        $pledge = $borrower->shareCapitalPledge;
 
         $this->putJson("/api/pledges/{$pledge->id}", ['amount' => 1000, 'schedule' => '30'])
             ->assertOk()
@@ -114,7 +112,7 @@ class ShareCapitalTest extends TestCase
     public function test_toggle_auto_credit(): void
     {
         $borrower = Borrower::factory()->create(['branch_id' => $this->branch->id]);
-        $pledge = ShareCapitalPledge::factory()->create(['borrower_id' => $borrower->id, 'auto_credit' => false]);
+        $pledge = $borrower->shareCapitalPledge;
 
         $this->patchJson("/api/pledges/{$pledge->id}/auto-credit")
             ->assertOk()
@@ -126,7 +124,7 @@ class ShareCapitalTest extends TestCase
     public function test_manual_entry_for_pledge(): void
     {
         $borrower = Borrower::factory()->create(['branch_id' => $this->branch->id]);
-        $pledge = ShareCapitalPledge::factory()->create(['borrower_id' => $borrower->id]);
+        $pledge = $borrower->shareCapitalPledge;
 
         $response = $this->postJson("/api/pledges/{$pledge->id}/entries", [
             'amount' => 500,
@@ -142,13 +140,11 @@ class ShareCapitalTest extends TestCase
     {
         $b1 = Borrower::factory()->create(['branch_id' => $this->branch->id]);
         $b2 = Borrower::factory()->create(['branch_id' => $this->branch->id]);
-        $p1 = ShareCapitalPledge::factory()->create(['borrower_id' => $b1->id]);
-        $p2 = ShareCapitalPledge::factory()->create(['borrower_id' => $b2->id]);
 
         $response = $this->postJson('/api/pledges/bulk-entries', [
             'entries' => [
-                ['pledge_id' => $p1->id, 'amount' => 500, 'type' => 'credit', 'date' => now()->toDateString()],
-                ['pledge_id' => $p2->id, 'amount' => 1000, 'type' => 'credit', 'date' => now()->toDateString()],
+                ['pledge_id' => $b1->shareCapitalPledge->id, 'amount' => 500, 'type' => 'credit', 'date' => now()->toDateString()],
+                ['pledge_id' => $b2->shareCapitalPledge->id, 'amount' => 1000, 'type' => 'credit', 'date' => now()->toDateString()],
             ],
         ]);
 

@@ -3,7 +3,6 @@
 namespace Tests\Feature;
 
 use App\Models\Borrower;
-use App\Models\ShareCapitalPledge;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
@@ -37,11 +36,11 @@ class AutoCreditTest extends TestCase
         $b3 = Borrower::factory()->create(['branch_id' => $this->branch->id]);
 
         // Eligible: auto_credit=true, amount > 0
-        ShareCapitalPledge::factory()->create(['borrower_id' => $b1->id, 'amount' => 500, 'auto_credit' => true]);
-        ShareCapitalPledge::factory()->create(['borrower_id' => $b2->id, 'amount' => 1000, 'auto_credit' => true]);
+        $b1->shareCapitalPledge->update(['amount' => 500, 'auto_credit' => true]);
+        $b2->shareCapitalPledge->update(['amount' => 1000, 'auto_credit' => true]);
 
-        // Not eligible: auto_credit=false
-        ShareCapitalPledge::factory()->create(['borrower_id' => $b3->id, 'amount' => 500, 'auto_credit' => false]);
+        // Not eligible: auto_credit=false (default)
+        $b3->shareCapitalPledge->update(['amount' => 500]);
 
         $response = $this->postJson('/api/auto-credit/process');
 
@@ -60,7 +59,7 @@ class AutoCreditTest extends TestCase
         $borrower = Borrower::factory()->create(['branch_id' => $this->branch->id]);
 
         // auto_credit=true but amount=0 — should NOT be processed
-        ShareCapitalPledge::factory()->create(['borrower_id' => $borrower->id, 'amount' => 0, 'auto_credit' => true]);
+        $borrower->shareCapitalPledge->update(['auto_credit' => true]);
 
         $this->postJson('/api/auto-credit/process')
             ->assertCreated()
@@ -74,8 +73,8 @@ class AutoCreditTest extends TestCase
         $b1 = Borrower::factory()->create(['branch_id' => $this->branch->id]);
         $b2 = Borrower::factory()->create(['branch_id' => $this->branch->id]);
 
-        ShareCapitalPledge::factory()->create(['borrower_id' => $b1->id, 'amount' => 500, 'auto_credit' => true]);
-        ShareCapitalPledge::factory()->create(['borrower_id' => $b2->id, 'amount' => 300, 'auto_credit' => false]);
+        $b1->shareCapitalPledge->update(['amount' => 500, 'auto_credit' => true]);
+        $b2->shareCapitalPledge->update(['amount' => 300, 'auto_credit' => false]);
 
         $response = $this->getJson('/api/auto-credit/status')->assertOk();
 
@@ -87,7 +86,7 @@ class AutoCreditTest extends TestCase
     public function test_last_run_appears_in_status_after_processing(): void
     {
         $borrower = Borrower::factory()->create(['branch_id' => $this->branch->id]);
-        ShareCapitalPledge::factory()->create(['borrower_id' => $borrower->id, 'amount' => 500, 'auto_credit' => true]);
+        $borrower->shareCapitalPledge->update(['amount' => 500, 'auto_credit' => true]);
 
         $this->postJson('/api/auto-credit/process');
 

@@ -20,6 +20,14 @@ class ShareCapitalPledgeFactory extends Factory
         ];
     }
 
+    public function configure(): static
+    {
+        return $this->afterMaking(function (ShareCapitalPledge $pledge) {
+            // Remove auto-created pledge so factory insert doesn't hit UNIQUE constraint
+            ShareCapitalPledge::where('borrower_id', $pledge->borrower_id)->delete();
+        });
+    }
+
     public function withAutoCredit(): static
     {
         return $this->state(['auto_credit' => true]);
