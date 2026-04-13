@@ -27,7 +27,27 @@ class ApprovalWorkflowController extends Controller
             new OA\Parameter(name: 'type', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['normal', 'policy_exception'], default: 'policy_exception')),
         ],
         responses: [
-            new OA\Response(response: 200, description: 'Approval chain steps'),
+            new OA\Response(
+                response: 200,
+                description: 'Approval chain steps',
+                content: new OA\JsonContent(
+                    properties: [
+                        new OA\Property(
+                            property: 'data',
+                            type: 'object',
+                            properties: [
+                                new OA\Property(property: 'type', type: 'string', enum: ['normal', 'policy_exception']),
+                                new OA\Property(
+                                    property: 'steps',
+                                    type: 'array',
+                                    items: new OA\Items(ref: '#/components/schemas/ApprovalChainStep'),
+                                ),
+                                new OA\Property(property: 'is_default', type: 'boolean', description: 'True if the chain is the built-in default (no custom save)'),
+                            ],
+                        ),
+                    ],
+                ),
+            ),
             new OA\Response(response: 401, description: 'Unauthenticated'),
         ],
     )]
@@ -52,12 +72,48 @@ class ApprovalWorkflowController extends Controller
     #[OA\Put(
         path: '/api/settings/approval-workflow',
         summary: 'Save approval workflow chain',
+        description: 'Upserts the chain for the given type. The chain must start with a `submit` step and end with a `release` step. Step ids must be unique.',
         tags: ['Settings'],
         security: [['sanctum' => []]],
+        requestBody: new OA\RequestBody(
+            required: true,
+            content: new OA\JsonContent(
+                required: ['type', 'steps'],
+                properties: [
+                    new OA\Property(property: 'type', type: 'string', enum: ['normal', 'policy_exception']),
+                    new OA\Property(
+                        property: 'steps',
+                        type: 'array',
+                        minItems: 1,
+                        items: new OA\Items(ref: '#/components/schemas/ApprovalChainStep'),
+                    ),
+                ],
+            ),
+        ),
         responses: [
-            new OA\Response(response: 200, description: 'Saved'),
+            new OA\Response(
+                response: 200,
+                description: 'Saved',
+                content: new OA\JsonContent(
+                    properties: [
+                        new OA\Property(
+                            property: 'data',
+                            type: 'object',
+                            properties: [
+                                new OA\Property(property: 'type', type: 'string', enum: ['normal', 'policy_exception']),
+                                new OA\Property(
+                                    property: 'steps',
+                                    type: 'array',
+                                    items: new OA\Items(ref: '#/components/schemas/ApprovalChainStep'),
+                                ),
+                                new OA\Property(property: 'is_default', type: 'boolean', example: false),
+                            ],
+                        ),
+                    ],
+                ),
+            ),
             new OA\Response(response: 401, description: 'Unauthenticated'),
-            new OA\Response(response: 422, description: 'Validation error'),
+            new OA\Response(response: 422, description: 'Validation error (empty chain, bad order, duplicate ids, etc.)'),
         ],
     )]
     public function update(Request $request): JsonResponse
@@ -92,6 +148,7 @@ class ApprovalWorkflowController extends Controller
     #[OA\Delete(
         path: '/api/settings/approval-workflow',
         summary: 'Reset approval workflow chain to default',
+        description: 'Deletes the custom chain for the given type. Subsequent GETs return the built-in default with `is_default: true`.',
         tags: ['Settings'],
         security: [['sanctum' => []]],
         parameters: [

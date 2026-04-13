@@ -3,7 +3,19 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use OpenApi\Attributes as OA;
 
+#[OA\Schema(
+    schema: 'ApprovalChainStep',
+    description: 'A single step in a loan approval chain',
+    required: ['id', 'name', 'role', 'kind'],
+    properties: [
+        new OA\Property(property: 'id', type: 'string', example: 'loan-processor', description: 'Stable identifier (slug)'),
+        new OA\Property(property: 'name', type: 'string', example: 'Loan Processor', description: 'Human-readable name'),
+        new OA\Property(property: 'role', type: 'string', example: 'loan_processor', description: 'RBAC role slug required to act on this step'),
+        new OA\Property(property: 'kind', type: 'string', enum: ['submit', 'approve', 'release'], description: 'Step type; chains must start with submit and end with release'),
+    ],
+)]
 class ApprovalWorkflowSetting extends Model
 {
     protected $fillable = [
