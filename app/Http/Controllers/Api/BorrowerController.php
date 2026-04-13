@@ -48,7 +48,19 @@ class BorrowerController extends Controller
             ->latest()
             ->paginate(min((int) request('per_page', 15), 100));
 
-        return BorrowerResource::collection($borrowers);
+        // Status count aggregation so the frontend can render status tabs without a second request.
+        $stats = Borrower::when(request('branch_id'), fn ($q, $branchId) => $q->forBranch($branchId))
+            ->selectRaw('status, COUNT(*) as count')
+            ->groupBy('status')
+            ->pluck('count', 'status')
+            ->toArray();
+
+        return BorrowerResource::collection($borrowers)
+            ->additional(['meta' => ['stats' => [
+                'active' => (int) ($stats['active'] ?? 0),
+                'inactive' => (int) ($stats['inactive'] ?? 0),
+                'blacklisted' => (int) ($stats['blacklisted'] ?? 0),
+            ]]]);
     }
 
     #[OA\Post(
@@ -323,6 +335,126 @@ DESC,
         $borrower->update(['status' => 'active']);
 
         return response()->json(['message' => 'Borrower reactivated successfully.']);
+    }
+
+    #[OA\Patch(
+        path: '/api/borrowers/bulk-deactivate',
+        summary: 'Bulk deactivate borrowers',
+        description: 'Marks the given borrower IDs as inactive in a single request. Returns per-id success/failure so the frontend can report partial results.',
+        tags: ['Borrowers'],
+        security: [['sanctum' => []]],
+        requestBody: new OA\RequestBody(
+            required: true,
+            content: new OA\JsonContent(
+                required: ['ids'],
+                properties: [
+                    new OA\Property(property: 'ids', type: 'array', items: new OA\Items(type: 'integer'), example: [1, 2, 3]),
+                ],
+            ),
+        ),
+        responses: [
+            new OA\Response(response: 200, description: 'Bulk result'),
+            new OA\Response(response: 422, description: 'Validation error'),
+        ],
+    )]
+    public function bulkDeactivate(): JsonResponse
+    {
+        $this->authorize('borrowers:update');
+
+        $validated = request()->validate([
+            'ids' => ['required', 'array', 'min:1', 'max:500'],
+            'ids.*' => ['integer', 'exists:borrowers,id'],
+        ]);
+
+        $deactivated = [];
+        $failed = [];
+
+        foreach ($validated['ids'] as $id) {
+            try {
+                /** @var Borrower $borrower */
+                $borrower = Borrower::findOrFail($id);
+                $borrower->update(['status' => 'inactive']);
+                $deactivated[] = $id;
+            } catch (\Throwable $e) {
+                $failed[] = ['id' => $id, 'reason' => $e->getMessage()];
+            }
+        }
+
+        return response()->json([
+            'message' => 'Bulk deactivation complete.',
+            'deactivated' => $deactivated,
+            'failed' => $failed,
+        ]);
+    }
+
+    #[OA\Delete(
+        path: '/api/borrowers/bulk',
+        summary: 'Bulk delete borrowers',
+        description: 'Deletes the given borrower IDs in a single request. Each delete runs in its own transaction (photo, documents, pledge, and ledger are removed). Returns per-id success/failure.',
+        tags: ['Borrowers'],
+        security: [['sanctum' => []]],
+        requestBody: new OA\RequestBody(
+            required: true,
+            content: new OA\JsonContent(
+                required: ['ids'],
+                properties: [
+                    new OA\Property(property: 'ids', type: 'array', items: new OA\Items(type: 'integer'), example: [1, 2, 3]),
+                ],
+            ),
+        ),
+        responses: [
+            new OA\Response(response: 200, description: 'Bulk result'),
+            new OA\Response(response: 422, description: 'Validation error'),
+        ],
+    )]
+    public function bulkDestroy(): JsonResponse
+    {
+        $this->authorize('borrowers:delete');
+
+        $validated = request()->validate([
+            'ids' => ['required', 'array', 'min:1', 'max:500'],
+            'ids.*' => ['integer', 'exists:borrowers,id'],
+        ]);
+
+        $deleted = [];
+        $failed = [];
+
+        foreach ($validated['ids'] as $id) {
+            try {
+                $borrower = Borrower::findOrFail($id);
+
+                DB::transaction(function () use ($borrower) {
+                    foreach ($borrower->coMakers as $coMaker) {
+                        foreach ($coMaker->documents as $doc) {
+                            Storage::disk('public')->delete($doc->file_path);
+                        }
+                        $coMaker->documents()->delete();
+                    }
+                    foreach ($borrower->documents as $doc) {
+                        Storage::disk('public')->delete($doc->file_path);
+                    }
+                    $borrower->documents()->delete();
+
+                    if ($borrower->photo_path) {
+                        Storage::disk('public')->delete($borrower->photo_path);
+                    }
+
+                    $borrower->shareCapitalLedger()->delete();
+                    $borrower->shareCapitalPledge()->delete();
+                    $borrower->delete();
+                });
+
+                $deleted[] = $id;
+            } catch (\Throwable $e) {
+                $failed[] = ['id' => $id, 'reason' => $e->getMessage()];
+            }
+        }
+
+        return response()->json([
+            'message' => 'Bulk delete complete.',
+            'deleted' => $deleted,
+            'failed' => $failed,
+        ]);
     }
 
     #[OA\Post(

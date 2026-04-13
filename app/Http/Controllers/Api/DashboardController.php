@@ -30,18 +30,27 @@ class DashboardController extends Controller
 
     #[OA\Get(
         path: '/api/dashboard/collections-trend',
-        summary: 'Collections trend (last 12 weeks)',
+        summary: 'Collections trend time-series',
+        description: 'Default is 12 weekly buckets. Pass `?period=month` for 12 monthly buckets or `?period=year` for 5 yearly buckets.',
         tags: ['Dashboard'],
         security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'period', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['week', 'month', 'year'], default: 'week')),
+        ],
         responses: [
-            new OA\Response(response: 200, description: 'Weekly collections trend'),
+            new OA\Response(response: 200, description: 'Collections trend'),
         ],
     )]
     public function collectionsTrend(): JsonResponse
     {
         $this->authorize('dashboard:view');
 
-        return response()->json($this->dashboardService->collectionsTrend());
+        $period = request('period', 'week');
+        if (! in_array($period, ['week', 'month', 'year'], true)) {
+            $period = 'week';
+        }
+
+        return response()->json($this->dashboardService->collectionsTrend($period));
     }
 
     #[OA\Get(
@@ -68,6 +77,9 @@ class DashboardController extends Controller
         summary: 'Recent transactions (payments + releases)',
         tags: ['Dashboard'],
         security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'limit', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 10, minimum: 1, maximum: 100)),
+        ],
         responses: [
             new OA\Response(response: 200, description: 'Recent transaction activity feed'),
         ],
@@ -76,6 +88,8 @@ class DashboardController extends Controller
     {
         $this->authorize('dashboard:view');
 
-        return response()->json($this->dashboardService->recentTransactions());
+        $limit = max(1, min((int) request('limit', 10), 100));
+
+        return response()->json($this->dashboardService->recentTransactions($limit));
     }
 }

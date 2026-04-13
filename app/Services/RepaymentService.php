@@ -189,6 +189,53 @@ class RepaymentService
     }
 
     /**
+     * Compute how a hypothetical repayment would be allocated without persisting anything.
+     *
+     * Uses a real-but-rolled-back database transaction so the preview matches the actual
+     * processRepayment logic exactly (penalty computation, schedule allocation, status flip).
+     * Nothing is saved because the outer DB::beginTransaction() wraps the inner transaction
+     * inside processRepayment and rolls back everything, including the Repayment row itself.
+     */
+    public function previewAllocation(
+        Loan $loan,
+        float $amountPaid,
+        string $paymentDate,
+        User $user,
+    ): array {
+        if (! in_array($loan->status, ['released', 'ongoing'])) {
+            throw ValidationException::withMessages([
+                'loan' => 'Repayment preview is only available for released or ongoing loans.',
+            ]);
+        }
+
+        DB::beginTransaction();
+
+        try {
+            $repayment = $this->processRepayment($loan, $amountPaid, $paymentDate, $user);
+
+            return [
+                'amount_paid' => (float) $repayment->amount_paid,
+                'allocated_to_penalty' => (float) $repayment->penalty_applied,
+                'allocated_to_overdue_interest' => (float) $repayment->overdue_interest_applied,
+                'allocated_to_current_interest' => (float) $repayment->current_interest_applied,
+                'allocated_to_current_principal' => (float) $repayment->current_principal_applied,
+                'allocated_to_next_interest' => (float) $repayment->next_interest_applied,
+                'allocated_to_next_principal' => (float) $repayment->next_principal_applied,
+                // Total interest + principal applied across all schedules
+                'total_interest_applied' => (float) $repayment->interest_applied,
+                'total_principal_applied' => (float) $repayment->principal_applied,
+                'overpayment' => (float) $repayment->overpayment,
+                'balance_before' => (float) $repayment->balance_before,
+                'balance_after' => (float) $repayment->balance_after,
+                'payment_type' => $repayment->payment_type,
+                'is_preview' => true,
+            ];
+        } finally {
+            DB::rollBack();
+        }
+    }
+
+    /**
      * Void a posted repayment and reverse its effects.
      */
     public function voidRepayment(Repayment $repayment, string $reason, User $user): Repayment

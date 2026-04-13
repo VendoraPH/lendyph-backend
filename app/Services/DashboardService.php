@@ -45,9 +45,18 @@ class DashboardService
         ];
     }
 
-    public function collectionsTrend(): array
+    public function collectionsTrend(string $period = 'week'): array
     {
-        $weeks = collect();
+        return match ($period) {
+            'month' => $this->monthlyTrend(),
+            'year' => $this->yearlyTrend(),
+            default => $this->weeklyTrend(),
+        };
+    }
+
+    private function weeklyTrend(): array
+    {
+        $points = collect();
         for ($i = 11; $i >= 0; $i--) {
             $start = Carbon::now()->startOfWeek()->subWeeks($i);
             $end = $start->copy()->endOfWeek();
@@ -56,14 +65,59 @@ class DashboardService
                 ->whereBetween('payment_date', [$start, $end])
                 ->sum('amount_paid');
 
-            $weeks->push([
-                'week' => 'W'.(12 - $i),
+            $points->push([
+                'period' => 'week',
+                'key' => 'W'.(12 - $i),
                 'label' => $start->format('M j'),
                 'total' => round($total, 2),
             ]);
         }
 
-        return ['data' => $weeks->values()->toArray()];
+        return ['data' => $points->values()->toArray()];
+    }
+
+    private function monthlyTrend(): array
+    {
+        $points = collect();
+        for ($i = 11; $i >= 0; $i--) {
+            $start = Carbon::now()->startOfMonth()->subMonths($i);
+            $end = $start->copy()->endOfMonth();
+
+            $total = (float) Repayment::where('status', 'posted')
+                ->whereBetween('payment_date', [$start, $end])
+                ->sum('amount_paid');
+
+            $points->push([
+                'period' => 'month',
+                'key' => $start->format('Y-m'),
+                'label' => $start->format('M Y'),
+                'total' => round($total, 2),
+            ]);
+        }
+
+        return ['data' => $points->values()->toArray()];
+    }
+
+    private function yearlyTrend(): array
+    {
+        $points = collect();
+        for ($i = 4; $i >= 0; $i--) {
+            $start = Carbon::now()->startOfYear()->subYears($i);
+            $end = $start->copy()->endOfYear();
+
+            $total = (float) Repayment::where('status', 'posted')
+                ->whereBetween('payment_date', [$start, $end])
+                ->sum('amount_paid');
+
+            $points->push([
+                'period' => 'year',
+                'key' => (string) $start->year,
+                'label' => (string) $start->year,
+                'total' => round($total, 2),
+            ]);
+        }
+
+        return ['data' => $points->values()->toArray()];
     }
 
     public function dailyDues(?string $date = null): array

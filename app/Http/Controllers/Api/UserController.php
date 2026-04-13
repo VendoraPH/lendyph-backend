@@ -53,7 +53,18 @@ class UserController extends Controller
             ->latest()
             ->paginate(min((int) request('per_page', 15), 100));
 
-        return UserResource::collection($users);
+        // Status count aggregation so the frontend can render status tabs without a second request.
+        $stats = User::when(request('branch_id'), fn ($q, $b) => $q->forBranch($b))
+            ->selectRaw('status, COUNT(*) as count')
+            ->groupBy('status')
+            ->pluck('count', 'status')
+            ->toArray();
+
+        return UserResource::collection($users)
+            ->additional(['meta' => ['stats' => [
+                'active' => (int) ($stats['active'] ?? 0),
+                'inactive' => (int) ($stats['inactive'] ?? 0),
+            ]]]);
     }
 
     #[OA\Post(

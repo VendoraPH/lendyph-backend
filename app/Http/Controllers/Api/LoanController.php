@@ -58,7 +58,26 @@ class LoanController extends Controller
             ->latest()
             ->paginate(min((int) request('per_page', 15), 100));
 
-        return LoanResource::collection($loans);
+        // Status count aggregation so the frontend can render status tabs without a second request.
+        $stats = Loan::when(request('branch_id'), fn ($q, $b) => $q->forBranch($b))
+            ->when(request('borrower_id'), fn ($q, $b) => $q->where('borrower_id', $b))
+            ->selectRaw('status, COUNT(*) as count')
+            ->groupBy('status')
+            ->pluck('count', 'status')
+            ->toArray();
+
+        return LoanResource::collection($loans)
+            ->additional(['meta' => ['stats' => [
+                'draft' => (int) ($stats['draft'] ?? 0),
+                'for_review' => (int) ($stats['for_review'] ?? 0),
+                'approved' => (int) ($stats['approved'] ?? 0),
+                'rejected' => (int) ($stats['rejected'] ?? 0),
+                'released' => (int) ($stats['released'] ?? 0),
+                'ongoing' => (int) ($stats['ongoing'] ?? 0),
+                'completed' => (int) ($stats['completed'] ?? 0),
+                'defaulted' => (int) ($stats['defaulted'] ?? 0),
+                'void' => (int) ($stats['void'] ?? 0),
+            ]]]);
     }
 
     #[OA\Post(

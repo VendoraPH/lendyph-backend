@@ -26,6 +26,8 @@ class RepaymentController extends Controller
         parameters: [
             new OA\Parameter(name: 'search', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
             new OA\Parameter(name: 'status', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['posted', 'voided'])),
+            new OA\Parameter(name: 'borrower_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer'), description: 'Filter to a single borrower'),
+            new OA\Parameter(name: 'loan_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer'), description: 'Filter to a single loan'),
             new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15)),
@@ -39,7 +41,7 @@ class RepaymentController extends Controller
     {
         $this->authorize('payments:view');
 
-        $repayments = Repayment::with('loan.borrower', 'receivedByUser', 'voidedByUser')
+        $query = Repayment::with('loan.borrower', 'receivedByUser', 'voidedByUser')
             ->when(request('search'), function ($q, $search) {
                 $q->where(function ($q) use ($search) {
                     $q->where('receipt_number', 'like', "%{$search}%")
@@ -54,12 +56,27 @@ class RepaymentController extends Controller
                 });
             })
             ->when(request('status'), fn ($q, $s) => $q->where('status', $s))
+            ->when(request('loan_id'), fn ($q, $id) => $q->where('loan_id', $id))
+            ->when(request('borrower_id'), fn ($q, $id) => $q->whereHas('loan', fn ($lq) => $lq->where('borrower_id', $id)))
             ->when(request('date_from'), fn ($q, $d) => $q->whereDate('payment_date', '>=', $d))
-            ->when(request('date_to'), fn ($q, $d) => $q->whereDate('payment_date', '<=', $d))
-            ->latest('payment_date')
+            ->when(request('date_to'), fn ($q, $d) => $q->whereDate('payment_date', '<=', $d));
+
+        $repayments = $query->latest('payment_date')
             ->paginate(min((int) request('per_page', 15), 100));
 
-        return RepaymentResource::collection($repayments);
+        // Attach status count aggregation to the meta envelope so the frontend can
+        // render status tabs without a second request.
+        $stats = Repayment::when(request('borrower_id'), fn ($q, $id) => $q->whereHas('loan', fn ($lq) => $lq->where('borrower_id', $id)))
+            ->selectRaw('status, COUNT(*) as count')
+            ->groupBy('status')
+            ->pluck('count', 'status')
+            ->toArray();
+
+        return RepaymentResource::collection($repayments)
+            ->additional(['meta' => ['stats' => [
+                'posted' => (int) ($stats['posted'] ?? 0),
+                'voided' => (int) ($stats['voided'] ?? 0),
+            ]]]);
     }
 
     #[OA\Get(
@@ -213,5 +230,49 @@ class RepaymentController extends Controller
         return response()->json([
             'data' => $this->repaymentService->getLoanSummary($loan),
         ]);
+    }
+
+    #[OA\Post(
+        path: '/api/loans/{loan}/repayments/preview',
+        summary: 'Preview repayment allocation',
+        description: 'Runs the real allocation logic inside a rolled-back transaction so the frontend can show a live breakdown of how the amount would split across penalty, overdue interest, current interest, current principal, next interest, next principal, and SCB overpayment — without saving anything.',
+        tags: ['Repayments'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'loan', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
+        ],
+        requestBody: new OA\RequestBody(
+            required: true,
+            content: new OA\JsonContent(
+                required: ['amount_paid', 'payment_date'],
+                properties: [
+                    new OA\Property(property: 'amount_paid', type: 'number', example: 5000.00),
+                    new OA\Property(property: 'payment_date', type: 'string', format: 'date', example: '2026-04-15'),
+                ],
+            ),
+        ),
+        responses: [
+            new OA\Response(response: 200, description: 'Allocation preview'),
+            new OA\Response(response: 422, description: 'Validation error'),
+            new OA\Response(response: 404, description: 'Loan not found'),
+        ],
+    )]
+    public function preview(Loan $loan): JsonResponse
+    {
+        $this->authorize('payments:view');
+
+        $validated = request()->validate([
+            'amount_paid' => ['required', 'numeric', 'min:0.01'],
+            'payment_date' => ['required', 'date'],
+        ]);
+
+        $preview = $this->repaymentService->previewAllocation(
+            $loan,
+            (float) $validated['amount_paid'],
+            $validated['payment_date'],
+            request()->user(),
+        );
+
+        return response()->json(['data' => $preview]);
     }
 }

@@ -48,7 +48,9 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     // Branches
     Route::apiResource('branches', BranchController::class)->except(['destroy']);
 
-    // Borrowers
+    // Borrowers — bulk routes FIRST so `bulk` is not matched as a {borrower} parameter
+    Route::patch('/borrowers/bulk-deactivate', [BorrowerController::class, 'bulkDeactivate']);
+    Route::delete('/borrowers/bulk', [BorrowerController::class, 'bulkDestroy']);
     Route::apiResource('borrowers', BorrowerController::class);
     Route::patch('/borrowers/{borrower}/deactivate', [BorrowerController::class, 'deactivate']);
     Route::patch('/borrowers/{borrower}/reactivate', [BorrowerController::class, 'reactivate']);
@@ -99,6 +101,7 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     // Repayments
     Route::get('/repayments', [RepaymentController::class, 'listAll']);
     Route::get('/loans/{loan}/repayments', [RepaymentController::class, 'index']);
+    Route::post('/loans/{loan}/repayments/preview', [RepaymentController::class, 'preview']);
     Route::post('/loans/{loan}/repayments', [RepaymentController::class, 'store']);
     Route::get('/loans/{loan}/summary', [RepaymentController::class, 'summary']);
     Route::get('/repayments/{repayment}', [RepaymentController::class, 'show']);
@@ -147,8 +150,10 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::patch('/roles/{role}/reactivate', [RoleController::class, 'reactivate']);
     Route::delete('/roles/{role}', [RoleController::class, 'destroy']);
 
-    // Audit Logs (read-only)
+    // Audit Logs (read-only + CSV export)
     Route::get('/audit-logs', [AuditLogController::class, 'index']);
+    Route::get('/audit-logs/export', [AuditLogController::class, 'export'])
+        ->middleware('throttle:exports');
     Route::get('/audit-logs/{auditLog}', [AuditLogController::class, 'show']);
 
     // Share Capital Ledger
