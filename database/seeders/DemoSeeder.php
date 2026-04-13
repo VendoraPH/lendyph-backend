@@ -80,6 +80,9 @@ class DemoSeeder extends Seeder
             'service_fee' => 1.0,
             'penalty_rate' => 3.0,
             'grace_period_days' => 3,
+            'scb_required' => true,
+            'min_scb' => 100,
+            'max_scb' => 500,
             'min_amount' => 5000,
             'max_amount' => 100000,
         ]);
@@ -97,6 +100,9 @@ class DemoSeeder extends Seeder
             'service_fee' => 1.5,
             'penalty_rate' => 2.0,
             'grace_period_days' => 5,
+            'scb_required' => false,
+            'min_scb' => 0,
+            'max_scb' => 1000,
             'min_amount' => 20000,
             'max_amount' => 500000,
         ]);

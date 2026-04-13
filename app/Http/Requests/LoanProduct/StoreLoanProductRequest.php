@@ -39,6 +39,9 @@ class StoreLoanProductRequest extends FormRequest
             'custom_fees.*.conditions' => ['nullable', 'array'],
             'penalty_rate' => ['nullable', 'numeric', 'min:0', 'max:100'],
             'grace_period_days' => ['nullable', 'integer', 'min:0'],
+            'scb_required' => ['nullable', 'boolean'],
+            'min_scb' => ['nullable', 'numeric', 'min:0', 'max:9999999.99'],
+            'max_scb' => ['nullable', 'numeric', 'min:0', 'max:9999999.99', 'gte:min_scb'],
             'min_amount' => ['nullable', 'numeric', 'min:0'],
             'max_amount' => ['nullable', 'numeric', 'min:0'],
         ];
