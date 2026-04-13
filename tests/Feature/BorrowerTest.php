@@ -35,6 +35,14 @@ class BorrowerTest extends TestCase
         $response->assertCreated()
             ->assertJsonPath('data.first_name', 'Maria')
             ->assertJsonFragment(['borrower_code' => 'BRW-000001']);
+
+        // The Borrower::created hook must auto-create a share capital pledge row.
+        $this->assertDatabaseHas('share_capital_pledges', [
+            'borrower_id' => $response->json('data.id'),
+            'amount' => 0,
+            'schedule' => '15/30',
+            'auto_credit' => false,
+        ]);
     }
 
     public function test_list_and_search_borrowers(): void

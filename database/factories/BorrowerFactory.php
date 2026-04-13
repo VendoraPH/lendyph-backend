@@ -20,7 +20,8 @@ class BorrowerFactory extends Factory
             'civil_status' => $this->faker->randomElement(['single', 'married', 'widowed']),
             'gender' => $this->faker->randomElement(['male', 'female']),
             'address' => $this->faker->address(),
-            'contact_number' => $this->faker->phoneNumber(),
+            // Use a deterministic PH mobile format so it satisfies StoreBorrowerRequest's regex.
+            'contact_number' => '09'.$this->faker->numerify('#########'),
             'email' => $this->faker->unique()->safeEmail(),
             'employer_or_business' => $this->faker->company(),
             'monthly_income' => $this->faker->randomFloat(2, 10000, 80000),

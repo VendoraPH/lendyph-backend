@@ -20,6 +20,64 @@ beforeEach(function () {
     Storage::fake('public');
 });
 
+it('rejects duplicate email on create', function () {
+    Borrower::factory()->create(['branch_id' => $this->branch->id, 'email' => 'taken@example.com']);
+
+    $this->postJson('/api/borrowers', [
+        'first_name' => 'Some',
+        'last_name' => 'One',
+        'email' => 'taken@example.com',
+        'branch_id' => $this->branch->id,
+    ])->assertStatus(422)
+        ->assertJsonValidationErrors(['email']);
+});
+
+it('rejects pledge_amount above the max cap', function () {
+    $this->postJson('/api/borrowers', [
+        'first_name' => 'Big',
+        'last_name' => 'Pledger',
+        'branch_id' => $this->branch->id,
+        'pledge_amount' => 99999999,
+    ])->assertStatus(422)
+        ->assertJsonValidationErrors(['pledge_amount']);
+});
+
+it('rejects invalid contact_number format', function () {
+    $this->postJson('/api/borrowers', [
+        'first_name' => 'Bad',
+        'last_name' => 'Number',
+        'branch_id' => $this->branch->id,
+        'contact_number' => 'not-a-phone',
+    ])->assertStatus(422)
+        ->assertJsonValidationErrors(['contact_number']);
+});
+
+it('accepts PH mobile and international contact_number formats', function () {
+    $this->postJson('/api/borrowers', [
+        'first_name' => 'Valid',
+        'last_name' => 'One',
+        'branch_id' => $this->branch->id,
+        'contact_number' => '09171234567',
+    ])->assertCreated();
+
+    $this->postJson('/api/borrowers', [
+        'first_name' => 'Valid',
+        'last_name' => 'Two',
+        'branch_id' => $this->branch->id,
+        'contact_number' => '+639171234568',
+    ])->assertCreated();
+});
+
+it('rejects birthdate before 1900', function () {
+    $this->postJson('/api/borrowers', [
+        'first_name' => 'Ancient',
+        'last_name' => 'One',
+        'branch_id' => $this->branch->id,
+        'birthdate' => '1850-01-01',
+    ])->assertStatus(422)
+        ->assertJsonValidationErrors(['birthdate']);
+});
+
 it('accepts pledge_amount on borrower create and uses it for the pledge', function () {
     $response = $this->postJson('/api/borrowers', [
         'first_name' => 'Test',

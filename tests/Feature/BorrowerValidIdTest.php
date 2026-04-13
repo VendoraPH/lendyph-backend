@@ -70,4 +70,17 @@ class BorrowerValidIdTest extends TestCase
             'type' => 'PhilSys ID',
         ])->assertUnprocessable();
     }
+
+    public function test_upload_valid_id_rejects_mixing_legacy_and_new_shape(): void
+    {
+        $borrower = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+        $legacy = UploadedFile::fake()->image('legacy.jpg');
+        $front = UploadedFile::fake()->image('front.jpg');
+
+        $this->postJson("/api/borrowers/{$borrower->id}/valid-ids", [
+            'type' => 'PhilSys ID',
+            'file' => $legacy,
+            'front_file' => $front,
+        ])->assertUnprocessable();
+    }
 }

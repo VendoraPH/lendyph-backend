@@ -55,8 +55,10 @@ class Borrower extends Model
     protected static function booted(): void
     {
         static::creating(function (Borrower $borrower) {
-            $lastCode = static::query()->orderByDesc('id')->value('borrower_code');
-            $nextNum = $lastCode ? (int) substr($lastCode, 4) + 1 : 1;
+            // Row-level lock prevents two concurrent creates from reading the same last code
+            // (mirrors the Loan::booted() pattern already in use)
+            $last = static::query()->orderByDesc('id')->lockForUpdate()->first();
+            $nextNum = $last ? (int) substr($last->borrower_code, 4) + 1 : 1;
             $borrower->borrower_code = 'BRW-'.str_pad($nextNum, 6, '0', STR_PAD_LEFT);
         });
 

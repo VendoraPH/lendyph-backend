@@ -97,7 +97,13 @@ class BorrowerController extends Controller
     )]
     public function store(StoreBorrowerRequest $request): JsonResponse
     {
-        $borrower = Borrower::create($request->validated());
+        // Wrap in a transaction so the borrower insert and the Borrower::created
+        // hook (which creates the ShareCapitalPledge) are atomic — if either fails,
+        // neither row is left behind.
+        $borrower = DB::transaction(function () use ($request) {
+            return Borrower::create($request->safe()->except('force'));
+        });
+
         $borrower->load('branch');
 
         return (new BorrowerResource($borrower))
@@ -173,7 +179,7 @@ class BorrowerController extends Controller
     )]
     public function update(UpdateBorrowerRequest $request, Borrower $borrower): BorrowerResource
     {
-        $borrower->update($request->validated());
+        $borrower->update($request->safe()->except('force'));
         $borrower->load('branch');
 
         return new BorrowerResource($borrower);
@@ -308,17 +314,19 @@ class BorrowerController extends Controller
             'photo' => ['required', 'image', 'max:5120'],
         ]);
 
-        // Delete old photo
-        if ($borrower->photo_path) {
-            Storage::disk('public')->delete($borrower->photo_path);
-        }
+        // Store the new photo BEFORE touching the old one so a failed upload
+        // cannot leave the borrower without a photo.
+        $oldPath = $borrower->photo_path;
+        $newPath = request()->file('photo')->store("borrowers/photos/{$borrower->id}", 'public');
+        $borrower->update(['photo_path' => $newPath]);
 
-        $path = request()->file('photo')->store("borrowers/photos/{$borrower->id}", 'public');
-        $borrower->update(['photo_path' => $path]);
+        if ($oldPath) {
+            Storage::disk('public')->delete($oldPath);
+        }
 
         return response()->json([
             'message' => 'Photo uploaded successfully.',
-            'photo_url' => Storage::disk('public')->url($path),
+            'photo_url' => Storage::disk('public')->url($newPath),
         ]);
     }
 
