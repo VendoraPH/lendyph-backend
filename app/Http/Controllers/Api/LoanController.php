@@ -78,6 +78,9 @@ class LoanController extends Controller
                     new OA\Property(property: 'purpose', type: 'string', example: 'Business expansion'),
                     new OA\Property(property: 'interest_rate', type: 'number', example: 3.0),
                     new OA\Property(property: 'start_date', type: 'string', format: 'date', example: '2026-04-01'),
+                    new OA\Property(property: 'scb_amount', type: 'number', example: 250, description: 'Share capital build-up per payment (0 = disabled)'),
+                    new OA\Property(property: 'policy_exception', type: 'boolean', example: false),
+                    new OA\Property(property: 'policy_exception_details', type: 'string', nullable: true, description: 'Required when policy_exception is true'),
                     new OA\Property(
                         property: 'deductions',
                         type: 'array',
