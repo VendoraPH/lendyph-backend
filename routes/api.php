@@ -138,9 +138,14 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
         });
     });
 
-    // Roles (read-only)
+    // Roles — full CRUD for custom role management
     Route::get('/roles', [RoleController::class, 'index']);
     Route::get('/roles/{role}', [RoleController::class, 'show']);
+    Route::post('/roles', [RoleController::class, 'store']);
+    Route::put('/roles/{role}', [RoleController::class, 'update']);
+    Route::patch('/roles/{role}/deactivate', [RoleController::class, 'deactivate']);
+    Route::patch('/roles/{role}/reactivate', [RoleController::class, 'reactivate']);
+    Route::delete('/roles/{role}', [RoleController::class, 'destroy']);
 
     // Audit Logs (read-only)
     Route::get('/audit-logs', [AuditLogController::class, 'index']);
