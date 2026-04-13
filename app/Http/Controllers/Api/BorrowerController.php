@@ -54,7 +54,24 @@ class BorrowerController extends Controller
     #[OA\Post(
         path: '/api/borrowers',
         summary: 'Create borrower',
-        description: 'Create a new borrower profile',
+        description: <<<'DESC'
+Create a new borrower profile.
+
+**Validation rules (enforced):**
+- `contact_number` must match `^(\+?\d{7,15}|0\d{9,10})$`
+- `email` must be unique across all borrowers
+- `pledge_amount` max `9,999,999.99`
+- `birthdate` must be after 1900-01-01 and before today
+
+**Duplicate detection:** the request is rejected with 422 if a borrower with a similar name already exists:
+1. **Exact match** — same normalized first+middle+last (case/whitespace insensitive) → always rejected
+2. **Fuzzy match** — Levenshtein distance ≤ 2 on normalized full name, *and* birthdate matches
+
+Pass `force=true` in the body to bypass the duplicate check (frontend "Create Anyway" flow).
+On a duplicate rejection, the error message in `errors.first_name[0]` contains the matched borrower's code and DOB.
+
+**Side effect:** a ShareCapitalPledge row is auto-created for the new borrower inside the same transaction.
+DESC,
         tags: ['Borrowers'],
         security: [['sanctum' => []]],
         requestBody: new OA\RequestBody(
@@ -69,22 +86,23 @@ class BorrowerController extends Controller
                     new OA\Property(property: 'birthdate', type: 'string', format: 'date', example: '1990-01-15'),
                     new OA\Property(property: 'civil_status', type: 'string', enum: ['single', 'married', 'widowed', 'separated', 'divorced']),
                     new OA\Property(property: 'gender', type: 'string', enum: ['male', 'female']),
-                    new OA\Property(property: 'address', type: 'string', description: 'Legacy single-line address'),
+                    new OA\Property(property: 'address', type: 'string', description: 'Legacy single-line address (use structured fields below instead)'),
                     new OA\Property(property: 'street_address', type: 'string', example: '123 Rizal St.'),
                     new OA\Property(property: 'barangay', type: 'string', example: 'Poblacion'),
                     new OA\Property(property: 'city', type: 'string', example: 'Butuan'),
                     new OA\Property(property: 'province', type: 'string', example: 'Agusan del Norte'),
-                    new OA\Property(property: 'contact_number', type: 'string', example: '09171234567'),
-                    new OA\Property(property: 'email', type: 'string', example: 'juan@email.com'),
+                    new OA\Property(property: 'contact_number', type: 'string', example: '09171234567', description: 'PH mobile (09xxxxxxxxx) or international (+63…)'),
+                    new OA\Property(property: 'email', type: 'string', format: 'email', example: 'juan@email.com', description: 'Must be unique'),
                     new OA\Property(property: 'employer_or_business', type: 'string'),
                     new OA\Property(property: 'monthly_income', type: 'number', example: 25000),
-                    new OA\Property(property: 'pledge_amount', type: 'number', example: 500, description: 'Share capital pledge amount (defaults to 0)'),
+                    new OA\Property(property: 'pledge_amount', type: 'number', example: 500, description: 'Share capital pledge amount (max 9,999,999.99, defaults to 0)'),
                     new OA\Property(property: 'spouse_first_name', type: 'string'),
                     new OA\Property(property: 'spouse_middle_name', type: 'string'),
                     new OA\Property(property: 'spouse_last_name', type: 'string'),
                     new OA\Property(property: 'spouse_contact_number', type: 'string'),
                     new OA\Property(property: 'spouse_occupation', type: 'string'),
                     new OA\Property(property: 'branch_id', type: 'integer', example: 1),
+                    new OA\Property(property: 'force', type: 'boolean', example: false, description: 'Bypass the duplicate-borrower check (use for "Create Anyway" confirmation)'),
                 ],
             ),
         ),
@@ -92,7 +110,20 @@ class BorrowerController extends Controller
             new OA\Response(response: 201, description: 'Borrower created'),
             new OA\Response(response: 401, description: 'Unauthenticated'),
             new OA\Response(response: 403, description: 'Forbidden'),
-            new OA\Response(response: 422, description: 'Validation error'),
+            new OA\Response(
+                response: 422,
+                description: 'Validation error. On duplicate, errors.first_name[0] includes the matched borrower code/name/DOB.',
+                content: new OA\JsonContent(
+                    example: [
+                        'message' => 'The first name field has duplicate match.',
+                        'errors' => [
+                            'first_name' => [
+                                'A similar borrower already exists: Juan Dela Cruz (BRW-000042, born 1990-01-15). Pass force=true to create anyway.',
+                            ],
+                        ],
+                    ],
+                ),
+            ),
         ],
     )]
     public function store(StoreBorrowerRequest $request): JsonResponse
@@ -139,7 +170,15 @@ class BorrowerController extends Controller
     #[OA\Put(
         path: '/api/borrowers/{id}',
         summary: 'Update borrower',
-        description: 'Update borrower profile',
+        description: <<<'DESC'
+Update borrower profile. All fields are optional (`sometimes` rules).
+
+The same validation and duplicate-detection rules as the create endpoint apply, except:
+- Email uniqueness ignores the current borrower being updated
+- Duplicate detection ignores the current borrower being updated
+
+Pass `force=true` to bypass the duplicate check.
+DESC,
         tags: ['Borrowers'],
         security: [['sanctum' => []]],
         parameters: [
@@ -156,17 +195,23 @@ class BorrowerController extends Controller
                     new OA\Property(property: 'birthdate', type: 'string', format: 'date'),
                     new OA\Property(property: 'civil_status', type: 'string'),
                     new OA\Property(property: 'gender', type: 'string'),
-                    new OA\Property(property: 'address', type: 'string'),
-                    new OA\Property(property: 'contact_number', type: 'string'),
-                    new OA\Property(property: 'email', type: 'string'),
+                    new OA\Property(property: 'address', type: 'string', description: 'Legacy single-line address'),
+                    new OA\Property(property: 'street_address', type: 'string'),
+                    new OA\Property(property: 'barangay', type: 'string'),
+                    new OA\Property(property: 'city', type: 'string'),
+                    new OA\Property(property: 'province', type: 'string'),
+                    new OA\Property(property: 'contact_number', type: 'string', description: 'PH mobile or international'),
+                    new OA\Property(property: 'email', type: 'string', format: 'email', description: 'Must be unique (self-ignored on update)'),
                     new OA\Property(property: 'employer_or_business', type: 'string'),
                     new OA\Property(property: 'monthly_income', type: 'number'),
+                    new OA\Property(property: 'pledge_amount', type: 'number', description: 'Max 9,999,999.99'),
                     new OA\Property(property: 'spouse_first_name', type: 'string'),
                     new OA\Property(property: 'spouse_middle_name', type: 'string'),
                     new OA\Property(property: 'spouse_last_name', type: 'string'),
                     new OA\Property(property: 'spouse_contact_number', type: 'string'),
                     new OA\Property(property: 'spouse_occupation', type: 'string'),
                     new OA\Property(property: 'branch_id', type: 'integer'),
+                    new OA\Property(property: 'force', type: 'boolean', description: 'Bypass duplicate-borrower check'),
                 ],
             ),
         ),
