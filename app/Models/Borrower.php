@@ -24,10 +24,15 @@ class Borrower extends Model
         'civil_status',
         'gender',
         'address',
+        'street_address',
+        'barangay',
+        'city',
+        'province',
         'contact_number',
         'email',
         'employer_or_business',
         'monthly_income',
+        'pledge_amount',
         'spouse_first_name',
         'spouse_middle_name',
         'spouse_last_name',
@@ -43,6 +48,7 @@ class Borrower extends Model
         return [
             'birthdate' => 'date',
             'monthly_income' => 'decimal:2',
+            'pledge_amount' => 'decimal:2',
         ];
     }
 
@@ -56,7 +62,7 @@ class Borrower extends Model
 
         static::created(function (Borrower $borrower) {
             $borrower->shareCapitalPledge()->create([
-                'amount' => 0,
+                'amount' => $borrower->pledge_amount ?? 0,
                 'schedule' => '15/30',
                 'auto_credit' => false,
             ]);

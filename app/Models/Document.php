@@ -14,6 +14,8 @@ class Document extends Model
         'documentable_id',
         'type',
         'label',
+        'id_number',
+        'side',
         'file_path',
         'original_filename',
         'mime_type',

@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\Api\ApprovalWorkflowController;
 use App\Http\Controllers\Api\AuditLogController;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\AutoCreditController;
@@ -159,4 +160,9 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     // Auto-Credit
     Route::get('/auto-credit/status', [AutoCreditController::class, 'status']);
     Route::post('/auto-credit/process', [AutoCreditController::class, 'process']);
+
+    // Settings
+    Route::get('/settings/approval-workflow', [ApprovalWorkflowController::class, 'show']);
+    Route::put('/settings/approval-workflow', [ApprovalWorkflowController::class, 'update']);
+    Route::delete('/settings/approval-workflow', [ApprovalWorkflowController::class, 'destroy']);
 });

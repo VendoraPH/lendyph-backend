@@ -108,5 +108,15 @@ class RoleAndPermissionSeeder extends Seeder
             'share_capital:view',
             'audit_logs:view',
         ]);
+
+        Role::firstOrCreate(['name' => 'general_bookkeeper', 'guard_name' => $guard])->syncPermissions([
+            'dashboard:view',
+            'borrowers:view',
+            'loans:view', 'loans:release',
+            'payments:view',
+            'reports:view',
+            'fees:view',
+            'share_capital:view',
+        ]);
     }
 }

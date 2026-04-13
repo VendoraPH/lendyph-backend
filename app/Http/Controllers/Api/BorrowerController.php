@@ -8,10 +8,13 @@ use App\Http\Requests\Borrower\UpdateBorrowerRequest;
 use App\Http\Resources\BorrowerResource;
 use App\Http\Resources\DocumentResource;
 use App\Models\Borrower;
+use App\Models\Document;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
+use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Validation\ValidationException;
 use OpenApi\Attributes as OA;
 
 class BorrowerController extends Controller
@@ -342,6 +345,7 @@ class BorrowerController extends Controller
     #[OA\Post(
         path: '/api/borrowers/{id}/valid-ids',
         summary: 'Upload borrower valid ID',
+        description: 'Accepts either single `file` (legacy) or `front_file`+`back_file` (new) with optional `id_number`.',
         tags: ['Borrowers'],
         security: [['sanctum' => []]],
         parameters: [
@@ -352,16 +356,19 @@ class BorrowerController extends Controller
             content: new OA\MediaType(
                 mediaType: 'multipart/form-data',
                 schema: new OA\Schema(
-                    required: ['file', 'type'],
+                    required: ['type'],
                     properties: [
-                        new OA\Property(property: 'file', type: 'string', format: 'binary'),
-                        new OA\Property(property: 'type', type: 'string', example: 'PhilSys ID'),
+                        new OA\Property(property: 'type', type: 'string', example: 'Driver\'s License'),
+                        new OA\Property(property: 'id_number', type: 'string', nullable: true, example: 'N01-23-456789'),
+                        new OA\Property(property: 'front_file', type: 'string', format: 'binary'),
+                        new OA\Property(property: 'back_file', type: 'string', format: 'binary', nullable: true),
+                        new OA\Property(property: 'file', type: 'string', format: 'binary', description: 'Legacy single-file upload'),
                     ],
                 ),
             ),
         ),
         responses: [
-            new OA\Response(response: 201, description: 'Valid ID uploaded'),
+            new OA\Response(response: 201, description: 'Valid ID(s) uploaded'),
             new OA\Response(response: 401, description: 'Unauthenticated'),
             new OA\Response(response: 422, description: 'Validation error'),
         ],
@@ -370,26 +377,76 @@ class BorrowerController extends Controller
     {
         $this->authorize('borrowers:update');
 
-        request()->validate([
-            'file' => ['required', 'file', 'max:10240', 'mimes:jpg,jpeg,png,pdf'],
+        $request = request();
+
+        // Mutual exclusion: legacy single-file shape vs new front/back shape
+        if ($request->hasFile('file') && $request->hasFile('front_file')) {
+            throw ValidationException::withMessages([
+                'file' => 'Use either `file` (legacy) or `front_file`/`back_file`, not both.',
+            ]);
+        }
+
+        $rules = [
             'type' => ['required', 'string', 'max:100'],
-        ]);
+            'id_number' => ['nullable', 'string', 'max:100'],
+            'file' => ['required_without:front_file', 'file', 'max:10240', 'mimes:jpg,jpeg,png,pdf'],
+            'front_file' => ['required_without:file', 'file', 'max:10240', 'mimes:jpg,jpeg,png,pdf'],
+            'back_file' => ['nullable', 'file', 'max:10240', 'mimes:jpg,jpeg,png,pdf'],
+        ];
 
-        $file = request()->file('file');
+        $request->validate($rules);
+
+        $type = $request->input('type');
+        $idNumber = $request->input('id_number');
+        $isLegacy = $request->hasFile('file');
+        $storedPaths = [];
+        $documents = [];
+
+        try {
+            DB::transaction(function () use ($borrower, $request, $type, $idNumber, $isLegacy, &$storedPaths, &$documents) {
+                if ($isLegacy) {
+                    $documents[] = $this->storeValidIdFile($borrower, $request->file('file'), $type, $idNumber, null, $storedPaths);
+                } else {
+                    $documents[] = $this->storeValidIdFile($borrower, $request->file('front_file'), $type, $idNumber, 'front', $storedPaths);
+                    if ($request->hasFile('back_file')) {
+                        $documents[] = $this->storeValidIdFile($borrower, $request->file('back_file'), $type, $idNumber, 'back', $storedPaths);
+                    }
+                }
+            });
+        } catch (\Throwable $e) {
+            // Roll back any files written to disk before the DB failure
+            foreach ($storedPaths as $path) {
+                Storage::disk('public')->delete($path);
+            }
+            throw $e;
+        }
+
+        if ($isLegacy) {
+            return (new DocumentResource($documents[0]))
+                ->response()
+                ->setStatusCode(201);
+        }
+
+        return DocumentResource::collection($documents)
+            ->response()
+            ->setStatusCode(201);
+    }
+
+    private function storeValidIdFile(Borrower $borrower, UploadedFile $file, string $type, ?string $idNumber, ?string $side, array &$storedPaths): Document
+    {
         $path = $file->store("documents/valid_id/borrower/{$borrower->id}", 'public');
+        $storedPaths[] = $path;
 
-        $document = $borrower->documents()->create([
+        return $borrower->documents()->create([
             'type' => 'valid_id',
-            'label' => request()->input('type'),
+            'label' => $type,
+            'id_number' => $idNumber,
+            'side' => $side,
             'file_path' => $path,
             'original_filename' => $file->getClientOriginalName(),
             'mime_type' => $file->getMimeType(),
             'file_size' => $file->getSize(),
         ]);
-
-        return (new DocumentResource($document))
-            ->response()
-            ->setStatusCode(201);
     }
 
     #[OA\Get(

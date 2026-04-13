@@ -47,19 +47,50 @@ class RepaymentService
                 ->orderBy('period_number')
                 ->get();
 
+            // Identify "current" schedule = first not-overdue schedule (due_date >= paymentDate)
+            // If all unpaid are overdue, the current = the most recent overdue (largest period_number among overdue)
+            $currentScheduleId = null;
+            $firstNotOverdue = $schedules->first(fn ($s) => $s->due_date->gte($paymentDate));
+            if ($firstNotOverdue) {
+                $currentScheduleId = $firstNotOverdue->id;
+            } else {
+                $currentScheduleId = $schedules->last()?->id;
+            }
+
             $remaining = $amountPaid;
             $principalApplied = 0.0;
             $interestApplied = 0.0;
             $penaltyApplied = 0.0;
+            $overdueInterestApplied = 0.0;
+            $currentInterestApplied = 0.0;
+            $currentPrincipalApplied = 0.0;
+            $nextInterestApplied = 0.0;
+            $nextPrincipalApplied = 0.0;
             $touchedFutureSchedule = false;
+
+            // Business rule (frontend PR #106): on SCB-bearing loans, overpayment must NOT pre-pay
+            // future amortization — it becomes share capital instead. The frontend computes the SCB
+            // credit and posts to /share-capital/ledger separately; here we just stop cascading so
+            // the remainder surfaces as `overpayment` on the repayment row.
+            $hasScb = (float) $loan->scb_amount > 0;
+            $currentHandled = false;
 
             foreach ($schedules as $schedule) {
                 if ($remaining <= 0) {
                     break;
                 }
 
+                $isCurrent = $schedule->id === $currentScheduleId;
+                $isOverdue = $schedule->due_date->lt($paymentDate);
                 $isFuture = $schedule->due_date->gt($paymentDate);
-                if ($isFuture) {
+
+                // With SCB: once the current schedule is fully allocated, stop the cascade.
+                // Overdue schedules earlier in the period list still get caught up (rule #2 in allocation order).
+                if ($hasScb && $currentHandled && ! $isOverdue) {
+                    break;
+                }
+
+                if ($isFuture && ! $hasScb) {
                     $touchedFutureSchedule = true;
                 }
 
@@ -72,6 +103,26 @@ class RepaymentService
                 $principalApplied += $pPaid;
                 $interestApplied += $iPaid;
                 $penaltyApplied += $penPaid;
+
+                // Categorize into 6-tier breakdown for frontend display:
+                // - Schedules with due_date < paymentDate → "overdue" buckets (interest + principal both go here)
+                // - The "current" schedule (first not-overdue, or most recent overdue if all are overdue) → "current" buckets
+                // - Schedules after the current → "next" buckets
+                if ($isCurrent) {
+                    $currentInterestApplied += $iPaid;
+                    $currentPrincipalApplied += $pPaid;
+                    $currentHandled = true;
+                } elseif ($isOverdue) {
+                    // Overdue but not the "current" schedule → bucket as overdue interest
+                    // (overdue principal collapses into the current period principal display in the UI;
+                    // we don't have a dedicated overdue_principal column)
+                    $overdueInterestApplied += $iPaid;
+                    $currentPrincipalApplied += $pPaid;
+                } else {
+                    // Future schedule (excess flows here when scb_amount == 0)
+                    $nextInterestApplied += $iPaid;
+                    $nextPrincipalApplied += $pPaid;
+                }
             }
 
             // Step 3: Remainder becomes overpayment
@@ -103,6 +154,11 @@ class RepaymentService
                 'principal_applied' => round($principalApplied, 2),
                 'interest_applied' => round($interestApplied, 2),
                 'penalty_applied' => round($penaltyApplied, 2),
+                'overdue_interest_applied' => round($overdueInterestApplied, 2),
+                'current_interest_applied' => round($currentInterestApplied, 2),
+                'current_principal_applied' => round($currentPrincipalApplied, 2),
+                'next_interest_applied' => round($nextInterestApplied, 2),
+                'next_principal_applied' => round($nextPrincipalApplied, 2),
                 'overpayment' => round($overpayment, 2),
                 'balance_before' => round($balanceBefore, 2),
                 'balance_after' => round($balanceAfter, 2),
@@ -123,6 +179,10 @@ class RepaymentService
             } elseif ($loan->status === 'released') {
                 $loan->update(['status' => 'ongoing']);
             }
+
+            // NOTE: SCB crediting is frontend-driven (see frontend PR #106).
+            // The frontend computes the actual excess allocation and posts to /api/share-capital/ledger
+            // separately after this endpoint returns. Do not auto-credit here.
 
             return $repayment;
         });
@@ -146,6 +206,10 @@ class RepaymentService
             // We stored totals only, so we reverse using a proportional approach:
             // Re-run the allocation simulation and reverse each schedule.
             $this->reverseAllocation($repayment);
+
+            // NOTE: SCB reversal is frontend-driven (see frontend PR #106).
+            // The caller that voids a repayment is responsible for posting an offsetting debit
+            // entry to /api/share-capital/ledger if this loan had SCB crediting on the original payment.
 
             $repayment->update([
                 'status' => 'voided',
