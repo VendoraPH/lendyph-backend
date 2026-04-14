@@ -5,7 +5,10 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Document\StoreDocumentRequest;
 use App\Http\Resources\DocumentResource;
+use App\Models\Borrower;
+use App\Models\CoMaker;
 use App\Models\Document;
+use App\Models\Loan;
 use App\Services\AuditLogService;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Http\JsonResponse;
@@ -15,13 +18,24 @@ use OpenApi\Attributes as OA;
 
 class DocumentController extends Controller
 {
+    private const PARENT_MODELS = [
+        'borrower' => Borrower::class,
+        'coMaker' => CoMaker::class,
+        'loan' => Loan::class,
+    ];
+
     private function resolveParent(): Model
     {
-        if ($borrower = request()->route('borrower')) {
-            return $borrower;
+        foreach (self::PARENT_MODELS as $key => $modelClass) {
+            $value = request()->route($key);
+            if ($value === null) {
+                continue;
+            }
+
+            return $value instanceof Model ? $value : $modelClass::findOrFail($value);
         }
 
-        return request()->route('coMaker');
+        abort(404, 'Document parent not found.');
     }
 
     #[OA\Get(
@@ -44,6 +58,20 @@ class DocumentController extends Controller
         security: [['sanctum' => []]],
         parameters: [
             new OA\Parameter(name: 'coMakerId', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
+        ],
+        responses: [
+            new OA\Response(response: 200, description: 'Document list'),
+            new OA\Response(response: 401, description: 'Unauthenticated'),
+        ],
+    )]
+    #[OA\Get(
+        path: '/api/loans/{loanId}/documents',
+        summary: 'List loan documents',
+        description: 'Returns all documents attached to a loan (e.g. policy exception letters).',
+        tags: ['Documents'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'loanId', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
         ],
         responses: [
             new OA\Response(response: 200, description: 'Document list'),
@@ -112,6 +140,36 @@ class DocumentController extends Controller
         responses: [
             new OA\Response(response: 201, description: 'Document uploaded'),
             new OA\Response(response: 401, description: 'Unauthenticated'),
+            new OA\Response(response: 422, description: 'Validation error'),
+        ],
+    )]
+    #[OA\Post(
+        path: '/api/loans/{loanId}/documents',
+        summary: 'Upload loan document',
+        description: 'Attach a document to a loan. Common use: policy exception letters attached to loans that require BOD review.',
+        tags: ['Documents'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'loanId', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
+        ],
+        requestBody: new OA\RequestBody(
+            required: true,
+            content: new OA\MediaType(
+                mediaType: 'multipart/form-data',
+                schema: new OA\Schema(
+                    required: ['file', 'type'],
+                    properties: [
+                        new OA\Property(property: 'file', type: 'string', format: 'binary'),
+                        new OA\Property(property: 'type', type: 'string', example: 'policy_exception_letter'),
+                        new OA\Property(property: 'label', type: 'string', example: 'Policy Exception Letter'),
+                    ],
+                ),
+            ),
+        ),
+        responses: [
+            new OA\Response(response: 201, description: 'Document uploaded'),
+            new OA\Response(response: 401, description: 'Unauthenticated'),
+            new OA\Response(response: 403, description: 'Forbidden — requires loans:update permission'),
             new OA\Response(response: 422, description: 'Validation error'),
         ],
     )]

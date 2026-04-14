@@ -45,6 +45,7 @@ class UpdateLoanProductRequest extends FormRequest
             'min_amount' => ['nullable', 'numeric', 'min:0'],
             'max_amount' => ['nullable', 'numeric', 'min:0'],
             'status' => ['sometimes', 'in:active,inactive'],
+            'is_active' => ['sometimes', 'boolean'],
         ];
     }
 
@@ -59,6 +60,9 @@ class UpdateLoanProductRequest extends FormRequest
         if (! $this->has('frequency') && $this->has('frequencies')) {
             $frequencies = $this->frequencies;
             $this->merge(['frequency' => is_array($frequencies) ? ($frequencies[0] ?? 'monthly') : $frequencies]);
+        }
+        if ($this->has('is_active') && ! $this->has('status')) {
+            $this->merge(['status' => $this->boolean('is_active') ? 'active' : 'inactive']);
         }
     }
 }

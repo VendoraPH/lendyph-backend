@@ -37,6 +37,8 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     // Auth
     Route::post('/auth/logout', [AuthController::class, 'logout']);
     Route::get('/auth/me', [AuthController::class, 'me']);
+    Route::patch('/auth/me', [AuthController::class, 'updateMe']);
+    Route::post('/auth/change-password', [AuthController::class, 'changePassword']);
     Route::post('/auth/refresh', [AuthController::class, 'refresh']);
 
     // Users
@@ -71,6 +73,8 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::post('/borrowers/{borrower}/documents', [DocumentController::class, 'store']);
     Route::get('/co-makers/{coMaker}/documents', [DocumentController::class, 'index']);
     Route::post('/co-makers/{coMaker}/documents', [DocumentController::class, 'store']);
+    Route::get('/loans/{loan}/documents', [DocumentController::class, 'index']);
+    Route::post('/loans/{loan}/documents', [DocumentController::class, 'store']);
     Route::get('/documents/{document}', [DocumentController::class, 'show']);
     Route::delete('/documents/{document}', [DocumentController::class, 'destroy']);
 

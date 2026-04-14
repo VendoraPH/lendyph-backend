@@ -8,7 +8,13 @@ class StoreDocumentRequest extends FormRequest
 {
     public function authorize(): bool
     {
-        return $this->user()->can('borrowers:update');
+        $user = $this->user();
+
+        if ($this->route('loan')) {
+            return $user->can('loans:update');
+        }
+
+        return $user->can('borrowers:update');
     }
 
     public function rules(): array

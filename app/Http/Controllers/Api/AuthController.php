@@ -3,12 +3,15 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\Auth\ChangePasswordRequest;
 use App\Http\Requests\Auth\LoginRequest;
+use App\Http\Requests\Auth\UpdateMeRequest;
 use App\Http\Resources\UserResource;
 use App\Models\User;
 use App\Services\AuditLogService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Hash;
+use Laravel\Sanctum\PersonalAccessToken;
 use OpenApi\Attributes as OA;
 
 class AuthController extends Controller
@@ -115,6 +118,83 @@ class AuthController extends Controller
         $user->load('branch', 'roles', 'permissions');
 
         return new UserResource($user);
+    }
+
+    #[OA\Patch(
+        path: '/api/auth/me',
+        summary: 'Update current user profile',
+        description: 'Self-service profile update. Only full_name, email, and mobile_number are editable. Username and role are admin-only.',
+        tags: ['Auth'],
+        security: [['sanctum' => []]],
+        requestBody: new OA\RequestBody(
+            required: true,
+            content: new OA\JsonContent(
+                properties: [
+                    new OA\Property(property: 'full_name', type: 'string', example: 'Juan Dela Cruz'),
+                    new OA\Property(property: 'email', type: 'string', format: 'email', nullable: true, example: 'juan@example.com'),
+                    new OA\Property(property: 'mobile_number', type: 'string', nullable: true, example: '09171234567'),
+                ],
+            ),
+        ),
+        responses: [
+            new OA\Response(response: 200, description: 'Profile updated'),
+            new OA\Response(response: 401, description: 'Unauthenticated'),
+            new OA\Response(response: 422, description: 'Validation error (e.g. email taken)'),
+        ],
+    )]
+    public function updateMe(UpdateMeRequest $request): UserResource
+    {
+        $user = $request->user();
+        $user->fill($request->validated())->save();
+
+        AuditLogService::log('profile_updated', $user, description: "User {$user->username} updated their profile");
+
+        $user->load('branch', 'roles', 'permissions');
+
+        return new UserResource($user);
+    }
+
+    #[OA\Post(
+        path: '/api/auth/change-password',
+        summary: 'Change current user password',
+        description: 'Verify current password, then update to new. Revokes all other sanctum tokens as a security precaution; the current session stays valid.',
+        tags: ['Auth'],
+        security: [['sanctum' => []]],
+        requestBody: new OA\RequestBody(
+            required: true,
+            content: new OA\JsonContent(
+                required: ['current_password', 'new_password', 'new_password_confirmation'],
+                properties: [
+                    new OA\Property(property: 'current_password', type: 'string', example: 'oldpassword'),
+                    new OA\Property(property: 'new_password', type: 'string', minLength: 8, example: 'newpassword123'),
+                    new OA\Property(property: 'new_password_confirmation', type: 'string', example: 'newpassword123'),
+                ],
+            ),
+        ),
+        responses: [
+            new OA\Response(response: 200, description: 'Password updated'),
+            new OA\Response(response: 401, description: 'Unauthenticated'),
+            new OA\Response(response: 422, description: 'Current password incorrect or new password invalid'),
+        ],
+    )]
+    public function changePassword(ChangePasswordRequest $request): JsonResponse
+    {
+        $user = $request->user();
+        $user->update(['password' => Hash::make($request->input('new_password'))]);
+
+        // Keep current session alive; invalidate all other tokens.
+        // currentAccessToken() is a PersonalAccessToken for API-token auth
+        // or a TransientToken for session-based (SPA) auth — only the former has an id.
+        $currentToken = $request->user()->currentAccessToken();
+        if ($currentToken instanceof PersonalAccessToken) {
+            $user->tokens()->where('id', '!=', $currentToken->id)->delete();
+        } else {
+            $user->tokens()->delete();
+        }
+
+        AuditLogService::log('password_changed', $user, description: "User {$user->username} changed their password");
+
+        return response()->json(['message' => 'Password updated successfully.']);
     }
 
     #[OA\Post(

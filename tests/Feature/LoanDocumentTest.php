@@ -3,7 +3,12 @@
 namespace Tests\Feature;
 
 use App\Models\Borrower;
+use App\Models\Document;
+use App\Models\Loan;
 use App\Models\LoanProduct;
+use App\Models\User;
+use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
@@ -103,5 +108,99 @@ class LoanDocumentTest extends TestCase
 
         $this->getJson("/api/loans/{$loanId}/promissory-note")
             ->assertUnprocessable();
+    }
+
+    // ── Loan document uploads (policy exception letters etc.) ─────────────────
+
+    public function test_uploads_policy_exception_letter_to_loan(): void
+    {
+        Storage::fake('public');
+
+        $loan = $this->createReleasedLoan();
+        $file = UploadedFile::fake()->create('letter.pdf', 200, 'application/pdf');
+
+        $response = $this->postJson("/api/loans/{$loan->id}/documents", [
+            'file' => $file,
+            'type' => 'policy_exception_letter',
+            'label' => 'Policy Exception Letter',
+        ]);
+
+        $response->assertCreated()
+            ->assertJsonPath('data.type', 'policy_exception_letter')
+            ->assertJsonPath('data.label', 'Policy Exception Letter');
+
+        $this->assertDatabaseHas('documents', [
+            'documentable_type' => Loan::class,
+            'documentable_id' => $loan->id,
+            'type' => 'policy_exception_letter',
+        ]);
+
+        $document = Document::where('documentable_type', Loan::class)
+            ->where('documentable_id', $loan->id)
+            ->first();
+        Storage::disk('public')->assertExists($document->file_path);
+    }
+
+    public function test_lists_uploaded_loan_documents(): void
+    {
+        Storage::fake('public');
+
+        $loan = $this->createReleasedLoan();
+
+        $this->postJson("/api/loans/{$loan->id}/documents", [
+            'file' => UploadedFile::fake()->create('a.pdf', 100, 'application/pdf'),
+            'type' => 'policy_exception_letter',
+        ])->assertCreated();
+
+        $this->postJson("/api/loans/{$loan->id}/documents", [
+            'file' => UploadedFile::fake()->create('b.pdf', 100, 'application/pdf'),
+            'type' => 'supporting_document',
+        ])->assertCreated();
+
+        $this->getJson("/api/loans/{$loan->id}/documents")
+            ->assertOk()
+            ->assertJsonCount(2, 'data');
+    }
+
+    public function test_loan_document_upload_requires_loans_update_permission(): void
+    {
+        Storage::fake('public');
+
+        $loan = $this->createReleasedLoan();
+
+        // Collector role has loans:view but NOT loans:update
+        $collector = User::factory()->create(['branch_id' => $this->branch->id]);
+        $collector->assignRole('collector');
+
+        $this->actingAs($collector)
+            ->postJson("/api/loans/{$loan->id}/documents", [
+                'file' => UploadedFile::fake()->create('letter.pdf', 100, 'application/pdf'),
+                'type' => 'policy_exception_letter',
+            ])
+            ->assertForbidden();
+    }
+
+    public function test_loan_document_upload_on_nonexistent_loan_returns_404(): void
+    {
+        $this->postJson('/api/loans/999999/documents', [
+            'file' => UploadedFile::fake()->create('letter.pdf', 100, 'application/pdf'),
+            'type' => 'policy_exception_letter',
+        ])->assertNotFound();
+    }
+
+    public function test_loan_document_upload_rejects_oversized_file(): void
+    {
+        Storage::fake('public');
+
+        $loan = $this->createReleasedLoan();
+
+        // 11 MB — rule is max:10240 KB
+        $oversized = UploadedFile::fake()->create('huge.pdf', 11 * 1024, 'application/pdf');
+
+        $this->postJson("/api/loans/{$loan->id}/documents", [
+            'file' => $oversized,
+            'type' => 'policy_exception_letter',
+        ])->assertUnprocessable()
+            ->assertJsonValidationErrors(['file']);
     }
 }
