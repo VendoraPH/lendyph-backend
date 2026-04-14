@@ -22,6 +22,10 @@ class DashboardTest extends TestCase
             ->assertJsonStructure([
                 'data' => [
                     'total_portfolio',
+                    'active_loans',
+                    'total_collected',
+                    'overdue_count',
+                    // Legacy aliases kept for backward compatibility
                     'active_loans_count',
                     'total_collected_mtd',
                     'overdue_loans_count',
@@ -36,15 +40,25 @@ class DashboardTest extends TestCase
 
         $response = $this->getJson('/api/dashboard/stats')->assertOk();
 
-        $this->assertEquals(1, $response->json('data.active_loans_count'));
+        // Canonical field names (consumed by frontend)
+        $this->assertEquals(1, $response->json('data.active_loans'));
         $this->assertGreaterThan(0, $response->json('data.total_portfolio'));
+
+        // Legacy aliases still present
+        $this->assertEquals(1, $response->json('data.active_loans_count'));
     }
 
     public function test_collections_trend_returns_12_weeks(): void
     {
-        $this->getJson('/api/dashboard/collections-trend')
+        $response = $this->getJson('/api/dashboard/collections-trend')
             ->assertOk()
             ->assertJsonCount(12, 'data');
+
+        // Each point must expose the frontend-canonical fields
+        $first = $response->json('data.0');
+        $this->assertArrayHasKey('value', $first);
+        $this->assertArrayHasKey('period_label', $first);
+        $this->assertArrayHasKey('label', $first); // legacy, kept
     }
 
     public function test_daily_dues_returns_expected_structure(): void

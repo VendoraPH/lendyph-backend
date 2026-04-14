@@ -215,13 +215,19 @@ class RepaymentService
 
             return [
                 'amount_paid' => (float) $repayment->amount_paid,
+                // Frontend-canonical scalar totals (consumed by /payments entry page)
+                'total_paid' => (float) $repayment->amount_paid,
+                'total_principal' => (float) $repayment->principal_applied,
+                'total_interest' => (float) $repayment->interest_applied,
+                'total_penalty' => (float) $repayment->penalty_applied,
+                'excess' => (float) $repayment->overpayment,
                 'allocated_to_penalty' => (float) $repayment->penalty_applied,
                 'allocated_to_overdue_interest' => (float) $repayment->overdue_interest_applied,
                 'allocated_to_current_interest' => (float) $repayment->current_interest_applied,
                 'allocated_to_current_principal' => (float) $repayment->current_principal_applied,
                 'allocated_to_next_interest' => (float) $repayment->next_interest_applied,
                 'allocated_to_next_principal' => (float) $repayment->next_principal_applied,
-                // Total interest + principal applied across all schedules
+                // Total interest + principal applied across all schedules (legacy names)
                 'total_interest_applied' => (float) $repayment->interest_applied,
                 'total_principal_applied' => (float) $repayment->principal_applied,
                 'overpayment' => (float) $repayment->overpayment,
@@ -323,9 +329,15 @@ class RepaymentService
             'total_due' => round($totalDue, 2),
             'total_paid' => round($totalPaid, 2),
             'total_repaid' => round($totalRepaid, 2),
+            // Paid breakdown — frontend renders each as its own row
+            'principal_paid' => round((float) $totalPrincipalPaid, 2),
+            'interest_paid' => round((float) $totalInterestPaid, 2),
+            'penalty_paid' => round((float) $totalPenaltyPaid, 2),
             'outstanding_principal' => round($outstandingPrincipal, 2),
             'outstanding_interest' => round($outstandingInterest, 2),
             'outstanding_penalty' => round($outstandingPenalty, 2),
+            // Frontend reads `penalty_amount` meaning the remaining penalty to collect.
+            'penalty_amount' => round($outstandingPenalty, 2),
             'outstanding_balance' => round($outstandingPrincipal + $outstandingInterest + $outstandingPenalty, 2),
             'overdue_amount' => round($overdueAmount, 2),
             'overdue_schedules_count' => $overdueSchedules->count(),

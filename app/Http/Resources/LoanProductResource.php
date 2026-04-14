@@ -72,6 +72,8 @@ class LoanProductResource extends JsonResource
             'min_amount' => $this->min_amount,
             'max_amount' => $this->max_amount,
             'status' => $this->status,
+            // Frontend-canonical boolean alias for the activate/deactivate toggle.
+            'is_active' => $this->status === 'active',
             'created_at' => $this->created_at,
             'updated_at' => $this->updated_at,
         ];

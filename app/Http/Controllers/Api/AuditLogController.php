@@ -140,7 +140,7 @@ class AuditLogController extends Controller
     {
         $this->authorize('audit_logs:view');
 
-        $auditLog->load('user');
+        $auditLog->load('user', 'auditable');
 
         return new AuditLogResource($auditLog);
     }
@@ -150,7 +150,7 @@ class AuditLogController extends Controller
      */
     private function buildQuery(): Builder
     {
-        return AuditLog::with('user')
+        return AuditLog::with('user', 'auditable')
             ->when(request('search'), function ($q, $search) {
                 $q->where(function ($q) use ($search) {
                     $q->where('action', 'like', "%{$search}%")

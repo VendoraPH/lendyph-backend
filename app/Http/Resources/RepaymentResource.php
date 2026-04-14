@@ -40,12 +40,25 @@ class RepaymentResource extends JsonResource
         // Map backend status 'posted' to frontend 'completed' for badge color matching
         $frontendStatus = $this->status === 'posted' ? 'completed' : $this->status;
 
+        // Derive next due date from the loan's next unpaid schedule if the loan and its
+        // schedules are eager-loaded. Safe null fallback otherwise.
+        $nextDueDate = null;
+        if ($this->loan && $this->loan->relationLoaded('amortizationSchedules')) {
+            $nextSchedule = $this->loan->amortizationSchedules
+                ->whereIn('status', ['pending', 'partial', 'overdue'])
+                ->sortBy('due_date')
+                ->first();
+            $nextDueDate = $nextSchedule?->due_date?->toDateString();
+        }
+
         return [
             'id' => $this->id,
             'receipt_number' => $this->receipt_number,
             'loan_id' => $this->loan_id,
             'borrower_id' => $this->loan?->borrower_id,
             'loan_account_number' => $this->loan?->loan_account_number,
+            'borrower_name' => $this->loan?->borrower?->full_name,
+            'loan_product_name' => $this->loan?->loanProduct?->name,
             'payment_date' => $this->payment_date?->toDateString(),
             'paid_at' => $this->payment_date?->toDateString(),
             'method' => $this->method,
@@ -54,10 +67,13 @@ class RepaymentResource extends JsonResource
             'amount' => (float) $this->amount_paid,
             'principal_applied' => (float) $this->principal_applied,
             'principal_amount' => (float) $this->principal_applied,
+            'principal' => (float) $this->principal_applied,
             'interest_applied' => (float) $this->interest_applied,
             'interest_amount' => (float) $this->interest_applied,
+            'interest' => (float) $this->interest_applied,
             'penalty_applied' => (float) $this->penalty_applied,
             'penalty_amount' => (float) $this->penalty_applied,
+            'penalty' => (float) $this->penalty_applied,
             'overdue_interest_applied' => (float) $this->overdue_interest_applied,
             'current_interest_applied' => (float) $this->current_interest_applied,
             'current_principal_applied' => (float) $this->current_principal_applied,
@@ -66,6 +82,10 @@ class RepaymentResource extends JsonResource
             'overpayment' => (float) $this->overpayment,
             'balance_before' => (float) $this->balance_before,
             'balance_after' => (float) $this->balance_after,
+            // Frontend-canonical aliases (consumed by payments receipt page)
+            'previous_balance' => (float) $this->balance_before,
+            'new_balance' => (float) $this->balance_after,
+            'next_due_date' => $nextDueDate,
             'payment_type' => $this->payment_type,
             'status' => $frontendStatus,
             'void_reason' => $this->void_reason,

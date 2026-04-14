@@ -150,6 +150,7 @@ class LoanController extends Controller
             'borrower', 'loanProduct', 'branch', 'coMakers',
             'approvedByUser', 'releasedByUser', 'rejectedByUser',
             'createdByUser', 'accountOfficer', 'amortizationSchedules',
+            'documents',
         );
 
         return new LoanResource($loan);

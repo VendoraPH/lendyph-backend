@@ -113,6 +113,12 @@ class LoanResource extends JsonResource
             'grace_period_days' => $this->grace_period_days,
             'policy_exception' => (bool) $this->policy_exception,
             'policy_exception_details' => $this->policy_exception_details,
+            // URL of the policy exception letter Document, if uploaded (requires `documents` eager-loaded).
+            'policy_exception_letter' => $this->whenLoaded('documents', function () {
+                $doc = $this->documents->firstWhere('type', 'policy_exception_letter');
+
+                return $doc?->url;
+            }),
             'status' => $this->status,
             'outstanding_balance' => $outstandingBalance,
             'next_due_date' => $nextDueDate,

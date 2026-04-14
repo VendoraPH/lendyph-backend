@@ -38,6 +38,10 @@ class DashboardService
 
         return [
             'total_portfolio' => round($totalPortfolio, 2),
+            'active_loans' => $activeLoansCount,
+            'total_collected' => round($totalCollectedMtd, 2),
+            'overdue_count' => $overdueLoansCount,
+            // Legacy aliases kept for backward compatibility — prefer the names above.
             'active_loans_count' => $activeLoansCount,
             'total_collected_mtd' => round($totalCollectedMtd, 2),
             'overdue_loans_count' => $overdueLoansCount,
@@ -69,6 +73,9 @@ class DashboardService
                 'period' => 'week',
                 'key' => 'W'.(12 - $i),
                 'label' => $start->format('M j'),
+                'period_label' => $start->format('M j'),
+                'value' => round($total, 2),
+                // Legacy alias.
                 'total' => round($total, 2),
             ]);
         }
@@ -91,6 +98,8 @@ class DashboardService
                 'period' => 'month',
                 'key' => $start->format('Y-m'),
                 'label' => $start->format('M Y'),
+                'period_label' => $start->format('M Y'),
+                'value' => round($total, 2),
                 'total' => round($total, 2),
             ]);
         }
@@ -113,6 +122,8 @@ class DashboardService
                 'period' => 'year',
                 'key' => (string) $start->year,
                 'label' => (string) $start->year,
+                'period_label' => (string) $start->year,
+                'value' => round($total, 2),
                 'total' => round($total, 2),
             ]);
         }

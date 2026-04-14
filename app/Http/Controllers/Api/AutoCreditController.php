@@ -50,6 +50,8 @@ class AutoCreditController extends Controller
                 'id' => $run->id,
                 'total_amount' => (float) $run->total_amount,
                 'member_count' => $run->member_count,
+                // Frontend-canonical alias
+                'processed_count' => $run->member_count,
                 'processed_at' => $run->processed_at?->toDateTimeString(),
                 'status' => $run->status,
             ],

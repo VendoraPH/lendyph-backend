@@ -41,7 +41,7 @@ class RepaymentController extends Controller
     {
         $this->authorize('payments:view');
 
-        $query = Repayment::with('loan.borrower', 'receivedByUser', 'voidedByUser')
+        $query = Repayment::with('loan.borrower', 'loan.loanProduct', 'loan.amortizationSchedules', 'receivedByUser', 'voidedByUser')
             ->when(request('search'), function ($q, $search) {
                 $q->where(function ($q) use ($search) {
                     $q->where('receipt_number', 'like', "%{$search}%")
@@ -99,7 +99,7 @@ class RepaymentController extends Controller
         $this->authorize('payments:view');
 
         $repayments = $loan->repayments()
-            ->with('receivedByUser', 'voidedByUser')
+            ->with('receivedByUser', 'voidedByUser', 'loan.borrower', 'loan.loanProduct', 'loan.amortizationSchedules')
             ->latest('payment_date')
             ->paginate(min((int) request('per_page', 15), 100));
 
@@ -142,7 +142,7 @@ class RepaymentController extends Controller
             $request->reference_number,
         );
 
-        $repayment->load('receivedByUser', 'loan');
+        $repayment->load('receivedByUser', 'loan.borrower', 'loan.loanProduct', 'loan.amortizationSchedules');
 
         return (new RepaymentResource($repayment))
             ->response()
@@ -166,7 +166,7 @@ class RepaymentController extends Controller
     {
         $this->authorize('payments:view');
 
-        $repayment->load('loan', 'receivedByUser', 'voidedByUser');
+        $repayment->load('loan.borrower', 'loan.loanProduct', 'loan.amortizationSchedules', 'receivedByUser', 'voidedByUser');
 
         return new RepaymentResource($repayment);
     }
@@ -201,7 +201,7 @@ class RepaymentController extends Controller
             $request->user(),
         );
 
-        $repayment->load('loan', 'receivedByUser', 'voidedByUser');
+        $repayment->load('loan.borrower', 'loan.loanProduct', 'loan.amortizationSchedules', 'receivedByUser', 'voidedByUser');
 
         return response()->json([
             'message' => 'Repayment voided successfully.',
