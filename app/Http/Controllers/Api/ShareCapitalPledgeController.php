@@ -36,6 +36,7 @@ class ShareCapitalPledgeController extends Controller
         $this->authorize('share_capital:view');
 
         $pledges = ShareCapitalPledge::with('borrower')
+            ->withMax('borrowerLedgerEntries as last_transaction_date', 'date')
             ->when(request('schedule'), fn ($q, $s) => $q->where('schedule', $s))
             ->when(request()->has('auto_credit'), fn ($q) => $q->where('auto_credit', filter_var(request('auto_credit'), FILTER_VALIDATE_BOOLEAN)))
             ->when(request('search'), fn ($q, $search) => $q->whereHas('borrower', fn ($bq) => $bq->where('first_name', 'like', "%{$search}%")->orWhere('last_name', 'like', "%{$search}%")))
@@ -59,7 +60,7 @@ class ShareCapitalPledgeController extends Controller
     public function update(UpdateShareCapitalPledgeRequest $request, ShareCapitalPledge $pledge): ShareCapitalPledgeResource
     {
         $pledge->update($request->validated());
-        $pledge->load('borrower');
+        $pledge->load('borrower')->loadMax('borrowerLedgerEntries as last_transaction_date', 'date');
 
         return new ShareCapitalPledgeResource($pledge);
     }

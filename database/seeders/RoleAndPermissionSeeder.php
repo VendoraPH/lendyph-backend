@@ -50,7 +50,7 @@ class RoleAndPermissionSeeder extends Seeder
             'collections:view', 'collections:mark_collected',
 
             // Settings
-            'settings:view', 'settings:update',
+            'settings:view', 'settings:update', 'settings:delete',
         ];
 
         $guard = 'web';

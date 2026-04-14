@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class ShareCapitalPledge extends Model
 {
@@ -28,5 +29,10 @@ class ShareCapitalPledge extends Model
     public function borrower(): BelongsTo
     {
         return $this->belongsTo(Borrower::class);
+    }
+
+    public function borrowerLedgerEntries(): HasMany
+    {
+        return $this->hasMany(ShareCapitalLedger::class, 'borrower_id', 'borrower_id');
     }
 }

@@ -139,6 +139,36 @@ it('rejects deletion of a custom role that has assigned users', function () {
     $this->assertDatabaseHas('roles', ['id' => $role->id]);
 });
 
+it('requires settings:delete permission to destroy a role (settings:update alone is insufficient)', function () {
+    $custom = Role::create(['name' => 'deletable_by_delegated', 'guard_name' => 'web', 'is_system' => false]);
+
+    $operator = User::factory()->create();
+    $operatorRole = Role::create(['name' => 'settings_updater', 'guard_name' => 'web', 'is_system' => false]);
+    $operatorRole->syncPermissions(['settings:view', 'settings:update', 'users:view']);
+    $operator->assignRole($operatorRole);
+
+    $this->actingAs($operator)
+        ->deleteJson("/api/roles/{$custom->id}")
+        ->assertStatus(403);
+
+    $this->assertDatabaseHas('roles', ['id' => $custom->id]);
+});
+
+it('allows destroy when the user has settings:delete', function () {
+    $custom = Role::create(['name' => 'deletable_role', 'guard_name' => 'web', 'is_system' => false]);
+
+    $operator = User::factory()->create();
+    $operatorRole = Role::create(['name' => 'settings_deleter', 'guard_name' => 'web', 'is_system' => false]);
+    $operatorRole->syncPermissions(['settings:view', 'settings:delete', 'users:view']);
+    $operator->assignRole($operatorRole);
+
+    $this->actingAs($operator)
+        ->deleteJson("/api/roles/{$custom->id}")
+        ->assertSuccessful();
+
+    $this->assertDatabaseMissing('roles', ['id' => $custom->id]);
+});
+
 it('exposes users_count on GET', function () {
     $role = Role::create(['name' => 'counted', 'guard_name' => 'web', 'is_system' => false]);
     User::factory()->count(2)->create()->each(fn ($u) => $u->assignRole($role));

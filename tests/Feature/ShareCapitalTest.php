@@ -136,6 +136,43 @@ class ShareCapitalTest extends TestCase
             ->assertJsonPath('data.credit', 500);
     }
 
+    public function test_pledge_exposes_last_transaction_date_from_ledger(): void
+    {
+        $borrower = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+
+        $this->postJson('/api/share-capital/ledger', [
+            'borrower_id' => $borrower->id,
+            'date' => '2026-01-10',
+            'description' => 'First',
+            'type' => 'credit',
+            'amount' => 500,
+        ])->assertCreated();
+
+        $this->postJson('/api/share-capital/ledger', [
+            'borrower_id' => $borrower->id,
+            'date' => '2026-03-22',
+            'description' => 'Most recent',
+            'type' => 'credit',
+            'amount' => 500,
+        ])->assertCreated();
+
+        $response = $this->getJson('/api/pledges')->assertOk();
+        $pledge = collect($response->json('data'))->firstWhere('borrower_id', $borrower->id);
+
+        expect($pledge)->not->toBeNull();
+        expect($pledge['last_transaction_date'])->toBe('2026-03-22');
+    }
+
+    public function test_pledge_last_transaction_date_is_null_when_no_ledger_entries(): void
+    {
+        $borrower = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+
+        $response = $this->getJson('/api/pledges')->assertOk();
+        $pledge = collect($response->json('data'))->firstWhere('borrower_id', $borrower->id);
+
+        expect($pledge['last_transaction_date'])->toBeNull();
+    }
+
     public function test_bulk_entry(): void
     {
         $b1 = Borrower::factory()->create(['branch_id' => $this->branch->id]);

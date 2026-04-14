@@ -231,7 +231,7 @@ class RoleController extends Controller
     )]
     public function destroy(Role $role): JsonResponse
     {
-        $this->authorize('settings:update');
+        $this->authorize('settings:delete');
 
         if ($role->is_system) {
             throw ValidationException::withMessages([

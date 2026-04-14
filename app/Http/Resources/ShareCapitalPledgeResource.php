@@ -17,6 +17,7 @@ class ShareCapitalPledgeResource extends JsonResource
             'amount' => (float) $this->amount,
             'schedule' => $this->schedule,
             'auto_credit' => (bool) $this->auto_credit,
+            'last_transaction_date' => $this->last_transaction_date,
             'created_at' => $this->created_at,
             'updated_at' => $this->updated_at,
         ];
