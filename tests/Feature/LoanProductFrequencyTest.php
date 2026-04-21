@@ -52,12 +52,16 @@ it('accepts every canonical frequency', function (string $value) {
     ]);
 })->with(LoanFrequency::values());
 
-it('rejects upon_maturity as a frequency', function () {
+it('accepts upon_maturity as a frequency (bullet loan product)', function () {
     $this->postJson('/api/loan-products', loanProductFrequencyPayload([
+        'name' => 'Upon-Maturity Product',
         'frequencies' => ['upon_maturity'],
-    ]))
-        ->assertStatus(422)
-        ->assertJsonValidationErrors(['frequency']);
+    ]))->assertCreated();
+
+    $this->assertDatabaseHas('loan_products', [
+        'name' => 'Upon-Maturity Product',
+        'frequency' => 'upon_maturity',
+    ]);
 });
 
 it('rejects empty frequencies array without silently defaulting', function () {

@@ -9,6 +9,7 @@ enum LoanFrequency: string
     case BiWeekly = 'bi_weekly';
     case SemiMonthly = 'semi_monthly';
     case Monthly = 'monthly';
+    case UponMaturity = 'upon_maturity';
 
     /**
      * @return list<string>
