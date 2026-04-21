@@ -19,6 +19,6 @@ class AdminUserSeeder extends Seeder
             'status' => 'active',
         ]);
 
-        $admin->assignRole('admin');
+        $admin->assignRole('super_admin');
     }
 }

@@ -17,9 +17,13 @@ class AppServiceProvider extends ServiceProvider
 
     public function boot(): void
     {
-        // Admin bypass — admin role gets all permissions automatically
+        // Super-admin bypass — developer-side super_admin role gets all
+        // permissions automatically. Client-side "admin" no longer bypasses
+        // here; instead, the RoleAndPermissionSeeder gives the admin role
+        // every permission directly, so this hook only matters as a safety
+        // net for the platform team.
         Gate::before(function ($user) {
-            return $user->hasRole('admin') ? true : null;
+            return $user->hasRole('super_admin') ? true : null;
         });
 
         // API rate limiters

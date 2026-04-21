@@ -181,9 +181,9 @@ class RoleController extends Controller
     {
         $this->authorize('settings:update');
 
-        if ($role->name === 'admin') {
+        if (in_array($role->name, ['super_admin', 'admin'], true)) {
             throw ValidationException::withMessages([
-                'role' => 'The admin role cannot be deactivated.',
+                'role' => "The {$role->name} role cannot be deactivated.",
             ]);
         }
 
