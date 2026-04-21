@@ -10,10 +10,10 @@ class AdminUserSeeder extends Seeder
     public function run(): void
     {
         $admin = User::create([
-            'first_name' => 'System',
-            'last_name' => 'Administrator',
-            'username' => 'admin',
-            'email' => 'admin@lendyph.com',
+            'first_name' => 'Super',
+            'last_name' => 'Admin',
+            'username' => 'super_admin',
+            'email' => 'super_admin@lendyph.com',
             'password' => 'password',
             'branch_id' => 1,
             'status' => 'active',
