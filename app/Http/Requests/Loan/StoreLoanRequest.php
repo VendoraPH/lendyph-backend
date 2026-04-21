@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests\Loan;
 
+use App\Enums\LoanFrequency;
 use Illuminate\Foundation\Http\FormRequest;
 
 class StoreLoanRequest extends FormRequest
@@ -22,7 +23,7 @@ class StoreLoanRequest extends FormRequest
             'purpose' => ['nullable', 'string', 'max:500'],
             'interest_rate' => ['nullable', 'numeric', 'min:0', 'max:100'],
             'term' => ['nullable', 'integer', 'min:1'],
-            'frequency' => ['nullable', 'in:daily,weekly,bi_weekly,semi_monthly,monthly'],
+            'frequency' => ['nullable', LoanFrequency::rule()],
             'start_date' => ['required', 'date'],
             'account_officer_id' => ['nullable', 'exists:users,id'],
             'scb_amount' => ['nullable', 'numeric', 'min:0'],
