@@ -68,7 +68,7 @@ class AuthTest extends TestCase
     public function test_me_returns_authenticated_user(): void
     {
         $loginResponse = $this->postJson('/api/auth/login', [
-            'login' => 'admin',
+            'login' => 'super_admin',
             'password' => 'password',
         ]);
 
@@ -77,6 +77,6 @@ class AuthTest extends TestCase
         $this->withHeader('Authorization', "Bearer {$token}")
             ->getJson('/api/auth/me')
             ->assertOk()
-            ->assertJsonPath('data.username', 'admin');
+            ->assertJsonPath('data.username', 'super_admin');
     }
 }

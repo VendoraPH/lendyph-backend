@@ -292,7 +292,9 @@ class LoanService
             'weekly' => $date->addWeeks($term),
             'bi_weekly' => $date->addDays($term * 14),
             'semi_monthly' => $date->addDays($term * 15),
-            'monthly' => $date->addMonths($term),
+            // Upon-maturity bullet loans treat `term` as months-until-maturity
+            // (single lump-sum payment on the maturity date).
+            'monthly', 'upon_maturity' => $date->addMonths($term),
         };
     }
 
@@ -446,7 +448,11 @@ class LoanService
             'weekly' => $date->copy()->addWeek(),
             'bi_weekly' => $date->copy()->addDays(14),
             'semi_monthly' => $date->copy()->addDays(15),
-            'monthly' => $date->copy()->addMonth(),
+            // Upon-maturity loans schedule a single bullet payment, so the
+            // schedule generator never iterates past period 1 — but treat the
+            // "next period" as the maturity date itself (term months out) for
+            // any caller that does invoke addPeriod defensively.
+            'monthly', 'upon_maturity' => $date->copy()->addMonth(),
         };
     }
 

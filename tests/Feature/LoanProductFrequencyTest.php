@@ -11,7 +11,7 @@ uses(TestCase::class);
 beforeEach(function () {
     Artisan::call('migrate:fresh');
     $this->seed(DatabaseSeeder::class);
-    $this->admin = User::where('username', 'admin')->first();
+    $this->admin = User::where('username', 'super_admin')->first();
     $this->actingAs($this->admin);
 });
 

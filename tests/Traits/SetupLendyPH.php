@@ -8,19 +8,21 @@ use App\Models\Loan;
 use App\Models\LoanProduct;
 use App\Models\User;
 use App\Services\LoanService;
+use Database\Seeders\DatabaseSeeder;
 use Illuminate\Support\Facades\Artisan;
 
 trait SetupLendyPH
 {
     protected User $admin;
+
     protected Branch $branch;
 
     protected function seedAndLogin(): void
     {
         Artisan::call('migrate:fresh');
-        $this->seed(\Database\Seeders\DatabaseSeeder::class);
+        $this->seed(DatabaseSeeder::class);
         $this->branch = Branch::first();
-        $this->admin = User::where('username', 'admin')->first();
+        $this->admin = User::where('username', 'super_admin')->first();
         $this->actingAs($this->admin);
     }
 
