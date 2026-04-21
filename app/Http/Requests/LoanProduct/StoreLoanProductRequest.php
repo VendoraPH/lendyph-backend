@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests\LoanProduct;
 
+use App\Enums\LoanFrequency;
 use Illuminate\Foundation\Http\FormRequest;
 
 class StoreLoanProductRequest extends FormRequest
@@ -22,9 +23,9 @@ class StoreLoanProductRequest extends FormRequest
             'term' => ['required', 'integer', 'min:1'],
             'min_term' => ['nullable', 'integer', 'min:1'],
             'max_term' => ['nullable', 'integer', 'min:1'],
-            'frequency' => ['required', 'in:daily,weekly,bi_weekly,semi_monthly,monthly'],
+            'frequency' => ['required', LoanFrequency::rule()],
             'frequencies' => ['nullable', 'array'],
-            'frequencies.*' => ['in:daily,weekly,bi_weekly,semi_monthly,monthly'],
+            'frequencies.*' => [LoanFrequency::rule()],
             'processing_fee' => ['nullable', 'numeric', 'min:0', 'max:100'],
             'min_processing_fee' => ['nullable', 'numeric', 'min:0', 'max:100'],
             'max_processing_fee' => ['nullable', 'numeric', 'min:0', 'max:100'],
@@ -59,8 +60,12 @@ class StoreLoanProductRequest extends FormRequest
             $this->merge(['term' => $this->max_term]);
         }
         if (! $this->has('frequency') && $this->has('frequencies')) {
-            $frequencies = $this->frequencies;
-            $this->merge(['frequency' => is_array($frequencies) ? ($frequencies[0] ?? 'monthly') : $frequencies]);
+            $frequencies = $this->input('frequencies');
+            if (is_array($frequencies) && count($frequencies) > 0) {
+                $this->merge(['frequency' => $frequencies[0]]);
+            } elseif (is_string($frequencies) && $frequencies !== '') {
+                $this->merge(['frequency' => $frequencies]);
+            }
         }
         if ($this->has('is_active') && ! $this->has('status')) {
             $this->merge(['status' => $this->boolean('is_active') ? 'active' : 'inactive']);
