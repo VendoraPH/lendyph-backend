@@ -62,7 +62,8 @@ class RoleAndPermissionSeeder extends Seeder
         // Default metadata for seeded system roles — flags them so the admin UI
         // knows they cannot be deleted or renamed.
         $systemRoleAttrs = [
-            'admin' => ['description' => 'Full system access — all permissions granted via Gate::before.'],
+            'super_admin' => ['description' => 'Developer-side super administrator — every permission plus Gate::before bypass. Reserved for the platform team, not client staff.'],
+            'admin' => ['description' => 'Client-side administrator — every operational permission for the lending organization (borrowers, loans, payments, staff, reports, settings).'],
             'loan_officer' => ['description' => 'Creates and processes loan applications; manages borrowers and share capital.'],
             'cashier' => ['description' => 'Records payments, releases approved loans, and reconciles cash.'],
             'collector' => ['description' => 'Collects payments on the field and marks collection status.'],
@@ -70,11 +71,22 @@ class RoleAndPermissionSeeder extends Seeder
             'general_bookkeeper' => ['description' => 'Releases loans after BOD approval in the normal workflow.'],
         ];
 
-        // Admin — gets all permissions via Gate::before bypass
+        // Super admin — developer-side role with every permission assigned
+        // directly (so frontend permission gating renders the full app) plus
+        // the Gate::before bypass in AppServiceProvider as defence-in-depth.
+        Role::updateOrCreate(
+            ['name' => 'super_admin', 'guard_name' => $guard],
+            ['is_system' => true, 'is_active' => true, 'description' => $systemRoleAttrs['super_admin']['description']],
+        )->syncPermissions(Permission::all());
+
+        // Admin — client-side full-access role for the lending organization's
+        // admin staff. Same permission set as super_admin today, but kept as
+        // a distinct role so platform-only future perms can be added to
+        // super_admin without auto-granting them to client admins.
         Role::updateOrCreate(
             ['name' => 'admin', 'guard_name' => $guard],
             ['is_system' => true, 'is_active' => true, 'description' => $systemRoleAttrs['admin']['description']],
-        );
+        )->syncPermissions(Permission::all());
 
         Role::updateOrCreate(
             ['name' => 'loan_officer', 'guard_name' => $guard],
