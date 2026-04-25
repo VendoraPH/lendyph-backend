@@ -25,3 +25,8 @@
 Homestead.json
 Homestead.yaml
 Thumbs.db
+
+# Agent / IDE tooling
+/.claude
+/.mcp.json
+/boost.json
