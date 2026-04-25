@@ -12,7 +12,7 @@ class LoanProductFactory extends Factory
     public function definition(): array
     {
         return [
-            'name' => $this->faker->words(3, true) . ' Loan',
+            'name' => $this->faker->words(3, true).' Loan',
             'interest_rate' => 3.0,
             'interest_method' => 'straight',
             'term' => 6,
