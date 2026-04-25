@@ -5,7 +5,6 @@ namespace App\Models;
 use App\Traits\Auditable;
 use Database\Factories\UserFactory;
 use Illuminate\Database\Eloquent\Attributes\Hidden;
-use Illuminate\Database\Eloquent\Attributes\ScopedBy;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;

@@ -23,7 +23,7 @@ class PromissoryNoteService
 
         return [
             'document_title' => 'PROMISSORY NOTE',
-            'reference_number' => 'PN-' . substr($loan->application_number, 3),
+            'reference_number' => 'PN-'.substr($loan->application_number, 3),
             'generated_at' => now()->toDateTimeString(),
 
             'borrower' => [
