@@ -250,6 +250,8 @@ class LoanController extends Controller
     )]
     public function approve(ApproveLoanRequest $request, Loan $loan): JsonResponse
     {
+        $this->authorize('loans:approve');
+
         $this->loanService->approve($loan, $request->user(), $request->approval_remarks);
         $loan->load('approvedByUser');
 
@@ -278,6 +280,8 @@ class LoanController extends Controller
     )]
     public function reject(RejectLoanRequest $request, Loan $loan): JsonResponse
     {
+        $this->authorize('loans:reject');
+
         $this->loanService->reject($loan, $request->user(), $request->approval_remarks);
 
         return response()->json(['message' => 'Loan rejected.', 'data' => new LoanResource($loan)]);
