@@ -64,6 +64,124 @@ class LoanAdjustmentService
         return $adjustment;
     }
 
+    /**
+     * Roll an upon-maturity loan forward by one frequency cycle.
+     *
+     * Carries unpaid principal + unpaid interest from the open amortization
+     * schedule(s) into a fresh bullet period, accrues new interest using the
+     * loan's existing rate, and records the action as a directly-applied
+     * LoanAdjustment row (no pending → approved → applied workflow).
+     */
+    public function extendLoan(Loan $loan, ?string $remarks, User $user): LoanAdjustment
+    {
+        if ($loan->interest_method !== 'upon_maturity') {
+            throw ValidationException::withMessages([
+                'loan' => 'Only upon-maturity loans can be extended.',
+            ]);
+        }
+
+        if (! in_array($loan->status, ['released', 'ongoing'])) {
+            throw ValidationException::withMessages([
+                'status' => 'Only released or ongoing loans can be extended.',
+            ]);
+        }
+
+        $openSchedules = $loan->amortizationSchedules()
+            ->whereIn('status', ['pending', 'partial', 'overdue'])
+            ->get();
+
+        if ($openSchedules->isEmpty()) {
+            throw ValidationException::withMessages([
+                'loan' => 'Loan has no open period to extend.',
+            ]);
+        }
+
+        $carryPrincipal = round($openSchedules->sum(
+            fn ($s) => (float) $s->principal_due - (float) $s->principal_paid,
+        ), 2);
+        $carryInterest = round($openSchedules->sum(
+            fn ($s) => (float) $s->interest_due - (float) $s->interest_paid,
+        ), 2);
+
+        $latestOpenDueDate = Carbon::parse($openSchedules->max('due_date'));
+        $maxPeriodNumber = (int) $loan->amortizationSchedules()->max('period_number');
+
+        // PH monthly-rate convention — same as LoanService::buildUponMaturity.
+        $freshInterest = round($carryPrincipal * ((float) $loan->interest_rate / 100), 2);
+
+        $newDueDate = $this->stepNextPeriod($latestOpenDueDate, $loan->frequency);
+
+        $oldValues = [
+            'maturity_date' => $loan->maturity_date->toDateString(),
+            'term' => $loan->term,
+            'open_principal' => $carryPrincipal,
+            'open_interest' => $carryInterest,
+            'open_schedule_due_date' => $latestOpenDueDate->toDateString(),
+        ];
+
+        $newInterestDue = round($carryInterest + $freshInterest, 2);
+        $newTotalDue = round($carryPrincipal + $newInterestDue, 2);
+        $newTerm = $loan->term + 1;
+
+        $newValues = [
+            'maturity_date' => $newDueDate->toDateString(),
+            'term' => $newTerm,
+            'carry_principal' => $carryPrincipal,
+            'carry_interest' => $carryInterest,
+            'fresh_interest' => $freshInterest,
+            'new_due_date' => $newDueDate->toDateString(),
+        ];
+
+        return DB::transaction(function () use (
+            $loan, $user, $remarks, $oldValues, $newValues,
+            $carryPrincipal, $newInterestDue, $newTotalDue,
+            $newDueDate, $maxPeriodNumber, $newTerm,
+        ) {
+            $loan->amortizationSchedules()
+                ->whereIn('status', ['pending', 'partial', 'overdue'])
+                ->delete();
+
+            AmortizationSchedule::create([
+                'loan_id' => $loan->id,
+                'period_number' => $maxPeriodNumber + 1,
+                'due_date' => $newDueDate->toDateString(),
+                'principal_due' => $carryPrincipal,
+                'interest_due' => $newInterestDue,
+                'total_due' => $newTotalDue,
+                'remaining_balance' => 0,
+                'status' => 'pending',
+            ]);
+
+            $loan->update([
+                'maturity_date' => $newDueDate,
+                'term' => $newTerm,
+            ]);
+
+            return LoanAdjustment::create([
+                'loan_id' => $loan->id,
+                'adjustment_type' => 'extension',
+                'description' => 'Loan extended by one cycle.',
+                'old_values' => $oldValues,
+                'new_values' => $newValues,
+                'status' => 'applied',
+                'remarks' => $remarks,
+                'adjusted_by' => $user->id,
+                'applied_at' => now(),
+            ]);
+        });
+    }
+
+    private function stepNextPeriod(Carbon $date, string $frequency): Carbon
+    {
+        return match ($frequency) {
+            'daily' => $date->copy()->addDay(),
+            'weekly' => $date->copy()->addWeek(),
+            'bi_weekly' => $date->copy()->addDays(14),
+            'semi_monthly' => $date->copy()->addDays(15),
+            'monthly', 'upon_maturity' => $date->copy()->addMonth(),
+        };
+    }
+
     public function applyAdjustment(LoanAdjustment $adjustment): LoanAdjustment
     {
         $this->guardStatus($adjustment, 'approved', 'apply');

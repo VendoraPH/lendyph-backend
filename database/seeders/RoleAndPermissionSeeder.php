@@ -26,6 +26,7 @@ class RoleAndPermissionSeeder extends Seeder
             // Loans
             'loans:view', 'loans:create', 'loans:update', 'loans:delete',
             'loans:approve', 'loans:reject', 'loans:release', 'loans:void',
+            'loans:extend',
 
             // Payments (renamed from repayments)
             'payments:view', 'payments:create', 'payments:update', 'payments:void',
@@ -96,6 +97,7 @@ class RoleAndPermissionSeeder extends Seeder
             'borrowers:view', 'borrowers:create', 'borrowers:update',
             'loans:view', 'loans:create', 'loans:update',
             'loans:approve', 'loans:reject', 'loans:release',
+            'loans:extend',
             'loan_adjustments:view', 'loan_adjustments:create',
             'payments:view',
             'collections:view',

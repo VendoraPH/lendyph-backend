@@ -14,7 +14,7 @@ class StoreLoanAdjustmentRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'adjustment_type' => ['required', 'in:restructure,penalty_waiver,balance_adjustment,term_extension'],
+            'adjustment_type' => ['required', 'in:restructure,penalty_waiver,balance_adjustment,term_extension,extension'],
             'description' => ['nullable', 'string', 'max:1000'],
             'new_values' => ['required', 'array'],
 
