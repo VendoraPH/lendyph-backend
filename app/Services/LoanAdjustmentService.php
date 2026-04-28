@@ -74,9 +74,15 @@ class LoanAdjustmentService
      */
     public function extendLoan(Loan $loan, ?string $remarks, User $user): LoanAdjustment
     {
-        if ($loan->interest_method !== 'upon_maturity') {
+        // `frequency` is the canonical bullet-loan flag (matches the frontend's
+        // isUponMaturity predicate). `interest_method` is accepted as a fallback
+        // because legacy products encode upon-maturity in the calculation field.
+        $isUponMaturity = $loan->frequency === 'upon_maturity'
+            || $loan->interest_method === 'upon_maturity';
+
+        if (! $isUponMaturity) {
             throw ValidationException::withMessages([
-                'loan' => 'Only upon-maturity loans can be extended.',
+                'frequency' => 'Only upon-maturity loans can be extended.',
             ]);
         }
 

@@ -161,4 +161,30 @@ class LoanExtensionTest extends TestCase
         $this->postJson("/api/loans/{$loan->id}/extend")
             ->assertUnprocessable();
     }
+
+    public function test_it_extends_loan_with_frequency_upon_maturity_and_interest_method_straight(): void
+    {
+        // Reproduces the bug from Loan #3: frequency drives upon-maturity, not interest_method.
+        $loan = $this->createReleasedLoan([
+            'product' => [
+                'interest_method' => 'straight',
+                'frequency' => 'upon_maturity',
+                'term' => 1,
+                'interest_rate' => 3.0,
+            ],
+            'principal_amount' => 60000,
+            'start_date' => '2026-04-27',
+        ]);
+
+        $this->postJson("/api/loans/{$loan->id}/extend", [
+            'remarks' => 'frequency-driven upon-maturity extension',
+        ])->assertOk()
+            ->assertJsonPath('data.id', $loan->id);
+
+        $this->assertDatabaseHas('loan_adjustments', [
+            'loan_id' => $loan->id,
+            'adjustment_type' => 'extension',
+            'status' => 'applied',
+        ]);
+    }
 }
