@@ -359,7 +359,7 @@ class LoanController extends Controller
             new OA\Response(response: 200, description: 'Loan extended; returns updated loan in GET /api/loans/{id} shape'),
             new OA\Response(response: 403, description: 'Missing loans:extend permission'),
             new OA\Response(response: 404, description: 'Loan not found'),
-            new OA\Response(response: 422, description: 'Loan is not upon_maturity, not in released/ongoing status, or has no open period'),
+            new OA\Response(response: 422, description: 'Loan is not upon-maturity (neither frequency nor interest_method is upon_maturity), not in released/ongoing status, or has no open period'),
         ],
     )]
     public function extend(ExtendLoanRequest $request, Loan $loan): JsonResponse
