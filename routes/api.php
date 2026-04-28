@@ -6,6 +6,8 @@ use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\AutoCreditController;
 use App\Http\Controllers\Api\BorrowerController;
 use App\Http\Controllers\Api\BranchController;
+use App\Http\Controllers\Api\CollateralController;
+use App\Http\Controllers\Api\CollateralTypeController;
 use App\Http\Controllers\Api\CoMakerController;
 use App\Http\Controllers\Api\DashboardController;
 use App\Http\Controllers\Api\DisclosureController;
@@ -160,6 +162,24 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::get('/audit-logs/export', [AuditLogController::class, 'export'])
         ->middleware('throttle:exports');
     Route::get('/audit-logs/{auditLog}', [AuditLogController::class, 'show']);
+
+    // Collaterals
+    Route::get('/collaterals', [CollateralController::class, 'index']);
+    Route::post('/collaterals', [CollateralController::class, 'store']);
+    Route::get('/collaterals/{collateral}', [CollateralController::class, 'show']);
+    Route::put('/collaterals/{collateral}', [CollateralController::class, 'update']);
+    Route::delete('/collaterals/{collateral}', [CollateralController::class, 'destroy']);
+
+    Route::get('/loans/{loan}/collaterals', [CollateralController::class, 'loanIndex']);
+    Route::post('/loans/{loan}/collaterals', [CollateralController::class, 'attach']);
+    Route::delete('/loans/{loan}/collaterals/{collateral}', [CollateralController::class, 'detach']);
+
+    // Collateral Types
+    Route::get('/collateral-types', [CollateralTypeController::class, 'index']);
+    Route::post('/collateral-types', [CollateralTypeController::class, 'store']);
+    Route::get('/collateral-types/{collateralType}', [CollateralTypeController::class, 'show']);
+    Route::put('/collateral-types/{collateralType}', [CollateralTypeController::class, 'update']);
+    Route::delete('/collateral-types/{collateralType}', [CollateralTypeController::class, 'destroy']);
 
     // Share Capital Ledger
     Route::get('/share-capital/ledger', [ShareCapitalLedgerController::class, 'index']);

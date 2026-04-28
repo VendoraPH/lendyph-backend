@@ -111,6 +111,11 @@ class Borrower extends Model
         return $this->hasMany(ShareCapitalLedger::class);
     }
 
+    public function collaterals(): HasMany
+    {
+        return $this->hasMany(Collateral::class);
+    }
+
     public function scopeActive($query)
     {
         return $query->where('status', 'active');
