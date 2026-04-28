@@ -107,6 +107,13 @@ class Loan extends Model
         return $this->belongsToMany(CoMaker::class, 'co_maker_loan')->withTimestamps();
     }
 
+    public function collaterals(): BelongsToMany
+    {
+        return $this->belongsToMany(Collateral::class, 'loan_collaterals')
+            ->withPivot(['snapshot_value', 'attached_at'])
+            ->withTimestamps();
+    }
+
     public function approvedByUser(): BelongsTo
     {
         return $this->belongsTo(User::class, 'approved_by');

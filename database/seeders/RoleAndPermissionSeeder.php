@@ -105,6 +105,7 @@ class RoleAndPermissionSeeder extends Seeder
             'share_capital:view', 'share_capital:create', 'share_capital:update',
             'auto_credit:process',
             'fees:view', 'fees:create', 'fees:update', 'fees:delete',
+            'collaterals:view', 'collaterals:create', 'collaterals:update',
         ]);
 
         Role::updateOrCreate(
@@ -118,6 +119,7 @@ class RoleAndPermissionSeeder extends Seeder
             'reports:view',
             'fees:view',
             'share_capital:view',
+            'collaterals:view',
         ]);
 
         Role::updateOrCreate(
@@ -132,6 +134,7 @@ class RoleAndPermissionSeeder extends Seeder
             'reports:view',
             'fees:view',
             'share_capital:view',
+            'collaterals:view',
         ]);
 
         Role::updateOrCreate(
@@ -147,6 +150,7 @@ class RoleAndPermissionSeeder extends Seeder
             'fees:view',
             'share_capital:view',
             'audit_logs:view',
+            'collaterals:view',
         ]);
 
         Role::updateOrCreate(
@@ -160,6 +164,7 @@ class RoleAndPermissionSeeder extends Seeder
             'reports:view',
             'fees:view',
             'share_capital:view',
+            'collaterals:view',
         ]);
     }
 }
