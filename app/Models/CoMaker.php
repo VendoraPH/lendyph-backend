@@ -41,7 +41,7 @@ class CoMaker extends Model
         static::creating(function (CoMaker $coMaker) {
             $lastCode = static::query()->orderByDesc('id')->value('co_maker_code');
             $nextNum = $lastCode ? (int) substr($lastCode, 4) + 1 : 1;
-            $coMaker->co_maker_code = 'CMK-' . str_pad($nextNum, 6, '0', STR_PAD_LEFT);
+            $coMaker->co_maker_code = 'CMK-'.str_pad($nextNum, 6, '0', STR_PAD_LEFT);
         });
     }
 

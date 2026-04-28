@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Enums\LoanFrequency;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\LoanProduct\StoreLoanProductRequest;
 use App\Http\Requests\LoanProduct\UpdateLoanProductRequest;
@@ -54,8 +55,8 @@ class LoanProductController extends Controller
                     new OA\Property(property: 'interest_rate', type: 'number', example: 3.0),
                     new OA\Property(property: 'interest_method', type: 'string', enum: ['straight', 'diminishing', 'upon_maturity']),
                     new OA\Property(property: 'term', type: 'integer', example: 12),
-                    new OA\Property(property: 'frequency', type: 'string', enum: \App\Enums\LoanFrequency::class),
-                    new OA\Property(property: 'frequencies', type: 'array', items: new OA\Items(type: 'string', enum: \App\Enums\LoanFrequency::class)),
+                    new OA\Property(property: 'frequency', type: 'string', enum: LoanFrequency::class),
+                    new OA\Property(property: 'frequencies', type: 'array', items: new OA\Items(type: 'string', enum: LoanFrequency::class)),
                     new OA\Property(property: 'processing_fee', type: 'number', example: 2.0),
                     new OA\Property(property: 'service_fee', type: 'number', example: 1.0),
                     new OA\Property(property: 'penalty_rate', type: 'number', example: 3.0),

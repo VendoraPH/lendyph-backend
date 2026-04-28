@@ -99,6 +99,7 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::patch('/loans/{loan}/reject', [LoanController::class, 'reject']);
     Route::patch('/loans/{loan}/release', [LoanController::class, 'release']);
     Route::patch('/loans/{loan}/void', [LoanController::class, 'void']);
+    Route::post('/loans/{loan}/extend', [LoanController::class, 'extend']);
     Route::get('/loans/{loan}/amortization-preview', [LoanController::class, 'amortizationPreview']);
     Route::get('/loans/{loan}/amortization-schedule', [LoanController::class, 'amortizationSchedule']);
 

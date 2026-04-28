@@ -4,12 +4,14 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Loan\ApproveLoanRequest;
+use App\Http\Requests\Loan\ExtendLoanRequest;
 use App\Http\Requests\Loan\RejectLoanRequest;
 use App\Http\Requests\Loan\StoreLoanRequest;
 use App\Http\Requests\Loan\UpdateLoanRequest;
 use App\Http\Resources\AmortizationScheduleResource;
 use App\Http\Resources\LoanResource;
 use App\Models\Loan;
+use App\Services\LoanAdjustmentService;
 use App\Services\LoanService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
@@ -17,7 +19,10 @@ use OpenApi\Attributes as OA;
 
 class LoanController extends Controller
 {
-    public function __construct(private LoanService $loanService) {}
+    public function __construct(
+        private LoanService $loanService,
+        private LoanAdjustmentService $loanAdjustmentService,
+    ) {}
 
     #[OA\Get(
         path: '/api/loans',
@@ -250,6 +255,8 @@ class LoanController extends Controller
     )]
     public function approve(ApproveLoanRequest $request, Loan $loan): JsonResponse
     {
+        $this->authorize('loans:approve');
+
         $this->loanService->approve($loan, $request->user(), $request->approval_remarks);
         $loan->load('approvedByUser');
 
@@ -278,6 +285,8 @@ class LoanController extends Controller
     )]
     public function reject(RejectLoanRequest $request, Loan $loan): JsonResponse
     {
+        $this->authorize('loans:reject');
+
         $this->loanService->reject($loan, $request->user(), $request->approval_remarks);
 
         return response()->json(['message' => 'Loan rejected.', 'data' => new LoanResource($loan)]);
@@ -328,6 +337,46 @@ class LoanController extends Controller
         $this->loanService->voidLoan($loan);
 
         return response()->json(['message' => 'Loan voided.', 'data' => new LoanResource($loan)]);
+    }
+
+    #[OA\Post(
+        path: '/api/loans/{id}/extend',
+        summary: 'Extend an upon-maturity loan by one cycle',
+        description: 'Rolls the maturity date forward by one frequency cycle. Carries unpaid principal and unpaid interest into a new period and accrues fresh interest using the loan\'s existing rate. Records a directly-applied LoanAdjustment row of type "extension".',
+        tags: ['Loans'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
+        ],
+        requestBody: new OA\RequestBody(
+            content: new OA\JsonContent(
+                properties: [
+                    new OA\Property(property: 'remarks', type: 'string', nullable: true, maxLength: 1000),
+                ],
+            ),
+        ),
+        responses: [
+            new OA\Response(response: 200, description: 'Loan extended; returns updated loan in GET /api/loans/{id} shape'),
+            new OA\Response(response: 403, description: 'Missing loans:extend permission'),
+            new OA\Response(response: 404, description: 'Loan not found'),
+            new OA\Response(response: 422, description: 'Loan is not upon_maturity, not in released/ongoing status, or has no open period'),
+        ],
+    )]
+    public function extend(ExtendLoanRequest $request, Loan $loan): JsonResponse
+    {
+        $this->loanAdjustmentService->extendLoan($loan, $request->input('remarks'), $request->user());
+
+        $loan->refresh()->load(
+            'borrower', 'loanProduct', 'branch', 'coMakers',
+            'approvedByUser', 'releasedByUser', 'rejectedByUser',
+            'createdByUser', 'accountOfficer', 'amortizationSchedules',
+            'documents',
+        );
+
+        return response()->json([
+            'message' => 'Loan extended.',
+            'data' => new LoanResource($loan),
+        ]);
     }
 
     #[OA\Get(

@@ -41,7 +41,7 @@ class LoanAdjustment extends Model
         static::creating(function (LoanAdjustment $adj) {
             $lastCode = static::query()->orderByDesc('id')->value('adjustment_number');
             $nextNum = $lastCode ? (int) substr($lastCode, 4) + 1 : 1;
-            $adj->adjustment_number = 'ADJ-' . str_pad($nextNum, 6, '0', STR_PAD_LEFT);
+            $adj->adjustment_number = 'ADJ-'.str_pad($nextNum, 6, '0', STR_PAD_LEFT);
         });
     }
 

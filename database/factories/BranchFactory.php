@@ -12,7 +12,7 @@ class BranchFactory extends Factory
     public function definition(): array
     {
         return [
-            'name' => $this->faker->company() . ' Branch',
+            'name' => $this->faker->company().' Branch',
             'code' => strtoupper($this->faker->unique()->lexify('???')),
             'address' => $this->faker->address(),
             'contact_number' => $this->faker->phoneNumber(),
