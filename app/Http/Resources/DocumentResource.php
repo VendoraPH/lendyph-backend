@@ -11,7 +11,8 @@ use OpenApi\Attributes as OA;
     properties: [
         new OA\Property(property: 'id', type: 'integer'),
         new OA\Property(property: 'type', type: 'string', example: 'valid_id'),
-        new OA\Property(property: 'label', type: 'string', nullable: true, example: "Driver's License"),
+        new OA\Property(property: 'label', type: 'string', nullable: true, example: 'philippine_id'),
+        new OA\Property(property: 'custom_type_name', type: 'string', nullable: true, example: 'Company HR ID'),
         new OA\Property(property: 'id_number', type: 'string', nullable: true, example: 'N01-23-456789'),
         new OA\Property(property: 'side', type: 'string', nullable: true, enum: ['front', 'back'], description: 'Which side of the ID (for paired uploads)'),
         new OA\Property(property: 'url', type: 'string'),
@@ -29,6 +30,7 @@ class DocumentResource extends JsonResource
             'id' => $this->id,
             'type' => $this->type,
             'label' => $this->label,
+            'custom_type_name' => $this->custom_type_name,
             'id_number' => $this->id_number,
             'side' => $this->side,
             'url' => $this->url,
