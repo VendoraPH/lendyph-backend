@@ -60,7 +60,9 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::patch('/borrowers/{borrower}/reactivate', [BorrowerController::class, 'reactivate']);
     Route::post('/borrowers/{borrower}/photo', [BorrowerController::class, 'uploadPhoto']);
     Route::delete('/borrowers/{borrower}/photo', [BorrowerController::class, 'deletePhoto']);
+    Route::get('/borrowers/{borrower}/valid-ids', [BorrowerController::class, 'listValidIds']);
     Route::post('/borrowers/{borrower}/valid-ids', [BorrowerController::class, 'uploadValidId']);
+    Route::delete('/borrowers/{borrower}/valid-ids/{validIdId}', [BorrowerController::class, 'deleteValidId']);
     Route::get('/borrowers/{borrower}/ledger', [BorrowerController::class, 'ledger']);
 
     // Co-makers

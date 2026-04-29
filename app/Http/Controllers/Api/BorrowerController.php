@@ -548,7 +548,8 @@ DESC,
                 schema: new OA\Schema(
                     required: ['type'],
                     properties: [
-                        new OA\Property(property: 'type', type: 'string', example: 'Driver\'s License'),
+                        new OA\Property(property: 'type', type: 'string', example: 'philippine_id'),
+                        new OA\Property(property: 'custom_type_name', type: 'string', nullable: true, description: 'Required when type is "others"', example: 'Company HR ID'),
                         new OA\Property(property: 'id_number', type: 'string', nullable: true, example: 'N01-23-456789'),
                         new OA\Property(property: 'front_file', type: 'string', format: 'binary'),
                         new OA\Property(property: 'back_file', type: 'string', format: 'binary', nullable: true),
@@ -578,6 +579,7 @@ DESC,
 
         $rules = [
             'type' => ['required', 'string', 'max:100'],
+            'custom_type_name' => ['nullable', 'string', 'max:100', 'required_if:type,others'],
             'id_number' => ['nullable', 'string', 'max:100'],
             'file' => ['required_without:front_file', 'file', 'max:10240', 'mimes:jpg,jpeg,png,pdf'],
             'front_file' => ['required_without:file', 'file', 'max:10240', 'mimes:jpg,jpeg,png,pdf'],
@@ -587,19 +589,20 @@ DESC,
         $request->validate($rules);
 
         $type = $request->input('type');
+        $customTypeName = $request->input('custom_type_name');
         $idNumber = $request->input('id_number');
         $isLegacy = $request->hasFile('file');
         $storedPaths = [];
         $documents = [];
 
         try {
-            DB::transaction(function () use ($borrower, $request, $type, $idNumber, $isLegacy, &$storedPaths, &$documents) {
+            DB::transaction(function () use ($borrower, $request, $type, $customTypeName, $idNumber, $isLegacy, &$storedPaths, &$documents) {
                 if ($isLegacy) {
-                    $documents[] = $this->storeValidIdFile($borrower, $request->file('file'), $type, $idNumber, null, $storedPaths);
+                    $documents[] = $this->storeValidIdFile($borrower, $request->file('file'), $type, $customTypeName, $idNumber, null, $storedPaths);
                 } else {
-                    $documents[] = $this->storeValidIdFile($borrower, $request->file('front_file'), $type, $idNumber, 'front', $storedPaths);
+                    $documents[] = $this->storeValidIdFile($borrower, $request->file('front_file'), $type, $customTypeName, $idNumber, 'front', $storedPaths);
                     if ($request->hasFile('back_file')) {
-                        $documents[] = $this->storeValidIdFile($borrower, $request->file('back_file'), $type, $idNumber, 'back', $storedPaths);
+                        $documents[] = $this->storeValidIdFile($borrower, $request->file('back_file'), $type, $customTypeName, $idNumber, 'back', $storedPaths);
                     }
                 }
             });
@@ -622,7 +625,7 @@ DESC,
             ->setStatusCode(201);
     }
 
-    private function storeValidIdFile(Borrower $borrower, UploadedFile $file, string $type, ?string $idNumber, ?string $side, array &$storedPaths): Document
+    private function storeValidIdFile(Borrower $borrower, UploadedFile $file, string $type, ?string $customTypeName, ?string $idNumber, ?string $side, array &$storedPaths): Document
     {
         $path = $file->store("documents/valid_id/borrower/{$borrower->id}", 'public');
         $storedPaths[] = $path;
@@ -630,6 +633,7 @@ DESC,
         return $borrower->documents()->create([
             'type' => 'valid_id',
             'label' => $type,
+            'custom_type_name' => $customTypeName,
             'id_number' => $idNumber,
             'side' => $side,
             'file_path' => $path,
@@ -637,6 +641,123 @@ DESC,
             'mime_type' => $file->getMimeType(),
             'file_size' => $file->getSize(),
         ]);
+    }
+
+    #[OA\Get(
+        path: '/api/borrowers/{id}/valid-ids',
+        summary: 'List borrower valid IDs',
+        description: 'Returns valid IDs grouped as front/back pairs. Documents sharing the same (label, id_number) are paired into a single entry. The entry "id" is the front document id and is the value to use for DELETE.',
+        tags: ['Borrowers'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
+        ],
+        responses: [
+            new OA\Response(
+                response: 200,
+                description: 'Valid ID list',
+                content: new OA\JsonContent(
+                    properties: [
+                        new OA\Property(
+                            property: 'data',
+                            type: 'array',
+                            items: new OA\Items(
+                                properties: [
+                                    new OA\Property(property: 'id', type: 'integer'),
+                                    new OA\Property(property: 'type', type: 'string', example: 'philippine_id'),
+                                    new OA\Property(property: 'custom_type_name', type: 'string', nullable: true, example: null),
+                                    new OA\Property(property: 'id_number', type: 'string', nullable: true, example: '1234-5678-9012'),
+                                    new OA\Property(property: 'front_url', type: 'string', example: '/storage/documents/valid_id/borrower/1/front-xxx.jpg'),
+                                    new OA\Property(property: 'back_url', type: 'string', nullable: true, example: '/storage/documents/valid_id/borrower/1/back-xxx.jpg'),
+                                    new OA\Property(property: 'created_at', type: 'string', format: 'date-time'),
+                                ],
+                            ),
+                        ),
+                    ],
+                ),
+            ),
+            new OA\Response(response: 401, description: 'Unauthenticated'),
+        ],
+    )]
+    public function listValidIds(Borrower $borrower): JsonResponse
+    {
+        $this->authorize('borrowers:view');
+
+        $documents = $borrower->documents()
+            ->where('type', 'valid_id')
+            ->orderBy('id')
+            ->get();
+
+        $groups = $documents->groupBy(fn (Document $doc) => $doc->label.'|'.($doc->id_number ?? ''));
+
+        $validIds = $groups->map(function ($group) {
+            $front = $group->firstWhere('side', 'front')
+                ?? $group->firstWhere('side', null)
+                ?? $group->first();
+            $back = $group->firstWhere('side', 'back');
+
+            return [
+                'id' => $front->id,
+                'type' => $front->label,
+                'custom_type_name' => $front->custom_type_name,
+                'id_number' => $front->id_number,
+                'front_url' => $front->url,
+                'back_url' => $back?->url,
+                'created_at' => $front->created_at,
+            ];
+        })->values();
+
+        return response()->json(['data' => $validIds]);
+    }
+
+    #[OA\Delete(
+        path: '/api/borrowers/{id}/valid-ids/{validIdId}',
+        summary: 'Delete a borrower valid ID',
+        description: 'Deletes the valid ID group identified by the front document id. Removes both the front and back documents (if present) sharing the same (label, id_number).',
+        tags: ['Borrowers'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
+            new OA\Parameter(name: 'validIdId', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
+        ],
+        responses: [
+            new OA\Response(response: 200, description: 'Valid ID deleted'),
+            new OA\Response(response: 401, description: 'Unauthenticated'),
+            new OA\Response(response: 403, description: 'Forbidden'),
+            new OA\Response(response: 404, description: 'Not found'),
+        ],
+    )]
+    public function deleteValidId(Borrower $borrower, int $validIdId): JsonResponse
+    {
+        $this->authorize('borrowers:delete');
+
+        $anchor = Document::where('id', $validIdId)
+            ->where('documentable_type', Borrower::class)
+            ->where('documentable_id', $borrower->id)
+            ->where('type', 'valid_id')
+            ->firstOrFail();
+
+        $pair = Document::where('documentable_type', Borrower::class)
+            ->where('documentable_id', $borrower->id)
+            ->where('type', 'valid_id')
+            ->where('label', $anchor->label)
+            ->where(function ($q) use ($anchor) {
+                if ($anchor->id_number === null) {
+                    $q->whereNull('id_number');
+                } else {
+                    $q->where('id_number', $anchor->id_number);
+                }
+            })
+            ->get();
+
+        DB::transaction(function () use ($pair) {
+            foreach ($pair as $doc) {
+                Storage::disk('public')->delete($doc->file_path);
+                $doc->delete();
+            }
+        });
+
+        return response()->json(['message' => 'Valid ID deleted successfully.']);
     }
 
     #[OA\Get(
