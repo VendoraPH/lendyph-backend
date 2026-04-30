@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\AutoPay\ToggleAutoPayRequest;
 use App\Http\Requests\Loan\ApproveLoanRequest;
 use App\Http\Requests\Loan\ExtendLoanRequest;
 use App\Http\Requests\Loan\RejectLoanRequest;
@@ -11,6 +12,7 @@ use App\Http\Requests\Loan\UpdateLoanRequest;
 use App\Http\Resources\AmortizationScheduleResource;
 use App\Http\Resources\LoanResource;
 use App\Models\Loan;
+use App\Services\AutoPayService;
 use App\Services\LoanAdjustmentService;
 use App\Services\LoanService;
 use Illuminate\Http\JsonResponse;
@@ -22,6 +24,7 @@ class LoanController extends Controller
     public function __construct(
         private LoanService $loanService,
         private LoanAdjustmentService $loanAdjustmentService,
+        private AutoPayService $autoPayService,
     ) {}
 
     #[OA\Get(
@@ -376,6 +379,53 @@ class LoanController extends Controller
         return response()->json([
             'message' => 'Loan extended.',
             'data' => new LoanResource($loan),
+        ]);
+    }
+
+    #[OA\Patch(
+        path: '/api/loans/{id}/auto-pay',
+        summary: 'Enable or disable auto-pay on a loan',
+        description: 'When enabled, the loan is included in subsequent /auto-pay/preview and /auto-pay/process runs. cbs_reference is required when enabling and is cleared when disabling.',
+        tags: ['Auto-Pay'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
+        ],
+        requestBody: new OA\RequestBody(
+            required: true,
+            content: new OA\JsonContent(
+                required: ['enabled'],
+                properties: [
+                    new OA\Property(property: 'enabled', type: 'boolean', example: true),
+                    new OA\Property(property: 'cbs_reference', type: 'string', maxLength: 100, nullable: true, example: 'CBS-2026-00123', description: 'Required when enabled=true'),
+                ],
+            ),
+        ),
+        responses: [
+            new OA\Response(response: 200, description: 'Auto-pay toggled'),
+            new OA\Response(response: 401, description: 'Unauthenticated'),
+            new OA\Response(response: 403, description: 'Missing auto_pay:toggle permission'),
+            new OA\Response(response: 404, description: 'Loan not found'),
+            new OA\Response(response: 422, description: 'Validation error or loan not in released/ongoing/past_due status'),
+        ],
+    )]
+    public function toggleAutoPay(ToggleAutoPayRequest $request, Loan $loan): JsonResponse
+    {
+        $loan = $this->autoPayService->toggle(
+            $loan,
+            (bool) $request->input('enabled'),
+            $request->input('cbs_reference'),
+            $request->user(),
+        );
+
+        return response()->json([
+            'data' => [
+                'loan_id' => $loan->id,
+                'auto_pay_enabled' => (bool) $loan->auto_pay,
+                'cbs_reference' => $loan->cbs_reference,
+                'enabled_at' => $loan->auto_pay_enabled_at?->toIso8601String(),
+                'enabled_by_user_id' => $loan->auto_pay_enabled_by,
+            ],
         ]);
     }
 
