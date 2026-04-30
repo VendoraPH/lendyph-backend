@@ -47,6 +47,10 @@ class Loan extends Model
         'released_at',
         'created_by',
         'account_officer_id',
+        'auto_pay',
+        'cbs_reference',
+        'auto_pay_enabled_at',
+        'auto_pay_enabled_by',
     ];
 
     protected function casts(): array
@@ -65,6 +69,8 @@ class Loan extends Model
             'released_at' => 'datetime',
             'rejected_at' => 'datetime',
             'deductions' => 'array',
+            'auto_pay' => 'boolean',
+            'auto_pay_enabled_at' => 'datetime',
         ];
     }
 
@@ -137,6 +143,11 @@ class Loan extends Model
     public function accountOfficer(): BelongsTo
     {
         return $this->belongsTo(User::class, 'account_officer_id');
+    }
+
+    public function autoPayEnabledByUser(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'auto_pay_enabled_by');
     }
 
     public function amortizationSchedules(): HasMany

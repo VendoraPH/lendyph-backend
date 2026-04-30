@@ -47,6 +47,9 @@ class RoleAndPermissionSeeder extends Seeder
             'share_capital:view', 'share_capital:create', 'share_capital:update',
             'auto_credit:process',
 
+            // Auto-Pay (CBS bulk loan deductions)
+            'auto_pay:view', 'auto_pay:process', 'auto_pay:toggle',
+
             // Collections
             'collections:view', 'collections:mark_collected',
 
@@ -104,6 +107,7 @@ class RoleAndPermissionSeeder extends Seeder
             'reports:view', 'reports:export',
             'share_capital:view', 'share_capital:create', 'share_capital:update',
             'auto_credit:process',
+            'auto_pay:view', 'auto_pay:toggle',
             'fees:view', 'fees:create', 'fees:update', 'fees:delete',
             'collaterals:view', 'collaterals:create', 'collaterals:update',
         ]);
@@ -119,6 +123,7 @@ class RoleAndPermissionSeeder extends Seeder
             'reports:view',
             'fees:view',
             'share_capital:view',
+            'auto_pay:view', 'auto_pay:process',
             'collaterals:view',
         ]);
 
@@ -150,6 +155,7 @@ class RoleAndPermissionSeeder extends Seeder
             'fees:view',
             'share_capital:view',
             'audit_logs:view',
+            'auto_pay:view',
             'collaterals:view',
         ]);
 
@@ -164,6 +170,7 @@ class RoleAndPermissionSeeder extends Seeder
             'reports:view',
             'fees:view',
             'share_capital:view',
+            'auto_pay:view',
             'collaterals:view',
         ]);
     }

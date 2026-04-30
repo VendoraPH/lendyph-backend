@@ -4,6 +4,7 @@ use App\Http\Controllers\Api\ApprovalWorkflowController;
 use App\Http\Controllers\Api\AuditLogController;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\AutoCreditController;
+use App\Http\Controllers\Api\AutoPayController;
 use App\Http\Controllers\Api\BorrowerController;
 use App\Http\Controllers\Api\BranchController;
 use App\Http\Controllers\Api\CollateralController;
@@ -104,6 +105,7 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::patch('/loans/{loan}/release', [LoanController::class, 'release']);
     Route::patch('/loans/{loan}/void', [LoanController::class, 'void']);
     Route::post('/loans/{loan}/extend', [LoanController::class, 'extend']);
+    Route::patch('/loans/{loan}/auto-pay', [LoanController::class, 'toggleAutoPay']);
     Route::get('/loans/{loan}/amortization-preview', [LoanController::class, 'amortizationPreview']);
     Route::get('/loans/{loan}/amortization-schedule', [LoanController::class, 'amortizationSchedule']);
 
@@ -197,6 +199,10 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     // Auto-Credit
     Route::get('/auto-credit/status', [AutoCreditController::class, 'status']);
     Route::post('/auto-credit/process', [AutoCreditController::class, 'process']);
+
+    // Auto-Pay (CBS bulk loan deductions)
+    Route::get('/auto-pay/preview', [AutoPayController::class, 'preview']);
+    Route::post('/auto-pay/process', [AutoPayController::class, 'process']);
 
     // Settings
     Route::get('/settings/approval-workflow', [ApprovalWorkflowController::class, 'show']);
