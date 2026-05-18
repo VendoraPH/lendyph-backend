@@ -35,6 +35,11 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'account_officer_id', type: 'integer', nullable: true),
         new OA\Property(property: 'release_date', type: 'string', format: 'date', nullable: true),
         new OA\Property(property: 'rejection_remarks', type: 'string', nullable: true),
+        new OA\Property(property: 'insurance_premium_percentage', type: 'number', nullable: true),
+        new OA\Property(property: 'insurance_premium_amount', type: 'number', nullable: true),
+        new OA\Property(property: 'insurance_payment_type', type: 'string', nullable: true, enum: ['full', 'partial']),
+        new OA\Property(property: 'insurance_partial_amount', type: 'number', nullable: true),
+        new OA\Property(property: 'insurance_remaining_balance', type: 'number'),
     ],
 )]
 class LoanResource extends JsonResource
@@ -134,6 +139,17 @@ class LoanResource extends JsonResource
             'rejected_at' => $this->rejected_at,
             'released_at' => $this->released_at,
             'release_date' => $this->released_at?->toDateString(),
+            'insurance_premium_percentage' => $this->insurance_premium_pct !== null
+                ? (float) $this->insurance_premium_pct
+                : null,
+            'insurance_premium_amount' => $this->insurance_premium_amount !== null
+                ? (float) $this->insurance_premium_amount
+                : null,
+            'insurance_payment_type' => $this->insurance_payment_type,
+            'insurance_partial_amount' => $this->insurance_partial_amount !== null
+                ? (float) $this->insurance_partial_amount
+                : null,
+            'insurance_remaining_balance' => (float) $this->insurance_remaining_balance,
             'is_editable' => $this->is_editable,
             'is_releasable' => $this->is_releasable,
             'borrower' => new BorrowerResource($this->whenLoaded('borrower')),
