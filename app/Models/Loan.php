@@ -51,6 +51,11 @@ class Loan extends Model
         'cbs_reference',
         'auto_pay_enabled_at',
         'auto_pay_enabled_by',
+        'insurance_premium_pct',
+        'insurance_premium_amount',
+        'insurance_payment_type',
+        'insurance_partial_amount',
+        'insurance_remaining_balance',
     ];
 
     protected function casts(): array
@@ -71,6 +76,10 @@ class Loan extends Model
             'deductions' => 'array',
             'auto_pay' => 'boolean',
             'auto_pay_enabled_at' => 'datetime',
+            'insurance_premium_pct' => 'decimal:2',
+            'insurance_premium_amount' => 'decimal:2',
+            'insurance_partial_amount' => 'decimal:2',
+            'insurance_remaining_balance' => 'decimal:2',
         ];
     }
 

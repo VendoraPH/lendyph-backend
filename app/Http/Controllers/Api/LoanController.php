@@ -7,6 +7,7 @@ use App\Http\Requests\AutoPay\ToggleAutoPayRequest;
 use App\Http\Requests\Loan\ApproveLoanRequest;
 use App\Http\Requests\Loan\ExtendLoanRequest;
 use App\Http\Requests\Loan\RejectLoanRequest;
+use App\Http\Requests\Loan\ReleaseLoanRequest;
 use App\Http\Requests\Loan\StoreLoanRequest;
 use App\Http\Requests\Loan\UpdateLoanRequest;
 use App\Http\Resources\AmortizationScheduleResource;
@@ -298,22 +299,32 @@ class LoanController extends Controller
     #[OA\Patch(
         path: '/api/loans/{id}/release',
         summary: 'Release loan',
-        description: 'Release an approved loan — generates loan account number and amortization schedule',
+        description: 'Release an approved loan — generates loan account number and amortization schedule. Optionally records insurance premium fields collected at release.',
         tags: ['Loans'],
         security: [['sanctum' => []]],
         parameters: [
             new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
         ],
+        requestBody: new OA\RequestBody(
+            required: false,
+            content: new OA\JsonContent(
+                properties: [
+                    new OA\Property(property: 'insurance_premium_percentage', type: 'number', nullable: true, minimum: 0, maximum: 100, description: 'When 0 or omitted, insurance block is ignored.'),
+                    new OA\Property(property: 'insurance_premium_amount', type: 'number', nullable: true, description: 'principal_amount × percentage / 100, rounded 2dp.'),
+                    new OA\Property(property: 'insurance_payment_type', type: 'string', nullable: true, enum: ['full', 'partial']),
+                    new OA\Property(property: 'insurance_partial_amount', type: 'number', nullable: true, description: 'Required when payment_type=partial. Must be null when payment_type=full.'),
+                    new OA\Property(property: 'insurance_remaining_balance', type: 'number', nullable: true, description: '0 when full; premium_amount − partial_amount when partial.'),
+                ],
+            ),
+        ),
         responses: [
             new OA\Response(response: 200, description: 'Loan released'),
-            new OA\Response(response: 422, description: 'Invalid status transition'),
+            new OA\Response(response: 422, description: 'Invalid status transition or insurance validation error'),
         ],
     )]
-    public function release(Loan $loan): JsonResponse
+    public function release(ReleaseLoanRequest $request, Loan $loan): JsonResponse
     {
-        $this->authorize('loans:release');
-
-        $loan = $this->loanService->release($loan, auth()->user());
+        $loan = $this->loanService->release($loan, $request->user(), $request->insurancePayload());
         $loan->load('borrower', 'loanProduct', 'branch', 'coMakers',
             'approvedByUser', 'releasedByUser', 'amortizationSchedules');
 

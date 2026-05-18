@@ -202,11 +202,11 @@ class LoanService
         return $loan;
     }
 
-    public function release(Loan $loan, User $releaser): Loan
+    public function release(Loan $loan, User $releaser, array $insurance = []): Loan
     {
         $this->guardStatus($loan, 'approved', 'release');
 
-        return DB::transaction(function () use ($loan, $releaser) {
+        return DB::transaction(function () use ($loan, $releaser, $insurance) {
             // Generate loan account number with row-level lock to prevent race conditions
             $lastLoan = Loan::whereNotNull('loan_account_number')
                 ->orderByDesc('id')
@@ -222,6 +222,8 @@ class LoanService
                 'released_at' => now(),
             ]);
 
+            $this->applyInsuranceOnRelease($loan, $insurance);
+
             // Persist amortization schedule
             $schedule = $this->buildAmortizationPreview($loan);
             foreach ($schedule as $row) {
@@ -233,6 +235,60 @@ class LoanService
 
             return $loan;
         });
+    }
+
+    private function applyInsuranceOnRelease(Loan $loan, array $insurance): void
+    {
+        $pct = $insurance['insurance_premium_percentage'] ?? null;
+        if ($pct === null || (float) $pct === 0.0) {
+            return;
+        }
+
+        $paymentType = $insurance['insurance_payment_type'] ?? 'full';
+        $premiumAmount = round((float) ($insurance['insurance_premium_amount'] ?? 0), 2);
+        $partialAmount = isset($insurance['insurance_partial_amount'])
+            ? round((float) $insurance['insurance_partial_amount'], 2)
+            : null;
+
+        if ($paymentType === 'full') {
+            $partialAmount = null;
+            $remainingBalance = 0.0;
+            $collected = $premiumAmount;
+        } else {
+            $remainingBalance = round($premiumAmount - (float) $partialAmount, 2);
+            $collected = (float) $partialAmount;
+        }
+
+        $newNetProceeds = round((float) $loan->net_proceeds - $collected, 2);
+
+        if ($newNetProceeds < 0) {
+            throw ValidationException::withMessages([
+                'insurance_premium_amount' => ['Insurance collected exceeds the loan net proceeds.'],
+            ]);
+        }
+
+        $loan->update([
+            'insurance_premium_pct' => round((float) $pct, 2),
+            'insurance_premium_amount' => $premiumAmount,
+            'insurance_payment_type' => $paymentType,
+            'insurance_partial_amount' => $partialAmount,
+            'insurance_remaining_balance' => $remainingBalance,
+            'net_proceeds' => $newNetProceeds,
+        ]);
+
+        AuditLogService::log(
+            action: 'release_insurance',
+            auditable: $loan,
+            newValues: [
+                'insurance_premium_percentage' => (float) $pct,
+                'insurance_premium_amount' => $premiumAmount,
+                'insurance_payment_type' => $paymentType,
+                'insurance_partial_amount' => $partialAmount,
+                'insurance_remaining_balance' => $remainingBalance,
+                'collected_at_release' => $collected,
+            ],
+            description: "Insurance premium recorded on release ({$paymentType}, ₱{$collected} collected)",
+        );
     }
 
     public function voidLoan(Loan $loan): Loan
