@@ -14,6 +14,9 @@ use App\Http\Controllers\Api\DashboardController;
 use App\Http\Controllers\Api\DisclosureController;
 use App\Http\Controllers\Api\DocumentController;
 use App\Http\Controllers\Api\FeeController;
+use App\Http\Controllers\Api\GCashReportController;
+use App\Http\Controllers\Api\GCashTierController;
+use App\Http\Controllers\Api\GCashTransactionController;
 use App\Http\Controllers\Api\HealthController;
 use App\Http\Controllers\Api\LoanAdjustmentController;
 use App\Http\Controllers\Api\LoanController;
@@ -203,6 +206,17 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     // Auto-Pay (CBS bulk loan deductions)
     Route::get('/auto-pay/preview', [AutoPayController::class, 'preview']);
     Route::post('/auto-pay/process', [AutoPayController::class, 'process']);
+
+    // GCash Transactions
+    Route::prefix('gcash')->group(function () {
+        Route::get('/transactions', [GCashTransactionController::class, 'index']);
+        Route::post('/transactions', [GCashTransactionController::class, 'store']);
+        Route::patch('/transactions/{transaction}/paid', [GCashTransactionController::class, 'markPaid']);
+        Route::get('/tiers', [GCashTierController::class, 'index']);
+        Route::put('/tiers', [GCashTierController::class, 'replace']);
+        Route::get('/reports/income', [GCashReportController::class, 'income']);
+        Route::get('/reports/pending', [GCashReportController::class, 'pending'])->name('gcash.reports.pending');
+    });
 
     // Settings
     Route::get('/settings/approval-workflow', [ApprovalWorkflowController::class, 'show']);
