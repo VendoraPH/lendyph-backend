@@ -54,6 +54,11 @@ trait HasBorrowerRules
             'spouse_contact_number' => ['nullable', 'string', 'max:20'],
             'spouse_occupation' => ['nullable', 'string', 'max:255'],
 
+            // `pending` is reserved for the public registration flow — every
+            // other status is operator-only. StoreBorrowerRequest narrows this
+            // list when the request is anonymous.
+            'status' => ['nullable', 'string', 'in:active,inactive,blacklisted,pending'],
+
             // Opt-out of the duplicate-borrower check. When omitted or false,
             // the NoDuplicateBorrower rule runs on the first_name field.
             'force' => ['nullable', 'boolean'],

@@ -28,14 +28,35 @@ use App\Http\Controllers\Api\RoleController;
 use App\Http\Controllers\Api\ShareCapitalLedgerController;
 use App\Http\Controllers\Api\ShareCapitalPledgeController;
 use App\Http\Controllers\Api\UserController;
+use App\Http\Middleware\AllowAuthOrSubmissionToken;
 use App\Http\Middleware\CheckTokenExpiry;
 use App\Http\Middleware\EnsureUserIsActive;
+use App\Http\Middleware\OptionalSanctumAuth;
 use Illuminate\Support\Facades\Route;
 
 Route::get('/health', HealthController::class);
 
 // Auth (stricter rate limit — 10/min per IP)
 Route::post('/auth/login', [AuthController::class, 'login'])->middleware('throttle:auth');
+
+// Public branch picker for the registration page — slim, no auth.
+Route::get('/branches/public', [BranchController::class, 'publicIndex']);
+
+// Public registration: anonymous borrower create (status=pending only) + the
+// two upload endpoints. Anonymous calls go through a 15-min submission token;
+// authenticated calls keep today's operator behavior. The auth middleware
+// runs FIRST so the throttle limiter can inspect $request->user() and skip
+// the per-IP cap for operator traffic. CheckTokenExpiry + EnsureUserIsActive
+// are no-ops when no user is attached, so they're safe to apply across both
+// paths.
+Route::post('/borrowers', [BorrowerController::class, 'store'])
+    ->middleware([OptionalSanctumAuth::class, 'throttle:public-registration', CheckTokenExpiry::class, EnsureUserIsActive::class]);
+
+Route::post('/borrowers/{borrower}/photo', [BorrowerController::class, 'uploadPhoto'])
+    ->middleware([AllowAuthOrSubmissionToken::class, 'throttle:public-registration', CheckTokenExpiry::class, EnsureUserIsActive::class]);
+
+Route::post('/borrowers/{borrower}/valid-ids', [BorrowerController::class, 'uploadValidId'])
+    ->middleware([AllowAuthOrSubmissionToken::class, 'throttle:public-registration', CheckTokenExpiry::class, EnsureUserIsActive::class]);
 
 // Protected routes
 Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::class])->group(function () {
@@ -56,16 +77,17 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     // Branches
     Route::apiResource('branches', BranchController::class)->except(['destroy']);
 
-    // Borrowers — bulk routes FIRST so `bulk` is not matched as a {borrower} parameter
+    // Borrowers — bulk routes FIRST so `bulk` is not matched as a {borrower} parameter.
+    // `store`, photo upload, and valid-id upload are defined OUTSIDE the auth group
+    // so the public-registration flow can post anonymously with a submission token;
+    // their authenticated paths still work via the same routes.
     Route::patch('/borrowers/bulk-deactivate', [BorrowerController::class, 'bulkDeactivate']);
     Route::delete('/borrowers/bulk', [BorrowerController::class, 'bulkDestroy']);
-    Route::apiResource('borrowers', BorrowerController::class);
+    Route::apiResource('borrowers', BorrowerController::class)->except(['store']);
     Route::patch('/borrowers/{borrower}/deactivate', [BorrowerController::class, 'deactivate']);
     Route::patch('/borrowers/{borrower}/reactivate', [BorrowerController::class, 'reactivate']);
-    Route::post('/borrowers/{borrower}/photo', [BorrowerController::class, 'uploadPhoto']);
     Route::delete('/borrowers/{borrower}/photo', [BorrowerController::class, 'deletePhoto']);
     Route::get('/borrowers/{borrower}/valid-ids', [BorrowerController::class, 'listValidIds']);
-    Route::post('/borrowers/{borrower}/valid-ids', [BorrowerController::class, 'uploadValidId']);
     Route::delete('/borrowers/{borrower}/valid-ids/{validIdId}', [BorrowerController::class, 'deleteValidId']);
     Route::get('/borrowers/{borrower}/ledger', [BorrowerController::class, 'ledger']);
 

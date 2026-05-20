@@ -5,6 +5,7 @@ namespace App\Http\Requests\Borrower;
 use App\Http\Requests\Borrower\Concerns\HasBorrowerRules;
 use App\Rules\NoDuplicateBorrower;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Rule;
 
 class StoreBorrowerRequest extends FormRequest
 {
@@ -12,6 +13,14 @@ class StoreBorrowerRequest extends FormRequest
 
     public function authorize(): bool
     {
+        // Anonymous public-registration callers are allowed through here so
+        // the response stays at 422 (validation) instead of 403 (auth) when
+        // they submit the wrong status. The `status` rule below enforces the
+        // pending-only constraint for unauthenticated requests.
+        if (! $this->user()) {
+            return true;
+        }
+
         return $this->user()->can('borrowers:create');
     }
 
@@ -25,7 +34,7 @@ class StoreBorrowerRequest extends FormRequest
             $firstNameRules[] = new NoDuplicateBorrower;
         }
 
-        return array_merge(
+        $rules = array_merge(
             $this->sharedBorrowerRules(),
             [
                 'first_name' => $firstNameRules,
@@ -33,6 +42,14 @@ class StoreBorrowerRequest extends FormRequest
                 'branch_id' => ['required', 'exists:branches,id'],
             ],
         );
+
+        // Anonymous callers must submit `pending` — they cannot create active
+        // or otherwise-operational borrowers.
+        if (! $this->user()) {
+            $rules['status'] = ['required', Rule::in(['pending'])];
+        }
+
+        return $rules;
     }
 
     public function messages(): array

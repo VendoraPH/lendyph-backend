@@ -9,7 +9,9 @@ use App\Http\Resources\BorrowerResource;
 use App\Http\Resources\DocumentResource;
 use App\Models\Borrower;
 use App\Models\Document;
+use App\Services\BorrowerSubmissionTokenService;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
@@ -69,6 +71,11 @@ class BorrowerController extends Controller
         description: <<<'DESC'
 Create a new borrower profile.
 
+**Authentication:**
+- Authenticated requests behave as today (any `status` allowed, response returns the full BorrowerResource).
+- Anonymous requests must set `status="pending"`. The response is a slim `{ id, submission_token, expires_at }` shape; the submission token lives for 15 minutes and is used as the `X-Submission-Token` header on the photo + valid-ids uploads. Per-IP rate limit (5 / 10 min) is enforced for the public-registration path.
+- Anonymous requests with any status other than `pending` are rejected (401/422).
+
 **Validation rules (enforced):**
 - `contact_number` must match `^(\+?\d{7,15}|0\d{9,10})$`
 - `email` must be unique across all borrowers
@@ -85,7 +92,7 @@ On a duplicate rejection, the error message in `errors.first_name[0]` contains t
 **Side effect:** a ShareCapitalPledge row is auto-created for the new borrower inside the same transaction.
 DESC,
         tags: ['Borrowers'],
-        security: [['sanctum' => []]],
+        security: [['sanctum' => []], []],
         requestBody: new OA\RequestBody(
             required: true,
             content: new OA\JsonContent(
@@ -115,12 +122,13 @@ DESC,
                     new OA\Property(property: 'spouse_occupation', type: 'string'),
                     new OA\Property(property: 'branch_id', type: 'integer', example: 1),
                     new OA\Property(property: 'force', type: 'boolean', example: false, description: 'Bypass the duplicate-borrower check (use for "Create Anyway" confirmation)'),
+                    new OA\Property(property: 'status', type: 'string', enum: ['active', 'inactive', 'blacklisted', 'pending'], description: 'Anonymous (public registration) requests must set this to "pending".'),
                 ],
             ),
         ),
         responses: [
-            new OA\Response(response: 201, description: 'Borrower created'),
-            new OA\Response(response: 401, description: 'Unauthenticated'),
+            new OA\Response(response: 201, description: 'Borrower created (authenticated: full BorrowerResource; anonymous: { id, submission_token, expires_at })'),
+            new OA\Response(response: 401, description: 'Anonymous request with status other than `pending`'),
             new OA\Response(response: 403, description: 'Forbidden'),
             new OA\Response(
                 response: 422,
@@ -138,7 +146,7 @@ DESC,
             ),
         ],
     )]
-    public function store(StoreBorrowerRequest $request): JsonResponse
+    public function store(StoreBorrowerRequest $request, BorrowerSubmissionTokenService $tokens): JsonResponse
     {
         // Wrap in a transaction so the borrower insert and the Borrower::created
         // hook (which creates the ShareCapitalPledge) are atomic — if either fails,
@@ -146,6 +154,22 @@ DESC,
         $borrower = DB::transaction(function () use ($request) {
             return Borrower::create($request->safe()->except('force'));
         });
+
+        // Public registration path — return a slim payload plus a submission
+        // token the anonymous client uses to attach photo + valid IDs against
+        // the borrower row it just created.
+        if (! $request->user()) {
+            $token = $tokens->issue($borrower, $request->ip());
+
+            return response()->json([
+                'success' => true,
+                'data' => [
+                    'id' => $borrower->id,
+                    'submission_token' => $token->token,
+                    'expires_at' => $token->expires_at->toIso8601String(),
+                ],
+            ], 201);
+        }
 
         $borrower->load('branch');
 
@@ -460,10 +484,12 @@ DESC,
     #[OA\Post(
         path: '/api/borrowers/{id}/photo',
         summary: 'Upload borrower photo',
+        description: 'Accepts a Bearer token (operator flow) or an `X-Submission-Token` header (public registration). When both are present, the auth header wins. Token must be bound to this borrower id and unexpired.',
         tags: ['Borrowers'],
-        security: [['sanctum' => []]],
+        security: [['sanctum' => []], []],
         parameters: [
             new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
+            new OA\Parameter(name: 'X-Submission-Token', in: 'header', required: false, description: 'Submission token from POST /api/borrowers (public registration fallback)', schema: new OA\Schema(type: 'string')),
         ],
         requestBody: new OA\RequestBody(
             required: true,
@@ -479,22 +505,28 @@ DESC,
         ),
         responses: [
             new OA\Response(response: 200, description: 'Photo uploaded'),
-            new OA\Response(response: 401, description: 'Unauthenticated'),
+            new OA\Response(response: 401, description: 'Unauthenticated — no Bearer token, no/invalid submission token, or token bound to a different borrower'),
             new OA\Response(response: 422, description: 'Validation error'),
         ],
     )]
-    public function uploadPhoto(Borrower $borrower): JsonResponse
+    public function uploadPhoto(Request $request, Borrower $borrower): JsonResponse
     {
-        $this->authorize('borrowers:update');
+        // When the AllowAuthOrSubmissionToken middleware has flagged the request
+        // as token-authenticated, the per-user permission check is skipped —
+        // the token itself is the authorization (and the middleware already
+        // verified the token is bound to *this* borrower).
+        if (! $request->attributes->get('submission_token_authenticated')) {
+            $this->authorize('borrowers:update');
+        }
 
-        request()->validate([
+        $request->validate([
             'photo' => ['required', 'image', 'max:5120'],
         ]);
 
         // Store the new photo BEFORE touching the old one so a failed upload
         // cannot leave the borrower without a photo.
         $oldPath = $borrower->photo_path;
-        $newPath = request()->file('photo')->store("borrowers/photos/{$borrower->id}", 'public');
+        $newPath = $request->file('photo')->store("borrowers/photos/{$borrower->id}", 'public');
         $borrower->update(['photo_path' => $newPath]);
 
         if ($oldPath) {
@@ -535,11 +567,12 @@ DESC,
     #[OA\Post(
         path: '/api/borrowers/{id}/valid-ids',
         summary: 'Upload borrower valid ID',
-        description: 'Accepts either single `file` (legacy) or `front_file`+`back_file` (new) with optional `id_number`.',
+        description: 'Accepts either single `file` (legacy) or `front_file`+`back_file` (new) with optional `id_number`. Authenticates via Bearer token (operator flow) or `X-Submission-Token` header (public registration). When both are present the Bearer wins. Token must be bound to this borrower id and unexpired.',
         tags: ['Borrowers'],
-        security: [['sanctum' => []]],
+        security: [['sanctum' => []], []],
         parameters: [
             new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
+            new OA\Parameter(name: 'X-Submission-Token', in: 'header', required: false, description: 'Submission token from POST /api/borrowers (public registration fallback)', schema: new OA\Schema(type: 'string')),
         ],
         requestBody: new OA\RequestBody(
             required: true,
@@ -564,11 +597,11 @@ DESC,
             new OA\Response(response: 422, description: 'Validation error'),
         ],
     )]
-    public function uploadValidId(Borrower $borrower): JsonResponse
+    public function uploadValidId(Request $request, Borrower $borrower): JsonResponse
     {
-        $this->authorize('borrowers:update');
-
-        $request = request();
+        if (! $request->attributes->get('submission_token_authenticated')) {
+            $this->authorize('borrowers:update');
+        }
 
         // Mutual exclusion: legacy single-file shape vs new front/back shape
         if ($request->hasFile('file') && $request->hasFile('front_file')) {

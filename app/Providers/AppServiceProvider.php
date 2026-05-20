@@ -38,5 +38,19 @@ class AppServiceProvider extends ServiceProvider
         RateLimiter::for('exports', function (Request $request) {
             return Limit::perMinute(5)->by($request->user()?->id ?: $request->ip());
         });
+
+        // Public registration (anonymous borrower submission + the two
+        // X-Submission-Token upload endpoints). 5 requests / 10 minutes / IP
+        // is enough for the legitimate 3-step flow plus retries while still
+        // shutting down abuse. Authenticated callers (operators creating
+        // borrowers in bulk from a shared office IP) bypass the limit so
+        // they don't share quota with public registrants.
+        RateLimiter::for('public-registration', function (Request $request) {
+            if ($request->user()) {
+                return Limit::none();
+            }
+
+            return Limit::perMinutes(10, 5)->by($request->ip());
+        });
     }
 }

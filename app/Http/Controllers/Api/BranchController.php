@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\Branch\StoreBranchRequest;
 use App\Http\Requests\Branch\UpdateBranchRequest;
 use App\Http\Resources\BranchResource;
+use App\Http\Resources\PublicBranchResource;
 use App\Models\Branch;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
@@ -126,5 +127,41 @@ class BranchController extends Controller
         $branch->update($request->validated());
 
         return new BranchResource($branch);
+    }
+
+    #[OA\Get(
+        path: '/api/branches/public',
+        summary: 'Public branch list',
+        description: 'Returns a slim list of active branches for the public registration page. No authentication required. Only id, name, and city are exposed — internal codes, financial fields, and manager assignments are filtered out.',
+        tags: ['Branches'],
+        responses: [
+            new OA\Response(
+                response: 200,
+                description: 'Public branch list',
+                content: new OA\JsonContent(
+                    properties: [
+                        new OA\Property(
+                            property: 'data',
+                            type: 'array',
+                            items: new OA\Items(
+                                properties: [
+                                    new OA\Property(property: 'id', type: 'integer', example: 1),
+                                    new OA\Property(property: 'name', type: 'string', example: 'Main Branch'),
+                                    new OA\Property(property: 'city', type: 'string', nullable: true, example: 'Iloilo City'),
+                                ],
+                            ),
+                        ),
+                    ],
+                ),
+            ),
+        ],
+    )]
+    public function publicIndex(): AnonymousResourceCollection
+    {
+        $branches = Branch::where('is_active', true)
+            ->orderBy('name')
+            ->get(['id', 'name', 'address']);
+
+        return PublicBranchResource::collection($branches);
     }
 }
