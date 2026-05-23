@@ -41,6 +41,11 @@ class Borrower extends Model
         'photo_path',
         'branch_id',
         'status',
+        'approved_at',
+        'approved_by',
+        'rejected_at',
+        'rejected_by',
+        'rejection_reason',
     ];
 
     protected function casts(): array
@@ -49,6 +54,8 @@ class Borrower extends Model
             'birthdate' => 'date',
             'monthly_income' => 'decimal:2',
             'pledge_amount' => 'decimal:2',
+            'approved_at' => 'datetime',
+            'rejected_at' => 'datetime',
         ];
     }
 
@@ -84,6 +91,16 @@ class Borrower extends Model
     public function branch(): BelongsTo
     {
         return $this->belongsTo(Branch::class);
+    }
+
+    public function approvedBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'approved_by');
+    }
+
+    public function rejectedBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'rejected_by');
     }
 
     public function coMakers(): HasMany

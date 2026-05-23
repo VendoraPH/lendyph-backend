@@ -133,6 +133,29 @@ class PublicRegistrationTest extends TestCase
             ->assertJsonValidationErrors(['status']);
     }
 
+    public function test_anonymous_borrower_create_without_branch_id_succeeds(): void
+    {
+        // The public form may skip branch selection (empty/hidden public branch
+        // list); an admin assigns the branch during review. branch_id is only
+        // required for authenticated operator creates.
+        $response = $this->postJson('/api/borrowers', [
+            'status' => 'pending',
+            'first_name' => 'NoBranch',
+            'last_name' => 'Applicant',
+            'email' => 'nobranch@example.com',
+            'contact_number' => '09171234599',
+        ]);
+
+        $response->assertCreated()
+            ->assertJsonStructure(['success', 'data' => ['id', 'submission_token', 'expires_at']]);
+
+        $this->assertDatabaseHas('borrowers', [
+            'id' => $response->json('data.id'),
+            'status' => 'pending',
+            'branch_id' => null,
+        ]);
+    }
+
     public function test_authenticated_borrower_create_still_returns_full_resource_without_token(): void
     {
         $this->actingAs($this->admin);

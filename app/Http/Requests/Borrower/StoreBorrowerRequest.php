@@ -34,12 +34,19 @@ class StoreBorrowerRequest extends FormRequest
             $firstNameRules[] = new NoDuplicateBorrower;
         }
 
+        // Anonymous public-registration applicants may omit branch_id — the
+        // public branch list can be empty or skipped, and an admin assigns the
+        // branch during review. Authenticated operators must still pick one.
+        $branchRules = $this->user()
+            ? ['required', 'exists:branches,id']
+            : ['nullable', 'exists:branches,id'];
+
         $rules = array_merge(
             $this->sharedBorrowerRules(),
             [
                 'first_name' => $firstNameRules,
                 'last_name' => ['required', 'string', 'max:255'],
-                'branch_id' => ['required', 'exists:branches,id'],
+                'branch_id' => $branchRules,
             ],
         );
 

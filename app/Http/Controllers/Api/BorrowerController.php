@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\Borrower\RejectBorrowerRequest;
 use App\Http\Requests\Borrower\StoreBorrowerRequest;
 use App\Http\Requests\Borrower\UpdateBorrowerRequest;
 use App\Http\Resources\BorrowerResource;
@@ -29,7 +30,7 @@ class BorrowerController extends Controller
         security: [['sanctum' => []]],
         parameters: [
             new OA\Parameter(name: 'search', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
-            new OA\Parameter(name: 'status', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['active', 'inactive', 'blacklisted'])),
+            new OA\Parameter(name: 'status', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['active', 'inactive', 'blacklisted', 'pending', 'rejected'])),
             new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15)),
         ],
@@ -62,6 +63,8 @@ class BorrowerController extends Controller
                 'active' => (int) ($stats['active'] ?? 0),
                 'inactive' => (int) ($stats['inactive'] ?? 0),
                 'blacklisted' => (int) ($stats['blacklisted'] ?? 0),
+                'pending' => (int) ($stats['pending'] ?? 0),
+                'rejected' => (int) ($stats['rejected'] ?? 0),
             ]]]);
     }
 
@@ -75,6 +78,7 @@ Create a new borrower profile.
 - Authenticated requests behave as today (any `status` allowed, response returns the full BorrowerResource).
 - Anonymous requests must set `status="pending"`. The response is a slim `{ id, submission_token, expires_at }` shape; the submission token lives for 15 minutes and is used as the `X-Submission-Token` header on the photo + valid-ids uploads. Per-IP rate limit (5 / 10 min) is enforced for the public-registration path.
 - Anonymous requests with any status other than `pending` are rejected (401/422).
+- `branch_id` is **required for authenticated (operator) creates** and **optional for anonymous submissions** — the admin assigns the branch during review.
 
 **Validation rules (enforced):**
 - `contact_number` must match `^(\+?\d{7,15}|0\d{9,10})$`
@@ -96,7 +100,7 @@ DESC,
         requestBody: new OA\RequestBody(
             required: true,
             content: new OA\JsonContent(
-                required: ['first_name', 'last_name', 'branch_id'],
+                required: ['first_name', 'last_name'],
                 properties: [
                     new OA\Property(property: 'first_name', type: 'string', example: 'Juan'),
                     new OA\Property(property: 'middle_name', type: 'string', example: 'Santos'),
@@ -120,7 +124,7 @@ DESC,
                     new OA\Property(property: 'spouse_last_name', type: 'string'),
                     new OA\Property(property: 'spouse_contact_number', type: 'string'),
                     new OA\Property(property: 'spouse_occupation', type: 'string'),
-                    new OA\Property(property: 'branch_id', type: 'integer', example: 1),
+                    new OA\Property(property: 'branch_id', type: 'integer', example: 1, description: 'Required for authenticated (operator) creates; optional for anonymous submissions (admin assigns during review).'),
                     new OA\Property(property: 'force', type: 'boolean', example: false, description: 'Bypass the duplicate-borrower check (use for "Create Anyway" confirmation)'),
                     new OA\Property(property: 'status', type: 'string', enum: ['active', 'inactive', 'blacklisted', 'pending'], description: 'Anonymous (public registration) requests must set this to "pending".'),
                 ],
@@ -359,6 +363,101 @@ DESC,
         $borrower->update(['status' => 'active']);
 
         return response()->json(['message' => 'Borrower reactivated successfully.']);
+    }
+
+    #[OA\Patch(
+        path: '/api/borrowers/{id}/approve-registration',
+        summary: 'Approve a pending borrower registration',
+        description: <<<'DESC'
+Approve a borrower whose status is `pending` (public-registration review).
+
+- Flips status `pending` → `active` and records `approved_by` / `approved_at`.
+- Returns the updated borrower.
+- The share-capital pledge and `borrower_code` are already created at submission time, so no extra setup runs here.
+- Returns 422 if the borrower is not currently `pending`. Use `/reactivate` to re-activate a previously-active member — keeping the two distinct preserves the audit distinction between "approved an application" and "reactivated a member".
+DESC,
+        tags: ['Borrowers'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
+        ],
+        responses: [
+            new OA\Response(response: 200, description: 'Registration approved; updated borrower returned'),
+            new OA\Response(response: 401, description: 'Unauthenticated'),
+            new OA\Response(response: 403, description: 'Forbidden'),
+            new OA\Response(response: 422, description: 'Borrower is not in pending status'),
+        ],
+    )]
+    public function approveRegistration(Request $request, Borrower $borrower): BorrowerResource
+    {
+        $this->authorize('borrowers:update');
+
+        if ($borrower->status !== 'pending') {
+            throw ValidationException::withMessages([
+                'status' => 'Only borrowers with a pending registration can be approved.',
+            ]);
+        }
+
+        $borrower->update([
+            'status' => 'active',
+            'approved_by' => $request->user()->id,
+            'approved_at' => now(),
+        ]);
+
+        $borrower->load('branch');
+
+        return new BorrowerResource($borrower);
+    }
+
+    #[OA\Patch(
+        path: '/api/borrowers/{id}/reject',
+        summary: 'Reject a pending borrower registration',
+        description: <<<'DESC'
+Reject a borrower whose status is `pending` **without hard-deleting the row**, preserving the audit trail.
+
+- Sets status `pending` → `rejected` and records `rejection_reason` / `rejected_at` / `rejected_by`.
+- Returns the updated borrower.
+- Returns 422 if the borrower is not currently `pending`, or if `reason` is missing.
+DESC,
+        tags: ['Borrowers'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
+        ],
+        requestBody: new OA\RequestBody(
+            required: true,
+            content: new OA\JsonContent(
+                required: ['reason'],
+                properties: [
+                    new OA\Property(property: 'reason', type: 'string', example: 'Submitted ID does not match the applicant name.', description: 'Why the registration was rejected (stored on the borrower).'),
+                ],
+            ),
+        ),
+        responses: [
+            new OA\Response(response: 200, description: 'Registration rejected; updated borrower returned'),
+            new OA\Response(response: 401, description: 'Unauthenticated'),
+            new OA\Response(response: 403, description: 'Forbidden'),
+            new OA\Response(response: 422, description: 'Borrower is not in pending status, or reason is missing'),
+        ],
+    )]
+    public function reject(RejectBorrowerRequest $request, Borrower $borrower): BorrowerResource
+    {
+        if ($borrower->status !== 'pending') {
+            throw ValidationException::withMessages([
+                'status' => 'Only borrowers with a pending registration can be rejected.',
+            ]);
+        }
+
+        $borrower->update([
+            'status' => 'rejected',
+            'rejection_reason' => $request->validated('reason'),
+            'rejected_by' => $request->user()->id,
+            'rejected_at' => now(),
+        ]);
+
+        $borrower->load('branch');
+
+        return new BorrowerResource($borrower);
     }
 
     #[OA\Patch(
