@@ -22,6 +22,7 @@ class RoleAndPermissionSeeder extends Seeder
 
             // Borrowers (renamed from customers)
             'borrowers:view', 'borrowers:create', 'borrowers:update', 'borrowers:delete',
+            'borrowers:approve',
 
             // Loans
             'loans:view', 'loans:create', 'loans:update', 'loans:delete',
@@ -100,7 +101,7 @@ class RoleAndPermissionSeeder extends Seeder
             ['is_system' => true, 'is_active' => true, 'description' => $systemRoleAttrs['loan_officer']['description']],
         )->syncPermissions([
             'dashboard:view',
-            'borrowers:view', 'borrowers:create', 'borrowers:update',
+            'borrowers:view', 'borrowers:create', 'borrowers:update', 'borrowers:approve',
             'loans:view', 'loans:create', 'loans:update',
             'loans:approve', 'loans:reject', 'loans:release',
             'loans:extend',
