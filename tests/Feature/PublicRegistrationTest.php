@@ -133,6 +133,53 @@ class PublicRegistrationTest extends TestCase
             ->assertJsonValidationErrors(['status']);
     }
 
+    public function test_anonymous_borrower_create_persists_submitted_branch_id(): void
+    {
+        // Regression: 2026-05-24 FE handoff reported that public POST /borrowers
+        // dropped branch_id silently. The DB row WAS being written correctly;
+        // this test locks in DB persistence so a future change can't regress it.
+        $response = $this->postJson('/api/borrowers', [
+            'status' => 'pending',
+            'branch_id' => $this->branch->id,
+            'first_name' => 'Branch',
+            'last_name' => 'Saved',
+            'email' => 'branch-saved@example.com',
+            'contact_number' => '09171234588',
+        ])->assertCreated();
+
+        $borrowerId = $response->json('data.id');
+
+        $this->assertDatabaseHas('borrowers', [
+            'id' => $borrowerId,
+            'branch_id' => $this->branch->id,
+            'status' => 'pending',
+        ]);
+    }
+
+    public function test_admin_show_returns_flat_branch_id_and_nested_branch(): void
+    {
+        // Regression: 2026-05-24 FE handoff. The DB stored branch_id correctly,
+        // but BorrowerResource only exposed nested `branch` (no flat field), so
+        // FE code reading `data.branch_id` got undefined and reported the bug.
+        // This test locks in BOTH shapes so neither read pattern silently breaks.
+        $created = $this->postJson('/api/borrowers', [
+            'status' => 'pending',
+            'branch_id' => $this->branch->id,
+            'first_name' => 'AdminReview',
+            'last_name' => 'Probe',
+            'contact_number' => '09171234500',
+            'email' => 'admin-review@example.com',
+        ])->assertCreated();
+
+        $borrowerId = $created->json('data.id');
+
+        $this->actingAs($this->admin)
+            ->getJson("/api/borrowers/{$borrowerId}")
+            ->assertOk()
+            ->assertJsonPath('data.branch_id', $this->branch->id)
+            ->assertJsonPath('data.branch.id', $this->branch->id);
+    }
+
     public function test_anonymous_borrower_create_without_branch_id_succeeds(): void
     {
         // The public form may skip branch selection (empty/hidden public branch
