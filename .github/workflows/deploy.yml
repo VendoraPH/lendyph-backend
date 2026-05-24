@@ -23,6 +23,9 @@ jobs:
             git reset --hard origin/main
             COMPOSER_ALLOW_SUPERUSER=1 composer install --no-dev --optimize-autoloader --no-interaction
             php artisan migrate --force
+            # Symlink public/storage -> storage/app/public so uploaded photos and
+            # valid-ID files are served at /storage/*. Idempotent; --force recreates a stale link.
+            php artisan storage:link --force
             php artisan config:clear
             php artisan route:clear
             php artisan view:clear
