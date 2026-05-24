@@ -86,6 +86,8 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::apiResource('borrowers', BorrowerController::class)->except(['store']);
     Route::patch('/borrowers/{borrower}/deactivate', [BorrowerController::class, 'deactivate']);
     Route::patch('/borrowers/{borrower}/reactivate', [BorrowerController::class, 'reactivate']);
+    Route::patch('/borrowers/{borrower}/approve-registration', [BorrowerController::class, 'approveRegistration']);
+    Route::patch('/borrowers/{borrower}/reject', [BorrowerController::class, 'reject']);
     Route::delete('/borrowers/{borrower}/photo', [BorrowerController::class, 'deletePhoto']);
     Route::get('/borrowers/{borrower}/valid-ids', [BorrowerController::class, 'listValidIds']);
     Route::delete('/borrowers/{borrower}/valid-ids/{validIdId}', [BorrowerController::class, 'deleteValidId']);
