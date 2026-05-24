@@ -9,7 +9,7 @@ class RejectBorrowerRequest extends FormRequest
 {
     public function authorize(): bool
     {
-        return $this->user()?->can('borrowers:update') ?? false;
+        return $this->user()?->can('borrowers:approve') ?? false;
     }
 
     /**

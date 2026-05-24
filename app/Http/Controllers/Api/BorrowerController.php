@@ -371,6 +371,7 @@ DESC,
         description: <<<'DESC'
 Approve a borrower whose status is `pending` (public-registration review).
 
+- Required permission: `borrowers:approve` (distinct from `borrowers:update` so the approval action can be granted separately from generic borrower edits).
 - Flips status `pending` → `active` and records `approved_by` / `approved_at`.
 - Returns the updated borrower.
 - The share-capital pledge and `borrower_code` are already created at submission time, so no extra setup runs here.
@@ -390,7 +391,7 @@ DESC,
     )]
     public function approveRegistration(Request $request, Borrower $borrower): BorrowerResource
     {
-        $this->authorize('borrowers:update');
+        $this->authorize('borrowers:approve');
 
         if ($borrower->status !== 'pending') {
             throw ValidationException::withMessages([
@@ -415,6 +416,7 @@ DESC,
         description: <<<'DESC'
 Reject a borrower whose status is `pending` **without hard-deleting the row**, preserving the audit trail.
 
+- Required permission: `borrowers:approve` (same gate as `/approve-registration` — registration review is a single approval permission).
 - Sets status `pending` → `rejected` and records `rejection_reason` / `rejected_at` / `rejected_by`.
 - Returns the updated borrower.
 - Returns 422 if the borrower is not currently `pending`, or if `reason` is missing.
