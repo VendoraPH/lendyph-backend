@@ -177,9 +177,12 @@ class Loan extends Model
     protected function outstandingBalance(): Attribute
     {
         return Attribute::get(function () {
-            return $this->amortizationSchedules()
+            $principalBalance = $this->amortizationSchedules()
+                ->reorder()
                 ->selectRaw('SUM(principal_due - principal_paid) as balance')
                 ->value('balance') ?? 0;
+
+            return round((float) $principalBalance + (float) $this->insurance_remaining_balance, 2);
         });
     }
 

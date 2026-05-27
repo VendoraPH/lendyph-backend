@@ -312,7 +312,7 @@ class LoanController extends Controller
                     new OA\Property(property: 'insurance_premium_percentage', type: 'number', nullable: true, minimum: 0, maximum: 100, description: 'When 0 or omitted, insurance block is ignored.'),
                     new OA\Property(property: 'insurance_premium_amount', type: 'number', nullable: true, description: 'principal_amount × percentage / 100, rounded 2dp.'),
                     new OA\Property(property: 'insurance_payment_type', type: 'string', nullable: true, enum: ['full', 'partial']),
-                    new OA\Property(property: 'insurance_partial_amount', type: 'number', nullable: true, description: 'Required when payment_type=partial. Must be null when payment_type=full.'),
+                    new OA\Property(property: 'insurance_partial_amount', type: 'number', nullable: true, description: 'Required (>0) when payment_type=partial. Must be null or 0 when payment_type=full.'),
                     new OA\Property(property: 'insurance_remaining_balance', type: 'number', nullable: true, description: '0 when full; premium_amount − partial_amount when partial.'),
                 ],
             ),
