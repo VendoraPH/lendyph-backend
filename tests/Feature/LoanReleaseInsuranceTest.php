@@ -291,6 +291,26 @@ class LoanReleaseInsuranceTest extends TestCase
         $this->assertEquals(100.0, (float) $response->json('data.insurance_remaining_balance'));
     }
 
+    public function test_release_picks_next_ln_from_highest_loan_account_number_not_highest_id(): void
+    {
+        // Simulate prod-style data: an earlier-id loan holds a higher LN than later-id loans.
+        // (Loans can be released out of insertion order.)
+        $loanA = $this->approvedLoan(10000);
+        $loanB = $this->approvedLoan(10000);
+        $loanC = $this->approvedLoan(10000);
+
+        // Force LN such that the highest id (loanC) has a LOWER LN than loanA.
+        $loanA->update(['loan_account_number' => 'LN-000004', 'status' => 'released', 'released_at' => now()]);
+        $loanB->update(['loan_account_number' => 'LN-000002', 'status' => 'released', 'released_at' => now()]);
+        $loanC->update(['loan_account_number' => 'LN-000003', 'status' => 'released', 'released_at' => now()]);
+
+        $loanD = $this->approvedLoan(10000);
+        $response = $this->patchJson("/api/loans/{$loanD->id}/release", []);
+
+        $response->assertOk()
+            ->assertJsonPath('data.loan_account_number', 'LN-000005');
+    }
+
     public function test_release_writes_release_insurance_audit_log(): void
     {
         $loan = $this->approvedLoan(10000);
