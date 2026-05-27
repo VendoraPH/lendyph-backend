@@ -42,10 +42,10 @@ class ReleaseLoanRequest extends FormRequest
                 );
             }
 
-            if ($paymentType === 'full' && $partial !== null && $partial !== '') {
+            if ($paymentType === 'full' && $partial !== null && $partial !== '' && (float) $partial !== 0.0) {
                 $v->errors()->add(
                     'insurance_partial_amount',
-                    'The insurance partial amount must be null when payment type is full.',
+                    'The insurance partial amount must be null or zero when payment type is full.',
                 );
             }
         });

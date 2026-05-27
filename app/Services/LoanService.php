@@ -267,14 +267,28 @@ class LoanService
             ]);
         }
 
-        $loan->update([
+        $loanUpdates = [
             'insurance_premium_pct' => round((float) $pct, 2),
             'insurance_premium_amount' => $premiumAmount,
             'insurance_payment_type' => $paymentType,
             'insurance_partial_amount' => $partialAmount,
             'insurance_remaining_balance' => $remainingBalance,
             'net_proceeds' => $newNetProceeds,
-        ]);
+        ];
+
+        if ($collected > 0) {
+            $deductions = $loan->deductions ?? [];
+            $deductions[] = [
+                'name' => 'Insurance Premium',
+                'amount' => round($collected, 2),
+                'type' => 'fixed',
+                'original_value' => round($collected, 2),
+            ];
+            $loanUpdates['deductions'] = $deductions;
+            $loanUpdates['total_deductions'] = round((float) $loan->total_deductions + $collected, 2);
+        }
+
+        $loan->update($loanUpdates);
 
         AuditLogService::log(
             action: 'release_insurance',
@@ -356,11 +370,37 @@ class LoanService
 
     public function buildAmortizationPreview(Loan $loan): array
     {
+        // `frequency = upon_maturity` is a bullet loan: a single lump-sum
+        // payment at maturity, regardless of which interest method is set.
+        if ($loan->frequency === 'upon_maturity') {
+            return $this->buildSinglePaymentAtMaturity($loan);
+        }
+
         return match ($loan->interest_method) {
             'straight' => $this->buildStraight($loan),
             'diminishing' => $this->buildDiminishing($loan),
             'upon_maturity' => $this->buildUponMaturity($loan),
         };
+    }
+
+    private function buildSinglePaymentAtMaturity(Loan $loan): array
+    {
+        $principal = (float) $loan->principal_amount;
+        $rate = (float) $loan->interest_rate / 100; // PH convention: monthly rate
+        $term = $loan->term;
+        $totalInterest = round($principal * $rate * $term, 2);
+
+        return [
+            [
+                'period_number' => 1,
+                'due_date' => $loan->maturity_date->toDateString(),
+                'principal_due' => round($principal, 2),
+                'interest_due' => $totalInterest,
+                'total_due' => round($principal + $totalInterest, 2),
+                'remaining_balance' => 0,
+                'status' => 'pending',
+            ],
+        ];
     }
 
     private function buildStraight(Loan $loan): array

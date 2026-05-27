@@ -173,6 +173,124 @@ class LoanReleaseInsuranceTest extends TestCase
             ->assertJsonValidationErrors(['insurance_partial_amount']);
     }
 
+    public function test_release_with_full_insurance_appends_insurance_premium_to_deductions(): void
+    {
+        $loan = $this->approvedLoan(10000);
+        $originalTotalDeductions = (float) $loan->total_deductions;
+        $originalDeductionCount = count($loan->deductions ?? []);
+
+        $response = $this->patchJson("/api/loans/{$loan->id}/release", [
+            'insurance_premium_percentage' => 1.5,
+            'insurance_premium_amount' => 150,
+            'insurance_payment_type' => 'full',
+        ]);
+
+        $response->assertOk();
+
+        $deductions = $response->json('data.deductions');
+        $this->assertCount($originalDeductionCount + 1, $deductions);
+
+        $insuranceLine = collect($deductions)->firstWhere('name', 'Insurance Premium');
+        $this->assertNotNull($insuranceLine);
+        $this->assertEquals(150.0, (float) $insuranceLine['amount']);
+
+        $this->assertEquals(
+            round($originalTotalDeductions + 150, 2),
+            (float) $response->json('data.total_deductions'),
+        );
+
+        $this->assertEquals(
+            (float) $response->json('data.principal_amount'),
+            (float) $response->json('data.total_deductions') + (float) $response->json('data.net_proceeds'),
+        );
+    }
+
+    public function test_release_with_partial_insurance_appends_only_partial_to_deductions(): void
+    {
+        $loan = $this->approvedLoan(10000);
+        $originalTotalDeductions = (float) $loan->total_deductions;
+
+        $response = $this->patchJson("/api/loans/{$loan->id}/release", [
+            'insurance_premium_percentage' => 1.0,
+            'insurance_premium_amount' => 100,
+            'insurance_payment_type' => 'partial',
+            'insurance_partial_amount' => 60,
+            'insurance_remaining_balance' => 40,
+        ]);
+
+        $response->assertOk();
+
+        $insuranceLine = collect($response->json('data.deductions'))
+            ->firstWhere('name', 'Insurance Premium');
+        $this->assertNotNull($insuranceLine);
+        $this->assertEquals(60.0, (float) $insuranceLine['amount']);
+
+        $this->assertEquals(
+            round($originalTotalDeductions + 60, 2),
+            (float) $response->json('data.total_deductions'),
+        );
+
+        $this->assertEquals(40.0, (float) $response->json('data.insurance_remaining_balance'));
+
+        $loan = Loan::find($loan->id);
+        $unpaidPrincipal = (float) $loan->amortizationSchedules()
+            ->reorder()
+            ->selectRaw('SUM(principal_due - principal_paid) as balance')
+            ->value('balance');
+
+        $this->assertEquals(
+            round($unpaidPrincipal + 40, 2),
+            round((float) $loan->outstanding_balance, 2),
+        );
+    }
+
+    public function test_release_accepts_partial_amount_zero_when_type_is_full(): void
+    {
+        $loan = $this->approvedLoan(10000);
+
+        $response = $this->patchJson("/api/loans/{$loan->id}/release", [
+            'insurance_premium_percentage' => 1.0,
+            'insurance_premium_amount' => 100,
+            'insurance_payment_type' => 'full',
+            'insurance_partial_amount' => 0,
+            'insurance_remaining_balance' => 0,
+        ]);
+
+        $response->assertOk()
+            ->assertJsonPath('data.insurance_payment_type', 'full')
+            ->assertJsonPath('data.insurance_partial_amount', null);
+
+        $this->assertEquals(100.0, (float) $response->json('data.insurance_premium_amount'));
+    }
+
+    public function test_release_skips_zero_amount_deduction_when_partial_amount_is_zero(): void
+    {
+        $loan = $this->approvedLoan(10000);
+        $originalDeductionCount = count($loan->deductions ?? []);
+        $originalTotalDeductions = (float) $loan->total_deductions;
+
+        $response = $this->patchJson("/api/loans/{$loan->id}/release", [
+            'insurance_premium_percentage' => 1.0,
+            'insurance_premium_amount' => 100,
+            'insurance_payment_type' => 'partial',
+            'insurance_partial_amount' => 0,
+            'insurance_remaining_balance' => 100,
+        ]);
+
+        $response->assertOk();
+
+        $deductions = $response->json('data.deductions');
+        $this->assertCount($originalDeductionCount, $deductions);
+        $this->assertNull(collect($deductions)->firstWhere('name', 'Insurance Premium'));
+
+        $this->assertEquals(
+            $originalTotalDeductions,
+            (float) $response->json('data.total_deductions'),
+        );
+
+        $this->assertEquals(100.0, (float) $response->json('data.insurance_remaining_balance'));
+    }
+
     public function test_release_writes_release_insurance_audit_log(): void
     {
         $loan = $this->approvedLoan(10000);
