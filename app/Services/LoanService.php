@@ -207,9 +207,11 @@ class LoanService
         $this->guardStatus($loan, 'approved', 'release');
 
         return DB::transaction(function () use ($loan, $releaser, $insurance) {
-            // Generate loan account number with row-level lock to prevent race conditions
+            // Generate loan account number with row-level lock to prevent race conditions.
+            // Order by loan_account_number (not id) so the next number is taken from the
+            // highest LN issued — loans can be released out of insertion order.
             $lastLoan = Loan::whereNotNull('loan_account_number')
-                ->orderByDesc('id')
+                ->orderByDesc('loan_account_number')
                 ->lockForUpdate()
                 ->first();
             $nextNum = $lastLoan ? (int) substr($lastLoan->loan_account_number, 3) + 1 : 1;
