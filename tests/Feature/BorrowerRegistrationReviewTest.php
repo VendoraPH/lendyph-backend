@@ -16,12 +16,23 @@ class BorrowerRegistrationReviewTest extends TestCase
         $this->seedAndLogin();
     }
 
+    private function attachValidId(Borrower $borrower): void
+    {
+        $borrower->documents()->create([
+            'type' => 'valid_id',
+            'label' => 'umid',
+            'file_path' => 'documents/valid_id/test.jpg',
+            'original_filename' => 'test.jpg',
+        ]);
+    }
+
     public function test_approve_registration_flips_pending_to_active_and_records_approver(): void
     {
         $borrower = Borrower::factory()->create([
             'branch_id' => $this->branch->id,
             'status' => 'pending',
         ]);
+        $this->attachValidId($borrower);
 
         $this->patchJson("/api/borrowers/{$borrower->id}/approve-registration")
             ->assertOk()
@@ -54,6 +65,25 @@ class BorrowerRegistrationReviewTest extends TestCase
         ]);
     }
 
+    public function test_approve_registration_requires_at_least_one_valid_id(): void
+    {
+        $borrower = Borrower::factory()->create([
+            'branch_id' => $this->branch->id,
+            'status' => 'pending',
+        ]);
+        // No valid ID attached — the KYC gate must block approval.
+
+        $this->patchJson("/api/borrowers/{$borrower->id}/approve-registration")
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['valid_id']);
+
+        $this->assertDatabaseHas('borrowers', [
+            'id' => $borrower->id,
+            'status' => 'pending',
+            'approved_by' => null,
+        ]);
+    }
+
     public function test_reject_registration_sets_rejected_status_and_reason_without_deleting(): void
     {
         $borrower = Borrower::factory()->create([
@@ -77,6 +107,24 @@ class BorrowerRegistrationReviewTest extends TestCase
             'rejected_by' => $this->admin->id,
         ]);
         $this->assertNotNull($borrower->fresh()->rejected_at);
+    }
+
+    public function test_reject_registration_deletes_the_share_capital_pledge(): void
+    {
+        $borrower = Borrower::factory()->create([
+            'branch_id' => $this->branch->id,
+            'status' => 'pending',
+        ]);
+
+        // The submission hook auto-creates a pledge for every borrower.
+        $this->assertDatabaseHas('share_capital_pledges', ['borrower_id' => $borrower->id]);
+
+        $this->patchJson("/api/borrowers/{$borrower->id}/reject", [
+            'reason' => 'Incomplete requirements.',
+        ])->assertOk();
+
+        // A rejected applicant is not a member — the dangling pledge must be gone.
+        $this->assertDatabaseMissing('share_capital_pledges', ['borrower_id' => $borrower->id]);
     }
 
     public function test_reject_registration_requires_a_reason(): void

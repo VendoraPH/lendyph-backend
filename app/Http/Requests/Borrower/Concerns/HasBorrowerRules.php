@@ -19,7 +19,9 @@ trait HasBorrowerRules
         return [
             'middle_name' => ['nullable', 'string', 'max:255'],
             'suffix' => ['nullable', 'string', 'max:20'],
-            'birthdate' => ['nullable', 'date', 'after:1900-01-01', 'before:today'],
+            // Applicants must be at least 18 (PH age of majority for lending).
+            // `before_or_equal:-18 years` also rejects future dates implicitly.
+            'birthdate' => ['nullable', 'date', 'after:1900-01-01', 'before_or_equal:-18 years'],
             'civil_status' => ['nullable', 'string', 'in:single,married,widowed,separated,divorced'],
             'gender' => ['nullable', 'string', 'in:male,female'],
 
@@ -45,6 +47,7 @@ trait HasBorrowerRules
                 Rule::unique('borrowers', 'email')->ignore($ignoreId),
             ],
             'employer_or_business' => ['nullable', 'string', 'max:255'],
+            'date_hired' => ['nullable', 'date', 'after:1900-01-01', 'before_or_equal:today'],
             'monthly_income' => ['nullable', 'numeric', 'min:0', 'max:99999999.99'],
             'pledge_amount' => ['nullable', 'numeric', 'min:0', 'max:9999999.99'],
 
@@ -75,6 +78,8 @@ trait HasBorrowerRules
             'email.unique' => 'A borrower with this email already exists.',
             'pledge_amount.max' => 'The pledge amount may not exceed 9,999,999.99.',
             'birthdate.after' => 'The birthdate must be after January 1, 1900.',
+            'birthdate.before_or_equal' => 'The applicant must be at least 18 years old.',
+            'date_hired.before_or_equal' => 'The date hired cannot be in the future.',
         ];
     }
 }

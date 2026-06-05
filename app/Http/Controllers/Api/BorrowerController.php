@@ -117,6 +117,7 @@ DESC,
                     new OA\Property(property: 'contact_number', type: 'string', example: '09171234567', description: 'PH mobile (09xxxxxxxxx) or international (+63…)'),
                     new OA\Property(property: 'email', type: 'string', format: 'email', example: 'juan@email.com', description: 'Must be unique'),
                     new OA\Property(property: 'employer_or_business', type: 'string'),
+                    new OA\Property(property: 'date_hired', type: 'string', format: 'date', example: '2020-03-01', description: 'Employment start date (not in the future)'),
                     new OA\Property(property: 'monthly_income', type: 'number', example: 25000),
                     new OA\Property(property: 'pledge_amount', type: 'number', example: 500, description: 'Share capital pledge amount (max 9,999,999.99, defaults to 0)'),
                     new OA\Property(property: 'spouse_first_name', type: 'string'),
@@ -243,6 +244,7 @@ DESC,
                     new OA\Property(property: 'contact_number', type: 'string', description: 'PH mobile or international'),
                     new OA\Property(property: 'email', type: 'string', format: 'email', description: 'Must be unique (self-ignored on update)'),
                     new OA\Property(property: 'employer_or_business', type: 'string'),
+                    new OA\Property(property: 'date_hired', type: 'string', format: 'date', description: 'Employment start date (not in the future)'),
                     new OA\Property(property: 'monthly_income', type: 'number'),
                     new OA\Property(property: 'pledge_amount', type: 'number', description: 'Max 9,999,999.99'),
                     new OA\Property(property: 'spouse_first_name', type: 'string'),
@@ -375,6 +377,7 @@ Approve a borrower whose status is `pending` (public-registration review).
 - Flips status `pending` → `active` and records `approved_by` / `approved_at`.
 - Returns the updated borrower.
 - The share-capital pledge and `borrower_code` are already created at submission time, so no extra setup runs here.
+- Requires at least one valid ID (`type=valid_id` document) on file — returns 422 otherwise.
 - Returns 422 if the borrower is not currently `pending`. Use `/reactivate` to re-activate a previously-active member — keeping the two distinct preserves the audit distinction between "approved an application" and "reactivated a member".
 DESC,
         tags: ['Borrowers'],
@@ -386,7 +389,7 @@ DESC,
             new OA\Response(response: 200, description: 'Registration approved; updated borrower returned'),
             new OA\Response(response: 401, description: 'Unauthenticated'),
             new OA\Response(response: 403, description: 'Forbidden'),
-            new OA\Response(response: 422, description: 'Borrower is not in pending status'),
+            new OA\Response(response: 422, description: 'Borrower is not in pending status, or has no valid ID on file'),
         ],
     )]
     public function approveRegistration(Request $request, Borrower $borrower): BorrowerResource
@@ -396,6 +399,15 @@ DESC,
         if ($borrower->status !== 'pending') {
             throw ValidationException::withMessages([
                 'status' => 'Only borrowers with a pending registration can be approved.',
+            ]);
+        }
+
+        // KYC gate: a membership cannot be approved until the applicant has at
+        // least one valid ID on file. The public form enforces this client-side;
+        // this server check prevents an operator from bypassing it during review.
+        if (! $borrower->documents()->where('type', 'valid_id')->exists()) {
+            throw ValidationException::withMessages([
+                'valid_id' => 'At least one valid ID must be uploaded before this registration can be approved.',
             ]);
         }
 
@@ -418,6 +430,7 @@ Reject a borrower whose status is `pending` **without hard-deleting the row**, p
 
 - Required permission: `borrowers:approve` (same gate as `/approve-registration` — registration review is a single approval permission).
 - Sets status `pending` → `rejected` and records `rejection_reason` / `rejected_at` / `rejected_by`.
+- Deletes the share-capital pledge auto-created at submission (a rejected applicant is not a member).
 - Returns the updated borrower.
 - Returns 422 if the borrower is not currently `pending`, or if `reason` is missing.
 DESC,
@@ -456,6 +469,10 @@ DESC,
             'rejected_by' => $request->user()->id,
             'rejected_at' => now(),
         ]);
+
+        // A rejected applicant is not a member: remove the share-capital pledge
+        // auto-created at submission so it doesn't linger in share-capital totals.
+        $borrower->shareCapitalPledge()->delete();
 
         $borrower->load('branch');
 
