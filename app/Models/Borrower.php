@@ -32,6 +32,7 @@ class Borrower extends Model
         'email',
         'employer_or_business',
         'monthly_income',
+        'date_hired',
         'pledge_amount',
         'spouse_first_name',
         'spouse_middle_name',
@@ -52,6 +53,7 @@ class Borrower extends Model
     {
         return [
             'birthdate' => 'date',
+            'date_hired' => 'date',
             'monthly_income' => 'decimal:2',
             'pledge_amount' => 'decimal:2',
             'approved_at' => 'datetime',

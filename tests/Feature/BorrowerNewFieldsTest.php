@@ -78,6 +78,25 @@ it('rejects birthdate before 1900', function () {
         ->assertJsonValidationErrors(['birthdate']);
 });
 
+it('rejects applicants under 18 years old', function () {
+    $this->postJson('/api/borrowers', [
+        'first_name' => 'Too',
+        'last_name' => 'Young',
+        'branch_id' => $this->branch->id,
+        'birthdate' => now()->subYears(15)->toDateString(),
+    ])->assertStatus(422)
+        ->assertJsonValidationErrors(['birthdate']);
+});
+
+it('accepts an adult (18+) birthdate', function () {
+    $this->postJson('/api/borrowers', [
+        'first_name' => 'Old',
+        'last_name' => 'Enough',
+        'branch_id' => $this->branch->id,
+        'birthdate' => now()->subYears(25)->toDateString(),
+    ])->assertCreated();
+});
+
 it('accepts pledge_amount on borrower create and uses it for the pledge', function () {
     $response = $this->postJson('/api/borrowers', [
         'first_name' => 'Test',
@@ -123,6 +142,33 @@ it('accepts structured address fields on borrower create', function () {
     expect($borrower->barangay)->toBe('Poblacion');
     expect($borrower->city)->toBe('Butuan');
     expect($borrower->province)->toBe('Agusan del Norte');
+});
+
+it('accepts date_hired on borrower create and exposes it in the resource', function () {
+    $response = $this->postJson('/api/borrowers', [
+        'first_name' => 'Employed',
+        'last_name' => 'Person',
+        'branch_id' => $this->branch->id,
+        'employer_or_business' => 'Acme Corp',
+        'date_hired' => '2020-03-01',
+    ])->assertCreated();
+
+    $borrower = Borrower::find($response->json('data.id'));
+    expect($borrower->date_hired->toDateString())->toBe('2020-03-01');
+
+    $this->getJson("/api/borrowers/{$borrower->id}")
+        ->assertSuccessful()
+        ->assertJsonPath('data.date_hired', '2020-03-01');
+});
+
+it('rejects a future date_hired', function () {
+    $this->postJson('/api/borrowers', [
+        'first_name' => 'Future',
+        'last_name' => 'Hire',
+        'branch_id' => $this->branch->id,
+        'date_hired' => now()->addYear()->toDateString(),
+    ])->assertStatus(422)
+        ->assertJsonValidationErrors(['date_hired']);
 });
 
 it('exposes new fields in BorrowerResource', function () {

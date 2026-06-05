@@ -113,6 +113,13 @@ class BorrowersApprovePermissionTest extends TestCase
             'branch_id' => $this->branch->id,
             'status' => 'pending',
         ]);
+        // Approval requires a valid ID on file (KYC gate).
+        $borrower->documents()->create([
+            'type' => 'valid_id',
+            'label' => 'umid',
+            'file_path' => 'documents/valid_id/test.jpg',
+            'original_filename' => 'test.jpg',
+        ]);
 
         $this->patchJson("/api/borrowers/{$borrower->id}/approve-registration")
             ->assertOk()
