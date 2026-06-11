@@ -27,7 +27,7 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'service_fee', type: 'number'),
         new OA\Property(property: 'min_service_fee', type: 'number', nullable: true),
         new OA\Property(property: 'max_service_fee', type: 'number', nullable: true),
-        new OA\Property(property: 'notarial_fee', type: 'number', nullable: true),
+        new OA\Property(property: 'notarial_fee', type: 'number', nullable: true, description: 'Percentage of principal, applied as an auto-deduction on loan creation'),
         new OA\Property(property: 'custom_fees', type: 'array', items: new OA\Items(type: 'object')),
         new OA\Property(property: 'penalty_rate', type: 'number'),
         new OA\Property(property: 'grace_period_days', type: 'integer'),

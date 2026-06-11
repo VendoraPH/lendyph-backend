@@ -128,6 +128,59 @@ class BusinessLogicTest extends TestCase
         $this->assertEquals(500, $response->json('data.total_deductions'));
     }
 
+    public function test_auto_computed_notarial_fee_is_percentage_of_principal(): void
+    {
+        $product = LoanProduct::factory()->create([
+            'processing_fee' => 3.0,
+            'service_fee' => 3.0,
+            'notarial_fee' => 1.0,
+        ]);
+        $borrower = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+
+        $response = $this->postJson('/api/loans', [
+            'borrower_id' => $borrower->id,
+            'loan_product_id' => $product->id,
+            'principal_amount' => 10000,
+            'start_date' => now()->toDateString(),
+        ]);
+
+        $response->assertCreated();
+        $data = $response->json('data');
+
+        // 1% of 10000 = 100 — not a flat ₱1 (the configured value is a rate)
+        $notarial = collect($data['deductions'])->firstWhere('name', 'Notarial Fee');
+        $this->assertNotNull($notarial);
+        $this->assertSame('percentage', $notarial['type']);
+        $this->assertEquals(100, (float) $notarial['amount']);
+
+        // 3% processing + 3% service + 1% notarial = 7% of 10000
+        $this->assertEquals(700, $data['total_deductions']);
+        $this->assertEquals(9300, $data['net_proceeds']);
+    }
+
+    public function test_principal_update_recomputes_percentage_deductions_from_original_rate(): void
+    {
+        $product = LoanProduct::factory()->create();
+        $borrower = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+
+        $loanId = $this->postJson('/api/loans', [
+            'borrower_id' => $borrower->id,
+            'loan_product_id' => $product->id,
+            'principal_amount' => 100000,
+            'start_date' => now()->toDateString(),
+        ])->assertCreated()->json('data.id');
+
+        // Recompute must use the stored original rates (2% + 1%), not the
+        // previously computed peso amounts re-applied as percentages.
+        $response = $this->putJson("/api/loans/{$loanId}", [
+            'principal_amount' => 200000,
+        ]);
+
+        $response->assertSuccessful();
+        $this->assertEquals(6000, (float) $response->json('data.total_deductions'));
+        $this->assertEquals(194000, (float) $response->json('data.net_proceeds'));
+    }
+
     // ── 3. Term/frequency overrides ───────────────────────────────────────
 
     public function test_accepts_term_override(): void
