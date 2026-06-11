@@ -64,7 +64,7 @@ class LoanService
                 $deductions[] = ['name' => 'Service Fee', 'amount' => (float) $product->service_fee, 'type' => 'percentage'];
             }
             if ((float) ($product->notarial_fee ?? 0) > 0) {
-                $deductions[] = ['name' => 'Notarial Fee', 'amount' => (float) $product->notarial_fee, 'type' => 'fixed'];
+                $deductions[] = ['name' => 'Notarial Fee', 'amount' => (float) $product->notarial_fee, 'type' => 'percentage'];
             }
         }
 
@@ -144,7 +144,7 @@ class LoanService
 
         if ($needsRecompute) {
             $principal = (float) ($validated['principal_amount'] ?? $loan->principal_amount);
-            $deductions = $validated['deductions'] ?? $loan->deductions ?? [];
+            $deductions = $validated['deductions'] ?? $this->deductionInputsFrom($loan->deductions ?? []);
             $result = $this->computeDeductions($principal, $deductions);
             $validated['deductions'] = $result['items'];
             $validated['total_deductions'] = $result['total'];
@@ -318,6 +318,23 @@ class LoanService
         $loan->update(['status' => 'void']);
 
         return $loan;
+    }
+
+    /**
+     * Rebuild deduction inputs from stored deduction items so a recompute
+     * applies percentage fees off their original rate (`original_value`),
+     * not the previously computed peso amount.
+     *
+     * @param  array<int, array{name: string, amount: float|int|string, type: string, original_value?: float|int|string}>  $items
+     * @return array<int, array{name: string, amount: float|int|string, type: string}>
+     */
+    private function deductionInputsFrom(array $items): array
+    {
+        return array_map(static fn (array $item): array => [
+            'name' => $item['name'],
+            'amount' => $item['original_value'] ?? $item['amount'],
+            'type' => $item['type'],
+        ], $items);
     }
 
     public function computeDeductions(float $principalAmount, array $deductions): array
