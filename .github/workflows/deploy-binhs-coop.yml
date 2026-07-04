@@ -35,3 +35,22 @@ jobs:
             else
               bash /var/www/binhs-coop-api-staging/deploy.sh
             fi
+
+      # The VPS has intermittently flaky inbound SSH (dial tcp :22 i/o timeout).
+      # deploy.sh is idempotent, so retry once to ride out transient blips.
+      - name: Deploy to VPS via SSH (retry on transient failure)
+        if: failure()
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          timeout: 120s
+          command_timeout: 20m
+          script: |
+            set -e
+            if [ "${{ inputs.environment }}" = "production" ]; then
+              bash /var/www/binhs-coop-api/deploy.sh
+            else
+              bash /var/www/binhs-coop-api-staging/deploy.sh
+            fi
