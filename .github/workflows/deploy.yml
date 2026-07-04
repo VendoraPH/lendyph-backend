@@ -3,6 +3,8 @@ name: Deploy to VPS
 on:
   push:
     branches: [main]
+    # CI-only changes (e.g. the binhs-coop dispatch workflow) shouldn't deploy api-lendyph.
+    paths-ignore: ['.github/**']
 
 jobs:
   deploy:
