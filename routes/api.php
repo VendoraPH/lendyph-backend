@@ -7,6 +7,7 @@ use App\Http\Controllers\Api\AutoCreditController;
 use App\Http\Controllers\Api\AutoPayController;
 use App\Http\Controllers\Api\BorrowerController;
 use App\Http\Controllers\Api\BranchController;
+use App\Http\Controllers\Api\BrandingController;
 use App\Http\Controllers\Api\CollateralController;
 use App\Http\Controllers\Api\CollateralTypeController;
 use App\Http\Controllers\Api\CoMakerController;
@@ -41,6 +42,9 @@ Route::post('/auth/login', [AuthController::class, 'login'])->middleware('thrott
 
 // Public branch picker for the registration page — slim, no auth.
 Route::get('/branches/public', [BranchController::class, 'publicIndex']);
+
+// Public organization branding (logo) for the login/registration pages — no auth.
+Route::get('/branding/public', [BrandingController::class, 'publicShow']);
 
 // Public registration: anonymous borrower create (status=pending only) + the
 // two upload endpoints. Anonymous calls go through a 15-min submission token;
@@ -246,4 +250,9 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::get('/settings/approval-workflow', [ApprovalWorkflowController::class, 'show']);
     Route::put('/settings/approval-workflow', [ApprovalWorkflowController::class, 'update']);
     Route::delete('/settings/approval-workflow', [ApprovalWorkflowController::class, 'destroy']);
+
+    // Branding (organization logo)
+    Route::get('/settings/branding', [BrandingController::class, 'show']);
+    Route::post('/settings/branding/logo', [BrandingController::class, 'uploadLogo']);
+    Route::delete('/settings/branding/logo', [BrandingController::class, 'deleteLogo']);
 });
