@@ -18,7 +18,7 @@ class AuthTest extends TestCase
     public function test_login_with_valid_credentials(): void
     {
         $response = $this->postJson('/api/auth/login', [
-            'login' => 'admin',
+            'login' => 'super_admin',
             'password' => 'password',
         ]);
 
@@ -29,7 +29,7 @@ class AuthTest extends TestCase
     public function test_login_with_wrong_password(): void
     {
         $response = $this->postJson('/api/auth/login', [
-            'login' => 'admin',
+            'login' => 'super_admin',
             'password' => 'wrong',
         ]);
 
@@ -52,7 +52,7 @@ class AuthTest extends TestCase
         $this->app['auth']->forgetGuards();
 
         $loginResponse = $this->postJson('/api/auth/login', [
-            'login' => 'admin',
+            'login' => 'super_admin',
             'password' => 'password',
         ]);
 
