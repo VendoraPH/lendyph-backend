@@ -1,0 +1,34 @@
+# Disposable, RAM-backed MySQL for running the test suite fast.
+#
+# The data directory lives on tmpfs and InnoDB durability is disabled. This is
+# safe because the test database is throwaway — every test rebuilds its schema
+# via `migrate:fresh` (tests/Traits/SetupLendyPH). Removing fsync/doublewrite/
+# binlog is what makes that DDL cheap and is the single biggest test speed-up.
+#
+# Matches the connection hardcoded in phpunit.xml: database `lendyph_testing`,
+# user `root`, empty password, reachable on 127.0.0.1:3306.
+#
+# Usage:
+#   docker compose -f docker-compose.testing.yml up -d
+#   composer test:parallel      # or: php artisan test --parallel
+#   docker compose -f docker-compose.testing.yml down
+services:
+  mysql-test:
+    image: mysql:8.0
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+      MYSQL_DATABASE: lendyph_testing
+    tmpfs:
+      - /var/lib/mysql
+    command:
+      - --innodb-flush-log-at-trx-commit=0
+      - --innodb-doublewrite=0
+      - --skip-log-bin
+      - --innodb-buffer-pool-size=512M
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
