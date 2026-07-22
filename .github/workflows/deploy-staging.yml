@@ -1,9 +1,13 @@
-name: Deploy to VPS
+name: Deploy Staging to VPS
 
+# Auto-deploys the `staging` branch to the staging API instance
+# (/var/www/api-lendyph-staging) on every push, mirroring the production deploy
+# in deploy.yml. Gives the backend a deployed staging environment to match the
+# frontend's `development` -> staging site.
 on:
   push:
-    branches: [main]
-    # CI-only changes (e.g. the binhs-coop dispatch workflow) shouldn't deploy api-lendyph.
+    branches: [staging]
+    # CI-only changes (e.g. workflow edits) shouldn't trigger a staging deploy.
     paths-ignore: ['.github/**']
 
 jobs:
@@ -15,10 +19,10 @@ jobs:
     env:
       DEPLOY_SCRIPT: |
         set -e
-        cd /var/www/api-lendyph
+        cd /var/www/api-lendyph-staging
         # Discard any local changes (e.g. regenerated api-docs.json) to avoid pull conflicts
-        git fetch origin main
-        git reset --hard origin/main
+        git fetch origin staging
+        git reset --hard origin/staging
         COMPOSER_ALLOW_SUPERUSER=1 composer install --no-dev --optimize-autoloader --no-interaction
         php artisan migrate --force
         # Symlink public/storage -> storage/app/public so uploaded photos and
@@ -33,12 +37,12 @@ jobs:
         chown -R www-data:www-data storage bootstrap/cache
 
         # Ensure Laravel scheduler cron is installed (idempotent). Guard on the
-        # full `cd <path> &&` so it never collides with the staging cron on the
-        # same VPS — api-lendyph and api-lendyph-staging share one crontab.
-        CRON_CMD="* * * * * cd /var/www/api-lendyph && php artisan schedule:run >> /dev/null 2>&1"
-        (crontab -l 2>/dev/null | grep -qF "cd /var/www/api-lendyph &&" || (crontab -l 2>/dev/null; echo "$CRON_CMD") | crontab -)
+        # full `cd <path> &&` so it never collides with the production cron on
+        # the same VPS — api-lendyph and api-lendyph-staging share one crontab.
+        CRON_CMD="* * * * * cd /var/www/api-lendyph-staging && php artisan schedule:run >> /dev/null 2>&1"
+        (crontab -l 2>/dev/null | grep -qF "cd /var/www/api-lendyph-staging &&" || (crontab -l 2>/dev/null; echo "$CRON_CMD") | crontab -)
 
-        echo "Deployed at $(date)"
+        echo "Deployed staging at $(date)"
 
     steps:
       - name: Deploy via SSH
@@ -52,11 +56,9 @@ jobs:
           command_timeout: 20m
           script: ${{ env.DEPLOY_SCRIPT }}
 
-      # appleboy/ssh-action does not retry a dropped/timed-out connection.
-      # The 2026-06-05 deploy of #17 failed with a one-off "dial tcp :22 i/o
-      # timeout" while the VPS was healthy (a re-run succeeded immediately).
-      # The deploy script is idempotent, so retry once to ride out transient
-      # network blips instead of leaving main merged-but-undeployed.
+      # appleboy/ssh-action does not retry a dropped/timed-out connection, and
+      # the VPS has intermittently flaky inbound SSH (dial tcp :22 i/o timeout).
+      # The deploy script is idempotent, so retry once to ride out transient blips.
       - name: Deploy via SSH (retry on transient failure)
         if: failure()
         uses: appleboy/ssh-action@v1

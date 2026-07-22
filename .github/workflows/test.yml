@@ -1,0 +1,63 @@
+name: tests
+
+# Runs the Pest suite on PRs and on pushes to the long-lived branches.
+# deploy.yml uses `paths-ignore: ['.github/**']`, so adding this workflow does
+# not trigger a deploy.
+on:
+  pull_request:
+  push:
+    branches: [staging, main]
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pest:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # MySQL is started as an explicit container (not a GitHub `services:` block)
+      # because service containers can't override the command, and we need the
+      # tmpfs + durability-off flags. Matches phpunit.xml: lendyph_testing / root /
+      # empty password on 127.0.0.1:3306.
+      - name: Start MySQL (tmpfs, durability off)
+        run: |
+          docker run -d --name mysql-test \
+            -p 3306:3306 \
+            --tmpfs /var/lib/mysql \
+            -e MYSQL_ALLOW_EMPTY_PASSWORD=yes \
+            -e MYSQL_DATABASE=lendyph_testing \
+            mysql:8.0 \
+            --innodb-flush-log-at-trx-commit=0 \
+            --innodb-doublewrite=0 \
+            --skip-log-bin \
+            --innodb-buffer-pool-size=512M
+          echo "Waiting for MySQL to accept connections..."
+          for i in $(seq 1 60); do
+            if docker exec mysql-test mysqladmin ping -h 127.0.0.1 --silent 2>/dev/null; then
+              echo "MySQL ready"; exit 0
+            fi
+            sleep 2
+          done
+          echo "MySQL did not become ready"; docker logs mysql-test; exit 1
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_mysql, gd, mbstring, bcmath, intl, zip
+          coverage: none
+
+      - name: Install Composer dependencies
+        run: composer install --no-interaction --prefer-dist --no-progress
+
+      - name: Prepare environment
+        run: |
+          cp .env.example .env
+          php artisan key:generate
+
+      - name: Run tests (parallel)
+        run: php artisan test --parallel
