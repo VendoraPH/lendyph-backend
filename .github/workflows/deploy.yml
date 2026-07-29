@@ -15,7 +15,7 @@ jobs:
     env:
       DEPLOY_SCRIPT: |
         set -e
-        cd /var/www/api-lendyph
+        cd /var/www/lendyph-backend
         # Discard any local changes (e.g. regenerated api-docs.json) to avoid pull conflicts
         git fetch origin main
         git reset --hard origin/main
@@ -35,8 +35,8 @@ jobs:
         # Ensure Laravel scheduler cron is installed (idempotent). Guard on the
         # full `cd <path> &&` so it never collides with the staging cron on the
         # same VPS — api-lendyph and api-lendyph-staging share one crontab.
-        CRON_CMD="* * * * * cd /var/www/api-lendyph && php artisan schedule:run >> /dev/null 2>&1"
-        (crontab -l 2>/dev/null | grep -qF "cd /var/www/api-lendyph &&" || (crontab -l 2>/dev/null; echo "$CRON_CMD") | crontab -)
+        CRON_CMD="* * * * * cd /var/www/lendyph-backend && php artisan schedule:run >> /dev/null 2>&1"
+        (crontab -l 2>/dev/null | grep -qF "cd /var/www/lendyph-backend &&" || (crontab -l 2>/dev/null; echo "$CRON_CMD") | crontab -)
 
         echo "Deployed at $(date)"
 
