@@ -67,7 +67,17 @@ class AuthController extends Controller
 
         $token = $user->createToken('auth-token', ['*'], $expiry);
 
-        $user->update(['last_login_at' => now()]);
+        // `last_login_at` is deliberately absent from User::$fillable so it can
+        // never be set from request data — a client must not be able to forge
+        // its own last-login timestamp. update() therefore silently discarded
+        // it and the column stayed null for every user. forceFill() bypasses
+        // that guard for this one server-controlled write.
+        //
+        // saveQuietly() skips model events: the Auditable trait logs on
+        // `updated`, so a normal save would write a second audit row on every
+        // login, duplicating the explicit 'login' entry below and copying the
+        // bcrypt hash into audit_logs.old_values.
+        $user->forceFill(['last_login_at' => now()])->saveQuietly();
 
         AuditLogService::log('login', $user, description: "User {$user->username} logged in");
 
