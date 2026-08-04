@@ -93,12 +93,54 @@ class LoanExtensionTest extends TestCase
         $this->assertEqualsWithDelta(60000.00, (float) $newSchedule->principal_due, 0.01);
     }
 
-    public function test_it_rejects_non_upon_maturity_loan_with_422(): void
+    public function test_it_rejects_loan_whose_term_is_not_one_month_with_422(): void
     {
+        // Default test product is monthly / term 6 — right frequency, wrong term.
         $loan = $this->createReleasedLoan();
 
         $this->postJson("/api/loans/{$loan->id}/extend")
-            ->assertUnprocessable();
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('term');
+    }
+
+    public function test_it_extends_a_plain_monthly_one_month_loan_regardless_of_product(): void
+    {
+        // Extension is gated on term, not on the product being upon-maturity:
+        // a straight-interest monthly loan with a one-month term qualifies.
+        $loan = $this->createReleasedLoan([
+            'product' => [
+                'interest_method' => 'straight',
+                'frequency' => 'monthly',
+                'term' => 1,
+                'interest_rate' => 3.0,
+            ],
+            'principal_amount' => 60000,
+            'start_date' => '2026-04-27',
+        ]);
+
+        $this->postJson("/api/loans/{$loan->id}/extend", ['remarks' => 'one-month monthly loan'])
+            ->assertOk();
+
+        $this->assertSame(2, $loan->fresh()->term);
+    }
+
+    public function test_it_rejects_a_daily_loan_that_merely_runs_about_a_month(): void
+    {
+        // `term` is days here, not months — 30 daily periods is not a one-month term.
+        $loan = $this->createReleasedLoan([
+            'product' => [
+                'interest_method' => 'straight',
+                'frequency' => 'daily',
+                'term' => 30,
+                'interest_rate' => 3.0,
+            ],
+            'principal_amount' => 60000,
+            'start_date' => '2026-04-27',
+        ]);
+
+        $this->postJson("/api/loans/{$loan->id}/extend")
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('term');
     }
 
     public function test_it_rejects_loan_in_completed_status_with_422(): void

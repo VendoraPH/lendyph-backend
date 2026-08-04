@@ -74,15 +74,18 @@ class LoanAdjustmentService
      */
     public function extendLoan(Loan $loan, ?string $remarks, User $user): LoanAdjustment
     {
-        // `frequency` is the canonical bullet-loan flag (matches the frontend's
-        // isUponMaturity predicate). `interest_method` is accepted as a fallback
-        // because legacy products encode upon-maturity in the calculation field.
-        $isUponMaturity = $loan->frequency === 'upon_maturity'
-            || $loan->interest_method === 'upon_maturity';
+        // Extension is limited to one-month-term loans, whatever the product.
+        // `term` is a period count whose unit follows `frequency`, and it is
+        // only denominated in months for these two — see
+        // LoanService::computeMaturityDate. A "1 month term" is therefore
+        // exactly term === 1 on monthly or upon_maturity; a daily loan with
+        // term 30 is thirty daily periods, not a one-month loan.
+        $isOneMonthTerm = in_array($loan->frequency, ['monthly', 'upon_maturity'], true)
+            && (int) $loan->term === 1;
 
-        if (! $isUponMaturity) {
+        if (! $isOneMonthTerm) {
             throw ValidationException::withMessages([
-                'frequency' => 'Only upon-maturity loans can be extended.',
+                'term' => 'Only loans with a one-month term can be extended.',
             ]);
         }
 
