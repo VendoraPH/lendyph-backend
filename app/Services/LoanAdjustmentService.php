@@ -291,10 +291,20 @@ class LoanAdjustmentService
         $newValues = $adjustment->new_values;
         $waiveAll = $newValues['waive_all'] ?? false;
 
+        // Waiving every penalty on the loan must be asked for explicitly.
+        // Previously a payload with neither key fell through to the unfiltered
+        // query below and wiped them all — silently, and irreversibly.
+        // StoreLoanAdjustmentRequest rejects that payload; this is the second line.
+        if (! $waiveAll && empty($newValues['schedule_ids'])) {
+            throw ValidationException::withMessages([
+                'new_values.schedule_ids' => 'Select the schedules to waive, or set waive_all to true.',
+            ]);
+        }
+
         $query = $loan->amortizationSchedules()
             ->whereIn('status', ['pending', 'partial', 'overdue']);
 
-        if (! $waiveAll && ! empty($newValues['schedule_ids'])) {
+        if (! $waiveAll) {
             $query->whereIn('id', $newValues['schedule_ids']);
         }
 
