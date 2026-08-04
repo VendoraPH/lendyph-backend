@@ -174,6 +174,43 @@ class Loan extends Model
         return $this->hasMany(LoanAdjustment::class)->latest();
     }
 
+    /**
+     * The term the loan was written with, before any extension.
+     *
+     * Each extension bumps `term` by one, so the stored value stops describing
+     * how the loan was originally agreed. The earliest 'extension' adjustment
+     * captured the term as it was before that first roll-forward.
+     */
+    public function originalTerm(): int
+    {
+        $firstExtension = $this->adjustments()
+            // adjustments() is ordered latest-first; we want the earliest.
+            ->reorder('id')
+            ->where('adjustment_type', 'extension')
+            ->first();
+
+        return (int) ($firstExtension?->old_values['term'] ?? $this->term);
+    }
+
+    /**
+     * Whether this loan is eligible for the Extend Loan action.
+     *
+     * Extension is limited to one-month-term loans whatever the product.
+     * `term` is a period count whose unit follows `frequency` and is only
+     * denominated in months for these two — see
+     * LoanService::computeMaturityDate — so a daily loan with term 30 is
+     * thirty daily periods, not a one-month loan.
+     *
+     * The check reads the ORIGINAL term so a one-month loan stays extendable
+     * for as many cycles as it needs; gating on the current term would let a
+     * loan be extended exactly once and then lock it out.
+     */
+    public function isOneMonthTerm(): bool
+    {
+        return in_array($this->frequency, ['monthly', 'upon_maturity'], true)
+            && $this->originalTerm() === 1;
+    }
+
     protected function outstandingBalance(): Attribute
     {
         return Attribute::get(function () {

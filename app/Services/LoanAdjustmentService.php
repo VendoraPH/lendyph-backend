@@ -75,15 +75,11 @@ class LoanAdjustmentService
     public function extendLoan(Loan $loan, ?string $remarks, User $user): LoanAdjustment
     {
         // Extension is limited to one-month-term loans, whatever the product.
-        // `term` is a period count whose unit follows `frequency`, and it is
-        // only denominated in months for these two — see
-        // LoanService::computeMaturityDate. A "1 month term" is therefore
-        // exactly term === 1 on monthly or upon_maturity; a daily loan with
-        // term 30 is thirty daily periods, not a one-month loan.
-        $isOneMonthTerm = in_array($loan->frequency, ['monthly', 'upon_maturity'], true)
-            && (int) $loan->term === 1;
-
-        if (! $isOneMonthTerm) {
+        // Loan::isOneMonthTerm() reads the ORIGINAL term rather than the
+        // current one — each extension below bumps `term`, so checking the
+        // stored value would allow exactly one extension and then lock the
+        // loan out. A one-month loan can roll forward as often as needed.
+        if (! $loan->isOneMonthTerm()) {
             throw ValidationException::withMessages([
                 'term' => 'Only loans with a one-month term can be extended.',
             ]);
