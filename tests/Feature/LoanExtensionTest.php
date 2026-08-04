@@ -93,6 +93,52 @@ class LoanExtensionTest extends TestCase
         $this->assertEqualsWithDelta(60000.00, (float) $newSchedule->principal_due, 0.01);
     }
 
+    public function test_a_one_month_loan_can_be_extended_repeatedly(): void
+    {
+        // Each extension bumps `term`, so gating on the stored value would let
+        // a loan be extended exactly once and then lock it out. Eligibility
+        // reads the original term instead.
+        $loan = $this->makeUponMaturityLoan();
+
+        foreach ([2, 3, 4] as $expectedTerm) {
+            $this->postJson("/api/loans/{$loan->id}/extend", ['remarks' => 'roll forward'])
+                ->assertOk();
+
+            $this->assertSame($expectedTerm, $loan->fresh()->term);
+        }
+
+        $this->assertTrue($loan->fresh()->isOneMonthTerm());
+    }
+
+    public function test_original_term_survives_extensions(): void
+    {
+        $loan = $this->makeUponMaturityLoan();
+
+        $this->assertSame(1, $loan->originalTerm());
+
+        $this->postJson("/api/loans/{$loan->id}/extend")->assertOk();
+        $this->postJson("/api/loans/{$loan->id}/extend")->assertOk();
+
+        $loan->refresh();
+
+        $this->assertSame(3, $loan->term, 'term should have rolled forward twice');
+        $this->assertSame(1, $loan->originalTerm(), 'the original term must not drift');
+    }
+
+    public function test_extension_eligibility_is_exposed_on_the_loan_resource(): void
+    {
+        $eligible = $this->makeUponMaturityLoan();
+        $ineligible = $this->createReleasedLoan(); // monthly / term 6
+
+        $this->getJson("/api/loans/{$eligible->id}")
+            ->assertOk()
+            ->assertJsonPath('data.is_one_month_term', true);
+
+        $this->getJson("/api/loans/{$ineligible->id}")
+            ->assertOk()
+            ->assertJsonPath('data.is_one_month_term', false);
+    }
+
     public function test_it_rejects_loan_whose_term_is_not_one_month_with_422(): void
     {
         // Default test product is monthly / term 6 — right frequency, wrong term.
