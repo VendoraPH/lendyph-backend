@@ -31,6 +31,75 @@ class LoanAdjustmentTest extends TestCase
         $this->assertNotNull($response->json('data.old_values'));
     }
 
+    public function test_penalty_waiver_requires_an_explicit_selection(): void
+    {
+        // Without this the payload reached a handler that waived the penalties
+        // on every open schedule of the loan — silently, and irreversibly.
+        $loan = $this->createReleasedLoan();
+
+        $this->postJson("/api/loans/{$loan->id}/adjustments", [
+            'adjustment_type' => 'penalty_waiver',
+            'new_values' => ['penalty_waived' => 500],
+            'description' => 'Waive a specific amount',
+        ])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('new_values.schedule_ids');
+    }
+
+    public function test_balance_adjustment_requires_adjustment_amount(): void
+    {
+        // `outstanding_balance` is not the contract — the handler reads
+        // new_values['adjustment_amount'] directly, so a missing key was a 500.
+        $loan = $this->createReleasedLoan();
+
+        $this->postJson("/api/loans/{$loan->id}/adjustments", [
+            'adjustment_type' => 'balance_adjustment',
+            'new_values' => ['outstanding_balance' => 12345],
+            'description' => 'Set a new balance',
+        ])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('new_values.adjustment_amount');
+    }
+
+    public function test_term_extension_requires_additional_terms(): void
+    {
+        // `term` is the restructure field; term_extension reads additional_terms.
+        $loan = $this->createReleasedLoan();
+
+        $this->postJson("/api/loans/{$loan->id}/adjustments", [
+            'adjustment_type' => 'term_extension',
+            'new_values' => ['term' => 9],
+            'description' => 'Extend the term',
+        ])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('new_values.additional_terms');
+    }
+
+    public function test_restructure_requires_at_least_one_figure(): void
+    {
+        $loan = $this->createReleasedLoan();
+
+        $this->postJson("/api/loans/{$loan->id}/adjustments", [
+            'adjustment_type' => 'restructure',
+            'new_values' => ['reason' => 'nothing to change'],
+            'description' => 'Empty restructure',
+        ])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('new_values');
+    }
+
+    public function test_penalty_waiver_with_schedule_ids_is_accepted(): void
+    {
+        $loan = $this->createReleasedLoan();
+        $scheduleId = $loan->amortizationSchedules()->value('id');
+
+        $this->postJson("/api/loans/{$loan->id}/adjustments", [
+            'adjustment_type' => 'penalty_waiver',
+            'new_values' => ['schedule_ids' => [$scheduleId]],
+            'description' => 'Waive one schedule',
+        ])->assertCreated();
+    }
+
     public function test_approve_and_apply_penalty_waiver(): void
     {
         $loan = $this->createReleasedLoan();
