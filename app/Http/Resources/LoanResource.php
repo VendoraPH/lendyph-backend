@@ -15,6 +15,7 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'interest_rate', type: 'number'),
         new OA\Property(property: 'interest_method', type: 'string'),
         new OA\Property(property: 'term', type: 'integer'),
+        new OA\Property(property: 'is_one_month_term', type: 'boolean', description: 'Eligible for POST /loans/{id}/extend — based on the original term, not the current one'),
         new OA\Property(property: 'frequency', type: 'string'),
         new OA\Property(property: 'principal_amount', type: 'number'),
         new OA\Property(property: 'purpose', type: 'string', nullable: true),
@@ -105,6 +106,11 @@ class LoanResource extends JsonResource
             'interest_rate' => $this->interest_rate,
             'interest_method' => $this->interest_method,
             'term' => $this->term,
+            // Eligibility for the Extend Loan action. Derived here rather than
+            // in the client because it depends on the loan's ORIGINAL term,
+            // which `term` no longer reflects once an extension has been
+            // applied — the UI cannot work it out from this payload alone.
+            'is_one_month_term' => $this->isOneMonthTerm(),
             'frequency' => $this->frequency,
             'principal_amount' => (float) $this->principal_amount,
             'purpose' => $this->purpose,
