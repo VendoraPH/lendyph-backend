@@ -50,6 +50,9 @@ class LoanController extends Controller
         $this->authorize('loans:view');
 
         $loans = Loan::with('borrower', 'loanProduct', 'branch', 'createdByUser', 'amortizationSchedules')
+            // Aliased count so LoanResource's extension_count reads an
+            // already-loaded value instead of firing a COUNT query per row.
+            ->withCount(['adjustments as extension_count' => fn ($q) => $q->where('adjustment_type', 'extension')])
             ->when(request('search'), function ($q, $search) {
                 $q->where(function ($query) use ($search) {
                     $query->where('application_number', 'like', "%{$search}%")
@@ -356,7 +359,7 @@ class LoanController extends Controller
     #[OA\Post(
         path: '/api/loans/{id}/extend',
         summary: 'Extend an upon-maturity loan by one cycle',
-        description: 'Rolls the maturity date forward by one frequency cycle. Carries unpaid principal and unpaid interest into a new period and accrues fresh interest using the loan\'s existing rate. Records a directly-applied LoanAdjustment row of type "extension".',
+        description: 'Rolls the maturity date forward by one frequency cycle and accrues one cycle of fresh interest at the loan\'s existing rate. `interest_option` decides what happens to interest already outstanding: "pay" collects it as a repayment first, so the new period carries only the fresh interest; "defer" leaves it unpaid so it stacks on top (₱50 outstanding + ₱50 fresh = ₱100 due). Both the repayment and the extension happen in one transaction. Records a directly-applied LoanAdjustment row of type "extension".',
         tags: ['Loans'],
         security: [['sanctum' => []]],
         parameters: [
@@ -364,8 +367,10 @@ class LoanController extends Controller
         ],
         requestBody: new OA\RequestBody(
             content: new OA\JsonContent(
+                required: ['interest_option'],
                 properties: [
                     new OA\Property(property: 'remarks', type: 'string', nullable: true, maxLength: 1000),
+                    new OA\Property(property: 'interest_option', type: 'string', enum: ['pay', 'defer'], description: 'pay = collect the outstanding interest before extending; defer = carry it into the new period'),
                 ],
             ),
         ),
@@ -378,7 +383,12 @@ class LoanController extends Controller
     )]
     public function extend(ExtendLoanRequest $request, Loan $loan): JsonResponse
     {
-        $this->loanAdjustmentService->extendLoan($loan, $request->input('remarks'), $request->user());
+        $this->loanAdjustmentService->extendLoan(
+            $loan,
+            $request->input('remarks'),
+            $request->user(),
+            $request->input('interest_option'),
+        );
 
         $loan->refresh()->load(
             'borrower', 'loanProduct', 'branch', 'coMakers',

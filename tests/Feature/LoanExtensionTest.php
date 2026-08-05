@@ -2,12 +2,16 @@
 
 namespace Tests\Feature;
 
+use App\Models\AmortizationSchedule;
 use App\Models\AuditLog;
 use App\Models\Loan;
 use App\Models\LoanAdjustment;
+use App\Models\Repayment;
 use App\Models\Role;
 use App\Models\User;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\DB;
+use RuntimeException;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
@@ -42,6 +46,7 @@ class LoanExtensionTest extends TestCase
         $expectedNewDueDate = Carbon::parse($originalDueDate)->copy()->addMonth()->toDateString();
 
         $response = $this->postJson("/api/loans/{$loan->id}/extend", [
+            'interest_option' => 'defer',
             'remarks' => 'Borrower needs more time',
         ]);
 
@@ -52,7 +57,9 @@ class LoanExtensionTest extends TestCase
 
         $this->assertSame('released', $loan->status);
         $this->assertSame($expectedNewDueDate, $loan->maturity_date->toDateString());
-        $this->assertSame(2, $loan->term);
+        // `term` is the agreed value, not how far the loan has rolled forward.
+        $this->assertSame(1, $loan->term);
+        $this->assertSame(1, $loan->extension_count);
 
         $this->assertCount(1, $loan->amortizationSchedules);
         $newSchedule = $loan->amortizationSchedules->first();
@@ -83,7 +90,7 @@ class LoanExtensionTest extends TestCase
             'status' => 'partial',
         ]);
 
-        $this->postJson("/api/loans/{$loan->id}/extend")->assertOk();
+        $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'defer'])->assertOk();
 
         $loan->refresh()->load('amortizationSchedules');
         $newSchedule = $loan->amortizationSchedules->first();
@@ -93,36 +100,186 @@ class LoanExtensionTest extends TestCase
         $this->assertEqualsWithDelta(60000.00, (float) $newSchedule->principal_due, 0.01);
     }
 
-    public function test_a_one_month_loan_can_be_extended_repeatedly(): void
+    public function test_defer_stacks_the_outstanding_interest_onto_the_fresh_cycle(): void
     {
-        // Each extension bumps `term`, so gating on the stored value would let
-        // a loan be extended exactly once and then lock it out. Eligibility
-        // reads the original term instead.
+        // The behaviour the team described: ₱1,800 already due, extend, another
+        // ₱1,800 accrues, so the new period owes ₱3,600 and nothing is collected.
         $loan = $this->makeUponMaturityLoan();
 
-        foreach ([2, 3, 4] as $expectedTerm) {
-            $this->postJson("/api/loans/{$loan->id}/extend", ['remarks' => 'roll forward'])
-                ->assertOk();
+        $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'defer'])
+            ->assertOk();
 
-            $this->assertSame($expectedTerm, $loan->fresh()->term);
-        }
+        $newSchedule = $loan->fresh()->amortizationSchedules()->first();
 
-        $this->assertTrue($loan->fresh()->isOneMonthTerm());
+        $this->assertEqualsWithDelta(3600.00, (float) $newSchedule->interest_due, 0.01);
+        $this->assertSame(0, Repayment::where('loan_id', $loan->id)->count(), 'defer must not collect anything');
+
+        $adj = LoanAdjustment::where('loan_id', $loan->id)->first();
+        $this->assertSame('defer', $adj->new_values['interest_option']);
+        $this->assertEqualsWithDelta(0.0, (float) $adj->new_values['interest_paid'], 0.01);
     }
 
-    public function test_original_term_survives_extensions(): void
+    public function test_pay_collects_the_outstanding_interest_so_only_fresh_interest_carries(): void
     {
         $loan = $this->makeUponMaturityLoan();
 
-        $this->assertSame(1, $loan->originalTerm());
+        // Keep the period current. processRepayment applies penalties to
+        // overdue schedules before allocating, and allocation runs
+        // penalty → interest → principal, so an overdue loan would spend part
+        // of this payment on the penalty and leave interest behind. That case
+        // is covered separately below; here we want the clean path.
+        $loan->amortizationSchedules()->update([
+            'due_date' => now()->addWeek()->toDateString(),
+            'status' => 'pending',
+        ]);
 
-        $this->postJson("/api/loans/{$loan->id}/extend")->assertOk();
-        $this->postJson("/api/loans/{$loan->id}/extend")->assertOk();
+        $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'pay'])
+            ->assertOk();
+
+        $newSchedule = $loan->fresh()->amortizationSchedules()->first();
+
+        // The ₱1,800 already due was settled, so only the fresh cycle remains.
+        $this->assertEqualsWithDelta(1800.00, (float) $newSchedule->interest_due, 0.01);
+
+        $repayment = Repayment::where('loan_id', $loan->id)->first();
+        $this->assertNotNull($repayment, 'pay must record the interest collection');
+        $this->assertEqualsWithDelta(1800.00, (float) $repayment->amount_paid, 0.01);
+
+        $adj = LoanAdjustment::where('loan_id', $loan->id)->first();
+        $this->assertSame('pay', $adj->new_values['interest_option']);
+        $this->assertEqualsWithDelta(1800.00, (float) $adj->new_values['interest_paid'], 0.01);
+    }
+
+    public function test_pay_on_an_overdue_loan_settles_the_penalty_first_so_some_interest_carries(): void
+    {
+        // Documented, inherited behaviour rather than a bug introduced here:
+        // "Pay Outstanding Interest" collects the interest figure the dialog
+        // shows, but processRepayment applies penalties to overdue schedules
+        // and allocates penalty → interest → principal. On an overdue loan the
+        // penalty is taken out of that amount first, so interest is only
+        // partly settled and the remainder carries into the new period.
+        //
+        // The client-side version behaved identically. Pinning it here so a
+        // future change to the allocation order is visible rather than silent.
+        $loan = $this->makeUponMaturityLoan();   // fixture is already overdue
+
+        $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'pay'])
+            ->assertOk();
+
+        $newSchedule = $loan->fresh()->amortizationSchedules()->first();
+
+        $this->assertNotNull(Repayment::where('loan_id', $loan->id)->first());
+        $this->assertGreaterThan(
+            1800.00,
+            (float) $newSchedule->interest_due,
+            'an overdue loan should carry the interest the penalty consumed',
+        );
+    }
+
+    public function test_the_interest_option_is_required(): void
+    {
+        $loan = $this->makeUponMaturityLoan();
+
+        $this->postJson("/api/loans/{$loan->id}/extend")
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('interest_option');
+
+        $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'sometimes'])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('interest_option');
+    }
+
+    public function test_a_failed_extension_does_not_leave_the_interest_payment_behind(): void
+    {
+        // The reason collection moved server-side. Previously the client posted
+        // the repayment and then called extend; a failure in between left the
+        // borrower charged with no extension, and the guard against re-charging
+        // was a useRef that reset whenever the dialog was reopened.
+        $loan = $this->makeUponMaturityLoan();
+
+        // Fail at the rebuild step, which runs after the repayment is written
+        // and before the transaction commits — precisely the window that used
+        // to leave an orphaned payment.
+        AmortizationSchedule::creating(function () {
+            throw new RuntimeException('forced failure after the interest was collected');
+        });
+
+        try {
+            $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'pay']);
+        } catch (RuntimeException) {
+            // expected — the point is what survives in the database
+        }
+
+        $this->assertSame(
+            0,
+            Repayment::where('loan_id', $loan->id)->count(),
+            'the repayment must roll back with the failed extension',
+        );
+    }
+
+    public function test_a_one_month_loan_can_be_extended_repeatedly(): void
+    {
+        // `term` no longer moves on extension, so eligibility keeps reading
+        // true across as many cycles as the loan needs instead of drifting
+        // out of range after the first one.
+        $loan = $this->makeUponMaturityLoan();
+        $originalDueDate = $loan->amortizationSchedules->first()->due_date->toDateString();
+
+        foreach (range(1, 3) as $i) {
+            $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'defer', 'remarks' => 'roll forward'])
+                ->assertOk();
+
+            $this->assertSame(1, $loan->fresh()->term, "term must still read 1 after extension {$i}");
+        }
+
+        $loan->refresh()->load('amortizationSchedules');
+
+        $this->assertSame(
+            Carbon::parse($originalDueDate)->copy()->addMonths(3)->toDateString(),
+            $loan->maturity_date->toDateString(),
+        );
+        $this->assertSame(3, $loan->extension_count);
+
+        // Still extendable — a 4th roll-forward succeeds rather than being
+        // locked out by an inflated term.
+        $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'defer'])
+            ->assertOk();
+        $this->assertSame(1, $loan->fresh()->term);
+    }
+
+    public function test_extension_history_still_records_term_values_even_though_the_loan_column_stops_drifting(): void
+    {
+        $loan = $this->makeUponMaturityLoan();
+
+        $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'defer'])->assertOk();
+        $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'defer'])->assertOk();
 
         $loan->refresh();
 
-        $this->assertSame(3, $loan->term, 'term should have rolled forward twice');
-        $this->assertSame(1, $loan->originalTerm(), 'the original term must not drift');
+        $this->assertSame(1, $loan->term, 'the loan column must not drift');
+        $this->assertSame(2, $loan->extension_count);
+
+        $adjustments = LoanAdjustment::where('loan_id', $loan->id)
+            ->where('adjustment_type', 'extension')
+            ->orderBy('id')
+            ->get();
+
+        $this->assertCount(2, $adjustments);
+
+        // old_values keeps the term as it stood — that is what the drift
+        // backfill reads. new_values must NOT carry a term: extending does not
+        // change it, and recording one would put a change in the audit trail
+        // that never happened.
+        foreach ($adjustments as $adjustment) {
+            $this->assertSame(1, $adjustment->old_values['term']);
+            $this->assertArrayNotHasKey('term', $adjustment->new_values);
+        }
+
+        // The maturity date is what actually moves, once per extension.
+        $this->assertNotSame(
+            $adjustments->first()->new_values['maturity_date'],
+            $adjustments->last()->new_values['maturity_date'],
+        );
     }
 
     public function test_extension_eligibility_is_exposed_on_the_loan_resource(): void
@@ -144,7 +301,7 @@ class LoanExtensionTest extends TestCase
         // Default test product is monthly / term 6 — right frequency, wrong term.
         $loan = $this->createReleasedLoan();
 
-        $this->postJson("/api/loans/{$loan->id}/extend")
+        $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'defer'])
             ->assertUnprocessable()
             ->assertJsonValidationErrors('term');
     }
@@ -164,10 +321,10 @@ class LoanExtensionTest extends TestCase
             'start_date' => '2026-04-27',
         ]);
 
-        $this->postJson("/api/loans/{$loan->id}/extend", ['remarks' => 'one-month monthly loan'])
+        $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'defer', 'remarks' => 'one-month monthly loan'])
             ->assertOk();
 
-        $this->assertSame(2, $loan->fresh()->term);
+        $this->assertSame(1, $loan->fresh()->term);
     }
 
     public function test_it_rejects_a_daily_loan_that_merely_runs_about_a_month(): void
@@ -184,7 +341,7 @@ class LoanExtensionTest extends TestCase
             'start_date' => '2026-04-27',
         ]);
 
-        $this->postJson("/api/loans/{$loan->id}/extend")
+        $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'defer'])
             ->assertUnprocessable()
             ->assertJsonValidationErrors('term');
     }
@@ -194,7 +351,7 @@ class LoanExtensionTest extends TestCase
         $loan = $this->makeUponMaturityLoan();
         $loan->update(['status' => 'completed']);
 
-        $this->postJson("/api/loans/{$loan->id}/extend")
+        $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'defer'])
             ->assertUnprocessable();
     }
 
@@ -206,7 +363,7 @@ class LoanExtensionTest extends TestCase
         $cashier->assignRole(Role::where('name', 'cashier')->first());
         $this->actingAs($cashier);
 
-        $this->postJson("/api/loans/{$loan->id}/extend")
+        $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'defer'])
             ->assertForbidden();
     }
 
@@ -214,7 +371,7 @@ class LoanExtensionTest extends TestCase
     {
         $loan = $this->makeUponMaturityLoan();
 
-        $extendResponse = $this->postJson("/api/loans/{$loan->id}/extend")->assertOk();
+        $extendResponse = $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'defer'])->assertOk();
         $showResponse = $this->getJson("/api/loans/{$loan->id}")->assertOk();
 
         $this->assertEqualsCanonicalizing(
@@ -231,7 +388,7 @@ class LoanExtensionTest extends TestCase
             ->where('action', 'updated')
             ->count();
 
-        $this->postJson("/api/loans/{$loan->id}/extend")->assertOk();
+        $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'defer'])->assertOk();
 
         $afterCount = AuditLog::where('auditable_id', $loan->id)
             ->where('auditable_type', $loan->getMorphClass())
@@ -246,7 +403,7 @@ class LoanExtensionTest extends TestCase
         $loan = $this->makeUponMaturityLoan();
         $loan->amortizationSchedules()->update(['status' => 'paid']);
 
-        $this->postJson("/api/loans/{$loan->id}/extend")
+        $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'defer'])
             ->assertUnprocessable();
     }
 
@@ -265,6 +422,7 @@ class LoanExtensionTest extends TestCase
         ]);
 
         $this->postJson("/api/loans/{$loan->id}/extend", [
+            'interest_option' => 'defer',
             'remarks' => 'frequency-driven upon-maturity extension',
         ])->assertOk()
             ->assertJsonPath('data.id', $loan->id);
@@ -274,5 +432,57 @@ class LoanExtensionTest extends TestCase
             'adjustment_type' => 'extension',
             'status' => 'applied',
         ]);
+    }
+
+    public function test_backfill_command_resets_a_drifted_loan_but_leaves_others_alone(): void
+    {
+        $drifted = $this->makeUponMaturityLoan();
+        LoanAdjustment::factory()->create([
+            'loan_id' => $drifted->id,
+            'adjustment_type' => 'extension',
+            'old_values' => ['term' => 1],
+            'new_values' => ['term' => 2],
+            'status' => 'applied',
+            'adjusted_by' => $this->admin->id,
+        ]);
+        // Simulate the historical bug this command repairs: the loan column
+        // rolled forward the way the fixed extendLoan() no longer does.
+        DB::table('loans')->where('id', $drifted->id)->update(['term' => 2]);
+
+        $extendedButNotDrifted = $this->makeUponMaturityLoan();
+        LoanAdjustment::factory()->create([
+            'loan_id' => $extendedButNotDrifted->id,
+            'adjustment_type' => 'extension',
+            'old_values' => ['term' => 1],
+            'new_values' => ['term' => 2],
+            'status' => 'applied',
+            'adjusted_by' => $this->admin->id,
+        ]);
+
+        $neverExtended = $this->makeUponMaturityLoan();
+
+        $this->artisan('loans:backfill-term-drift')->assertSuccessful();
+
+        $this->assertSame(1, $drifted->fresh()->term, 'the drifted loan must be repaired');
+        $this->assertSame(1, $extendedButNotDrifted->fresh()->term, 'a loan that never drifted must be left alone');
+        $this->assertSame(1, $neverExtended->fresh()->term, 'a loan with no extension history must be untouched');
+    }
+
+    public function test_backfill_command_dry_run_writes_nothing(): void
+    {
+        $drifted = $this->makeUponMaturityLoan();
+        LoanAdjustment::factory()->create([
+            'loan_id' => $drifted->id,
+            'adjustment_type' => 'extension',
+            'old_values' => ['term' => 1],
+            'new_values' => ['term' => 2],
+            'status' => 'applied',
+            'adjusted_by' => $this->admin->id,
+        ]);
+        DB::table('loans')->where('id', $drifted->id)->update(['term' => 2]);
+
+        $this->artisan('loans:backfill-term-drift', ['--dry-run' => true])->assertSuccessful();
+
+        $this->assertSame(2, $drifted->fresh()->term, 'dry-run must not write anything');
     }
 }
