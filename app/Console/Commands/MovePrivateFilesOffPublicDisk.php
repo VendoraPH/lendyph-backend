@@ -77,6 +77,18 @@ class MovePrivateFilesOffPublicDisk extends Command
 
         $this->info("Moved {$moved} file(s); {$skipped} already private; {$failed} failed.");
 
+        // The private disk has no `visibility` set, so Flysystem creates
+        // directories 0700 / files 0600 — correct for identity documents, but
+        // it means only the owning user can read them. Run this as root and
+        // php-fpm (www-data) cannot open a single file: every signed link
+        // returns 404 while the file sits happily on disk.
+        if ($moved > 0 && function_exists('posix_geteuid') && posix_geteuid() === 0) {
+            $this->newLine();
+            $this->warn('Ran as root, so the moved files are root-owned and 0700 — the web user cannot read them.');
+            $this->warn('Fix ownership before the links will work:');
+            $this->line('  chown -R www-data:www-data '.storage_path('app/private'));
+        }
+
         return $failed > 0 ? self::FAILURE : self::SUCCESS;
     }
 }
