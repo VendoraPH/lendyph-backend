@@ -16,7 +16,7 @@ class BorrowerValidIdTest extends TestCase
     {
         parent::setUp();
         $this->seedAndLogin();
-        Storage::fake('public');
+        Storage::fake('private');
     }
 
     public function test_upload_valid_id_success(): void

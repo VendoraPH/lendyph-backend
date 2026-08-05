@@ -295,20 +295,20 @@ DESC,
             // Delete co-maker documents from disk
             foreach ($borrower->coMakers as $coMaker) {
                 foreach ($coMaker->documents as $doc) {
-                    Storage::disk('public')->delete($doc->file_path);
+                    Storage::disk('private')->delete($doc->file_path);
                 }
                 $coMaker->documents()->delete();
             }
 
             // Delete borrower documents from disk
             foreach ($borrower->documents as $doc) {
-                Storage::disk('public')->delete($doc->file_path);
+                Storage::disk('private')->delete($doc->file_path);
             }
             $borrower->documents()->delete();
 
             // Delete photo from disk
             if ($borrower->photo_path) {
-                Storage::disk('public')->delete($borrower->photo_path);
+                Storage::disk('private')->delete($borrower->photo_path);
             }
 
             // Delete share capital records (FK uses restrictOnDelete)
@@ -568,17 +568,17 @@ DESC,
                 DB::transaction(function () use ($borrower) {
                     foreach ($borrower->coMakers as $coMaker) {
                         foreach ($coMaker->documents as $doc) {
-                            Storage::disk('public')->delete($doc->file_path);
+                            Storage::disk('private')->delete($doc->file_path);
                         }
                         $coMaker->documents()->delete();
                     }
                     foreach ($borrower->documents as $doc) {
-                        Storage::disk('public')->delete($doc->file_path);
+                        Storage::disk('private')->delete($doc->file_path);
                     }
                     $borrower->documents()->delete();
 
                     if ($borrower->photo_path) {
-                        Storage::disk('public')->delete($borrower->photo_path);
+                        Storage::disk('private')->delete($borrower->photo_path);
                     }
 
                     $borrower->shareCapitalLedger()->delete();
@@ -644,16 +644,16 @@ DESC,
         // Store the new photo BEFORE touching the old one so a failed upload
         // cannot leave the borrower without a photo.
         $oldPath = $borrower->photo_path;
-        $newPath = $request->file('photo')->store("borrowers/photos/{$borrower->id}", 'public');
+        $newPath = $request->file('photo')->store("borrowers/photos/{$borrower->id}", 'private');
         $borrower->update(['photo_path' => $newPath]);
 
         if ($oldPath) {
-            Storage::disk('public')->delete($oldPath);
+            Storage::disk('private')->delete($oldPath);
         }
 
         return response()->json([
             'message' => 'Photo uploaded successfully.',
-            'photo_url' => Storage::disk('public')->url($newPath),
+            'photo_url' => $borrower->fresh()->photo_url,
         ]);
     }
 
@@ -675,7 +675,7 @@ DESC,
         $this->authorize('borrowers:update');
 
         if ($borrower->photo_path) {
-            Storage::disk('public')->delete($borrower->photo_path);
+            Storage::disk('private')->delete($borrower->photo_path);
             $borrower->update(['photo_path' => null]);
         }
 
@@ -760,7 +760,7 @@ DESC,
         } catch (\Throwable $e) {
             // Roll back any files written to disk before the DB failure
             foreach ($storedPaths as $path) {
-                Storage::disk('public')->delete($path);
+                Storage::disk('private')->delete($path);
             }
             throw $e;
         }
@@ -778,7 +778,7 @@ DESC,
 
     private function storeValidIdFile(Borrower $borrower, UploadedFile $file, string $type, ?string $customTypeName, ?string $idNumber, ?string $side, array &$storedPaths): Document
     {
-        $path = $file->store("documents/valid_id/borrower/{$borrower->id}", 'public');
+        $path = $file->store("documents/valid_id/borrower/{$borrower->id}", 'private');
         $storedPaths[] = $path;
 
         return $borrower->documents()->create([
@@ -903,7 +903,7 @@ DESC,
 
         DB::transaction(function () use ($pair) {
             foreach ($pair as $doc) {
-                Storage::disk('public')->delete($doc->file_path);
+                Storage::disk('private')->delete($doc->file_path);
                 $doc->delete();
             }
         });

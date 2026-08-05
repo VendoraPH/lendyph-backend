@@ -4,7 +4,6 @@ namespace App\Http\Resources;
 
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
-use Illuminate\Support\Facades\Storage;
 use OpenApi\Attributes as OA;
 
 #[OA\Schema(
@@ -41,7 +40,9 @@ class BorrowerResource extends JsonResource
 {
     public function toArray(Request $request): array
     {
-        $photoUrl = $this->photo_path ? Storage::disk('public')->url($this->photo_path) : null;
+        // Signed, expiring link minted by Borrower::photoUrl — the file is on
+        // the private disk and has no directly reachable URL.
+        $photoUrl = $this->photo_url;
 
         return [
             'id' => $this->id,

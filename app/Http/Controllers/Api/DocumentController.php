@@ -180,7 +180,7 @@ class DocumentController extends Controller
         $type = $request->input('type');
 
         $modelType = strtolower(class_basename($parent));
-        $path = $file->store("documents/{$type}/{$modelType}/{$parent->id}", 'public');
+        $path = $file->store("documents/{$type}/{$modelType}/{$parent->id}", 'private');
 
         $document = $parent->documents()->create([
             'type' => $type,
@@ -238,7 +238,7 @@ class DocumentController extends Controller
     {
         $this->authorize('borrowers:delete');
 
-        Storage::disk('public')->delete($document->file_path);
+        Storage::disk('private')->delete($document->file_path);
 
         AuditLogService::log('deleted', $document->documentable, description: "Document '{$document->type}' deleted");
 

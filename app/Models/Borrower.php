@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Http\Controllers\Api\FileController;
 use App\Traits\Auditable;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -10,6 +11,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Database\Eloquent\Relations\MorphMany;
+use Illuminate\Support\Facades\URL;
 
 class Borrower extends Model
 {
@@ -88,6 +90,23 @@ class Borrower extends Model
             $this->last_name,
             $this->suffix,
         ])->filter()->implode(' '));
+    }
+
+    /**
+     * A temporary signed link to the borrower's photo, or null if none is set.
+     *
+     * The photo is on the private disk and is not web-reachable; this link is
+     * the only way in and expires shortly after being minted.
+     */
+    protected function photoUrl(): Attribute
+    {
+        return Attribute::get(fn () => $this->photo_path
+            ? URL::temporarySignedRoute(
+                'files.borrower-photo',
+                now()->addMinutes(FileController::LINK_TTL_MINUTES),
+                ['borrower' => $this->getKey()],
+            )
+            : null);
     }
 
     public function branch(): BelongsTo
