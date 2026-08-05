@@ -163,7 +163,7 @@ class CoMakerController extends Controller
         $this->authorize('borrowers:delete');
 
         foreach ($coMaker->documents as $doc) {
-            Storage::disk('public')->delete($doc->file_path);
+            Storage::disk('private')->delete($doc->file_path);
         }
         $coMaker->documents()->delete();
         $coMaker->delete();
