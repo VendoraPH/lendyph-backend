@@ -25,7 +25,7 @@ class PublicRegistrationTest extends TestCase
         $this->seed(DatabaseSeeder::class);
         $this->branch = Branch::first();
         $this->admin = User::where('username', 'super_admin')->first();
-        Storage::fake('public');
+        Storage::fake('private');
         // Note: NOT calling actingAs() — these specs cover the anonymous flow.
     }
 

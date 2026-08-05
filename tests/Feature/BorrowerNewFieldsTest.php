@@ -17,7 +17,7 @@ beforeEach(function () {
     $this->branch = Branch::first();
     $this->admin = User::where('username', 'super_admin')->first();
     $this->actingAs($this->admin);
-    Storage::fake('public');
+    Storage::fake('private');
 });
 
 it('rejects duplicate email on create', function () {

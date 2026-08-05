@@ -14,6 +14,7 @@ use App\Http\Controllers\Api\CoMakerController;
 use App\Http\Controllers\Api\DashboardController;
 use App\Http\Controllers\Api\DisclosureController;
 use App\Http\Controllers\Api\DocumentController;
+use App\Http\Controllers\Api\FileController;
 use App\Http\Controllers\Api\FeeController;
 use App\Http\Controllers\Api\GCashReportController;
 use App\Http\Controllers\Api\GCashTierController;
@@ -45,6 +46,18 @@ Route::get('/branches/public', [BranchController::class, 'publicIndex']);
 
 // Public organization branding (logo) for the login/registration pages — no auth.
 Route::get('/branding/public', [BrandingController::class, 'publicShow']);
+
+// Borrower KYC documents and photos, off the private disk. Authenticated by a
+// temporary signature rather than a bearer token: these URLs are consumed by
+// <img src>, which cannot send an Authorization header. Links are only minted
+// while serialising a response for an already-authorised caller, and expire
+// after FileController::LINK_TTL_MINUTES.
+Route::middleware('signed')->group(function () {
+    Route::get('/files/documents/{document}', [FileController::class, 'document'])
+        ->name('files.document');
+    Route::get('/files/borrowers/{borrower}/photo', [FileController::class, 'borrowerPhoto'])
+        ->name('files.borrower-photo');
+});
 
 // Public registration: anonymous borrower create (status=pending only) + the
 // two upload endpoints. Anonymous calls go through a 15-min submission token;

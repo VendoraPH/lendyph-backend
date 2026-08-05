@@ -38,11 +38,28 @@ return [
             'report' => false,
         ],
 
+        // Anything on this disk is reachable by URL with no authentication at
+        // all — nginx serves public/storage straight off the filesystem. Only
+        // genuinely public assets belong here; today that is the organisation
+        // logo, which the sign-in and registration pages render before anyone
+        // has logged in. Borrower KYC documents and photos live on `private`.
         'public' => [
             'driver' => 'local',
             'root' => storage_path('app/public'),
             'url' => rtrim(env('APP_URL', 'http://localhost'), '/').'/storage',
             'visibility' => 'public',
+            'throw' => false,
+            'report' => false,
+        ],
+
+        // Borrower photos and KYC documents (valid IDs, loan paperwork). Not
+        // web-reachable: there is no symlink into public/, so the only way in
+        // is a temporary signed URL served by FileController. Shares a root
+        // with `local`; named separately so call sites read as a deliberate
+        // choice rather than a default.
+        'private' => [
+            'driver' => 'local',
+            'root' => storage_path('app/private'),
             'throw' => false,
             'report' => false,
         ],

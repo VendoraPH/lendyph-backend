@@ -114,7 +114,7 @@ class LoanDocumentTest extends TestCase
 
     public function test_uploads_policy_exception_letter_to_loan(): void
     {
-        Storage::fake('public');
+        Storage::fake('private');
 
         $loan = $this->createReleasedLoan();
         $file = UploadedFile::fake()->create('letter.pdf', 200, 'application/pdf');
@@ -138,12 +138,12 @@ class LoanDocumentTest extends TestCase
         $document = Document::where('documentable_type', Loan::class)
             ->where('documentable_id', $loan->id)
             ->first();
-        Storage::disk('public')->assertExists($document->file_path);
+        Storage::disk('private')->assertExists($document->file_path);
     }
 
     public function test_lists_uploaded_loan_documents(): void
     {
-        Storage::fake('public');
+        Storage::fake('private');
 
         $loan = $this->createReleasedLoan();
 
@@ -164,7 +164,7 @@ class LoanDocumentTest extends TestCase
 
     public function test_loan_document_upload_requires_loans_update_permission(): void
     {
-        Storage::fake('public');
+        Storage::fake('private');
 
         $loan = $this->createReleasedLoan();
 
@@ -190,7 +190,7 @@ class LoanDocumentTest extends TestCase
 
     public function test_loan_document_upload_rejects_oversized_file(): void
     {
-        Storage::fake('public');
+        Storage::fake('private');
 
         $loan = $this->createReleasedLoan();
 
