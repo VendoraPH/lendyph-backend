@@ -11,6 +11,7 @@ use App\Http\Requests\Loan\ReleaseLoanRequest;
 use App\Http\Requests\Loan\StoreLoanRequest;
 use App\Http\Requests\Loan\UpdateLoanRequest;
 use App\Http\Resources\AmortizationScheduleResource;
+use App\Http\Resources\LoanLedgerEntryResource;
 use App\Http\Resources\LoanResource;
 use App\Models\Loan;
 use App\Services\AutoPayService;
@@ -519,6 +520,35 @@ class LoanController extends Controller
         return response()->json([
             'data' => AmortizationScheduleResource::collection($schedules),
             'summary' => $summary,
+        ]);
+    }
+
+    #[OA\Get(
+        path: '/api/loans/{id}/ledger-entries',
+        summary: 'Loan ledger entries',
+        description: 'Debits and credits recorded against the loan, oldest first. Extending a loan writes a debit for the interest it accrues, plus a credit when the outstanding interest was collected first. Kept out of the loan resource because entries accumulate per extension.',
+        tags: ['Loans'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
+        ],
+        responses: [
+            new OA\Response(response: 200, description: 'Ledger entries'),
+            new OA\Response(response: 403, description: 'Missing loans:view permission'),
+            new OA\Response(response: 404, description: 'Loan not found'),
+        ],
+    )]
+    public function ledgerEntries(Loan $loan): JsonResponse
+    {
+        $this->authorize('loans:view');
+
+        $entries = $loan->ledgerEntries()
+            ->orderBy('entry_date')
+            ->orderBy('id')
+            ->get();
+
+        return response()->json([
+            'data' => LoanLedgerEntryResource::collection($entries),
         ]);
     }
 }

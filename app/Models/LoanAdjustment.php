@@ -6,6 +6,7 @@ use App\Traits\Auditable;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class LoanAdjustment extends Model
 {
@@ -34,6 +35,11 @@ class LoanAdjustment extends Model
             'approved_at' => 'datetime',
             'applied_at' => 'datetime',
         ];
+    }
+
+    public function ledgerEntries(): HasMany
+    {
+        return $this->hasMany(LoanLedgerEntry::class);
     }
 
     protected static function booted(): void
