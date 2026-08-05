@@ -12,7 +12,10 @@ use Illuminate\Validation\ValidationException;
 
 class LoanAdjustmentService
 {
-    public function __construct(private LoanService $loanService) {}
+    public function __construct(
+        private LoanService $loanService,
+        private RepaymentService $repaymentService,
+    ) {}
 
     public function createAdjustment(Loan $loan, array $validated, User $user): LoanAdjustment
     {
@@ -72,8 +75,31 @@ class LoanAdjustmentService
      * loan's existing rate, and records the action as a directly-applied
      * LoanAdjustment row (no pending → approved → applied workflow).
      */
-    public function extendLoan(Loan $loan, ?string $remarks, User $user): LoanAdjustment
-    {
+    /**
+     * Roll an upon-maturity loan forward by one cycle.
+     *
+     * `$interestOption` decides what happens to interest already outstanding:
+     *
+     *   'pay'   — collect it as a repayment first, so the new period carries
+     *             only the freshly accrued interest.
+     *   'defer' — leave it unpaid; it carries into the new period and stacks
+     *             on top of the fresh interest (₱50 outstanding + ₱50 fresh
+     *             becomes ₱50 + ₱50 = ₱100 due).
+     *
+     * The collection happens inside this method's transaction rather than as a
+     * separate call from the client. Previously the UI posted the repayment and
+     * then called extend; if the extend failed the payment was already
+     * committed, and the client-side guard against re-charging was a useRef
+     * that reset whenever the dialog was reopened or the page refreshed. Doing
+     * both here means either the borrower is charged AND the loan extends, or
+     * neither happens.
+     */
+    public function extendLoan(
+        Loan $loan,
+        ?string $remarks,
+        User $user,
+        string $interestOption = 'pay',
+    ): LoanAdjustment {
         // Extension is limited to one-month-term loans, whatever the product.
         // Loan::isOneMonthTerm() reads the ORIGINAL term rather than the
         // current one — each extension below bumps `term`, so checking the
@@ -91,57 +117,83 @@ class LoanAdjustmentService
             ]);
         }
 
-        $openSchedules = $loan->amortizationSchedules()
-            ->whereIn('status', ['pending', 'partial', 'overdue'])
-            ->get();
-
-        if ($openSchedules->isEmpty()) {
+        if (! $loan->amortizationSchedules()->whereIn('status', ['pending', 'partial', 'overdue'])->exists()) {
             throw ValidationException::withMessages([
                 'loan' => 'Loan has no open period to extend.',
             ]);
         }
 
-        $carryPrincipal = round($openSchedules->sum(
-            fn ($s) => (float) $s->principal_due - (float) $s->principal_paid,
-        ), 2);
-        $carryInterest = round($openSchedules->sum(
-            fn ($s) => (float) $s->interest_due - (float) $s->interest_paid,
-        ), 2);
+        return DB::transaction(function () use ($loan, $user, $remarks, $interestOption) {
+            $oldMaturityDate = $loan->maturity_date->toDateString();
+            $oldTerm = $loan->term;
 
-        $latestOpenDueDate = Carbon::parse($openSchedules->max('due_date'));
-        $maxPeriodNumber = (int) $loan->amortizationSchedules()->max('period_number');
+            $openBefore = $this->openSchedules($loan);
+            $interestBefore = $this->outstandingInterest($openBefore);
 
-        // PH monthly-rate convention — same as LoanService::buildUponMaturity.
-        $freshInterest = round($carryPrincipal * ((float) $loan->interest_rate / 100), 2);
+            // Settle the accrued interest first so the new period starts clean.
+            // Allocation inside processRepayment runs penalty → interest →
+            // principal, so where a penalty is outstanding this amount is
+            // consumed by that first and some interest still carries. That
+            // matches what the UI did before this moved server-side, and the
+            // carry figures below are re-read afterwards, so the arithmetic
+            // stays correct either way.
+            $interestPaid = 0.0;
 
-        $newDueDate = $this->stepNextPeriod($latestOpenDueDate, $loan->frequency);
+            if ($interestOption === 'pay' && $interestBefore > 0) {
+                $this->repaymentService->processRepayment(
+                    $loan,
+                    $interestBefore,
+                    now()->toDateString(),
+                    $user,
+                    $remarks ?: '[EXTENSION INTEREST]',
+                );
 
-        $oldValues = [
-            'maturity_date' => $loan->maturity_date->toDateString(),
-            'term' => $loan->term,
-            'open_principal' => $carryPrincipal,
-            'open_interest' => $carryInterest,
-            'open_schedule_due_date' => $latestOpenDueDate->toDateString(),
-        ];
+                $interestPaid = $interestBefore;
+            }
 
-        $newInterestDue = round($carryInterest + $freshInterest, 2);
-        $newTotalDue = round($carryPrincipal + $newInterestDue, 2);
-        $newTerm = $loan->term + 1;
+            // Re-read: on the 'pay' path the rows above have just been
+            // allocated against, so this is what genuinely remains.
+            $openSchedules = $this->openSchedules($loan);
 
-        $newValues = [
-            'maturity_date' => $newDueDate->toDateString(),
-            'term' => $newTerm,
-            'carry_principal' => $carryPrincipal,
-            'carry_interest' => $carryInterest,
-            'fresh_interest' => $freshInterest,
-            'new_due_date' => $newDueDate->toDateString(),
-        ];
+            $carryPrincipal = round($openSchedules->sum(
+                fn ($s) => (float) $s->principal_due - (float) $s->principal_paid,
+            ), 2);
+            $carryInterest = $this->outstandingInterest($openSchedules);
 
-        return DB::transaction(function () use (
-            $loan, $user, $remarks, $oldValues, $newValues,
-            $carryPrincipal, $newInterestDue, $newTotalDue,
-            $newDueDate, $maxPeriodNumber, $newTerm,
-        ) {
+            $latestOpenDueDate = Carbon::parse($openSchedules->max('due_date'));
+            $maxPeriodNumber = (int) $loan->amortizationSchedules()->max('period_number');
+
+            // PH monthly-rate convention — same as LoanService::buildUponMaturity.
+            // One flat cycle regardless of how many days the cycle spans.
+            $freshInterest = round($carryPrincipal * ((float) $loan->interest_rate / 100), 2);
+
+            $newDueDate = $this->stepNextPeriod($latestOpenDueDate, $loan->frequency);
+
+            // On 'defer' this is where the stacking happens: the unpaid interest
+            // is still in $carryInterest and the fresh cycle is added on top.
+            $newInterestDue = round($carryInterest + $freshInterest, 2);
+            $newTotalDue = round($carryPrincipal + $newInterestDue, 2);
+            $newTerm = $loan->term + 1;
+
+            $oldValues = [
+                'maturity_date' => $oldMaturityDate,
+                'term' => $oldTerm,
+                'open_principal' => $carryPrincipal,
+                'open_interest' => $interestBefore,
+                'open_schedule_due_date' => $latestOpenDueDate->toDateString(),
+            ];
+
+            $newValues = [
+                'maturity_date' => $newDueDate->toDateString(),
+                'term' => $newTerm,
+                'carry_principal' => $carryPrincipal,
+                'carry_interest' => $carryInterest,
+                'fresh_interest' => $freshInterest,
+                'new_due_date' => $newDueDate->toDateString(),
+                'interest_option' => $interestOption,
+                'interest_paid' => $interestPaid,
+            ];
+
             $loan->amortizationSchedules()
                 ->whereIn('status', ['pending', 'partial', 'overdue'])
                 ->delete();
@@ -174,6 +226,26 @@ class LoanAdjustmentService
                 'applied_at' => now(),
             ]);
         });
+    }
+
+    /**
+     * @return \Illuminate\Database\Eloquent\Collection<int, AmortizationSchedule>
+     */
+    private function openSchedules(Loan $loan): \Illuminate\Database\Eloquent\Collection
+    {
+        return $loan->amortizationSchedules()
+            ->whereIn('status', ['pending', 'partial', 'overdue'])
+            ->get();
+    }
+
+    /**
+     * @param  \Illuminate\Support\Collection<int, AmortizationSchedule>  $schedules
+     */
+    private function outstandingInterest($schedules): float
+    {
+        return round($schedules->sum(
+            fn ($s) => (float) $s->interest_due - (float) $s->interest_paid,
+        ), 2);
     }
 
     private function stepNextPeriod(Carbon $date, string $frequency): Carbon
