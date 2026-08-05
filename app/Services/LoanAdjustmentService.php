@@ -173,8 +173,6 @@ class LoanAdjustmentService
             // is still in $carryInterest and the fresh cycle is added on top.
             $newInterestDue = round($carryInterest + $freshInterest, 2);
             $newTotalDue = round($carryPrincipal + $newInterestDue, 2);
-            $newTerm = $loan->term + 1;
-
             $oldValues = [
                 'maturity_date' => $oldMaturityDate,
                 'term' => $oldTerm,
@@ -185,7 +183,10 @@ class LoanAdjustmentService
 
             $newValues = [
                 'maturity_date' => $newDueDate->toDateString(),
-                'term' => $newTerm,
+                // No `term` here: extending does not change the agreed term,
+                // and recording one would put a change in the audit trail that
+                // never happened. `old_values['term']` keeps the term as it
+                // stood, which is what the drift backfill reads.
                 'carry_principal' => $carryPrincipal,
                 'carry_interest' => $carryInterest,
                 'fresh_interest' => $freshInterest,
@@ -210,8 +211,10 @@ class LoanAdjustmentService
             ]);
 
             $loan->update([
+                // Only the maturity date moves. `term` is the term the loan was
+                // agreed at and stays fixed however many cycles it rolls
+                // forward — see Loan::extensionCount() for how far it has.
                 'maturity_date' => $newDueDate,
-                'term' => $newTerm,
             ]);
 
             return LoanAdjustment::create([

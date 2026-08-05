@@ -50,6 +50,9 @@ class LoanController extends Controller
         $this->authorize('loans:view');
 
         $loans = Loan::with('borrower', 'loanProduct', 'branch', 'createdByUser', 'amortizationSchedules')
+            // Aliased count so LoanResource's extension_count reads an
+            // already-loaded value instead of firing a COUNT query per row.
+            ->withCount(['adjustments as extension_count' => fn ($q) => $q->where('adjustment_type', 'extension')])
             ->when(request('search'), function ($q, $search) {
                 $q->where(function ($query) use ($search) {
                     $query->where('application_number', 'like', "%{$search}%")
