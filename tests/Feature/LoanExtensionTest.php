@@ -120,6 +120,16 @@ class LoanExtensionTest extends TestCase
     {
         $loan = $this->makeUponMaturityLoan();
 
+        // Keep the period current. processRepayment applies penalties to
+        // overdue schedules before allocating, and allocation runs
+        // penalty → interest → principal, so an overdue loan would spend part
+        // of this payment on the penalty and leave interest behind. That case
+        // is covered separately below; here we want the clean path.
+        $loan->amortizationSchedules()->update([
+            'due_date' => now()->addWeek()->toDateString(),
+            'status' => 'pending',
+        ]);
+
         $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'pay'])
             ->assertOk();
 
@@ -135,6 +145,32 @@ class LoanExtensionTest extends TestCase
         $adj = LoanAdjustment::where('loan_id', $loan->id)->first();
         $this->assertSame('pay', $adj->new_values['interest_option']);
         $this->assertEqualsWithDelta(1800.00, (float) $adj->new_values['interest_paid'], 0.01);
+    }
+
+    public function test_pay_on_an_overdue_loan_settles_the_penalty_first_so_some_interest_carries(): void
+    {
+        // Documented, inherited behaviour rather than a bug introduced here:
+        // "Pay Outstanding Interest" collects the interest figure the dialog
+        // shows, but processRepayment applies penalties to overdue schedules
+        // and allocates penalty → interest → principal. On an overdue loan the
+        // penalty is taken out of that amount first, so interest is only
+        // partly settled and the remainder carries into the new period.
+        //
+        // The client-side version behaved identically. Pinning it here so a
+        // future change to the allocation order is visible rather than silent.
+        $loan = $this->makeUponMaturityLoan();   // fixture is already overdue
+
+        $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'pay'])
+            ->assertOk();
+
+        $newSchedule = $loan->fresh()->amortizationSchedules()->first();
+
+        $this->assertNotNull(Repayment::where('loan_id', $loan->id)->first());
+        $this->assertGreaterThan(
+            1800.00,
+            (float) $newSchedule->interest_due,
+            'an overdue loan should carry the interest the penalty consumed',
+        );
     }
 
     public function test_the_interest_option_is_required(): void
