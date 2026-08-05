@@ -175,6 +175,15 @@ class Loan extends Model
     }
 
     /**
+     * Debits and credits recorded against this loan, oldest first — a ledger
+     * only makes sense read forwards.
+     */
+    public function ledgerEntries(): HasMany
+    {
+        return $this->hasMany(LoanLedgerEntry::class)->orderBy('entry_date')->orderBy('id');
+    }
+
+    /**
      * Whether this loan is eligible for the Extend Loan action.
      *
      * Extension is limited to one-month-term loans whatever the product.

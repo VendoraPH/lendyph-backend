@@ -149,6 +149,7 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::patch('/loans/{loan}/release', [LoanController::class, 'release']);
     Route::patch('/loans/{loan}/void', [LoanController::class, 'void']);
     Route::post('/loans/{loan}/extend', [LoanController::class, 'extend']);
+    Route::get('/loans/{loan}/ledger-entries', [LoanController::class, 'ledgerEntries']);
     Route::patch('/loans/{loan}/auto-pay', [LoanController::class, 'toggleAutoPay']);
     Route::get('/loans/{loan}/amortization-preview', [LoanController::class, 'amortizationPreview']);
     Route::get('/loans/{loan}/amortization-schedule', [LoanController::class, 'amortizationSchedule']);
