@@ -89,7 +89,7 @@ class PrivateFileAccessTest extends TestCase
 
     public function test_a_signed_link_for_one_document_does_not_open_another(): void
     {
-        [$borrower] = $this->makeBorrowerWithDocument();
+        [$borrower, $document] = $this->makeBorrowerWithDocument();
 
         $other = Document::create([
             'documentable_type' => Borrower::class,
@@ -101,12 +101,13 @@ class PrivateFileAccessTest extends TestCase
             'file_size' => 5,
         ]);
 
-        $signedForOther = $other->url;
+        // Swap in an id that genuinely EXISTS: pointing at a missing row would
+        // 404 at route-model binding before the signature was ever checked,
+        // which proves nothing. With a real target, the only thing standing
+        // between the caller and someone else's document is the signature.
+        $tampered = str_replace("/{$other->id}?", "/{$document->id}?", $other->url);
 
-        // Swapping the id invalidates the signature rather than serving the
-        // other file — the id is part of what is signed.
-        $this->get(str_replace("/{$other->id}?", '/999999?', $signedForOther))
-            ->assertForbidden();
+        $this->get($tampered)->assertForbidden();
     }
 
     public function test_borrower_photo_is_served_through_a_signed_link(): void
