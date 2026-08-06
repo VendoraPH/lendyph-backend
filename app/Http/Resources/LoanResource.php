@@ -86,7 +86,6 @@ class LoanResource extends JsonResource
     {
         // Compute payment-related fields from loaded schedules to avoid N+1
         $nextDueDate = null;
-        $outstandingBalance = 0.0;
         $currentDue = 0.0;
         $overdueAmount = 0.0;
         $totalPenalty = 0.0;
@@ -109,11 +108,6 @@ class LoanResource extends JsonResource
                     2,
                 );
             }
-
-            // Outstanding principal balance
-            $outstandingBalance = round($this->amortizationSchedules->sum(function ($s) {
-                return max(0, (float) $s->principal_due - (float) $s->principal_paid);
-            }), 2);
 
             // Overdue = sum of remaining amounts on schedules past due date
             $overdueSchedules = $unpaidSchedules->filter(fn ($s) => $s->due_date->lt($today));
@@ -170,7 +164,13 @@ class LoanResource extends JsonResource
                 return $doc?->url;
             }),
             'status' => $this->status,
-            'outstanding_balance' => $outstandingBalance,
+            // Read from the model accessor rather than recomputed here: this is
+            // the same figure the reports and exports use, it includes any
+            // uncollected insurance premium, and it stays correct when the
+            // caller did not eager-load `amortizationSchedules` (this used to
+            // silently serialise 0 — which is why every Releases List row read
+            // as fully paid).
+            'outstanding_balance' => $this->outstanding_balance,
             'next_due_date' => $nextDueDate,
             'current_due' => $currentDue,
             'overdue_amount' => $overdueAmount,
