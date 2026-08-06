@@ -3,8 +3,13 @@
 namespace Tests\Feature;
 
 use App\Models\AmortizationSchedule;
+use App\Models\Borrower;
 use App\Models\Loan;
+use App\Models\LoanProduct;
 use App\Models\Repayment;
+use App\Models\Role;
+use App\Models\User;
+use App\Services\LoanService;
 use Carbon\Carbon;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
@@ -208,6 +213,73 @@ class ReportAccuracyTest extends TestCase
         $this->assertEqualsWithDelta(0, $summary->json('data.at_risk_amount'), 0.01);
         $this->assertEqualsWithDelta(0, $summary->json('data.par_ratio'), 0.01);
         $this->assertSame(0, $summary->json('data.overdue.loan_count'));
+    }
+
+    /**
+     * The same outcome, but driven end to end through the real endpoints.
+     *
+     * The two tests above assert what the reports do with a closure state that
+     * this test file constructs by hand. Nothing checked that
+     * `LoanService::closeRestructuredSource()` actually produces that state —
+     * ReportAccuracyTest simulates the closure with an update(), and
+     * LoanRestructureTest never looks at a report — so a change to the closure
+     * could break every delinquency report while both suites stayed green. This
+     * closes that seam: restructure for real, then read the reports.
+     *
+     * The source loan carries an uncollected insurance premium on purpose. The
+     * resource accessor adds insurance into the outstanding balance, so if the
+     * closure ever stops zeroing it, a written-off loan starts reporting a
+     * balance again.
+     */
+    public function test_restructuring_through_the_endpoint_drops_the_loan_from_every_delinquency_report(): void
+    {
+        $source = $this->createLoanWithUncollectedInsurance();
+        $this->moveScheduleDaysAgo($source, periodNumber: 1, daysAgo: 40);
+
+        $this->assertSame(1, $this->getJson('/api/reports/aging')->assertOk()->json('data.total.count'));
+        $this->assertSame(1, $this->getJson('/api/reports/due-past-due')->assertOk()->json('totals.count'));
+        $this->assertSame(1, $this->getJson('/api/reports/loan-balance-summary')->assertOk()->json('data.active_loans'));
+
+        $replacement = Loan::findOrFail(
+            $this->postJson("/api/loans/{$source->id}/restructure", [
+                'borrower_id' => $source->borrower_id,
+                'loan_product_id' => $source->loan_product_id,
+                'principal_amount' => 70000,
+                'start_date' => Carbon::today()->toDateString(),
+                'remarks' => 'Shortfall written off per committee resolution.',
+            ])->assertCreated()->json('data.id')
+        );
+
+        $this->releaseThroughEndpoints($replacement);
+
+        $source->refresh();
+        $this->assertSame('restructured', $source->status);
+        $this->assertEqualsWithDelta(0, (float) $source->insurance_remaining_balance, 0.01);
+        $this->assertEqualsWithDelta(0, (float) $source->outstanding_balance, 0.01);
+
+        $this->getJson("/api/loans/{$source->id}")->assertOk()
+            ->assertJsonPath('data.status', 'restructured')
+            ->assertJsonPath('data.outstanding_balance', fn ($v) => abs((float) $v) < 0.01);
+
+        // Money that went out the door stays in the historical reports.
+        $releases = $this->getJson('/api/reports/releases')->assertOk();
+        $this->assertContains($source->id, array_column($releases->json('data'), 'id'));
+        $this->assertSame(2, $this->getJson('/api/reports/disbursements')->assertOk()->json('data.loans_released'));
+
+        $summary = $this->getJson('/api/reports/loan-balance-summary')->assertOk();
+        $this->assertSame(2, $summary->json('data.portfolio.loan_count'), 'Historical count keeps the closed loan.');
+
+        // But it is neither active nor delinquent any more.
+        $this->assertSame(1, $summary->json('data.active_loans'), 'Only the replacement is active.');
+        $this->assertSame(1, $summary->json('data.portfolio.active_loan_count'));
+
+        $aging = $this->getJson('/api/reports/aging')->assertOk();
+        $this->assertSame(0, $aging->json('data.total.count'));
+        $this->assertEqualsWithDelta(0, $aging->json('data.total.amount'), 0.01);
+
+        $duePastDue = $this->getJson('/api/reports/due-past-due')->assertOk();
+        $this->assertSame(0, $duePastDue->json('totals.count'));
+        $this->assertSame([], $duePastDue->json('data'));
     }
 
     public function test_restructure_closed_loan_is_not_delinquent_even_with_a_stray_open_schedule(): void
@@ -552,6 +624,65 @@ class ReportAccuracyTest extends TestCase
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────
+
+    /**
+     * A released loan whose insurance premium was only partly collected, so
+     * `insurance_remaining_balance` is non-zero going into a restructure.
+     */
+    private function createLoanWithUncollectedInsurance(): Loan
+    {
+        $product = LoanProduct::factory()->create([
+            'interest_rate' => 3.0,
+            'interest_method' => 'straight',
+            'term' => 6,
+            'frequency' => 'monthly',
+            'penalty_rate' => 2.0,
+            'grace_period_days' => 3,
+        ]);
+
+        $loanService = app(LoanService::class);
+
+        $loan = $loanService->createLoan([
+            'borrower_id' => Borrower::factory()->create(['branch_id' => $this->branch->id])->id,
+            'loan_product_id' => $product->id,
+            'principal_amount' => 60000,
+            'start_date' => Carbon::today()->toDateString(),
+        ], $this->admin);
+
+        $loanService->submitForReview($loan);
+        $loanService->approve($loan, $this->admin, 'Approved for testing');
+
+        $this->patchJson("/api/loans/{$loan->id}/release", [
+            'insurance_premium_percentage' => 1.0,
+            'insurance_premium_amount' => 600,
+            'insurance_payment_type' => 'partial',
+            'insurance_partial_amount' => 200,
+            'insurance_remaining_balance' => 400,
+        ])->assertOk();
+
+        return $loan->fresh();
+    }
+
+    /**
+     * Drive an application to released through the same endpoints the frontend
+     * uses. Approval needs a second user because maker-checker forbids approving
+     * your own application.
+     */
+    private function releaseThroughEndpoints(Loan $loan): void
+    {
+        $approver = tap(
+            User::factory()->create(),
+            fn (User $user) => $user->assignRole(Role::where('name', 'admin')->firstOrFail()),
+        );
+
+        $this->patchJson("/api/loans/{$loan->id}/submit")->assertOk();
+
+        $this->actingAs($approver);
+        $this->patchJson("/api/loans/{$loan->id}/approve", ['approval_remarks' => 'ok'])->assertOk();
+
+        $this->actingAs($this->admin);
+        $this->patchJson("/api/loans/{$loan->id}/release")->assertOk();
+    }
 
     /**
      * Re-date one instalment relative to today so a report scenario can be set
