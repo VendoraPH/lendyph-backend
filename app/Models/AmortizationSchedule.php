@@ -10,6 +10,49 @@ class AmortizationSchedule extends Model
 {
     use HasFactory;
 
+    /**
+     * Statuses a schedule can be in while it still owes money.
+     *
+     * Anything outside this list is settled and must never appear in a
+     * due/past-due, aging, or outstanding figure.
+     */
+    public const UNPAID_STATUSES = ['pending', 'partial', 'overdue'];
+
+    /**
+     * SQL for the principal a single schedule row still owes.
+     *
+     * Floored at zero per ROW on purpose: an overpayment recorded against one
+     * period must not net off what another period still owes, which is exactly
+     * how `SUM(principal_due) - SUM(principal_paid)` used to understate the
+     * portfolio. Every aggregate outstanding figure must go through these.
+     */
+    public static function remainingPrincipalSql(): string
+    {
+        return 'GREATEST(principal_due - principal_paid, 0)';
+    }
+
+    public static function remainingInterestSql(): string
+    {
+        return 'GREATEST(interest_due - interest_paid, 0)';
+    }
+
+    public static function remainingPenaltySql(): string
+    {
+        return 'GREATEST(penalty_amount - penalty_paid, 0)';
+    }
+
+    /**
+     * Principal + interest + penalty still owed on a single schedule row.
+     *
+     * Parenthesised so a caller can safely wrap or scale the whole expression.
+     */
+    public static function remainingTotalSql(): string
+    {
+        return '('.self::remainingPrincipalSql()
+            .' + '.self::remainingInterestSql()
+            .' + '.self::remainingPenaltySql().')';
+    }
+
     protected $fillable = [
         'loan_id',
         'period_number',

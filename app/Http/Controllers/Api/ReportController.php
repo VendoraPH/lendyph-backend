@@ -6,13 +6,13 @@ use App\Http\Controllers\Api\Traits\CsvExportTrait;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\LoanResource;
 use App\Http\Resources\RepaymentResource;
-use App\Models\AmortizationSchedule;
 use App\Models\Borrower;
 use App\Models\Loan;
-use App\Models\Repayment;
 use App\Services\ReportService;
+use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
+use Illuminate\Validation\Rule;
 use OpenApi\Attributes as OA;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
@@ -21,6 +21,34 @@ class ReportController extends Controller
     use CsvExportTrait;
 
     public function __construct(private ReportService $reportService) {}
+
+    /**
+     * Validate the filter parameters the reports share.
+     *
+     * Every report funnels its query string through here so a malformed date
+     * comes back as a 422 the client can act on, instead of reaching
+     * `Carbon::parse()` and surfacing as a 500.
+     *
+     * @param  array<string, array<int, string>>  $extra  Endpoint-specific rules.
+     * @return array<string, mixed>
+     */
+    private function reportFilters(array $extra = []): array
+    {
+        return request()->validate(array_merge([
+            'date' => ['nullable', 'date'],
+            'as_of_date' => ['nullable', 'date'],
+            'date_from' => ['nullable', 'date'],
+            'date_to' => array_values(array_filter([
+                'nullable',
+                'date',
+                // Only a cross-field rule when there is a field to compare to.
+                request()->filled('date_from') ? 'after_or_equal:date_from' : null,
+            ])),
+            'branch_id' => ['nullable', 'integer'],
+            'loan_id' => ['nullable', 'integer'],
+            'per_page' => ['nullable', 'integer', 'min:1', 'max:1000'],
+        ], $extra));
+    }
 
     #[OA\Get(
         path: '/api/reports/statement-of-account/{loan}',
@@ -66,10 +94,7 @@ class ReportController extends Controller
         $this->authorize('reports:view');
 
         return response()->json([
-            'data' => $this->reportService->subsidiaryLedger(
-                $borrower,
-                request()->only('date_from', 'date_to'),
-            ),
+            'data' => $this->reportService->subsidiaryLedger($borrower, $this->reportFilters()),
         ]);
     }
 
@@ -83,7 +108,7 @@ class ReportController extends Controller
             new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
-            new OA\Parameter(name: 'status', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['released', 'ongoing', 'completed'])),
+            new OA\Parameter(name: 'status', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['released', 'ongoing', 'completed', 'defaulted', 'restructured'])),
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15)),
         ],
         responses: [
@@ -94,11 +119,14 @@ class ReportController extends Controller
     {
         $this->authorize('reports:view');
 
-        $results = $this->reportService->listOfReleases(
-            request()->only('date_from', 'date_to', 'branch_id', 'status', 'per_page'),
-        );
+        $filters = $this->reportFilters([
+            'status' => ['nullable', 'string', Rule::in(Loan::EVER_RELEASED_STATUSES)],
+        ]);
 
-        return LoanResource::collection($results);
+        return LoanResource::collection($this->reportService->listOfReleases($filters))
+            // Totals over the full filtered set — the client caps its fetch at
+            // one page and must not add the visible rows up itself.
+            ->additional(['totals' => $this->reportService->listOfReleasesTotals($filters)]);
     }
 
     #[OA\Get(
@@ -123,11 +151,12 @@ class ReportController extends Controller
     {
         $this->authorize('reports:view');
 
-        $results = $this->reportService->listOfRepayments(
-            request()->only('date_from', 'date_to', 'branch_id', 'loan_id', 'status', 'per_page'),
-        );
+        $filters = $this->reportFilters([
+            'status' => ['nullable', 'string', 'in:posted,voided'],
+        ]);
 
-        return RepaymentResource::collection($results);
+        return RepaymentResource::collection($this->reportService->listOfRepayments($filters))
+            ->additional(['totals' => $this->reportService->listOfRepaymentsTotals($filters)]);
     }
 
     #[OA\Get(
@@ -150,34 +179,46 @@ class ReportController extends Controller
     {
         $this->authorize('reports:view');
 
-        $results = $this->reportService->listOfDuePastDue(
-            request()->only('date_from', 'date_to', 'branch_id', 'per_page'),
-        );
+        $filters = $this->reportFilters();
+        $results = $this->reportService->listOfDuePastDue($filters);
+        $today = Carbon::today();
 
         return response()->json([
-            'data' => $results->getCollection()->map(fn ($s) => [
-                'id' => $s->id,
-                'loan_id' => $s->loan_id,
-                'loan_account_number' => $s->loan?->loan_account_number,
-                'borrower_name' => $s->loan?->borrower?->full_name,
-                'borrower_code' => $s->loan?->borrower?->borrower_code,
-                'branch_name' => $s->loan?->branch?->name,
-                'period_number' => $s->period_number,
-                'due_date' => $s->due_date->toDateString(),
-                'principal_due' => (float) $s->principal_due,
-                'interest_due' => (float) $s->interest_due,
-                'penalty_amount' => (float) $s->penalty_amount,
-                'total_due' => (float) $s->total_due,
-                'principal_paid' => (float) $s->principal_paid,
-                'interest_paid' => (float) $s->interest_paid,
-                'amount_remaining' => round(
+            'data' => $results->getCollection()->map(function ($s) use ($today) {
+                $dueDate = $s->due_date->copy()->startOfDay();
+                $amountRemaining = round(
                     max(0, (float) $s->principal_due - (float) $s->principal_paid)
                     + max(0, (float) $s->interest_due - (float) $s->interest_paid)
                     + max(0, (float) $s->penalty_amount - (float) $s->penalty_paid),
                     2,
-                ),
-                'status' => $s->status,
-            ]),
+                );
+
+                return [
+                    'id' => $s->id,
+                    'loan_id' => $s->loan_id,
+                    'loan_account_number' => $s->loan?->loan_account_number,
+                    'borrower_name' => $s->loan?->borrower?->full_name,
+                    'borrower_code' => $s->loan?->borrower?->borrower_code,
+                    'branch_name' => $s->loan?->branch?->name,
+                    'period_number' => $s->period_number,
+                    'due_date' => $dueDate->toDateString(),
+                    // Zero for a schedule due today — due is not the same as
+                    // late. Without this the client had nothing to count and
+                    // reported an Overdue Count of 0 forever.
+                    'days_overdue' => $dueDate->lt($today) ? (int) $dueDate->diffInDays($today) : 0,
+                    'days_past_due' => $dueDate->lt($today) ? (int) $dueDate->diffInDays($today) : 0,
+                    'principal_due' => (float) $s->principal_due,
+                    'interest_due' => (float) $s->interest_due,
+                    'penalty_amount' => (float) $s->penalty_amount,
+                    'total_due' => (float) $s->total_due,
+                    'principal_paid' => (float) $s->principal_paid,
+                    'interest_paid' => (float) $s->interest_paid,
+                    'amount_remaining' => $amountRemaining,
+                    'balance' => $amountRemaining,
+                    'status' => $s->status,
+                ];
+            }),
+            'totals' => $this->reportService->listOfDuePastDueTotals($filters),
             'meta' => [
                 'current_page' => $results->currentPage(),
                 'last_page' => $results->lastPage(),
@@ -207,9 +248,7 @@ class ReportController extends Controller
         $this->authorize('reports:view');
 
         return response()->json([
-            'data' => $this->reportService->loanBalanceSummary(
-                request()->only('date_from', 'date_to', 'branch_id'),
-            ),
+            'data' => $this->reportService->loanBalanceSummary($this->reportFilters()),
         ]);
     }
 
@@ -219,7 +258,9 @@ class ReportController extends Controller
         tags: ['Reports'],
         security: [['sanctum' => []]],
         parameters: [
-            new OA\Parameter(name: 'date', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'date', in: 'query', required: false, description: 'Legacy single-day parameter; superseded by date_from/date_to.', schema: new OA\Schema(type: 'string', format: 'date')),
         ],
         responses: [new OA\Response(response: 200, description: 'Daily collection summary')],
     )]
@@ -227,7 +268,7 @@ class ReportController extends Controller
     {
         $this->authorize('reports:view');
 
-        return response()->json(['data' => $this->reportService->dailyCollection(request()->only('date'))]);
+        return response()->json(['data' => $this->reportService->dailyCollection($this->reportFilters())]);
     }
 
     #[OA\Get(
@@ -245,7 +286,7 @@ class ReportController extends Controller
     {
         $this->authorize('reports:view');
 
-        return response()->json(['data' => $this->reportService->incomeReport(request()->only('date_from', 'date_to'))]);
+        return response()->json(['data' => $this->reportService->incomeReport($this->reportFilters())]);
     }
 
     #[OA\Get(
@@ -254,7 +295,9 @@ class ReportController extends Controller
         tags: ['Reports'],
         security: [['sanctum' => []]],
         parameters: [
-            new OA\Parameter(name: 'as_of_date', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'date_to', in: 'query', required: false, description: 'Used as the as-of date when supplied.', schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'as_of_date', in: 'query', required: false, description: 'Legacy as-of parameter; superseded by date_to.', schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
         ],
         responses: [new OA\Response(response: 200, description: 'Aging buckets')],
@@ -263,7 +306,7 @@ class ReportController extends Controller
     {
         $this->authorize('reports:view');
 
-        return response()->json(['data' => $this->reportService->agingReport(request()->only('as_of_date', 'branch_id'))]);
+        return response()->json(['data' => $this->reportService->agingReport($this->reportFilters())]);
     }
 
     #[OA\Get(
@@ -281,7 +324,7 @@ class ReportController extends Controller
     {
         $this->authorize('reports:view');
 
-        return response()->json(['data' => $this->reportService->borrowerReport(request()->only('date_from', 'date_to'))]);
+        return response()->json(['data' => $this->reportService->borrowerReport($this->reportFilters())]);
     }
 
     #[OA\Get(
@@ -300,7 +343,7 @@ class ReportController extends Controller
     {
         $this->authorize('reports:view');
 
-        return response()->json(['data' => $this->reportService->disbursementReport(request()->only('date_from', 'date_to', 'branch_id'))]);
+        return response()->json(['data' => $this->reportService->disbursementReport($this->reportFilters())]);
     }
 
     // ── CSV Exports ──────────────────────────────────────────────────────
@@ -316,16 +359,15 @@ class ReportController extends Controller
     {
         $this->authorize('reports:export');
 
-        $query = Loan::with('borrower', 'loanProduct')
-            ->whereIn('status', ['released', 'ongoing', 'completed'])
-            ->when(request('date_from'), fn ($q, $d) => $q->whereDate('released_at', '>=', $d))
-            ->when(request('date_to'), fn ($q, $d) => $q->whereDate('released_at', '<=', $d))
-            ->when(request('branch_id'), fn ($q, $b) => $q->where('branch_id', $b))
-            ->latest('released_at');
+        $query = $this->reportService
+            ->releasesQuery($this->reportFilters([
+                'status' => ['nullable', 'string', Rule::in(Loan::EVER_RELEASED_STATUSES)],
+            ]))
+            ->with('borrower', 'loanProduct');
 
         return $this->streamCsv('releases.csv', [
             'Loan #', 'Borrower', 'Product', 'Principal', 'Interest Rate', 'Term', 'Released', 'Status',
-        ], $query->cursor()->map(fn ($l) => [
+        ], $query->lazy(500)->map(fn ($l) => [
             $l->loan_account_number ?? $l->application_number,
             $l->borrower?->full_name ?? '',
             $l->loanProduct?->name ?? '',
@@ -348,16 +390,17 @@ class ReportController extends Controller
     {
         $this->authorize('reports:export');
 
-        $query = Repayment::with('loan.borrower')
-            ->when(request('date_from'), fn ($q, $d) => $q->whereDate('payment_date', '>=', $d))
-            ->when(request('date_to'), fn ($q, $d) => $q->whereDate('payment_date', '<=', $d))
-            ->when(request('status'), fn ($q, $s) => $q->where('status', $s))
-            ->when(request('loan_id'), fn ($q, $l) => $q->where('loan_id', $l))
-            ->latest('payment_date');
+        // Same builder as the preview, so the CSV cannot include voided
+        // receipts the screen excluded.
+        $query = $this->reportService
+            ->repaymentsQuery($this->reportFilters([
+                'status' => ['nullable', 'string', 'in:posted,voided'],
+            ]))
+            ->with('loan.borrower');
 
         return $this->streamCsv('repayments.csv', [
             'Receipt #', 'Borrower', 'Loan #', 'Date', 'Amount', 'Method', 'Status',
-        ], $query->cursor()->map(fn ($r) => [
+        ], $query->lazy(500)->map(fn ($r) => [
             $r->receipt_number,
             $r->loan?->borrower?->full_name ?? '',
             $r->loan?->loan_account_number ?? '',
@@ -379,25 +422,31 @@ class ReportController extends Controller
     {
         $this->authorize('reports:export');
 
-        $query = AmortizationSchedule::with('loan.borrower')
-            ->whereHas('loan', fn ($q) => $q->whereIn('status', ['released', 'ongoing']))
-            ->whereIn('status', ['pending', 'partial', 'overdue'])
-            ->where('due_date', '<=', now())
-            ->when(request('date_from'), fn ($q, $d) => $q->whereDate('due_date', '>=', $d))
-            ->when(request('date_to'), fn ($q, $d) => $q->whereDate('due_date', '<=', $d))
-            ->orderBy('due_date');
+        // Same builder as the preview. These two used to disagree on both the
+        // loan statuses and the cutoff (`now()` vs `Carbon::today()`), so the
+        // CSV did not match the screen it was exported from.
+        $query = $this->reportService
+            ->duePastDueQuery($this->reportFilters())
+            ->with('loan.borrower');
+
+        $today = Carbon::today();
 
         return $this->streamCsv('due-past-due.csv', [
-            'Borrower', 'Loan #', 'Due Date', 'Principal Due', 'Interest Due', 'Penalty', 'Total Due', 'Status',
-        ], $query->cursor()->map(fn ($s) => [
-            $s->loan?->borrower?->full_name ?? '',
-            $s->loan?->loan_account_number ?? '',
-            $s->due_date?->toDateString() ?? '',
-            $s->principal_due,
-            $s->interest_due,
-            $s->penalty_amount ?? 0,
-            $s->total_due,
-            $s->status,
-        ]));
+            'Borrower', 'Loan #', 'Due Date', 'Days Overdue', 'Principal Due', 'Interest Due', 'Penalty', 'Total Due', 'Status',
+        ], $query->lazy(500)->map(function ($s) use ($today) {
+            $dueDate = $s->due_date?->copy()->startOfDay();
+
+            return [
+                $s->loan?->borrower?->full_name ?? '',
+                $s->loan?->loan_account_number ?? '',
+                $dueDate?->toDateString() ?? '',
+                $dueDate && $dueDate->lt($today) ? (int) $dueDate->diffInDays($today) : 0,
+                $s->principal_due,
+                $s->interest_due,
+                $s->penalty_amount ?? 0,
+                $s->total_due,
+                $s->status,
+            ];
+        }));
     }
 }

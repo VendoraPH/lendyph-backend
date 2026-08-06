@@ -15,6 +15,41 @@ class Loan extends Model
 {
     use Auditable, HasFactory;
 
+    /**
+     * Loans that have been money out the door — the portfolio a balance,
+     * release, disbursement, or income report is measured over.
+     *
+     * A loan that was released does not stop having been released because it
+     * later defaulted or was closed by a restructure, so those belong here too
+     * — the cash went out the door either way, and a releases or disbursement
+     * report that hides it is wrong. Whether such a loan still OWES anything is
+     * a different question: see COLLECTIBLE_STATUSES.
+     */
+    public const EVER_RELEASED_STATUSES = ['released', 'ongoing', 'completed', 'defaulted', 'restructured'];
+
+    /**
+     * Loans that can still owe money on a schedule.
+     *
+     * `ongoing` matters because RepaymentService flips `released → ongoing` on
+     * the very first payment, so filtering on `released` alone silently drops
+     * every loan that has ever paid. `defaulted` matters because a defaulted
+     * loan is precisely what a delinquency report exists to show.
+     *
+     * `restructured` is deliberately NOT here, and must not be re-added.
+     * LoanService::closeRestructuredSource() is the only thing that sets it,
+     * and it means one thing: closed, because the balance moved to a new loan.
+     * It clears the open schedules first and zeroes the insurance, so such a
+     * loan owes nothing and RepaymentService refuses payments against it.
+     *
+     * Note the ordering dependency this carries: before that behaviour shipped,
+     * `restructured` was stamped on loans that were still live with open
+     * schedules. Listing it here is the correct reading of THAT data. So the
+     * restructure work — including its backfill of the damaged rows to
+     * released/ongoing — has to land before this line does, or those live loans
+     * disappear from every delinquency report.
+     */
+    public const COLLECTIBLE_STATUSES = ['released', 'ongoing', 'defaulted'];
+
     protected $fillable = [
         'loan_account_number',
         'borrower_id',
@@ -221,13 +256,32 @@ class Loan extends Model
         });
     }
 
+    /**
+     * The one definition of what this loan still owes: principal remaining on
+     * its schedules (floored at zero per period) plus any insurance premium
+     * that was not collected at release.
+     *
+     * Every caller — the API resource, the reports, the exports — must read
+     * this rather than recomputing, which is how four different "outstanding
+     * balance" figures ended up on the same dashboard. Aggregate/grouped SQL
+     * gets the identical rule from AmortizationSchedule::remainingPrincipalSql().
+     *
+     * Uses the eager-loaded schedules when the caller supplied them, so a
+     * paginated list costs no extra query per row; falls back to one aggregate
+     * query otherwise, so the value is still correct on a bare model instead of
+     * silently reading 0.
+     */
     protected function outstandingBalance(): Attribute
     {
-        return Attribute::get(function () {
-            $principalBalance = $this->amortizationSchedules()
-                ->reorder()
-                ->selectRaw('SUM(principal_due - principal_paid) as balance')
-                ->value('balance') ?? 0;
+        return Attribute::get(function (): float {
+            $principalBalance = $this->relationLoaded('amortizationSchedules')
+                ? $this->amortizationSchedules->sum(
+                    fn ($schedule) => max(0, (float) $schedule->principal_due - (float) $schedule->principal_paid)
+                )
+                : (float) ($this->amortizationSchedules()
+                    ->reorder()
+                    ->selectRaw('SUM('.AmortizationSchedule::remainingPrincipalSql().') as balance')
+                    ->value('balance') ?? 0);
 
             return round((float) $principalBalance + (float) $this->insurance_remaining_balance, 2);
         });
