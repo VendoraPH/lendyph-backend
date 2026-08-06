@@ -8,6 +8,7 @@ use App\Http\Requests\Loan\ApproveLoanRequest;
 use App\Http\Requests\Loan\ExtendLoanRequest;
 use App\Http\Requests\Loan\RejectLoanRequest;
 use App\Http\Requests\Loan\ReleaseLoanRequest;
+use App\Http\Requests\Loan\RestructureLoanRequest;
 use App\Http\Requests\Loan\StoreLoanRequest;
 use App\Http\Requests\Loan\UpdateLoanRequest;
 use App\Http\Resources\AmortizationScheduleResource;
@@ -89,6 +90,9 @@ class LoanController extends Controller
                 'ongoing' => (int) ($stats['ongoing'] ?? 0),
                 'completed' => (int) ($stats['completed'] ?? 0),
                 'defaulted' => (int) ($stats['defaulted'] ?? 0),
+                // Loans closed because their balance moved to a restructure.
+                // Omitting this made them vanish from the frontend's tab counts.
+                'restructured' => (int) ($stats['restructured'] ?? 0),
                 'void' => (int) ($stats['void'] ?? 0),
             ]]]);
     }
@@ -164,6 +168,9 @@ class LoanController extends Controller
             'approvedByUser', 'releasedByUser', 'rejectedByUser',
             'createdByUser', 'accountOfficer', 'amortizationSchedules',
             'documents',
+            // Restructure lineage — loaded here only. index() would pay for it
+            // on every row of every page to render a link almost nothing uses.
+            'sourceLoan', 'restructuredInto',
         );
 
         return new LoanResource($loan);
@@ -186,7 +193,7 @@ class LoanController extends Controller
     )]
     public function update(UpdateLoanRequest $request, Loan $loan): LoanResource
     {
-        $loan = $this->loanService->updateLoan($loan, $request->validated());
+        $loan = $this->loanService->updateLoan($loan, $request->validated(), $request->user());
         $loan->load('borrower', 'loanProduct', 'branch', 'coMakers');
 
         return new LoanResource($loan);
@@ -391,17 +398,79 @@ class LoanController extends Controller
             $request->input('interest_option'),
         );
 
+        // Mirrors show()'s eager-loads, lineage included — this endpoint
+        // documents itself as returning the GET /api/loans/{id} shape, and a
+        // test pins the two key sets as identical.
         $loan->refresh()->load(
             'borrower', 'loanProduct', 'branch', 'coMakers',
             'approvedByUser', 'releasedByUser', 'rejectedByUser',
             'createdByUser', 'accountOfficer', 'amortizationSchedules',
-            'documents',
+            'documents', 'sourceLoan', 'restructuredInto',
         );
 
         return response()->json([
             'message' => 'Loan extended.',
             'data' => new LoanResource($loan),
         ]);
+    }
+
+    #[OA\Post(
+        path: '/api/loans/{id}/restructure',
+        summary: 'Restructure a loan into a new loan',
+        description: 'Creates a NEW loan derived from the source loan\'s outstanding balance (unpaid principal + interest + penalty + insurance). The new loan starts as `draft` and goes through the normal submit → approve → release flow; the source loan is untouched and stays fully collectible until that new loan is RELEASED, at which point the source is closed as `restructured`. A rejected or voided restructure leaves the source exactly as it was. `principal_amount` may not exceed the outstanding balance; anything less is a shortfall and requires `remarks`, and is recorded as `write_off_amount` on the source at closure. `interest_method` is never accepted here — it is snapshotted from the loan product, as with POST /loans.',
+        tags: ['Loans'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'id', in: 'path', required: true, description: 'Source loan id', schema: new OA\Schema(type: 'integer')),
+        ],
+        requestBody: new OA\RequestBody(
+            required: true,
+            content: new OA\JsonContent(
+                required: ['borrower_id', 'loan_product_id', 'principal_amount', 'start_date'],
+                properties: [
+                    new OA\Property(property: 'borrower_id', type: 'integer', example: 1, description: 'Must match the source loan\'s borrower'),
+                    new OA\Property(property: 'co_maker_ids', type: 'array', items: new OA\Items(type: 'integer'), example: [1], description: 'Omit to inherit the source loan\'s co-makers; send [] to drop them'),
+                    new OA\Property(property: 'loan_product_id', type: 'integer', example: 1),
+                    new OA\Property(property: 'principal_amount', type: 'number', example: 45000, description: 'May not exceed the source loan\'s outstanding balance'),
+                    new OA\Property(property: 'start_date', type: 'string', format: 'date', example: '2026-08-01'),
+                    new OA\Property(property: 'purpose', type: 'string', nullable: true),
+                    new OA\Property(property: 'interest_rate', type: 'number', nullable: true, example: 3.0),
+                    new OA\Property(property: 'term', type: 'integer', nullable: true, example: 6),
+                    new OA\Property(property: 'frequency', type: 'string', nullable: true, enum: ['daily', 'weekly', 'bi_weekly', 'semi_monthly', 'monthly', 'upon_maturity']),
+                    new OA\Property(property: 'account_officer_id', type: 'integer', nullable: true),
+                    new OA\Property(property: 'scb_amount', type: 'number', nullable: true, example: 250),
+                    new OA\Property(property: 'policy_exception', type: 'boolean', nullable: true, example: false),
+                    new OA\Property(property: 'policy_exception_details', type: 'string', nullable: true),
+                    new OA\Property(property: 'remarks', type: 'string', nullable: true, maxLength: 1000, description: 'Required when principal_amount is below the outstanding balance'),
+                    new OA\Property(
+                        property: 'deductions',
+                        type: 'array',
+                        items: new OA\Items(
+                            properties: [
+                                new OA\Property(property: 'name', type: 'string', example: 'Processing Fee'),
+                                new OA\Property(property: 'amount', type: 'number', example: 2),
+                                new OA\Property(property: 'type', type: 'string', enum: ['fixed', 'percentage'], example: 'percentage'),
+                            ],
+                        ),
+                    ),
+                ],
+            ),
+        ),
+        responses: [
+            new OA\Response(response: 201, description: 'New draft loan created, with source_loan_id set'),
+            new OA\Response(response: 403, description: 'Missing loans:restructure permission'),
+            new OA\Response(response: 404, description: 'Loan not found'),
+            new OA\Response(response: 422, description: 'Source loan is not released/ongoing, borrower mismatch, a restructure is already in progress, nothing outstanding, principal exceeds the outstanding balance, or a shortfall was sent without remarks'),
+        ],
+    )]
+    public function restructure(RestructureLoanRequest $request, Loan $loan): JsonResponse
+    {
+        $newLoan = $this->loanService->restructure($loan, $request->validated(), $request->user());
+        $newLoan->load('borrower', 'loanProduct', 'branch', 'coMakers', 'createdByUser', 'sourceLoan');
+
+        return (new LoanResource($newLoan))
+            ->response()
+            ->setStatusCode(201);
     }
 
     #[OA\Patch(

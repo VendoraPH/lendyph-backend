@@ -19,6 +19,7 @@ class Loan extends Model
         'loan_account_number',
         'borrower_id',
         'loan_product_id',
+        'source_loan_id',
         'branch_id',
         'interest_rate',
         'interest_method',
@@ -56,6 +57,13 @@ class Loan extends Model
         'insurance_payment_type',
         'insurance_partial_amount',
         'insurance_remaining_balance',
+        'restructured_at',
+        'restructured_balance',
+        'write_off_amount',
+        'restructure_outstanding',
+        'restructure_principal',
+        'restructure_shortfall',
+        'restructure_remarks',
     ];
 
     protected function casts(): array
@@ -80,6 +88,12 @@ class Loan extends Model
             'insurance_premium_amount' => 'decimal:2',
             'insurance_partial_amount' => 'decimal:2',
             'insurance_remaining_balance' => 'decimal:2',
+            'restructured_at' => 'datetime',
+            'restructured_balance' => 'decimal:2',
+            'write_off_amount' => 'decimal:2',
+            'restructure_outstanding' => 'decimal:2',
+            'restructure_principal' => 'decimal:2',
+            'restructure_shortfall' => 'decimal:2',
         ];
     }
 
@@ -115,6 +129,26 @@ class Loan extends Model
     public function branch(): BelongsTo
     {
         return $this->belongsTo(Branch::class);
+    }
+
+    /**
+     * The loan this one was restructured out of — its outstanding balance is
+     * what funded this loan's principal.
+     */
+    public function sourceLoan(): BelongsTo
+    {
+        return $this->belongsTo(self::class, 'source_loan_id');
+    }
+
+    /**
+     * Restructure applications derived from this loan. Plural because a
+     * rejected or voided attempt stays on record and a later one can follow;
+     * only one may be open (draft/for_review/approved) at a time, and only the
+     * released one closes this loan.
+     */
+    public function restructuredInto(): HasMany
+    {
+        return $this->hasMany(self::class, 'source_loan_id');
     }
 
     public function coMakers(): BelongsToMany
@@ -196,6 +230,16 @@ class Loan extends Model
     {
         return in_array($this->frequency, ['monthly', 'upon_maturity'], true)
             && $this->term === 1;
+    }
+
+    /**
+     * Whether this loan was created by restructuring another one, i.e. its
+     * principal came from a source loan's outstanding balance rather than from
+     * fresh money. Exposed as `is_restructure` on LoanResource.
+     */
+    public function isRestructure(): bool
+    {
+        return $this->source_loan_id !== null;
     }
 
     /**
