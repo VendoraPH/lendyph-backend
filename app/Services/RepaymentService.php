@@ -252,6 +252,18 @@ class RepaymentService
             ]);
         }
 
+        // A restructured loan's schedule no longer describes the debt this
+        // payment was made against: closing it deleted the unpaid rows and shrank
+        // the partly-paid ones to exactly what had been collected. reverseAllocation()
+        // would replay against those rewritten rows and resurrect a balance on a
+        // loan that is closed and uncollectible, while `restructured_balance` and
+        // `write_off_amount` silently stopped being true.
+        if ($repayment->loan?->status === 'restructured') {
+            throw ValidationException::withMessages([
+                'loan' => 'This loan was closed by a restructure. Void the payment on the restructured loan instead, or reverse the restructure first.',
+            ]);
+        }
+
         return DB::transaction(function () use ($repayment, $reason, $user) {
             $loan = $repayment->loan;
 

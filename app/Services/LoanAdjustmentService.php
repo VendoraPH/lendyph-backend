@@ -5,8 +5,11 @@ namespace App\Services;
 use App\Models\AmortizationSchedule;
 use App\Models\Loan;
 use App\Models\LoanAdjustment;
+use App\Models\LoanLedgerEntry;
+use App\Models\Repayment;
 use App\Models\User;
 use Carbon\Carbon;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
@@ -138,9 +141,10 @@ class LoanAdjustmentService
             // carry figures below are re-read afterwards, so the arithmetic
             // stays correct either way.
             $interestPaid = 0.0;
+            $interestRepayment = null;
 
             if ($interestOption === 'pay' && $interestBefore > 0) {
-                $this->repaymentService->processRepayment(
+                $interestRepayment = $this->repaymentService->processRepayment(
                     $loan,
                     $interestBefore,
                     now()->toDateString(),
@@ -217,7 +221,7 @@ class LoanAdjustmentService
                 'maturity_date' => $newDueDate,
             ]);
 
-            return LoanAdjustment::create([
+            $adjustment = LoanAdjustment::create([
                 'loan_id' => $loan->id,
                 'adjustment_type' => 'extension',
                 'description' => 'Loan extended by one cycle.',
@@ -228,7 +232,61 @@ class LoanAdjustmentService
                 'adjusted_by' => $user->id,
                 'applied_at' => now(),
             ]);
+
+            $this->recordExtensionLedgerEntries(
+                $loan,
+                $adjustment,
+                $freshInterest,
+                $interestPaid,
+                $interestRepayment,
+            );
+
+            return $adjustment;
         });
+    }
+
+    /**
+     * Record an extension's money movements in the loan ledger.
+     *
+     * The debit is the interest the extension accrues, and is always written.
+     * The credit only exists on the 'pay' path, where the interest already
+     * outstanding was collected first — it carries the repayment it settled so
+     * the ledger and the payment list describe one event rather than two.
+     *
+     * Called inside extendLoan()'s transaction, so the entries commit with the
+     * extension or not at all.
+     */
+    private function recordExtensionLedgerEntries(
+        Loan $loan,
+        LoanAdjustment $adjustment,
+        float $freshInterest,
+        float $interestPaid,
+        ?Repayment $interestRepayment,
+    ): void {
+        $entryDate = now()->toDateString();
+
+        if ($interestPaid > 0) {
+            LoanLedgerEntry::create([
+                'loan_id' => $loan->id,
+                'loan_adjustment_id' => $adjustment->id,
+                'repayment_id' => $interestRepayment?->id,
+                'type' => 'credit',
+                'category' => 'interest',
+                'amount' => round($interestPaid, 2),
+                'entry_date' => $entryDate,
+                'description' => 'Payment of outstanding interest upon loan extension',
+            ]);
+        }
+
+        LoanLedgerEntry::create([
+            'loan_id' => $loan->id,
+            'loan_adjustment_id' => $adjustment->id,
+            'type' => 'debit',
+            'category' => 'interest',
+            'amount' => round($freshInterest, 2),
+            'entry_date' => $entryDate,
+            'description' => 'Interest charged for the extended loan term',
+        ]);
     }
 
     /**
@@ -242,7 +300,7 @@ class LoanAdjustmentService
     }
 
     /**
-     * @param  \Illuminate\Support\Collection<int, AmortizationSchedule>  $schedules
+     * @param  Collection<int, AmortizationSchedule>  $schedules
      */
     private function outstandingInterest($schedules): float
     {
@@ -348,12 +406,17 @@ class LoanAdjustmentService
             $newFrequency,
         );
 
+        // The loan keeps its released/ongoing status on purpose. This adjustment
+        // reschedules a balance that is still owed, and
+        // RepaymentService::processRepayment() only accepts released/ongoing —
+        // stamping 'restructured' here made the loan permanently uncollectible.
+        // `restructured` now means one thing only: closed because its balance
+        // moved to a NEW loan (see LoanService::closeRestructuredSource()).
         $loan->update([
             'interest_rate' => $newRate,
             'term' => $lastPaidPeriod + $newTerm,
             'frequency' => $newFrequency,
             'maturity_date' => $newMaturity,
-            'status' => 'restructured',
         ]);
     }
 

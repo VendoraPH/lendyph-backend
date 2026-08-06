@@ -42,6 +42,42 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'insurance_payment_type', type: 'string', nullable: true, enum: ['full', 'partial']),
         new OA\Property(property: 'insurance_partial_amount', type: 'number', nullable: true),
         new OA\Property(property: 'insurance_remaining_balance', type: 'number'),
+        new OA\Property(property: 'source_loan_id', type: 'integer', nullable: true, description: 'The loan this one was restructured out of'),
+        new OA\Property(property: 'is_restructure', type: 'boolean', description: 'True when source_loan_id is set'),
+        new OA\Property(property: 'restructured_at', type: 'string', format: 'date-time', nullable: true, description: 'When this loan was closed because its balance moved to a restructure'),
+        new OA\Property(property: 'restructured_balance', type: 'number', nullable: true, description: 'What was still owed on this loan when the restructure closed it'),
+        new OA\Property(property: 'write_off_amount', type: 'number', nullable: true, description: 'restructured_balance minus the new loan\'s principal, when the restructure took on less than the full balance'),
+        new OA\Property(
+            property: 'source_loan',
+            type: 'object',
+            nullable: true,
+            description: 'Flat summary of the source loan (requires `sourceLoan` eager-loaded). Flat rather than a nested Loan to keep a chain of restructures from recursing.',
+            properties: [
+                new OA\Property(property: 'id', type: 'integer'),
+                new OA\Property(property: 'application_number', type: 'string'),
+                new OA\Property(property: 'loan_account_number', type: 'string', nullable: true),
+                new OA\Property(property: 'status', type: 'string'),
+                new OA\Property(property: 'principal_amount', type: 'number'),
+                new OA\Property(property: 'restructured_at', type: 'string', format: 'date-time', nullable: true),
+                new OA\Property(property: 'restructured_balance', type: 'number', nullable: true),
+                new OA\Property(property: 'write_off_amount', type: 'number', nullable: true),
+            ],
+        ),
+        new OA\Property(
+            property: 'restructured_into',
+            type: 'array',
+            description: 'Flat summaries of restructure applications derived from this loan (requires `restructuredInto` eager-loaded).',
+            items: new OA\Items(
+                properties: [
+                    new OA\Property(property: 'id', type: 'integer'),
+                    new OA\Property(property: 'application_number', type: 'string'),
+                    new OA\Property(property: 'loan_account_number', type: 'string', nullable: true),
+                    new OA\Property(property: 'status', type: 'string'),
+                    new OA\Property(property: 'principal_amount', type: 'number'),
+                    new OA\Property(property: 'start_date', type: 'string', format: 'date', nullable: true),
+                ],
+            ),
+        ),
     ],
 )]
 class LoanResource extends JsonResource
@@ -50,7 +86,6 @@ class LoanResource extends JsonResource
     {
         // Compute payment-related fields from loaded schedules to avoid N+1
         $nextDueDate = null;
-        $outstandingBalance = 0.0;
         $currentDue = 0.0;
         $overdueAmount = 0.0;
         $totalPenalty = 0.0;
@@ -73,11 +108,6 @@ class LoanResource extends JsonResource
                     2,
                 );
             }
-
-            // Outstanding principal balance
-            $outstandingBalance = round($this->amortizationSchedules->sum(function ($s) {
-                return max(0, (float) $s->principal_due - (float) $s->principal_paid);
-            }), 2);
 
             // Overdue = sum of remaining amounts on schedules past due date
             $overdueSchedules = $unpaidSchedules->filter(fn ($s) => $s->due_date->lt($today));
@@ -134,7 +164,13 @@ class LoanResource extends JsonResource
                 return $doc?->url;
             }),
             'status' => $this->status,
-            'outstanding_balance' => $outstandingBalance,
+            // Read from the model accessor rather than recomputed here: this is
+            // the same figure the reports and exports use, it includes any
+            // uncollected insurance premium, and it stays correct when the
+            // caller did not eager-load `amortizationSchedules` (this used to
+            // silently serialise 0 — which is why every Releases List row read
+            // as fully paid).
+            'outstanding_balance' => $this->outstanding_balance,
             'next_due_date' => $nextDueDate,
             'current_due' => $currentDue,
             'overdue_amount' => $overdueAmount,
@@ -177,6 +213,41 @@ class LoanResource extends JsonResource
             'amortization_schedules' => AmortizationScheduleResource::collection(
                 $this->whenLoaded('amortizationSchedules')
             ),
+            'source_loan_id' => $this->source_loan_id,
+            'is_restructure' => $this->isRestructure(),
+            'restructured_at' => $this->restructured_at,
+            'restructured_balance' => $this->restructured_balance !== null
+                ? (float) $this->restructured_balance
+                : null,
+            'write_off_amount' => $this->write_off_amount !== null
+                ? (float) $this->write_off_amount
+                : null,
+            // Lineage is FLAT, not a nested LoanResource: a chain of
+            // restructures would recurse, and LoanResource's totals need
+            // `amortizationSchedules` loaded, which these summaries never are.
+            'source_loan' => $this->whenLoaded('sourceLoan', fn () => $this->sourceLoan ? [
+                'id' => $this->sourceLoan->id,
+                'application_number' => $this->sourceLoan->application_number,
+                'loan_account_number' => $this->sourceLoan->loan_account_number,
+                'status' => $this->sourceLoan->status,
+                'principal_amount' => (float) $this->sourceLoan->principal_amount,
+                'restructured_at' => $this->sourceLoan->restructured_at,
+                'restructured_balance' => $this->sourceLoan->restructured_balance !== null
+                    ? (float) $this->sourceLoan->restructured_balance
+                    : null,
+                'write_off_amount' => $this->sourceLoan->write_off_amount !== null
+                    ? (float) $this->sourceLoan->write_off_amount
+                    : null,
+            ] : null),
+            'restructured_into' => $this->whenLoaded('restructuredInto', fn () => $this->restructuredInto
+                ->map(fn ($child) => [
+                    'id' => $child->id,
+                    'application_number' => $child->application_number,
+                    'loan_account_number' => $child->loan_account_number,
+                    'status' => $child->status,
+                    'principal_amount' => (float) $child->principal_amount,
+                    'start_date' => $child->start_date?->toDateString(),
+                ])->values()),
             'created_at' => $this->created_at,
             'updated_at' => $this->updated_at,
         ];

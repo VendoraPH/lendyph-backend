@@ -8,7 +8,20 @@ use Illuminate\Database\Eloquent\Relations\MorphTo;
 
 class AuditLog extends Model
 {
-    public $timestamps = false;
+    /**
+     * Audit rows are append-only, so the table has no `updated_at` column.
+     *
+     * Timestamps stay ENABLED (rather than `$timestamps = false`) so Eloquent
+     * stamps `created_at` from PHP's clock, in the application timezone, exactly
+     * like every other table in this schema. The column also carries a
+     * `useCurrent()` default from its migration, but that default must never be
+     * what actually fires: it resolves to MySQL's `CURRENT_TIMESTAMP`, and the
+     * database server runs in UTC in production while the app runs in
+     * Asia/Manila. Letting the database stamp the audit trail put every entry —
+     * including `restructure_closed`, the justification record for written-off
+     * debt — eight hours behind the event it describes.
+     */
+    public const UPDATED_AT = null;
 
     protected $fillable = [
         'user_id',

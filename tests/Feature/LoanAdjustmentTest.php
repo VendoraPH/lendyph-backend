@@ -154,6 +154,50 @@ class LoanAdjustmentTest extends TestCase
         $this->assertGreaterThan($originalTerm, $loan->term);
     }
 
+    public function test_an_applied_restructure_adjustment_leaves_the_loan_collectible(): void
+    {
+        $loan = $this->createReleasedLoan();
+
+        $createResponse = $this->postJson("/api/loans/{$loan->id}/adjustments", [
+            'adjustment_type' => 'restructure',
+            'new_values' => ['term' => 12, 'interest_rate' => 2.0],
+            'description' => 'Reschedule the outstanding balance',
+        ])->assertCreated();
+
+        $adjId = $createResponse->json('data.id');
+
+        $this->patchJson("/api/loan-adjustments/{$adjId}/approve")->assertOk();
+        $this->patchJson("/api/loan-adjustments/{$adjId}/apply")
+            ->assertOk()
+            ->assertJsonPath('data.status', 'applied');
+
+        $loan->refresh();
+
+        // `restructured` means one thing: the loan closed because its balance
+        // moved to a brand-new loan. This adjustment reschedules a balance that
+        // is still owed on THIS loan, so the loan stays open.
+        $this->assertSame('released', $loan->status);
+
+        // The assertion that actually pins the bug. applyRestructure() used to
+        // stamp 'restructured' here, and RepaymentService::processRepayment()
+        // rejects anything outside released/ongoing — so the rescheduled balance
+        // became permanently uncollectible. Only posting a real payment proves
+        // it isn't; a status assertion alone would not have caught the impact.
+        $schedule = $loan->amortizationSchedules()->orderBy('period_number')->first();
+
+        $repaymentResponse = $this->postJson("/api/loans/{$loan->id}/repayments", [
+            'payment_date' => now()->toDateString(),
+            'amount_paid' => (float) $schedule->total_due,
+            'method' => 'cash',
+        ])->assertCreated();
+
+        $this->assertGreaterThan(0, $repaymentResponse->json('data.principal_applied'));
+        $this->assertDatabaseHas('repayments', [
+            'loan_id' => $loan->id,
+            'status' => 'posted',
+        ]);
+    }
+
     public function test_reject_adjustment(): void
     {
         $loan = $this->createReleasedLoan();

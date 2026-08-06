@@ -18,6 +18,11 @@ class UpdateLoanRequest extends FormRequest
             'co_maker_ids.*' => ['exists:co_makers,id'],
             'principal_amount' => ['sometimes', 'numeric', 'min:1'],
             'purpose' => ['nullable', 'string', 'max:500'],
+            // Only consumed when the principal of a RESTRUCTURE is being changed:
+            // that re-runs the shortfall rules, which require a reason. There is
+            // no `remarks` column on loans, so it never reaches the row itself —
+            // LoanService maps it onto `restructure_remarks`.
+            'remarks' => ['nullable', 'string', 'max:1000'],
             'interest_rate' => ['nullable', 'numeric', 'min:0', 'max:100'],
             'start_date' => ['sometimes', 'date'],
             'scb_amount' => ['nullable', 'numeric', 'min:0'],
