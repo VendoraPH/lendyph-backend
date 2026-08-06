@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests\User;
 
+use App\Rules\AssignableRole;
 use Illuminate\Foundation\Http\FormRequest;
 
 class StoreUserRequest extends FormRequest
@@ -21,7 +22,7 @@ class StoreUserRequest extends FormRequest
             'mobile_number' => ['nullable', 'string', 'max:20'],
             'password' => ['required', 'string', 'min:8', 'confirmed'],
             'branch_id' => ['required', 'exists:branches,id'],
-            'role' => ['required', 'string', 'exists:roles,name'],
+            'role' => ['required', 'string', 'exists:roles,name', new AssignableRole($this->user())],
         ];
     }
 }
