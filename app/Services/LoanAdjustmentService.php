@@ -9,6 +9,7 @@ use App\Models\LoanLedgerEntry;
 use App\Models\Repayment;
 use App\Models\User;
 use Carbon\Carbon;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
@@ -299,7 +300,7 @@ class LoanAdjustmentService
     }
 
     /**
-     * @param  \Illuminate\Support\Collection<int, AmortizationSchedule>  $schedules
+     * @param  Collection<int, AmortizationSchedule>  $schedules
      */
     private function outstandingInterest($schedules): float
     {
@@ -405,12 +406,17 @@ class LoanAdjustmentService
             $newFrequency,
         );
 
+        // The loan keeps its released/ongoing status on purpose. This adjustment
+        // reschedules a balance that is still owed, and
+        // RepaymentService::processRepayment() only accepts released/ongoing —
+        // stamping 'restructured' here made the loan permanently uncollectible.
+        // `restructured` now means one thing only: closed because its balance
+        // moved to a NEW loan (see LoanService::closeRestructuredSource()).
         $loan->update([
             'interest_rate' => $newRate,
             'term' => $lastPaidPeriod + $newTerm,
             'frequency' => $newFrequency,
             'maturity_date' => $newMaturity,
-            'status' => 'restructured',
         ]);
     }
 

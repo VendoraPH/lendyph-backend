@@ -9,12 +9,19 @@ use App\Models\Loan;
 use App\Models\LoanProduct;
 use App\Models\User;
 use Carbon\Carbon;
+use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
 class LoanService
 {
-    public function createLoan(array $validated, User $user): Loan
+    /**
+     * @param  bool  $enforceMinimumAmount  Set false for a restructure: the new
+     *                                      loan's principal is a part-paid balance, which is routinely below the
+     *                                      product's `min_amount` and must not be rejected for it. Every other
+     *                                      product rule (max_amount, interest-rate range, term range) still applies.
+     */
+    public function createLoan(array $validated, User $user, bool $enforceMinimumAmount = true): Loan
     {
         $product = LoanProduct::findOrFail($validated['loan_product_id']);
         $borrower = Borrower::findOrFail($validated['borrower_id']);
@@ -25,7 +32,7 @@ class LoanService
         $frequency = $validated['frequency'] ?? $product->frequency;
 
         // Validate principal against product min/max
-        if ($product->min_amount > 0 && $principal < (float) $product->min_amount) {
+        if ($enforceMinimumAmount && $product->min_amount > 0 && $principal < (float) $product->min_amount) {
             throw ValidationException::withMessages([
                 'principal_amount' => ["Minimum loan amount for this product is {$product->min_amount}."],
             ]);
@@ -132,13 +139,213 @@ class LoanService
         return $loan;
     }
 
-    public function updateLoan(Loan $loan, array $validated): Loan
+    /**
+     * Restructure a live loan by creating a NEW loan carrying its outstanding
+     * balance.
+     *
+     * The new loan starts as `draft` and goes through the normal submit →
+     * approve → release flow. The source loan is untouched here and stays fully
+     * collectible: it is only closed as `restructured` when the new loan is
+     * RELEASED (see closeRestructuredSource()). A rejected or voided restructure
+     * therefore leaves the source exactly as it was.
+     *
+     * @param  array<string, mixed>  $validated  RestructureLoanRequest payload
+     */
+    public function restructure(Loan $sourceLoan, array $validated, User $user): Loan
+    {
+        if ((int) $validated['borrower_id'] !== (int) $sourceLoan->borrower_id) {
+            throw ValidationException::withMessages([
+                'borrower_id' => ['A restructured loan must stay with the borrower of the loan it replaces.'],
+            ]);
+        }
+
+        $principal = round((float) $validated['principal_amount'], 2);
+        $remarks = $validated['remarks'] ?? null;
+
+        // The guards run INSIDE the transaction, opening with a row lock on the
+        // source. The one-open-application-at-a-time rule is an exists() check
+        // followed by an insert, so without serializing on the source two
+        // simultaneous requests would both see "none open" and both create one.
+        return DB::transaction(function () use ($sourceLoan, $validated, $user, $principal, $remarks) {
+            $lockedSource = $this->lockSourceLoan($sourceLoan->id);
+
+            $hasOpenRestructure = $lockedSource->restructuredInto()
+                ->whereIn('status', ['draft', 'for_review', 'approved'])
+                ->exists();
+
+            if ($hasOpenRestructure) {
+                throw ValidationException::withMessages([
+                    'loan' => ['This loan already has a restructure application in progress. Release, reject, or void it first.'],
+                ]);
+            }
+
+            ['outstanding' => $outstanding, 'shortfall' => $shortfall] =
+                $this->assertRestructureInvariants($lockedSource, $principal, $remarks, $user);
+
+            $newLoan = $this->createLoan($validated, $user, enforceMinimumAmount: false);
+
+            // Terms as approved, frozen here. The write-off at release is
+            // computed from these and not from the live columns — see the
+            // migration for why.
+            $newLoan->update([
+                'source_loan_id' => $lockedSource->id,
+                'restructure_outstanding' => $outstanding,
+                'restructure_principal' => $principal,
+                'restructure_shortfall' => $shortfall,
+                'restructure_remarks' => $remarks,
+            ]);
+
+            // Co-makers carry over when the caller says nothing about them. An
+            // explicitly empty array is respected — that is how you drop them.
+            if (! array_key_exists('co_maker_ids', $validated)) {
+                $inherited = $lockedSource->coMakers()->pluck('co_makers.id')->all();
+
+                if ($inherited !== []) {
+                    $newLoan->coMakers()->sync($inherited);
+                }
+            }
+
+            AuditLogService::log(
+                action: 'restructure_created',
+                auditable: $newLoan,
+                oldValues: [
+                    'source_loan_id' => $lockedSource->id,
+                    'source_application_number' => $lockedSource->application_number,
+                    'source_loan_account_number' => $lockedSource->loan_account_number,
+                    'source_status' => $lockedSource->status,
+                ],
+                newValues: [
+                    'outstanding_at_application' => $outstanding,
+                    'new_principal' => $principal,
+                    'shortfall_amount' => $shortfall,
+                    'remarks' => $remarks,
+                ],
+                description: "Restructure application {$newLoan->application_number} created from loan "
+                    .($lockedSource->loan_account_number ?? $lockedSource->application_number)
+                    ." (outstanding ₱{$outstanding} → principal ₱{$principal}, shortfall ₱{$shortfall})",
+            );
+
+            return $newLoan->refresh();
+        });
+    }
+
+    /**
+     * Take a row lock on the loan being restructured.
+     *
+     * Every path that decides something about a source loan — creating an
+     * application against it, releasing one — serializes here, so the checks
+     * below cannot be raced by a concurrent request.
+     */
+    private function lockSourceLoan(int $sourceLoanId): Loan
+    {
+        $source = Loan::whereKey($sourceLoanId)->lockForUpdate()->first();
+
+        if (! $source) {
+            throw ValidationException::withMessages([
+                'loan' => ['The loan being restructured no longer exists.'],
+            ]);
+        }
+
+        return $source;
+    }
+
+    /**
+     * The complete rule set for restructuring a given source at a given
+     * principal. Shared by creation and by any later edit of the principal, so
+     * the two can never drift apart.
+     *
+     * @return array{outstanding: float, shortfall: float}
+     *
+     * @throws AuthorizationException when a shortfall is attempted without `loans:write_off`
+     */
+    private function assertRestructureInvariants(Loan $sourceLoan, float $principal, ?string $remarks, User $user): array
+    {
+        if (! in_array($sourceLoan->status, ['released', 'ongoing'], true)) {
+            throw ValidationException::withMessages([
+                'status' => ['Only released or ongoing loans can be restructured.'],
+            ]);
+        }
+
+        $outstanding = $this->totalOutstanding($sourceLoan);
+
+        if ($outstanding <= 0) {
+            throw ValidationException::withMessages([
+                'loan' => ['This loan has no outstanding balance to restructure.'],
+            ]);
+        }
+
+        // Compared in centavos so a 2dp float never rounds a genuine overshoot
+        // into an accepted amount, or an exact match into a rejection.
+        if ($this->toCentavos($principal) > $this->toCentavos($outstanding)) {
+            throw ValidationException::withMessages([
+                'principal_amount' => ["The restructured principal cannot exceed the loan's outstanding balance of {$outstanding}."],
+            ]);
+        }
+
+        $shortfall = round($outstanding - $principal, 2);
+
+        if ($this->toCentavos($shortfall) > 0) {
+            // A shortfall writes debt off, so it must carry a reason…
+            if (blank($remarks)) {
+                throw ValidationException::withMessages([
+                    'remarks' => ['Remarks are required when the restructured principal is less than the outstanding balance.'],
+                ]);
+            }
+
+            // …and destroying debt is a separate privilege from rescheduling it.
+            // Enforced here rather than in the FormRequest because whether this
+            // is a shortfall at all depends on the computed outstanding balance,
+            // which the request cannot see.
+            if (! $user->can('loans:write_off')) {
+                throw new AuthorizationException(
+                    'Writing off part of the balance requires the loans:write_off permission. '
+                    ."Restructure the full outstanding balance of ₱{$outstanding} instead.",
+                );
+            }
+        }
+
+        return ['outstanding' => $outstanding, 'shortfall' => $shortfall];
+    }
+
+    /**
+     * Everything the borrower still owes on a loan: unpaid principal, unpaid
+     * interest, unpaid penalty, plus any insurance premium still on the books.
+     *
+     * Deliberately WIDER than the `Loan::outstanding_balance` accessor
+     * (principal + insurance only) because a restructure normally capitalizes
+     * arrears — the borrower's whole obligation moves to the new loan, not just
+     * the principal slice of it.
+     */
+    private function totalOutstanding(Loan $loan): float
+    {
+        $openSchedules = $loan->amortizationSchedules()
+            ->reorder()
+            ->whereIn('status', ['pending', 'partial', 'overdue'])
+            ->get();
+
+        $unpaid = $openSchedules->sum(
+            fn (AmortizationSchedule $s): float => max(0, (float) $s->principal_due - (float) $s->principal_paid)
+                + max(0, (float) $s->interest_due - (float) $s->interest_paid)
+                + max(0, (float) ($s->penalty_amount ?? 0) - (float) ($s->penalty_paid ?? 0)),
+        );
+
+        return round((float) $unpaid + (float) $loan->insurance_remaining_balance, 2);
+    }
+
+    private function toCentavos(float $amount): int
+    {
+        return (int) round($amount * 100);
+    }
+
+    public function updateLoan(Loan $loan, array $validated, ?User $user = null): Loan
     {
         if (! $loan->is_editable) {
             throw ValidationException::withMessages([
                 'status' => ['Loan can only be edited in draft or for_review status.'],
             ]);
         }
+
+        $validated = $this->guardRestructurePrincipalEdit($loan, $validated, $user);
 
         $needsRecompute = isset($validated['principal_amount']) || isset($validated['deductions']);
 
@@ -168,6 +375,75 @@ class LoanService
         return $loan;
     }
 
+    /**
+     * Keep a restructure's principal from being edited out from under the rules
+     * that approved it.
+     *
+     * `PATCH /loans/{id}` is gated on `loans:update` and a draft/for_review
+     * status, neither of which knows anything about restructures. Without this,
+     * an application approved at the full outstanding balance could be dropped
+     * to ₱1 afterwards and released, writing the entire debt off with no
+     * shortfall check, no remarks and no write-off permission ever consulted.
+     *
+     * A legitimate change is still allowed — it just re-runs the complete rule
+     * set and re-freezes the snapshot the write-off is computed from.
+     *
+     * @param  array<string, mixed>  $validated
+     * @return array<string, mixed>
+     */
+    private function guardRestructurePrincipalEdit(Loan $loan, array $validated, ?User $user): array
+    {
+        if ($loan->source_loan_id === null || ! array_key_exists('principal_amount', $validated)) {
+            return $validated;
+        }
+
+        $principal = round((float) $validated['principal_amount'], 2);
+
+        if ($this->toCentavos($principal) === $this->toCentavos((float) $loan->principal_amount)) {
+            return $validated;
+        }
+
+        if (! $user || ! $user->can('loans:restructure')) {
+            throw new AuthorizationException(
+                'Changing the principal of a restructure requires the loans:restructure permission.',
+            );
+        }
+
+        $remarks = $validated['remarks'] ?? $loan->restructure_remarks;
+        // There is no `remarks` column on loans; it is only carried here.
+        unset($validated['remarks']);
+
+        $source = $this->lockSourceLoan($loan->source_loan_id);
+
+        ['outstanding' => $outstanding, 'shortfall' => $shortfall] =
+            $this->assertRestructureInvariants($source, $principal, $remarks, $user);
+
+        $validated['restructure_outstanding'] = $outstanding;
+        $validated['restructure_principal'] = $principal;
+        $validated['restructure_shortfall'] = $shortfall;
+        $validated['restructure_remarks'] = $remarks;
+
+        AuditLogService::log(
+            action: 'restructure_principal_changed',
+            auditable: $loan,
+            oldValues: [
+                'principal_amount' => (float) $loan->principal_amount,
+                'restructure_outstanding' => (float) $loan->restructure_outstanding,
+                'restructure_shortfall' => (float) $loan->restructure_shortfall,
+            ],
+            newValues: [
+                'principal_amount' => $principal,
+                'restructure_outstanding' => $outstanding,
+                'restructure_shortfall' => $shortfall,
+                'remarks' => $remarks,
+            ],
+            description: "Restructure {$loan->application_number} principal changed to ₱{$principal} "
+                ."(outstanding ₱{$outstanding}, shortfall ₱{$shortfall})",
+        );
+
+        return $validated;
+    }
+
     public function submitForReview(Loan $loan): Loan
     {
         $this->guardStatus($loan, 'draft', 'submit for review');
@@ -179,6 +455,18 @@ class LoanService
     public function approve(Loan $loan, User $approver, ?string $remarks): Loan
     {
         $this->guardStatus($loan, 'for_review', 'approve');
+
+        // Dual control on restructures only. A restructure can destroy debt, so
+        // the person who raised it must not also be the one who signs it off.
+        // Deliberately NOT applied to ordinary loans: this client is a small
+        // cooperative where one person legitimately handles a whole application,
+        // and the write-off risk is specific to restructures.
+        if ($loan->source_loan_id !== null && (int) $loan->created_by === (int) $approver->id) {
+            throw new AuthorizationException(
+                'A restructure must be approved by someone other than the person who created it.',
+            );
+        }
+
         $loan->update([
             'status' => 'approved',
             'approved_by' => $approver->id,
@@ -207,6 +495,13 @@ class LoanService
         $this->guardStatus($loan, 'approved', 'release');
 
         return DB::transaction(function () use ($loan, $releaser, $insurance) {
+            // Lock and validate the source FIRST, before anything is written.
+            // Two approved restructures of the same source releasing at once
+            // would otherwise both succeed and the borrower would owe both, for
+            // the same balance. Whichever transaction gets the lock second finds
+            // the source already closed and is rolled back by the throw.
+            $lockedSource = $this->lockAndGuardRestructureSource($loan);
+
             // Generate loan account number with row-level lock to prevent race conditions.
             // Order by loan_account_number (not id) so the next number is taken from the
             // highest LN issued — loans can be released out of insertion order.
@@ -235,8 +530,168 @@ class LoanService
                 ]);
             }
 
+            // Releasing a restructure is the moment the old debt actually moves.
+            // Inside this transaction so a failure anywhere above leaves the
+            // source loan open and collectible.
+            if ($lockedSource) {
+                $this->closeRestructuredSource($loan, $lockedSource, $releaser);
+            }
+
             return $loan;
         });
+    }
+
+    /**
+     * Lock the source loan and refuse to release unless it is still open and
+     * the application still matches what was approved.
+     *
+     * Catches a source already closed by a different restructure, one paid off
+     * while this application sat in review, and a principal edited after
+     * sign-off. Fails CLOSED: anything unexpected throws and rolls the release
+     * back rather than quietly releasing a second loan for the same debt.
+     *
+     * @return Loan|null the locked source, or null when this is an ordinary loan
+     */
+    private function lockAndGuardRestructureSource(Loan $loan): ?Loan
+    {
+        if ($loan->source_loan_id === null) {
+            return null;
+        }
+
+        $source = Loan::whereKey($loan->source_loan_id)->lockForUpdate()->first();
+
+        if (! $source || ! in_array($source->status, ['released', 'ongoing'], true)) {
+            throw ValidationException::withMessages([
+                'source_loan_id' => ['The loan being restructured is no longer open, so this restructure cannot be released.'],
+            ]);
+        }
+
+        // The write-off is derived from the snapshot taken when the terms were
+        // approved, so a principal that no longer matches it means the amount of
+        // debt being destroyed has moved since sign-off.
+        if ($loan->restructure_principal === null) {
+            throw ValidationException::withMessages([
+                'source_loan_id' => ['This restructure has no approved terms recorded and cannot be released.'],
+            ]);
+        }
+
+        if ($this->toCentavos((float) $loan->principal_amount) !== $this->toCentavos((float) $loan->restructure_principal)) {
+            throw ValidationException::withMessages([
+                'principal_amount' => [
+                    'The principal has changed since this restructure was approved (approved ₱'
+                    .$loan->restructure_principal.', now ₱'.$loan->principal_amount
+                    .'). It must be re-approved before release.',
+                ],
+            ]);
+        }
+
+        return $source;
+    }
+
+    /**
+     * Close the source loan once its restructure is released.
+     *
+     * This is the ONLY place a loan reaches `restructured`, which is what makes
+     * that status mean exactly one thing: closed because its balance moved to a
+     * new loan.
+     *
+     * `$source` is already locked by lockAndGuardRestructureSource().
+     */
+    private function closeRestructuredSource(Loan $newLoan, Loan $source, User $releaser): void
+    {
+        $previousStatus = $source->status;
+        $closingBalance = $this->totalOutstanding($source);
+
+        $this->clearOpenSchedules($source);
+
+        // From the approved snapshot, NOT from the live balance: penalties keep
+        // accruing between approval and release, and charging that drift to the
+        // write-off would destroy more debt than anyone signed off on.
+        $writeOff = round(max(0, (float) $newLoan->restructure_shortfall), 2);
+        $drift = round($closingBalance - (float) $newLoan->restructure_outstanding, 2);
+
+        $source->update([
+            'status' => 'restructured',
+            'restructured_at' => now(),
+            'restructured_balance' => $closingBalance,
+            'write_off_amount' => $writeOff,
+            'insurance_remaining_balance' => 0,
+        ]);
+
+        AuditLogService::log(
+            action: 'restructure_closed',
+            auditable: $source,
+            oldValues: [
+                'status' => $previousStatus,
+                'outstanding_balance' => $closingBalance,
+            ],
+            newValues: [
+                'status' => 'restructured',
+                'restructured_into_loan_id' => $newLoan->id,
+                'restructured_into_application_number' => $newLoan->application_number,
+                'restructured_into_loan_account_number' => $newLoan->loan_account_number,
+                'restructured_balance' => $closingBalance,
+                'new_principal' => (float) $newLoan->principal_amount,
+                'write_off_amount' => $writeOff,
+                // The approved figures the write-off came from, plus how far the
+                // real balance drifted from them between approval and release —
+                // so the number can be justified later without re-deriving it.
+                'approved_outstanding' => (float) $newLoan->restructure_outstanding,
+                'approved_shortfall' => (float) $newLoan->restructure_shortfall,
+                'balance_drift_since_approval' => $drift,
+                // The event destroys debt, so it carries the stated reason.
+                'remarks' => $newLoan->restructure_remarks,
+                'closed_by' => $releaser->id,
+            ],
+            description: "Loan closed as restructured — ₱{$closingBalance} moved to loan "
+                .($newLoan->loan_account_number ?? $newLoan->application_number)
+                .($writeOff > 0 ? ", ₱{$writeOff} written off ({$newLoan->restructure_remarks})" : ''),
+        );
+    }
+
+    /**
+     * Wipe what is still owed on a loan whose balance has moved elsewhere.
+     *
+     * Rows with nothing collected are DELETED; partially-paid rows are shrunk to
+     * exactly what was collected and marked `paid`.
+     *
+     * Deleting rather than introducing a `void` schedule status is deliberate:
+     * `ReportService::loanBalanceSummary()` sums `principal_due` with no status
+     * filter and `DashboardService::stats()` counts overdue schedules with no
+     * loan-status filter, so a voided row would keep inflating both. Deleting is
+     * also what `extendLoan()` and `applyRestructure()` already do. Rewriting
+     * the partial rows instead of deleting them is what keeps
+     * `SUM(principal_paid)` — every peso the borrower actually paid —
+     * reconciling across the closure.
+     */
+    private function clearOpenSchedules(Loan $loan): void
+    {
+        $openSchedules = $loan->amortizationSchedules()
+            ->reorder()
+            ->whereIn('status', ['pending', 'partial', 'overdue'])
+            ->get();
+
+        foreach ($openSchedules as $schedule) {
+            $collected = (float) $schedule->principal_paid
+                + (float) $schedule->interest_paid
+                + (float) ($schedule->penalty_paid ?? 0);
+
+            if ($collected <= 0) {
+                $schedule->delete();
+
+                continue;
+            }
+
+            $schedule->update([
+                'principal_due' => $schedule->principal_paid,
+                'interest_due' => $schedule->interest_paid,
+                'penalty_amount' => $schedule->penalty_paid ?? 0,
+                // `total_due` excludes penalty everywhere else in this codebase.
+                'total_due' => round((float) $schedule->principal_paid + (float) $schedule->interest_paid, 2),
+                'remaining_balance' => 0,
+                'status' => 'paid',
+            ]);
+        }
     }
 
     private function applyInsuranceOnRelease(Loan $loan, array $insurance): void

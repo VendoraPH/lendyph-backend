@@ -14,8 +14,8 @@ use App\Http\Controllers\Api\CoMakerController;
 use App\Http\Controllers\Api\DashboardController;
 use App\Http\Controllers\Api\DisclosureController;
 use App\Http\Controllers\Api\DocumentController;
-use App\Http\Controllers\Api\FileController;
 use App\Http\Controllers\Api\FeeController;
+use App\Http\Controllers\Api\FileController;
 use App\Http\Controllers\Api\GCashReportController;
 use App\Http\Controllers\Api\GCashTierController;
 use App\Http\Controllers\Api\GCashTransactionController;
@@ -149,6 +149,7 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::patch('/loans/{loan}/release', [LoanController::class, 'release']);
     Route::patch('/loans/{loan}/void', [LoanController::class, 'void']);
     Route::post('/loans/{loan}/extend', [LoanController::class, 'extend']);
+    Route::post('/loans/{loan}/restructure', [LoanController::class, 'restructure']);
     Route::get('/loans/{loan}/ledger-entries', [LoanController::class, 'ledgerEntries']);
     Route::patch('/loans/{loan}/auto-pay', [LoanController::class, 'toggleAutoPay']);
     Route::get('/loans/{loan}/amortization-preview', [LoanController::class, 'amortizationPreview']);
