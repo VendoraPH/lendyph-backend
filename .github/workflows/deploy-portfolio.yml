@@ -1,0 +1,101 @@
+name: Deploy Portfolio API
+
+# LendyPH — PORTFOLIO API (the owner's personal demo instance, NOT a product
+# environment).
+#   domain : api-lendyph.abedubas.dev
+#   dir    : /var/www/lendyph-backend   (VPS 76.13.22.110)
+#   branch : main
+#
+# Manual-only on purpose. This used to fire on every push to `main`, which put
+# a personal demo box in the product's release train; the real environments now
+# live in deploy-production.yml (api.lendyph.com) and deploy-staging.yml
+# (staging-api.lendyph.com). Deploy this one when you actually want the demo
+# refreshed.
+#
+# Unlike the other two Lendyph API instances, /var/www/lendyph-backend has no
+# on-VPS deploy.sh, so the steps stay inline here.
+on:
+  workflow_dispatch:
+
+# Never let two demo deploys interleave over the same checkout.
+concurrency:
+  group: deploy-portfolio-api
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy portfolio API (api-lendyph.abedubas.dev)
+    runs-on: ubuntu-latest
+
+    # The on-VPS deploy script is defined once and reused by both the initial
+    # attempt and the transient-failure retry below, so the two never drift.
+    env:
+      DEPLOY_SCRIPT: |
+        set -e
+        cd /var/www/lendyph-backend
+        # Discard any local changes (e.g. regenerated api-docs.json) to avoid pull conflicts
+        git fetch origin main
+        git reset --hard origin/main
+        COMPOSER_ALLOW_SUPERUSER=1 composer install --no-dev --optimize-autoloader --no-interaction
+        php artisan migrate --force
+        # Symlink public/storage -> storage/app/public so uploaded photos and
+        # valid-ID files are served at /storage/*. Idempotent; --force recreates a stale link.
+        php artisan storage:link --force
+        php artisan config:clear
+        php artisan route:clear
+        php artisan view:clear
+        php artisan config:cache
+        php artisan route:cache
+        php artisan l5-swagger:generate
+        chown -R www-data:www-data storage bootstrap/cache
+
+        # --- Laravel scheduler cron (idempotent, scoped to THIS directory) ---
+        # Three Lendyph backends share this VPS's single root crontab:
+        #   /var/www/lendyph-com-api          -> api.lendyph.com          (production)
+        #   /var/www/lendyph-com-api-staging  -> staging-api.lendyph.com  (staging)
+        #   /var/www/lendyph-backend          -> api-lendyph.abedubas.dev (portfolio)
+        # Each needs its OWN schedule:run entry, so the guard must match this
+        # directory and nothing else. Matching through "&& php artisan
+        # schedule:run" makes " &&" the terminator, so no path can be a prefix
+        # of another — and it also won't be fooled by some unrelated cron that
+        # happens to cd into the same directory.
+        # flock serialises the read-modify-write: `crontab -l | ... | crontab -`
+        # from two environments deploying at once would otherwise silently drop
+        # whichever entry lost the race.
+        export CRON_JOB="cd /var/www/lendyph-backend && php artisan schedule:run"
+        export CRON_LINE="* * * * * $CRON_JOB >> /dev/null 2>&1"
+        flock /var/lock/lendyph-scheduler-crontab.lock bash -c 'crontab -l 2>/dev/null | grep -qF "$CRON_JOB" || (crontab -l 2>/dev/null; echo "$CRON_LINE") | crontab -'
+
+        # Fail loudly rather than leave the demo running without a scheduler.
+        crontab -l 2>/dev/null | grep -qF "$CRON_JOB"
+        echo "scheduler cron present: $CRON_LINE"
+
+        echo "Portfolio API deployed at $(date)"
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          # Bumped from the 30s default: a slow handshake should wait, not fail.
+          timeout: 120s
+          command_timeout: 20m
+          script: ${{ env.DEPLOY_SCRIPT }}
+
+      # appleboy/ssh-action does not retry a dropped/timed-out connection.
+      # The 2026-06-05 deploy of #17 failed with a one-off "dial tcp :22 i/o
+      # timeout" while the VPS was healthy (a re-run succeeded immediately).
+      # The deploy script is idempotent, so retry once to ride out transient
+      # network blips rather than failing the run outright.
+      - name: Deploy via SSH (retry on transient failure)
+        if: failure()
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          timeout: 120s
+          command_timeout: 20m
+          script: ${{ env.DEPLOY_SCRIPT }}

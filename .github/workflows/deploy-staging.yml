@@ -1,0 +1,89 @@
+name: Deploy Staging API
+
+# LendyPH SaaS — STAGING API.
+#   domain : staging-api.lendyph.com
+#   dir    : /var/www/lendyph-com-api-staging   (VPS 76.13.22.110)
+#   branch : staging                            (db: lendyph_com_staging)
+#
+# The on-VPS /var/www/lendyph-com-api-staging/deploy.sh owns the app-level work
+# (fetch/reset, composer, migrate, storage:link --force, config/route cache,
+# l5-swagger, chown www-data). This workflow invokes it and then adds the one
+# host-level thing deploy.sh does not do: the Laravel scheduler crontab entry.
+on:
+  push:
+    branches: [staging]
+    # CI-only changes (e.g. edits to these workflows) shouldn't redeploy staging.
+    paths-ignore: ['.github/**']
+  # Manual re-deploy path: re-runs the idempotent deploy against whatever
+  # origin/staging points at now, without needing an empty commit.
+  workflow_dispatch:
+
+# Two overlapping deploys would `git reset --hard` the checkout out from under
+# a running composer install. Queue them instead of interleaving; never cancel
+# a deploy mid-flight.
+concurrency:
+  group: deploy-staging-api
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy staging API (staging-api.lendyph.com)
+    runs-on: ubuntu-latest
+
+    # The on-VPS deploy script is defined once and reused by both the initial
+    # attempt and the transient-failure retry below, so the two never drift.
+    env:
+      DEPLOY_SCRIPT: |
+        set -e
+        bash /var/www/lendyph-com-api-staging/deploy.sh
+
+        # --- Laravel scheduler cron (idempotent, scoped to THIS directory) ---
+        # Three Lendyph backends share this VPS's single root crontab:
+        #   /var/www/lendyph-com-api          -> api.lendyph.com          (production)
+        #   /var/www/lendyph-com-api-staging  -> staging-api.lendyph.com  (staging)
+        #   /var/www/lendyph-backend          -> api-lendyph.abedubas.dev (portfolio)
+        # Each needs its OWN schedule:run entry, so the guard must match this
+        # directory and nothing else. Matching through "&& php artisan
+        # schedule:run" makes " &&" the terminator, so no path can be a prefix
+        # of another (production's "/var/www/lendyph-com-api" is a prefix of
+        # this one) — and it also won't be fooled by some unrelated cron that
+        # happens to cd into the same directory.
+        # flock serialises the read-modify-write: `crontab -l | ... | crontab -`
+        # from two environments deploying at once would otherwise silently drop
+        # whichever entry lost the race.
+        export CRON_JOB="cd /var/www/lendyph-com-api-staging && php artisan schedule:run"
+        export CRON_LINE="* * * * * $CRON_JOB >> /dev/null 2>&1"
+        flock /var/lock/lendyph-scheduler-crontab.lock bash -c 'crontab -l 2>/dev/null | grep -qF "$CRON_JOB" || (crontab -l 2>/dev/null; echo "$CRON_LINE") | crontab -'
+
+        # Fail loudly rather than leave staging running without a scheduler.
+        crontab -l 2>/dev/null | grep -qF "$CRON_JOB"
+        echo "scheduler cron present: $CRON_LINE"
+
+        echo "Staging API deployed at $(date)"
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          # Bumped from the 30s default: a slow handshake should wait, not fail.
+          timeout: 120s
+          command_timeout: 20m
+          script: ${{ env.DEPLOY_SCRIPT }}
+
+      # appleboy/ssh-action does not retry a dropped/timed-out connection, and
+      # this VPS has intermittently flaky inbound SSH (dial tcp :22 i/o timeout
+      # while the box was healthy; a plain re-run succeeded immediately). The
+      # deploy script is idempotent, so retry once to ride out transient blips.
+      - name: Deploy via SSH (retry on transient failure)
+        if: failure()
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          timeout: 120s
+          command_timeout: 20m
+          script: ${{ env.DEPLOY_SCRIPT }}
