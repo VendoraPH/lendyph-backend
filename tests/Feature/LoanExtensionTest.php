@@ -6,6 +6,7 @@ use App\Models\AmortizationSchedule;
 use App\Models\AuditLog;
 use App\Models\Loan;
 use App\Models\LoanAdjustment;
+use App\Models\LoanLedgerEntry;
 use App\Models\Repayment;
 use App\Models\Role;
 use App\Models\User;
@@ -174,6 +175,86 @@ class LoanExtensionTest extends TestCase
             (float) $newSchedule->interest_due,
             'an overdue loan should carry the interest the penalty consumed',
         );
+    }
+
+    public function test_defer_records_only_an_interest_debit_in_the_ledger(): void
+    {
+        // Spec scenario 2: the outstanding interest is not paid, so the ledger
+        // gains the extension's interest as a debit and nothing else.
+        $loan = $this->makeUponMaturityLoan();
+
+        $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'defer'])->assertOk();
+
+        $entries = LoanLedgerEntry::where('loan_id', $loan->id)->get();
+
+        $this->assertCount(1, $entries);
+        $this->assertSame('debit', $entries[0]->type);
+        $this->assertSame('interest', $entries[0]->category);
+        $this->assertEqualsWithDelta(1800.00, (float) $entries[0]->amount, 0.01);
+        $this->assertSame('Interest charged for the extended loan term', $entries[0]->description);
+        $this->assertNotNull($entries[0]->loan_adjustment_id);
+        $this->assertNull($entries[0]->repayment_id);
+    }
+
+    public function test_pay_records_both_a_credit_and_an_interest_debit(): void
+    {
+        // Spec scenario 1: the outstanding interest is collected first, so the
+        // ledger shows the payment as a credit and the new cycle as a debit.
+        $loan = $this->makeUponMaturityLoan();
+        $loan->amortizationSchedules()->update([
+            'due_date' => now()->addWeek()->toDateString(),
+            'status' => 'pending',
+        ]);
+
+        $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'pay'])->assertOk();
+
+        $entries = LoanLedgerEntry::where('loan_id', $loan->id)->get();
+        $credit = $entries->firstWhere('type', 'credit');
+        $debit = $entries->firstWhere('type', 'debit');
+
+        $this->assertCount(2, $entries);
+
+        $this->assertNotNull($credit);
+        $this->assertEqualsWithDelta(1800.00, (float) $credit->amount, 0.01);
+        $this->assertSame('Payment of outstanding interest upon loan extension', $credit->description);
+        // Carries the repayment it settled, so the client can show the money
+        // once rather than as both a ledger credit and a payment row.
+        $this->assertNotNull($credit->repayment_id);
+
+        $this->assertNotNull($debit);
+        $this->assertEqualsWithDelta(1800.00, (float) $debit->amount, 0.01);
+        $this->assertSame('Interest charged for the extended loan term', $debit->description);
+    }
+
+    public function test_a_later_extension_appends_to_the_ledger_without_touching_earlier_entries(): void
+    {
+        // "The extension must not remove or overwrite previous ledger records."
+        $loan = $this->makeUponMaturityLoan();
+
+        $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'defer'])->assertOk();
+        $firstIds = LoanLedgerEntry::where('loan_id', $loan->id)->pluck('id')->all();
+
+        $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'defer'])->assertOk();
+
+        $allIds = LoanLedgerEntry::where('loan_id', $loan->id)->pluck('id')->all();
+
+        $this->assertCount(2, $allIds);
+        foreach ($firstIds as $id) {
+            $this->assertContains($id, $allIds, 'an earlier ledger entry was removed');
+        }
+    }
+
+    public function test_ledger_entries_are_exposed_on_the_loan(): void
+    {
+        $loan = $this->makeUponMaturityLoan();
+
+        $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'defer'])->assertOk();
+
+        $this->getJson("/api/loans/{$loan->id}/ledger-entries")
+            ->assertOk()
+            ->assertJsonPath('data.0.type', 'debit')
+            ->assertJsonPath('data.0.category', 'interest')
+            ->assertJsonPath('data.0.description', 'Interest charged for the extended loan term');
     }
 
     public function test_the_interest_option_is_required(): void
