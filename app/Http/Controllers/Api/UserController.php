@@ -11,6 +11,7 @@ use App\Models\User;
 use App\Services\AuditLogService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
+use Illuminate\Validation\ValidationException;
 use OpenApi\Attributes as OA;
 
 class UserController extends Controller
@@ -70,7 +71,9 @@ class UserController extends Controller
     #[OA\Post(
         path: '/api/users',
         summary: 'Create user',
-        description: 'Create a new user account',
+        description: 'Create a new user account. `role` is limited to roles the caller may grant: '
+            .'`super_admin` requires the caller to already be a `super_admin`, and no role may carry '
+            .'permissions the caller does not hold themselves.',
         tags: ['Users'],
         security: [['sanctum' => []]],
         requestBody: new OA\RequestBody(
@@ -101,6 +104,17 @@ class UserController extends Controller
     {
         $user = User::create($request->safe()->except('role'));
         $user->assignRole($request->role);
+
+        // The Auditable trait's `created` row carries the user's columns, and
+        // the role is not one of them — it lands in model_has_roles, which is
+        // mutable and keeps no history. Without this entry the trail cannot
+        // say which role an account was opened with.
+        AuditLogService::log(
+            action: 'role_assigned',
+            auditable: $user,
+            newValues: ['role' => $request->role],
+            description: "User {$user->username} created with role {$request->role}",
+        );
 
         $user->load('branch', 'roles');
 
@@ -137,7 +151,9 @@ class UserController extends Controller
     #[OA\Put(
         path: '/api/users/{id}',
         summary: 'Update user',
-        description: 'Update an existing user',
+        description: 'Update an existing user. Same `role` restrictions as user creation, plus: you may '
+            .'not change the role on your own record, and only a `super_admin` may change the role of a '
+            .'`super_admin`. Non-role fields on your own record are still editable.',
         tags: ['Users'],
         security: [['sanctum' => []]],
         parameters: [
@@ -167,10 +183,32 @@ class UserController extends Controller
     )]
     public function update(UpdateUserRequest $request, User $user): UserResource
     {
+        $previousRole = $user->getRoleNames()->first();
+
         $user->update($request->safe()->except('role'));
 
         if ($request->has('role')) {
             $user->syncRoles([$request->role]);
+
+            // Roles live in a pivot table, so a role-only payload leaves the
+            // user row non-dirty and the Auditable trait never fires — a
+            // promotion used to pass through completely unrecorded. Log it
+            // explicitly. `AuditLogService` stamps the actor (auth user) and
+            // the target (auditable), so both ends of the change are captured.
+            if ($request->role !== $previousRole) {
+                AuditLogService::log(
+                    action: 'role_changed',
+                    auditable: $user,
+                    oldValues: ['role' => $previousRole],
+                    newValues: ['role' => $request->role],
+                    description: sprintf(
+                        'Role for %s changed from %s to %s',
+                        $user->username,
+                        $previousRole ?? 'none',
+                        $request->role,
+                    ),
+                );
+            }
         }
 
         $user->load('branch', 'roles');
@@ -191,11 +229,21 @@ class UserController extends Controller
             new OA\Response(response: 200, description: 'User deactivated'),
             new OA\Response(response: 401, description: 'Unauthenticated'),
             new OA\Response(response: 403, description: 'Forbidden'),
+            new OA\Response(response: 422, description: 'Target is a super_admin and the caller is not'),
         ],
     )]
     public function deactivate(User $user): JsonResponse
     {
         $this->authorize('users:delete');
+
+        // Deactivation revokes the target's tokens on their next request, so a
+        // client admin could otherwise lock the platform team out of their own
+        // deployment. Same boundary as editing or resetting that account.
+        if (! auth()->user()->canManageAccount($user)) {
+            throw ValidationException::withMessages([
+                'user' => 'Only a super_admin can deactivate a super_admin.',
+            ]);
+        }
 
         $user->update(['status' => 'inactive']);
         $user->tokens()->delete();

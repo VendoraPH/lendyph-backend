@@ -458,10 +458,25 @@ class LoanService
 
         // Dual control on restructures only. A restructure can destroy debt, so
         // the person who raised it must not also be the one who signs it off.
+        //
+        // super_admin is exempt by product decision: the platform owner operates
+        // the system directly and there is no second super_admin to hand the
+        // approval to, so the rule would simply block them. Every other role —
+        // including the client-side `admin`, which holds every permission —
+        // still needs a second person.
+        //
+        // The exemption has to be spelled out here because this is a plain role
+        // check, not an authorization check: `Gate::before` in AppServiceProvider
+        // short-circuits Gate/permission calls for super_admin, and never sees
+        // this guard.
+        //
         // Deliberately NOT applied to ordinary loans: this client is a small
         // cooperative where one person legitimately handles a whole application,
         // and the write-off risk is specific to restructures.
-        if ($loan->source_loan_id !== null && (int) $loan->created_by === (int) $approver->id) {
+        if ($loan->source_loan_id !== null
+            && (int) $loan->created_by === (int) $approver->id
+            && ! $approver->hasRole('super_admin')
+        ) {
             throw new AuthorizationException(
                 'A restructure must be approved by someone other than the person who created it.',
             );
