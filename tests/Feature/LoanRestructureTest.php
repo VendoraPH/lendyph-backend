@@ -74,8 +74,11 @@ class LoanRestructureTest extends TestCase
     }
 
     /**
-     * A second admin, because a restructure may not be approved by whoever
-     * created it. Everything in this file is created by $this->admin.
+     * A second admin. Everything in this file is created by $this->admin, who
+     * is a super_admin and is therefore exempt from restructure dual control —
+     * but the realistic client flow is still a second person signing off, so
+     * these tests approve as one. The dual-control rule itself is exercised
+     * with non-super_admin roles further down.
      */
     private function approver(): User
     {
@@ -780,17 +783,63 @@ class LoanRestructureTest extends TestCase
 
     public function test_a_restructure_cannot_be_approved_by_whoever_created_it(): void
     {
-        $source = $this->createReleasedLoan();
-        $newLoan = $this->restructure($source);
+        // Dual control is a plain role check in LoanService::approve(), not a
+        // permission check, so it has to be proven with a role that does NOT
+        // get the super_admin Gate::before bypass. `admin` is the strongest
+        // such role — it holds every permission, including loans:approve, and
+        // is still blocked. That is the whole point of the control.
+        $creator = $this->userWithRole('admin');
+        $this->assertFalse($creator->hasRole('super_admin'));
+        $this->assertTrue($creator->can('loans:approve'));
 
+        $source = $this->createReleasedLoan();
+
+        $this->actingAs($creator);
+        $newLoan = $this->restructure($source);
         $this->patchJson("/api/loans/{$newLoan->id}/submit")->assertOk();
 
-        // $this->admin created it — and holds every permission, including the
-        // super_admin Gate bypass. Dual control is not a permission check.
         $this->patchJson("/api/loans/{$newLoan->id}/approve", ['approval_remarks' => 'self-approved'])
             ->assertForbidden();
 
         $this->assertSame('for_review', $newLoan->fresh()->status);
+
+        // A second person — also not a super_admin — signs it off fine.
+        $this->actingAs($this->approver());
+        $this->patchJson("/api/loans/{$newLoan->id}/approve", ['approval_remarks' => 'ok'])->assertOk();
+
+        $this->assertSame('approved', $newLoan->fresh()->status);
+    }
+
+    public function test_a_super_admin_can_approve_a_restructure_they_created(): void
+    {
+        // Product decision: super_admin must be able to do everything. The
+        // owner operates the system directly and has no second super_admin to
+        // hand a restructure to, so dual control would simply block them.
+        $this->assertTrue($this->admin->hasRole('super_admin'));
+
+        $source = $this->createReleasedLoan();
+        $newLoan = $this->restructure($source);
+
+        $this->patchJson("/api/loans/{$newLoan->id}/submit")->assertOk();
+        $this->patchJson("/api/loans/{$newLoan->id}/approve", ['approval_remarks' => 'self-approved'])
+            ->assertOk();
+
+        $newLoan->refresh();
+        $this->assertSame('approved', $newLoan->status);
+        $this->assertSame((int) $this->admin->id, (int) $newLoan->approved_by);
+        $this->assertSame((int) $this->admin->id, (int) $newLoan->created_by);
+    }
+
+    public function test_a_restructure_can_be_approved_by_a_different_user_of_any_role(): void
+    {
+        $source = $this->createReleasedLoan();
+
+        // Raised by a loan officer, signed off by an admin: neither is a
+        // super_admin, and dual control only ever cares about who created it.
+        $officer = $this->userWithRole('loan_officer');
+        $this->actingAs($officer);
+        $newLoan = $this->restructure($source);
+        $this->patchJson("/api/loans/{$newLoan->id}/submit")->assertOk();
 
         $this->actingAs($this->approver());
         $this->patchJson("/api/loans/{$newLoan->id}/approve", ['approval_remarks' => 'ok'])->assertOk();
@@ -803,8 +852,14 @@ class LoanRestructureTest extends TestCase
         // The dual-control rule is scoped to restructures on purpose: this is a
         // small cooperative where one person legitimately handles a whole
         // ordinary application, and the write-off risk is restructure-specific.
+        //
+        // Acted out as a non-super_admin: as $this->admin this would pass on
+        // the super_admin exemption alone and prove nothing about ordinary
+        // loans.
         $borrower = Borrower::factory()->create(['branch_id' => $this->branch->id]);
         $product = $this->createReleasedLoan()->loanProduct;
+
+        $this->actingAs($this->userWithRole('admin'));
 
         $response = $this->postJson('/api/loans', [
             'borrower_id' => $borrower->id,
