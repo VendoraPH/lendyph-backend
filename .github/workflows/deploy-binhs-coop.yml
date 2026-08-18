@@ -1,7 +1,7 @@
 name: Deploy binhs-coop (backend)
 
 # Manual-only deploys for the binhs-coop client API instance.
-#   staging    -> api.binhs-coop-staging.lendyph.com  (/var/www/binhs-coop-backend-staging, branch staging)
+#   staging    -> api.binhs-coop-staging.lendyph.com  (/var/www/binhs-coop-backend-staging, branch development)
 #   production -> api.binhs-coop.lendyph.com           (/var/www/binhs-coop-backend, branch main)
 on:
   workflow_dispatch:
