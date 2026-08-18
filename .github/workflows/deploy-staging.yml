@@ -3,7 +3,7 @@ name: Deploy Staging API
 # LendyPH SaaS — STAGING API.
 #   domain : staging-api.lendyph.com
 #   dir    : /var/www/lendyph-com-api-staging   (VPS 76.13.22.110)
-#   branch : staging                            (db: lendyph_com_staging)
+#   branch : development                        (db: lendyph_com_staging)
 #
 # The on-VPS /var/www/lendyph-com-api-staging/deploy.sh owns the app-level work
 # (fetch/reset, composer, migrate, storage:link --force, config/route cache,
@@ -11,11 +11,11 @@ name: Deploy Staging API
 # host-level thing deploy.sh does not do: the Laravel scheduler crontab entry.
 on:
   push:
-    branches: [staging]
+    branches: [development]
     # CI-only changes (e.g. edits to these workflows) shouldn't redeploy staging.
     paths-ignore: ['.github/**']
   # Manual re-deploy path: re-runs the idempotent deploy against whatever
-  # origin/staging points at now, without needing an empty commit.
+  # origin/development points at now, without needing an empty commit.
   workflow_dispatch:
 
 # Two overlapping deploys would `git reset --hard` the checkout out from under
