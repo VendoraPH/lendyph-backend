@@ -54,6 +54,13 @@ jobs:
       - name: Install Composer dependencies
         run: composer install --no-interaction --prefer-dist --no-progress
 
+      # Pint was already in require-dev but nothing ran it, so style drifted
+      # silently. vendora-api has had this step since it was created; this is
+      # the backport. Repo verified clean at 321 files when added — run
+      # `vendor/bin/pint` to fix anything this flags.
+      - name: Check code style (Pint)
+        run: ./vendor/bin/pint --test
+
       - name: Prepare environment
         run: |
           cp .env.example .env

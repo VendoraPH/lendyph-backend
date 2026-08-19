@@ -7,6 +7,7 @@ use App\Models\Role;
 use App\Models\User;
 use Database\Seeders\DatabaseSeeder;
 use Illuminate\Support\Facades\Artisan;
+use Spatie\Permission\Models\Permission;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
@@ -202,7 +203,7 @@ it('admin role can be updated with collateral permissions (regression for the or
         ],
     ])->assertOk();
 
-    $perms = \Spatie\Permission\Models\Permission::query()
+    $perms = Permission::query()
         ->whereIn('name', ['collaterals:view', 'collaterals:create', 'collaterals:update', 'collaterals:delete'])
         ->pluck('name')
         ->all();
