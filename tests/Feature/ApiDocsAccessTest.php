@@ -22,10 +22,17 @@ it('does not serve the swagger ui when docs are disabled', function () {
     $this->get('/api/documentation')->assertNotFound();
 });
 
-it('defaults to disabled when the deployment says nothing', function () {
-    // The deny-by-default is the whole point: ten deployments share this
-    // codebase, so a box that never sets the flag must publish nothing.
-    expect(config('l5-swagger.enabled'))->toBeFalse();
+it('denies when the deployment has not set the flag at all', function () {
+    // Deny-by-default is the whole point: ten deployments share this codebase,
+    // so a box that never sets the flag must publish nothing.
+    //
+    // Asserting the *resolved* config value would only prove what this
+    // environment's .env happens to say — CI copies .env.example, a developer
+    // has their own. What matters is that an absent flag denies.
+    config(['l5-swagger.enabled' => null]);
+
+    $this->get('/docs')->assertNotFound();
+    $this->get('/api/documentation')->assertNotFound();
 });
 
 it('serves the swagger ui once a deployment opts in', function () {
