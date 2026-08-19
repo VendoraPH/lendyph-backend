@@ -1,0 +1,86 @@
+name: Fleet drift check
+
+# Ten deployments share this repo and lendyph-frontend, differing only by their
+# .env and the branch they track. Nothing used to verify a box was actually
+# serving the branch it tracks, so drift was found by hand — usually by someone
+# testing a "fixed" bug against a deployment that never received the fix.
+#
+# This asks each backend what commit it is serving (GET /api/health) and compares
+# that to the head of the branch it is supposed to track. It deliberately does
+# NOT ssh: runner->VPS SSH drops intermittently upstream, and a drift check that
+# is itself flaky teaches you to ignore it.
+#
+# Frontends are not covered here — they are Next.js and expose no health route.
+# The on-box /usr/local/bin/lendyph-drift-check.sh covers all ten.
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+
+jobs:
+  check:
+    name: Are all backends serving their branch?
+    runs-on: ubuntu-latest
+    steps:
+      - name: Compare each deployment against its branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+
+          # host|branch|label
+          DEPLOYMENTS='
+          api-lendyph.abedubas.dev|main|portfolio
+          api.lendyph.com|main|lendy.ph prod
+          staging-api.lendyph.com|development|lendy.ph staging
+          api.binhs-coop.lendyph.com|main|binhs-coop prod
+          api.binhs-coop-staging.lendyph.com|development|binhs-coop staging
+          '
+
+          declare -A TIP
+          for b in main development; do
+            TIP[$b]=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${b}" --jq '.sha[0:7]')
+            echo "branch ${b} tip = ${TIP[$b]}"
+          done
+          echo
+
+          drift=0
+          while IFS='|' read -r host branch label; do
+            [ -z "${host:-}" ] && continue
+
+            body=$(curl -fsS --max-time 20 "https://${host}/api/health" 2>/dev/null) || {
+              echo "::error title=Unreachable::${label} (${host}) did not answer /api/health"
+              drift=1; continue
+            }
+
+            got=$(jq -r '.commit // "unknown"' <<<"$body")
+            want=${TIP[$branch]}
+
+            if [ "$got" = "unknown" ]; then
+              echo "::error title=No identity::${label} (${host}) does not report a commit — is it running a build from before the health endpoint reported one?"
+              drift=1
+            elif [ "$got" != "$want" ]; then
+              # The deploy workflows carry `paths-ignore: ['.github/**']`, so a
+              # CI-only merge deliberately does not redeploy. Flagging that would
+              # make this check cry wolf on every workflow tweak — and a check
+              # that cries wolf is one you learn to ignore.
+              deployable=$(gh api "repos/${GITHUB_REPOSITORY}/compare/${got}...${want}" \
+                --jq '[.files[]?.filename | select(startswith(".github/") | not)] | length' 2>/dev/null || echo "?")
+
+              if [ "$deployable" = "0" ]; then
+                echo "ok  ${label} (${host}) — ${got}, behind ${want} by CI-only changes (not deployable)"
+              else
+                echo "::error title=Behind::${label} (${host}) serves ${got}, but ${branch} is at ${want} — ${deployable} deployable file(s) not on this box"
+                drift=1
+              fi
+            else
+              echo "ok  ${label} (${host}) — ${got} = ${branch}"
+            fi
+          done <<< "$DEPLOYMENTS"
+
+          echo
+          if [ "$drift" -ne 0 ]; then
+            echo "One or more deployments are not serving the branch they track."
+            exit 1
+          fi
+          echo "All backends are current."

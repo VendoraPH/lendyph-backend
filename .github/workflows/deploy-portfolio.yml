@@ -47,6 +47,13 @@ jobs:
         php artisan config:cache
         php artisan route:cache
         php artisan l5-swagger:generate
+        # Borrower photos and loan documents belong on the private disk, behind
+        # expiring signed links. This box was the one deployment where that
+        # migration had never run — because it is the only one with no deploy.sh,
+        # and the command lived in no deploy path at all. 60 identity documents
+        # were served anonymously at /storage/** until 2026-08-19. Idempotent:
+        # it skips anything already private, so the steady-state cost is nil.
+        php artisan files:move-private
         chown -R www-data:www-data storage bootstrap/cache
 
         # --- Laravel scheduler cron (idempotent, scoped to THIS directory) ---
