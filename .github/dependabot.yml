@@ -1,0 +1,22 @@
+version: 2
+
+# Weekly rather than daily, and grouped, because this repo has one maintainer —
+# a PR per dependency per day would just be noise that gets ignored, which is
+# worse than no alerts at all. Security updates still arrive immediately via
+# GitHub's separate security-update path.
+updates:
+  - package-ecosystem: composer
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      php-minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3

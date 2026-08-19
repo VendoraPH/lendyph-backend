@@ -1,9 +1,20 @@
 <?php
 
+use App\Http\Middleware\EnsureDocsAreEnabled;
 use L5Swagger\Generator;
 use OpenApi\scan;
 
 return [
+    /*
+     * Whether this deployment serves the API docs at all.
+     *
+     * Defaults to false so a deployment that says nothing publishes nothing.
+     * Ten instances share this codebase and differ only by their .env, so an
+     * opt-out default would mean every new box leaks its API surface until
+     * someone remembers to turn it off.
+     */
+    'enabled' => env('L5_SWAGGER_ENABLED', false),
+
     'default' => 'default',
     'documentations' => [
         'default' => [
@@ -76,8 +87,22 @@ return [
 
             /*
              * Route Group options
+             *
+             * Applied to all four docs routes at once (ui, json, asset,
+             * oauth2_callback) — unlike the per-route `middleware` map above,
+             * which misses the asset route.
+             *
+             * The throttle matters independently of the gate: l5-swagger
+             * regenerates the spec per request when `generate_always` is on,
+             * which is a full static analysis of app/. Unthrottled, that is a
+             * cheap way for an anonymous caller to saturate php-fpm.
              */
-            'group_options' => [],
+            'group_options' => [
+                'middleware' => [
+                    EnsureDocsAreEnabled::class,
+                    'throttle:10,1',
+                ],
+            ],
         ],
 
         'paths' => [

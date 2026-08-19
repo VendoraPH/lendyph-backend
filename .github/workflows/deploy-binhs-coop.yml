@@ -57,6 +57,17 @@ jobs:
               bash /var/www/binhs-coop-backend-staging/deploy.sh
             fi
 
+      # The retry below used to fire ~2 min after the first attempt — inside the
+      # same outage window — so both legs died together and the deploy shipped
+      # nothing. Observed three times on 2026-08-19, each succeeding on a manual
+      # re-run minutes later with nothing changed. The drops happen upstream of
+      # the VPS: the errors quote the correct IP, ufw allows OpenSSH from
+      # anywhere, fail2ban is not installed, and the box's own sshd journal has
+      # no trace of the attempts. Waiting is the only lever we have from here.
+      - name: Wait out the transient network window
+        if: failure()
+        run: sleep 240
+
       # The VPS has intermittently flaky inbound SSH (dial tcp :22 i/o timeout).
       # deploy.sh is idempotent, so retry once to ride out transient blips.
       - name: Deploy to VPS via SSH (retry on transient failure)
