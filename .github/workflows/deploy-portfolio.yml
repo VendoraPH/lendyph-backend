@@ -84,6 +84,17 @@ jobs:
           command_timeout: 20m
           script: ${{ env.DEPLOY_SCRIPT }}
 
+      # The retry below used to fire ~2 min after the first attempt — inside the
+      # same outage window — so both legs died together and the deploy shipped
+      # nothing. Observed three times on 2026-08-19, each succeeding on a manual
+      # re-run minutes later with nothing changed. The drops happen upstream of
+      # the VPS: the errors quote the correct IP, ufw allows OpenSSH from
+      # anywhere, fail2ban is not installed, and the box's own sshd journal has
+      # no trace of the attempts. Waiting is the only lever we have from here.
+      - name: Wait out the transient network window
+        if: failure()
+        run: sleep 240
+
       # appleboy/ssh-action does not retry a dropped/timed-out connection.
       # The 2026-06-05 deploy of #17 failed with a one-off "dial tcp :22 i/o
       # timeout" while the VPS was healthy (a re-run succeeded immediately).
