@@ -15,6 +15,12 @@ name: Deploy Portfolio API
 # Unlike the other two Lendyph API instances, /var/www/lendyph-backend has no
 # on-VPS deploy.sh, so the steps stay inline here.
 on:
+  push:
+    # Tracks main, like the other production deployments. Previously
+    # dispatch-only, which is why this box silently fell behind — and why its
+    # one-shot files:move-private step never ran here.
+    branches: [main]
+    paths-ignore: ['.github/**']
   workflow_dispatch:
 
 # Never let two demo deploys interleave over the same checkout.
