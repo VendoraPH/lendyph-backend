@@ -8,12 +8,17 @@ name: Deploy binhs-coop (backend)
 # staging API cannot silently fall behind the branch it tracks — it used to,
 # because every deploy needed someone to remember to dispatch this by hand.
 #
-# Production stays manual on purpose: a person picks the moment a change
-# reaches the client's live API.
+# Production now tracks main. It was dispatch-only so a person could pick the
+# moment a change reached the client's live API; in practice that meant the box
+# sat behind main until someone remembered, which is the failure this repo keeps
+# hitting. main is protected and cannot take code that has not passed pest, so
+# the gate has not been removed — it moved to the pull request, where it is
+# enforced rather than remembered.
 on:
   push:
-    branches: [development]
-    # CI-only edits shouldn't redeploy the client's staging box.
+    # development -> staging, main -> production.
+    branches: [development, main]
+    # CI-only edits shouldn't redeploy anything.
     paths-ignore: ['.github/**']
   workflow_dispatch:
     inputs:
@@ -28,17 +33,17 @@ on:
 
 # Never let two deploys interleave over the same checkout.
 concurrency:
-  group: deploy-binhs-coop-api-${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'staging' }}
+  group: deploy-binhs-coop-api-${{ github.event_name == 'workflow_dispatch' && inputs.environment || (github.ref_name == 'main' && 'production' || 'staging') }}
   cancel-in-progress: false
 
 env:
-  # A push to `development` always means staging; only a dispatch may name
-  # production.
-  TARGET: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'staging' }}
+  # push development -> staging, push main -> production; a dispatch may name
+  # either explicitly.
+  TARGET: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || (github.ref_name == 'main' && 'production' || 'staging') }}
 
 jobs:
   deploy:
-    name: Deploy binhs-coop API ${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'staging' }}
+    name: Deploy binhs-coop API ${{ github.event_name == 'workflow_dispatch' && inputs.environment || (github.ref_name == 'main' && 'production' || 'staging') }}
     runs-on: ubuntu-latest
     steps:
       - name: Deploy to VPS via SSH
