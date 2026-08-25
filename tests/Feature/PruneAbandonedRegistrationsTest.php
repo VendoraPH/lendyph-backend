@@ -6,6 +6,10 @@ use App\Models\AuditLog;
 use App\Models\Borrower;
 use App\Models\BorrowerSubmissionToken;
 use App\Models\Branch;
+use App\Models\GCashTransaction;
+use App\Models\Loan;
+use App\Models\ShareCapitalLedger;
+use App\Services\BorrowerPurgeService;
 use Database\Seeders\DatabaseSeeder;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Storage;
@@ -202,5 +206,105 @@ class PruneAbandonedRegistrationsTest extends TestCase
         $this->artisan('registrations:prune')->assertSuccessful();
 
         $this->assertSame(0, Borrower::where('last_name', 'Twice')->count());
+    }
+
+    /**
+     * "Pending" plus a loan is a real state in this data model, not a
+     * contradiction. The portfolio database holds nine such loans across four
+     * pending borrowers — 30% of its loan book — every one of them matching the
+     * status-and-documents rule this command originally shipped with.
+     *
+     * binhs-coop happens to have none, which is the only reason that rule
+     * looked safe when it was first checked against production.
+     */
+    public function test_never_prunes_a_pending_borrower_that_has_a_loan(): void
+    {
+        $borrower = $this->pendingBorrower('Borrowed', now()->subDays(300));
+        Loan::factory()->create([
+            'borrower_id' => $borrower->id,
+            'branch_id' => $this->branch->id,
+        ]);
+
+        $this->artisan('registrations:prune')->assertSuccessful();
+
+        $this->assertDatabaseHas('borrowers', ['id' => $borrower->id]);
+        $this->assertDatabaseMissing('audit_logs', [
+            'action' => 'pruned',
+            'auditable_id' => $borrower->id,
+        ]);
+    }
+
+    public function test_never_prunes_a_pending_borrower_with_share_capital_movement(): void
+    {
+        $borrower = $this->pendingBorrower('Contributed', now()->subDays(300));
+        ShareCapitalLedger::factory()->create(['borrower_id' => $borrower->id]);
+
+        $this->artisan('registrations:prune')->assertSuccessful();
+
+        $this->assertDatabaseHas('borrowers', ['id' => $borrower->id]);
+    }
+
+    public function test_never_prunes_a_pending_borrower_with_a_gcash_transaction(): void
+    {
+        $borrower = $this->pendingBorrower('Cashed', now()->subDays(300));
+        GCashTransaction::factory()->create(['borrower_id' => $borrower->id]);
+
+        $this->artisan('registrations:prune')->assertSuccessful();
+
+        $this->assertDatabaseHas('borrowers', ['id' => $borrower->id]);
+    }
+
+    /**
+     * The other half of the financial-history guard. Every borrower gets a
+     * ShareCapitalPledge from Borrower::booted(), so gating on the pledge — the
+     * obvious sibling of the ledger — would exclude every row and quietly turn
+     * the command into a no-op that still reports success.
+     */
+    public function test_the_auto_created_pledge_alone_does_not_protect_a_borrower(): void
+    {
+        $borrower = $this->pendingBorrower('OnlyPledge', now()->subDays(30));
+        $this->assertDatabaseHas('share_capital_pledges', ['borrower_id' => $borrower->id]);
+        $this->assertSame(0, $borrower->loans()->count());
+
+        $this->artisan('registrations:prune')->assertSuccessful();
+
+        $this->assertDatabaseMissing('borrowers', ['id' => $borrower->id]);
+    }
+
+    /**
+     * A failed purge must leave the borrower AND its files intact together.
+     *
+     * The files used to be unlinked inside the transaction, so a throw after the
+     * first unlink rolled the rows back and left the files gone — the borrower
+     * survived pointing at a photo that no longer existed. The audit row was
+     * written outside that transaction too, so it survived as well, claiming a
+     * prune that never happened.
+     */
+    public function test_a_failed_purge_leaves_no_audit_row_and_no_missing_files(): void
+    {
+        $borrower = $this->pendingBorrower('Restricted', now()->subDays(300));
+        $borrower->forceFill(['photo_path' => 'borrowers/photos/'.$borrower->id.'/photo.jpg'])->saveQuietly();
+        Storage::disk('private')->put($borrower->photo_path, 'photo-bytes');
+
+        // A loan makes $borrower->delete() throw on the restrictOnDelete FK,
+        // which is exactly the failure the portfolio box was about to hit.
+        Loan::factory()->create([
+            'borrower_id' => $borrower->id,
+            'branch_id' => $this->branch->id,
+        ]);
+
+        // Bypass the command's guard to exercise the service's own crash safety.
+        try {
+            app(BorrowerPurgeService::class)->purge($borrower->fresh(), audit: false);
+        } catch (\Throwable) {
+            // expected
+        }
+
+        $this->assertDatabaseHas('borrowers', ['id' => $borrower->id]);
+        Storage::disk('private')->assertExists($borrower->photo_path);
+        $this->assertDatabaseMissing('audit_logs', [
+            'action' => 'pruned',
+            'auditable_id' => $borrower->id,
+        ]);
     }
 }

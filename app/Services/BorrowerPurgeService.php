@@ -37,37 +37,75 @@ class BorrowerPurgeService
      */
     public function purge(Borrower $borrower, bool $audit = true): void
     {
-        DB::transaction(function () use ($borrower, $audit) {
-            $disk = Storage::disk('private');
+        $disk = Storage::disk('private');
 
+        /*
+         * Files are collected here and unlinked only after the transaction
+         * commits.
+         *
+         * They used to be deleted inline, inside the transaction, which is not
+         * safe: the filesystem has no rollback. Any failure after the first
+         * unlink — most obviously `$borrower->delete()` throwing on a
+         * restrictOnDelete foreign key such as `loans` — restored every database
+         * row and left the files gone, so the borrower survived pointing at a
+         * photo that no longer existed. On the portfolio box that was three real
+         * borrower photos, one 03:30 run away.
+         *
+         * Deleting after the commit inverts the failure mode: a crash now leaves
+         * files whose rows are gone, which is recoverable and detectable, rather
+         * than rows whose files are gone, which is neither.
+         */
+        $paths = [];
+        $directories = [];
+
+        DB::transaction(function () use ($borrower, $audit, &$paths, &$directories) {
             foreach ($borrower->coMakers as $coMaker) {
                 foreach ($coMaker->documents as $document) {
-                    $disk->delete($document->file_path);
+                    $paths[] = $document->file_path;
                 }
                 $coMaker->documents()->delete();
             }
 
             foreach ($borrower->documents as $document) {
-                $disk->delete($document->file_path);
+                $paths[] = $document->file_path;
             }
             $borrower->documents()->delete();
 
             if ($borrower->photo_path) {
-                $disk->delete($borrower->photo_path);
+                $paths[] = $borrower->photo_path;
             }
 
             // The per-borrower directories, not just the files. Uploads land in
             // documents/valid_id/borrower/{id}/ and borrowers/photos/{id}/, and
             // deleting only the files leaves an empty tree behind that grows by
             // one directory per abandoned application.
-            $disk->deleteDirectory("documents/valid_id/borrower/{$borrower->id}");
-            $disk->deleteDirectory("borrowers/photos/{$borrower->id}");
+            $directories[] = "documents/valid_id/borrower/{$borrower->id}";
+            $directories[] = "borrowers/photos/{$borrower->id}";
 
             // Both are restrictOnDelete; the pledge always exists.
             $borrower->shareCapitalLedger()->delete();
             $borrower->shareCapitalPledge()->delete();
 
             $audit ? $borrower->delete() : $borrower->deleteQuietly();
+        });
+
+        /*
+         * afterCommit, not a plain call here: the prune command wraps its audit
+         * row and this purge in one transaction, which makes the transaction
+         * above a savepoint rather than the outermost one. Unlinking straight
+         * after it would still run with the caller's transaction open and
+         * reintroduce the same hazard on the outer rollback. With no
+         * transaction active — a direct call from the controllers — this runs
+         * immediately.
+         */
+        DB::afterCommit(function () use ($disk, $paths, $directories) {
+            foreach (array_filter($paths) as $path) {
+                $disk->delete($path);
+            }
+
+            foreach ($directories as $directory) {
+                $disk->deleteDirectory($directory);
+            }
         });
     }
 }
