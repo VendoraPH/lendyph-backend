@@ -10,6 +10,7 @@ use App\Http\Resources\BorrowerResource;
 use App\Http\Resources\DocumentResource;
 use App\Models\Borrower;
 use App\Models\Document;
+use App\Services\BorrowerPurgeService;
 use App\Services\BorrowerSubmissionTokenService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -287,36 +288,11 @@ DESC,
             new OA\Response(response: 403, description: 'Forbidden'),
         ],
     )]
-    public function destroy(Borrower $borrower): JsonResponse
+    public function destroy(Borrower $borrower, BorrowerPurgeService $purge): JsonResponse
     {
         $this->authorize('borrowers:delete');
 
-        DB::transaction(function () use ($borrower) {
-            // Delete co-maker documents from disk
-            foreach ($borrower->coMakers as $coMaker) {
-                foreach ($coMaker->documents as $doc) {
-                    Storage::disk('private')->delete($doc->file_path);
-                }
-                $coMaker->documents()->delete();
-            }
-
-            // Delete borrower documents from disk
-            foreach ($borrower->documents as $doc) {
-                Storage::disk('private')->delete($doc->file_path);
-            }
-            $borrower->documents()->delete();
-
-            // Delete photo from disk
-            if ($borrower->photo_path) {
-                Storage::disk('private')->delete($borrower->photo_path);
-            }
-
-            // Delete share capital records (FK uses restrictOnDelete)
-            $borrower->shareCapitalLedger()->delete();
-            $borrower->shareCapitalPledge()->delete();
-
-            $borrower->delete();
-        });
+        $purge->purge($borrower);
 
         return response()->json(['message' => 'Borrower deleted successfully.']);
     }
@@ -549,7 +525,7 @@ DESC,
             new OA\Response(response: 422, description: 'Validation error'),
         ],
     )]
-    public function bulkDestroy(): JsonResponse
+    public function bulkDestroy(BorrowerPurgeService $purge): JsonResponse
     {
         $this->authorize('borrowers:delete');
 
@@ -563,28 +539,7 @@ DESC,
 
         foreach ($validated['ids'] as $id) {
             try {
-                $borrower = Borrower::findOrFail($id);
-
-                DB::transaction(function () use ($borrower) {
-                    foreach ($borrower->coMakers as $coMaker) {
-                        foreach ($coMaker->documents as $doc) {
-                            Storage::disk('private')->delete($doc->file_path);
-                        }
-                        $coMaker->documents()->delete();
-                    }
-                    foreach ($borrower->documents as $doc) {
-                        Storage::disk('private')->delete($doc->file_path);
-                    }
-                    $borrower->documents()->delete();
-
-                    if ($borrower->photo_path) {
-                        Storage::disk('private')->delete($borrower->photo_path);
-                    }
-
-                    $borrower->shareCapitalLedger()->delete();
-                    $borrower->shareCapitalPledge()->delete();
-                    $borrower->delete();
-                });
+                $purge->purge(Borrower::findOrFail($id));
 
                 $deleted[] = $id;
             } catch (\Throwable $e) {

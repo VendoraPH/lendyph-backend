@@ -8,6 +8,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use OpenApi\Attributes as OA;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class BrandingController extends Controller
 {
@@ -40,6 +41,39 @@ class BrandingController extends Controller
             'data' => [
                 'logo_url' => BrandingSetting::current()->logo_url,
             ],
+        ]);
+    }
+
+    #[OA\Get(
+        path: '/api/branding/logo',
+        summary: 'Stream the organization logo',
+        description: 'Serves the logo bytes through the API rather than the public storage path. Unauthenticated, like /api/branding/public — the sign-in page renders it before anyone has logged in.',
+        tags: ['Settings'],
+        responses: [
+            new OA\Response(response: 200, description: 'Logo image bytes'),
+            new OA\Response(response: 404, description: 'No logo configured'),
+        ],
+    )]
+    public function publicLogo(): StreamedResponse
+    {
+        $path = BrandingSetting::current()->logo_path;
+        $disk = Storage::disk('public');
+
+        abort_if(! $path || ! $disk->exists($path), 404);
+
+        // Deliberately served through PHP rather than letting callers hit
+        // /storage/** directly. nginx serves that path off the public/storage
+        // symlink via try_files and never reaches PHP, so HandleCors cannot add
+        // a header there — which is why the report exporters' cross-origin
+        // fetch of the logo silently failed and every PDF/DOCX fell back to a
+        // text header. Adding `storage/*` to cors.paths does nothing for the
+        // same reason; this route is under `api/*`, which cors.paths covers.
+        //
+        // Unlike the KYC files in FileController, this is genuinely public
+        // branding rendered before login, so it is cacheable and needs no
+        // signature.
+        return $disk->response($path, null, [
+            'Cache-Control' => 'public, max-age=300',
         ]);
     }
 
