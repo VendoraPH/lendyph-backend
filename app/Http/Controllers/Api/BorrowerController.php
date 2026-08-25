@@ -170,7 +170,7 @@ DESC,
                 'success' => true,
                 'data' => [
                     'id' => $borrower->id,
-                    'submission_token' => $token->token,
+                    'submission_token' => $token->plainTextToken,
                     'expires_at' => $token->expires_at->toIso8601String(),
                 ],
             ], 201);

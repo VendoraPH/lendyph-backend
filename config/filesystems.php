@@ -30,10 +30,18 @@ return [
 
     'disks' => [
 
+        // `serve` is deliberately absent. It defaults to true in Laravel's stock
+        // config, which registers GET *and PUT* /storage/{path} over this disk's
+        // root — and this root is `app/private`, the KYC store. That published a
+        // second, undocumented way into borrower photos and valid IDs, including
+        // arbitrary write, flatly contradicting the `private` disk's comment
+        // below. It was not exploitable (both routes require a valid signature),
+        // but nothing in this application ever mints those URLs, so it was pure
+        // surface. Files are read through FileController's expiring signed
+        // routes; nothing needs this.
         'local' => [
             'driver' => 'local',
             'root' => storage_path('app/private'),
-            'serve' => true,
             'throw' => false,
             'report' => false,
         ],
