@@ -75,7 +75,13 @@ trait HasBorrowerRules
     {
         return [
             'contact_number.regex' => 'The contact number must be a valid phone format (e.g., 09171234567 or +639171234567).',
-            'email.unique' => 'A borrower with this email already exists.',
+            // Same reasoning as NoDuplicateBorrower: public registration is
+            // anonymous, so confirming that an address is already on file lets
+            // anyone enumerate who borrows here. Operators still get the direct
+            // message, since they need it to resolve the collision.
+            'email.unique' => $this->user()
+                ? 'A borrower with this email already exists.'
+                : 'This email cannot be used. Please contact your branch to continue.',
             'pledge_amount.max' => 'The pledge amount may not exceed 9,999,999.99.',
             'birthdate.after' => 'The birthdate must be after January 1, 1900.',
             'birthdate.before_or_equal' => 'The applicant must be at least 18 years old.',

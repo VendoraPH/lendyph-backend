@@ -31,7 +31,7 @@ class StoreBorrowerRequest extends FormRequest
         // Duplicate check is bypassed when the caller explicitly sends force=true
         // (used by the frontend's "Create Anyway" confirmation dialog in PR #105).
         if (! $this->boolean('force')) {
-            $firstNameRules[] = new NoDuplicateBorrower;
+            $firstNameRules[] = new NoDuplicateBorrower(revealDetails: (bool) $this->user());
         }
 
         // Anonymous public-registration applicants may omit branch_id — the
