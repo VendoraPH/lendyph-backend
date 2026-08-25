@@ -16,3 +16,9 @@ Schedule::command('loans:apply-penalties')->dailyAt('06:05');
 
 // Database backup daily at 2 AM, keep last 7
 Schedule::command('db:backup --keep=7')->dailyAt('02:00');
+
+// Drop anonymous registrations that can never be completed, and submission
+// tokens well past their 15-minute life. Only touches pending submissions with
+// no valid ID — the ones with documents attached are the operator review queue,
+// not abandonment.
+Schedule::command('registrations:prune')->dailyAt('03:30');
