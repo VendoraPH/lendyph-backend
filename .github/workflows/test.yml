@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # MySQL is started as an explicit container (not a GitHub `services:` block)
       # because service containers can't override the command, and we need the
