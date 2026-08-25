@@ -13,6 +13,15 @@ use Illuminate\Contracts\Validation\ValidationRule;
  * Attached to the `first_name` field so the error surfaces there in the standard
  * `{errors: {first_name: [...]}}` validation envelope. Clients can pass
  * `force=true` in the request to bypass this rule (see StoreBorrowerRequest).
+ *
+ * The failure message is deliberately two-tiered. Public registration is
+ * anonymous, and the exact-match tier needs only first+middle+last name — so
+ * naming the match would let anyone confirm that a given person borrows here and
+ * harvest their date of birth and borrower code. A DOB is an identity-theft
+ * primitive and a standard account-recovery answer, and because the row is only
+ * written when validation *passes*, a probe leaves no trace. Operators get the
+ * detail they need to resolve the collision; anonymous applicants get a generic
+ * message that tells them what to do without confirming anything.
  */
 class NoDuplicateBorrower implements DataAwareRule, ValidationRule
 {
@@ -21,7 +30,14 @@ class NoDuplicateBorrower implements DataAwareRule, ValidationRule
      */
     private array $data = [];
 
-    public function __construct(private readonly ?int $ignoreId = null) {}
+    /**
+     * @param  bool  $revealDetails  Whether the caller may see who matched. Defaults
+     *                               to false so a new call site fails closed.
+     */
+    public function __construct(
+        private readonly ?int $ignoreId = null,
+        private readonly bool $revealDetails = false,
+    ) {}
 
     public function setData(array $data): static
     {
@@ -50,6 +66,12 @@ class NoDuplicateBorrower implements DataAwareRule, ValidationRule
         );
 
         if (! $duplicate) {
+            return;
+        }
+
+        if (! $this->revealDetails) {
+            $fail('A similar borrower already exists. Please contact your branch to continue.');
+
             return;
         }
 

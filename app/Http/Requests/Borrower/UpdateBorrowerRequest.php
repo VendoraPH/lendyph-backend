@@ -22,7 +22,7 @@ class UpdateBorrowerRequest extends FormRequest
         $firstNameRules = ['sometimes', 'string', 'max:255'];
 
         if (! $this->boolean('force')) {
-            $firstNameRules[] = new NoDuplicateBorrower($borrowerId);
+            $firstNameRules[] = new NoDuplicateBorrower($borrowerId, revealDetails: true);
         }
 
         return array_merge(

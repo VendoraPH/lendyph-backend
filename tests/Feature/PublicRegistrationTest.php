@@ -105,7 +105,9 @@ class PublicRegistrationTest extends TestCase
 
         $token = BorrowerSubmissionToken::where('borrower_id', $borrowerId)->first();
         $this->assertNotNull($token);
-        $this->assertSame($response->json('data.submission_token'), $token->token);
+        // The column holds the SHA-256; the plaintext is returned once and never
+        // stored. Asserting equality here would be asserting the old behaviour.
+        $this->assertSame(hash('sha256', $response->json('data.submission_token')), $token->token);
         $this->assertTrue($token->expires_at->isFuture());
     }
 
@@ -276,7 +278,10 @@ class PublicRegistrationTest extends TestCase
         $borrowerId = $create->json('data.id');
         $token = $create->json('data.submission_token');
 
-        BorrowerSubmissionToken::where('token', $token)->update(['expires_at' => now()->subMinutes(5)]);
+        // Look up by hash — a plaintext lookup now matches zero rows, so the
+        // update would silently no-op and this test would pass a live token.
+        BorrowerSubmissionToken::where('token', hash('sha256', $token))
+            ->update(['expires_at' => now()->subMinutes(5)]);
 
         $this->postJson(
             "/api/borrowers/{$borrowerId}/photo",
@@ -366,6 +371,102 @@ class PublicRegistrationTest extends TestCase
                 'Authorization' => 'Bearer '.$token,
                 'X-Submission-Token' => 'stk_invalid_garbage_value_should_be_ignored',
             ],
+        )->assertOk();
+    }
+
+    /**
+     * Public registration is anonymous and the exact-match tier needs only
+     * first+middle+last name, so naming the match would let anyone confirm that a
+     * given person borrows here and read back their date of birth and borrower
+     * code. Probing leaves no trace either, since the row is only written when
+     * validation passes.
+     */
+    public function test_anonymous_duplicate_does_not_disclose_the_matching_borrower(): void
+    {
+        $existing = Borrower::factory()->create([
+            'branch_id' => $this->branch->id,
+            'first_name' => 'Juan',
+            'middle_name' => 'Dela',
+            'last_name' => 'Cruz',
+            'birthdate' => '1990-05-12',
+        ]);
+
+        $response = $this->postJson('/api/borrowers', [
+            'status' => 'pending',
+            'branch_id' => $this->branch->id,
+            'first_name' => 'Juan',
+            'middle_name' => 'Dela',
+            'last_name' => 'Cruz',
+            'contact_number' => '09171234567',
+            'address' => '123 Mango St',
+        ]);
+
+        $response->assertStatus(422);
+
+        $message = implode(' ', $response->json('errors.first_name') ?? []);
+
+        $this->assertStringNotContainsString('1990-05-12', $message);
+        $this->assertStringNotContainsString($existing->borrower_code, $message);
+        $this->assertStringNotContainsString('Juan', $message);
+        $this->assertStringContainsString('contact your branch', $message);
+    }
+
+    public function test_authenticated_duplicate_still_names_the_match_for_operators(): void
+    {
+        $existing = Borrower::factory()->create([
+            'branch_id' => $this->branch->id,
+            'first_name' => 'Maria',
+            'middle_name' => 'Santos',
+            'last_name' => 'Reyes',
+            'birthdate' => '1985-03-04',
+        ]);
+
+        $response = $this->actingAs($this->admin)->postJson('/api/borrowers', [
+            'status' => 'active',
+            'branch_id' => $this->branch->id,
+            'first_name' => 'Maria',
+            'middle_name' => 'Santos',
+            'last_name' => 'Reyes',
+            'contact_number' => '09179876543',
+            'address' => '9 Ilang St',
+        ]);
+
+        $response->assertStatus(422);
+
+        $message = implode(' ', $response->json('errors.first_name') ?? []);
+
+        $this->assertStringContainsString($existing->borrower_code, $message);
+        $this->assertStringContainsString('1985-03-04', $message);
+    }
+
+    /**
+     * A database read — a backup artifact, the nightly db:backup, an injection
+     * elsewhere — must not hand over live tokens for every borrower created in
+     * the preceding 15 minutes.
+     */
+    public function test_submission_token_is_persisted_hashed_not_in_plaintext(): void
+    {
+        $response = $this->postJson('/api/borrowers', [
+            'status' => 'pending',
+            'branch_id' => $this->branch->id,
+            'first_name' => 'Pedro',
+            'last_name' => 'Bautista',
+            'contact_number' => '09170001111',
+            'address' => '5 Narra St',
+        ])->assertCreated();
+
+        $plainText = $response->json('data.submission_token');
+        $stored = BorrowerSubmissionToken::firstOrFail();
+
+        $this->assertNotSame($plainText, $stored->token);
+        $this->assertSame(hash('sha256', $plainText), $stored->token);
+        $this->assertDatabaseMissing('borrower_submission_tokens', ['token' => $plainText]);
+
+        // The plaintext must still authenticate an upload, or hashing broke the flow.
+        $this->postJson(
+            "/api/borrowers/{$response->json('data.id')}/photo",
+            ['photo' => UploadedFile::fake()->image('id.jpg')],
+            ['X-Submission-Token' => $plainText],
         )->assertOk();
     }
 }
