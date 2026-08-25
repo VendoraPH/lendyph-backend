@@ -47,6 +47,11 @@ Route::get('/branches/public', [BranchController::class, 'publicIndex']);
 // Public organization branding (logo) for the login/registration pages — no auth.
 Route::get('/branding/public', [BrandingController::class, 'publicShow']);
 
+// The logo bytes, served through PHP so they carry CORS headers. /storage/** is
+// handled by nginx and never reaches Laravel, so a cross-origin read of the
+// logo there always fails — which is why report exports lost their logo.
+Route::get('/branding/logo', [BrandingController::class, 'publicLogo']);
+
 // Borrower KYC documents and photos, off the private disk. Authenticated by a
 // temporary signature rather than a bearer token: these URLs are consumed by
 // <img src>, which cannot send an Authorization header. Links are only minted
