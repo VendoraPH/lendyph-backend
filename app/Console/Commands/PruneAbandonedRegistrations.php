@@ -9,6 +9,8 @@ use App\Services\BorrowerPurgeService;
 use Illuminate\Console\Attributes\Description;
 use Illuminate\Console\Attributes\Signature;
 use Illuminate\Console\Command;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 #[Signature('registrations:prune
     {--days=14 : Days of inactivity before an incomplete pending submission counts as abandoned}
@@ -53,6 +55,30 @@ class PruneAbandonedRegistrations extends Command
              * look idle.
              */
             ->whereDoesntHave('documents', fn ($q) => $q->where('created_at', '>=', $cutoff))
+            /*
+             * Never touch a borrower with financial history, whatever `status`
+             * says. "Pending" plus a loan is not a contradiction in this data
+             * model — it is a real state, and the portfolio database holds nine
+             * such loans across four pending borrowers, 30% of its loan book.
+             * binhs-coop happens to have none, which is the only reason a
+             * status-and-documents rule looked safe when it was first checked.
+             *
+             * `loans.borrower_id` is restrictOnDelete, so these would throw
+             * rather than cascade — but purge() has already deleted their photo
+             * and upload directories by then, and the filesystem does not roll
+             * back with the transaction. Excluding them here is what actually
+             * prevents that; the ordering fix in BorrowerPurgeService is the
+             * belt to this pair of braces.
+             *
+             * NOT share_capital_pledges: Borrower::booted() creates one for
+             * every borrower, so gating on it would prune nothing, ever.
+             */
+            ->whereDoesntHave('loans')
+            ->whereDoesntHave('shareCapitalLedger')
+            // No gcashTransactions() relation exists on Borrower.
+            ->whereNotExists(fn ($q) => $q->select(DB::raw(1))
+                ->from('gcash_transactions')
+                ->whereColumn('gcash_transactions.borrower_id', 'borrowers.id'))
             ->get();
 
         $expiredTokens = BorrowerSubmissionToken::query()
@@ -77,25 +103,51 @@ class PruneAbandonedRegistrations extends Command
         foreach ($candidates as $borrower) {
             try {
                 /*
-                 * Logged BEFORE the delete so auditable_id still resolves, and
-                 * carrying only the borrower code. Purging with audit=false
+                 * One transaction around the audit row AND the purge.
+                 *
+                 * The log has to happen before the delete so auditable_id still
+                 * resolves — but purge() opens its own transaction, so a write
+                 * left outside it survives the rollback when the purge throws.
+                 * That wrote "pruned" rows for borrowers that still existed:
+                 * four of them on the portfolio box, for the loan-holders the
+                 * guard above now excludes. Wrapping both means the claim and
+                 * the act commit together or not at all. purge()'s transaction
+                 * nests as a savepoint.
+                 *
+                 * It carries only the borrower code. Purging with audit=false
                  * suppresses the Auditable trait, which would otherwise write
                  * the borrower's full attributes — name, birthdate, address,
                  * contact number, income — into audit_logs.old_values and keep
                  * them forever. A retention prune that preserves the personal
                  * data it exists to remove is not a retention prune.
                  */
-                AuditLogService::log(
-                    action: 'pruned',
-                    auditable: $borrower,
-                    newValues: ['borrower_code' => $borrower->borrower_code],
-                    description: "Abandoned anonymous registration pruned after {$days} days without a valid ID",
-                );
+                DB::transaction(function () use ($purge, $borrower, $days) {
+                    AuditLogService::log(
+                        action: 'pruned',
+                        auditable: $borrower,
+                        newValues: ['borrower_code' => $borrower->borrower_code],
+                        description: "Abandoned anonymous registration pruned after {$days} days without a valid ID",
+                    );
 
-                $purge->purge($borrower, audit: false);
+                    $purge->purge($borrower, audit: false);
+                });
+
                 $pruned++;
             } catch (\Throwable $e) {
                 $this->error("  failed {$borrower->borrower_code}: {$e->getMessage()}");
+
+                /*
+                 * The console output goes nowhere: the scheduler runs from root
+                 * cron as `schedule:run >> /dev/null 2>&1`, so a failing prune
+                 * is invisible and the non-zero exit code is discarded too.
+                 * Laravel's log is the only channel anyone can actually read
+                 * after the fact.
+                 */
+                Log::warning('registrations:prune failed to purge a borrower', [
+                    'borrower_code' => $borrower->borrower_code,
+                    'exception' => $e->getMessage(),
+                ]);
+
                 $failed++;
             }
         }
