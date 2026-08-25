@@ -1,5 +1,12 @@
 version: 2
 
+# Target `development`, not the default branch.
+#
+# Dependabot defaults to the repo default branch, which here is `main` — and
+# main auto-deploys to production. That means a dependency bump would reach the
+# client's live API without ever passing through staging. Targeting development
+# restores the intended path: development -> staging -> verify -> main -> prod.
+
 # Weekly rather than daily, and grouped, because this repo has one maintainer —
 # a PR per dependency per day would just be noise that gets ignored, which is
 # worse than no alerts at all. Security updates still arrive immediately via
@@ -7,6 +14,7 @@ version: 2
 updates:
   - package-ecosystem: composer
     directory: /
+    target-branch: development
     schedule:
       interval: weekly
       day: monday
@@ -17,6 +25,7 @@ updates:
 
   - package-ecosystem: github-actions
     directory: /
+    target-branch: development
     schedule:
       interval: monthly
     open-pull-requests-limit: 3
