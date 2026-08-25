@@ -177,4 +177,51 @@ class BrandingTest extends TestCase
 
         $this->assertSame(1, BrandingSetting::count());
     }
+
+    /**
+     * The logo is also reachable through the API, not just the public storage
+     * path. /storage/** is served by nginx off the public/storage symlink and
+     * never reaches PHP, so it carries no CORS headers — which is why the report
+     * exporters' cross-origin fetch of the logo silently failed and every PDF
+     * and DOCX fell back to a text header. This route is under api/*, so it is
+     * covered by config/cors.php and, in the browser, by the frontend's
+     * same-origin proxy.
+     */
+    public function test_logo_route_streams_the_image_unauthenticated(): void
+    {
+        $this->actingAs($this->admin)
+            ->post('/api/settings/branding/logo', ['logo' => UploadedFile::fake()->image('logo.png')])
+            ->assertOk();
+
+        // Explicitly unauthenticated — the sign-in page renders this before
+        // anyone has logged in.
+        auth()->forgetGuards();
+
+        $response = $this->get('/api/branding/logo');
+
+        $response->assertOk();
+        expect($response->headers->get('Content-Type'))->toStartWith('image/');
+    }
+
+    public function test_logo_route_404s_when_no_logo_is_configured(): void
+    {
+        $this->get('/api/branding/logo')->assertNotFound();
+    }
+
+    public function test_logo_route_is_cacheable_unlike_the_kyc_file_routes(): void
+    {
+        // FileController sends `private, no-store` because those are identity
+        // documents. This is public branding on the login page, so it should be
+        // cacheable — asserting the distinction so a copy-paste from
+        // FileController does not quietly make every page load re-fetch it.
+        $this->actingAs($this->admin)
+            ->post('/api/settings/branding/logo', ['logo' => UploadedFile::fake()->image('logo.png')])
+            ->assertOk();
+        auth()->forgetGuards();
+
+        $cacheControl = $this->get('/api/branding/logo')->headers->get('Cache-Control');
+
+        expect($cacheControl)->toContain('public')
+            ->and($cacheControl)->not->toContain('no-store');
+    }
 }
