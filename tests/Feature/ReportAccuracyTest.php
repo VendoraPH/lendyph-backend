@@ -8,6 +8,7 @@ use App\Models\Loan;
 use App\Models\LoanProduct;
 use App\Models\Repayment;
 use App\Models\Role;
+use App\Models\ShareCapitalLedger;
 use App\Models\User;
 use App\Services\LoanService;
 use Carbon\Carbon;
@@ -588,6 +589,104 @@ class ReportAccuracyTest extends TestCase
         $this->assertEqualsWithDelta(0, $otherBranch->json('data.at_risk_amount'), 0.01);
         $this->assertEqualsWithDelta(0, $otherBranch->json('data.par_ratio'), 0.01);
         $this->assertSame([], $otherBranch->json('data.by_branch'));
+    }
+
+    // ── Cross-report reconciliation ───────────────────────────
+
+    /**
+     * Cash Flow and Daily Collection count the same money, so for one day they
+     * must land on the same figure. The comparison has to be against
+     * `inflows.repayments.total` and not `inflows.total`: Cash Flow also counts
+     * share capital, which Daily Collection knows nothing about.
+     */
+    public function test_cash_flow_repayment_inflow_equals_daily_collection_for_the_same_day(): void
+    {
+        $loan = $this->createReleasedLoan();
+        $this->moveScheduleDaysAgo($loan, periodNumber: 1, daysAgo: 0);
+        $this->postRepayment($loan, 5900);
+
+        $member = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+        ShareCapitalLedger::factory()->create([
+            'borrower_id' => $member->id,
+            'date' => Carbon::today()->toDateString(),
+            'credit' => 2000,
+            'debit' => 0,
+            'created_by' => $this->admin->id,
+        ]);
+
+        $today = Carbon::today()->toDateString();
+        $daily = $this->getJson("/api/reports/daily-collection?date_from={$today}&date_to={$today}")->assertOk();
+        $cashFlow = $this->getJson("/api/reports/cash-flow?date_from={$today}&date_to={$today}")->assertOk();
+
+        $this->assertEqualsWithDelta(5900, $daily->json('data.total_collected'), 0.01);
+        $this->assertEqualsWithDelta(
+            $daily->json('data.total_collected'),
+            $cashFlow->json('data.inflows.repayments.total'),
+            0.01,
+            'The two reports count the same posted repayments over the same day and must never disagree.',
+        );
+
+        $this->assertEqualsWithDelta(7900, $cashFlow->json('data.inflows.total'), 0.01);
+        $this->assertNotEqualsWithDelta(
+            $daily->json('data.total_collected'),
+            $cashFlow->json('data.inflows.total'),
+            0.01,
+            'inflows.total also carries the 2,000 share capital credit, which is not loan collection.',
+        );
+    }
+
+    public function test_collection_efficiency_matches_daily_collection_for_identical_filters(): void
+    {
+        $loan = $this->createReleasedLoan();
+        // 11,800 falls due today.
+        $this->moveScheduleDaysAgo($loan, periodNumber: 1, daysAgo: 0);
+
+        $today = Carbon::today()->toDateString();
+        $fiveDaysAgo = Carbon::today()->subDays(5)->toDateString();
+
+        $this->postRepayment($loan, 1000, $fiveDaysAgo);
+        $this->postRepayment($loan, 5900, $today);
+
+        $windows = [
+            'today' => "date_from={$today}&date_to={$today}",
+            'five day window' => "date_from={$fiveDaysAgo}&date_to={$today}",
+            'branch filtered' => "date_from={$fiveDaysAgo}&date_to={$today}&branch_id={$this->branch->id}",
+        ];
+
+        foreach ($windows as $label => $query) {
+            $daily = $this->getJson("/api/reports/daily-collection?{$query}")->assertOk()->json('data');
+            $efficiency = $this->getJson("/api/reports/collection-efficiency?{$query}")->assertOk()->json('data');
+
+            foreach (['total_due', 'total_collected', 'collection_rate', 'uncollected'] as $figure) {
+                $this->assertEqualsWithDelta(
+                    $daily[$figure],
+                    $efficiency[$figure],
+                    0.01,
+                    "{$figure} disagreed between Daily Collection and Collection Efficiency ({$label}). Both sides "
+                    .'of the ratio are supposed to be scoped through the same releasedLoanScope() closure.',
+                );
+            }
+        }
+
+        // Hand-computed, so the agreement above is not two reports being
+        // identically wrong.
+        $narrow = $this->getJson("/api/reports/collection-efficiency?{$windows['today']}")->assertOk()->json('data');
+        $this->assertEqualsWithDelta(11800, $narrow['total_due'], 0.01);
+        $this->assertEqualsWithDelta(5900, $narrow['total_collected'], 0.01, 'The payment five days ago is out of window.');
+        $this->assertEqualsWithDelta(50.0, $narrow['collection_rate'], 0.01);
+
+        $wide = $this->getJson("/api/reports/collection-efficiency?{$windows['five day window']}")->assertOk()->json('data');
+        $this->assertEqualsWithDelta(11800, $wide['total_due'], 0.01);
+        $this->assertEqualsWithDelta(6900, $wide['total_collected'], 0.01);
+        $this->assertEqualsWithDelta(58.47, $wide['collection_rate'], 0.01);
+        $this->assertEqualsWithDelta(4900, $wide['uncollected'], 0.01);
+
+        // With a single branch on the book, the one branch row IS the report.
+        $this->assertCount(1, $wide['by_branch']);
+        $this->assertSame($this->branch->id, $wide['by_branch'][0]['branch_id']);
+        $this->assertEqualsWithDelta($wide['total_due'], $wide['by_branch'][0]['total_due'], 0.01);
+        $this->assertEqualsWithDelta($wide['total_collected'], $wide['by_branch'][0]['total_collected'], 0.01);
+        $this->assertEqualsWithDelta($wide['collection_rate'], $wide['by_branch'][0]['collection_rate'], 0.01);
     }
 
     // ── Validation ───────────────────────────────────────────────────────

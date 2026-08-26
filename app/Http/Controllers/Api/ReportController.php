@@ -13,6 +13,7 @@ use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 use OpenApi\Attributes as OA;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
@@ -21,6 +22,27 @@ class ReportController extends Controller
     use CsvExportTrait;
 
     public function __construct(private ReportService $reportService) {}
+
+    /**
+     * The widest reporting period any report will accept, in years.
+     *
+     * The span is an amplifier, not just a filter: ReportService::monthBuckets()
+     * emits one bucket per calendar month the period touches and then does a
+     * per-bucket lookup, so `?date_from=1900-01-01&date_to=2400-01-01` turns a
+     * single authenticated GET into ~6,000 buckets of work and payload. Ten
+     * years caps that at ~121 buckets — a table a human can actually read —
+     * while still covering the longest genuinely useful query, since
+     * cooperatives are only required to retain books of account for ten years.
+     * Anything wider is a typo or a probe, and a 422 is a better answer to
+     * both than a 40x-size response.
+     *
+     * This is defence in depth, not the only control: the whole `api` group is
+     * already throttled to 60 requests/minute per user (per IP when anonymous)
+     * via bootstrap/app.php and AppServiceProvider. The throttle bounds how
+     * OFTEN a report can be asked for; this bounds how much work any single
+     * permitted request can buy, which is the half the throttle cannot see.
+     */
+    private const MAX_SPAN_YEARS = 10;
 
     /**
      * Validate the filter parameters the reports share.
@@ -34,7 +56,7 @@ class ReportController extends Controller
      */
     private function reportFilters(array $extra = []): array
     {
-        return request()->validate(array_merge([
+        $filters = request()->validate(array_merge([
             'date' => ['nullable', 'date'],
             'as_of_date' => ['nullable', 'date'],
             'date_from' => ['nullable', 'date'],
@@ -48,6 +70,78 @@ class ReportController extends Controller
             'loan_id' => ['nullable', 'integer'],
             'per_page' => ['nullable', 'integer', 'min:1', 'max:1000'],
         ], $extra));
+
+        $this->assertSpanWithinCap($filters);
+
+        return $filters;
+    }
+
+    /**
+     * Reject a reporting period wider than self::MAX_SPAN_YEARS with a 422.
+     *
+     * Applied here rather than per report so every endpoint inherits it, and
+     * measured on the period the service will actually RESOLVE, not on the raw
+     * parameters — otherwise the cap is bypassed by simply omitting an end.
+     * The defaults below therefore mirror ReportService::resolveDateRange(),
+     * resolveOpenEndedRange() and resolveAsOfDate() exactly, including their
+     * swap of a reversed range, so `?date_from=2400-01-01&date_to=1900-01-01`
+     * is measured as the 500-year period it becomes and not as a negative one.
+     *
+     * A period with no `date_from` at all is not capped here: that is the
+     * share capital reports' "since inception" mode, whose buckets are
+     * anchored on the earliest row actually in the ledger rather than on
+     * anything the caller sent.
+     *
+     * @param  array<string, mixed>  $filters
+     *
+     * @throws ValidationException
+     */
+    private function assertSpanWithinCap(array $filters): void
+    {
+        $legacy = ! empty($filters['date']) ? Carbon::parse($filters['date']) : null;
+
+        $from = ! empty($filters['date_from']) ? Carbon::parse($filters['date_from']) : $legacy;
+        $to = null;
+
+        foreach (['date_to', 'as_of_date', 'date'] as $key) {
+            if (! empty($filters[$key])) {
+                $to = Carbon::parse($filters[$key]);
+                break;
+            }
+        }
+
+        if ($from === null && $to === null) {
+            return;
+        }
+
+        // An absent end resolves to today in every resolver, so the cap has to
+        // measure against today too.
+        $from ??= Carbon::today();
+        $to ??= Carbon::today();
+
+        [$start, $end] = $to->lt($from) ? [$to, $from] : [$from, $to];
+
+        if ($start->copy()->addYears(self::MAX_SPAN_YEARS)->gte($end)) {
+            return;
+        }
+
+        $message = sprintf(
+            'The reporting period may not exceed %d years. Requested %s to %s; narrow the range and try again.',
+            self::MAX_SPAN_YEARS,
+            $start->toDateString(),
+            $end->toDateString(),
+        );
+
+        // Attributed to the fields the caller actually sent, so the client can
+        // highlight the inputs at fault.
+        $fields = array_values(array_filter(
+            ['date_from', 'date_to', 'as_of_date', 'date'],
+            fn (string $key) => ! empty($filters[$key]),
+        ));
+
+        throw ValidationException::withMessages(
+            array_fill_keys($fields, $message),
+        );
     }
 
     #[OA\Get(
@@ -344,6 +438,163 @@ class ReportController extends Controller
         $this->authorize('reports:view');
 
         return response()->json(['data' => $this->reportService->disbursementReport($this->reportFilters())]);
+    }
+
+    #[OA\Get(
+        path: '/api/reports/cash-flow',
+        summary: 'Cash Flow / Cash Position',
+        description: 'Cash in (posted repayments split by allocation, plus share capital credits) versus cash out (net proceeds released, plus share capital debits) for a period, with a per-branch breakdown. Deductions are reported separately as non-cash.',
+        tags: ['Reports'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'date', in: 'query', required: false, description: 'Legacy single-day parameter; superseded by date_from/date_to.', schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, description: 'Scopes loan cash by the loan\'s branch and share capital by the member\'s branch, matching the Share Capital report. See share_capital.branch_scope (borrower_branch when filtered, organisation when not). Share capital stays out of by_branch either way.', schema: new OA\Schema(type: 'integer')),
+        ],
+        responses: [new OA\Response(response: 200, description: 'Cash flow for the period')],
+    )]
+    public function cashFlow(): JsonResponse
+    {
+        $this->authorize('reports:view');
+
+        return response()->json(['data' => $this->reportService->cashFlow($this->reportFilters())]);
+    }
+
+    #[OA\Get(
+        path: '/api/reports/collection-efficiency',
+        summary: 'Collection Efficiency',
+        description: 'Amount due versus amount collected for a period, overall and segmented by branch and by month.',
+        tags: ['Reports'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'date', in: 'query', required: false, description: 'Legacy single-day parameter; superseded by date_from/date_to.', schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
+        ],
+        responses: [new OA\Response(response: 200, description: 'Collection efficiency with branch and monthly breakdowns')],
+    )]
+    public function collectionEfficiency(): JsonResponse
+    {
+        $this->authorize('reports:view');
+
+        return response()->json(['data' => $this->reportService->collectionEfficiency($this->reportFilters())]);
+    }
+
+    #[OA\Get(
+        path: '/api/reports/portfolio-by-product',
+        summary: 'Loan Portfolio by Product',
+        description: 'Loan count, amount released, outstanding balance, average rate, overdue amount and PAR ratio per loan product. Date filters apply to release date, matching the Loan Balance Summary.',
+        tags: ['Reports'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'date_from', in: 'query', required: false, description: 'Filters on release date.', schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'date_to', in: 'query', required: false, description: 'Filters on release date.', schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
+        ],
+        responses: [new OA\Response(response: 200, description: 'Portfolio broken down by loan product')],
+    )]
+    public function portfolioByProduct(): JsonResponse
+    {
+        $this->authorize('reports:view');
+
+        return response()->json(['data' => $this->reportService->portfolioByProduct($this->reportFilters())]);
+    }
+
+    #[OA\Get(
+        path: '/api/reports/share-capital',
+        summary: 'Share Capital Report',
+        description: 'Opening balance, period credits and debits, closing balance, monthly movement, per-member holdings and subscription totals. Omit date_from to report from inception. `by_member` requires the reports:export permission; without it the field is null and `by_member_omitted` explains why, while every aggregate figure is unchanged.',
+        tags: ['Reports'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'date_from', in: 'query', required: false, description: 'Optional. Everything before this date forms the opening balance; omit to report from inception.', schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'date_to', in: 'query', required: false, description: 'Defaults to today.', schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'as_of_date', in: 'query', required: false, description: 'Legacy as-of parameter; superseded by date_to.', schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, description: 'The ledger has no branch column, so this filters on the member\'s branch.', schema: new OA\Schema(type: 'integer')),
+        ],
+        responses: [new OA\Response(response: 200, description: 'Share capital movement and balances')],
+    )]
+    public function shareCapital(): JsonResponse
+    {
+        $this->authorize('reports:view');
+
+        // `by_member` is the whole membership roster with each member's
+        // balance. `reports:view` is held by every seeded role, so gate the
+        // roster on `reports:export` and leave the aggregates open to all.
+        // Resolved here, server-side — reportFilters() strips unknown keys, so
+        // this can never be influenced by the query string.
+        $includeMembers = (bool) request()->user()?->can('reports:export');
+
+        return response()->json([
+            'data' => $this->reportService->shareCapital($this->reportFilters(), $includeMembers),
+        ]);
+    }
+
+    #[OA\Get(
+        path: '/api/reports/performance',
+        summary: 'Officer / Branch Performance',
+        description: 'Loans released and amounts collected for the period, alongside outstanding portfolio, overdue amount, PAR ratio and active borrowers as of today, grouped by account officer and mirrored by branch. Loans with no officer appear as an Unassigned row.',
+        tags: ['Reports'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'date_from', in: 'query', required: false, description: 'Bounds released and collected figures only; omit for all time.', schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'date_to', in: 'query', required: false, description: 'Bounds released and collected figures only; omit for all time.', schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
+        ],
+        responses: [new OA\Response(response: 200, description: 'Performance by account officer and by branch')],
+    )]
+    public function performance(): JsonResponse
+    {
+        $this->authorize('reports:view');
+
+        return response()->json(['data' => $this->reportService->performance($this->reportFilters())]);
+    }
+
+    #[OA\Get(
+        path: '/api/reports/provisioning',
+        summary: 'Loan Loss Provisioning',
+        description: 'Required allowance per aging bucket, derived from the Aging report so the bucket boundaries can never drift, multiplied by the policy provision rates (5 / 15 / 25 / 50 %).',
+        tags: ['Reports'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'date_to', in: 'query', required: false, description: 'Used as the as-of date when supplied.', schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'as_of_date', in: 'query', required: false, description: 'Legacy as-of parameter; superseded by date_to.', schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
+        ],
+        responses: [new OA\Response(response: 200, description: 'Required allowance by aging bucket')],
+    )]
+    public function provisioning(): JsonResponse
+    {
+        $this->authorize('reports:view');
+
+        return response()->json(['data' => $this->reportService->provisioning($this->reportFilters())]);
+    }
+
+    #[OA\Get(
+        path: '/api/reports/share-capital-statement/{borrower}',
+        summary: 'Share Capital Statement',
+        description: 'One member\'s complete share capital ledger with a running balance, opening and closing balances and period totals. Unpaginated: this feeds a printable certificate.',
+        tags: ['Reports'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'borrower', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
+            new OA\Parameter(name: 'date_from', in: 'query', required: false, description: 'Optional. Everything before this date forms the opening balance; omit to report from inception.', schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'date_to', in: 'query', required: false, description: 'Defaults to today.', schema: new OA\Schema(type: 'string', format: 'date')),
+        ],
+        responses: [
+            new OA\Response(response: 200, description: 'Share capital statement for the member'),
+            new OA\Response(response: 404, description: 'Borrower not found'),
+        ],
+    )]
+    public function shareCapitalStatement(Borrower $borrower): JsonResponse
+    {
+        $this->authorize('reports:view');
+
+        return response()->json([
+            'data' => $this->reportService->shareCapitalStatement($borrower, $this->reportFilters()),
+        ]);
     }
 
     // ── CSV Exports ──────────────────────────────────────────────────────

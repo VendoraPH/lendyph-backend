@@ -15,7 +15,7 @@ class BrandingController extends Controller
     #[OA\Get(
         path: '/api/branding/public',
         summary: 'Get public organization branding',
-        description: 'Unauthenticated. Returns the cooperative logo URL for public pages (login, registration). `logo_url` is null on a fresh deployment.',
+        description: 'Unauthenticated. Returns the cooperative logo URL and organization identity for public pages (login, registration). Every field is null on a fresh deployment. Deliberately public: the sign-in screen names the cooperative before anyone has an account, and the same identity is printed on documents handed to members. Nothing beyond these four fields is exposed here.',
         tags: ['Settings'],
         responses: [
             new OA\Response(
@@ -28,6 +28,9 @@ class BrandingController extends Controller
                             type: 'object',
                             properties: [
                                 new OA\Property(property: 'logo_url', type: 'string', nullable: true, example: 'http://localhost/storage/branding/logo.png'),
+                                new OA\Property(property: 'organization_name', type: 'string', nullable: true, example: 'Binhs Multi-Purpose Cooperative'),
+                                new OA\Property(property: 'organization_address', type: 'string', nullable: true, example: '123 Rizal St., Brgy. Poblacion, Bacolod City'),
+                                new OA\Property(property: 'organization_contact', type: 'string', nullable: true, example: '(034) 123-4567 / info@binhscoop.ph', description: 'Served to unauthenticated callers. Free text with no format constraint, so treat any value as world-readable: use an organizational landline and a shared inbox. A named staff member plus a personal mobile number would publish personal information with no access control under RA 10173 (Data Privacy Act).'),
                             ],
                         ),
                     ],
@@ -38,9 +41,7 @@ class BrandingController extends Controller
     public function publicShow(): JsonResponse
     {
         return response()->json([
-            'data' => [
-                'logo_url' => BrandingSetting::current()->logo_url,
-            ],
+            'data' => $this->publicBrandingPayload(BrandingSetting::current()),
         ]);
     }
 
@@ -93,6 +94,9 @@ class BrandingController extends Controller
                             type: 'object',
                             properties: [
                                 new OA\Property(property: 'logo_url', type: 'string', nullable: true),
+                                new OA\Property(property: 'organization_name', type: 'string', nullable: true),
+                                new OA\Property(property: 'organization_address', type: 'string', nullable: true),
+                                new OA\Property(property: 'organization_contact', type: 'string', nullable: true),
                             ],
                         ),
                     ],
@@ -107,9 +111,67 @@ class BrandingController extends Controller
         $this->authorize('settings:view');
 
         return response()->json([
-            'data' => [
-                'logo_url' => BrandingSetting::current()->logo_url,
-            ],
+            'data' => $this->brandingPayload(BrandingSetting::current()),
+        ]);
+    }
+
+    #[OA\Put(
+        path: '/api/settings/branding',
+        summary: 'Update organization identity',
+        description: 'Sets the cooperative name, address and contact printed on reports and legal documents (promissory note, disclosure statement). Only the keys present in the request are written, so a caller may update one field without clearing the others. Blank strings arrive as null via ConvertEmptyStringsToNull, which is what lets the client fall back to the app-level name.',
+        tags: ['Settings'],
+        security: [['sanctum' => []]],
+        requestBody: new OA\RequestBody(
+            required: true,
+            content: new OA\JsonContent(
+                properties: [
+                    new OA\Property(property: 'organization_name', type: 'string', nullable: true, maxLength: 255, example: 'Binhs Multi-Purpose Cooperative'),
+                    new OA\Property(property: 'organization_address', type: 'string', nullable: true, maxLength: 500, example: '123 Rizal St., Brgy. Poblacion, Bacolod City'),
+                    new OA\Property(property: 'organization_contact', type: 'string', nullable: true, maxLength: 255, example: '(034) 123-4567 / info@binhscoop.ph', description: 'Printed on reports and legal documents, and also served unauthenticated by GET /api/branding/public. Free text with no format constraint — use an organizational landline and a shared inbox, not a named staff member and a personal mobile number, which this endpoint would publish with no access control under RA 10173 (Data Privacy Act).'),
+                ],
+            ),
+        ),
+        responses: [
+            new OA\Response(
+                response: 200,
+                description: 'Updated branding settings — identical shape to GET /api/settings/branding',
+                content: new OA\JsonContent(
+                    properties: [
+                        new OA\Property(
+                            property: 'data',
+                            type: 'object',
+                            properties: [
+                                new OA\Property(property: 'logo_url', type: 'string', nullable: true),
+                                new OA\Property(property: 'organization_name', type: 'string', nullable: true),
+                                new OA\Property(property: 'organization_address', type: 'string', nullable: true),
+                                new OA\Property(property: 'organization_contact', type: 'string', nullable: true),
+                            ],
+                        ),
+                    ],
+                ),
+            ),
+            new OA\Response(response: 401, description: 'Unauthenticated'),
+            new OA\Response(response: 403, description: 'Forbidden (missing settings:update)'),
+            new OA\Response(response: 422, description: 'Validation error'),
+        ],
+    )]
+    public function update(Request $request): JsonResponse
+    {
+        $this->authorize('settings:update');
+
+        $validated = $request->validate([
+            'organization_name' => ['nullable', 'string', 'max:255'],
+            'organization_address' => ['nullable', 'string', 'max:500'],
+            'organization_contact' => ['nullable', 'string', 'max:255'],
+        ]);
+
+        // Only the submitted keys are written — validate() drops absent ones —
+        // so a partial payload leaves the untouched fields as they were.
+        $setting = BrandingSetting::current();
+        $setting->update($validated);
+
+        return response()->json([
+            'data' => $this->brandingPayload($setting),
         ]);
     }
 
@@ -223,5 +285,44 @@ class BrandingController extends Controller
                 'message' => 'Logo removed successfully.',
             ],
         ]);
+    }
+
+    /**
+     * The four fields GET /api/branding/public serves to anyone.
+     *
+     * Adding a key here publishes it to unauthenticated callers on the public
+     * internet. There is no second gate. An admin-only branding field — a BIR
+     * TIN, a CDA registration number, an SMS sender id, a default notification
+     * address — belongs in brandingPayload() below, which publicShow() cannot
+     * reach.
+     *
+     * @return array{logo_url: string|null, organization_name: string|null, organization_address: string|null, organization_contact: string|null}
+     */
+    private function publicBrandingPayload(BrandingSetting $setting): array
+    {
+        return [
+            'logo_url' => $setting->logo_url,
+            'organization_name' => $setting->organization_name,
+            'organization_address' => $setting->organization_address,
+            'organization_contact' => $setting->organization_contact,
+        ];
+    }
+
+    /**
+     * Everything an authenticated settings reader sees.
+     *
+     * Backs show() (settings:view) and update() (settings:update). Today it is
+     * exactly the public payload — reports and printables build their letterhead
+     * from those same fields, so the two reads cannot drift apart. Private keys
+     * get appended here, never to publicBrandingPayload().
+     *
+     * @return array{logo_url: string|null, organization_name: string|null, organization_address: string|null, organization_contact: string|null}
+     */
+    private function brandingPayload(BrandingSetting $setting): array
+    {
+        return [
+            ...$this->publicBrandingPayload($setting),
+            // Admin-only branding fields go here.
+        ];
     }
 }
