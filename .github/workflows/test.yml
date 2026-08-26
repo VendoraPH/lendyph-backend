@@ -54,6 +54,41 @@ jobs:
       - name: Install Composer dependencies
         run: composer install --no-interaction --prefer-dist --no-progress
 
+      # Nothing had ever audited dependencies here, so 33 advisories across 11
+      # packages accumulated unseen — 8 of them high — including one against the
+      # framework backing the KYC signed-URL mechanism. Cleaning that up once
+      # only resets the clock; this is what stops it recurring.
+      #
+      # Fails on high/critical only. A medium or low advisory published upstream
+      # overnight must not turn every unrelated PR red — a check that cries wolf
+      # is one people learn to ignore, and this repo already learned that lesson
+      # with the fleet drift check. Everything else is printed for visibility.
+      - name: Audit Composer dependencies
+        run: |
+          # --locked audits composer.lock rather than the installed tree.
+          # Without it, `composer audit` reports "No packages - skipping audit"
+          # whenever vendor/ is absent — a silent pass that looks like a clean bill.
+          composer audit --locked --format=json > audit.json || true
+          php -r '
+            $a = json_decode(file_get_contents("audit.json"), true)["advisories"] ?? [];
+            $rows = [];
+            foreach ($a as $pkg => $items) {
+              foreach ($items as $i) {
+                $rows[] = [strtolower($i["severity"] ?? "unknown"), $pkg, $i["cve"] ?? $i["advisoryId"] ?? "", $i["title"] ?? ""];
+              }
+            }
+            $bad = array_filter($rows, fn ($r) => in_array($r[0], ["high", "critical"], true));
+            foreach ($rows as $r) {
+              printf("%-9s %-28s %-20s %s\n", $r[0], $r[1], $r[2], substr($r[3], 0, 90));
+            }
+            printf("\n%d advisories, %d high/critical\n", count($rows), count($bad));
+            if ($bad) {
+              fwrite(STDERR, "::error title=Vulnerable dependency::" . count($bad) . " high/critical advisory(ies) — run composer audit locally\n");
+              exit(1);
+            }
+          '
+          rm -f audit.json
+
       # Pint was already in require-dev but nothing ran it, so style drifted
       # silently. vendora-api has had this step since it was created; this is
       # the backport. Repo verified clean at 321 files when added — run
