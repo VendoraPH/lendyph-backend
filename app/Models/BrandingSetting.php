@@ -10,6 +10,9 @@ class BrandingSetting extends Model
 {
     protected $fillable = [
         'logo_path',
+        'organization_name',
+        'organization_address',
+        'organization_contact',
     ];
 
     /**
