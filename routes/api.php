@@ -195,6 +195,18 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
         Route::get('/borrowers', [ReportController::class, 'borrowerReport']);
         Route::get('/disbursements', [ReportController::class, 'disbursementReport']);
 
+        // Financial reports (Part B)
+        Route::get('/cash-flow', [ReportController::class, 'cashFlow']);
+        Route::get('/collection-efficiency', [ReportController::class, 'collectionEfficiency']);
+        Route::get('/portfolio-by-product', [ReportController::class, 'portfolioByProduct']);
+        Route::get('/share-capital', [ReportController::class, 'shareCapital']);
+        Route::get('/performance', [ReportController::class, 'performance']);
+        Route::get('/provisioning', [ReportController::class, 'provisioning']);
+
+        // Feeds the printable Share Capital Certificate — unpaginated, unlike
+        // GET /api/share-capital/ledger which caps per_page at 100.
+        Route::get('/share-capital-statement/{borrower}', [ReportController::class, 'shareCapitalStatement']);
+
         // CSV Exports (stricter rate limit — 5/min)
         Route::middleware('throttle:exports')->group(function () {
             Route::get('/releases/export', [ReportController::class, 'exportReleases']);
@@ -271,8 +283,9 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::put('/settings/approval-workflow', [ApprovalWorkflowController::class, 'update']);
     Route::delete('/settings/approval-workflow', [ApprovalWorkflowController::class, 'destroy']);
 
-    // Branding (organization logo)
+    // Branding (organization logo + identity printed on reports and documents)
     Route::get('/settings/branding', [BrandingController::class, 'show']);
+    Route::put('/settings/branding', [BrandingController::class, 'update']);
     Route::post('/settings/branding/logo', [BrandingController::class, 'uploadLogo']);
     Route::delete('/settings/branding/logo', [BrandingController::class, 'deleteLogo']);
 });

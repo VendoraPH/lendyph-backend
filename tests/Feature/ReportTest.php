@@ -63,8 +63,12 @@ class ReportTest extends TestCase
     {
         $this->createReleasedLoan();
 
-        // Future date should return empty
-        $this->getJson('/api/reports/releases?date_from=2099-01-01')
+        // Future date should return empty. Kept inside the reporting-period
+        // cap in ReportController — a span wider than that is now a 422, and
+        // this test is about the filter, not the cap.
+        $future = now()->addYears(5)->toDateString();
+
+        $this->getJson("/api/reports/releases?date_from={$future}")
             ->assertOk()
             ->assertJsonCount(0, 'data');
     }
