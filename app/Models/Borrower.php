@@ -30,6 +30,7 @@ class Borrower extends Model
     public const NON_MEMBER_STATUSES = ['pending', 'rejected'];
 
     protected $fillable = [
+        'registration_uuid',
         'first_name',
         'middle_name',
         'last_name',

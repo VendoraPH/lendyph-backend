@@ -12,6 +12,7 @@ use App\Models\Borrower;
 use App\Models\Document;
 use App\Services\BorrowerPurgeService;
 use App\Services\BorrowerSubmissionTokenService;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
@@ -117,6 +118,18 @@ Create a new borrower profile.
 Pass `force=true` in the body to bypass the duplicate check (frontend "Create Anyway" flow).
 On a duplicate rejection, the error message in `errors.first_name[0]` contains the matched borrower's code and DOB.
 
+**Idempotency (public registration):** an anonymous caller may send a client-generated `registration_uuid`
+(UUID **v4**, e.g. the browser's `crypto.randomUUID()`). A retry is honoured — same 201 shape, same borrower
+id, a freshly issued token, no second row — only when the key matches a **still-pending** submission created
+inside the 15-minute submission-token window **and** the retry's `first_name`, `last_name` and `birthdate`
+describe the same person that submission did.
+
+Both conditions are security boundaries, not tidiness. The response hands out a submission token, which grants
+write access to that borrower's photo and valid-ID uploads, so a leaked key must buy no more than a leaked
+token does — and must be useless without the applicant's own identity alongside it. A key failing either
+condition is silently discarded and the request is processed as a brand-new registration, which is
+indistinguishable from sending a key nobody has used; the endpoint never confirms that a given key exists.
+
 **Side effect:** a ShareCapitalPledge row is auto-created for the new borrower inside the same transaction.
 DESC,
         tags: ['Borrowers'],
@@ -150,6 +163,7 @@ DESC,
                     new OA\Property(property: 'spouse_contact_number', type: 'string'),
                     new OA\Property(property: 'spouse_occupation', type: 'string'),
                     new OA\Property(property: 'branch_id', type: 'integer', example: 1, description: 'Required for authenticated (operator) creates; optional for anonymous submissions (admin assigns during review).'),
+                    new OA\Property(property: 'registration_uuid', type: 'string', format: 'uuid', example: '9f1c1a5e-6f2a-4a2e-9f1c-1a5e6f2a4a2e', description: 'Client-generated idempotency key (UUID v4) for the public registration form. Resending the same key inside the 15-minute submission window, with the same first name, last name and birthdate, returns the borrower the first attempt created instead of a duplicate.'),
                     new OA\Property(property: 'force', type: 'boolean', example: false, description: 'Bypass the duplicate-borrower check (use for "Create Anyway" confirmation)'),
                     new OA\Property(property: 'status', type: 'string', enum: ['active', 'inactive', 'blacklisted', 'pending'], description: 'Anonymous (public registration) requests must set this to "pending".'),
                 ],
@@ -177,12 +191,19 @@ DESC,
     )]
     public function store(StoreBorrowerRequest $request, BorrowerSubmissionTokenService $tokens): JsonResponse
     {
-        // Wrap in a transaction so the borrower insert and the Borrower::created
-        // hook (which creates the ShareCapitalPledge) are atomic — if either fails,
-        // neither row is left behind.
-        $borrower = DB::transaction(function () use ($request) {
-            return Borrower::create($request->safe()->except('force'));
-        });
+        /**
+         * A retry of a submission whose response was lost has to resolve to the
+         * row the first attempt already created, not to a second applicant. An
+         * applicant on a Facebook in-app browser hit a 30-second timeout, never
+         * saw the 201, and their retry was refused as a duplicate of their own
+         * record. The frontend's cache cannot help — it only fills in once the
+         * client has actually seen a response — so the key travels with the
+         * request instead.
+         *
+         * StoreBorrowerRequest::existingRegistration() holds the four
+         * conditions a key must satisfy before it is honoured.
+         */
+        $borrower = $request->existingRegistration() ?? $this->createBorrower($request);
 
         // Public registration path — return a slim payload plus a submission
         // token the anonymous client uses to attach photo + valid IDs against
@@ -205,6 +226,65 @@ DESC,
         return (new BorrowerResource($borrower))
             ->response()
             ->setStatusCode(201);
+    }
+
+    /**
+     * Inserts the borrower, settling a retry race against the unique index.
+     *
+     * Two retries of one submission can both miss existingRegistration() and
+     * reach the insert. `borrowers.registration_uuid` is unique, so the index —
+     * not the read — is what decides which one wins; the loser reads the
+     * winner's row back rather than failing.
+     */
+    private function createBorrower(StoreBorrowerRequest $request): Borrower
+    {
+        $attributes = $request->safe()->except('force');
+
+        try {
+            // Wrap in a transaction so the borrower insert and the Borrower::created
+            // hook (which creates the ShareCapitalPledge) are atomic — if either fails,
+            // neither row is left behind.
+            return DB::transaction(function () use ($attributes) {
+                return Borrower::create($attributes);
+            });
+        } catch (UniqueConstraintViolationException $e) {
+            $uuid = $attributes['registration_uuid'] ?? null;
+
+            // Not an idempotency-key collision — `borrower_code` is the other
+            // unique column on this table and a clash there is a real fault.
+            if (! is_string($uuid) || ! Borrower::where('registration_uuid', $uuid)->exists()) {
+                throw $e;
+            }
+
+            $existing = $request->refreshExistingRegistration();
+
+            if ($existing) {
+                return $existing;
+            }
+
+            /*
+             * The key is held by a row this caller may not be given: an approved
+             * member, a rejected applicant, a submission older than the token
+             * window, or somebody else entirely. Returning it would turn a
+             * leaked key into a live upload token against another applicant's
+             * KYC files — the very thing the window and the identity binding in
+             * existingRegistration() exist to prevent.
+             *
+             * So the key is discarded and the submission is handled as what it
+             * is: a new registration that happened to quote a key it has no
+             * claim to. That keeps this branch INDISTINGUISHABLE from sending a
+             * key nobody has ever used — both produce a 201 carrying a brand-new
+             * id. An error naming `registration_uuid` would instead have
+             * confirmed to an anonymous caller that the key exists, which is an
+             * existence oracle over a value whose only defence is being
+             * unguessable.
+             */
+            unset($attributes['registration_uuid']);
+
+            return DB::transaction(function () use ($attributes) {
+                return Borrower::create($attributes);
+            });
+        }
     }
 
     #[OA\Get(
