@@ -18,12 +18,64 @@ use App\Models\Loan;
 use App\Services\AutoPayService;
 use App\Services\LoanAdjustmentService;
 use App\Services\LoanService;
+use Carbon\Carbon;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
+use Illuminate\Validation\Rule;
 use OpenApi\Attributes as OA;
 
 class LoanController extends Controller
 {
+    /**
+     * The only values `?sort=` accepts.
+     *
+     * A whitelist, not a mapping of anything the caller sends: this value ends
+     * up inside an ORDER BY clause. Anything not on this list is a 422 from the
+     * validator and never reaches the database. See applySort() for what each
+     * key resolves to — three of them are not columns.
+     *
+     * @var array<int, string>
+     */
+    private const SORT_KEYS = [
+        'application_number',
+        'borrower',
+        'product',
+        'amount',
+        'term',
+        'status',
+        'created_at',
+    ];
+
+    /**
+     * Status order used by `?sort=status`, deliberately not alphabetical.
+     *
+     * It is the order of the tabs on the loans screen — the sequence the user
+     * is already looking at — which is what the list sorted by while it was
+     * doing this client-side.
+     *
+     * `ongoing` occupies the slot the Current tab occupies, because that tab
+     * now points at `ongoing`; it used to say `current`, which is not a member
+     * of the `loans.status` enum and so never matched a row. Ranking `ongoing`
+     * explicitly is not cosmetic: left out, it falls into the unranked bucket
+     * below and every live, paying loan sorts BENEATH the completed and
+     * rejected ones.
+     *
+     * Statuses with no tab (`defaulted`, `restructured`, `void`) are absent on
+     * purpose and sort after everything listed here; see statusOrderSql().
+     *
+     * @var array<int, string>
+     */
+    private const STATUS_SORT_ORDER = [
+        'draft',
+        'for_review',
+        'approved',
+        'rejected',
+        'released',
+        'ongoing',
+        'completed',
+    ];
+
     public function __construct(
         private LoanService $loanService,
         private LoanAdjustmentService $loanAdjustmentService,
@@ -33,32 +85,98 @@ class LoanController extends Controller
     #[OA\Get(
         path: '/api/loans',
         summary: 'List loans',
+        description: <<<'DESC'
+Get a paginated list of loans with search, filters and sorting.
+
+`status` takes a single status (`released`) **or a comma-separated list**
+(`released,ongoing`), resolved as a `whereIn`. The list form is what backs the
+loans screen's Active tab, which is more than one status at once.
+`status=active` is shorthand for that whole set and is what clients should
+send — the set is defined once in `Loan::ACTIVE_STATUSES`, it has already
+changed once, and a list pinned in a client cannot follow it. It always agrees
+with `meta.stats.active`.
+
+A value that is not a stored status matches nothing rather than returning a
+422, so a client still sending the retired `current` or `past_due` gets an
+empty result instead of a broken page. Neither is a member of the
+`loans.status` enum and neither is reported in `meta.stats`: the Current tab
+reads `ongoing`, and past due is a schedule-derived concept (an `ongoing` loan
+with an overdue amortization schedule), not a status.
+
+`date_from` / `date_to` are an inclusive whole-day range on **`created_at`**
+(application date), so `date_to=2026-08-27` includes a loan captured at
+23:59 on the 27th. A reversed range simply matches nothing.
+
+`sort` accepts only `application_number`, `borrower`, `product`, `amount`,
+`term`, `status` and `created_at`; anything else is a 422. `borrower` orders by
+the borrower's last name then first name (`full_name` is computed in PHP and
+cannot be ordered by), `product` by loan product name, and `status` by the
+order of the tabs on the loans screen — draft, for_review, approved, rejected,
+released, ongoing, completed, everything else (`defaulted`, `restructured`,
+`void`) last — NOT alphabetically. `dir` is `asc` or `desc` and defaults to `desc` on `created_at`,
+which is the newest-first order the list has always had. Every sort carries a
+final tiebreak on `id`, so paging through equal values cannot repeat or skip a
+loan.
+
+`meta.stats` is always organisation-wide — narrowed by `branch_id` and
+`borrower_id` only, and never by `search`, `status`, `loan_product_id` or the
+date range. Those counts are the KPI cards and tab badges: scoping them to the
+current filter would make every tab read the number of rows already on screen.
+It carries one entry per status in the enum, plus `active`, the sum of the
+statuses `status=active` selects.
+DESC,
         tags: ['Loans'],
         security: [['sanctum' => []]],
         parameters: [
-            new OA\Parameter(name: 'search', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
-            new OA\Parameter(name: 'status', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
+            new OA\Parameter(name: 'search', in: 'query', required: false, description: 'Application number, loan account number, borrower name or borrower code.', schema: new OA\Schema(type: 'string')),
+            new OA\Parameter(name: 'status', in: 'query', required: false, description: 'One status, a comma-separated list, or `active` (preferred).', schema: new OA\Schema(type: 'string', example: 'active')),
             new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
             new OA\Parameter(name: 'borrower_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
-            new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15)),
+            new OA\Parameter(name: 'loan_product_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
+            new OA\Parameter(name: 'date_from', in: 'query', required: false, description: 'Inclusive lower bound on created_at (YYYY-MM-DD).', schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'date_to', in: 'query', required: false, description: 'Inclusive upper bound on created_at, whole day (YYYY-MM-DD).', schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'sort', in: 'query', required: false, schema: new OA\Schema(type: 'string', default: 'created_at', enum: self::SORT_KEYS)),
+            new OA\Parameter(name: 'dir', in: 'query', required: false, schema: new OA\Schema(type: 'string', default: 'desc', enum: ['asc', 'desc'])),
+            new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15, maximum: 100)),
         ],
         responses: [
             new OA\Response(response: 200, description: 'Paginated loan list'),
             new OA\Response(response: 401, description: 'Unauthenticated'),
+            new OA\Response(response: 422, description: 'Unknown sort key, bad direction or malformed date'),
         ],
     )]
     public function index(): AnonymousResourceCollection
     {
         $this->authorize('loans:view');
 
-        $loans = Loan::with('borrower', 'loanProduct', 'branch', 'createdByUser', 'amortizationSchedules')
+        $filters = request()->validate([
+            'search' => ['nullable', 'string'],
+            // Not constrained to the enum on purpose — see Loan::scopeForStatus().
+            'status' => ['nullable', 'string'],
+            'branch_id' => ['nullable', 'integer'],
+            'borrower_id' => ['nullable', 'integer'],
+            'loan_product_id' => ['nullable', 'integer'],
+            'date_from' => ['nullable', 'date'],
+            'date_to' => ['nullable', 'date'],
+            'sort' => ['nullable', Rule::in(self::SORT_KEYS)],
+            'dir' => ['nullable', Rule::in(['asc', 'desc'])],
+            'per_page' => ['nullable', 'integer', 'min:1'],
+        ]);
+
+        $query = Loan::query()
+            // Qualified, and selected before withCount() rather than left to it:
+            // sort=borrower and sort=product join a table that has its own
+            // `status`, `branch_id` and `created_at`, and an unqualified `*`
+            // would let those columns land on the hydrated loan.
+            ->select('loans.*')
+            ->with('borrower', 'loanProduct', 'branch', 'createdByUser', 'amortizationSchedules')
             // Aliased count so LoanResource's extension_count reads an
             // already-loaded value instead of firing a COUNT query per row.
             ->withCount(['adjustments as extension_count' => fn ($q) => $q->where('adjustment_type', 'extension')])
-            ->when(request('search'), function ($q, $search) {
+            ->when($filters['search'] ?? null, function ($q, $search) {
                 $q->where(function ($query) use ($search) {
-                    $query->where('application_number', 'like', "%{$search}%")
-                        ->orWhere('loan_account_number', 'like', "%{$search}%")
+                    $query->where('loans.application_number', 'like', "%{$search}%")
+                        ->orWhere('loans.loan_account_number', 'like', "%{$search}%")
                         ->orWhereHas('borrower', function ($bq) use ($search) {
                             $bq->where('first_name', 'like', "%{$search}%")
                                 ->orWhere('last_name', 'like', "%{$search}%")
@@ -66,15 +184,33 @@ class LoanController extends Controller
                         });
                 });
             })
-            ->when(request('status'), fn ($q, $s) => $q->forStatus($s))
-            ->when(request('branch_id'), fn ($q, $b) => $q->forBranch($b))
-            ->when(request('borrower_id'), fn ($q, $b) => $q->where('borrower_id', $b))
-            ->latest()
-            ->paginate(min((int) request('per_page', 15), 100));
+            ->when($filters['status'] ?? null, fn ($q, $s) => $q->forStatus($s))
+            ->when($filters['branch_id'] ?? null, fn ($q, $b) => $q->forBranch($b))
+            ->when($filters['borrower_id'] ?? null, fn ($q, $b) => $q->where('loans.borrower_id', $b))
+            ->when($filters['loan_product_id'] ?? null, fn ($q, $p) => $q->where('loans.loan_product_id', $p))
+            // Inclusive whole-day range on the application date. Expressed as a
+            // range rather than with whereDate(), which wraps the column in a
+            // function and forfeits any index on it; endOfDay() is what makes
+            // `date_to` cover the loans captured during that day rather than
+            // only one created exactly at midnight.
+            ->when($filters['date_from'] ?? null, fn ($q, $from) => $q->where('loans.created_at', '>=', Carbon::parse($from)->startOfDay()))
+            ->when($filters['date_to'] ?? null, fn ($q, $to) => $q->where('loans.created_at', '<=', Carbon::parse($to)->endOfDay()));
 
-        // Status count aggregation so the frontend can render status tabs without a second request.
-        $stats = Loan::when(request('branch_id'), fn ($q, $b) => $q->forBranch($b))
-            ->when(request('borrower_id'), fn ($q, $b) => $q->where('borrower_id', $b))
+        $this->applySort($query, $filters['sort'] ?? 'created_at', $filters['dir'] ?? 'desc');
+
+        $loans = $query->paginate(min(max((int) ($filters['per_page'] ?? 15), 1), 100));
+
+        /**
+         * Status counts so the frontend can render its tabs and KPI cards
+         * without a second request. Intentionally global — branch- and
+         * borrower-scoped only, never narrowed by `search`, `status`,
+         * `loan_product_id` or the date range, exactly as
+         * BorrowerController::index() does it and for the same reason. These
+         * are KPI figures: scoping them to the active filter would make each
+         * tab report the size of the page already on screen.
+         */
+        $stats = Loan::when($filters['branch_id'] ?? null, fn ($q, $b) => $q->forBranch($b))
+            ->when($filters['borrower_id'] ?? null, fn ($q, $b) => $q->where('loans.borrower_id', $b))
             ->selectRaw('status, COUNT(*) as count')
             ->groupBy('status')
             ->pluck('count', 'status')
@@ -87,6 +223,16 @@ class LoanController extends Controller
                 'approved' => (int) ($stats['approved'] ?? 0),
                 'rejected' => (int) ($stats['rejected'] ?? 0),
                 'released' => (int) ($stats['released'] ?? 0),
+                // `current` and `past_due` were reported here and have been
+                // removed. Neither is a member of the `loans.status` enum, so
+                // both were structurally always 0, and a key that can only ever
+                // be 0 invites the wrong repair — adding the enum member —
+                // rather than the right one. The Current tab reads `ongoing`
+                // below. Past due is not a status: it is an `ongoing` loan
+                // holding an overdue amortization schedule, so it wants a
+                // schedule-derived filter, filed as a follow-up. Do not put
+                // either key back without the concept behind it. See
+                // Loan::ACTIVE_STATUSES.
                 'ongoing' => (int) ($stats['ongoing'] ?? 0),
                 'completed' => (int) ($stats['completed'] ?? 0),
                 'defaulted' => (int) ($stats['defaulted'] ?? 0),
@@ -94,7 +240,78 @@ class LoanController extends Controller
                 // Omitting this made them vanish from the frontend's tab counts.
                 'restructured' => (int) ($stats['restructured'] ?? 0),
                 'void' => (int) ($stats['void'] ?? 0),
+                // The Active Loans KPI card: everything out the door and not
+                // yet closed. Summed from the same constant `status=active`
+                // filters on, so the card and the tab it opens cannot disagree
+                // — including when that set changes, as it just did.
+                'active' => array_sum(array_map(
+                    fn (string $status) => (int) ($stats[$status] ?? 0),
+                    Loan::ACTIVE_STATUSES,
+                )),
             ]]]);
+    }
+
+    /**
+     * Order the loans list by one already-whitelisted sort key.
+     *
+     * `$sort` has been checked against self::SORT_KEYS by index() before it
+     * gets here, so nothing a caller typed is ever concatenated into SQL.
+     */
+    private function applySort(Builder $query, string $sort, string $dir): void
+    {
+        // Re-derived rather than trusted, because statusOrderSql() puts it in
+        // raw SQL: this stays correct even if a future caller skips validation.
+        $dir = strtolower($dir) === 'asc' ? 'asc' : 'desc';
+
+        match ($sort) {
+            'application_number' => $query->orderBy('loans.application_number', $dir),
+            'amount' => $query->orderBy('loans.principal_amount', $dir),
+            'term' => $query->orderBy('loans.term', $dir),
+            'created_at' => $query->orderBy('loans.created_at', $dir),
+            // Last name then first name, not the `full_name` the table shows:
+            // that accessor is assembled in PHP and there is no column to order
+            // by. A LEFT join rather than a correlated subquery per row — it is
+            // a to-one relation on a primary key, so it can neither duplicate
+            // nor drop a loan, and `borrowers.last_name` is indexed.
+            'borrower' => $query
+                ->leftJoin('borrowers', 'borrowers.id', '=', 'loans.borrower_id')
+                ->orderBy('borrowers.last_name', $dir)
+                ->orderBy('borrowers.first_name', $dir),
+            'product' => $query
+                ->leftJoin('loan_products', 'loan_products.id', '=', 'loans.loan_product_id')
+                ->orderBy('loan_products.name', $dir),
+            'status' => $query->orderByRaw($this->statusOrderSql($dir), self::STATUS_SORT_ORDER),
+        };
+
+        // Deterministic tiebreak on every sort. Without it MySQL may order rows
+        // that tie differently for each page, which silently repeats one loan
+        // and hides another as the user pages through — and ties are routine
+        // here: a status sort has at most eight distinct values, and two loans
+        // captured in the same second share a created_at.
+        $query->orderBy('loans.id', $dir);
+    }
+
+    /**
+     * ORDER BY expression placing statuses in the loans screen's tab order,
+     * with anything that has no tab last.
+     *
+     * Not alphabetical, deliberately. This reproduces the ordering the list
+     * already had while it sorted client-side, where the sequence was the tab
+     * row the user is looking at; sorting A-Z instead would quietly reshuffle
+     * every list in the product. The status values are bound as parameters
+     * rather than written into the string — only the rank literals and the
+     * direction, both derived here, are interpolated.
+     */
+    private function statusOrderSql(string $dir): string
+    {
+        $cases = implode(' ', array_map(
+            fn (int $rank) => "when ? then {$rank}",
+            array_keys(self::STATUS_SORT_ORDER),
+        ));
+
+        $unranked = count(self::STATUS_SORT_ORDER);
+
+        return "case `loans`.`status` {$cases} else {$unranked} end {$dir}";
     }
 
     #[OA\Post(
