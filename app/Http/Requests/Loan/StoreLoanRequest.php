@@ -3,10 +3,14 @@
 namespace App\Http\Requests\Loan;
 
 use App\Enums\LoanFrequency;
+use App\Http\Requests\Concerns\ExcludesRejectedBorrowers;
+use App\Rules\ExistingCoMakerOrBorrower;
 use Illuminate\Foundation\Http\FormRequest;
 
 class StoreLoanRequest extends FormRequest
 {
+    use ExcludesRejectedBorrowers;
+
     public function authorize(): bool
     {
         return $this->user()->can('loans:create');
@@ -15,9 +19,14 @@ class StoreLoanRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'borrower_id' => ['required', 'exists:borrowers,id'],
+            'borrower_id' => ['required', $this->nonRejectedBorrowerRule()],
             'co_maker_ids' => ['nullable', 'array'],
-            'co_maker_ids.*' => ['integer'],
+            // Same rule as the principal borrower above and as
+            // RestructureLoanRequest: a co-maker is jointly liable, so a
+            // rejected registration must not become one. A bare `integer` let
+            // any id at all reach LoanService::createLoan(), which resolves it
+            // as a borrower and binds that person to the loan.
+            'co_maker_ids.*' => ['integer', new ExistingCoMakerOrBorrower],
             'loan_product_id' => ['required', 'exists:loan_products,id'],
             'principal_amount' => ['required', 'numeric', 'min:1'],
             'purpose' => ['nullable', 'string', 'max:500'],

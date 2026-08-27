@@ -72,7 +72,7 @@ class ShareCapitalLedgerController extends Controller
         ),
         responses: [
             new OA\Response(response: 201, description: 'Ledger entry created'),
-            new OA\Response(response: 422, description: 'Validation error'),
+            new OA\Response(response: 422, description: 'Validation error. `borrower_id` must belong to a member — a borrower whose registration is still `pending` or was `rejected` is refused here, exactly as on `/pledges/{pledge}/entries`.'),
         ],
     )]
     public function store(StoreShareCapitalLedgerRequest $request): JsonResponse
