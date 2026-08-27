@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\AmortizationSchedule;
 use App\Models\Borrower;
+use App\Models\Collateral;
 use App\Models\CoMaker;
 use App\Models\Loan;
 use App\Models\LoanProduct;
@@ -205,6 +206,8 @@ class LoanService
                 }
             }
 
+            $inheritedCollaterals = $this->inheritCollaterals($lockedSource, $newLoan);
+
             AuditLogService::log(
                 action: 'restructure_created',
                 auditable: $newLoan,
@@ -219,6 +222,7 @@ class LoanService
                     'new_principal' => $principal,
                     'shortfall_amount' => $shortfall,
                     'remarks' => $remarks,
+                    'inherited_collateral_ids' => $inheritedCollaterals,
                 ],
                 description: "Restructure application {$newLoan->application_number} created from loan "
                     .($lockedSource->loan_account_number ?? $lockedSource->application_number)
@@ -227,6 +231,77 @@ class LoanService
 
             return $newLoan->refresh();
         });
+    }
+
+    /**
+     * Move the source loan's collateral onto the loan replacing it.
+     *
+     * Unconditional, unlike the co-maker inheritance above: there is no
+     * `collateral_ids` input on RestructureLoanRequest to opt out with, and
+     * leaving the collateral behind is not a neutral choice. On release,
+     * closeRestructuredSource() flips the source to `restructured`, which is
+     * outside Loan::ACTIVE_STATUSES — so a source whose collateral did not come
+     * with it makes CollateralResource's `active_loans` report a land title as
+     * FREE while it is still securing a live balance, and makes
+     * CollateralController::attach() let a second loan take it. That is the
+     * exact failure the lock state exists to prevent, reached through the
+     * sanctioned workflow.
+     *
+     * Deliberately NOT routed through the attach guard. The source is
+     * `released` or `ongoing` — assertRestructureInvariants() accepts nothing
+     * else — so the guard would reject every one of these rows. Collateral
+     * moving from a live loan to the loan replacing it is the sanctioned
+     * transfer the guard protects, not the double pledge it refuses. Both loans
+     * hold the collateral between application and release, which is correct and
+     * costs nothing: the new loan is a draft, so `active_loans` still names only
+     * the source, and release closes the source in the same transaction, so
+     * there is never a moment when both are active.
+     *
+     * @return array<int, int> ids of the collaterals carried over
+     */
+    private function inheritCollaterals(Loan $source, Loan $newLoan): array
+    {
+        // Read under a row lock. These are the same `collaterals` rows
+        // CollateralController::attach() locks before it decides, so a
+        // concurrent attach of one of them serializes behind this copy instead
+        // of racing it; the lock also covers the `loan_collaterals` rows, so a
+        // detach cannot delete a row out from under the read and leave the new
+        // loan holding collateral the source no longer has.
+        //
+        // No lock-order cycle with attach(): attach waits on a `loans` row only
+        // for the foreign-key check when it INSERTS a pivot row, and it only
+        // ever inserts for a collateral the target loan does not already hold —
+        // disjoint, by construction, from the set copied here.
+        $rows = $source->collaterals()
+            ->lockForUpdate()
+            ->get()
+            ->mapWithKeys(fn (Collateral $collateral) => [
+                $collateral->id => [
+                    // Carried forward, not re-appraised.
+                    //
+                    // POST /loans/{loan}/collaterals takes `snapshot_value` from
+                    // the operator; this path has no such input, so deriving a
+                    // fresh figure from the live `collaterals.amount` would have
+                    // the server assert an appraisal nobody signed off on — the
+                    // same class of error closeRestructuredSource() avoids by
+                    // computing the write-off from the approved snapshot rather
+                    // than the live balance. The source's row is left untouched,
+                    // so what was pledged against the original loan, and when it
+                    // was struck, both stay on the record. An operator who wants
+                    // the collateral re-valued for the new loan detaches and
+                    // re-attaches it with a stated value.
+                    'snapshot_value' => $collateral->pivot->snapshot_value,
+                    'attached_at' => now(),
+                ],
+            ]);
+
+        if ($rows->isEmpty()) {
+            return [];
+        }
+
+        $newLoan->collaterals()->attach($rows->all());
+
+        return $rows->keys()->map(fn ($id) => (int) $id)->all();
     }
 
     /**
