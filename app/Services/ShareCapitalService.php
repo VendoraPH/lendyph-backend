@@ -11,9 +11,20 @@ use Illuminate\Support\Facades\DB;
 
 class ShareCapitalService
 {
+    /**
+     * Post one credit per eligible pledge and record the run.
+     *
+     * `forMembers()` is a financial control, not cosmetics: toggleAutoCredit()
+     * performs no status check, so a `pending` applicant's auto-created pledge
+     * can already carry `auto_credit = true` with a non-zero amount. Without
+     * this scope the run would post real share_capital_ledger credits for
+     * somebody who is not a member — and now that the pledge list hides those
+     * rows, the flag would not even be visible to switch back off.
+     */
     public function processAutoCredit(User $user): AutoCreditRun
     {
         $eligiblePledges = ShareCapitalPledge::with('borrower')
+            ->forMembers()
             ->where('auto_credit', true)
             ->where('amount', '>', 0)
             ->get();
@@ -45,9 +56,18 @@ class ShareCapitalService
         });
     }
 
+    /**
+     * Auto-credit dashboard figures.
+     *
+     * Member-scoped so it agrees with what processAutoCredit() would actually
+     * post; a `pending` applicant must not show up under `no_pledge_members`
+     * as somebody to chase for a pledge amount.
+     *
+     * @return array<string, mixed>
+     */
     public function getAutoCreditStatus(): array
     {
-        $allPledges = ShareCapitalPledge::with('borrower')->get();
+        $allPledges = ShareCapitalPledge::with('borrower')->forMembers()->get();
 
         $activeMembers = $allPledges->filter(fn ($p) => $p->auto_credit && (float) $p->amount > 0);
         $disabledMembers = $allPledges->filter(fn ($p) => ! $p->auto_credit);

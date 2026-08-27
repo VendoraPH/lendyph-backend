@@ -26,14 +26,30 @@ class BorrowerController extends Controller
     #[OA\Get(
         path: '/api/borrowers',
         summary: 'List borrowers',
-        description: 'Get a paginated list of borrowers with search and filters',
+        description: <<<'DESC'
+Get a paginated list of borrowers with search and filters.
+
+`search` matches borrower code, any name part, contact number or email.
+
+`members_only=1` returns everyone who is a member of the cooperative — every
+status except `pending` and `rejected`. Use it for the Members screen instead
+of `status`, which only takes one exact value at a time. `inactive` and
+`blacklisted` members are included: they are members in poor standing, not
+non-members.
+
+`meta.stats` is always organisation-wide (branch-filtered only) and is NOT
+narrowed by `search` or `members_only`, so `stats.pending` stays a correct
+source for the pending-registrations badge while the user types in the search
+box.
+DESC,
         tags: ['Borrowers'],
         security: [['sanctum' => []]],
         parameters: [
             new OA\Parameter(name: 'search', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
             new OA\Parameter(name: 'status', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['active', 'inactive', 'blacklisted', 'pending', 'rejected'])),
+            new OA\Parameter(name: 'members_only', in: 'query', required: false, description: 'Exclude pending and rejected registrations.', schema: new OA\Schema(type: 'boolean')),
             new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
-            new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15)),
+            new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15, maximum: 100)),
         ],
         responses: [
             new OA\Response(response: 200, description: 'Paginated borrower list'),
@@ -48,11 +64,18 @@ class BorrowerController extends Controller
         $borrowers = Borrower::with('branch')
             ->when(request('search'), fn ($q, $search) => $q->search($search))
             ->when(request('status'), fn ($q, $status) => $q->where('status', $status))
+            ->when(filter_var(request('members_only'), FILTER_VALIDATE_BOOLEAN), fn ($q) => $q->members())
             ->when(request('branch_id'), fn ($q, $branchId) => $q->forBranch($branchId))
             ->latest()
             ->paginate(min((int) request('per_page', 15), 100));
 
-        // Status count aggregation so the frontend can render status tabs without a second request.
+        /**
+         * Status counts so the frontend can render status tabs without a second
+         * request. Intentionally global — branch-filtered only, never narrowed
+         * by `search` or `members_only`. These are KPI figures: making them
+         * search-scoped would silently change the pending-registrations badge
+         * on every keystroke in the members search box.
+         */
         $stats = Borrower::when(request('branch_id'), fn ($q, $branchId) => $q->forBranch($branchId))
             ->selectRaw('status, COUNT(*) as count')
             ->groupBy('status')

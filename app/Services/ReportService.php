@@ -1493,18 +1493,26 @@ class ReportService
      * `share_capital_pledges.amount` is a PER-SCHEDULE commitment (the 15th,
      * the 30th, or both) — not a lump-sum subscription — so it must not be
      * netted against paid-in capital. Borrower::booted() creates a pledge row
-     * for every member, so only rows with a non-zero amount count as an actual
-     * subscription.
+     * for every borrower, so only rows with a non-zero amount count as an
+     * actual subscription.
+     *
+     * Member-scoped: an applicant who typed a pledge amount on the public
+     * registration form has subscribed to nothing until the co-op approves the
+     * registration, so `pending` and `rejected` borrowers are excluded. The
+     * member and branch filters share one subquery.
      *
      * @return array<string, mixed>
      */
     private function shareCapitalSubscription(int|string|null $branchId, float $paidIn): array
     {
         $pledges = fn () => DB::table('share_capital_pledges')
-            ->when($branchId, fn ($q, $b) => $q->whereIn(
+            ->whereIn(
                 'share_capital_pledges.borrower_id',
-                DB::table('borrowers')->where('branch_id', $b)->select('id'),
-            ));
+                DB::table('borrowers')
+                    ->whereNotIn('status', Borrower::NON_MEMBER_STATUSES)
+                    ->when($branchId, fn ($q, $b) => $q->where('branch_id', $b))
+                    ->select('id'),
+            );
 
         $totals = $pledges()
             ->where('amount', '>', 0)
@@ -1537,6 +1545,18 @@ class ReportService
     }
 
     /**
+     * Per-member holdings, deliberately NOT member-scoped.
+     *
+     * Unlike the pledge-driven blocks, this aggregates `share_capital_ledger`,
+     * so a `pending` or `rejected` borrower can only appear here if real money
+     * was actually posted against them — a genuine state in this data model,
+     * not a phantom row.
+     *
+     * Do not "complete" the member filter here. `opening_balance`, `credits`,
+     * `debits`, `closing_balance` and `by_month` all count that same money;
+     * dropping the rows from `by_member` alone would leave the detail table no
+     * longer summing to the report's own total and break reconciliation.
+     *
      * @return array<int, array<string, mixed>>
      */
     private function shareCapitalByMember(?string $fromDate, string $toDate, int|string|null $branchId): array

@@ -35,4 +35,17 @@ class ShareCapitalPledge extends Model
     {
         return $this->hasMany(ShareCapitalLedger::class, 'borrower_id', 'borrower_id');
     }
+
+    /**
+     * Pledges owned by an actual member.
+     *
+     * Borrower::booted() creates a pledge row for every borrower, `pending`
+     * applicants included, so every read path that means "members" has to say
+     * so. Delegates to Borrower::scopeMembers() rather than repeating the
+     * status list — there is one definition of "member" and this is not it.
+     */
+    public function scopeForMembers($query)
+    {
+        return $query->whereHas('borrower', fn ($q) => $q->members());
+    }
 }
