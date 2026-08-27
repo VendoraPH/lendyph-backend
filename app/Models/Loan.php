@@ -50,6 +50,40 @@ class Loan extends Model
      */
     public const COLLECTIBLE_STATUSES = ['released', 'ongoing', 'defaulted'];
 
+    /**
+     * Loans that are out the door and not yet finished with — the portfolio the
+     * loans screen's "Active Loans" card counts, and what `?status=active`
+     * expands to.
+     *
+     * Not the same set as COLLECTIBLE_STATUSES, and the difference is
+     * deliberate: `defaulted` still owes money, so a delinquency report must
+     * include it, but it is not what an operator means by an active loan, and
+     * the loans screen gives it no tab. Do not collapse the two.
+     *
+     * This list also carried `current` and `past_due` until they were removed.
+     * Neither is a member of the `loans.status` enum, so no row can hold one and
+     * the entries only made this constant assert statuses that cannot exist.
+     * Do NOT add them back — not here and not to the enum. The screen's Current
+     * tab points at `ongoing`, and past due is not a status at all: it is an
+     * `ongoing` loan holding an overdue amortization schedule, which is a
+     * schedule-derived filter and is filed as a follow-up. Adding the enum
+     * member instead would let a loan be stamped `past_due` and then be
+     * invisible to everything that reasons about `ongoing` — which is most of
+     * this codebase, RepaymentService::processRepayment() included.
+     */
+    public const ACTIVE_STATUSES = ['released', 'ongoing'];
+
+    /**
+     * Virtual `status` value standing for the whole of self::ACTIVE_STATUSES.
+     *
+     * Not a stored status and never written to a row — it exists only as a
+     * query-string shorthand, so that what the Active Loans card counts and
+     * what the tab it opens filters on are one definition. Callers should send
+     * this rather than spelling the statuses out: the set has already changed
+     * once, and a hardcoded list on the client goes stale silently.
+     */
+    public const VIRTUAL_STATUS_ACTIVE = 'active';
+
     protected $fillable = [
         'loan_account_number',
         'borrower_id',
@@ -338,11 +372,48 @@ class Loan extends Model
 
     public function scopeForBranch($query, int $branchId)
     {
-        return $query->where('branch_id', $branchId);
+        // Qualified: the loans list joins `borrowers` to sort by borrower name,
+        // and that table has a `branch_id` of its own.
+        return $query->where('loans.branch_id', $branchId);
     }
 
-    public function scopeForStatus($query, string $status)
+    /**
+     * Filter by a single status, a comma-separated list, or an array of them.
+     *
+     * The loans list needs the list form: its Active tab is several statuses at
+     * once (self::ACTIVE_STATUSES) and has to render from ONE request, not one
+     * per status. A single value still behaves exactly as it did.
+     *
+     * `active` is accepted as a virtual value and expands to
+     * self::ACTIVE_STATUSES, so a caller may send `status=active` or spell the
+     * statuses out and get the same rows — and either way the page total agrees
+     * with `meta.stats.active`. Prefer the shorthand: the set is defined in one
+     * place here, and a list pinned in the client cannot follow it.
+     *
+     * Values that are not statuses are deliberately NOT rejected, they simply
+     * match nothing. That is what keeps a client still sending the retired
+     * `current` or `past_due` working — an empty result for those, rather than
+     * a 422 that takes the whole page down with it.
+     *
+     * @param  string|array<int, string>  $status
+     */
+    public function scopeForStatus($query, string|array $status)
     {
-        return $query->where('status', $status);
+        $statuses = collect(is_array($status) ? $status : explode(',', $status))
+            ->map(fn ($value) => trim((string) $value))
+            ->flatMap(fn (string $value) => $value === self::VIRTUAL_STATUS_ACTIVE
+                ? self::ACTIVE_STATUSES
+                : [$value])
+            ->filter(fn (string $value) => $value !== '')
+            ->unique()
+            ->values();
+
+        // `?status=` or `?status=,` means "no status filter", not "match
+        // nothing" — whereIn([]) would hand back an empty page instead.
+        if ($statuses->isEmpty()) {
+            return $query;
+        }
+
+        return $query->whereIn('loans.status', $statuses->all());
     }
 }
