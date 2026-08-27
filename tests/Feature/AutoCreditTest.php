@@ -83,6 +83,83 @@ class AutoCreditTest extends TestCase
         $this->assertEquals(1, $response->json('data.disabled_count'));
     }
 
+    /**
+     * The financial-safety test.
+     *
+     * toggleAutoCredit() performs no status check, so a pending applicant's
+     * auto-created pledge can carry auto_credit = true with a real amount —
+     * and now that the pledge list is member-scoped, nobody can see it to turn
+     * it off. The run must never post ledger credits for a non-member.
+     */
+    public function test_process_skips_a_pending_borrower_even_when_auto_credit_is_enabled(): void
+    {
+        $applicant = Borrower::factory()->create([
+            'branch_id' => $this->branch->id,
+            'status' => 'pending',
+        ]);
+        $applicant->shareCapitalPledge->update(['amount' => 500, 'auto_credit' => true]);
+
+        $this->postJson('/api/auto-credit/process')
+            ->assertCreated()
+            ->assertJsonPath('data.member_count', 0)
+            ->assertJsonPath('data.total_amount', 0);
+
+        $this->assertDatabaseCount('share_capital_ledger', 0);
+    }
+
+    public function test_process_credits_inactive_and_blacklisted_members(): void
+    {
+        $inactive = Borrower::factory()->create(['branch_id' => $this->branch->id, 'status' => 'inactive']);
+        $blacklisted = Borrower::factory()->create(['branch_id' => $this->branch->id, 'status' => 'blacklisted']);
+
+        $inactive->shareCapitalPledge->update(['amount' => 200, 'auto_credit' => true]);
+        $blacklisted->shareCapitalPledge->update(['amount' => 300, 'auto_credit' => true]);
+
+        $this->postJson('/api/auto-credit/process')
+            ->assertCreated()
+            ->assertJsonPath('data.member_count', 2)
+            ->assertJsonPath('data.total_amount', 500);
+
+        $this->assertDatabaseCount('share_capital_ledger', 2);
+    }
+
+    public function test_status_excludes_pending_applicants_from_the_no_pledge_figures(): void
+    {
+        $member = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+        $applicant = Borrower::factory()->create([
+            'branch_id' => $this->branch->id,
+            'status' => 'pending',
+        ]);
+
+        $response = $this->getJson('/api/auto-credit/status')->assertOk();
+
+        $this->assertSame(1, $response->json('data.no_pledge_count'), 'Only the member is missing a pledge amount.');
+
+        $names = collect($response->json('data.no_pledge_members'))->pluck('borrower_name');
+        $this->assertContains($member->full_name, $names);
+        $this->assertNotContains($applicant->full_name, $names);
+    }
+
+    public function test_status_includes_inactive_and_blacklisted_members(): void
+    {
+        $inactive = Borrower::factory()->create(['branch_id' => $this->branch->id, 'status' => 'inactive']);
+        $blacklisted = Borrower::factory()->create(['branch_id' => $this->branch->id, 'status' => 'blacklisted']);
+
+        $inactive->shareCapitalPledge->update(['amount' => 200, 'auto_credit' => true]);
+        $blacklisted->shareCapitalPledge->update(['amount' => 300, 'auto_credit' => false]);
+
+        $response = $this->getJson('/api/auto-credit/status')->assertOk();
+
+        $this->assertSame(1, $response->json('data.active_count'));
+        $this->assertEquals(200.0, $response->json('data.total_to_credit'));
+        $this->assertSame(1, $response->json('data.disabled_count'));
+
+        $activeNames = collect($response->json('data.active_members'))->pluck('borrower_name');
+        $disabledNames = collect($response->json('data.disabled_members'))->pluck('borrower_name');
+        $this->assertContains($inactive->full_name, $activeNames);
+        $this->assertContains($blacklisted->full_name, $disabledNames);
+    }
+
     public function test_last_run_appears_in_status_after_processing(): void
     {
         $borrower = Borrower::factory()->create(['branch_id' => $this->branch->id]);

@@ -703,6 +703,79 @@ class ReportFinancialTest extends TestCase
         $this->assertEqualsWithDelta(9500, $todayOnly['closing_balance'], 0.01);
     }
 
+    public function test_share_capital_subscription_ignores_a_pending_applicants_pledge_amount(): void
+    {
+        [$periodStart] = $this->seedShareCapitalPeriod();
+
+        // Someone who typed a pledge amount into the public registration form.
+        // Borrower::booted() stores it, but they have subscribed to nothing
+        // until the co-op approves the registration.
+        Borrower::factory()->create([
+            'branch_id' => $this->branch->id,
+            'status' => 'pending',
+            'pledge_amount' => 750,
+        ]);
+        Borrower::factory()->create([
+            'branch_id' => $this->branch->id,
+            'status' => 'rejected',
+            'pledge_amount' => 250,
+        ]);
+
+        $from = $periodStart->toDateString();
+        $to = Carbon::today()->toDateString();
+
+        $data = $this->getJson("/api/reports/share-capital?date_from={$from}&date_to={$to}")
+            ->assertOk()->json('data');
+
+        $this->assertSame(
+            1,
+            $data['subscription']['pledged_member_count'],
+            'Only the one approved member with a real per-schedule commitment counts.',
+        );
+        $this->assertEqualsWithDelta(500, $data['subscription']['total_subscribed_per_period'], 0.01);
+        $this->assertCount(1, $data['subscription']['by_schedule']);
+        $this->assertSame(1, $data['subscription']['by_schedule'][0]['member_count']);
+        $this->assertEqualsWithDelta(500, $data['subscription']['by_schedule'][0]['amount'], 0.01);
+    }
+
+    /**
+     * Guards a deliberate NON-change.
+     *
+     * `by_member` aggregates the ledger, so a pending borrower only shows up
+     * when real money was posted for them. Filtering those rows out would leave
+     * the detail table no longer summing to the report's own closing balance,
+     * because every aggregate still counts that money.
+     */
+    public function test_share_capital_by_member_keeps_a_pending_borrower_who_has_ledger_entries(): void
+    {
+        [$periodStart] = $this->seedShareCapitalPeriod();
+
+        $applicant = Borrower::factory()->create([
+            'branch_id' => $this->branch->id,
+            'status' => 'pending',
+        ]);
+        $this->ledgerEntry($applicant, Carbon::today()->toDateString(), credit: 1200);
+
+        $from = $periodStart->toDateString();
+        $to = Carbon::today()->toDateString();
+
+        $data = $this->getJson("/api/reports/share-capital?date_from={$from}&date_to={$to}")
+            ->assertOk()->json('data');
+
+        $this->assertEqualsWithDelta(10700, $data['closing_balance'], 0.01, '9,500 plus the 1,200 actually posted.');
+
+        $row = collect($data['by_member'])->firstWhere('borrower_id', $applicant->id);
+        $this->assertNotNull($row, 'Money that was really posted must still be attributable to somebody.');
+        $this->assertEqualsWithDelta(1200, $row['closing_balance'], 0.01);
+
+        $this->assertEqualsWithDelta(
+            $data['closing_balance'],
+            array_sum(array_column($data['by_member'], 'closing_balance')),
+            0.01,
+            'by_member must keep summing to the headline closing balance.',
+        );
+    }
+
     // ── Officer / Branch Performance ─────────────────────────────────────
 
     public function test_performance_reports_unassigned_loans_so_officer_and_branch_rows_reconcile(): void

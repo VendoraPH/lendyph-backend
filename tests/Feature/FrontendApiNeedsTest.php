@@ -33,6 +33,63 @@ it('includes status stats in /api/borrowers meta', function () {
     expect($response->json('meta.stats.inactive'))->toBe(2);
 });
 
+// ── Borrowers list: members_only + pagination ────────────────────────
+
+it('excludes pending and rejected registrations when members_only is set', function () {
+    Borrower::factory()->count(3)->create(['branch_id' => $this->branch->id, 'status' => 'active']);
+    Borrower::factory()->create(['branch_id' => $this->branch->id, 'status' => 'inactive']);
+    Borrower::factory()->create(['branch_id' => $this->branch->id, 'status' => 'blacklisted']);
+    Borrower::factory()->count(2)->create(['branch_id' => $this->branch->id, 'status' => 'pending']);
+    Borrower::factory()->create(['branch_id' => $this->branch->id, 'status' => 'rejected']);
+
+    $response = $this->getJson('/api/borrowers?members_only=1&per_page=100')->assertSuccessful();
+
+    $statuses = collect($response->json('data'))->pluck('status');
+
+    expect($statuses)->not->toContain('pending')
+        ->and($statuses)->not->toContain('rejected')
+        ->and($statuses)->toContain('inactive')
+        ->and($statuses)->toContain('blacklisted');
+
+    // 3 active + 1 inactive + 1 blacklisted — members in poor standing are
+    // still members.
+    expect($response->json('meta.total'))->toBe(5);
+});
+
+it('keeps meta.stats global while members_only narrows the page', function () {
+    Borrower::factory()->count(2)->create(['branch_id' => $this->branch->id, 'status' => 'active']);
+    Borrower::factory()->count(3)->create(['branch_id' => $this->branch->id, 'status' => 'pending']);
+
+    $response = $this->getJson('/api/borrowers?members_only=1&per_page=100')->assertSuccessful();
+
+    expect($response->json('meta.total'))->toBe(2);
+    // stats stays a whole-book KPI so the pending-registrations badge keeps
+    // reading 3 while the members list shows 2.
+    expect($response->json('meta.stats.pending'))->toBe(3);
+    expect($response->json('meta.stats.active'))->toBe(2);
+});
+
+it('paginates borrowers past the default page size', function () {
+    // The reported bug: the Members screen fetched page 1 (15 rows) and
+    // filtered client-side, so it rendered 3 of 38 members.
+    Borrower::factory()->count(20)->create(['branch_id' => $this->branch->id, 'status' => 'active']);
+
+    $response = $this->getJson('/api/borrowers?members_only=1&per_page=10&page=2')->assertSuccessful();
+
+    expect($response->json('data'))->toHaveCount(10);
+    expect($response->json('meta.total'))->toBe(20);
+    expect($response->json('meta.current_page'))->toBe(2);
+    expect($response->json('meta.last_page'))->toBe(2);
+});
+
+it('clamps per_page to 100 on /api/borrowers', function () {
+    Borrower::factory()->count(3)->create(['branch_id' => $this->branch->id]);
+
+    $response = $this->getJson('/api/borrowers?per_page=9999')->assertSuccessful();
+
+    expect($response->json('meta.per_page'))->toBe(100);
+});
+
 // ── Loans list: stats meta ───────────────────────────────────────────
 
 it('includes status stats in /api/loans meta', function () {

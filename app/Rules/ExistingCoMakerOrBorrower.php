@@ -19,6 +19,14 @@ use Illuminate\Contracts\Validation\ValidationRule;
  * What this does close: without it the field was a bare `integer`, so arbitrary
  * unvalidated ids reached that lookup — probing rows and binding whoever came
  * back to a live loan.
+ *
+ * The borrower branch excludes `rejected` registrations, matching
+ * ExcludesRejectedBorrowers on the principal `borrower_id`. A co-maker is
+ * jointly liable for the loan, so admitting somebody the cooperative turned
+ * away as a co-maker is the same defect as admitting them as the borrower —
+ * gating one and not the other just moves the hole one field to the right.
+ * `pending` stays acceptable for the same reason it does there: pending
+ * borrowers demonstrably hold live loans in production.
  */
 class ExistingCoMakerOrBorrower implements ValidationRule
 {
@@ -30,7 +38,11 @@ class ExistingCoMakerOrBorrower implements ValidationRule
             return;
         }
 
-        if (CoMaker::whereKey($value)->exists() || Borrower::whereKey($value)->exists()) {
+        if (CoMaker::whereKey($value)->exists()) {
+            return;
+        }
+
+        if (Borrower::whereKey($value)->whereNot('status', 'rejected')->exists()) {
             return;
         }
 
