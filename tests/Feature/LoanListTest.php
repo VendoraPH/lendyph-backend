@@ -289,6 +289,71 @@ class LoanListTest extends TestCase
         $this->assertSame([$loans['B']->id, $loans['A']->id], array_column($byProduct->json('data'), 'id'));
     }
 
+    // ── filter integrity ────────────────────────────────────────────────
+
+    public function test_an_id_filter_of_zero_is_rejected_rather_than_ignored(): void
+    {
+        $this->createLoan();
+        $this->createLoan(['borrower_id' => Borrower::factory()->create(['branch_id' => $this->branch->id])->id]);
+
+        // `Builder::when()` skips a falsy condition, so a 0 that reached the
+        // query builder used to drop the filter and answer with the whole loan
+        // book — every borrower's PII — for a caller asking about one borrower.
+        // The frontend reaches this by way of Number(params.id) on
+        // /borrowers/0. It has to be a 422, not a silent full read.
+        foreach (['borrower_id', 'branch_id', 'loan_product_id'] as $filter) {
+            $this->getJson("/api/loans?{$filter}=0")
+                ->assertStatus(422)
+                ->assertJsonValidationErrors($filter);
+
+            $this->getJson("/api/loans?{$filter}=-1")
+                ->assertStatus(422)
+                ->assertJsonValidationErrors($filter);
+        }
+
+        // NaN was already covered by the integer rule; only 0 slipped through.
+        $this->getJson('/api/loans?borrower_id=nope')
+            ->assertStatus(422)
+            ->assertJsonValidationErrors('borrower_id');
+    }
+
+    public function test_a_falsy_string_filter_still_filters(): void
+    {
+        $this->createLoan(['status' => 'released']);
+        $this->createLoan(['status' => 'draft']);
+
+        // "0" is a value a user can type and it is falsy in PHP, so a
+        // truthiness gate dropped the filter and answered with the whole book.
+        // No row can carry a status of "0", so the honest answer is no rows.
+        $this->assertSame(0, $this->getJson('/api/loans?status=0')->assertOk()->json('meta.total'));
+
+        // `search` runs through the same gate. It cannot be proved the same way
+        // — every application number is zero-padded (LA-000001), so "0" really
+        // does match every loan — but blank must still mean "no filter" rather
+        // than a LIKE against nothing.
+        $this->assertSame(2, $this->getJson('/api/loans?search=%20%20')->assertOk()->json('meta.total'));
+        $this->assertSame(2, $this->getJson('/api/loans?search=')->assertOk()->json('meta.total'));
+    }
+
+    public function test_a_borrower_filter_narrows_the_page_and_the_stats_together(): void
+    {
+        // If only one of the two honours the filter, a borrower's page sits
+        // under someone else's totals.
+        $mine = $this->createLoan(['status' => 'released']);
+        $theirs = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+        $this->createLoan(['status' => 'released', 'borrower_id' => $theirs->id]);
+        $this->createLoan(['status' => 'draft', 'borrower_id' => $theirs->id]);
+
+        $response = $this->getJson("/api/loans?borrower_id={$mine->borrower_id}")->assertOk();
+
+        $this->assertSame(1, $response->json('meta.total'));
+        $this->assertSame([$mine->id], array_column($response->json('data'), 'id'));
+        $this->assertSame(1, $response->json('meta.stats.released'));
+        $this->assertSame(1, $response->json('meta.stats.active'));
+        // The other borrower's draft must not leak into these counts.
+        $this->assertSame(0, $response->json('meta.stats.draft'));
+    }
+
     // ── pagination ──────────────────────────────────────────────────────
 
     public function test_per_page_clamps_at_100(): void

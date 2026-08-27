@@ -153,9 +153,12 @@ DESC,
             'search' => ['nullable', 'string'],
             // Not constrained to the enum on purpose — see Loan::scopeForStatus().
             'status' => ['nullable', 'string'],
-            'branch_id' => ['nullable', 'integer'],
-            'borrower_id' => ['nullable', 'integer'],
-            'loan_product_id' => ['nullable', 'integer'],
+            // `min:1` is not cosmetic: 0 is a valid integer that no row can
+            // carry, and it used to reach a `when()` that treats it as absent
+            // — see the filled() note below.
+            'branch_id' => ['nullable', 'integer', 'min:1'],
+            'borrower_id' => ['nullable', 'integer', 'min:1'],
+            'loan_product_id' => ['nullable', 'integer', 'min:1'],
             'date_from' => ['nullable', 'date'],
             'date_to' => ['nullable', 'date'],
             'sort' => ['nullable', Rule::in(self::SORT_KEYS)],
@@ -163,17 +166,43 @@ DESC,
             'per_page' => ['nullable', 'integer', 'min:1'],
         ]);
 
+        /**
+         * Pulled out as locals so every filter below can be gated on
+         * filled() — PRESENCE — rather than on truthiness.
+         *
+         * `Builder::when()` skips its callback for any falsy condition, and
+         * `0` and `'0'` are falsy. Gating on the value itself therefore
+         * dropped `?borrower_id=0` on the floor and answered with the entire
+         * loan book joined to borrower PII, plus org-wide `meta.stats`, for a
+         * caller who had asked about one borrower. `/borrowers/0` on the
+         * frontend does exactly that, via Number(params.id). The same hole
+         * swallowed `search=0` and `status=0`, which are ordinary values a user
+         * can type.
+         */
+        $search = $filters['search'] ?? null;
+        $status = $filters['status'] ?? null;
+        $branchId = $filters['branch_id'] ?? null;
+        $borrowerId = $filters['borrower_id'] ?? null;
+        $loanProductId = $filters['loan_product_id'] ?? null;
+        $dateFrom = $filters['date_from'] ?? null;
+        $dateTo = $filters['date_to'] ?? null;
+
         $query = Loan::query()
-            // Qualified, and selected before withCount() rather than left to it:
-            // sort=borrower and sort=product join a table that has its own
-            // `status`, `branch_id` and `created_at`, and an unqualified `*`
-            // would let those columns land on the hydrated loan.
+            // Do NOT reorder these two lines, and do not delete the select.
+            //
+            // withCount() only injects its own `loans.*` when the column list
+            // is still null, so putting it first and this second would leave
+            // `extension_count` off the select and silently reinstate a COUNT
+            // per row. Dropping the select altogether is worse: sort=borrower
+            // joins `borrowers`, whose `id`, `status` and `branch_id` would
+            // then hydrate OVER the loan's, and LoanResource would publish the
+            // borrower's id and status on every row of the list.
             ->select('loans.*')
             ->with('borrower', 'loanProduct', 'branch', 'createdByUser', 'amortizationSchedules')
             // Aliased count so LoanResource's extension_count reads an
             // already-loaded value instead of firing a COUNT query per row.
             ->withCount(['adjustments as extension_count' => fn ($q) => $q->where('adjustment_type', 'extension')])
-            ->when($filters['search'] ?? null, function ($q, $search) {
+            ->when(filled($search), function ($q) use ($search) {
                 $q->where(function ($query) use ($search) {
                     $query->where('loans.application_number', 'like', "%{$search}%")
                         ->orWhere('loans.loan_account_number', 'like', "%{$search}%")
@@ -184,17 +213,17 @@ DESC,
                         });
                 });
             })
-            ->when($filters['status'] ?? null, fn ($q, $s) => $q->forStatus($s))
-            ->when($filters['branch_id'] ?? null, fn ($q, $b) => $q->forBranch($b))
-            ->when($filters['borrower_id'] ?? null, fn ($q, $b) => $q->where('loans.borrower_id', $b))
-            ->when($filters['loan_product_id'] ?? null, fn ($q, $p) => $q->where('loans.loan_product_id', $p))
+            ->when(filled($status), fn ($q) => $q->forStatus($status))
+            ->when(filled($branchId), fn ($q) => $q->forBranch($branchId))
+            ->when(filled($borrowerId), fn ($q) => $q->where('loans.borrower_id', $borrowerId))
+            ->when(filled($loanProductId), fn ($q) => $q->where('loans.loan_product_id', $loanProductId))
             // Inclusive whole-day range on the application date. Expressed as a
             // range rather than with whereDate(), which wraps the column in a
             // function and forfeits any index on it; endOfDay() is what makes
             // `date_to` cover the loans captured during that day rather than
             // only one created exactly at midnight.
-            ->when($filters['date_from'] ?? null, fn ($q, $from) => $q->where('loans.created_at', '>=', Carbon::parse($from)->startOfDay()))
-            ->when($filters['date_to'] ?? null, fn ($q, $to) => $q->where('loans.created_at', '<=', Carbon::parse($to)->endOfDay()));
+            ->when(filled($dateFrom), fn ($q) => $q->where('loans.created_at', '>=', Carbon::parse($dateFrom)->startOfDay()))
+            ->when(filled($dateTo), fn ($q) => $q->where('loans.created_at', '<=', Carbon::parse($dateTo)->endOfDay()));
 
         $this->applySort($query, $filters['sort'] ?? 'created_at', $filters['dir'] ?? 'desc');
 
@@ -208,9 +237,13 @@ DESC,
          * BorrowerController::index() does it and for the same reason. These
          * are KPI figures: scoping them to the active filter would make each
          * tab report the size of the page already on screen.
+         *
+         * The two scopes it DOES honour are gated on filled() for the same
+         * reason the page is, and the two must agree: fixing one alone would
+         * sit a borrower-filtered page underneath whole-book counts.
          */
-        $stats = Loan::when($filters['branch_id'] ?? null, fn ($q, $b) => $q->forBranch($b))
-            ->when($filters['borrower_id'] ?? null, fn ($q, $b) => $q->where('loans.borrower_id', $b))
+        $stats = Loan::when(filled($branchId), fn ($q) => $q->forBranch($branchId))
+            ->when(filled($borrowerId), fn ($q) => $q->where('loans.borrower_id', $borrowerId))
             ->selectRaw('status, COUNT(*) as count')
             ->groupBy('status')
             ->pluck('count', 'status')
