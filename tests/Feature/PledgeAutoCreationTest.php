@@ -27,13 +27,57 @@ it('auto-creates a pledge when a borrower is created', function () {
     expect($borrower->shareCapitalPledge->auto_credit)->toBeFalse();
 });
 
-it('returns pledges for all borrowers via GET /api/pledges', function () {
+it('returns pledges for every member via GET /api/pledges', function () {
     $borrowers = Borrower::factory()->count(3)->create(['branch_id' => $this->branch->id]);
 
     $response = $this->getJson('/api/pledges?per_page=100')->assertSuccessful();
 
     $pledgeIds = collect($response->json('data'))->pluck('borrower_id');
     $borrowers->each(fn ($b) => expect($pledgeIds)->toContain($b->id));
+});
+
+it('still creates the pledge row for a pending borrower but hides it from GET /api/pledges', function () {
+    $applicant = Borrower::factory()->create([
+        'branch_id' => $this->branch->id,
+        'status' => 'pending',
+        'pledge_amount' => 500,
+    ]);
+
+    // The creation hook is unconditional on purpose: the amount typed on the
+    // public registration form survives until the co-op reviews it.
+    $this->assertDatabaseHas('share_capital_pledges', [
+        'borrower_id' => $applicant->id,
+        'amount' => 500,
+    ]);
+
+    $pledgeIds = collect($this->getJson('/api/pledges?per_page=100')->assertSuccessful()->json('data'))
+        ->pluck('borrower_id');
+
+    expect($pledgeIds)->not->toContain($applicant->id);
+});
+
+it('includes inactive and blacklisted members in GET /api/pledges', function () {
+    // The single most important guard in this file: "member" is NOT "active".
+    // An inactive or blacklisted member is a member in poor standing and still
+    // holds share capital, so narrowing the filter to scopeActive() would be a
+    // regression, not a simplification.
+    $inactive = Borrower::factory()->create(['branch_id' => $this->branch->id, 'status' => 'inactive']);
+    $blacklisted = Borrower::factory()->create(['branch_id' => $this->branch->id, 'status' => 'blacklisted']);
+
+    $pledgeIds = collect($this->getJson('/api/pledges?per_page=100')->assertSuccessful()->json('data'))
+        ->pluck('borrower_id');
+
+    expect($pledgeIds)->toContain($inactive->id)
+        ->and($pledgeIds)->toContain($blacklisted->id);
+});
+
+it('excludes a rejected borrower from GET /api/pledges', function () {
+    $rejected = Borrower::factory()->create(['branch_id' => $this->branch->id, 'status' => 'rejected']);
+
+    $pledgeIds = collect($this->getJson('/api/pledges?per_page=100')->assertSuccessful()->json('data'))
+        ->pluck('borrower_id');
+
+    expect($pledgeIds)->not->toContain($rejected->id);
 });
 
 it('can update an auto-created pledge', function () {

@@ -68,17 +68,23 @@ Route::middleware('signed')->group(function () {
 // two upload endpoints. Anonymous calls go through a 15-min submission token;
 // authenticated calls keep today's operator behavior. The auth middleware
 // runs FIRST so the throttle limiter can inspect $request->user() and skip
-// the per-IP cap for operator traffic. CheckTokenExpiry + EnsureUserIsActive
-// are no-ops when no user is attached, so they're safe to apply across both
-// paths.
+// the per-IP cap for operator traffic — and, on the upload routes, so it can
+// read the X-Submission-Token the limiter keys on. Do not move the throttle
+// ahead of it. CheckTokenExpiry + EnsureUserIsActive are no-ops when no user
+// is attached, so they're safe to apply across both paths.
+//
+// The create and the uploads are metered by SEPARATE limiters on purpose.
+// They shared `public-registration` until one applicant's create + photo +
+// valid IDs spent most of a 5-per-10-minute per-IP budget, and the next
+// person to open the form was refused. See App\Providers\AppServiceProvider.
 Route::post('/borrowers', [BorrowerController::class, 'store'])
     ->middleware([OptionalSanctumAuth::class, 'throttle:public-registration', CheckTokenExpiry::class, EnsureUserIsActive::class]);
 
 Route::post('/borrowers/{borrower}/photo', [BorrowerController::class, 'uploadPhoto'])
-    ->middleware([AllowAuthOrSubmissionToken::class, 'throttle:public-registration', CheckTokenExpiry::class, EnsureUserIsActive::class]);
+    ->middleware([AllowAuthOrSubmissionToken::class, 'throttle:registration-uploads', CheckTokenExpiry::class, EnsureUserIsActive::class]);
 
 Route::post('/borrowers/{borrower}/valid-ids', [BorrowerController::class, 'uploadValidId'])
-    ->middleware([AllowAuthOrSubmissionToken::class, 'throttle:public-registration', CheckTokenExpiry::class, EnsureUserIsActive::class]);
+    ->middleware([AllowAuthOrSubmissionToken::class, 'throttle:registration-uploads', CheckTokenExpiry::class, EnsureUserIsActive::class]);
 
 // Protected routes
 Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::class])->group(function () {

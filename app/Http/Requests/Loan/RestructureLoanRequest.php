@@ -3,6 +3,7 @@
 namespace App\Http\Requests\Loan;
 
 use App\Enums\LoanFrequency;
+use App\Http\Requests\Concerns\ExcludesRejectedBorrowers;
 use App\Rules\ExistingCoMakerOrBorrower;
 use Illuminate\Foundation\Http\FormRequest;
 
@@ -20,6 +21,8 @@ use Illuminate\Foundation\Http\FormRequest;
  */
 class RestructureLoanRequest extends FormRequest
 {
+    use ExcludesRejectedBorrowers;
+
     public function authorize(): bool
     {
         return $this->user()->can('loans:restructure');
@@ -28,12 +31,13 @@ class RestructureLoanRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'borrower_id' => ['required', 'exists:borrowers,id'],
+            'borrower_id' => ['required', $this->nonRejectedBorrowerRule()],
             'co_maker_ids' => ['nullable', 'array'],
-            // Must exist as a co-maker OR a borrower — both are valid inputs to
-            // createLoan(), and the co-maker picker sends borrower ids. Tighter
-            // than StoreLoanRequest's bare `integer`, which let arbitrary
-            // unvalidated ids reach that lookup.
+            // Must exist as a co-maker OR a non-rejected borrower — both are
+            // valid inputs to createLoan(), and the co-maker picker sends
+            // borrower ids. StoreLoanRequest now carries the identical rule;
+            // it used to be a bare `integer`, which let arbitrary unvalidated
+            // ids reach that lookup.
             'co_maker_ids.*' => ['integer', new ExistingCoMakerOrBorrower],
             'loan_product_id' => ['required', 'exists:loan_products,id'],
             'principal_amount' => ['required', 'numeric', 'min:1'],

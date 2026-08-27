@@ -17,7 +17,20 @@ class Borrower extends Model
 {
     use Auditable, HasFactory;
 
+    /**
+     * Registration statuses that are NOT membership.
+     *
+     * A `pending` applicant has not been approved yet and a `rejected` one
+     * never will be; neither may appear anywhere the system means "member".
+     * `inactive` and `blacklisted` are intentionally absent — those people are
+     * members in poor standing, not non-members.
+     *
+     * @var list<string>
+     */
+    public const NON_MEMBER_STATUSES = ['pending', 'rejected'];
+
     protected $fillable = [
+        'registration_uuid',
         'first_name',
         'middle_name',
         'last_name',
@@ -73,6 +86,15 @@ class Borrower extends Model
             $borrower->borrower_code = 'BRW-'.str_pad($nextNum, 6, '0', STR_PAD_LEFT);
         });
 
+        /**
+         * A pledge row is created for EVERY borrower, `pending` applicants
+         * included. The hook stays unconditional on purpose: it keeps the
+         * pledge amount typed on the public registration form, and an approved
+         * registration then needs no backfill.
+         *
+         * The member / non-member split is made on READ instead — see
+         * Borrower::scopeMembers() and ShareCapitalPledge::scopeForMembers().
+         */
         static::created(function (Borrower $borrower) {
             $borrower->shareCapitalPledge()->create([
                 'amount' => $borrower->pledge_amount ?? 0,
@@ -159,11 +181,33 @@ class Borrower extends Model
         return $query->where('status', 'active');
     }
 
+    /**
+     * Everyone who belongs to the cooperative, whatever their standing.
+     *
+     * Deliberately NOT scopeActive(): `inactive` and `blacklisted` borrowers
+     * are still members and legitimately hold share capital, so narrowing this
+     * to `active` would drop their pledges and holdings — a regression, not a
+     * simplification. This mirrors the Members screen's own semantics:
+     * everything except a registration that is still `pending` or was
+     * `rejected`.
+     */
+    public function scopeMembers($query)
+    {
+        return $query->whereNotIn('status', self::NON_MEMBER_STATUSES);
+    }
+
     public function scopeForBranch($query, int $branchId)
     {
         return $query->where('branch_id', $branchId);
     }
 
+    /**
+     * Free-text borrower lookup: code, any name part, contact number or email.
+     *
+     * `email` is included because the Members screen searches it. That screen
+     * filtered client-side over one page of results; moving it server-side
+     * would have silently dropped email matching without this.
+     */
     public function scopeSearch($query, string $term)
     {
         return $query->where(function ($q) use ($term) {
@@ -171,7 +215,8 @@ class Borrower extends Model
                 ->orWhere('first_name', 'like', "%{$term}%")
                 ->orWhere('middle_name', 'like', "%{$term}%")
                 ->orWhere('last_name', 'like', "%{$term}%")
-                ->orWhere('contact_number', 'like', "%{$term}%");
+                ->orWhere('contact_number', 'like', "%{$term}%")
+                ->orWhere('email', 'like', "%{$term}%");
         });
     }
 }

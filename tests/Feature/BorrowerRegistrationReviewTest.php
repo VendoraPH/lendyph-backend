@@ -47,6 +47,36 @@ class BorrowerRegistrationReviewTest extends TestCase
         $this->assertNotNull($borrower->fresh()->approved_at);
     }
 
+    /**
+     * End-to-end proof that hiding pending applicants is a READ-side filter.
+     *
+     * The pledge row exists the whole time; approval is what makes it visible,
+     * so nothing has to be backfilled when a registration is approved.
+     */
+    public function test_approving_a_registration_reveals_the_borrowers_pledge_in_the_pledge_list(): void
+    {
+        $applicant = Borrower::factory()->create([
+            'branch_id' => $this->branch->id,
+            'status' => 'pending',
+            'pledge_amount' => 300,
+        ]);
+        $this->attachValidId($applicant);
+
+        $before = collect($this->getJson('/api/pledges?per_page=100')->assertOk()->json('data'))
+            ->pluck('borrower_id');
+        $this->assertNotContains($applicant->id, $before->all());
+
+        $this->patchJson("/api/borrowers/{$applicant->id}/approve-registration")
+            ->assertOk()
+            ->assertJsonPath('data.status', 'active');
+
+        $after = collect($this->getJson('/api/pledges?per_page=100')->assertOk()->json('data'));
+        $row = $after->firstWhere('borrower_id', $applicant->id);
+
+        $this->assertNotNull($row, 'An approved member belongs in Pledge Entry.');
+        $this->assertEqualsWithDelta(300.0, $row['amount'], 0.01, 'The amount typed at registration survived the wait.');
+    }
+
     public function test_approve_registration_rejects_non_pending_borrower(): void
     {
         $borrower = Borrower::factory()->create([

@@ -47,8 +47,16 @@ class BorrowerTest extends TestCase
 
     public function test_list_and_search_borrowers(): void
     {
-        Borrower::factory()->create(['branch_id' => $this->branch->id, 'first_name' => 'Juan']);
-        Borrower::factory()->create(['branch_id' => $this->branch->id, 'first_name' => 'Pedro']);
+        $juan = Borrower::factory()->create([
+            'branch_id' => $this->branch->id,
+            'first_name' => 'Juan',
+            'email' => 'juan.dela.cruz@example.test',
+        ]);
+        Borrower::factory()->create([
+            'branch_id' => $this->branch->id,
+            'first_name' => 'Pedro',
+            'email' => 'pedro@example.test',
+        ]);
 
         $this->getJson('/api/borrowers')
             ->assertOk()
@@ -57,6 +65,13 @@ class BorrowerTest extends TestCase
         $this->getJson('/api/borrowers?search=Juan')
             ->assertOk()
             ->assertJsonCount(1, 'data');
+
+        // The Members screen searches email; moving that filter server-side
+        // would have dropped email matching without this.
+        $this->getJson('/api/borrowers?search=juan.dela.cruz@')
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.id', $juan->id);
     }
 
     public function test_update_borrower(): void
