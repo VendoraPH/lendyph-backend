@@ -305,15 +305,41 @@ class ReportService
      * Preview and export used to build their own queries with different loan
      * statuses and different cutoffs (`Carbon::today()` vs `now()`), so the CSV
      * a manager downloaded did not match the screen they downloaded it from.
+     *
+     * This asks what is DUE. It deliberately does NOT apply
+     * AmortizationSchedule::pastGraceSql(), and that is not an oversight —
+     * grace was reviewed here and rejected.
+     *
+     * Grace governs when a borrower is penalised and when they are called late;
+     * it does not change whether the money is owed. Every loan product carries
+     * some grace, so filtering this list on `due_date + grace < today` would
+     * empty the entire "Due" half of a report named "Due / Past Due" and hide
+     * the current period's receivables from collections. The report already
+     * draws that line itself: a row due today is listed with `days_overdue` 0,
+     * which is what test_schedule_due_today_is_due_but_not_overdue() pins.
+     *
+     * Loan::scopePastDue() asks the other question — what is LATE — and does
+     * apply grace. The two are meant to differ, and the loans screen's Past Due
+     * tab being the smaller set is the intended result. If lateness ever needs
+     * to be visible HERE, it belongs in the row payload as a grace-aware
+     * `days_overdue` in ReportController, not as a membership filter that
+     * deletes rows.
+     *
+     * All three date bounds are plain comparisons rather than whereDate().
+     * `due_date` is a DATE column with no time component to strip, so DATE() is
+     * a no-op that only wraps the column and makes it useless as an index range
+     * bound — the same reasoning already written into LoanController::index()
+     * for `date_from`/`date_to`. This query has no `loan_id` equality to lead
+     * with, so the due_date range is the only leg an index can serve.
      */
     public function duePastDueQuery(array $filters): Builder
     {
         return AmortizationSchedule::query()
             ->whereHas('loan', fn ($q) => $q->whereIn('status', Loan::COLLECTIBLE_STATUSES))
             ->whereIn('status', AmortizationSchedule::UNPAID_STATUSES)
-            ->whereDate('due_date', '<=', Carbon::today()->toDateString())
-            ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->whereDate('due_date', '>=', $d))
-            ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->whereDate('due_date', '<=', $d))
+            ->where('due_date', '<=', Carbon::today()->toDateString())
+            ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->where('due_date', '>=', $d))
+            ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->where('due_date', '<=', $d))
             ->when($filters['branch_id'] ?? null, fn ($q, $b) => $q->whereHas('loan', fn ($lq) => $lq->where('branch_id', $b)))
             ->orderBy('due_date')
             ->orderBy('id');
@@ -327,6 +353,30 @@ class ReportService
     }
 
     /**
+     * The totals block under the Due/Past Due list.
+     *
+     * Membership is duePastDueQuery()'s — what is OWED, grace ignored, see the
+     * docblock there. `overdue_count` is the one figure in here that asserts
+     * LATENESS rather than debt, so it is the one that honours grace.
+     *
+     * The contract it owes the row payload: `overdue_count` is exactly the
+     * number of rows in the same result set whose `days_overdue` is greater
+     * than zero. Both sides decide "is this row late?" with
+     * AmortizationSchedule::pastGraceSql() / pastGraceCutoff(), so a report
+     * cannot show a page of rows all reading 0 days overdue above a totals
+     * block claiming several are late, or the reverse.
+     *
+     * Nothing else in here implies lateness. The principal/interest/due/balance
+     * sums are amounts owed, which grace does not move. `total_penalty` sums
+     * the stored `penalty_amount`, which RepaymentService::applyPenalties() now
+     * leaves at 0 through the grace window — so it follows this definition
+     * automatically, through the data, and must not be filtered here as well or
+     * the same rule would be applied twice.
+     *
+     * There is no PAR figure or aging bucket in this block; those live in
+     * agingReport() and loanBalanceSummary(), and both deliberately still
+     * measure from the bare due date. See the comments there.
+     *
      * @return array<string, float|int>
      */
     public function listOfDuePastDueTotals(array $filters): array
@@ -342,8 +392,15 @@ class ReportService
             COALESCE(SUM('.AmortizationSchedule::remainingTotalSql().'), 0) as total_balance
         ')->first();
 
+        // Late, not merely due: past the due date AND past the loan's grace
+        // period. The comparison needs `loans` in scope, which inside a
+        // whereHas('loan') it has — `loans` is the subquery's own table and
+        // `amortization_schedules` is the correlated outer reference.
         $overdueCount = (clone $base)
-            ->whereDate('due_date', '<', Carbon::today()->toDateString())
+            ->whereHas('loan', fn ($q) => $q->whereRaw(
+                AmortizationSchedule::pastGraceSql(),
+                [Carbon::today()->toDateString()],
+            ))
             ->count();
 
         return [
@@ -381,10 +438,14 @@ class ReportService
             ')
             ->first();
 
+        // Also from the bare due date. This block feeds the balance summary's
+        // `overdue` figures alongside the PAR ratio below and is read with
+        // them, so the two must be struck the same way. See the note on
+        // overdueScheduleQuery() for why that is the due date and not grace.
         $overdueAgg = DB::table('amortization_schedules')
             ->whereIn('loan_id', $loanIds)
             ->whereIn('status', AmortizationSchedule::UNPAID_STATUSES)
-            ->whereDate('due_date', '<', $today)
+            ->where('due_date', '<', $today)
             ->selectRaw('
                 COALESCE(SUM('.AmortizationSchedule::remainingPrincipalSql().'), 0) as overdue_principal,
                 COALESCE(SUM('.AmortizationSchedule::remainingInterestSql().'), 0) as overdue_interest,
@@ -407,10 +468,14 @@ class ReportService
         // least one schedule more than PAR_THRESHOLD_DAYS past due, over total
         // outstanding. The numerator is the loan's WHOLE remaining balance, not
         // just the late instalment; that is what makes it "at risk".
+        // From the due date, grace deliberately ignored — PAR30 is a prudential
+        // ratio struck the same way everywhere it is reported. Same reasoning
+        // as the aging buckets in overdueScheduleQuery(); see the comment
+        // there, and do not make one grace-aware without the other.
         $atRiskLoanIds = DB::table('amortization_schedules')
             ->whereIn('loan_id', $loanIds)
             ->whereIn('status', AmortizationSchedule::UNPAID_STATUSES)
-            ->whereDate('due_date', '<', $parCutoff)
+            ->where('due_date', '<', $parCutoff)
             ->select('loan_id');
 
         $atRiskAmount = (float) DB::table('amortization_schedules')
@@ -595,10 +660,10 @@ class ReportService
         $result = [];
         foreach ($buckets as $key => [$minDays, $maxDays]) {
             $query = $this->overdueScheduleQuery($filters, $asOf)
-                ->whereDate('due_date', '<=', $asOf->copy()->subDays($minDays)->toDateString());
+                ->where('due_date', '<=', $asOf->copy()->subDays($minDays)->toDateString());
 
             if ($maxDays !== null) {
-                $query->whereDate('due_date', '>=', $asOf->copy()->subDays($maxDays)->toDateString());
+                $query->where('due_date', '>=', $asOf->copy()->subDays($maxDays)->toDateString());
             }
 
             $result[$key] = [
@@ -617,7 +682,7 @@ class ReportService
         // "the buckets sum to the total" is a genuine assertion about the
         // boundaries and not a tautology.
         $overall = $this->overdueScheduleQuery($filters, $asOf)
-            ->whereDate('due_date', '<=', $asOf->copy()->subDay()->toDateString());
+            ->where('due_date', '<=', $asOf->copy()->subDay()->toDateString());
 
         return [
             'as_of_date' => $asOf->toDateString(),
@@ -641,7 +706,26 @@ class ReportService
             ->when($filters['branch_id'] ?? null, fn ($q, $b) => $q->whereHas('loan', fn ($lq) => $lq->where('branch_id', $b)))
             // Nothing that is not yet late may enter an aging bucket, whatever
             // the bucket boundaries do.
-            ->whereDate('due_date', '<', $asOf->toDateString());
+            //
+            // Measured from the bare due date, and deliberately NOT through
+            // AmortizationSchedule::pastGraceSql(). Aging buckets are a
+            // prudential portfolio-quality measure and are conventionally
+            // struck from the due date, exactly like the 90-day threshold in
+            // CheckDefaultedLoans; honouring grace here would shift every
+            // bucket boundary by the product's grace period and move reported
+            // portfolio quality. That is a provisioning decision, not an
+            // engineering one, so it is recorded rather than made. The
+            // Due/Past Due list's `overdue_count` DOES honour grace, because it
+            // is a collections figure rather than a prudential one — if these
+            // two are ever unified, that is the difference to resolve first.
+            //
+            // Plain comparison, not whereDate(): `due_date` is a DATE column,
+            // so DATE() strips nothing and only stops the column serving as an
+            // index range bound. This is the root of every aging bucket and of
+            // the PAR numerator, which are the heaviest scans in this file and
+            // exactly the (loan_id, status, due_date) shape the composite index
+            // on amortization_schedules exists to serve.
+            ->where('due_date', '<', $asOf->toDateString());
     }
 
     public function borrowerReport(array $filters): array
@@ -1771,6 +1855,20 @@ class ReportService
      * joining `amortization_schedules` straight onto `loans` multiplies every
      * loan-level column by the schedule count, which is the bug
      * balanceSummaryByBranch() already had to fix once.
+     *
+     * Both lateness tests below — `overdue_amount` against $today and
+     * `is_at_risk` against $parCutoff — are struck from the bare `due_date`,
+     * and deliberately NOT through AmortizationSchedule::pastGraceSql(). This
+     * is the third site under the same decision as the aging buckets in
+     * overdueScheduleQuery() and the PAR numerator in loanBalanceSummary():
+     * prudential portfolio-quality figures are conventionally measured from the
+     * due date, so honouring grace here would move reported portfolio quality.
+     * That is a provisioning decision, recorded rather than made — do not
+     * "finish the job" by making this one grace-aware on its own.
+     *
+     * Note this is the easiest of the three to change by accident, because the
+     * comparison is buried in raw SQL as two bare `due_date < ?` fragments
+     * rather than in a named query method.
      */
     private function loanScheduleTotals(Carbon $today, Carbon $parCutoff): QueryBuilder
     {

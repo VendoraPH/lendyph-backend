@@ -2,9 +2,11 @@
 
 namespace App\Models;
 
+use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Support\Collection;
 
 class AmortizationSchedule extends Model
 {
@@ -51,6 +53,99 @@ class AmortizationSchedule extends Model
         return '('.self::remainingPrincipalSql()
             .' + '.self::remainingInterestSql()
             .' + '.self::remainingPenaltySql().')';
+    }
+
+    /**
+     * The one definition of LATE: past the due date AND past the grace period
+     * the loan contractually grants.
+     *
+     * `grace_period_days` is copied from the product onto the loan at creation
+     * (LoanService::createLoan()), printed on the promissory note and the
+     * disclosure statement, and was for a long time honoured by nothing — every
+     * caller compared a bare `due_date` against today, so a borrower inside the
+     * grace window the paperwork promised them was penalised and labelled
+     * overdue anyway. This method and self::pastGraceCutoff() are the only two
+     * places that comparison may be written. Five hand-rolled copies of a date
+     * comparison is exactly how the phantom `past_due` status happened.
+     *
+     * Note what this deliberately does NOT govern. Grace changes when a
+     * borrower is PENALISED and when they are called LATE. It does not change
+     * whether the money is OWED — so the Due/Past Due report
+     * (ReportService::duePastDueQuery()) and auto-pay collection
+     * (AutoPayService) still work off a bare `due_date`, and must. The
+     * codebase already draws that line: see the report's `days_overdue`, which
+     * reads 0 for a row it still lists.
+     *
+     * Takes ONE binding, the as-of date. Both `amortization_schedules` and
+     * `loans` must be in scope where this lands — inside a `whereHas` on either
+     * side of the relation, or after an explicit join.
+     *
+     * Written as `due_date < DATE_SUB(?, ...)` rather than the algebraically
+     * identical `DATE_ADD(due_date, ...) < ?` on purpose. This form leaves
+     * `due_date` bare on the left and puts the arithmetic on the right, where
+     * `loans.grace_period_days` is a constant per correlated probe — so it
+     * still resolves to an index range on `amortization_schedules`. Wrapping
+     * the column instead would forfeit that index on every row.
+     *
+     * A null `grace_period_days` is zero grace, which is the pre-existing
+     * behaviour for every loan that has none.
+     */
+    public static function pastGraceSql(): string
+    {
+        return '`amortization_schedules`.`due_date` < DATE_SUB(?, INTERVAL COALESCE(`loans`.`grace_period_days`, 0) DAY)';
+    }
+
+    /**
+     * The date a schedule must fall strictly before to be late — the PHP mirror
+     * of self::pastGraceSql(), for callers that already hold the loan and so do
+     * not need `loans` in the query at all.
+     *
+     * Shifting the cutoff rather than the column is what keeps those callers on
+     * a bare, indexable `due_date` comparison.
+     *
+     * Null and 0 grace both return $asOf untouched, so a loan without a grace
+     * period behaves exactly as it did before grace was honoured. The as-of
+     * value is passed through at whatever precision it arrived with —
+     * applyPenalties() is called with a payment timestamp as well as with
+     * Carbon::today(), and normalising it here would silently move the
+     * same-day boundary.
+     */
+    public static function pastGraceCutoff(?int $graceDays, Carbon $asOf): Carbon
+    {
+        return $asOf->copy()->subDays(max(0, (int) $graceDays));
+    }
+
+    /**
+     * The already-loaded schedules that are LATE — still owing, and past both
+     * the due date and the loan's grace period.
+     *
+     * The in-memory twin of self::pastGraceSql(), for the two callers that
+     * present a borrower's arrears back to them from a collection they already
+     * hold: LoanResource's `overdue_amount` on every row of the loans list, and
+     * RepaymentService::getLoanSummary()'s `overdue_amount` /
+     * `overdue_schedules_count`.
+     *
+     * It exists as one method rather than as the same one-line filter written
+     * twice because those two figures are read side by side and must agree —
+     * and because both used to be a bare `due_date < today`, which put money on
+     * the screen labelled overdue for a loan the Past Due tab correctly said
+     * was not yet late. A user seeing "₱5,000 overdue" on a row that no arrears
+     * filter returns cannot tell which of the two is lying.
+     *
+     * Filters on status as well as date so a caller cannot pass a raw schedule
+     * collection and quietly count settled rows as arrears.
+     *
+     * @param  Collection<int, self>  $schedules
+     * @return Collection<int, self>
+     */
+    public static function lateUnpaid(Collection $schedules, ?int $graceDays, Carbon $asOf): Collection
+    {
+        $cutoff = self::pastGraceCutoff($graceDays, $asOf);
+
+        return $schedules->filter(
+            fn (self $schedule) => in_array($schedule->status, self::UNPAID_STATUSES, true)
+                && $schedule->due_date->lt($cutoff)
+        );
     }
 
     protected $fillable = [
