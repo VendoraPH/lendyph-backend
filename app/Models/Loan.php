@@ -70,6 +70,13 @@ class Loan extends Model
      * member instead would let a loan be stamped `past_due` and then be
      * invisible to everything that reasons about `ongoing` — which is most of
      * this codebase, RepaymentService::processRepayment() included.
+     *
+     * That schedule-derived filter has since shipped as
+     * self::VIRTUAL_STATUS_PAST_DUE / self::scopePastDue(), which is where a
+     * Past Due tab must go. It still is not — and must never become — a member
+     * of this constant or of the enum. Note that scope filters on
+     * self::COLLECTIBLE_STATUSES rather than on this list: a defaulted loan has
+     * no tab of its own and would otherwise be reachable only under All.
      */
     public const ACTIVE_STATUSES = ['released', 'ongoing'];
 
@@ -83,6 +90,22 @@ class Loan extends Model
      * once, and a hardcoded list on the client goes stale silently.
      */
     public const VIRTUAL_STATUS_ACTIVE = 'active';
+
+    /**
+     * Virtual `status` value standing for self::scopePastDue().
+     *
+     * Like VIRTUAL_STATUS_ACTIVE this is a query-string shorthand that is never
+     * written to a row. Unlike it, `past_due` does not expand to a list of
+     * statuses at all: it is derived from `amortization_schedules`, so it
+     * resolves to a subquery rather than to a `whereIn` on `loans.status`.
+     *
+     * Both `?status=past_due` and `meta.stats.past_due` are built from
+     * self::scopePastDue(), so the tab and the badge above it cannot drift.
+     *
+     * It is NOT a subset of VIRTUAL_STATUS_ACTIVE: past due reaches `defaulted`
+     * loans, which are collectible but not active.
+     */
+    public const VIRTUAL_STATUS_PAST_DUE = 'past_due';
 
     protected $fillable = [
         'loan_account_number',
@@ -378,42 +401,117 @@ class Loan extends Model
     }
 
     /**
+     * Loans an operator has to chase: money out the door, still owing, and
+     * holding at least one unpaid schedule that is LATE — past its due date and
+     * past the grace period the loan's paperwork promised.
+     *
+     * Past due is not a `loans.status` and must never become one — see
+     * self::ACTIVE_STATUSES for why. It is a property of the loan's
+     * amortization schedule, so it lives here as a scope and reaches the API
+     * as self::VIRTUAL_STATUS_PAST_DUE.
+     *
+     * Lateness itself is NOT defined here. It is
+     * AmortizationSchedule::pastGraceSql(), shared with
+     * RepaymentService::applyPenalties() and the loans:apply-penalties command,
+     * so that the tab, the `overdue` stamp and the money charged for being late
+     * cannot disagree about what late means. Do not inline the comparison.
+     *
+     * Membership matches ReportService::duePastDueQuery() on statuses —
+     * self::COLLECTIBLE_STATUSES, `defaulted` included. The loans screen gives
+     * `defaulted` no tab of its own, so before this it was reachable only under
+     * All; surfacing it here gives collections one place to look and puts the
+     * list and the report on the same set of loans.
+     *
+     * ONE deliberate difference from that report remains, and it must survive
+     * any later attempt to unify the two:
+     *
+     *   This asks whether a schedule is LATE. The report asks whether it is
+     *   DUE — `due_date <= today`, no grace — because its bucket is "Due AND
+     *   Past Due" combined and it exists to show what is owed. An installment
+     *   falling due today is due, not late, and one inside its grace window is
+     *   due but not yet late; counting either here would report arrears early.
+     *   The report's own `days_overdue` reads 0 for exactly those rows.
+     *
+     * This reads the due date rather than the schedule's `overdue` stamp, so it
+     * is correct on the day a schedule turns late rather than whenever
+     * something last re-stamped it.
+     */
+    public function scopePastDue($query)
+    {
+        return $query
+            ->whereIn('loans.status', self::COLLECTIBLE_STATUSES)
+            ->whereHas('amortizationSchedules', fn ($q) => $q
+                ->whereIn('amortization_schedules.status', AmortizationSchedule::UNPAID_STATUSES)
+                ->whereRaw(AmortizationSchedule::pastGraceSql(), [today()->toDateString()]));
+    }
+
+    /**
      * Filter by a single status, a comma-separated list, or an array of them.
      *
      * The loans list needs the list form: its Active tab is several statuses at
      * once (self::ACTIVE_STATUSES) and has to render from ONE request, not one
      * per status. A single value still behaves exactly as it did.
      *
-     * `active` is accepted as a virtual value and expands to
-     * self::ACTIVE_STATUSES, so a caller may send `status=active` or spell the
-     * statuses out and get the same rows — and either way the page total agrees
-     * with `meta.stats.active`. Prefer the shorthand: the set is defined in one
-     * place here, and a list pinned in the client cannot follow it.
+     * Two virtual values are accepted alongside the real statuses:
      *
-     * Values that are not statuses are deliberately NOT rejected, they simply
-     * match nothing. That is what keeps a client still sending the retired
-     * `current` or `past_due` working — an empty result for those, rather than
-     * a 422 that takes the whole page down with it.
+     * - `active` (self::VIRTUAL_STATUS_ACTIVE) expands to
+     *   self::ACTIVE_STATUSES, so a caller may send it or spell the statuses
+     *   out and get the same rows — either way the page total agrees with
+     *   `meta.stats.active`.
+     * - `past_due` (self::VIRTUAL_STATUS_PAST_DUE) resolves to
+     *   self::scopePastDue() and agrees with `meta.stats.past_due` the same
+     *   way.
+     *
+     * Prefer the shorthands: both sets are defined in one place here, and a
+     * list pinned in the client cannot follow them.
+     *
+     * Note that only `active` can be flattened into the `whereIn` below.
+     * `past_due` is schedule-derived, so it is a subquery, not a status — it
+     * has to be branched on before the `whereIn` rather than mapped into it.
+     * A list mixing the two stays an OR, which is what a comma already means
+     * here, so `status=completed,past_due` is "completed OR past due".
+     *
+     * Values that are neither a status nor a virtual value are deliberately NOT
+     * rejected, they simply match nothing. That is what keeps a client still
+     * sending the retired `current` working — an empty result for it, rather
+     * than a 422 that takes the whole page down with it.
      *
      * @param  string|array<int, string>  $status
      */
     public function scopeForStatus($query, string|array $status)
     {
-        $statuses = collect(is_array($status) ? $status : explode(',', $status))
+        $requested = collect(is_array($status) ? $status : explode(',', $status))
             ->map(fn ($value) => trim((string) $value))
-            ->flatMap(fn (string $value) => $value === self::VIRTUAL_STATUS_ACTIVE
-                ? self::ACTIVE_STATUSES
-                : [$value])
             ->filter(fn (string $value) => $value !== '')
             ->unique()
             ->values();
 
         // `?status=` or `?status=,` means "no status filter", not "match
         // nothing" — whereIn([]) would hand back an empty page instead.
-        if ($statuses->isEmpty()) {
+        if ($requested->isEmpty()) {
             return $query;
         }
 
-        return $query->whereIn('loans.status', $statuses->all());
+        $wantsPastDue = $requested->contains(self::VIRTUAL_STATUS_PAST_DUE);
+
+        $statuses = $requested
+            ->reject(fn (string $value) => $value === self::VIRTUAL_STATUS_PAST_DUE)
+            ->flatMap(fn (string $value) => $value === self::VIRTUAL_STATUS_ACTIVE
+                ? self::ACTIVE_STATUSES
+                : [$value])
+            ->unique()
+            ->values();
+
+        if (! $wantsPastDue) {
+            return $query->whereIn('loans.status', $statuses->all());
+        }
+
+        if ($statuses->isEmpty()) {
+            return $query->pastDue();
+        }
+
+        return $query->where(fn ($q) => $q
+            ->whereIn('loans.status', $statuses->all())
+            ->orWhere(fn ($inner) => $inner->pastDue()));
     }
 }

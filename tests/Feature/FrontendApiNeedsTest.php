@@ -96,11 +96,12 @@ it('includes status stats in /api/loans meta', function () {
     $response = $this->getJson('/api/loans')->assertSuccessful();
     // Every tab the loans screen renders, plus the Active Loans card's
     // aggregate. The Current tab reads `ongoing`; there is deliberately no
-    // `current` or `past_due` key, because the `loans.status` enum holds
-    // neither. See LoanListTest for the counts themselves.
+    // `current` key, because the `loans.status` enum does not hold one.
+    // `past_due` is not a status either, but it IS reported — it is derived
+    // from the loan's schedule. See LoanListTest for the counts themselves.
     expect($response->json('meta.stats'))->toHaveKeys([
         'draft', 'for_review', 'approved', 'rejected', 'released',
-        'ongoing', 'completed', 'active',
+        'ongoing', 'completed', 'active', 'past_due',
     ]);
 });
 

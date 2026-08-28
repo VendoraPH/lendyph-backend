@@ -90,14 +90,35 @@ DESC,
     {
         $this->authorize('share_capital:view');
 
+        $filters = request()->validate([
+            'schedule' => ['nullable', 'string'],
+            'search' => ['nullable', 'string'],
+            'per_page' => ['nullable', 'integer', 'min:1'],
+        ]);
+
+        /**
+         * Gated on filled() — PRESENCE — rather than on truthiness.
+         *
+         * `Builder::when()` skips its callback for any falsy condition, and `0`
+         * and `'0'` are falsy, so `?search=0` and `?schedule=0` were dropped and
+         * answered with the whole pledge register instead of the narrowed set.
+         * These are strings rather than ids, so the blast radius is smaller than
+         * the `?borrower_id=0` case — but `0` is an ordinary thing to type into a
+         * search box, and a filter that silently widens is the same defect
+         * whatever its type. `auto_credit` was already correct: it gates on
+         * has(), which is a presence test.
+         */
+        $schedule = $filters['schedule'] ?? null;
+        $search = $filters['search'] ?? null;
+
         $pledges = ShareCapitalPledge::with('borrower')
             ->forMembers()
             ->withMax('borrowerLedgerEntries as last_transaction_date', 'date')
-            ->when(request('schedule'), fn ($q, $s) => $q->where('schedule', $s))
+            ->when(filled($schedule), fn ($q) => $q->where('schedule', $schedule))
             ->when(request()->has('auto_credit'), fn ($q) => $q->where('auto_credit', filter_var(request('auto_credit'), FILTER_VALIDATE_BOOLEAN)))
-            ->when(request('search'), fn ($q, $search) => $q->whereHas('borrower', fn ($bq) => $bq->where('first_name', 'like', "%{$search}%")->orWhere('last_name', 'like', "%{$search}%")))
+            ->when(filled($search), fn ($q) => $q->whereHas('borrower', fn ($bq) => $bq->where('first_name', 'like', "%{$search}%")->orWhere('last_name', 'like', "%{$search}%")))
             ->orderBy('id')
-            ->paginate(min((int) request('per_page', 15), 100));
+            ->paginate(min(max((int) ($filters['per_page'] ?? 15), 1), 100));
 
         return ShareCapitalPledgeResource::collection($pledges);
     }

@@ -53,7 +53,7 @@ beforeEach(function () {
  * `defaulted` or `void`, and nothing under test here reads a loan attribute
  * other than `status` and `loan_account_number`.
  */
-function loanInStatus(array $defaults, string $status): Loan
+function loanInStatus(array $defaults, string $status, ?int $borrowerId = null): Loan
 {
     static $serial = 0;
     $serial++;
@@ -61,7 +61,7 @@ function loanInStatus(array $defaults, string $status): Loan
     return Loan::factory()->create(array_merge($defaults, [
         'status' => $status,
         'loan_account_number' => 'LN-'.str_pad((string) $serial, 6, '0', STR_PAD_LEFT),
-    ]));
+    ], $borrowerId === null ? [] : ['borrower_id' => $borrowerId]));
 }
 
 /**
@@ -494,7 +494,12 @@ it('never lets the collateral be taken by another loan at any point in the restr
         'snapshot_value' => 250000,
     ])->assertCreated();
 
-    $rival = loanInStatus($this->loanDefaults, 'released');
+    // The rival must be the SAME borrower's loan. createReleasedLoan() makes its
+    // own borrower, and AttachCollateralRequest now scopes `collateral_id` to
+    // the loan's borrower — a rival belonging to $this->borrower would be
+    // refused on ownership and this test would stop exercising the pledge guard
+    // it exists for.
+    $rival = loanInStatus($this->loanDefaults, 'released', $source->borrower_id);
     $grab = fn () => $this->postJson("/api/loans/{$rival->id}/collaterals", [
         'collateral_id' => $collateral->id,
         'snapshot_value' => 250000,
@@ -631,11 +636,14 @@ it('has no write path into loan_collaterals outside the two that are accounted f
     sort($writes);
 
     expect($writes)->toBe([
-        // The endpoint. Guarded by assertNotPledgedToAnotherActiveLoan().
+        // The endpoint. Guarded by CollateralPledgeGuard::assertCollateralIsFree(),
+        // with ownership enforced ahead of it by AttachCollateralRequest.
         'app/Http/Controllers/Api/CollateralController.php',
         // Restructure inheritance. Deliberately unguarded — it moves collateral
         // from a live loan to the loan replacing it, which the guard would
-        // reject; see LoanService::inheritCollaterals().
+        // reject; see LoanService::inheritCollaterals(). The release of that
+        // restructure IS guarded, at the end of its transaction, once
+        // closeRestructuredSource() has taken the source out of the active set.
         'app/Services/LoanService.php',
     ], 'a new write into loan_collaterals appeared; either route it through the same active-loan guard as CollateralController::attach(), or account for it here and say why it is exempt');
 });

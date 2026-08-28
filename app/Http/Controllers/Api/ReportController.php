@@ -6,6 +6,7 @@ use App\Http\Controllers\Api\Traits\CsvExportTrait;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\LoanResource;
 use App\Http\Resources\RepaymentResource;
+use App\Models\AmortizationSchedule;
 use App\Models\Borrower;
 use App\Models\Loan;
 use App\Services\ReportService;
@@ -66,8 +67,18 @@ class ReportController extends Controller
                 // Only a cross-field rule when there is a field to compare to.
                 request()->filled('date_from') ? 'after_or_equal:date_from' : null,
             ])),
-            'branch_id' => ['nullable', 'integer'],
-            'loan_id' => ['nullable', 'integer'],
+            // `min:1` is not cosmetic, it is the same falsy hole the loans list
+            // closed. 0 is a valid integer that no row can carry, and every
+            // consumer of these two filters in ReportService gates on
+            // `when($filters['branch_id'] ?? null, ...)` — truthiness, not
+            // presence. `?branch_id=0` therefore validated, reached ~30 `when()`
+            // calls that treat 0 as absent, and answered a question about one
+            // branch with the whole cooperative's figures. `?loan_id=0` does the
+            // same to the repayments export. Rejecting it at the boundary is the
+            // fix that covers all ~20 endpoints at once; see
+            // LoanController::index() for the original write-up.
+            'branch_id' => ['nullable', 'integer', 'min:1'],
+            'loan_id' => ['nullable', 'integer', 'min:1'],
             'per_page' => ['nullable', 'integer', 'min:1', 'max:1000'],
         ], $extra));
 
@@ -280,6 +291,13 @@ class ReportController extends Controller
         return response()->json([
             'data' => $results->getCollection()->map(function ($s) use ($today) {
                 $dueDate = $s->due_date->copy()->startOfDay();
+
+                // `loan` is eager loaded whole by ReportService::listOfDuePastDue(),
+                // so reading grace off it costs no query per row. Null-safe for
+                // the same reason every other `$s->loan?->` below is: the
+                // relation is nullable in PHP even though the column is not.
+                $daysLate = $this->daysLate($dueDate, $s->loan?->grace_period_days, $today);
+
                 $amountRemaining = round(
                     max(0, (float) $s->principal_due - (float) $s->principal_paid)
                     + max(0, (float) $s->interest_due - (float) $s->interest_paid)
@@ -299,8 +317,25 @@ class ReportController extends Controller
                     // Zero for a schedule due today — due is not the same as
                     // late. Without this the client had nothing to count and
                     // reported an Overdue Count of 0 forever.
-                    'days_overdue' => $dueDate->lt($today) ? (int) $dueDate->diffInDays($today) : 0,
-                    'days_past_due' => $dueDate->lt($today) ? (int) $dueDate->diffInDays($today) : 0,
+                    //
+                    // The same rule, widened from one day to the loan's
+                    // contractual grace window: `grace_period_days` is printed
+                    // on the promissory note and the disclosure statement, so a
+                    // borrower inside it is not late and must not be counted or
+                    // called as if they were. Measured from grace EXPIRY, not
+                    // from the due date, so the first figure a row ever shows is
+                    // 1 rather than `grace + 1`.
+                    //
+                    // The row itself stays in the report. Grace governs
+                    // lateness, not owed-ness — the money is due and collections
+                    // have to see it. That is duePastDueQuery()'s decision and
+                    // it is deliberate; this field is where the distinction is
+                    // drawn, which is exactly what the docblock there says.
+                    //
+                    // See self::daysLate() for where the line is drawn and who
+                    // else draws it the same way.
+                    'days_overdue' => $daysLate,
+                    'days_past_due' => $daysLate,
                     'principal_due' => (float) $s->principal_due,
                     'interest_due' => (float) $s->interest_due,
                     'penalty_amount' => (float) $s->penalty_amount,
@@ -662,6 +697,41 @@ class ReportController extends Controller
         ]));
     }
 
+    /**
+     * How many days late a schedule is, measured from the expiry of its loan's
+     * grace period rather than from the due date, and floored at zero.
+     *
+     * `grace_period_days` is printed on the promissory note and the disclosure
+     * statement. A borrower inside that window is not late and must not be
+     * counted or chased as if they were — this is the report's long-standing
+     * "due today is not late" rule widened from one day to the contractual
+     * window. The row itself is unaffected: grace governs lateness, not
+     * owed-ness, so the schedule stays in a report collections rely on.
+     *
+     * One method for the preview and the export because those two have drifted
+     * apart before — they disagreed on loan statuses and on the cutoff, and the
+     * CSV a manager downloaded did not match the screen they downloaded it
+     * from. The boundary itself lives in AmortizationSchedule::pastGraceCutoff(),
+     * shared in turn with the SQL twin pastGraceSql() that
+     * ReportService::listOfDuePastDueTotals() uses for `overdue_count`. All
+     * three therefore answer "is this row late?" identically, which is what
+     * stops a page of rows reading 0 days overdue above a totals block claiming
+     * several are late.
+     *
+     * Grace 0 collapses the cutoff back to `$asOf`, reproducing the original
+     * due-date comparison exactly — which is the regression check.
+     */
+    private function daysLate(?Carbon $dueDate, ?int $graceDays, Carbon $asOf): int
+    {
+        if ($dueDate === null) {
+            return 0;
+        }
+
+        $cutoff = AmortizationSchedule::pastGraceCutoff($graceDays, $asOf);
+
+        return $dueDate->lt($cutoff) ? (int) $dueDate->diffInDays($cutoff) : 0;
+    }
+
     #[OA\Get(
         path: '/api/reports/due-past-due/export',
         summary: 'Export due/past-due schedules as CSV',
@@ -691,7 +761,12 @@ class ReportController extends Controller
                 $s->loan?->borrower?->full_name ?? '',
                 $s->loan?->loan_account_number ?? '',
                 $dueDate?->toDateString() ?? '',
-                $dueDate && $dueDate->lt($today) ? (int) $dueDate->diffInDays($today) : 0,
+                // Through the same helper as the preview. This column and the
+                // preview's `days_overdue` are asserted equal row for row by
+                // test_due_past_due_export_matches_the_preview_row_for_row(),
+                // which is what caught this when only the preview was made
+                // grace-aware.
+                $this->daysLate($dueDate, $s->loan?->grace_period_days, $today),
                 $s->principal_due,
                 $s->interest_due,
                 $s->penalty_amount ?? 0,
