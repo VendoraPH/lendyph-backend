@@ -177,6 +177,11 @@ class RepaymentService
             if ($unpaidCount === 0) {
                 $loan->update(['status' => 'completed']);
             } elseif ($loan->status === 'released') {
+                // No CollateralPledgeGuard call here on purpose. `released` and
+                // `ongoing` are BOTH in Loan::ACTIVE_STATUSES, so this loan is
+                // already an active holder of whatever it holds and this write
+                // cannot add one. The guard is for transitions INTO the active
+                // set from outside it; see voidRepayment() below.
                 $loan->update(['status' => 'ongoing']);
             }
 
@@ -264,8 +269,40 @@ class RepaymentService
             ]);
         }
 
+        // Hydrated OUTSIDE the transaction on purpose, so that reading it inside
+        // fires no query. A plain SELECT as the transaction's first statement
+        // would fix the consistent snapshot BEFORE the collateral lock below,
+        // which is the exact defect this ordering exists to avoid. The guard at
+        // :261 has already loaded it; this makes that guarantee explicit rather
+        // than incidental.
+        $repayment->loadMissing('loan');
+
         return DB::transaction(function () use ($repayment, $reason, $user) {
             $loan = $repayment->loan;
+
+            // THE FIRST STATEMENT THAT TOUCHES THE DATABASE IN THIS TRANSACTION,
+            // and it has to stay that way. Under REPEATABLE READ the consistent
+            // snapshot is fixed by the first plain SELECT, and neither a locking
+            // read nor DML moves it. reverseAllocation() below opens with a plain
+            // `->get()` over the schedules — so with the lock taken after it, this
+            // guard locked the right rows and then answered from a snapshot that
+            // predated the lock, missing any pledge committed in between. That is
+            // a live exploit, not a theoretical one: void a payment on a completed
+            // loan, and while it is inside reverseAllocation() attach its
+            // collateral to another active loan (permitted, because this loan is
+            // not active yet). The guard would see no conflict and un-complete the
+            // loan onto a collateral that now secures two live balances.
+            //
+            // Locking here means that attach cannot commit until this transaction
+            // ends, so every later snapshot already contains everything the
+            // assertion needs to see.
+            //
+            // Unconditional, even though only a `completed` loan goes on to
+            // transition. Gating it on the same status test used below would
+            // save a lock on the common path, at the cost of two conditions that
+            // must be kept in agreement forever — and getting them out of step
+            // reopens exactly this defect. Voids are rare; the lock is cheap.
+            $lockedCollateralIds = CollateralPledgeGuard::lockCollateralsOf($loan);
 
             // Reverse allocation from schedules — we need to know per-schedule amounts.
             // We stored totals only, so we reverse using a proportional approach:
@@ -289,6 +326,24 @@ class RepaymentService
                     ->where('status', 'posted')
                     ->where('id', '!=', $repayment->id)
                     ->count();
+
+                // `completed` → `ongoing`/`released` is a transition INTO
+                // Loan::ACTIVE_STATUSES, and it writes no `loan_collaterals`
+                // row, so the guard on CollateralController::attach() cannot
+                // see it. This is the REACHABLE double pledge, reachable
+                // without anybody doing anything unusual: that guard
+                // deliberately permits an attach whose only other holder is
+                // `completed`, so a sanctioned attach to a second loan followed
+                // by a sanctioned void of a payment on the first leaves one
+                // collateral securing two live balances.
+                //
+                // Asserted before the status write; the lock it relies on was
+                // taken at the top of the transaction. A throw rolls the whole
+                // void back — the repayment stays `posted` and the schedules
+                // stay as reverseAllocation() found them — which is the right
+                // failure: refuse to un-complete the loan rather than
+                // un-complete it into an unenforceable state.
+                CollateralPledgeGuard::assertNoDoublePledge($lockedCollateralIds, $loan);
 
                 $loan->update(['status' => $remainingPayments > 0 ? 'ongoing' : 'released']);
             }

@@ -39,8 +39,34 @@ class UserController extends Controller
     {
         $this->authorize('users:view');
 
+        $filters = request()->validate([
+            'search' => ['nullable', 'string'],
+            'status' => ['nullable', 'string'],
+            // `min:1` is not cosmetic: 0 is a valid integer that no row can
+            // carry, and it used to reach a `when()` that treats it as absent.
+            'branch_id' => ['nullable', 'integer', 'min:1'],
+            'role' => ['nullable', 'string'],
+            'per_page' => ['nullable', 'integer', 'min:1'],
+        ]);
+
+        /**
+         * Pulled out as locals so every filter below can be gated on filled() —
+         * PRESENCE — rather than on truthiness.
+         *
+         * `Builder::when()` skips its callback for any falsy condition, and `0`
+         * and `'0'` are falsy, so `?branch_id=0` dropped the scoping filter and
+         * listed every user in the organisation — names, usernames, emails and
+         * roles — plus org-wide `meta.stats`, for a caller who had asked about one
+         * branch. Same hole, same fix, as the loan, collateral, repayment and
+         * share-capital lists.
+         */
+        $search = $filters['search'] ?? null;
+        $status = $filters['status'] ?? null;
+        $branchId = $filters['branch_id'] ?? null;
+        $role = $filters['role'] ?? null;
+
         $users = User::with('branch', 'roles')
-            ->when(request('search'), function ($query, $search) {
+            ->when(filled($search), function ($query) use ($search) {
                 $query->where(function ($q) use ($search) {
                     $q->where('first_name', 'like', "%{$search}%")
                         ->orWhere('last_name', 'like', "%{$search}%")
@@ -48,14 +74,17 @@ class UserController extends Controller
                         ->orWhere('email', 'like', "%{$search}%");
                 });
             })
-            ->when(request('status'), fn ($query, $status) => $query->where('status', $status))
-            ->when(request('branch_id'), fn ($query, $branchId) => $query->forBranch($branchId))
-            ->when(request('role'), fn ($query, $role) => $query->role($role))
+            ->when(filled($status), fn ($query) => $query->where('status', $status))
+            ->when(filled($branchId), fn ($query) => $query->forBranch($branchId))
+            ->when(filled($role), fn ($query) => $query->role($role))
             ->latest()
-            ->paginate(min((int) request('per_page', 15), 100));
+            ->paginate(min(max((int) ($filters['per_page'] ?? 15), 1), 100));
 
-        // Status count aggregation so the frontend can render status tabs without a second request.
-        $stats = User::when(request('branch_id'), fn ($q, $b) => $q->forBranch($b))
+        // Status count aggregation so the frontend can render status tabs without
+        // a second request. Branch-scoped on the same filled() gate as the list
+        // above — the two must agree, or the tabs report the whole organisation
+        // while the rows report one branch.
+        $stats = User::when(filled($branchId), fn ($q) => $q->forBranch($branchId))
             ->selectRaw('status, COUNT(*) as count')
             ->groupBy('status')
             ->pluck('count', 'status')
