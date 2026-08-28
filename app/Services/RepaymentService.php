@@ -317,9 +317,10 @@ class RepaymentService
         $outstandingInterest = $schedules->sum(fn ($s) => max(0, (float) $s->interest_due - (float) $s->interest_paid));
         $outstandingPenalty = $schedules->sum(fn ($s) => max(0, (float) $s->penalty_amount - (float) $s->penalty_paid));
 
-        $overdueSchedules = $schedules->filter(
-            fn ($s) => $s->due_date->lt($today) && in_array($s->status, ['pending', 'partial', 'overdue'])
-        );
+        // Late, not merely due — same cutoff and same helper as
+        // LoanResource's `overdue_amount`, so the loans list and the loan
+        // detail screen cannot report different arrears for one loan.
+        $overdueSchedules = AmortizationSchedule::lateUnpaid($schedules, $loan->grace_period_days, $today);
         $overdueAmount = $overdueSchedules->sum(fn ($s) => (
             max(0, (float) $s->principal_due - (float) $s->principal_paid)
             + max(0, (float) $s->interest_due - (float) $s->interest_paid)
@@ -365,6 +366,21 @@ class RepaymentService
 
     /**
      * Compute and apply penalty_amount to overdue schedules (non-destructive on paid amount).
+     *
+     * Only schedules past the loan's contractual grace period are penalised or
+     * stamped `overdue`. That grace is copied onto the loan at creation and
+     * printed on the borrower's promissory note and disclosure statement, and
+     * until this comparison moved it was honoured by nothing here — a borrower
+     * inside the window their own paperwork granted them was charged anyway,
+     * and their schedule was labelled overdue on the screen.
+     *
+     * The cutoff comes from AmortizationSchedule::pastGraceCutoff() rather than
+     * being written out here, so this, the loans:apply-penalties pre-filter and
+     * Loan::scopePastDue() cannot drift on what late means. The loan is already
+     * in hand, so shifting the cutoff back by the grace days leaves `due_date`
+     * bare and indexable instead of wrapping it in date arithmetic.
+     *
+     * No grace (0 or null) reproduces the previous behaviour exactly.
      */
     public function applyPenalties(Loan $loan, Carbon $asOfDate): void
     {
@@ -374,8 +390,10 @@ class RepaymentService
             return;
         }
 
+        $lateBefore = AmortizationSchedule::pastGraceCutoff($loan->grace_period_days, $asOfDate);
+
         $loan->amortizationSchedules()
-            ->where('due_date', '<', $asOfDate)
+            ->where('due_date', '<', $lateBefore)
             ->whereIn('status', ['pending', 'partial', 'overdue'])
             ->each(function (AmortizationSchedule $schedule) use ($penaltyRate) {
                 $remainingDue = (float) $schedule->principal_due - (float) $schedule->principal_paid;
@@ -458,6 +476,13 @@ class RepaymentService
 
         $remaining = $amountPaid;
 
+        // Same definition of late as applyPenalties() a hundred lines up. The
+        // status re-derivation below is the other place this service stamps
+        // `overdue`, so voiding a repayment against a schedule still inside its
+        // grace window would otherwise put back exactly the label the penalty
+        // fix removes.
+        $lateBefore = AmortizationSchedule::pastGraceCutoff($loan->grace_period_days, $paymentDate);
+
         foreach ($schedules as $schedule) {
             if ($remaining <= 0) {
                 break;
@@ -489,7 +514,7 @@ class RepaymentService
 
             // Recalculate schedule status
             if ($schedule->principal_paid == 0 && $schedule->interest_paid == 0 && $schedule->penalty_paid == 0) {
-                $schedule->status = $schedule->due_date->lt($paymentDate) ? 'overdue' : 'pending';
+                $schedule->status = $schedule->due_date->lt($lateBefore) ? 'overdue' : 'pending';
                 $schedule->penalty_amount = 0;
             } else {
                 $schedule->status = 'partial';
