@@ -33,11 +33,37 @@ class ShareCapitalLedgerController extends Controller
     {
         $this->authorize('share_capital:view');
 
+        $filters = request()->validate([
+            // `min:1` is not cosmetic: 0 is a valid integer that no row can
+            // carry, and it used to reach a `when()` that treats it as absent.
+            'borrower_id' => ['nullable', 'integer', 'min:1'],
+            'date_from' => ['nullable', 'date'],
+            'date_to' => ['nullable', 'date'],
+            'search' => ['nullable', 'string'],
+            'per_page' => ['nullable', 'integer', 'min:1'],
+        ]);
+
+        /**
+         * Pulled out as locals so every filter below can be gated on filled() —
+         * PRESENCE — rather than on truthiness.
+         *
+         * `Builder::when()` skips its callback for any falsy condition, and `0`
+         * and `'0'` are falsy, so `?borrower_id=0` dropped the scoping filter and
+         * returned the entire share-capital ledger — every member's contribution
+         * history — to a caller who had asked about one member. `/borrowers/0` on
+         * the frontend does exactly that, via Number(params.id). Same hole, same
+         * fix, as the loan, collateral and repayment lists.
+         */
+        $borrowerId = $filters['borrower_id'] ?? null;
+        $dateFrom = $filters['date_from'] ?? null;
+        $dateTo = $filters['date_to'] ?? null;
+        $search = $filters['search'] ?? null;
+
         $entries = ShareCapitalLedger::with('borrower', 'createdByUser')
-            ->when(request('borrower_id'), fn ($q, $id) => $q->where('borrower_id', $id))
-            ->when(request('date_from'), fn ($q, $d) => $q->whereDate('date', '>=', $d))
-            ->when(request('date_to'), fn ($q, $d) => $q->whereDate('date', '<=', $d))
-            ->when(request('search'), function ($q, $search) {
+            ->when(filled($borrowerId), fn ($q) => $q->where('borrower_id', $borrowerId))
+            ->when(filled($dateFrom), fn ($q) => $q->whereDate('date', '>=', $dateFrom))
+            ->when(filled($dateTo), fn ($q) => $q->whereDate('date', '<=', $dateTo))
+            ->when(filled($search), function ($q) use ($search) {
                 $q->where(function ($q) use ($search) {
                     $q->where('reference', 'like', "%{$search}%")
                         ->orWhere('description', 'like', "%{$search}%")
@@ -47,7 +73,7 @@ class ShareCapitalLedgerController extends Controller
             })
             ->orderByDesc('date')
             ->orderByDesc('id')
-            ->paginate(min((int) request('per_page', 15), 100));
+            ->paginate(min(max((int) ($filters['per_page'] ?? 15), 1), 100));
 
         return ShareCapitalLedgerResource::collection($entries);
     }

@@ -37,12 +37,30 @@ class AuditLogController extends Controller
     {
         $this->authorize('audit_logs:view');
 
-        $logs = $this->buildQuery()
-            ->latest('created_at')
-            ->paginate(min((int) request('per_page', 15), 100));
+        $filters = $this->validatedFilters();
 
-        // Action count aggregation so the frontend can render action filter chips without a second request.
-        $stats = AuditLog::selectRaw('action, COUNT(*) as count')
+        $logs = $this->buildQuery($filters)
+            ->latest('created_at')
+            ->paginate(min(max((int) ($filters['per_page'] ?? 15), 1), 100));
+
+        /**
+         * Action counts so the frontend can render its filter chips without a
+         * second request. Scoped to `user_id` and nothing else, which is the
+         * same rule RepaymentController and UserController follow for their
+         * `meta.stats`, and LoanController and BorrowerController before them:
+         * narrow the counts by the ENTITY the page is about, never by `search`,
+         * `action` or the date range.
+         *
+         * The user scope is not cosmetic. Left global — as it was — the chips
+         * counted the whole organisation's trail while the rows underneath them
+         * showed one user's, so every chip promised results the page could not
+         * produce.
+         */
+        $stats = AuditLog::when(
+            filled($filters['user_id'] ?? null),
+            fn ($q) => $q->where('user_id', $filters['user_id']),
+        )
+            ->selectRaw('action, COUNT(*) as count')
             ->groupBy('action')
             ->pluck('count', 'action')
             ->toArray();
@@ -78,9 +96,15 @@ class AuditLogController extends Controller
     {
         $this->authorize('audit_logs:export');
 
+        // Validated here, not inside the closure below. The closure runs after
+        // the response has begun streaming, so a ValidationException thrown from
+        // there would be appended to a half-written CSV instead of becoming a
+        // 422.
+        $filters = $this->validatedFilters();
+
         $filename = 'audit-logs-'.now()->format('Ymd-His').'.csv';
 
-        return response()->streamDownload(function () {
+        return response()->streamDownload(function () use ($filters) {
             $handle = fopen('php://output', 'w');
 
             fputcsv($handle, [
@@ -95,7 +119,7 @@ class AuditLogController extends Controller
                 'New Values',
             ]);
 
-            $this->buildQuery()
+            $this->buildQuery($filters)
                 ->orderBy('created_at')
                 ->chunk(500, function ($chunk) use ($handle) {
                     foreach ($chunk as $log) {
@@ -146,12 +170,50 @@ class AuditLogController extends Controller
     }
 
     /**
-     * Shared query builder used by both index (paginated) and export (streamed).
+     * The filter set both index() and export() read, validated once.
+     *
+     * `min:1` on `user_id` is not cosmetic: 0 is a valid integer that no row can
+     * carry, and it used to reach a `when()` that treats it as absent.
+     *
+     * @return array<string, mixed>
      */
-    private function buildQuery(): Builder
+    private function validatedFilters(): array
     {
+        return request()->validate([
+            'search' => ['nullable', 'string'],
+            'user_id' => ['nullable', 'integer', 'min:1'],
+            'action' => ['nullable', 'string'],
+            'auditable_type' => ['nullable', 'string'],
+            'date_from' => ['nullable', 'date'],
+            'date_to' => ['nullable', 'date'],
+            'per_page' => ['nullable', 'integer', 'min:1'],
+        ]);
+    }
+
+    /**
+     * Shared query builder used by both index (paginated) and export (streamed).
+     *
+     * Every filter is gated on filled() — PRESENCE — rather than on truthiness.
+     * `Builder::when()` skips its callback for any falsy condition, and `0` and
+     * `'0'` are falsy, so `?user_id=0` dropped the scoping filter and returned
+     * the entire audit trail — every actor's activity, with `old_values` and
+     * `new_values` payloads — to a caller who had asked about one user. Same
+     * hole, same fix, as the loan, collateral, repayment, share-capital and user
+     * lists. It bit the CSV export too, which shares this builder.
+     *
+     * @param  array<string, mixed>  $filters  from validatedFilters()
+     */
+    private function buildQuery(array $filters): Builder
+    {
+        $search = $filters['search'] ?? null;
+        $userId = $filters['user_id'] ?? null;
+        $action = $filters['action'] ?? null;
+        $auditableType = $filters['auditable_type'] ?? null;
+        $dateFrom = $filters['date_from'] ?? null;
+        $dateTo = $filters['date_to'] ?? null;
+
         return AuditLog::with('user', 'auditable')
-            ->when(request('search'), function ($q, $search) {
+            ->when(filled($search), function ($q) use ($search) {
                 $q->where(function ($q) use ($search) {
                     $q->where('action', 'like', "%{$search}%")
                         ->orWhere('auditable_type', 'like', "%{$search}%")
@@ -163,10 +225,10 @@ class AuditLogController extends Controller
                         });
                 });
             })
-            ->when(request('user_id'), fn ($q, $userId) => $q->where('user_id', $userId))
-            ->when(request('action'), fn ($q, $action) => $q->where('action', $action))
-            ->when(request('auditable_type'), fn ($q, $type) => $q->where('auditable_type', 'like', "%{$type}%"))
-            ->when(request('date_from'), fn ($q, $date) => $q->where('created_at', '>=', $date))
-            ->when(request('date_to'), fn ($q, $date) => $q->where('created_at', '<=', "{$date} 23:59:59"));
+            ->when(filled($userId), fn ($q) => $q->where('user_id', $userId))
+            ->when(filled($action), fn ($q) => $q->where('action', $action))
+            ->when(filled($auditableType), fn ($q) => $q->where('auditable_type', 'like', "%{$auditableType}%"))
+            ->when(filled($dateFrom), fn ($q) => $q->where('created_at', '>=', $dateFrom))
+            ->when(filled($dateTo), fn ($q) => $q->where('created_at', '<=', "{$dateTo} 23:59:59"));
     }
 }

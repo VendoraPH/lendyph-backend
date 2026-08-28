@@ -41,8 +41,39 @@ class RepaymentController extends Controller
     {
         $this->authorize('payments:view');
 
+        $filters = request()->validate([
+            'search' => ['nullable', 'string'],
+            'status' => ['nullable', 'string'],
+            // `min:1` is not cosmetic: 0 is a valid integer that no row can
+            // carry, and it used to reach a `when()` that treats it as absent.
+            'loan_id' => ['nullable', 'integer', 'min:1'],
+            'borrower_id' => ['nullable', 'integer', 'min:1'],
+            'date_from' => ['nullable', 'date'],
+            'date_to' => ['nullable', 'date'],
+            'per_page' => ['nullable', 'integer', 'min:1'],
+        ]);
+
+        /**
+         * Pulled out as locals so every filter below can be gated on filled() —
+         * PRESENCE — rather than on truthiness.
+         *
+         * `Builder::when()` skips its callback for any falsy condition, and `0`
+         * and `'0'` are falsy, so `?borrower_id=0` dropped the scoping filter and
+         * answered with the whole repayment book — every member's payment history
+         * — plus org-wide `meta.stats`, for a caller who had asked about one
+         * member. `/borrowers/0` on the frontend does exactly that, via
+         * Number(params.id). Identical to the hole fixed on the loan and
+         * collateral lists; this is the same fix carried across.
+         */
+        $search = $filters['search'] ?? null;
+        $status = $filters['status'] ?? null;
+        $loanId = $filters['loan_id'] ?? null;
+        $borrowerId = $filters['borrower_id'] ?? null;
+        $dateFrom = $filters['date_from'] ?? null;
+        $dateTo = $filters['date_to'] ?? null;
+
         $query = Repayment::with('loan.borrower', 'loan.loanProduct', 'loan.amortizationSchedules', 'receivedByUser', 'voidedByUser')
-            ->when(request('search'), function ($q, $search) {
+            ->when(filled($search), function ($q) use ($search) {
                 $q->where(function ($q) use ($search) {
                     $q->where('receipt_number', 'like', "%{$search}%")
                         ->orWhereHas('loan', function ($lq) use ($search) {
@@ -55,18 +86,20 @@ class RepaymentController extends Controller
                         });
                 });
             })
-            ->when(request('status'), fn ($q, $s) => $q->where('status', $s))
-            ->when(request('loan_id'), fn ($q, $id) => $q->where('loan_id', $id))
-            ->when(request('borrower_id'), fn ($q, $id) => $q->whereHas('loan', fn ($lq) => $lq->where('borrower_id', $id)))
-            ->when(request('date_from'), fn ($q, $d) => $q->whereDate('payment_date', '>=', $d))
-            ->when(request('date_to'), fn ($q, $d) => $q->whereDate('payment_date', '<=', $d));
+            ->when(filled($status), fn ($q) => $q->where('status', $status))
+            ->when(filled($loanId), fn ($q) => $q->where('loan_id', $loanId))
+            ->when(filled($borrowerId), fn ($q) => $q->whereHas('loan', fn ($lq) => $lq->where('borrower_id', $borrowerId)))
+            ->when(filled($dateFrom), fn ($q) => $q->whereDate('payment_date', '>=', $dateFrom))
+            ->when(filled($dateTo), fn ($q) => $q->whereDate('payment_date', '<=', $dateTo));
 
         $repayments = $query->latest('payment_date')
-            ->paginate(min((int) request('per_page', 15), 100));
+            ->paginate(min(max((int) ($filters['per_page'] ?? 15), 1), 100));
 
         // Attach status count aggregation to the meta envelope so the frontend can
-        // render status tabs without a second request.
-        $stats = Repayment::when(request('borrower_id'), fn ($q, $id) => $q->whereHas('loan', fn ($lq) => $lq->where('borrower_id', $id)))
+        // render status tabs without a second request. Borrower-scoped on the same
+        // filled() gate as the list above — the two must agree, or the tabs report
+        // the whole organisation while the rows report one member.
+        $stats = Repayment::when(filled($borrowerId), fn ($q) => $q->whereHas('loan', fn ($lq) => $lq->where('borrower_id', $borrowerId)))
             ->selectRaw('status, COUNT(*) as count')
             ->groupBy('status')
             ->pluck('count', 'status')
