@@ -2,7 +2,9 @@
 
 namespace Tests\Feature;
 
+use App\Http\Resources\BorrowerResource;
 use App\Models\Borrower;
+use Illuminate\Support\Facades\DB;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
@@ -24,6 +26,99 @@ class BorrowerRegistrationReviewTest extends TestCase
             'file_path' => 'documents/valid_id/test.jpg',
             'original_filename' => 'test.jpg',
         ]);
+    }
+
+    // ── the reviewer behind the id ───────────────────────────────────────
+
+    public function test_the_resource_carries_the_reviewer_not_just_their_id(): void
+    {
+        // `approved_by` / `rejected_by` are bare user ids, so the Rejected
+        // applications tab could only render "Reviewer #7". Resolving that
+        // client-side would need `users:view`, which a reviewer holding only
+        // `borrowers:approve` may not have.
+        $borrower = Borrower::factory()->create([
+            'branch_id' => $this->branch->id,
+            'status' => 'rejected',
+            'rejected_by' => $this->admin->id,
+            'rejected_at' => now(),
+            'approved_by' => $this->admin->id,
+            'approved_at' => now(),
+        ]);
+
+        $payload = (new BorrowerResource($borrower->load('rejectedBy', 'approvedBy')))->resolve();
+
+        $this->assertSame($this->admin->id, $payload['rejected_by_user']['id']);
+        $this->assertSame($this->admin->id, $payload['approved_by_user']['id']);
+        $this->assertNotEmpty($payload['rejected_by_user']['full_name'] ?? $payload['rejected_by_user']['first_name']);
+
+        // The bare ids stay: this adds a field, it does not replace one.
+        $this->assertSame($this->admin->id, $payload['rejected_by']);
+        $this->assertSame($this->admin->id, $payload['approved_by']);
+    }
+
+    public function test_the_reviewer_is_omitted_rather_than_lazily_loaded(): void
+    {
+        // whenLoaded(), so a caller that has not eager-loaded the relation gets
+        // no key at all — never a query per row. This is what makes the field
+        // safe to add ahead of the eager-loading in BorrowerController.
+        $borrower = Borrower::factory()->create([
+            'branch_id' => $this->branch->id,
+            'status' => 'rejected',
+            'rejected_by' => $this->admin->id,
+            'rejected_at' => now(),
+        ]);
+
+        $payload = (new BorrowerResource($borrower))->resolve();
+
+        $this->assertArrayNotHasKey('rejected_by_user', $payload);
+        $this->assertArrayNotHasKey('approved_by_user', $payload);
+        $this->assertFalse($borrower->relationLoaded('rejectedBy'), 'the resource lazily loaded the relation');
+    }
+
+    public function test_the_borrowers_list_costs_a_fixed_number_of_queries_however_many_reviewed_rows(): void
+    {
+        // The N+1 this field could have introduced, held shut. It stays valid
+        // once BorrowerController eager-loads the two relations: that adds a
+        // constant number of queries, not one per row.
+        $this->makeReviewedBorrowers(2);
+        $this->getJson('/api/borrowers')->assertOk();
+
+        $small = $this->countQueriesForBorrowerIndex();
+
+        $this->makeReviewedBorrowers(10);
+
+        $this->assertSame(
+            $small,
+            $this->countQueriesForBorrowerIndex(),
+            'the borrowers list is doing per-row work for the reviewer relations',
+        );
+    }
+
+    private function makeReviewedBorrowers(int $count): void
+    {
+        for ($i = 0; $i < $count; $i++) {
+            Borrower::factory()->create([
+                'branch_id' => $this->branch->id,
+                'status' => 'rejected',
+                'rejected_by' => $this->admin->id,
+                'rejected_at' => now(),
+                'approved_by' => $this->admin->id,
+                'approved_at' => now(),
+            ]);
+        }
+    }
+
+    private function countQueriesForBorrowerIndex(): int
+    {
+        DB::flushQueryLog();
+        DB::enableQueryLog();
+
+        $this->getJson('/api/borrowers?per_page=100')->assertOk();
+
+        $queries = DB::getQueryLog();
+        DB::disableQueryLog();
+
+        return count($queries);
     }
 
     public function test_approve_registration_flips_pending_to_active_and_records_approver(): void
