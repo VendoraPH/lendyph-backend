@@ -2,7 +2,9 @@
 
 namespace Tests\Feature;
 
+use App\Models\AmortizationSchedule;
 use App\Models\Borrower;
+use App\Models\Branch;
 use App\Models\Loan;
 use App\Models\LoanProduct;
 use Illuminate\Support\Facades\DB;
@@ -56,12 +58,13 @@ class LoanListTest extends TestCase
         $released = $this->createLoan(['status' => 'released']);
         $this->createLoan(['status' => 'draft']);
 
-        // `current` and `past_due` were never enum members and are no longer
-        // offered. A client still sending one has to get an empty result, not a
-        // 422 that takes the whole page down.
-        $this->assertSame(0, $this->getJson('/api/loans?status=past_due')->assertOk()->json('meta.total'));
+        // `current` was never an enum member and is no longer offered. A client
+        // still sending it has to get an empty result, not a 422 that takes the
+        // whole page down. (`past_due` was in the same position and is now a
+        // real virtual filter — see the past due section below.)
+        $this->assertSame(0, $this->getJson('/api/loans?status=current')->assertOk()->json('meta.total'));
 
-        $mixed = $this->getJson('/api/loans?status=released,current,past_due')->assertOk();
+        $mixed = $this->getJson('/api/loans?status=released,current')->assertOk();
 
         $this->assertSame([$released->id], array_column($mixed->json('data'), 'id'));
     }
@@ -86,10 +89,12 @@ class LoanListTest extends TestCase
 
         $shorthand = $this->getJson('/api/loans?status=active')->assertOk();
         $spelledOut = $this->getJson('/api/loans?status=released,ongoing')->assertOk();
-        // What a client pinned to the OLD active set still sends. It resolves
-        // to the same rows only because the two retired values match nothing —
-        // which is the argument for sending `active` and letting the server own
-        // the set, rather than hardcoding a list that goes stale in silence.
+        // What a client pinned to the OLD active set still sends. `current`
+        // matches nothing, and none of these loans carries a schedule, so
+        // `past_due` matches nothing here either — it is NOT a subset of
+        // `active` any more, since it now reaches `defaulted` too. Which is the
+        // argument for sending `active` and letting the server own the set,
+        // rather than hardcoding a list that goes stale in silence.
         $stale = $this->getJson('/api/loans?status=released,current,ongoing,past_due')->assertOk();
 
         $expected = array_column($shorthand->json('data'), 'id');
@@ -354,6 +359,250 @@ class LoanListTest extends TestCase
         $this->assertSame(0, $response->json('meta.stats.draft'));
     }
 
+    // ── status: the virtual `past_due` set ───────────────────────────────
+
+    public function test_past_due_selects_collectible_loans_holding_an_unpaid_schedule_that_is_late(): void
+    {
+        // In: a collectible loan with a schedule that is late and still owes.
+        // `pending` counts as much as `overdue` — the filter reads the due
+        // date, not the stamp, so a schedule nothing has re-stamped yet is
+        // still past due.
+        $stamped = $this->createPastDueLoan(['status' => 'ongoing'], ['status' => 'overdue']);
+        $partiallyPaid = $this->createPastDueLoan(['status' => 'released'], ['status' => 'partial']);
+        $neverStamped = $this->createPastDueLoan(['status' => 'ongoing'], ['status' => 'pending']);
+
+        // Out: the overdue schedule is settled, so the loan owes nothing late.
+        $this->createLoanWithSchedules(['status' => 'ongoing'], [
+            ['due_date' => today()->subMonths(2), 'status' => 'paid'],
+        ]);
+
+        // Out: nothing has come due yet.
+        $this->createLoanWithSchedules(['status' => 'ongoing'], [
+            ['due_date' => today()->addDay(), 'status' => 'pending'],
+            ['due_date' => today()->addMonth(), 'status' => 'pending'],
+        ]);
+
+        // Out: closed and never-released loans, even holding an old unpaid
+        // schedule. A completed loan's leftover rows are data hygiene, not
+        // arrears, and a draft was never money out the door — neither is
+        // something an operator can chase, and neither has a Past Due tab to
+        // be reachable from.
+        $this->createLoanWithSchedules(['status' => 'completed'], [
+            ['due_date' => today()->subMonths(3), 'status' => 'pending'],
+        ]);
+        $this->createLoanWithSchedules(['status' => 'draft'], [
+            ['due_date' => today()->subMonths(3), 'status' => 'pending'],
+        ]);
+
+        // Out: active, but with no schedule at all.
+        $this->createLoan(['status' => 'ongoing']);
+
+        $response = $this->getJson('/api/loans?status=past_due&per_page=100')->assertOk();
+
+        $this->assertEqualsCanonicalizing(
+            [$stamped->id, $partiallyPaid->id, $neverStamped->id],
+            array_column($response->json('data'), 'id'),
+        );
+        $this->assertSame(3, $response->json('meta.total'));
+    }
+
+    public function test_past_due_starts_the_day_after_the_due_date(): void
+    {
+        // Grace pinned at 0 so this test is about the strict `< today` cutoff
+        // and nothing else. The grace window has its own boundary tests in
+        // GracePeriodTest; LoanFactory's default of 3 days would blur the two.
+        $yesterday = $this->createLoanWithSchedules(['status' => 'ongoing', 'grace_period_days' => 0], [
+            ['due_date' => today()->subDay(), 'status' => 'pending'],
+        ]);
+
+        // Deliberately excluded, and the one place this filter parts company
+        // with ReportService::duePastDueQuery(): that report is `<= today`
+        // because its bucket is "Due AND Past Due" combined. An installment
+        // falling due today is due, not late — counting it would put every
+        // borrower into arrears a day early, every day.
+        $this->createLoanWithSchedules(['status' => 'ongoing', 'grace_period_days' => 0], [
+            ['due_date' => today(), 'status' => 'pending'],
+        ]);
+
+        $response = $this->getJson('/api/loans?status=past_due')->assertOk();
+
+        $this->assertSame([$yesterday->id], array_column($response->json('data'), 'id'));
+        $this->assertSame(1, $response->json('meta.stats.past_due'));
+
+        // LoanResource computes `overdue_amount` through the same cutoff this
+        // tab filters on — AmortizationSchedule::lateUnpaid(), due date plus
+        // the loan's grace period — so every row the tab returns carries a
+        // non-zero one, and nothing outside it does. If the two ever part
+        // company the screen shows a Past Due row with nothing overdue on it,
+        // or arrears on a row no arrears filter returns, and the user cannot
+        // tell which figure is wrong. GracePeriodTest pins both directions.
+        $this->assertGreaterThan(0, $response->json('data.0.overdue_amount'));
+    }
+
+    public function test_past_due_includes_defaulted_loans_because_nothing_else_on_the_screen_does(): void
+    {
+        $ongoing = $this->createPastDueLoan(['status' => 'ongoing']);
+        $released = $this->createPastDueLoan(['status' => 'released']);
+
+        // A defaulted loan is the most past due a loan can be, and the loans
+        // screen has no Defaulted tab — before this it was reachable only under
+        // All. Including it here matches ReportService::duePastDueQuery() on
+        // membership (Loan::COLLECTIBLE_STATUSES) and gives collections one
+        // place to look.
+        $defaulted = $this->createPastDueLoan(['status' => 'defaulted']);
+
+        // `restructured` stays out: it is not collectible. The balance moved to
+        // a new loan, its open schedules were cleared, and it owes nothing.
+        $this->createPastDueLoan(['status' => 'restructured']);
+
+        $response = $this->getJson('/api/loans?status=past_due&per_page=100')->assertOk();
+
+        $this->assertEqualsCanonicalizing(
+            [$ongoing->id, $released->id, $defaulted->id],
+            array_column($response->json('data'), 'id'),
+        );
+        $this->assertSame(3, $response->json('meta.stats.past_due'));
+
+        // Past due is no longer a subset of `active`, so the two badges are now
+        // free to disagree — 2 active, 3 past due.
+        $this->assertSame(2, $response->json('meta.stats.active'));
+    }
+
+    public function test_past_due_stat_always_equals_the_rows_that_tab_returns(): void
+    {
+        $otherBranch = Branch::factory()->create();
+        $otherBorrower = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+
+        $this->createPastDueLoan();
+        $this->createPastDueLoan();
+        $this->createPastDueLoan(['branch_id' => $otherBranch->id]);
+        $this->createPastDueLoan(['borrower_id' => $otherBorrower->id]);
+        $this->createLoanWithSchedules(['status' => 'ongoing'], [
+            ['due_date' => today()->addMonth(), 'status' => 'pending'],
+        ]);
+        $this->createLoan(['status' => 'draft']);
+
+        // The badge and the page behind it are two different queries — one
+        // aggregate, one paginated filter — so they are held against each
+        // other rather than against a number written here, under every scope
+        // meta.stats honours.
+        $scopes = [
+            '',
+            "&branch_id={$this->branch->id}",
+            "&branch_id={$otherBranch->id}",
+            "&borrower_id={$otherBorrower->id}",
+        ];
+
+        foreach ($scopes as $scope) {
+            $badge = $this->getJson('/api/loans?per_page=100'.$scope)->assertOk()->json('meta.stats.past_due');
+            $rows = $this->getJson('/api/loans?per_page=100&status=past_due'.$scope)->assertOk();
+
+            $this->assertSame($badge, $rows->json('meta.total'), "past_due badge disagrees with the page for '{$scope}'");
+            $this->assertCount($badge, $rows->json('data'), "past_due badge disagrees with the rows for '{$scope}'");
+        }
+
+        // And the scoping actually bit, so the equality above is not four
+        // copies of the same unfiltered number.
+        $this->assertSame(3, $this->getJson("/api/loans?branch_id={$this->branch->id}")->assertOk()->json('meta.stats.past_due'));
+        $this->assertSame(1, $this->getJson("/api/loans?branch_id={$otherBranch->id}")->assertOk()->json('meta.stats.past_due'));
+        $this->assertSame(1, $this->getJson("/api/loans?borrower_id={$otherBorrower->id}")->assertOk()->json('meta.stats.past_due'));
+    }
+
+    public function test_past_due_stat_stays_global_while_the_page_narrows(): void
+    {
+        $this->createPastDueLoan();
+        $this->createPastDueLoan();
+        $this->createPastDueLoan();
+
+        // `search` and the date range narrow the page but never the badge —
+        // the same rule the rest of meta.stats follows. A tab that renumbered
+        // itself as the operator typed would only ever report the page.
+        $response = $this->getJson('/api/loans?status=past_due&search=zzz-no-such-borrower')->assertOk();
+
+        $this->assertSame(0, $response->json('meta.total'));
+        $this->assertSame(3, $response->json('meta.stats.past_due'));
+    }
+
+    public function test_past_due_combines_with_search_branch_and_pagination(): void
+    {
+        $otherBranch = Branch::factory()->create();
+
+        $wanted = [];
+
+        foreach (['Delgado', 'Delgado', 'Delgado'] as $lastName) {
+            $wanted[] = $this->createPastDueLoan([
+                'borrower_id' => Borrower::factory()->create([
+                    'branch_id' => $this->branch->id,
+                    'last_name' => $lastName,
+                ])->id,
+            ])->id;
+        }
+
+        // Same surname, wrong branch.
+        $this->createPastDueLoan([
+            'branch_id' => $otherBranch->id,
+            'borrower_id' => Borrower::factory()->create([
+                'branch_id' => $otherBranch->id,
+                'last_name' => 'Delgado',
+            ])->id,
+        ]);
+
+        // Right branch and surname, but not past due.
+        $this->createLoanWithSchedules([
+            'borrower_id' => Borrower::factory()->create([
+                'branch_id' => $this->branch->id,
+                'last_name' => 'Delgado',
+            ])->id,
+            'status' => 'ongoing',
+        ], [
+            ['due_date' => today()->addMonth(), 'status' => 'pending'],
+        ]);
+
+        // Right branch, past due, different surname.
+        $this->createPastDueLoan([
+            'borrower_id' => Borrower::factory()->create([
+                'branch_id' => $this->branch->id,
+                'last_name' => 'Ramos',
+            ])->id,
+        ]);
+
+        $base = "/api/loans?status=past_due&search=Delgado&branch_id={$this->branch->id}";
+
+        $page1 = $this->getJson($base.'&sort=created_at&dir=asc&per_page=2&page=1')->assertOk();
+        $page2 = $this->getJson($base.'&sort=created_at&dir=asc&per_page=2&page=2')->assertOk();
+
+        $this->assertSame(3, $page1->json('meta.total'));
+        $this->assertSame(2, $page1->json('meta.last_page'));
+        $this->assertCount(2, $page1->json('data'));
+        $this->assertCount(1, $page2->json('data'));
+
+        $this->assertEqualsCanonicalizing($wanted, array_merge(
+            array_column($page1->json('data'), 'id'),
+            array_column($page2->json('data'), 'id'),
+        ));
+
+        // The badge is branch-scoped but not search-scoped: 3 Delgados + 1
+        // Ramos in this branch, and the other branch's Delgado left out.
+        $this->assertSame(4, $page1->json('meta.stats.past_due'));
+    }
+
+    public function test_past_due_in_a_comma_separated_list_stays_an_or(): void
+    {
+        $pastDue = $this->createPastDueLoan(['status' => 'ongoing']);
+        $completed = $this->createLoan(['status' => 'completed']);
+        $this->createLoan(['status' => 'draft']);
+        $this->createLoanWithSchedules(['status' => 'released'], [
+            ['due_date' => today()->addMonth(), 'status' => 'pending'],
+        ]);
+
+        $response = $this->getJson('/api/loans?status=completed,past_due&per_page=100')->assertOk();
+
+        $this->assertEqualsCanonicalizing(
+            [$pastDue->id, $completed->id],
+            array_column($response->json('data'), 'id'),
+        );
+    }
+
     // ── pagination ──────────────────────────────────────────────────────
 
     public function test_per_page_clamps_at_100(): void
@@ -405,8 +654,14 @@ class LoanListTest extends TestCase
         // ROW. Selecting `loans.*` explicitly — which the sort joins need — must
         // not knock the extension_count subselect off the select list and put
         // that per-row COUNT back.
+        //
+        // Every loan here is past due, so `meta.stats.past_due` and the
+        // `status=past_due` page both have real work to do: the past due count
+        // is one extra aggregate on top of the GROUP BY, and it has to stay
+        // ONE — an exists() evaluated per row, or a count re-run per schedule,
+        // would show up here as the page grows.
         for ($i = 0; $i < 3; $i++) {
-            $this->createLoan();
+            $this->createPastDueLoan();
         }
 
         // Warm-up: the first authorized request of a test also resolves the
@@ -415,21 +670,29 @@ class LoanListTest extends TestCase
         $this->getJson('/api/loans')->assertOk();
 
         $small = $this->countQueriesForOnePage();
+        $smallPastDue = $this->countQueriesForOnePage('&status=past_due');
 
         for ($i = 0; $i < 12; $i++) {
-            $this->createLoan();
+            $this->createPastDueLoan();
         }
 
         $this->assertSame(15, $this->getJson('/api/loans')->assertOk()->json('meta.total'));
+        $this->assertSame(15, $this->getJson('/api/loans?status=past_due')->assertOk()->json('meta.total'));
+
         $this->assertSame($small, $this->countQueriesForOnePage(), 'the loans list is doing per-row work');
+        $this->assertSame(
+            $smallPastDue,
+            $this->countQueriesForOnePage('&status=past_due'),
+            'the past due filter is doing per-row work',
+        );
     }
 
-    private function countQueriesForOnePage(): int
+    private function countQueriesForOnePage(string $extraQuery = ''): int
     {
         DB::flushQueryLog();
         DB::enableQueryLog();
 
-        $this->getJson('/api/loans?sort=borrower&dir=asc&per_page=100')->assertOk();
+        $this->getJson('/api/loans?sort=borrower&dir=asc&per_page=100'.$extraQuery)->assertOk();
 
         $queries = DB::getQueryLog();
         DB::disableQueryLog();
@@ -457,11 +720,14 @@ class LoanListTest extends TestCase
             array_keys($stats),
         ));
 
+        // `past_due` is a tab too, but a schedule-derived one rather than a
+        // status — its own section below holds it against the rows.
+        $this->assertArrayHasKey('past_due', $stats);
+
         // And nothing reports a status the `loans.status` enum cannot hold. A
         // key that is structurally always 0 is an invitation to add the enum
-        // member; past due is an `ongoing` loan with an overdue schedule, so it
-        // needs a schedule-derived filter rather than a status.
-        $this->assertSame([], array_intersect(['current', 'past_due'], array_keys($stats)));
+        // member. The Current tab reads `ongoing`.
+        $this->assertSame([], array_intersect(['current'], array_keys($stats)));
 
         $this->assertSame(2, $stats['released']);
         $this->assertSame(1, $stats['ongoing']);
@@ -571,5 +837,44 @@ class LoanListTest extends TestCase
             'branch_id' => $this->branch->id,
             'created_by' => $this->admin->id,
         ], $attributes));
+    }
+
+    /**
+     * A loan plus the schedule rows it is being judged on.
+     *
+     * `period_number` is filled in by position because the table is unique on
+     * (loan_id, period_number) — a caller only has to say when each row falls
+     * due and what state it is in.
+     *
+     * @param  array<string, mixed>  $attributes
+     * @param  array<int, array<string, mixed>>  $schedules
+     */
+    private function createLoanWithSchedules(array $attributes, array $schedules): Loan
+    {
+        $loan = $this->createLoan($attributes);
+
+        foreach (array_values($schedules) as $index => $schedule) {
+            AmortizationSchedule::factory()->create(array_merge([
+                'loan_id' => $loan->id,
+                'period_number' => $index + 1,
+            ], $schedule));
+        }
+
+        return $loan;
+    }
+
+    /**
+     * The canonical past due loan: active, holding one unpaid schedule that
+     * fell due well before today.
+     *
+     * @param  array<string, mixed>  $attributes
+     * @param  array<string, mixed>  $schedule
+     */
+    private function createPastDueLoan(array $attributes = [], array $schedule = []): Loan
+    {
+        return $this->createLoanWithSchedules(
+            array_merge(['status' => 'ongoing'], $attributes),
+            [array_merge(['due_date' => today()->subDays(30), 'status' => 'overdue'], $schedule)],
+        );
     }
 }
