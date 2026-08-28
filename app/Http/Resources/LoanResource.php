@@ -2,6 +2,7 @@
 
 namespace App\Http\Resources;
 
+use App\Models\AmortizationSchedule;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 use OpenApi\Attributes as OA;
@@ -109,8 +110,19 @@ class LoanResource extends JsonResource
                 );
             }
 
-            // Overdue = sum of remaining amounts on schedules past due date
-            $overdueSchedules = $unpaidSchedules->filter(fn ($s) => $s->due_date->lt($today));
+            // Overdue = sum of remaining amounts on schedules that are LATE:
+            // past the due date AND past the grace period this loan grants.
+            //
+            // This used to be a bare `due_date < today`, which put a row on the
+            // loans list reading "₱X overdue" for a loan the Past Due tab
+            // correctly excluded, because that tab honours grace. Shares the
+            // cutoff with RepaymentService::getLoanSummary(), which computes
+            // the same figure for the loan detail screen.
+            $overdueSchedules = AmortizationSchedule::lateUnpaid(
+                $unpaidSchedules,
+                $this->grace_period_days,
+                $today,
+            );
             $overdueAmount = round($overdueSchedules->sum(function ($s) {
                 return max(0, (float) $s->principal_due - (float) $s->principal_paid)
                     + max(0, (float) $s->interest_due - (float) $s->interest_paid)

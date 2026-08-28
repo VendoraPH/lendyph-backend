@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Models\AmortizationSchedule;
 use App\Models\Loan;
 use App\Services\RepaymentService;
 use Carbon\Carbon;
@@ -17,11 +18,17 @@ class ApplyOverduePenalties extends Command
     {
         $today = Carbon::today();
 
-        $loans = Loan::whereIn('status', ['released', 'ongoing'])
+        // Must use the SAME definition of late as
+        // RepaymentService::applyPenalties(), which is the only thing that then
+        // writes anything. A bare `due_date < today` here loaded every loan
+        // inside its grace period so the service could skip it — work done to
+        // reach a no-op, and a candidate count that did not describe what the
+        // command actually did.
+        $loans = Loan::whereIn('status', Loan::ACTIVE_STATUSES)
             ->where('penalty_rate', '>', 0)
             ->whereHas('amortizationSchedules', function ($q) use ($today) {
-                $q->where('due_date', '<', $today)
-                    ->whereIn('status', ['pending', 'partial', 'overdue']);
+                $q->whereRaw(AmortizationSchedule::pastGraceSql(), [$today->toDateString()])
+                    ->whereIn('status', AmortizationSchedule::UNPAID_STATUSES);
             })
             ->get();
 

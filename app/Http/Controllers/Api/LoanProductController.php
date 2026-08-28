@@ -32,9 +32,28 @@ class LoanProductController extends Controller
     {
         $this->authorize('loans:view');
 
+        $filters = request()->validate([
+            'search' => ['nullable', 'string'],
+            'status' => ['nullable', 'string'],
+        ]);
+
+        /**
+         * Gated on filled() — PRESENCE — rather than on truthiness.
+         *
+         * `Builder::when()` skips its callback for any falsy condition, and `0`
+         * and `'0'` are falsy, so `?search=0` and `?status=0` were dropped and
+         * this unpaginated list answered with every product instead of the
+         * narrowed set. Same class as the `?borrower_id=0` holes on the loan,
+         * collateral, repayment, share-capital, user and audit lists; strings
+         * rather than ids, so narrower, but `0` is an ordinary product-name
+         * fragment to search for.
+         */
+        $search = $filters['search'] ?? null;
+        $status = $filters['status'] ?? null;
+
         $products = LoanProduct::query()
-            ->when(request('search'), fn ($q, $s) => $q->where('name', 'like', "%{$s}%"))
-            ->when(request('status'), fn ($q, $s) => $q->where('status', $s))
+            ->when(filled($search), fn ($q) => $q->where('name', 'like', "%{$search}%"))
+            ->when(filled($status), fn ($q) => $q->where('status', $status))
             ->orderBy('name')
             ->get();
 
