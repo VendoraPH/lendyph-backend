@@ -125,8 +125,12 @@ class ReportAccuracyTest extends TestCase
         $row = $rows[0];
         $this->assertSame($schedule->id, $row['id']);
         $this->assertSame($loan->id, $row['loan_id']);
-        $this->assertSame(45, $row['days_overdue']);
-        $this->assertSame(45, $row['days_past_due']);
+        // 42, not 45: createReleasedLoan()'s product carries
+        // grace_period_days 3, and lateness is now measured from grace expiry
+        // rather than from the due date. The row is still listed either way —
+        // grace governs lateness, not owed-ness.
+        $this->assertSame(42, $row['days_overdue']);
+        $this->assertSame(42, $row['days_past_due']);
         // 1,000 against an overdue period pays the 200 penalty (2% of the 10,000
         // principal still due) then 800 interest, leaving 10,000 + 1,000.
         $this->assertEqualsWithDelta(11000, $row['amount_remaining'], 0.01);
@@ -159,7 +163,8 @@ class ReportAccuracyTest extends TestCase
 
         $this->assertCount(1, $rows, 'A defaulted loan is still collectible and must be listed.');
         $this->assertSame($schedule->id, $rows[0]['id']);
-        $this->assertSame(100, $rows[0]['days_overdue']);
+        // 97 = 100 days past due less the product's 3 days of grace.
+        $this->assertSame(97, $rows[0]['days_overdue']);
         $this->assertEqualsWithDelta(11800, $rows[0]['total_due'], 0.01);
         $this->assertSame(1, $duePastDue->json('totals.count'));
         $this->assertSame(1, $duePastDue->json('totals.overdue_count'));
@@ -372,7 +377,11 @@ class ReportAccuracyTest extends TestCase
         $rows = $preview->json('data');
 
         $this->assertCount(3, $rows);
-        $this->assertSame([20, 5, 0], array_column($rows, 'days_overdue'), 'Preview is ordered by due date.');
+        // Each figure is its days-past-due less the product's 3 days of grace,
+        // floored at 0: 20 - 3, 5 - 3, and the row due today stays 0. The
+        // ordering is by due date and is unaffected by grace, since every row
+        // here shares one product and so one grace window.
+        $this->assertSame([17, 2, 0], array_column($rows, 'days_overdue'), 'Preview is ordered by due date.');
 
         $export = $this->get('/api/reports/due-past-due/export');
         $export->assertOk();

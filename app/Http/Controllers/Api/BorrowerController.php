@@ -38,10 +38,20 @@ of `status`, which only takes one exact value at a time. `inactive` and
 `blacklisted` members are included: they are members in poor standing, not
 non-members.
 
-`meta.stats` is always organisation-wide (branch-filtered only) and is NOT
-narrowed by `search` or `members_only`, so `stats.pending` stays a correct
-source for the pending-registrations badge while the user types in the search
-box.
+`meta.stats` follows `branch_id` and `search`, and deliberately ignores
+`status` and `members_only`.
+
+It follows `search` so the tab totals describe the same borrowers the paginator
+is showing — otherwise searching for one member left the Active tab still
+claiming the whole branch.
+
+It ignores `status` because each tab needs its own count: scoping by the
+selected status would leave every other tab reading zero and the user could
+never leave the tab they were on.
+
+It ignores `members_only` because `stats.pending` is the source for the
+pending-registrations badge, and the Members screen sends `members_only=1`.
+Scoping by it would zero that badge exactly where it is read.
 DESC,
         tags: ['Borrowers'],
         security: [['sanctum' => []]],
@@ -62,22 +72,90 @@ DESC,
     {
         $this->authorize('borrowers:view');
 
-        $borrowers = Borrower::with('branch')
-            ->when(request('search'), fn ($q, $search) => $q->search($search))
-            ->when(request('status'), fn ($q, $status) => $q->where('status', $status))
-            ->when(filter_var(request('members_only'), FILTER_VALIDATE_BOOLEAN), fn ($q) => $q->members())
-            ->when(request('branch_id'), fn ($q, $branchId) => $q->forBranch($branchId))
-            ->latest()
-            ->paginate(min((int) request('per_page', 15), 100));
+        $filters = request()->validate([
+            'search' => ['nullable', 'string'],
+            // Deliberately NOT constrained to the status enum. A client still
+            // sending a retired value should get an empty page, not a 422 that
+            // takes the whole screen down — the same call Loan::scopeForStatus()
+            // documents.
+            'status' => ['nullable', 'string'],
+            // `min:1` is not cosmetic: 0 is a valid integer that no row can
+            // carry, and it used to reach a `when()` that treats it as absent
+            // — see the filled() note below.
+            'branch_id' => ['nullable', 'integer', 'min:1'],
+            // Also load-bearing, and measured rather than assumed:
+            // `?per_page=-5` reached the database as a negative LIMIT and was a
+            // 500, and `?per_page=0` was silently ignored — Builder::paginate()
+            // does `$perPage ?: $model->getPerPage()`, so 0 quietly became 15
+            // and the caller was never told. There was no lower clamp here, only
+            // the upper `min(..., 100)`.
+            'per_page' => ['nullable', 'integer', 'min:1'],
+        ]);
 
         /**
-         * Status counts so the frontend can render status tabs without a second
-         * request. Intentionally global — branch-filtered only, never narrowed
-         * by `search` or `members_only`. These are KPI figures: making them
-         * search-scoped would silently change the pending-registrations badge
-         * on every keystroke in the members search box.
+         * Pulled out as locals so every filter below can be gated on
+         * filled() — PRESENCE — rather than on truthiness.
+         *
+         * `Builder::when()` skips its callback for any falsy condition, and
+         * `0` and `'0'` are falsy. Gating on the value itself therefore dropped
+         * `?branch_id=0` on the floor and answered with every borrower in the
+         * cooperative — names, contact numbers, emails — plus organisation-wide
+         * `meta.stats`, for a caller who had asked about one branch.
+         * `/borrowers/0` on the frontend does exactly that, via
+         * Number(params.id). The same hole swallowed `search=0` and
+         * `status=0`, which are ordinary values a user can type.
+         *
+         * `members_only` is the one input that must NOT move to filled():
+         * `members_only=0` means "do not apply the members filter", so its
+         * falsiness IS the answer rather than a bug, and filter_var() is what
+         * turns `0`, `false` and `off` into that answer.
          */
-        $stats = Borrower::when(request('branch_id'), fn ($q, $branchId) => $q->forBranch($branchId))
+        $search = $filters['search'] ?? null;
+        $status = $filters['status'] ?? null;
+        $branchId = $filters['branch_id'] ?? null;
+        $membersOnly = filter_var(request('members_only'), FILTER_VALIDATE_BOOLEAN);
+
+        // Eager loaded, never lazily: the reviewer relations cost two queries
+        // for the whole page rather than two per row. Both point at `users`, so
+        // a page of rows all reviewed by the same admin still costs exactly two.
+        $borrowers = Borrower::with('branch', 'approvedBy', 'rejectedBy')
+            ->when(filled($search), fn ($q) => $q->search($search))
+            ->when(filled($status), fn ($q) => $q->where('status', $status))
+            ->when($membersOnly, fn ($q) => $q->members())
+            ->when(filled($branchId), fn ($q) => $q->forBranch($branchId))
+            ->latest()
+            ->paginate(min(max((int) ($filters['per_page'] ?? 15), 1), 100));
+
+        /**
+         * Status counts so the frontend can render the status tabs without a
+         * second request.
+         *
+         * Scoped by `branch_id` and `search`. NOT by `status`, and NOT by
+         * `members_only`. Those last two are both excluded, but for unrelated
+         * reasons, and the reasons are what matter if you are deciding whether
+         * to change this:
+         *
+         *  - `search` is now included. Without it the tab totals contradicted
+         *    the paginator directly underneath them: searching for one member
+         *    left the Active tab still claiming the whole branch.
+         *  - `status` is excluded because each tab needs its own count. Scoping
+         *    by the selected status would leave every other tab reading zero,
+         *    and the user could never leave the tab they were on.
+         *  - `members_only` is excluded because `stats.pending` is what feeds
+         *    the pending-registrations badge, and the Members screen is exactly
+         *    the screen that sends `members_only=1`. Scoping by it would zero
+         *    that badge at the one place it is read. This is pinned by
+         *    FrontendApiNeedsTest's "keeps meta.stats global while members_only
+         *    narrows the page" — do not fold it in without moving the badge to
+         *    its own request first.
+         *
+         * The cost of that last exclusion, stated plainly: under
+         * `members_only=1` the tabs do not sum to `meta.total`, because stats
+         * still counts the pending and rejected rows the page excludes.
+         */
+        $stats = Borrower::query()
+            ->when(filled($search), fn ($q) => $q->search($search))
+            ->when(filled($branchId), fn ($q) => $q->forBranch($branchId))
             ->selectRaw('status, COUNT(*) as count')
             ->groupBy('status')
             ->pluck('count', 'status')
@@ -221,7 +299,7 @@ DESC,
             ], 201);
         }
 
-        $borrower->load('branch');
+        $borrower->load('branch', 'approvedBy', 'rejectedBy');
 
         return (new BorrowerResource($borrower))
             ->response()
@@ -307,7 +385,7 @@ DESC,
     {
         $this->authorize('borrowers:view');
 
-        $borrower->load('branch', 'coMakers.documents', 'documents');
+        $borrower->load('branch', 'coMakers.documents', 'documents', 'approvedBy', 'rejectedBy');
 
         return new BorrowerResource($borrower);
     }
@@ -371,7 +449,7 @@ DESC,
     public function update(UpdateBorrowerRequest $request, Borrower $borrower): BorrowerResource
     {
         $borrower->update($request->safe()->except('force'));
-        $borrower->load('branch');
+        $borrower->load('branch', 'approvedBy', 'rejectedBy');
 
         return new BorrowerResource($borrower);
     }
@@ -496,7 +574,7 @@ DESC,
             'approved_at' => now(),
         ]);
 
-        $borrower->load('branch');
+        $borrower->load('branch', 'approvedBy', 'rejectedBy');
 
         return new BorrowerResource($borrower);
     }
@@ -553,7 +631,7 @@ DESC,
         // auto-created at submission so it doesn't linger in share-capital totals.
         $borrower->shareCapitalPledge()->delete();
 
-        $borrower->load('branch');
+        $borrower->load('branch', 'approvedBy', 'rejectedBy');
 
         return new BorrowerResource($borrower);
     }
