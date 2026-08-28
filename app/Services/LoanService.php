@@ -273,6 +273,10 @@ class LoanService
         // ever inserts for a collateral the target loan does not already hold —
         // disjoint, by construction, from the set copied here.
         $rows = $source->collaterals()
+            // Same stated lock order as CollateralPledgeGuard::lockCollateralsOf().
+            // A convention rather than a guarantee — see the note there — but the
+            // two paths lock the same rows and should ask in the same order.
+            ->orderBy('collaterals.id')
             ->lockForUpdate()
             ->get()
             ->mapWithKeys(fn (Collateral $collateral) => [
@@ -585,7 +589,23 @@ class LoanService
         $this->guardStatus($loan, 'approved', 'release');
 
         return DB::transaction(function () use ($loan, $releaser, $insurance) {
-            // Lock and validate the source FIRST, before anything is written.
+            // THE FIRST STATEMENT IN THIS TRANSACTION, and it has to stay that
+            // way. Under REPEATABLE READ the consistent snapshot is fixed by the
+            // first plain SELECT, and neither a locking read nor DML moves it —
+            // so the conflict read in assertNoDoublePledge() below is answered
+            // from whatever the world looked like at that first plain read. Take
+            // the collateral lock after it (say, after totalOutstanding() inside
+            // closeRestructuredSource()) and the guard silently starts reading a
+            // stale world: it locks the right rows and then fails to see a pledge
+            // another transaction committed in between. Locking here means no
+            // conflicting pledge CAN be committed from here on, so every later
+            // snapshot already contains everything the guard needs.
+            //
+            // It is also the better lock order: collaterals before `loans`, the
+            // same order CollateralController::attach() takes.
+            $lockedCollateralIds = CollateralPledgeGuard::lockCollateralsOf($loan);
+
+            // Lock and validate the source up front, before anything is written.
             // Two approved restructures of the same source releasing at once
             // would otherwise both succeed and the borrower would owe both, for
             // the same balance. Whichever transaction gets the lock second finds
@@ -626,6 +646,24 @@ class LoanService
             if ($lockedSource) {
                 $this->closeRestructuredSource($loan, $lockedSource, $releaser);
             }
+
+            // `approved` → `released` is a transition INTO Loan::ACTIVE_STATUSES,
+            // and it writes no `loan_collaterals` row, so the guard on
+            // CollateralController::attach() never sees it. Without this, a loan
+            // attached while its collateral's only other holder was inactive
+            // becomes a second active holder the moment it is released.
+            //
+            // The ASSERTION is deliberately the last thing in the transaction,
+            // even though its lock is the first. inheritCollaterals() copies the
+            // source loan's collateral onto its restructure ON PURPOSE and
+            // bypasses the attach guard to do it, so between application and
+            // release BOTH loans hold it — asserting before
+            // closeRestructuredSource() would reject every restructure release
+            // that inherited anything. Here the source is already `restructured`
+            // and out of ACTIVE_STATUSES, so what is asserted is the state this
+            // transaction is actually about to commit. A throw still rolls the
+            // whole release back, status write and loan account number included.
+            CollateralPledgeGuard::assertNoDoublePledge($lockedCollateralIds, $loan);
 
             return $loan;
         });
@@ -689,6 +727,12 @@ class LoanService
      */
     private function closeRestructuredSource(Loan $newLoan, Loan $source, User $releaser): void
     {
+        // Read for the audit entry only — this is NOT a rollback and nothing
+        // below restores it. An audit has flagged it as a third double-pledge
+        // path; it is not one. The only status write here moves the source from
+        // `released`/`ongoing` INTO `restructured`, which is outside
+        // Loan::ACTIVE_STATUSES, so it FREES a collateral rather than taking
+        // one. CollateralPledgeGuard is deliberately not called from here.
         $previousStatus = $source->status;
         $closingBalance = $this->totalOutstanding($source);
 
