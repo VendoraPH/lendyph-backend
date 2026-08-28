@@ -96,12 +96,33 @@ send — the set is defined once in `Loan::ACTIVE_STATUSES`, it has already
 changed once, and a list pinned in a client cannot follow it. It always agrees
 with `meta.stats.active`.
 
-A value that is not a stored status matches nothing rather than returning a
-422, so a client still sending the retired `current` or `past_due` gets an
-empty result instead of a broken page. Neither is a member of the
-`loans.status` enum and neither is reported in `meta.stats`: the Current tab
-reads `ongoing`, and past due is a schedule-derived concept (an `ongoing` loan
-with an overdue amortization schedule), not a status.
+`status=past_due` is the second virtual value: a **collectible** loan
+(`released`, `ongoing` or `defaulted`) holding at least one unpaid amortization
+schedule that is **late** — past its due date *and* past the `grace_period_days`
+the loan grants. It is not a member of the `loans.status` enum and no loan row
+can carry it — it is derived from the schedule — but it is a real filter, and
+its row count always equals `meta.stats.past_due` under the same `branch_id`
+and `borrower_id`. It overlaps `released`, `ongoing` and `defaulted` by design,
+so the tab badges do not sum to the book total, and it is **not** a subset of
+`active`.
+
+Grace matters here: a loan one day past due on a product granting seven days'
+grace is **not** past due on this filter, and becomes so on the eighth day.
+
+Deliberately not the same as the Due/Past Due report at
+`/api/reports/due-past-due`. They agree on which loans are collectible, but that
+report asks what is **owed** — `due_date <= today`, grace ignored — because its
+bucket is "Due and Past Due" combined. This asks what is **late**. Expect the
+report's count to be the larger of the two.
+
+Because a comma-separated list is an OR, `status=completed,past_due` means
+"completed OR past due".
+
+A value that is neither a stored status nor one of those two virtual values
+matches nothing rather than returning a 422, so a client still sending the
+retired `current` gets an empty result instead of a broken page: it is not a
+member of the enum and is not reported in `meta.stats`, and the Current tab
+reads `ongoing`.
 
 `date_from` / `date_to` are an inclusive whole-day range on **`created_at`**
 (application date), so `date_to=2026-08-27` includes a loan captured at
@@ -122,14 +143,15 @@ loan.
 `borrower_id` only, and never by `search`, `status`, `loan_product_id` or the
 date range. Those counts are the KPI cards and tab badges: scoping them to the
 current filter would make every tab read the number of rows already on screen.
-It carries one entry per status in the enum, plus `active`, the sum of the
-statuses `status=active` selects.
+It carries one entry per status in the enum, plus `active` (the sum of the
+statuses `status=active` selects) and `past_due` (the row count `status=past_due`
+returns).
 DESC,
         tags: ['Loans'],
         security: [['sanctum' => []]],
         parameters: [
             new OA\Parameter(name: 'search', in: 'query', required: false, description: 'Application number, loan account number, borrower name or borrower code.', schema: new OA\Schema(type: 'string')),
-            new OA\Parameter(name: 'status', in: 'query', required: false, description: 'One status, a comma-separated list, or `active` (preferred).', schema: new OA\Schema(type: 'string', example: 'active')),
+            new OA\Parameter(name: 'status', in: 'query', required: false, description: 'One status, a comma-separated list, or a virtual value: `active` or `past_due` (both preferred over spelling statuses out).', schema: new OA\Schema(type: 'string', example: 'active')),
             new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
             new OA\Parameter(name: 'borrower_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
             new OA\Parameter(name: 'loan_product_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
@@ -249,6 +271,27 @@ DESC,
             ->pluck('count', 'status')
             ->toArray();
 
+        /**
+         * Past due cannot come out of the GROUP BY above.
+         *
+         * It is not a status but a property of the loan's schedule, so it cuts
+         * ACROSS `released` and `ongoing` rather than partitioning alongside
+         * them: folding it into that result set would count those loans twice
+         * and leave the tab badges summing to more than the book.
+         *
+         * One extra aggregate, unconditional, so the request stays at a fixed
+         * query count no matter how many rows the page returns. It repeats the
+         * two filled() scopes above deliberately — the count and the page it
+         * sits over must narrow together, or a branch-filtered Past Due tab
+         * would open under a whole-book badge. Same scope rules as the rest of
+         * meta.stats: branch and borrower only, never `search`, `status`,
+         * `loan_product_id` or the date range.
+         */
+        $pastDueCount = Loan::when(filled($branchId), fn ($q) => $q->forBranch($branchId))
+            ->when(filled($borrowerId), fn ($q) => $q->where('loans.borrower_id', $borrowerId))
+            ->pastDue()
+            ->count();
+
         return LoanResource::collection($loans)
             ->additional(['meta' => ['stats' => [
                 'draft' => (int) ($stats['draft'] ?? 0),
@@ -256,16 +299,11 @@ DESC,
                 'approved' => (int) ($stats['approved'] ?? 0),
                 'rejected' => (int) ($stats['rejected'] ?? 0),
                 'released' => (int) ($stats['released'] ?? 0),
-                // `current` and `past_due` were reported here and have been
-                // removed. Neither is a member of the `loans.status` enum, so
-                // both were structurally always 0, and a key that can only ever
-                // be 0 invites the wrong repair — adding the enum member —
-                // rather than the right one. The Current tab reads `ongoing`
-                // below. Past due is not a status: it is an `ongoing` loan
-                // holding an overdue amortization schedule, so it wants a
-                // schedule-derived filter, filed as a follow-up. Do not put
-                // either key back without the concept behind it. See
-                // Loan::ACTIVE_STATUSES.
+                // `current` is deliberately absent and must stay absent: it
+                // is not a member of the `loans.status` enum, so the key could
+                // only ever read 0, and a permanently-zero badge invites the
+                // wrong repair — adding the enum member — rather than the
+                // right one. The Current tab reads `ongoing` below.
                 'ongoing' => (int) ($stats['ongoing'] ?? 0),
                 'completed' => (int) ($stats['completed'] ?? 0),
                 'defaulted' => (int) ($stats['defaulted'] ?? 0),
@@ -281,6 +319,15 @@ DESC,
                     fn (string $status) => (int) ($stats[$status] ?? 0),
                     Loan::ACTIVE_STATUSES,
                 )),
+                // The Past Due tab. NOT a status — `past_due` is not in the
+                // enum and must never be added to it — but a real filter: a
+                // collectible loan holding an unpaid schedule that is past both
+                // its due date and the loan's grace period. Counted through the
+                // same Loan::scopePastDue() that `?status=past_due` filters on,
+                // so this badge and the page that tab opens cannot disagree.
+                // It overlaps `released`, `ongoing` and `defaulted` by design,
+                // and is not a subset of `active`.
+                'past_due' => $pastDueCount,
             ]]]);
     }
 
@@ -747,7 +794,7 @@ DESC,
             new OA\Response(response: 401, description: 'Unauthenticated'),
             new OA\Response(response: 403, description: 'Missing auto_pay:toggle permission'),
             new OA\Response(response: 404, description: 'Loan not found'),
-            new OA\Response(response: 422, description: 'Validation error or loan not in released/ongoing/past_due status'),
+            new OA\Response(response: 422, description: 'Validation error or loan not in released/ongoing status'),
         ],
     )]
     public function toggleAutoPay(ToggleAutoPayRequest $request, Loan $loan): JsonResponse

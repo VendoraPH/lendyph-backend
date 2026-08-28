@@ -19,6 +19,8 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'approved_by', type: 'integer', nullable: true, description: 'User id that approved the registration'),
         new OA\Property(property: 'rejected_at', type: 'string', format: 'date-time', nullable: true, description: 'Set when a pending registration is rejected'),
         new OA\Property(property: 'rejected_by', type: 'integer', nullable: true, description: 'User id that rejected the registration'),
+        new OA\Property(property: 'approved_by_user', type: 'object', nullable: true, description: 'The reviewer who approved the registration, as a UserResource. Present only when the `approvedBy` relation is eager-loaded; absent otherwise, never lazily fetched.'),
+        new OA\Property(property: 'rejected_by_user', type: 'object', nullable: true, description: 'The reviewer who rejected the registration, as a UserResource. Present only when the `rejectedBy` relation is eager-loaded; absent otherwise, never lazily fetched.'),
         new OA\Property(property: 'rejection_reason', type: 'string', nullable: true, description: 'Reason captured when a registration is rejected'),
         new OA\Property(property: 'branch_id', type: 'integer', nullable: true, description: 'Foreign key to the assigned branch (null for anonymous submissions awaiting admin review)'),
         new OA\Property(property: 'photo_url', type: 'string', nullable: true),
@@ -79,6 +81,24 @@ class BorrowerResource extends JsonResource
             'approved_by' => $this->approved_by,
             'rejected_at' => $this->rejected_at?->toIso8601String(),
             'rejected_by' => $this->rejected_by,
+            /*
+             * The reviewer, not just their id.
+             *
+             * `approved_by` / `rejected_by` are bare user ids, so a screen
+             * showing who reviewed a registration could only render
+             * "Reviewer #7" — and resolving the name client-side would need
+             * `users:view`, which a reviewer holding only `borrowers:approve`
+             * may not have. Shaped exactly like LoanResource's
+             * `approved_by_user` / `rejected_by_user` so the two read the same.
+             *
+             * whenLoaded(), so this can never introduce a query per row: if the
+             * relation was not eager-loaded the key is simply absent from the
+             * payload rather than lazily fetched. That does mean the caller has
+             * to load it — see BorrowerController, where every path returning
+             * this resource needs `approvedBy`/`rejectedBy` alongside `branch`.
+             */
+            'approved_by_user' => new UserResource($this->whenLoaded('approvedBy')),
+            'rejected_by_user' => new UserResource($this->whenLoaded('rejectedBy')),
             'rejection_reason' => $this->rejection_reason,
             'branch_id' => $this->branch_id,
             'branch' => new BranchResource($this->whenLoaded('branch')),

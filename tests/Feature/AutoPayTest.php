@@ -88,6 +88,52 @@ class AutoPayTest extends TestCase
         ])->assertUnprocessable();
     }
 
+    public function test_toggle_accepts_exactly_the_active_statuses(): void
+    {
+        $loan = $this->createReleasedLoan();
+
+        // The gate used to list a third value, `past_due`, which the
+        // `loans.status` enum has never held — so it allowed nothing while the
+        // 422 below advertised it. What it stands for, an active loan with an
+        // overdue schedule, is already `released` or `ongoing`.
+        $this->assertSame(['released', 'ongoing'], Loan::ACTIVE_STATUSES);
+
+        foreach (Loan::ACTIVE_STATUSES as $status) {
+            $loan->update(['status' => $status]);
+
+            $this->patchJson("/api/loans/{$loan->id}/auto-pay", [
+                'enabled' => true,
+                'cbs_reference' => 'CBS-2026-00123',
+            ])->assertOk()->assertJsonPath('data.auto_pay_enabled', true);
+        }
+
+        foreach (['draft', 'for_review', 'approved', 'rejected', 'completed', 'defaulted', 'restructured', 'void'] as $status) {
+            $loan->update(['status' => $status]);
+
+            $this->patchJson("/api/loans/{$loan->id}/auto-pay", [
+                'enabled' => true,
+                'cbs_reference' => 'CBS-2026-00123',
+            ])->assertUnprocessable()->assertJsonValidationErrors(['loan']);
+        }
+    }
+
+    public function test_the_ineligible_status_message_does_not_name_a_status_that_cannot_exist(): void
+    {
+        $loan = $this->createReleasedLoan();
+        $loan->update(['status' => 'completed']);
+
+        $message = $this->patchJson("/api/loans/{$loan->id}/auto-pay", [
+            'enabled' => true,
+            'cbs_reference' => 'CBS-2026-00123',
+        ])->assertUnprocessable()->json('errors.loan.0');
+
+        // A 422 that tells an operator to put the loan into a state the schema
+        // cannot store sends them looking for a control that does not exist.
+        $this->assertStringNotContainsStringIgnoringCase('past', $message);
+        $this->assertStringContainsString('released', $message);
+        $this->assertStringContainsString('ongoing', $message);
+    }
+
     public function test_toggle_forbidden_for_user_without_permission(): void
     {
         $loan = $this->createReleasedLoan();

@@ -183,17 +183,22 @@ class AutoPayService
     /**
      * Toggle auto-pay on a single loan.
      *
-     * - $enabled = true requires non-empty cbs_reference and loan in
-     *   {released, ongoing, past_due}.
+     * - $enabled = true requires a non-empty cbs_reference.
+     * - The loan must be in Loan::ACTIVE_STATUSES either way: auto-pay only
+     *   means anything for a loan that is out the door and still owes.
      * - $enabled = false clears the reference and the audit columns.
+     *
+     * This list used to carry a third value, `past_due`, which the
+     * `loans.status` enum has never held — so it allowed nothing, while the
+     * 422 below promised callers a status no loan can be in. A past-due loan
+     * is an `ongoing` (or `released`) loan with an overdue schedule, and is
+     * already covered by those two. See Loan::scopePastDue().
      */
     public function toggle(Loan $loan, bool $enabled, ?string $cbsReference, User $user): Loan
     {
-        $allowedStatuses = ['released', 'ongoing', 'past_due'];
-
-        if (! in_array($loan->status, $allowedStatuses, true)) {
+        if (! in_array($loan->status, Loan::ACTIVE_STATUSES, true)) {
             throw ValidationException::withMessages([
-                'loan' => 'Auto-pay can only be toggled on released, ongoing, or past-due loans.',
+                'loan' => 'Auto-pay can only be toggled on released or ongoing loans.',
             ]);
         }
 
@@ -226,7 +231,9 @@ class AutoPayService
     {
         return Loan::query()
             ->where('auto_pay', true)
-            ->whereIn('status', ['released', 'ongoing', 'past_due'])
+            // Same set as toggle() enforces. `past_due` used to be listed here
+            // too and matched nothing — it is not a member of the enum.
+            ->whereIn('status', Loan::ACTIVE_STATUSES)
             ->when(! empty($productIds), fn ($q) => $q->whereIn('loan_product_id', $productIds));
     }
 
