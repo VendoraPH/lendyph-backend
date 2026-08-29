@@ -140,6 +140,9 @@ class CsvImportStager
                 // to guess which of the two it is holding.
                 'line_number' => $row->recordNumber,
                 'record_number' => $row->rowNumber,
+                // The erasure key. Written here and only here, for every row,
+                // valid or not and parsed or not — see self::externalAccountNo().
+                'external_account_no' => self::externalAccountNo($normalized, $row->cells),
                 // A LIST. See the class docblock — an object here is corruption.
                 'raw' => json_encode($row->cells, JSON_UNESCAPED_UNICODE),
                 'normalized' => json_encode($normalized->toPayload(), JSON_UNESCAPED_UNICODE),
@@ -207,6 +210,96 @@ class CsvImportStager
     public function isStaged(CsvImportFile $file): bool
     {
         return $file->record_count !== null;
+    }
+
+    /**
+     * The value `csv_import_rows.external_account_no` holds — the one link an
+     * erasure has to a line that never produced a borrower.
+     *
+     * WRITTEN FOR EVERY ROW, including the invalid ones, and BEFORE any outcome
+     * exists — which is the whole reason this exists rather than being derived
+     * later. `borrower_id` is only ever set on a row that produced or matched a
+     * member; a row rejected at staging, an ambiguous identity match, a loan
+     * whose member was not found, a row abandoned after repeated attempts and a
+     * row that threw mid-write all carry NULL there while still holding that
+     * member's entire line in `raw`. Before this column, BorrowerPurgeService
+     * could not find any of them — and keying the erasure on the outcome would
+     * have meant re-auditing that list every time an outcome is added.
+     *
+     * Public and static so the test fixtures that write staged rows directly
+     * derive the key the same way this does. Two definitions of "which string
+     * links this line to a member" is one definition that quietly stops matching.
+     *
+     * The NORMALISED value first, and NOT re-trimmed: CsvImportProcessor writes
+     * exactly `(string) $normalized->value('account_no')` into
+     * `borrowers.external_account_no`, so anything done to it here that is not
+     * done there is a member this predicate will fail to match. ValueNormalizer
+     * has already trimmed it, stripped the BOM and the non-breaking space, and
+     * capped it at the 50 characters both columns hold.
+     *
+     * THE RAW CELL BEHIND IT, because "written for every row" was not true of a
+     * row that never PARSED. When cellsByKey() fails its column-count check —
+     * one stray delimiter inside an unquoted address is enough — both
+     * normalizers return a NormalizedRow with EMPTY values, so there is no
+     * `account_no` to read and the key was staged NULL while `raw` still held
+     * the member's whole line: name, birthdate, contact number, address,
+     * income. That is one parse-failure class rather than the five outcome
+     * classes the column was added for, and the 30-day sweep still reaches
+     * those rows because it scopes by `csv_import_file_id` rather than by this
+     * key — but an erasure request asked before that clock expires would have
+     * missed them.
+     *
+     * THE FALLBACK MAY BE WRONG, AND THAT IS THE POINT — do not "fix" it out.
+     * The row failed to parse precisely because its columns do not line up, so
+     * cell 0 is not guaranteed to be the account number. The failure is
+     * symmetric and both directions are acceptable:
+     *
+     *  - a wrong key matches no member, which is exactly the NULL it replaces;
+     *  - a wrong key that happens to equal ANOTHER member's account number
+     *    redacts one extra row on that member's erasure. That costs a line of
+     *    report arithmetic. It discloses nothing — redaction only ever removes
+     *    data, never exposes it — and it is strictly better than leaving a
+     *    member unerasable.
+     *
+     * Capped at 50 here where the normalised path is not, and the asymmetry is
+     * deliberate: on that path ValueNormalizer's own 50-character cap
+     * guarantees the width, so truncating there would be a silent bug hiding a
+     * schema change. On THIS path the normalizer never ran, nothing bounds the
+     * cell, and an over-long one would fail the whole staging pass with MySQL
+     * error 1406 — losing every row in the file over one malformed line. A
+     * truncated key is just another key that fails to match.
+     *
+     * Empty becomes NULL rather than `''`. An empty string is a key every blank
+     * row would share, and a purge matching on it would blank strangers' lines.
+     *
+     * @param  list<string>  $cells  The row exactly as read, positionally.
+     */
+    public static function externalAccountNo(NormalizedRow $normalized, array $cells = []): ?string
+    {
+        $value = $normalized->value('account_no');
+
+        if (is_string($value) && $value !== '') {
+            return $value;
+        }
+
+        /*
+         * The schema's own index, never a literal 0. `account_no` leads both
+         * shapes today; deriving it is what keeps that from becoming a fact
+         * this method silently depends on.
+         */
+        $cell = $cells[CsvImportSchema::indexOf($normalized->shape, 'account_no')] ?? null;
+
+        if (! is_string($cell)) {
+            return null;
+        }
+
+        // The same trim, BOM strip and non-breaking-space repair the normalised
+        // path already had applied to it — otherwise a cell carrying a stray
+        // U+FEFF is a different string from the one on the borrower and never
+        // matches.
+        $cell = (new ValueNormalizer)->text($cell);
+
+        return $cell === null ? null : mb_substr($cell, 0, 50);
     }
 
     private function shapeFor(CsvImportFile $file): string

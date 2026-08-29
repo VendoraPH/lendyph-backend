@@ -52,4 +52,8 @@ Schedule::command('imports:process')->everyMinute()->withoutOverlapping(10);
 // staging had already copied every member's name, birthdate, contact number and
 // income into those rows, and nothing removed them. Runs at 03:45, after the
 // registration prune, so the two retention jobs never overlap on the same box.
+//
+// The month is counted from the run FINISHING, not from the upload — so a run an
+// admin abandoned holds its rows until `imports:process` writes it off at
+// --prune-days=14, and only then starts the 30. Worst case is ~44 days, not 30.
 Schedule::command('imports:redact-rows')->dailyAt('03:45');

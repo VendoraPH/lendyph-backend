@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\Borrower;
 use App\Models\CsvImportRow;
 use App\Services\CsvImport\CsvImportRowRedactor;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 
@@ -25,6 +26,12 @@ use Illuminate\Support\Facades\Storage;
  *    record and wrong for the person in it: the delete cut the link and left the
  *    member's whole CSV line intact in `raw`. So the staged rows are redacted
  *    here, and BEFORE the delete, while the foreign key still points at them.
+ *  - …and `borrower_id` is not enough on its own. It is NULL on every staged
+ *    line that never produced a member — a line rejected at staging, an
+ *    ambiguous identity match, a loan whose member was not found — while that
+ *    line still holds the member verbatim. Those are found through
+ *    `csv_import_rows.external_account_no`, which the stager records for every
+ *    row. See the redaction block below.
  *
  * `co_makers` and `collaterals` cascade on delete and are left to the database.
  */
@@ -125,9 +132,61 @@ class BorrowerPurgeService
              * a purge that throws on `loans.borrower_id` — restrictOnDelete —
              * must not leave a surviving borrower whose import history has been
              * wiped. Unlike the files below, this one CAN roll back, so it does.
+             *
+             * TWO PREDICATES, BECAUSE `borrower_id` FINDS ONLY SOME OF THE ROWS.
+             * It is set when a row produced or matched a member. Of the twelve
+             * RowOutcome producers in CsvImportProcessor, FIVE leave it NULL on
+             * a row that still holds that member's entire line:
+             *
+             *  - markInvalidRowsSkipped() stamps `result = 'skipped'` on
+             *    everything that failed validation at staging, and stamps no
+             *    borrower because there is none;
+             *  - BorrowerMatch::ambiguous() passes `borrower: null`, so
+             *    RowOutcome::skipped() stamps none — even though its
+             *    `candidateIds` name real members on file. The ambiguity is
+             *    about WHICH member, never about whether the line describes one;
+             *  - a loan row that fails `borrower_not_found`;
+             *  - a row given up on after MAX_ATTEMPTS (`failed`/`abandoned`);
+             *  - a row that threw while being written (`failed`/`exception`).
+             *
+             * The last two are shape-agnostic, so they apply to CUSTOMERS rows
+             * as well — which is the case an enumeration of outcomes is most
+             * likely to miss. The predicate below does not depend on that
+             * enumeration being right: it keys on a column the STAGER writes for
+             * every row, before any outcome exists.
+             *
+             * The case that makes this a live leak rather than a theoretical
+             * one is ordinary: a member imported successfully by a second run
+             * whose first-run line was ambiguous or invalid. Redacting on
+             * `borrower_id` alone blanked the linked row and left the other two
+             * intact, and ErrorReportBuilder::csvRows() goes on streaming them
+             * — that member's legacy account number and real birthdate, out of
+             * `GET /api/imports/{run}/errors.csv` — until the retention clock
+             * expires. Admin-gated, so not a disclosure; an erasure request
+             * answered incompletely, which is the thing this method exists to
+             * do correctly.
+             *
+             * `external_account_no` is read off the borrower while they are
+             * still here, which is the other half of why the order above
+             * matters: after `$borrower->delete()` there is no account number
+             * left to match on either.
              */
             $this->redactor->redact(
-                CsvImportRow::query()->where('borrower_id', $borrower->id),
+                CsvImportRow::query()->where(function (Builder $rows) use ($borrower): void {
+                    $rows->where('borrower_id', $borrower->id);
+
+                    /*
+                     * Guarded, and it has to be. A member who was never imported
+                     * has a NULL here, and `orWhere('external_account_no',
+                     * null)` builds `= NULL`, which matches nothing — but a
+                     * `whereNull` written by mistake in its place would match
+                     * every staged row that has no account number, in every run,
+                     * belonging to everybody.
+                     */
+                    if ($borrower->external_account_no !== null) {
+                        $rows->orWhere('external_account_no', $borrower->external_account_no);
+                    }
+                }),
             );
 
             // Both are restrictOnDelete; the pledge always exists.

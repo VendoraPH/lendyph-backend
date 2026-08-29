@@ -17,6 +17,16 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * A NULL `result` means the row has not been decided yet; that is the resume
  * marker the importer restarts from.
  *
+ * `external_account_no` is the member's account number as this line stated it,
+ * copied out at staging time. It is NOT a duplicate of `borrower_id`: that
+ * column is only populated when the row produced or matched a borrower, and
+ * five of the import pass's outcomes leave it NULL on a row that still holds a
+ * member's whole line — a line rejected at staging, an ambiguous identity match,
+ * a loan whose member was not found, a row abandoned after repeated attempts,
+ * and a row that threw while being written. This column is what an erasure
+ * matches those rows on, and it is written by the STAGER, so it does not depend
+ * on which outcome the row ends up with. See BorrowerPurgeService.
+ *
  * Deliberately NOT Auditable. Auditing would write one audit row per staged
  * CSV line — doubling the write volume of the very operation this table exists
  * to make cheap, and telling an operator nothing the row itself does not.
@@ -27,6 +37,7 @@ class CsvImportRow extends Model
         'csv_import_file_id',
         'line_number',
         'record_number',
+        'external_account_no',
         'raw',
         'normalized',
         'status',

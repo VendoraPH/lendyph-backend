@@ -9,8 +9,14 @@ use App\Models\CsvImportRun;
 use App\Models\Loan;
 use App\Services\BorrowerPurgeService;
 use App\Services\CsvImport\CsvImportRowRedactor;
+use Illuminate\Console\Command;
+use Illuminate\Database\Eloquent\Builder as EloquentBuilder;
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\Artisan;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
+use PDOException;
 use Tests\TestCase;
 use Tests\Traits\StagesCsvImportRuns;
 
@@ -22,6 +28,14 @@ use Tests\Traits\StagesCsvImportRuns;
  * income into these rows, and nothing removed them — so a completed migration
  * left a full membership register readable through the error report for the life
  * of the deployment, and deleting a borrower left their line in it intact.
+ *
+ * The erasure half has a second edge, and it is the one that actually bit:
+ * `borrower_id` links only the rows that produced or matched a member, so an
+ * erasure that redacted on it alone blanked the linked line and left the
+ * member's ambiguous and invalid lines streaming out of `errors.csv`. Those are
+ * matched on `external_account_no` now, and the tests at the bottom of this file
+ * assert all three kinds of row together — a test covering only the linked row
+ * passes against the broken predicate and proves nothing.
  *
  * What both halves must NOT do is change the arithmetic. The counts on the
  * status endpoint and the groups on the error summary are what an operator
@@ -357,5 +371,376 @@ class CsvImportRowRetentionTest extends TestCase
 
         $this->assertNotNull($row->fresh()->raw);
         $this->assertDatabaseHas('borrowers', ['id' => $borrower->id]);
+    }
+
+    /**
+     * The three staged rows an erasure has to reach, only ONE of which carries a
+     * borrower.
+     *
+     * `csv_import_rows.borrower_id` is set when a row produced or matched a
+     * member. Five of the import pass's outcomes leave it NULL while the row
+     * still holds that member's entire line: markInvalidRowsSkipped(), which
+     * stamps every row that failed validation at staging; BorrowerMatch::
+     * ambiguous(), which passes `borrower: null` even though its candidates are
+     * real members on file; a loan row that fails `borrower_not_found`; a row
+     * abandoned after repeated attempts; and a row that threw mid-write.
+     * Redacting on `borrower_id` alone therefore answered a right-to-erasure
+     * request with the linked row blanked and the rest of the member still
+     * readable.
+     *
+     * Two of the three staged below stand in for that whole set, because they
+     * fail for the same structural reason: nothing linked them.
+     *
+     * The scenario is the ordinary one: a member imported successfully by a
+     * later run whose earlier line was ambiguous or invalid. Both runs are
+     * INSIDE the retention window, so nothing here can be credited to
+     * `imports:redact-rows` — only the purge can explain it.
+     */
+    public function test_purging_a_member_redacts_the_lines_that_never_linked_to_them(): void
+    {
+        Storage::fake('private');
+
+        $this->run->forceFill(['finished_at' => now()->subDay()])->save();
+
+        $ambiguous = $this->stageMember(3, ['account_no' => 'A-001'], [
+            'result' => 'skipped',
+            'result_category' => 'ambiguous_match',
+            'result_message' => 'Two members match Maria Dela Cruz born 1979-04-02, so the row was left for a human.',
+        ]);
+
+        $invalid = $this->stageRow($this->customers, 4, [
+            'account_no' => 'A-001',
+            'last_name' => 'Dela Cruz',
+            'first_name' => 'Maria',
+        ], [
+            // The birthdate never normalised, so it survives only in `raw` —
+            // which is exactly where the error report reads Original Value from.
+            'raw' => [
+                'account_no' => 'A-001',
+                'last_name' => 'Dela Cruz',
+                'first_name' => 'Maria',
+                'birthdate' => '31/02/1979',
+            ],
+            'errors' => [['birthdate', 'date_invalid', '"31/02/1979" is not a date this importer recognises.']],
+            'result' => 'skipped',
+            'result_category' => 'invalid_row',
+            'result_message' => 'This row did not pass validation at staging and was not imported.',
+        ]);
+
+        // The later run, which did produce the member.
+        $laterRun = $this->makeImportRun(['phase' => 'completed', 'finished_at' => now()->subDay()]);
+        $laterFile = $this->makeImportFile($laterRun, 'customers');
+
+        $borrower = Borrower::factory()->create([
+            'branch_id' => $this->importBranch->id,
+            'external_account_no' => 'A-001',
+            'first_name' => 'Maria',
+            'last_name' => 'Dela Cruz',
+        ]);
+
+        $linked = $this->stageRow($laterFile, 2, [
+            'account_no' => 'A-001',
+            'last_name' => 'Dela Cruz',
+            'first_name' => 'Maria',
+            'birthdate' => '1979-04-02',
+        ], ['result' => 'imported']);
+        $linked->forceFill(['borrower_id' => $borrower->id])->save();
+
+        /*
+         * The leak, before the fix is applied to it. Asserted rather than
+         * assumed: a test that only checked the "after" would pass against a
+         * report that never named the member in the first place.
+         */
+        $before = $this->get("/api/imports/{$this->run->id}/errors.csv")->streamedContent();
+        $this->assertStringContainsString('A-001', $before);
+        $this->assertStringContainsString('31/02/1979', $before);
+
+        app(BorrowerPurgeService::class)->purge($borrower);
+
+        foreach (['linked' => $linked, 'ambiguous' => $ambiguous, 'invalid' => $invalid] as $label => $row) {
+            $row->refresh();
+
+            $this->assertNotNull($row->redacted_at, "The {$label} row was not redacted.");
+            $this->assertNull($row->raw, "The {$label} row still holds every cell of the member.");
+            $this->assertNull($row->result_message, "The {$label} row's message quotes the member's cell.");
+            $this->assertNull($row->external_account_no, "The {$label} row still names the erased member's account.");
+
+            $attributes = json_encode($row->getAttributes());
+            $this->assertStringNotContainsString('A-001', $attributes, "The {$label} row still names the account.");
+            $this->assertStringNotContainsString('31/02/1979', $attributes, "The {$label} row still holds the birthdate.");
+            $this->assertStringNotContainsString('Dela Cruz', $attributes, "The {$label} row still names the member.");
+        }
+
+        // And the endpoint the finding was proven through.
+        $after = $this->get("/api/imports/{$this->run->id}/errors.csv")->streamedContent();
+        $this->assertStringNotContainsString('A-001', $after, 'errors.csv still streams the erased account number.');
+        $this->assertStringNotContainsString('31/02/1979', $after, 'errors.csv still streams the erased birthdate.');
+        $this->assertStringNotContainsString('Dela Cruz', $after);
+
+        // The arithmetic is untouched: the same lines are still reported, they
+        // just no longer say whose they were.
+        $this->assertSame(
+            substr_count($before, "\n"),
+            substr_count($after, "\n"),
+            'An erasure must not change how many rows the report accounts for.',
+        );
+
+        $this->assertDatabaseMissing('borrowers', ['id' => $borrower->id]);
+    }
+
+    /**
+     * The predicate is the member's OWN account number, not "any row without
+     * one".
+     *
+     * `orWhere('external_account_no', null)` builds `= NULL` and matches
+     * nothing, but a `whereNull` written in its place would match every staged
+     * row that has no account number — in every run, belonging to everybody. The
+     * blank row below is what fails if that ever happens.
+     */
+    public function test_a_purge_leaves_every_other_members_staged_lines_alone(): void
+    {
+        Storage::fake('private');
+
+        $this->run->forceFill(['finished_at' => now()->subDay()])->save();
+
+        $borrower = Borrower::factory()->create([
+            'branch_id' => $this->importBranch->id,
+            'external_account_no' => 'A-001',
+        ]);
+
+        $mine = $this->stageMember(2, ['account_no' => 'A-001'], [
+            'result' => 'skipped',
+            'result_category' => 'ambiguous_match',
+        ]);
+
+        $somebodyElse = $this->stageMember(3, ['account_no' => 'A-002'], [
+            'result' => 'skipped',
+            'result_category' => 'ambiguous_match',
+        ]);
+
+        $noAccountNumber = $this->stageMember(4, ['account_no' => null], [
+            'errors' => [['account_no', 'required', 'This field is required and the cell is blank.']],
+            'result' => 'skipped',
+            'result_category' => 'invalid_row',
+        ]);
+
+        $this->assertNull($noAccountNumber->fresh()->external_account_no);
+
+        app(BorrowerPurgeService::class)->purge($borrower);
+
+        $this->assertNull($mine->fresh()->raw);
+        $this->assertNotNull($somebodyElse->fresh()->raw, 'A purge blanked a different member.');
+        $this->assertNotNull($noAccountNumber->fresh()->raw, 'A purge blanked every row with no account number.');
+    }
+
+    /**
+     * The erasure key is itself personal data, and goes with the rest of it.
+     *
+     * It is the cooperative's own identifier for the member, copied out of the
+     * file — not a surrogate id like `borrower_id`, which is kept because it is
+     * a link and means nothing outside this app. Keeping it would leave an
+     * erased person's account number readable in this table forever, and it has
+     * no job left: a redacted row holds nothing for a later erasure to find.
+     */
+    public function test_a_redaction_blanks_the_erasure_key_itself(): void
+    {
+        $row = $this->stageMember(2, ['account_no' => 'A-001'], ['result' => 'imported']);
+
+        $this->assertSame('A-001', $row->external_account_no);
+
+        Artisan::call('imports:redact-rows');
+
+        $this->assertNull($row->fresh()->external_account_no);
+        $this->assertStringNotContainsString('A-001', json_encode($row->fresh()->getAttributes()));
+    }
+
+    /**
+     * Rows staged before the column existed are reachable too.
+     *
+     * Without the migration's backfill this fix would have a silent hole in
+     * exactly the shape it closes: every row already in the table carries a NULL
+     * key, so the widened predicate would miss all of them, and on a box that
+     * has already run an import that is all of them.
+     *
+     * The migration is called directly rather than re-run through the migrator,
+     * because the suite migrates fresh before every test and would otherwise
+     * only ever see rows staged after the column existed — which is the one case
+     * that cannot fail.
+     */
+    public function test_the_backfill_reaches_rows_staged_before_the_column_existed(): void
+    {
+        Storage::fake('private');
+
+        $this->run->forceFill(['finished_at' => now()->subDay()])->save();
+
+        $borrower = Borrower::factory()->create([
+            'branch_id' => $this->importBranch->id,
+            'external_account_no' => 'A-001',
+        ]);
+
+        $legacy = $this->stageMember(3, ['account_no' => 'A-001'], [
+            'result' => 'skipped',
+            'result_category' => 'ambiguous_match',
+        ]);
+
+        $blank = $this->stageMember(4, ['account_no' => null], [
+            'errors' => [['account_no', 'required', 'This field is required and the cell is blank.']],
+            'result' => 'skipped',
+            'result_category' => 'invalid_row',
+        ]);
+
+        // What a row staged before the migration looks like.
+        DB::table('csv_import_rows')->update(['external_account_no' => null]);
+
+        $migration = require database_path(
+            'migrations/2026_08_30_100300_add_external_account_no_to_csv_import_rows_table.php'
+        );
+        $migration->backfill();
+
+        $this->assertSame('A-001', $legacy->fresh()->external_account_no);
+
+        /*
+         * JSON_UNQUOTE of a JSON null returns the four-character string "null",
+         * so without the JSON_TYPE guard this row would come back carrying a key
+         * that looks populated, matches no member, and hides the fact that it
+         * has none.
+         */
+        $this->assertNull($blank->fresh()->external_account_no, 'A blank account number was backfilled as text.');
+
+        app(BorrowerPurgeService::class)->purge($borrower);
+
+        $this->assertNull($legacy->fresh()->raw, 'A row staged before the column is still unreachable by an erasure.');
+        $this->assertNotNull($blank->fresh()->raw);
+    }
+
+    /**
+     * A redaction that fails must not print or log the members in the query that
+     * failed.
+     *
+     * A QueryException's message is the failing SQL WITH THE BINDINGS
+     * SUBSTITUTED IN, so `$e->getMessage()` on a sweep over this table is a
+     * member's record — onto an operator's terminal, and into
+     * `storage/logs/laravel.log`, which is the `single` channel: one file, never
+     * rotated, mode 644. That the redactor's own statements happen to bind file
+     * ids, nulls and timestamps today is a property of today's code, not a rule;
+     * this test is the rule.
+     *
+     * The exception below is shaped like the real one — a lock-wait timeout,
+     * which is the systemic failure that would hit every row rather than one.
+     */
+    public function test_a_failed_redaction_never_prints_or_logs_the_query_that_failed(): void
+    {
+        $this->stageMember(2, [], ['result' => 'imported']);
+
+        $driver = new PDOException('SQLSTATE[HY000]: General error: 1205 Lock wait timeout exceeded');
+        $driver->errorInfo = ['HY000', 1205, 'Lock wait timeout exceeded; try restarting transaction'];
+
+        $failure = new QueryException(
+            'mysql',
+            'update `csv_import_rows` set `raw` = ? where `id` = ?',
+            ['["A-001","Dela Cruz","Maria","1979-04-02","09171234567"]', 41],
+            $driver,
+        );
+
+        $this->assertStringContainsString('Dela Cruz', $failure->getMessage(), 'The fixture has to actually carry a member, or this test proves nothing.');
+
+        $this->app->bind(CsvImportRowRedactor::class, fn () => new class($failure) extends CsvImportRowRedactor
+        {
+            public function __construct(private readonly QueryException $failure) {}
+
+            public function redact(EloquentBuilder $query): int
+            {
+                throw $this->failure;
+            }
+        });
+
+        Log::spy();
+
+        $exit = Artisan::call('imports:redact-rows');
+        $output = Artisan::output();
+
+        $this->assertSame(Command::FAILURE, $exit);
+        $this->assertStringNotContainsString('Dela Cruz', $output, 'The failing query was printed to the operator.');
+        $this->assertStringNotContainsString('09171234567', $output);
+
+        // What the operator DOES get: the driver's own number, which is the
+        // difference between "retry it" and "something is wrong".
+        $this->assertStringContainsString('database error (1205)', $output);
+
+        Log::shouldHaveReceived('warning')->withArgs(function (string $message, array $context): bool {
+            $encoded = json_encode($context);
+
+            $this->assertStringNotContainsString('Dela Cruz', $encoded, 'The failing query was written to the shared log.');
+            $this->assertStringNotContainsString('09171234567', $encoded);
+            $this->assertSame('1205', $context['driver_code'] ?? null);
+            $this->assertSame('HY000', $context['sql_state'] ?? null);
+
+            return true;
+        })->once();
+    }
+
+    /**
+     * An erasure reaches a line that never PARSED, not just one that never
+     * imported.
+     *
+     * The sibling of the five-outcome case above, and it fails for a different
+     * reason: not "no borrower was produced" but "no VALUES were produced". A
+     * column-count failure leaves both normalizers returning an empty
+     * NormalizedRow, so there is no `account_no` to key on — while `raw` still
+     * holds the member's whole line. CsvImportStager::externalAccountNo() falls
+     * back to the raw cell for exactly this row, and this is the test that says
+     * the fallback is load-bearing rather than defensive decoration.
+     *
+     * `values` is empty here on purpose: it IS the parse-failure shape, and a
+     * fixture that filled it in would key off `normalized` and prove nothing.
+     */
+    public function test_purging_a_member_redacts_a_line_that_never_parsed(): void
+    {
+        Storage::fake('private');
+
+        $this->run->forceFill(['finished_at' => now()->subDay()])->save();
+
+        $unparseable = $this->stageRow($this->customers, 3, [], [
+            'raw' => [
+                'account_no' => 'A-001',
+                'last_name' => 'Dela Cruz',
+                'first_name' => 'Maria',
+                'birthdate' => '1979-04-02',
+                'contact_number' => '09171234567',
+            ],
+            'errors' => [['__row', 'row_column_count', 'This row has 23 columns but 22 were expected, so its values cannot be matched to fields.']],
+            'result' => 'skipped',
+            'result_category' => 'invalid_row',
+        ]);
+
+        $this->assertNull(
+            $unparseable->normalized['values'][0],
+            'The fixture has to have no parsed account number, or it is not testing the fallback.',
+        );
+        $this->assertSame('A-001', $unparseable->external_account_no, 'The key has to come from `raw` here.');
+
+        $borrower = Borrower::factory()->create([
+            'branch_id' => $this->importBranch->id,
+            'external_account_no' => 'A-001',
+            'first_name' => 'Maria',
+            'last_name' => 'Dela Cruz',
+        ]);
+
+        $before = $this->get("/api/imports/{$this->run->id}/errors.csv")->streamedContent();
+        $this->assertStringContainsString('A-001', $before);
+
+        app(BorrowerPurgeService::class)->purge($borrower);
+
+        $unparseable->refresh();
+
+        $this->assertNotNull($unparseable->redacted_at);
+        $this->assertNull($unparseable->raw, 'The member is still in a line nothing could parse.');
+        $this->assertNull($unparseable->external_account_no);
+        $this->assertStringNotContainsString('09171234567', json_encode($unparseable->getAttributes()));
+        $this->assertStringNotContainsString('Dela Cruz', json_encode($unparseable->getAttributes()));
+
+        $after = $this->get("/api/imports/{$this->run->id}/errors.csv")->streamedContent();
+        $this->assertStringNotContainsString('A-001', $after);
+        $this->assertStringNotContainsString('Dela Cruz', $after);
     }
 }

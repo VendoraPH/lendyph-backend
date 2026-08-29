@@ -7,6 +7,7 @@ use App\Services\CsvImport\CsvImportSchema;
 use App\Services\CsvImport\CsvImportStager;
 use App\Services\CsvImport\NormalizedRow;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
 use LogicException;
 use Tests\TestCase;
 use Tests\Traits\BuildsCsvImports;
@@ -225,5 +226,142 @@ class CsvImportStagerTest extends TestCase
 
         $this->assertSame(2, CsvImportRow::where('csv_import_file_id', $file->id)->count());
         $this->assertTrue($stager->isStaged($file->fresh()));
+    }
+
+    /**
+     * Every staged row records the account number the erasure path matches on.
+     *
+     * `csv_import_rows.borrower_id` only ever links the rows that produced or
+     * matched a member. The rows that did not — a line rejected at staging, an
+     * ambiguous identity match, a loan whose member was not found — still hold
+     * that member's whole line, and before this column BorrowerPurgeService had
+     * nothing to find them by. So the assertion that matters here is the SECOND
+     * row: it is invalid, no borrower will ever be created for it, and it must
+     * still carry the key.
+     *
+     * Asserted against a real MySQL round trip rather than against the value on
+     * the way in, because a column that silently refused the write would leave
+     * exactly the hole this closes.
+     */
+    public function test_it_records_the_account_number_an_erasure_matches_on(): void
+    {
+        $this->seedForImport();
+
+        $run = $this->makeRun();
+        $file = $this->makeFile($run, 'customers', [
+            $this->customerRow('A-001'),
+            // Blank surname: the row fails validation at staging, is stamped
+            // `skipped`/`invalid_row` by the import pass and never becomes a
+            // borrower.
+            $this->customerRow('A-002', ['last_name' => '']),
+        ]);
+
+        (new CsvImportStager)->stage($file);
+
+        $rows = CsvImportRow::where('csv_import_file_id', $file->id)->orderBy('id')->get();
+
+        $this->assertSame(['A-001', 'A-002'], $rows->pluck('external_account_no')->all());
+        $this->assertSame(['valid', 'invalid'], $rows->pluck('status')->all());
+    }
+
+    /**
+     * The loans shape too, and for the same reason: a loan row that fails
+     * `borrower_not_found` names a member the importer could not place, which is
+     * not the same thing as naming nobody.
+     */
+    public function test_it_records_the_account_number_on_loan_rows_as_well(): void
+    {
+        $this->seedForImport();
+
+        $run = $this->makeRun();
+        $file = $this->makeFile($run, 'loans', [
+            $this->loanRow('A-001', 'L-1'),
+            $this->loanRow('A-002', 'L-2'),
+        ]);
+
+        (new CsvImportStager)->stage($file);
+
+        $this->assertSame(
+            ['A-001', 'A-002'],
+            CsvImportRow::where('csv_import_file_id', $file->id)->orderBy('id')->pluck('external_account_no')->all(),
+        );
+    }
+
+    /**
+     * A blank account number is NULL, never the empty string.
+     *
+     * `''` would be a key every blank row in every run shares, and a purge
+     * matching on it would blank strangers' lines rather than the member's.
+     */
+    public function test_a_row_with_no_account_number_carries_no_key(): void
+    {
+        $this->seedForImport();
+
+        $run = $this->makeRun();
+        $file = $this->makeFile($run, 'customers', [$this->customerRow('', ['last_name' => 'Reyes'])]);
+
+        (new CsvImportStager)->stage($file);
+
+        $this->assertNull(
+            CsvImportRow::where('csv_import_file_id', $file->id)->value('external_account_no'),
+            'An empty string here is a key that matches every blank row in the table.',
+        );
+    }
+
+    /**
+     * A row that never PARSED still records the account number.
+     *
+     * This is the one hole the "written for every row" argument did not cover.
+     * When cellsByKey() fails its column-count check — a stray delimiter inside
+     * an unquoted address is the usual cause — both normalizers return a
+     * NormalizedRow with EMPTY values, so there is no `account_no` to read.
+     * `raw` meanwhile holds the member's whole line: name, birthdate, contact
+     * number, address, income. Keyed off `normalized` alone, that member had no
+     * link an erasure could find.
+     *
+     * The middle row below is deliberately the one that breaks, so the file
+     * still passes the reader's modal-width check and exactly one record fails
+     * — the real shape of this fault, rather than a file-level rejection.
+     */
+    public function test_a_row_that_fails_to_parse_still_records_the_account_number(): void
+    {
+        $this->seedForImport();
+
+        $run = $this->makeRun();
+        $file = $this->makeFile($run, 'customers', [
+            $this->customerRow('A-001'),
+            $this->customerRow('A-002'),
+            $this->customerRow('A-003'),
+        ]);
+
+        // One stray delimiter on the second record: 23 cells where 22 are
+        // expected. Written straight to the disk because the fixture builder
+        // pads every row to the schema width by construction, which is exactly
+        // the malformation being tested.
+        $lines = explode("\n", rtrim(Storage::disk('private')->get($file->assembled_path), "\n"));
+        $lines[2] .= ',stray';
+        Storage::disk('private')->put($file->assembled_path, implode("\n", $lines)."\n");
+
+        (new CsvImportStager)->stage($file);
+
+        $rows = CsvImportRow::where('csv_import_file_id', $file->id)->orderBy('id')->get();
+
+        $this->assertSame(['valid', 'invalid', 'valid'], $rows->pluck('status')->all());
+        $this->assertSame('row_column_count', $rows[1]->errors[0]['code'], 'The middle row did not fail the way this test assumes.');
+        $this->assertCount(23, $rows[1]->raw);
+
+        $this->assertSame(
+            ['A-001', 'A-002', 'A-003'],
+            $rows->pluck('external_account_no')->all(),
+            'An unparseable row staged no erasure key, so the member in it cannot be found by one.',
+        );
+
+        /*
+         * And it came from `raw`, not from `normalized` — which is what makes
+         * the fallback load-bearing rather than incidental. toPayload() writes
+         * one null per schema column for an empty-values row, so the JSON path
+         * the migration's backfill reads resolves to null here too.
+         */
+        $this->assertNull($rows[1]->normalized['values'][0]);
     }
 }

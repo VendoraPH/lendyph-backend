@@ -10,6 +10,7 @@ use App\Models\CsvImportRun;
 use App\Models\Role;
 use App\Models\User;
 use App\Services\CsvImport\CsvImportSchema;
+use App\Services\CsvImport\CsvImportStager;
 use App\Services\CsvImport\NormalizedRow;
 use App\Services\CsvImport\RowNote;
 use Database\Seeders\DatabaseSeeder;
@@ -134,11 +135,22 @@ trait StagesCsvImportRuns
             $values,
         );
 
+        // Hoisted, because the erasure key is derived from these cells too — a
+        // row whose `values` are empty (the parse-failure shape) keys off `raw`.
+        $raw = $this->rawCells($shape, $rawSource);
+
         return CsvImportRow::create([
             'csv_import_file_id' => $file->id,
             'line_number' => $lineNumber,
             'record_number' => $recordNumber,
-            'raw' => $this->rawCells($shape, $rawSource),
+            /*
+             * Derived through the stager's own method, not written by hand.
+             * This is the key BorrowerPurgeService matches a member's staged
+             * lines on, and a fixture that computed it differently would let an
+             * erasure test pass against a predicate that misses in production.
+             */
+            'external_account_no' => CsvImportStager::externalAccountNo($normalized, $raw),
+            'raw' => $raw,
             'normalized' => ($options['normalized_null'] ?? false) ? null : $normalized->toPayload(),
             'status' => $options['status'] ?? (($options['errors'] ?? []) === [] ? 'valid' : 'invalid'),
             'errors' => ($options['errors'] ?? []) === [] ? null : $normalized->errorsToArray(),

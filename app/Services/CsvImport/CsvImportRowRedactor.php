@@ -142,6 +142,14 @@ class CsvImportRowRedactor
      * files rather than MAX(csv_import_rows.updated_at), precisely because that
      * column is not indexed.
      *
+     * `external_account_no` goes with the rest of it. It is the erasure KEY, but
+     * it is also the cooperative's own identifier for the member copied out of
+     * their file — personal data, unlike `borrower_id`, which is a surrogate
+     * link that means nothing outside this app and is kept. Keeping it would
+     * leave an erased person's account number readable in this table for the
+     * life of the deployment, and it has no job left to do: a redacted row holds
+     * nothing a later erasure could still need to find.
+     *
      * @return array<string, mixed>
      */
     private function columns(CarbonInterface $now): array
@@ -149,6 +157,7 @@ class CsvImportRowRedactor
         return [
             'raw' => null,
             'result_message' => null,
+            'external_account_no' => null,
             'redacted_at' => $now,
             'updated_at' => $now,
         ];
