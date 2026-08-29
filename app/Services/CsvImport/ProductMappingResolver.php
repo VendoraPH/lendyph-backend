@@ -546,60 +546,99 @@ class ProductMappingResolver
             }
         }
 
-        $outOfBounds = false;
+        $breaches = self::boundsBreaches($product, $row->csv_amount, $row->csv_term, $row->csv_rate);
+
+        foreach ($breaches as $breach) {
+            $acc[$breach]++;
+        }
+
+        if ($breaches !== []) {
+            $acc['rows_out_of_bounds']++;
+        }
+    }
+
+    /**
+     * Which of LoanService::createLoan()'s bounds one loan breaks, if any.
+     *
+     * THE one implementation, called from two places on purpose:
+     *
+     *  - accumulate() above, which forecasts the damage on the mapping screen
+     *    BEFORE the run — "288 loans will disagree with their product".
+     *  - the importer, which stamps
+     *    `ErrorReportBuilder::CATEGORY_OUT_OF_PRODUCT_BOUNDS` onto the row it
+     *    just wrote, so the forecast can afterwards be expanded into the list of
+     *    rows it actually turned out to be.
+     *
+     * If those two ever disagreed, the mapping screen would promise 288 and the
+     * error report would list 291, and nobody could tell which was lying. They
+     * cannot disagree while they are the same function.
+     *
+     * These are exactly the guards the importer skips by bypassing
+     * LoanService::createLoan() — and it goes on skipping them. A migration has
+     * to be able to carry a decade of loans that today's product configuration
+     * would reject; this reports the breach, it does not prevent it.
+     *
+     * Tolerant of both the staged string form (JSON_UNQUOTE hands back strings)
+     * and the typed form the importer holds, because the two callers have the
+     * row in different shapes and a silent type mismatch here would simply stop
+     * reporting breaches.
+     *
+     * @param  mixed  $amountCentavos  principal in INTEGER CENTAVOS, as staged;
+     *                                 product bounds are in pesos
+     * @param  mixed  $term  the CSV's stated Term in Months — NOT the period
+     *                       count LoanScheduleReconstructor derives, which is
+     *                       what `loans.term` becomes
+     * @return list<string> breached bound names, empty when the loan is inside
+     *                      every bound or too malformed to compare
+     */
+    public static function boundsBreaches(LoanProduct $product, mixed $amountCentavos, mixed $term, mixed $rate): array
+    {
+        $breaches = [];
 
         // Money is staged as integer centavos; product bounds are in pesos.
-        if ($row->csv_amount !== null && preg_match('/^-?\d+$/', (string) $row->csv_amount) === 1) {
-            $amount = ((int) $row->csv_amount) / 100;
+        if ($amountCentavos !== null && preg_match('/^-?\d+$/', (string) $amountCentavos) === 1) {
+            $amount = ((int) $amountCentavos) / 100;
             $min = (float) $product->min_amount;
             $max = (float) $product->max_amount;
 
             if ($min > 0 && $amount < $min) {
-                $acc['amount_below_min']++;
-                $outOfBounds = true;
+                $breaches[] = 'amount_below_min';
             }
 
             if ($max > 0 && $amount > $max) {
-                $acc['amount_above_max']++;
-                $outOfBounds = true;
+                $breaches[] = 'amount_above_max';
             }
         }
 
-        if ($row->csv_term !== null && preg_match('/^-?\d+$/', (string) $row->csv_term) === 1) {
-            $term = (int) $row->csv_term;
+        if ($term !== null && preg_match('/^-?\d+$/', (string) $term) === 1) {
+            $months = (int) $term;
             $minTerm = (int) ($product->min_term ?? 1);
             $maxTerm = (int) ($product->max_term ?? $product->term);
 
-            if ($term < $minTerm) {
-                $acc['term_below_min']++;
-                $outOfBounds = true;
+            if ($months < $minTerm) {
+                $breaches[] = 'term_below_min';
             }
 
-            if ($maxTerm > 0 && $term > $maxTerm) {
-                $acc['term_above_max']++;
-                $outOfBounds = true;
+            if ($maxTerm > 0 && $months > $maxTerm) {
+                $breaches[] = 'term_above_max';
             }
         }
 
-        if ($row->csv_rate !== null && is_numeric((string) $row->csv_rate)) {
-            $rate = (float) $row->csv_rate;
+        if ($rate !== null && is_numeric((string) $rate)) {
+            $value = (float) $rate;
             $minRate = (float) ($product->min_interest_rate ?? $product->interest_rate);
             $maxRate = (float) $product->interest_rate;
 
-            if ($rate < $minRate) {
-                $acc['rate_below_min']++;
-                $outOfBounds = true;
+            if ($value < $minRate) {
+                $breaches[] = 'rate_below_min';
             }
 
-            if ($rate > $maxRate) {
-                $acc['rate_above_max']++;
-                $outOfBounds = true;
+            if ($value > $maxRate) {
+                $breaches[] = 'rate_above_max';
             }
         }
 
-        if ($outOfBounds) {
-            $acc['rows_out_of_bounds']++;
-        }
+        return $breaches;
     }
 
     /**

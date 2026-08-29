@@ -85,13 +85,35 @@ return new class extends Migration
             $table->unsignedBigInteger('cursor_row_id')->nullable();
 
             /**
-             * Who started it, and from where.
+             * Who started it.
              *
              * nullOnDelete: staff turnover must not be able to delete the
              * record of an import. The row survives with a null actor, which is
              * still more truthful than cascading it away.
              */
             $table->foreignId('initiated_by')->nullable()->constrained('users')->nullOnDelete();
+
+            /**
+             * `$request->ip()` at the moment the run was opened — which on this
+             * deployment is NOT "from where".
+             *
+             * Every browser call reaches this API through the Next.js server-side
+             * rewrite, so REMOTE_ADDR is the frontend host. TrustProxies is wired
+             * in bootstrap/app.php but `TRUSTED_PROXIES` ships EMPTY (see
+             * config/trustedproxy.php for why turning it on needs the frontend to
+             * authenticate itself as a proxy first), so X-Forwarded-For is not
+             * honoured and this column holds the same single address for every
+             * admin on the box. It is not spoofable — it is uninformative, which
+             * is the harder failure to notice: an incident review reads a value
+             * that looks like provenance and is not.
+             *
+             * Kept because it costs nothing and becomes truthful the moment the
+             * proxy list is populated. If "from where" ever has to mean
+             * something before then, the answer is the authenticated Sanctum
+             * token id — `$request->user()?->currentAccessToken()?->id` — which
+             * identifies the session that asked and survives the proxy hop. That
+             * is a column and an upload-service write, not a comment.
+             */
             $table->string('initiated_ip', 45)->nullable();
 
             $table->timestamp('started_at')->nullable();

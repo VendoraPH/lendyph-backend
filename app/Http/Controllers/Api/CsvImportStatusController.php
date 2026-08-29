@@ -2,8 +2,8 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Http\Controllers\Api\Traits\ResolvesImportRuns;
 use App\Http\Controllers\Controller;
-use App\Models\CsvImportRun;
 use App\Services\CsvImport\RunStatusReader;
 use Illuminate\Http\JsonResponse;
 use OpenApi\Attributes as OA;
@@ -18,6 +18,9 @@ use OpenApi\Attributes as OA;
  */
 class CsvImportStatusController extends Controller
 {
+    /** The run id is resolved AFTER the permission check — see the trait. */
+    use ResolvesImportRuns;
+
     public function __construct(private RunStatusReader $reader) {}
 
     #[OA\Get(
@@ -39,10 +42,10 @@ class CsvImportStatusController extends Controller
             new OA\Response(response: 404, description: 'Not found'),
         ],
     )]
-    public function show(CsvImportRun $run): JsonResponse
+    public function show(int $run): JsonResponse
     {
         $this->authorize('imports:process');
 
-        return response()->json(['data' => $this->reader->payload($run)]);
+        return response()->json(['data' => $this->reader->payload($this->importRun($run))]);
     }
 }

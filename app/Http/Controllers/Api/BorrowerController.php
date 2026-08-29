@@ -119,6 +119,16 @@ DESC,
         // for the whole page rather than two per row. Both point at `users`, so
         // a page of rows all reviewed by the same admin still costs exactly two.
         $borrowers = Borrower::with('branch', 'approvedBy', 'rejectedBy')
+            /*
+             * One aggregate subquery for the page, not a documents relation per
+             * row. It answers BorrowerResource's `has_valid_id`, which pairs
+             * with `is_imported` to mark the members a CSV migration created
+             * with no KYC on file — a backlog an operator can only work if the
+             * list can show it. Loading `documents` instead would pull every
+             * KYC row and its signed-URL machinery for 100 members to answer a
+             * yes/no question.
+             */
+            ->withCount(['documents as valid_id_documents_count' => fn ($q) => $q->where('type', 'valid_id')])
             ->when(filled($search), fn ($q) => $q->search($search))
             ->when(filled($status), fn ($q) => $q->where('status', $status))
             ->when($membersOnly, fn ($q) => $q->members())
