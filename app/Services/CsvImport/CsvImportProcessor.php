@@ -54,11 +54,18 @@ use Throwable;
  * rows inside it matched, so the walk terminates by construction rather than by
  * relying on rows falling out of their own WHERE clause.
  *
- * ## This class never writes to the filesystem
+ * ## This class never CREATES a file
  *
  * The scheduler runs as root and php-fpm as www-data. A file created here would
  * be root-owned 0600 under a directory the web process cannot read, and that
  * only ever shows up in production.
+ *
+ * It does RESOLVE the `private` disk, through CsvImportStager and
+ * CsvImportReader, and resolving a local disk mkdirs its root —
+ * FilesystemManager::createLocalDriver() builds the adapter with
+ * `$lazyRootCreation = false`. That is a directory, not a file, and it is
+ * covered by the same rule for the same reason: see the fuller note on
+ * ProcessCsvImports, which owns the uid discipline.
  */
 class CsvImportProcessor
 {
@@ -101,11 +108,64 @@ class CsvImportProcessor
     public const TERMINAL_PHASES = ['completed', 'failed', 'cancelled'];
 
     /**
+     * The `audit_logs.action` self::finalise() writes for each terminal phase.
+     *
+     * One action per outcome rather than one shared `csv_import_finished`,
+     * because the question an auditor arrives with is "did this import finish or
+     * was it stopped", and answering it by parsing a description string is how
+     * the answer eventually becomes wrong. Keyed by phase so the map cannot
+     * fall out of step with self::TERMINAL_PHASES without failing loudly.
+     *
+     * @var array<string, string>
+     */
+    public const FINAL_ACTIONS = [
+        'completed' => 'csv_import_completed',
+        'failed' => 'csv_import_failed',
+        'cancelled' => 'csv_import_cancelled',
+    ];
+
+    /**
+     * `csv_import_rows.result_category` for a loan that was imported but breaks
+     * one of the bounds configured on the product it was mapped to.
+     *
+     * The string is published by ErrorReportBuilder as
+     * CATEGORY_OUT_OF_PRODUCT_BOUNDS, which is the error report's own name for
+     * it; it is repeated rather than imported for the same reason self::RESOLVER
+     * is a string — that class is on another branch. On merge, this constant
+     * should point at ErrorReportBuilder's rather than restate it.
+     */
+    public const CATEGORY_OUT_OF_PRODUCT_BOUNDS = 'out_of_product_bounds';
+
+    /**
+     * Container key a bounds check may be bound to, overriding self::RESOLVER.
+     */
+    public const BOUNDS_CHECKER = 'csv-import.bounds-breaches';
+
+    /**
+     * The mapping screen's bounds arithmetic — see self::boundsBreaches() for
+     * why it is named rather than imported, and when the indirection goes.
+     */
+    private const RESOLVER = 'App\\Services\\CsvImport\\ProductMappingResolver';
+
+    private const BOUNDS_BREACHES = 'boundsBreaches';
+
+    /**
      * Phases this class will pick up and move along.
      *
      * @var list<string>
      */
     public const WORKABLE_PHASES = ['assembled', 'staging', 'awaiting_mapping', 'importing_customers', 'importing_loans'];
+
+    /**
+     * Whether the missing-bounds-check warning has already been logged.
+     *
+     * Per INSTANCE, not per class: one line per command invocation is the
+     * useful amount, where a static would say it once per process (and then
+     * never again in a long-lived worker) and no guard at all would say it once
+     * per loan — twelve thousand identical warnings in a file that never
+     * rotates.
+     */
+    private bool $boundsCheckerReported = false;
 
     public function __construct(
         private readonly CsvImportStager $stager = new CsvImportStager,
@@ -536,12 +596,23 @@ class CsvImportProcessor
 
                 return count($rows);
             } catch (Throwable $e) {
+                // ImportErrorDigest, never $e->getMessage() — a QueryException's
+                // message is the failing SQL with the bindings substituted, so
+                // interpolating it here writes up to fifty members' full records
+                // into a log file that never rotates. See that class.
+                $context = ImportErrorDigest::context($e);
+
                 Log::warning('csv-import: chunk rolled back, isolating its rows', [
                     'csv_import_run_id' => $run->id,
                     'shape' => $shape,
                     'rows' => count($workable),
                     'from_row_id' => $workable[0]->id,
-                    'exception' => $e->getMessage(),
+                ] + $context);
+
+                ImportErrorDigest::recordDiagnostics($e, [
+                    'csv_import_run_id' => $run->id,
+                    'shape' => $shape,
+                    'from_row_id' => $workable[0]->id,
                 ]);
             }
         }
@@ -550,18 +621,35 @@ class CsvImportProcessor
             try {
                 DB::transaction(fn () => $this->writeChunk($run, [$row], $shape));
             } catch (Throwable $e) {
+                $context = ImportErrorDigest::context($e);
+
                 Log::warning('csv-import: row failed and was isolated', [
                     'csv_import_run_id' => $run->id,
                     'csv_import_row_id' => $row->id,
                     'line_number' => $row->line_number,
-                    'exception' => $e->getMessage(),
+                ] + $context);
+
+                ImportErrorDigest::recordDiagnostics($e, [
+                    'csv_import_run_id' => $run->id,
+                    'csv_import_row_id' => $row->id,
+                    'line_number' => $row->line_number,
                 ]);
 
                 // Stamped in its OWN transaction, after the failed one rolled
                 // back. Writing it inside would have rolled back with the work
                 // and left the row looking untouched, which is how a bad row
                 // gets picked up forever.
-                $this->stamp($row, RowOutcome::failed('exception', $e->getMessage()));
+                //
+                // The stamp is fixed prose keyed to the line number, NOT the
+                // exception message: this column is rendered by the admin error
+                // screen and streamed by `errors.csv`, so a driver message
+                // landing in it hands the member's own record back to the
+                // browser. The line number is what makes it actionable; the
+                // driver's numeric code is the only variable part.
+                $this->stamp($row, RowOutcome::failed(
+                    'exception',
+                    ImportErrorDigest::forRow($e, (int) $row->line_number),
+                ));
             }
         }
 
@@ -595,6 +683,20 @@ class CsvImportProcessor
         // `withoutEvents()`/`saveQuietly()` would have taken the pledge with it,
         // silently, and `pledges:backfill` hardcodes amount = 0 so it could
         // never be recovered. One summary audit row is written per run instead.
+        //
+        // THE SUPPRESSION IS PROCESS-WIDE, NOT MODEL-WIDE. It is a single static
+        // flag on AuditLogService (deliberately — a static declared on the trait
+        // would be a separate variable per model and could never cover Borrower
+        // and Loan at once), so for the duration of this callback NOTHING
+        // auditable writes an audit row, whether this method knows about it or
+        // not. Today that is Borrower, Loan and the share capital pledge.
+        //
+        // The moment somebody adds co-makers, collateral, a document record or
+        // any other Auditable model to the import, those silently lose their
+        // audit rows too. There is no error and no warning; the only symptom is
+        // an absence in `audit_logs` that nobody notices until an auditor asks.
+        // If you add a write here, decide explicitly whether it belongs in the
+        // run's summary row (self::finalise()) and put it there.
         AuditLogService::withoutModelAuditing(function () use ($run, $rows, $shape): void {
             foreach ($rows as $row) {
                 $outcome = $shape === CsvImportSchema::CUSTOMERS
@@ -687,7 +789,20 @@ class CsvImportProcessor
              * a state where none of it is visible.
              */
             'status' => 'active',
-        ]);
+            /*
+             * ...and WHO admitted them, and WHEN. See
+             * CsvImportRun::admissionStamp(), which owns both values.
+             *
+             * `status = 'active'` on its own says a member was admitted while
+             * `approved_at`/`approved_by` say nobody admitted them on no date,
+             * which is not a gap in the record so much as a contradiction in it.
+             * It is also not a stable gap: `registrations:backfill-approvals`
+             * fills `whereNull('approved_at')` with `created_at` and a null
+             * approver, so leaving these blank would let a later housekeeping
+             * command invent an admission dated to the night of the upload.
+             * Stamping here is what makes that command skip them.
+             */
+        ] + $run->admissionStamp());
 
         return RowOutcome::imported(
             borrowerId: $borrower->id,
@@ -877,12 +992,123 @@ class CsvImportProcessor
             $schedule->warnings,
         ));
 
+        /*
+         * Which of LoanService::createLoan()'s bounds this loan breaks, if any.
+         *
+         * The importer deliberately bypasses createLoan() — a migration has to
+         * be able to carry a decade of loans that today's product configuration
+         * would refuse, and refusing them would strand the members those loans
+         * belong to. But bypassing the guard is not the same as pretending it
+         * passed, so the breach is RECORDED and the loan is written anyway.
+         *
+         * `term_in_months` and not $schedule->term: the bounds on a product are
+         * expressed in months and the admin is looking at the months column in
+         * their own file. The reconstructed period count is a different number
+         * in a different unit and comparing it here would report breaches that
+         * are not there for every non-monthly loan.
+         */
+        $breaches = $this->boundsBreaches(
+            $product,
+            $principal,
+            $normalized->value('term_in_months'),
+            $normalized->value('interest_rate'),
+        );
+
+        $messages = $warnings === [] ? [] : [$this->joinNotes($warnings)];
+
+        if ($breaches !== []) {
+            $messages[] = "This loan is outside the bounds configured on [{$product->name}] ("
+                .implode(', ', $breaches).'). It was imported exactly as the file states it — a migration carries '
+                .'the existing book across rather than re-underwriting it — but the same figures typed into the '
+                .'new loan form would be refused.';
+        }
+
         return RowOutcome::imported(
             borrowerId: $borrower->id,
             loanId: $loan->id,
-            category: $warnings === [] ? null : 'imported_with_warnings',
-            message: $warnings === [] ? null : $this->joinNotes($warnings),
+            /*
+             * A bounds breach OUTRANKS `imported_with_warnings`, and the order
+             * is the whole point. Every normalisation warning is already on the
+             * row in `normalized.warnings` and survives whatever category it is
+             * filed under; a bounds breach has no other trace anywhere. Filing
+             * it under the weaker category because the row also happened to
+             * warn about a phone number would be the one way to lose it.
+             */
+            category: $breaches !== []
+                ? self::CATEGORY_OUT_OF_PRODUCT_BOUNDS
+                : ($warnings === [] ? null : 'imported_with_warnings'),
+            message: $messages === [] ? null : implode(' ', $messages),
         );
+    }
+
+    /**
+     * Delegated to ProductMappingResolver, and NOT reimplemented here.
+     *
+     * The mapping screen forecasts the damage before the run — "288 loans will
+     * disagree with their product" — and this stamps the rows it actually
+     * turned out to be. Two copies of the arithmetic is precisely how the screen
+     * promises 288 and the error report lists 291, with nobody able to say which
+     * is lying. They cannot disagree while they are the same function.
+     *
+     * ## Why it is reached by name
+     *
+     * Same shape, and the same reasoning, as
+     * ProcessCsvImports::resolveStorageSweep(): the resolver lands on a
+     * different branch, so during the merge window the class genuinely is not
+     * here, and an import that fatals on every loan row would be a far worse
+     * outcome than one that reports no breaches. Unlike that one, however, this
+     * indirection IS temporary — post-merge the resolver is a hard dependency of
+     * the mapping screen and always present, so once both branches are on
+     * `csv-import/backend` this method should collapse to a direct
+     * `ProductMappingResolver::boundsBreaches(...)` call, and self::RESOLVER,
+     * self::BOUNDS_CHECKER and $this->boundsCheckerReported should all go with
+     * it. The test binds self::BOUNDS_CHECKER, so it keeps passing either way.
+     *
+     * @return list<string>
+     */
+    private function boundsBreaches(LoanProduct $product, mixed $amountCentavos, mixed $term, mixed $rate): array
+    {
+        $checker = $this->resolveBoundsChecker();
+
+        if ($checker === null) {
+            if (! $this->boundsCheckerReported) {
+                $this->boundsCheckerReported = true;
+
+                Log::warning('csv-import: could not reach the product bounds check', [
+                    'resolver' => self::RESOLVER,
+                    'method' => self::BOUNDS_BREACHES,
+                    'consequence' => 'Loans that disagree with their mapped product are being imported without '
+                        .'being flagged, so the mapping screen\'s forecast has nothing to expand into.',
+                ]);
+            }
+
+            return [];
+        }
+
+        $breaches = $checker($product, $amountCentavos, $term, $rate);
+
+        return is_array($breaches)
+            ? array_values(array_map(static fn ($breach): string => (string) $breach, $breaches))
+            : [];
+    }
+
+    /**
+     * A bound override first, so the behaviour is testable before the two
+     * branches meet; the class check is what takes over afterwards. Resolved by
+     * name rather than through an import, because an import of a class that is
+     * not on this branch yet is a lie to every reader and every tool.
+     */
+    private function resolveBoundsChecker(): ?callable
+    {
+        if (app()->bound(self::BOUNDS_CHECKER)) {
+            $bound = app(self::BOUNDS_CHECKER);
+
+            return is_callable($bound) ? $bound : null;
+        }
+
+        return class_exists(self::RESOLVER) && method_exists(self::RESOLVER, self::BOUNDS_BREACHES)
+            ? [self::RESOLVER, self::BOUNDS_BREACHES]
+            : null;
     }
 
     /**
@@ -1008,55 +1234,9 @@ class CsvImportProcessor
         $run->forceFill(['cursor_row_id' => $rows[array_key_last($rows)]->id])->save();
     }
 
-    /**
-     * Finish the run: one summary audit row, then the terminal phase, together.
-     *
-     * Both inside a transaction taken under a row lock, so two overlapping
-     * schedulers cannot both see a live run and both write the summary. The
-     * phase is re-read under the lock rather than trusted from the model that
-     * was loaded a minute ago.
-     */
     private function completeRun(CsvImportRun $run): ImportTick
     {
-        DB::transaction(function () use ($run): void {
-            $locked = CsvImportRun::query()->whereKey($run->id)->lockForUpdate()->first();
-
-            if ($locked === null || in_array($locked->phase, self::TERMINAL_PHASES, true)) {
-                return;
-            }
-
-            $summary = $this->summarise($locked);
-
-            /*
-             * ONE audit row for the whole run.
-             *
-             * The per-model rows were suppressed in writeChunk(), so this is the
-             * only trace in `audit_logs` that a cooperative's entire membership
-             * and loan book appeared in one night — which makes it the row an
-             * auditor will actually ask about.
-             *
-             * `initiated_by` and `initiated_ip` are passed explicitly because
-             * this runs from the scheduler: there is no `auth()` user and no
-             * inbound request, so the defaults inside AuditLogService would name
-             * nobody and come from nowhere. They were captured on the run when
-             * the admin asked for the work.
-             */
-            AuditLogService::log(
-                action: 'csv_import_completed',
-                auditable: $locked,
-                newValues: $summary,
-                description: "CSV migration run #{$locked->id} completed: "
-                    ."{$summary['borrowers_imported']} member(s) and {$summary['loans_imported']} loan(s) imported.",
-                userId: $locked->initiated_by,
-                ipAddress: $locked->initiated_ip,
-            );
-
-            $locked->forceFill([
-                'phase' => 'completed',
-                'finished_at' => now(),
-                'notes' => array_merge((array) $locked->notes, [self::NOTE_SUMMARY => $summary]),
-            ])->save();
-        });
+        $this->finalise($run, 'completed');
 
         $run->refresh();
 
@@ -1066,6 +1246,135 @@ class CsvImportProcessor
         ]);
 
         return new ImportTick('completed', 0, idle: true, note: 'Run completed.');
+    }
+
+    /**
+     * End a run: one summary audit row, then the terminal phase, together.
+     *
+     * ## Every way a run can end comes through here
+     *
+     * This used to live inside completeRun(), which meant the summary row was
+     * written on exactly ONE of the four ways a run can reach a terminal phase.
+     * The other three wrote nothing at all:
+     *
+     *  - anything throwing out of advance(), which the command catches and
+     *    writes off as `failed`;
+     *  - the 14-day abandoned sweep;
+     *  - an operator cancelling after staging.
+     *
+     * None of those is exotic, and all three are reachable with members already
+     * created: a run can import two thousand borrowers, go idle in
+     * `importing_loans`, be swept a fortnight later, and leave `audit_logs`
+     * completely empty. Two thousand member records created, the run written
+     * off, and no trace anywhere that it happened.
+     *
+     * That is the whole point of the row. The per-model audit rows were
+     * suppressed in writeChunk(), so this is the ONLY entry in `audit_logs`
+     * saying a cooperative's membership and loan book appeared in one night. It
+     * carries the same summarise() counts whatever the outcome, because how much
+     * was written before a run died is exactly what an auditor asks about — a
+     * failed run is not an empty one.
+     *
+     * ## Why it is public
+     *
+     * The cancel path lives on CsvImportUploadService, which is a different
+     * class on a different branch. It calls this rather than growing its own
+     * copy: one shape, one owner, and no way for the two to drift into
+     * disagreeing about what a run's summary means.
+     *
+     * ## Locking
+     *
+     * The audit row and the phase are written in one transaction taken under a
+     * row lock, and the phase is RE-READ under that lock rather than trusted
+     * from a model loaded a minute ago. Two overlapping schedulers, or a cancel
+     * racing a completion, therefore produce one summary row and not two — the
+     * loser sees a terminal phase and returns.
+     *
+     * @param  string  $phase  One of self::TERMINAL_PHASES.
+     * @param  string|null  $failureReason  Persisted to `failure_reason`. MUST
+     *                                      already be safe to show a browser —
+     *                                      see ImportErrorDigest.
+     * @param  int|null  $userId  Defaults to the run's initiator. The scheduler
+     *                            has no `auth()` user, so the accountable human
+     *                            has to come off the run, where it was captured
+     *                            when they asked for the work. An HTTP caller
+     *                            (cancel) should pass the actor instead.
+     * @param  string|null  $ipAddress  Same, for `initiated_ip`.
+     * @return CsvImportRun|null The finalised run, or null if it was already
+     *                           terminal (or gone) and this call did nothing.
+     *
+     * @throws LogicException when $phase is not terminal
+     */
+    public function finalise(
+        CsvImportRun $run,
+        string $phase,
+        ?string $failureReason = null,
+        ?int $userId = null,
+        ?string $ipAddress = null,
+    ): ?CsvImportRun {
+        if (! in_array($phase, self::TERMINAL_PHASES, true)) {
+            throw new LogicException(
+                "finalise() ends a run, so [{$phase}] must be one of ["
+                .implode(', ', self::TERMINAL_PHASES).']. Use setPhase() to move a run along instead.'
+            );
+        }
+
+        return DB::transaction(function () use ($run, $phase, $failureReason, $userId, $ipAddress): ?CsvImportRun {
+            $locked = CsvImportRun::query()->whereKey($run->id)->lockForUpdate()->first();
+
+            if ($locked === null || in_array($locked->phase, self::TERMINAL_PHASES, true)) {
+                return null;
+            }
+
+            $summary = $this->summarise($locked);
+            $newValues = $failureReason === null ? $summary : $summary + ['failure_reason' => $failureReason];
+
+            AuditLogService::log(
+                action: self::FINAL_ACTIONS[$phase],
+                auditable: $locked,
+                newValues: $newValues,
+                description: $this->finalDescription($locked, $phase, $summary),
+                userId: $userId ?? $locked->initiated_by,
+                ipAddress: $ipAddress ?? $locked->initiated_ip,
+            );
+
+            $attributes = [
+                'phase' => $phase,
+                'finished_at' => now(),
+                // The counts go on the run as well as in the audit row: the
+                // status screen is where somebody asks "how far did it get"
+                // about a run that did not finish.
+                'notes' => array_merge((array) $locked->notes, [self::NOTE_SUMMARY => $summary]),
+            ];
+
+            if ($failureReason !== null) {
+                $attributes['failure_reason'] = mb_substr($failureReason, 0, 2000);
+            }
+
+            $locked->forceFill($attributes)->save();
+
+            return $locked;
+        });
+    }
+
+    /**
+     * The audit row's human sentence.
+     *
+     * The counts are stated for every outcome, not just the happy one: "failed"
+     * on its own invites the reading that nothing was written, and on this
+     * importer that is usually false.
+     *
+     * @param  array<string, mixed>  $summary
+     */
+    private function finalDescription(CsvImportRun $run, string $phase, array $summary): string
+    {
+        $written = "{$summary['borrowers_imported']} member(s) and {$summary['loans_imported']} loan(s)";
+
+        return match ($phase) {
+            'completed' => "CSV migration run #{$run->id} completed: {$written} imported.",
+            'failed' => "CSV migration run #{$run->id} failed: {$written} had already been imported when it stopped.",
+            'cancelled' => "CSV migration run #{$run->id} cancelled: {$written} had already been imported when it was cancelled.",
+        };
     }
 
     /**

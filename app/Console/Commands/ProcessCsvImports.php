@@ -4,6 +4,7 @@ namespace App\Console\Commands;
 
 use App\Models\CsvImportRun;
 use App\Services\CsvImport\CsvImportProcessor;
+use App\Services\CsvImport\ImportErrorDigest;
 use Illuminate\Console\Attributes\Description;
 use Illuminate\Console\Attributes\Signature;
 use Illuminate\Console\Command;
@@ -30,6 +31,19 @@ use Throwable;
  * actually running. If a worker is ever deployed this can become a job; until
  * then, dispatching one would be a bug that looks like a feature.
  *
+ * CONVERTING IT TO A JOB REQUIRES RE-REVIEWING AuditLogService's SUPPRESSION
+ * FLAG, and this is not a formality. `AuditLogService::$modelAuditingSuppressed`
+ * is a static, so its scope is the PHP PROCESS, not the run — while
+ * CsvImportProcessor::writeChunk() holds it, nothing anywhere in that process
+ * writes a model audit row. It cannot leak today for one reason only: the
+ * scheduler forks its own OS process per command and there is no queue worker,
+ * so the only thing alive in that process is this import. A queue worker is the
+ * opposite — one long-lived process handling many jobs, and if a job ever runs
+ * concurrently with the import (or the flag is left set by an unusual exit), a
+ * teller's borrower edit handled in the same worker loses its audit row
+ * silently. Before this becomes a job, that flag has to move to something with
+ * a narrower scope than the process.
+ *
  * ## Why it returns quickly
  *
  * `withoutOverlapping(10)` takes a cache lock for the length of the run and
@@ -51,18 +65,37 @@ use Throwable;
  * completion — is logged there. Console output is kept as well, for the case
  * where an operator runs this by hand.
  *
- * ## Why it never writes a file
+ * ## Why it never CREATES a file
  *
  * The scheduler runs as root; php-fpm runs as www-data. Anything root creates
  * under `storage/app/private` is root-owned 0600 and the web process can never
- * read it back — and that only shows up in production. This command and
- * everything it calls read from disk and write only to the database.
+ * read it back — and that only shows up in production. So this command, and
+ * everything it calls, creates no file on the private disk.
  *
- * That is about CREATING files, and the distinction is load-bearing: unlinking
- * creates nothing and needs only write permission on the parent directory,
- * which root has unconditionally. So a scheduled sweep DELETING import files is
- * safe, and this command does reach one — see self::releaseOrphanedStorage().
- * What is unsafe is deleting the row that points at them.
+ * CREATES is the whole of the rule, and the two things it does NOT say are both
+ * true of this command today:
+ *
+ *  - IT RESOLVES THE `private` DISK, AND RESOLVING IT MKDIRS THE ROOT.
+ *    FilesystemManager::createLocalDriver() builds the adapter with
+ *    `$lazyRootCreation = false`, so `Storage::disk('private')` creates
+ *    `storage/app/private` if it is absent — no read and no write required.
+ *    CsvImportReader::readFromDisk() does exactly that, from this command. On a
+ *    box where that directory already exists this is a no-op; on a fresh
+ *    deployment where the scheduler ticks before the first upload, root creates
+ *    the disk root itself and www-data is locked out of it. Deployment must
+ *    therefore keep creating and chowning `storage/app/private` before anything
+ *    runs, and this is why.
+ *  - IT DELETES FROM THAT DISK, VIA A LISTENER IT DOES NOT CALL DIRECTLY.
+ *    CsvImportUploadService listens for a run reaching a terminal phase and
+ *    releases its files, so self::writeOff() and self::pruneAbandonedRuns()
+ *    both cause real unlinks when they save a run. self::releaseOrphanedStorage()
+ *    then reconciles what the listener missed.
+ *
+ * Deleting is safe where creating is not: unlinking creates nothing and needs
+ * only write permission on the parent directory, which root has unconditionally.
+ * The uid reasoning above is still the right rule — it is a rule about
+ * ownership of NEW files, and nothing more. What is unsafe is deleting the row
+ * that points at them.
  *
  * THE LOG FILE IS THE ONE EXCEPTION, and it is a standing hazard rather than a
  * present fault. This command runs as root and logs heavily by design (above),
@@ -137,7 +170,7 @@ class ProcessCsvImports extends Command
         $this->info("Advanced {$runs->count()} run(s), {$rows} row(s), in {$elapsed}s.");
 
         if (! $this->option('no-prune')) {
-            $this->pruneAbandonedRuns((int) $this->option('prune-days'));
+            $this->pruneAbandonedRuns($processor, (int) $this->option('prune-days'));
             $this->releaseOrphanedStorage();
         }
 
@@ -190,15 +223,26 @@ class ProcessCsvImports extends Command
                 $run->refresh();
             }
         } catch (Throwable $e) {
+            // Never $e->getMessage(). A QueryException's message is the failing
+            // SQL with the bindings substituted in, so on this command that is a
+            // member's whole record — and it would land in the log, in
+            // `failure_reason`, and on an operator's terminal. See
+            // ImportErrorDigest.
+            $reason = ImportErrorDigest::forRun($e, $run->id);
+
             Log::error('imports:process could not advance a run', [
                 'csv_import_run_id' => $run->id,
                 'phase' => $run->phase,
-                'exception' => $e->getMessage(),
+            ] + ImportErrorDigest::context($e));
+
+            ImportErrorDigest::recordDiagnostics($e, [
+                'csv_import_run_id' => $run->id,
+                'phase' => $run->phase,
             ]);
 
-            $this->error("  run #{$run->id} failed: {$e->getMessage()}");
+            $this->error("  run #{$run->id} failed: {$reason}");
 
-            $this->writeOff($run, $e->getMessage());
+            $this->writeOff($processor, $run, $reason);
         }
 
         return $rows;
@@ -223,8 +267,37 @@ class ProcessCsvImports extends Command
         return (microtime(true) - $startedAt) >= $maxSeconds || $rows >= $maxRows;
     }
 
-    private function writeOff(CsvImportRun $run, string $reason): void
+    /**
+     * Write a run off as `failed`, with its summary audit row.
+     *
+     * Through CsvImportProcessor::finalise() rather than a bare save, because
+     * this path is reachable with thousands of members already created and it
+     * used to leave `audit_logs` completely empty when it was. The processor
+     * owns the shape of that row; this only supplies the outcome.
+     *
+     * The fallback is not belt-and-braces. finalise() writes an audit row, and
+     * this method is called precisely when the database has just misbehaved — so
+     * if it throws, the run must STILL reach a terminal phase, or the next tick
+     * picks it up, throws again, and the run wedges the scheduler every minute
+     * forever. A written-off run with no audit row is bad; an un-writable-off
+     * run is worse.
+     *
+     * @param  string  $reason  Already sanitised by ImportErrorDigest — this is
+     *                          persisted to a column the status endpoint returns.
+     */
+    private function writeOff(CsvImportProcessor $processor, CsvImportRun $run, string $reason): void
     {
+        try {
+            $processor->finalise($run, 'failed', $reason);
+
+            return;
+        } catch (Throwable $e) {
+            Log::error('imports:process could not write the summary for a failed run', [
+                'csv_import_run_id' => $run->id,
+                'consequence' => 'The run is being marked failed without its audit row.',
+            ] + ImportErrorDigest::context($e));
+        }
+
         try {
             $run->forceFill([
                 'phase' => 'failed',
@@ -234,8 +307,7 @@ class ProcessCsvImports extends Command
         } catch (Throwable $e) {
             Log::error('imports:process could not even mark a run failed', [
                 'csv_import_run_id' => $run->id,
-                'exception' => $e->getMessage(),
-            ]);
+            ] + ImportErrorDigest::context($e));
         }
     }
 
@@ -270,7 +342,7 @@ class ProcessCsvImports extends Command
      * Guarded and logged: a failure here must not take the import work with it,
      * because the import work is the point of the command.
      */
-    private function pruneAbandonedRuns(int $days): void
+    private function pruneAbandonedRuns(CsvImportProcessor $processor, int $days): void
     {
         if ($days < 1) {
             return;
@@ -284,6 +356,8 @@ class ProcessCsvImports extends Command
                 ->where('updated_at', '<', $cutoff)
                 ->get();
 
+            $swept = 0;
+
             foreach ($abandoned as $run) {
                 // Captured before the save: Eloquent re-syncs `original` on
                 // write, so reading them afterwards would report the values this
@@ -291,12 +365,26 @@ class ProcessCsvImports extends Command
                 $wasPhase = $run->phase;
                 $lastSeen = $run->updated_at?->toDateTimeString();
 
-                $run->forceFill([
-                    'phase' => 'failed',
-                    'finished_at' => now(),
-                    'failure_reason' => "Abandoned: no activity for {$days} days while in phase [{$wasPhase}]. "
-                        .'The uploaded files and staged rows were left in place; start a new run to continue.',
-                ])->save();
+                // Through the processor, so a run swept after importing two
+                // thousand members still leaves the one audit row saying so. It
+                // used to leave none: this sweep wrote `failed` and nothing
+                // else, and the per-model rows had already been suppressed
+                // during the import.
+                $finalised = $processor->finalise(
+                    $run,
+                    'failed',
+                    "Abandoned: no activity for {$days} days while in phase [{$wasPhase}]. "
+                    .'The uploaded files and staged rows were left in place; start a new run to continue.',
+                );
+
+                if ($finalised === null) {
+                    // Somebody else reached it first between the SELECT above
+                    // and the lock inside finalise() — a cancel, or an
+                    // overlapping tick. Nothing to do and nothing wrong.
+                    continue;
+                }
+
+                $swept++;
 
                 Log::warning('imports:process wrote off an abandoned run', [
                     'csv_import_run_id' => $run->id,
@@ -305,13 +393,13 @@ class ProcessCsvImports extends Command
                 ]);
             }
 
-            if ($abandoned->isNotEmpty()) {
-                $this->warn("Wrote off {$abandoned->count()} abandoned run(s).");
+            if ($swept > 0) {
+                $this->warn("Wrote off {$swept} abandoned run(s).");
             }
         } catch (Throwable $e) {
-            Log::error('imports:process abandoned-run sweep failed', [
-                'exception' => $e->getMessage(),
-            ]);
+            Log::error('imports:process abandoned-run sweep failed', ImportErrorDigest::context($e));
+
+            ImportErrorDigest::recordDiagnostics($e, ['sweep' => 'abandoned-runs']);
         }
     }
 
@@ -321,14 +409,20 @@ class ProcessCsvImports extends Command
      * ## Why this lives here
      *
      * The upload service releases a run's storage when the run reaches a
-     * terminal phase, driven by a model event. That listener does not fire for
-     * this command: `Model::query()->update()` is a mass update and Eloquent
-     * dispatches NO model events for it, so the runs self::pruneAbandonedRuns()
-     * writes off go straight to `failed` in SQL with nothing listening. The
-     * upload engineer proved that on real disk — assembled run, mass update,
-     * files still sitting there — and answered it with a RECONCILING sweep
-     * rather than another listener, which is the right shape: it looks at what
-     * is actually on disk instead of trusting that an event fired.
+     * terminal phase, driven by a model event. This command's paths DO fire that
+     * listener — self::writeOff() and self::pruneAbandonedRuns() both go through
+     * CsvImportProcessor::finalise(), which saves the model — so the listener is
+     * the primary mechanism here and this is not a replacement for it.
+     *
+     * It is a RECONCILING backstop, and that is the right shape: it looks at
+     * what is actually on disk instead of trusting that an event fired. The
+     * upload engineer built it after proving the gap on real disk, with
+     * `Model::query()->update()` — a mass update, for which Eloquent dispatches
+     * NO model events at all. Nothing here uses one today, but a future
+     * `whereIn(...)->update(['phase' => 'failed'])` looks like an obvious
+     * optimisation of the loop below and would silently take the listener out of
+     * the picture. This sweep is what makes that a slow cleanup rather than
+     * member PII left on disk indefinitely.
      *
      * He calls it when a new import is created, so the disk is clean at the
      * start of every run. That leaves exactly one gap, and it is the one this
@@ -342,22 +436,33 @@ class ProcessCsvImports extends Command
      * self::pruneAbandonedRuns() for why that is not a contradiction of the
      * class docblock.
      *
-     * ## Why it is guarded
+     * ## Why it is guarded, and why the indirection STAYS
      *
-     * Guarded twice over, and both guards earn their place:
+     * Guarded twice over, and both guards earn their place permanently:
      *
-     *  - RESOLUTION. The sweep lands on a different branch to this command, so
-     *    during the merge window the class genuinely is not here. Skipping is
-     *    the only option, but it is skipped LOUDLY — a silent no-op is how a
-     *    bad merge turns into member PII sitting on disk forever, which is the
-     *    exact failure this method exists to prevent.
+     *  - RESOLUTION. Skipped LOUDLY when the sweep cannot be reached — a
+     *    warning naming the consequence in words, because a silent no-op is how
+     *    this turns into member PII sitting on disk forever, which is the exact
+     *    failure the method exists to prevent. It began as merge-window
+     *    scaffolding, but that is not why it is still here: a typed hard
+     *    dependency would fatal the whole tick, taking the IMPORT down with the
+     *    housekeeping, and this command's standing rule is that housekeeping is
+     *    never allowed to do that. Failing loudly and carrying on is strictly
+     *    better than failing fatally.
      *  - EXECUTION. Somebody else's abandoned upload failing to clean up must
-     *    never fail this tick or block the next import. The import work is the
-     *    point of the command; housekeeping is not allowed to take it down.
+     *    never fail this tick or block the next import.
      *
-     * The resolution guard is merge-window scaffolding. Once both branches are
-     * on `csv-import/backend`, replace it with a constructor-injected
-     * CsvImportUploadService and keep only the try/catch.
+     * AN EARLIER VERSION OF THIS COMMENT TOLD YOU TO REPLACE THE INDIRECTION
+     * WITH A CONSTRUCTOR-INJECTED CsvImportUploadService ONCE THE BRANCHES MET.
+     * That instruction was wrong and has been withdrawn — it was tried against
+     * the merged tree and reverted. A typed constructor parameter rejects the
+     * anonymous-class doubles the tests bind to self::UPLOAD_SERVICE (they are
+     * deliberately not subclasses: the point of those tests is that this command
+     * calls a NAMED METHOD on whatever is bound, and a subclass would test
+     * inheritance instead). Resolving through `app()` with a typed property
+     * changes nothing at all. So the choice is between rewriting working tests
+     * to permit a change with no benefit, or keeping a seam that already
+     * degrades correctly. Keep the seam.
      */
     private function releaseOrphanedStorage(): void
     {
@@ -377,9 +482,9 @@ class ProcessCsvImports extends Command
         try {
             $sweep->{self::STORAGE_SWEEP}();
         } catch (Throwable $e) {
-            Log::error('imports:process orphaned-storage sweep failed', [
-                'exception' => $e->getMessage(),
-            ]);
+            Log::error('imports:process orphaned-storage sweep failed', ImportErrorDigest::context($e));
+
+            ImportErrorDigest::recordDiagnostics($e, ['sweep' => 'orphaned-storage']);
         }
     }
 

@@ -273,6 +273,40 @@ class RowNormalizerTest extends TestCase
         $this->assertStringContainsString('09281234567', $warning['message']);
     }
 
+    /**
+     * A placeholder is not a list of numbers, and must not be reported as one.
+     *
+     * `/` is one of the separators, so `N/A` splits into `N` and `A` — two
+     * non-empty parts — and the cell used to be reported as holding more than
+     * one number, of which the import "kept N and dropped A". Nonsense, and then
+     * reported as invalid as well, so the operator got two warnings where one is
+     * true.
+     *
+     * The behaviour was never wrong: the member imports with a blank number
+     * either way. The REPORT was wrong, and the report is the whole recovery
+     * mechanism for a migration — one line an admin can see is nonsense is how
+     * they learn to stop reading the rest.
+     */
+    public function test_a_placeholder_contact_number_warns_once_and_does_not_claim_it_held_two_numbers(): void
+    {
+        foreach (['N/A', 'n/a', 'none', 'N / A'] as $placeholder) {
+            $row = $this->customerRow(['contact_number' => $placeholder]);
+            $codes = array_column($row->warningsToArray(), 'code');
+
+            $this->assertTrue($row->isValid(), "[{$placeholder}] must still import the member.");
+            $this->assertNull($row->value('contact_number'));
+
+            $this->assertNotContains('contact_number_multiple', $codes,
+                "[{$placeholder}] was reported as holding more than one number.");
+            $this->assertContains('contact_number_invalid', $codes);
+            $this->assertSame(
+                ['contact_number_invalid'],
+                array_values(array_filter($codes, static fn (string $code): bool => str_starts_with($code, 'contact_number_'))),
+                "[{$placeholder}] produced more than one contact number warning."
+            );
+        }
+    }
+
     public function test_an_invalid_email_is_downgraded_to_null_with_a_warning(): void
     {
         $row = $this->customerRow(['email' => 'juan(at)example.com']);

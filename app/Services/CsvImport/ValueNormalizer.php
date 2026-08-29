@@ -375,15 +375,31 @@ class ValueNormalizer
             return null;
         }
 
-        if (count($parts) > 1) {
-            $dropped = implode(', ', array_slice($parts, 1));
-            $notes->warn($field, 'contact_number_multiple', "\"{$original}\" holds more than one number. The first was kept and \"{$dropped}\" dropped — the field stores only 20 characters, which is less than two mobile numbers.");
-        }
-
         $candidate = $parts[0];
         $prefix = str_starts_with($candidate, '+') ? '+' : '';
         $digits = (string) preg_replace('/\D/', '', $candidate);
         $normalized = $prefix.$digits;
+
+        /*
+         * Only claim the cell held a LIST of numbers if the part that was kept
+         * is one.
+         *
+         * The separators include `/`, so `N/A` splits into `N` and `A` — two
+         * non-empty parts — and the cell is reported as holding more than one
+         * number, of which Lendyph "kept N and dropped A". It then fails the
+         * regex and is reported as invalid as well. The member imports correctly
+         * with a blank number either way, so this is purely about the report
+         * — and the report is the entire recovery mechanism for a migration.
+         * One obviously-wrong line is how an operator learns to stop reading it.
+         *
+         * If the kept part has no digits in it at all, the value was never a
+         * list of numbers; the single contact_number_invalid warning below tells
+         * the whole truth on its own.
+         */
+        if (count($parts) > 1 && $digits !== '') {
+            $dropped = implode(', ', array_slice($parts, 1));
+            $notes->warn($field, 'contact_number_multiple', "\"{$original}\" holds more than one number. The first was kept and \"{$dropped}\" dropped — the field stores only 20 characters, which is less than two mobile numbers.");
+        }
 
         if ($normalized !== '' && preg_match(self::CONTACT_NUMBER_REGEX, $normalized) === 1) {
             return $normalized;

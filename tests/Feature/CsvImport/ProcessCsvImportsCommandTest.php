@@ -8,6 +8,7 @@ use App\Models\Borrower;
 use App\Models\CsvImportRow;
 use App\Models\CsvImportRun;
 use App\Models\LoanProduct;
+use App\Models\User;
 use App\Services\CsvImport\CsvImportProcessor;
 use App\Services\CsvImport\CsvImportSchema;
 use App\Services\CsvImport\CsvImportStager;
@@ -19,6 +20,7 @@ use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Storage;
+use LogicException;
 use ReflectionClass;
 use RuntimeException;
 use Tests\TestCase;
@@ -380,6 +382,233 @@ class ProcessCsvImportsCommandTest extends TestCase
         $this->assertNotNull($broken->fresh()->failure_reason);
         $this->assertSame('completed', $healthy->fresh()->phase);
         $this->assertSame(1, Borrower::where('external_account_no', 'B-001')->count());
+    }
+
+    /**
+     * Import two members and leave the run part-way through, in `importing_loans`
+     * with its loans still to do — the ordinary state a run is in when the
+     * scheduler stops running for a fortnight.
+     */
+    private function runStalledAfterImportingTwoMembers(): CsvImportRun
+    {
+        $product = LoanProduct::factory()->create(['name' => 'Salary Loan', 'interest_rate' => 3.0, 'interest_method' => 'straight', 'term' => 6, 'frequency' => 'monthly', 'min_amount' => 1000, 'max_amount' => 1000000]);
+        $run = $this->makeRun(['product_mapping' => ['Salary Loan' => $product->id]]);
+
+        $this->makeFile($run, 'customers', [$this->customerRow('A-001'), $this->customerRow('A-002')]);
+        $this->makeFile($run, 'loans', [$this->loanRow('A-001', 'L-1'), $this->loanRow('A-002', 'L-2')]);
+
+        // Stopped at the transition itself, before a single loan row is
+        // touched: the point is a run left part-way, with work outstanding.
+        $processor = app(CsvImportProcessor::class);
+
+        for ($tick = 0; $tick < 50 && $run->phase !== 'importing_loans'; $tick++) {
+            $advanced = $processor->advance($run);
+            $run->refresh();
+
+            if ($advanced->idle && $run->phase !== 'importing_loans') {
+                $this->fail("The run went idle in [{$run->phase}] instead of reaching the loans phase.");
+            }
+        }
+
+        $this->assertSame('importing_loans', $run->phase);
+        $this->assertSame(2, Borrower::whereNotNull('external_account_no')->count());
+
+        // The state the finding is about: two members' full records created, and
+        // nothing in `audit_logs` to say so. The per-model rows were suppressed
+        // during the import, so the run's own summary is the only trace there
+        // will ever be — and it is only written when the run ends.
+        $this->assertSame(0, $this->summaryAuditCount());
+
+        return $run;
+    }
+
+    /**
+     * Rows written by CsvImportProcessor::finalise(), and nothing else — the
+     * seeded fixtures write audit rows of their own and they are not the
+     * subject here.
+     */
+    private function summaryAuditCount(): int
+    {
+        return AuditLog::whereIn('action', array_values(CsvImportProcessor::FINAL_ACTIONS))->count();
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function assertSingleSummaryAudit(CsvImportRun $run, string $action): array
+    {
+        $logs = AuditLog::where('action', $action)->get();
+
+        $this->assertCount(1, $logs, "Expected exactly one [{$action}] row. Found: "
+            .json_encode(AuditLog::pluck('action')->all()));
+
+        $this->assertSame(1, $this->summaryAuditCount(), 'A run must end exactly once.');
+
+        $log = $logs->first();
+
+        // From the scheduler there is no auth() user and no request, so both of
+        // these can only come off the run, where they were captured when the
+        // admin asked for the work.
+        $this->assertSame($this->admin->id, $log->user_id);
+        $this->assertSame('203.0.113.9', $log->ip_address);
+        $this->assertSame(CsvImportRun::class, $log->auditable_type);
+        $this->assertSame($run->id, $log->auditable_id);
+
+        return $log->new_values;
+    }
+
+    /**
+     * A run swept as abandoned still writes its summary row.
+     *
+     * This is the finding, reproduced: before, the summary was written from
+     * completeRun() alone, so a run that ended ANY other way left `audit_logs`
+     * completely empty — two members' full records created, the run written off,
+     * and no trace anywhere that a cooperative's data had been loaded onto this
+     * server. The counts have to survive, not just the fact: "failed" reads as
+     * "nothing happened", and here that is false.
+     *
+     * The advance loop is scoped to another run with `--run`, which is what
+     * standing in for "the scheduler has not touched this for a fortnight" looks
+     * like from inside a test. The sweep itself is not scoped and runs for real.
+     */
+    public function test_a_run_swept_as_abandoned_still_writes_its_summary_audit_row(): void
+    {
+        $this->seedForImport();
+
+        $run = $this->runStalledAfterImportingTwoMembers();
+        $bystander = $this->makeRun(['phase' => 'completed']);
+
+        DB::table('csv_import_runs')->where('id', $run->id)->update(['updated_at' => now()->subDays(20)]);
+
+        Artisan::call('imports:process', ['--run' => $bystander->id]);
+
+        $run->refresh();
+
+        $this->assertSame('failed', $run->phase);
+        $this->assertStringContainsString('Abandoned', (string) $run->failure_reason);
+        $this->assertNotNull($run->finished_at);
+
+        $summary = $this->assertSingleSummaryAudit($run, 'csv_import_failed');
+
+        $this->assertSame(2, $summary['borrowers_imported']);
+        $this->assertSame(0, $summary['loans_imported']);
+        $this->assertStringContainsString('Abandoned', $summary['failure_reason']);
+
+        // Still exactly one row overall: the sweep must not also write a
+        // `csv_import_completed`, and a second tick must not write a second
+        // anything.
+        Artisan::call('imports:process');
+        $this->assertSame(1, $this->summaryAuditCount());
+    }
+
+    /**
+     * The same for the other scheduler path: anything escaping advance() is
+     * caught and the run written off, and that is equally reachable with
+     * thousands of members already created.
+     *
+     * The trigger is a customer row losing its result while the run has already
+     * moved on to loans — a resumed run, a support fix, anything with database
+     * access. assertCustomersComplete() then refuses to import loans, which is
+     * exactly what it is there for, and the refusal escapes as a throw.
+     */
+    public function test_a_run_written_off_after_a_throw_still_writes_its_summary_audit_row(): void
+    {
+        $this->seedForImport();
+
+        $run = $this->runStalledAfterImportingTwoMembers();
+
+        // A THIRD customer row appears, unprocessed, after the run has already
+        // moved on to loans. The two that imported keep their results, so the
+        // summary still has two members to report.
+        $template = (array) DB::table('csv_import_rows')
+            ->where('csv_import_file_id', $run->customersFile->id)
+            ->orderBy('id')
+            ->first();
+
+        unset($template['id']);
+        DB::table('csv_import_rows')->insert(array_merge($template, [
+            'line_number' => 99,
+            'result' => null,
+            'result_category' => null,
+            'result_message' => null,
+            'borrower_id' => null,
+            'attempts' => 0,
+        ]));
+
+        $entries = $this->captureLog(fn () => $this->assertSame(0, Artisan::call('imports:process')));
+
+        $run->refresh();
+
+        $this->assertSame('failed', $run->phase);
+
+        $summary = $this->assertSingleSummaryAudit($run, 'csv_import_failed');
+        $this->assertSame(2, $summary['borrowers_imported']);
+
+        // The reason is the digest, never the exception's own words: this column
+        // is returned to the browser by the status endpoint.
+        $this->assertSame(
+            'This run was stopped after an unexpected error (LogicException). Nothing further was written; '
+            ."see the run log for run #{$run->id}.",
+            (string) $run->failure_reason,
+        );
+        $this->assertStringNotContainsString('cannot import loans yet', (string) $run->failure_reason);
+
+        $this->assertLogged($entries, 'could not advance a run', 'error');
+    }
+
+    /**
+     * Every terminal phase gets an action of its own, so an auditor does not
+     * have to parse prose to learn whether an import finished or was stopped.
+     *
+     * Cancellation lives on CsvImportUploadService, on another branch. It calls
+     * this same method rather than growing a second copy — so this asserts the
+     * shape that call depends on, from the side that owns it.
+     */
+    public function test_finalise_is_the_one_way_a_run_ends_and_names_the_outcome(): void
+    {
+        $this->seedForImport();
+
+        $run = $this->runStalledAfterImportingTwoMembers();
+        $processor = app(CsvImportProcessor::class);
+
+        // An HTTP caller knows who is acting and says so; the scheduler cannot
+        // and falls back to the run's initiator.
+        $canceller = User::where('username', 'super_admin')->firstOrFail();
+
+        $finalised = $processor->finalise($run, 'cancelled', 'Cancelled by the operator.', $canceller->id, '198.51.100.4');
+
+        $this->assertNotNull($finalised);
+        $this->assertSame('cancelled', $run->fresh()->phase);
+
+        $log = AuditLog::where('action', 'csv_import_cancelled')->sole();
+        $this->assertSame($canceller->id, $log->user_id);
+        $this->assertSame('198.51.100.4', $log->ip_address);
+        $this->assertSame(2, $log->new_values['borrowers_imported']);
+        $this->assertStringContainsString('cancelled', (string) $log->description);
+
+        // Already terminal: a second call is a no-op rather than a second row.
+        // Two overlapping schedulers, or a cancel racing a completion, must not
+        // both write a summary.
+        $this->assertNull($processor->finalise($run->fresh(), 'failed', 'a second opinion'));
+        $this->assertSame(1, $this->summaryAuditCount());
+        $this->assertSame('cancelled', $run->fresh()->phase);
+    }
+
+    /**
+     * finalise() ENDS a run. Handing it a phase the run can still be worked in
+     * would write a summary for an import that is still running and then leave
+     * it running, which is worse than either outcome on its own.
+     */
+    public function test_finalise_refuses_a_phase_that_is_not_terminal(): void
+    {
+        $this->seedForImport();
+
+        $run = $this->makeRun();
+
+        $this->expectException(LogicException::class);
+        $this->expectExceptionMessageMatches('/must be one of/');
+
+        app(CsvImportProcessor::class)->finalise($run, 'importing_customers');
     }
 
     /**

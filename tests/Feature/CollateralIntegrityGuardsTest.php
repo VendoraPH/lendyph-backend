@@ -920,7 +920,7 @@ it('has no path writing an active loan status outside the ones that are accounte
         //
         // The moment this importer learns to attach collateral, that stops
         // being true and this line has to move to the guarded list.
-        'app/Services/CsvImport/CsvImportProcessor.php:855 — \'status\' => \'ongoing\',',
+        'app/Services/CsvImport/CsvImportProcessor.php:970 — \'status\' => \'ongoing\',',
         // release(): approved → released. Its lock is the first statement of the
         // transaction; the assertion runs at the end, after
         // closeRestructuredSource() has taken any restructure source out of the
