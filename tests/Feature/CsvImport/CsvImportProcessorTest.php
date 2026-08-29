@@ -15,7 +15,6 @@ use App\Services\CsvImport\CsvImportSchema;
 use App\Services\CsvImport\CsvImportStager;
 use App\Services\CsvImport\ImportErrorDigest;
 use App\Services\CsvImport\ImportTick;
-use ArrayObject;
 use Illuminate\Database\QueryException;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Log\Events\MessageLogged;
@@ -687,6 +686,32 @@ class CsvImportProcessorTest extends TestCase
     }
 
     /**
+     * A product whose bounds this fixture's default loan row breaks.
+     *
+     * 60,000.00 against a 50,000 ceiling, and the fixture's 6-month dates
+     * against a 6-month product — so the CSV's own "Term in Months" is the only
+     * thing that can push the term out of range, which is what makes the term
+     * assertion below mean something.
+     */
+    private function narrowSalaryLoanProduct(): LoanProduct
+    {
+        return LoanProduct::factory()->create([
+            'name' => 'Salary Loan',
+            'interest_rate' => 3.0,
+            'interest_method' => 'straight',
+            'term' => 6,
+            'min_term' => null,
+            'max_term' => null,
+            'min_interest_rate' => null,
+            'frequency' => 'monthly',
+            'penalty_rate' => 2.0,
+            'grace_period_days' => 3,
+            'min_amount' => 1000,
+            'max_amount' => 50000,
+        ]);
+    }
+
+    /**
      * A loan the importer writes past LoanService::createLoan()'s bounds is
      * recorded as having broken them.
      *
@@ -695,25 +720,22 @@ class CsvImportProcessorTest extends TestCase
      * would strand the members they belong to. Pretending the guard passed is
      * not part of that bargain.
      *
-     * The check itself belongs to ProductMappingResolver, which also powers the
-     * mapping screen's "288 loans will disagree with their product" forecast.
-     * It is reached by name during the merge window, so this binds a double at
-     * the same key the real one will answer on — asserting the WIRING, which is
-     * what is actually mine, rather than re-testing his arithmetic.
+     * Driven through the REAL ProductMappingResolver::boundsBreaches(), the same
+     * function the mapping screen's "288 loans will disagree with their product"
+     * forecast is computed from. It used to bind a double at a container key
+     * while the two halves of this feature were on different branches; the
+     * branches have met, the indirection is gone, and a double here would now
+     * only be able to prove that the importer can call a closure.
+     *
+     * The two arguments that are easy to get wrong are pinned by CONSEQUENCE
+     * rather than by inspecting arguments, which is the stronger test — see the
+     * two assertions that name what the wrong value would have produced.
      */
     public function test_a_loan_outside_its_products_bounds_is_imported_and_flagged(): void
     {
         $this->seedForImport();
 
-        $seen = new ArrayObject(['calls' => []]);
-
-        $this->app->bind(CsvImportProcessor::BOUNDS_CHECKER, fn () => function (LoanProduct $product, mixed $amount, mixed $term, mixed $rate) use ($seen): array {
-            $seen['calls'][] = ['amount' => $amount, 'term' => $term, 'rate' => $rate];
-
-            return ['amount_above_max', 'term_above_max'];
-        });
-
-        $product = $this->salaryLoanProduct();
+        $product = $this->narrowSalaryLoanProduct();
         $run = $this->makeRun(['product_mapping' => ['Salary Loan' => $product->id]]);
 
         $this->makeFile($run, 'customers', [$this->customerRow('A-001')]);
@@ -730,16 +752,22 @@ class CsvImportProcessorTest extends TestCase
         $this->assertStringContainsString('amount_above_max, term_above_max', (string) $row->result_message);
         $this->assertStringContainsString($product->name, (string) $row->result_message);
 
-        // Handed the CSV's STATED term in months, never the reconstructed period
-        // count — product bounds are expressed in months and so is the column
-        // the admin is looking at. `term` on the loan is a different number in a
-        // different unit.
-        $this->assertCount(1, $seen['calls']);
-        $this->assertSame('18', (string) $seen['calls'][0]['term']);
-        $this->assertNotSame((string) $loan->term, (string) $seen['calls'][0]['term']);
+        /*
+         * The principal is handed over as INTEGER CENTAVOS, because the resolver
+         * divides by 100. Hand it pesos and 60,000.00 is compared as 600, which
+         * is under the 1,000 floor — so `amount_below_min` appearing here, or
+         * `amount_above_max` not appearing, is precisely the unit bug.
+         */
+        $this->assertStringNotContainsString('amount_below_min', (string) $row->result_message);
 
-        // Centavos, as staged: 60,000.00 pesos.
-        $this->assertSame(6000000, $seen['calls'][0]['amount']);
+        /*
+         * And the term is the CSV's stated "Term in Months" (18), never the
+         * reconstructed period count. The product's ceiling is 6 and so is the
+         * reconstruction — the fixture's dates are six months apart — so
+         * `term_above_max` can ONLY have come from the CSV's own figure.
+         */
+        $this->assertSame(6, (int) $loan->term);
+        $this->assertStringNotContainsString('term_below_min', (string) $row->result_message);
     }
 
     /**
@@ -748,20 +776,20 @@ class CsvImportProcessorTest extends TestCase
      * Normalisation warnings are already on the row in `normalized.warnings` and
      * survive whatever category the row is filed under. A bounds breach has no
      * other trace anywhere, so filing it under the weaker category because the
-     * row also happened to warn about a phone number is the one way to lose it.
+     * row also happened to warn about a fee description is the one way to lose
+     * it.
      */
     public function test_a_bounds_breach_outranks_a_warning_and_both_are_reported(): void
     {
         $this->seedForImport();
 
-        $this->app->bind(CsvImportProcessor::BOUNDS_CHECKER, fn () => fn (): array => ['rate_above_max']);
-
-        $product = $this->salaryLoanProduct();
+        $product = $this->narrowSalaryLoanProduct();
         $run = $this->makeRun(['product_mapping' => ['Salary Loan' => $product->id]]);
 
         $this->makeFile($run, 'customers', [$this->customerRow('A-001')]);
-        // An unusable "Other Fee Detail" is a normalisation warning, so this row
-        // qualifies for both categories at once.
+        // An unexplained other-fee is a normalisation warning, and the default
+        // 60,000.00 is over this product's ceiling — so the row qualifies for
+        // both categories at once, which is the whole point.
         $this->makeFile($run, 'loans', [$this->loanRow('A-001', 'L-1', [
             'other_fee_amount' => '250.00',
             'other_fee_detail' => '',
@@ -773,50 +801,38 @@ class CsvImportProcessorTest extends TestCase
 
         $this->assertSame('imported', $row->result);
         $this->assertSame(CsvImportProcessor::CATEGORY_OUT_OF_PRODUCT_BOUNDS, $row->result_category);
-
-        // The warning is still in the message; only the category was outranked.
-        $this->assertStringContainsString('rate_above_max', (string) $row->result_message);
         $this->assertNotSame('imported_with_warnings', $row->result_category);
+
+        // Only the CATEGORY was outranked. The warning itself is still in the
+        // message, alongside the breach.
+        $this->assertStringContainsString('amount_above_max', (string) $row->result_message);
+        $this->assertStringContainsString('no description', (string) $row->result_message);
     }
 
     /**
-     * With no bounds check reachable — the merge window — loans import exactly
-     * as before, and the absence is stated once rather than per row.
+     * A loan inside every bound is not flagged, so the category means something.
      *
-     * A missing housekeeping check must never fatal an import; a SILENT missing
-     * check is how the mapping screen's forecast quietly stops having anything
-     * to expand into.
+     * Without this, a resolver that returned a breach for everything — or a
+     * call site that passed the wrong product — would look identical to a
+     * working one in the two tests above.
      */
-    public function test_an_unreachable_bounds_check_reports_itself_once_and_imports_anyway(): void
+    public function test_a_loan_inside_its_products_bounds_is_not_flagged(): void
     {
         $this->seedForImport();
 
         $product = $this->salaryLoanProduct();
         $run = $this->makeRun(['product_mapping' => ['Salary Loan' => $product->id]]);
 
-        $this->makeFile($run, 'customers', [$this->customerRow('A-001'), $this->customerRow('A-002')]);
-        $this->makeFile($run, 'loans', [$this->loanRow('A-001', 'L-1'), $this->loanRow('A-002', 'L-2')]);
+        $this->makeFile($run, 'customers', [$this->customerRow('A-001')]);
+        $this->makeFile($run, 'loans', [$this->loanRow('A-001', 'L-1')]);
 
-        $warnings = [];
-        Event::listen(function (MessageLogged $message) use (&$warnings): void {
-            if (str_contains($message->message, 'could not reach the product bounds check')) {
-                $warnings[] = $message->context;
-            }
-        });
+        $this->runToIdle($run);
 
-        // One processor for the whole run, exactly as the command resolves it.
-        $processor = new CsvImportProcessor;
+        $row = CsvImportRow::whereNotNull('loan_id')->firstOrFail();
 
-        for ($i = 0; $i < 50 && ! $processor->advance($run)->idle; $i++) {
-            $run->refresh();
-        }
-
-        $this->assertSame('completed', $run->fresh()->phase);
-        $this->assertSame(2, Loan::whereNotNull('external_loan_no')->count());
+        $this->assertSame('imported', $row->result);
+        $this->assertNotSame(CsvImportProcessor::CATEGORY_OUT_OF_PRODUCT_BOUNDS, $row->result_category);
         $this->assertSame(0, CsvImportRow::where('result_category', CsvImportProcessor::CATEGORY_OUT_OF_PRODUCT_BOUNDS)->count());
-
-        $this->assertCount(1, $warnings, 'Two loans, one warning: this must not be logged per row.');
-        $this->assertArrayHasKey('consequence', $warnings[0]);
     }
 
     /**

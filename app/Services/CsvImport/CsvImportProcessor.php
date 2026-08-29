@@ -135,35 +135,11 @@ class CsvImportProcessor
     public const CATEGORY_OUT_OF_PRODUCT_BOUNDS = ErrorReportBuilder::CATEGORY_OUT_OF_PRODUCT_BOUNDS;
 
     /**
-     * Container key a bounds check may be bound to, overriding self::RESOLVER.
-     */
-    public const BOUNDS_CHECKER = 'csv-import.bounds-breaches';
-
-    /**
-     * The mapping screen's bounds arithmetic — see self::boundsBreaches() for
-     * why it is named rather than imported, and when the indirection goes.
-     */
-    private const RESOLVER = 'App\\Services\\CsvImport\\ProductMappingResolver';
-
-    private const BOUNDS_BREACHES = 'boundsBreaches';
-
-    /**
      * Phases this class will pick up and move along.
      *
      * @var list<string>
      */
     public const WORKABLE_PHASES = ['assembled', 'staging', 'awaiting_mapping', 'importing_customers', 'importing_loans'];
-
-    /**
-     * Whether the missing-bounds-check warning has already been logged.
-     *
-     * Per INSTANCE, not per class: one line per command invocation is the
-     * useful amount, where a static would say it once per process (and then
-     * never again in a long-lived worker) and no guard at all would say it once
-     * per loan — twelve thousand identical warnings in a file that never
-     * rotates.
-     */
-    private bool $boundsCheckerReported = false;
 
     public function __construct(
         private readonly CsvImportStager $stager = new CsvImportStager,
@@ -999,13 +975,25 @@ class CsvImportProcessor
          * belong to. But bypassing the guard is not the same as pretending it
          * passed, so the breach is RECORDED and the loan is written anyway.
          *
+         * DELEGATED TO ProductMappingResolver, AND NOT REIMPLEMENTED HERE. That
+         * same function forecasts the damage on the mapping screen BEFORE the
+         * run — "288 loans will disagree with their product" — and this stamps
+         * the rows it actually turned out to be. Two copies of the arithmetic is
+         * precisely how the screen promises 288 and the error report lists 291,
+         * with nobody able to say which is lying. They cannot disagree while
+         * they are the same function.
+         *
+         * `$principal` is INTEGER CENTAVOS and the resolver divides by 100;
+         * handing it pesos would silently compare a 60,000 peso loan against
+         * the bounds as though it were 600.
+         *
          * `term_in_months` and not $schedule->term: the bounds on a product are
          * expressed in months and the admin is looking at the months column in
          * their own file. The reconstructed period count is a different number
          * in a different unit and comparing it here would report breaches that
          * are not there for every non-monthly loan.
          */
-        $breaches = $this->boundsBreaches(
+        $breaches = ProductMappingResolver::boundsBreaches(
             $product,
             $principal,
             $normalized->value('term_in_months'),
@@ -1037,76 +1025,6 @@ class CsvImportProcessor
                 : ($warnings === [] ? null : 'imported_with_warnings'),
             message: $messages === [] ? null : implode(' ', $messages),
         );
-    }
-
-    /**
-     * Delegated to ProductMappingResolver, and NOT reimplemented here.
-     *
-     * The mapping screen forecasts the damage before the run — "288 loans will
-     * disagree with their product" — and this stamps the rows it actually
-     * turned out to be. Two copies of the arithmetic is precisely how the screen
-     * promises 288 and the error report lists 291, with nobody able to say which
-     * is lying. They cannot disagree while they are the same function.
-     *
-     * ## Why it is reached by name
-     *
-     * Same shape, and the same reasoning, as
-     * ProcessCsvImports::resolveStorageSweep(): the resolver lands on a
-     * different branch, so during the merge window the class genuinely is not
-     * here, and an import that fatals on every loan row would be a far worse
-     * outcome than one that reports no breaches. Unlike that one, however, this
-     * indirection IS temporary — post-merge the resolver is a hard dependency of
-     * the mapping screen and always present, so once both branches are on
-     * `csv-import/backend` this method should collapse to a direct
-     * `ProductMappingResolver::boundsBreaches(...)` call, and self::RESOLVER,
-     * self::BOUNDS_CHECKER and $this->boundsCheckerReported should all go with
-     * it. The test binds self::BOUNDS_CHECKER, so it keeps passing either way.
-     *
-     * @return list<string>
-     */
-    private function boundsBreaches(LoanProduct $product, mixed $amountCentavos, mixed $term, mixed $rate): array
-    {
-        $checker = $this->resolveBoundsChecker();
-
-        if ($checker === null) {
-            if (! $this->boundsCheckerReported) {
-                $this->boundsCheckerReported = true;
-
-                Log::warning('csv-import: could not reach the product bounds check', [
-                    'resolver' => self::RESOLVER,
-                    'method' => self::BOUNDS_BREACHES,
-                    'consequence' => 'Loans that disagree with their mapped product are being imported without '
-                        .'being flagged, so the mapping screen\'s forecast has nothing to expand into.',
-                ]);
-            }
-
-            return [];
-        }
-
-        $breaches = $checker($product, $amountCentavos, $term, $rate);
-
-        return is_array($breaches)
-            ? array_values(array_map(static fn ($breach): string => (string) $breach, $breaches))
-            : [];
-    }
-
-    /**
-     * A bound override first, so the behaviour is testable before the two
-     * branches meet; the class check is what takes over afterwards. Resolved by
-     * name rather than through an import, because an import of a class that is
-     * not on this branch yet is a lie to every reader and every tool.
-     */
-    private function resolveBoundsChecker(): ?callable
-    {
-        if (app()->bound(self::BOUNDS_CHECKER)) {
-            $bound = app(self::BOUNDS_CHECKER);
-
-            return is_callable($bound) ? $bound : null;
-        }
-
-        return class_exists(self::RESOLVER) && method_exists(self::RESOLVER, self::BOUNDS_BREACHES)
-            ? [self::RESOLVER, self::BOUNDS_BREACHES]
-            : null;
     }
 
     /**
