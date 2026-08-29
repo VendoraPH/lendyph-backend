@@ -5,6 +5,7 @@ namespace App\Providers;
 use App\Models\CsvImportRun;
 use App\Services\BorrowerSubmissionTokenService;
 use App\Services\CsvImport\CsvImportUploadService;
+use App\Services\CsvImport\ImportErrorDigest;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -204,14 +205,35 @@ class AppServiceProvider extends ServiceProvider
             try {
                 app(CsvImportUploadService::class)->releaseStorage($run);
             } catch (Throwable $e) {
+                /*
+                 * The digest, not the message. This listener fires on a phase
+                 * write to a run whose staged rows are the cooperative's
+                 * membership, and it logs to the DEFAULT channel — `single`:
+                 * one file, never rotated, mode 644. A QueryException reaching
+                 * here would carry the failing SQL with its bindings
+                 * substituted. See ImportErrorDigest.
+                 *
+                 * This site is outside the reach of
+                 * tests/Unit/CsvImportExceptionMessageArchTest.php on purpose —
+                 * it is a shared provider, and an arch test that fails somebody
+                 * for an unrelated line in another feature gets deleted. What
+                 * holds it instead is
+                 * CsvImportUploadApiTest::test_a_failing_storage_release_does_not_fail_the_run_it_was_tidying_up_after(),
+                 * which pins the shape of this very context.
+                 */
                 Log::error('csv-import: could not release a finished run\'s storage', [
                     'csv_import_run_id' => $run->id,
                     'phase' => $run->phase,
-                    'exception' => $e->getMessage(),
                     'consequence' => 'The run\'s uploaded CSVs are still on the private disk. They hold member '
                         .'names, birthdates, contact numbers and incomes. releaseAbandonedStorage() will '
                         .'reconcile them on the next import or scheduled tick; if it keeps failing, that is a '
                         .'disk or permissions fault to fix rather than a run to re-import.',
+                ] + ImportErrorDigest::context($e));
+
+                ImportErrorDigest::recordDiagnostics($e, [
+                    'csv_import_run_id' => $run->id,
+                    'phase' => $run->phase,
+                    'stage' => 'storage-release',
                 ]);
             }
         });

@@ -534,9 +534,14 @@ class CsvImportUploadService
      * quietly attribute one admin's decision to another admin's name, in the
      * single audit row that exists to say who did this.
      *
-     * `auth()->id()` and `request()->ip()` rather than the request object,
-     * because this service is also reachable from the console; both are simply
-     * null there, which is what finalise()'s own fallback is for.
+     * `auth()->id()` rather than the request object, because this service is
+     * also reachable from the console, where it is honestly null and
+     * finalise()'s own fallback to `initiated_by` is the right answer.
+     *
+     * The IP goes through self::actorIpAddress() rather than being read
+     * straight off `request()`, because the symmetry an earlier version of this
+     * note claimed DOES NOT EXIST: `request()->ip()` is not null off a request.
+     * See that method for what it returns instead and why it matters here.
      *
      * ## The transition
      *
@@ -650,17 +655,33 @@ class CsvImportUploadService
                     $phase,
                     failureReason: $failureReason,
                     userId: auth()->id(),
-                    ipAddress: request()->ip(),
+                    ipAddress: $this->actorIpAddress(),
                 );
             } catch (Throwable $e) {
                 /*
-                 * Reported as well as logged below, and the two are not
-                 * redundant. The outcome lines say what happened to the RUN,
-                 * which is what an operator needs; only the trace says where
+                 * NOT report(), and the two are still not redundant. The
+                 * outcome lines below say what happened to the RUN, which is
+                 * what an operator needs; the exception's own text says where
                  * inside finalise() it broke, which is what the next engineer
-                 * needs. Neither answers the other's question.
+                 * needs. But report() hands that text to the DEFAULT channel —
+                 * `single`: one file, never rotated, mode 644 — and finalise()
+                 * ends in an `insert into audit_logs` with the run's values
+                 * bound, so the day anybody moves a member-bearing write inside
+                 * it, a QueryException's message IS that member's record and
+                 * report() writes it there verbatim. Gating report() behind the
+                 * diagnostics flag would not have helped: the flag decides
+                 * whether the text is written, not where it lands.
+                 *
+                 * recordDiagnostics() carries the same text, with the file and
+                 * the line, to the dedicated `csv-import` channel — off by
+                 * default, its own permissions, its own retention. See
+                 * ImportErrorDigest.
                  */
-                report($e);
+                ImportErrorDigest::recordDiagnostics($e, [
+                    'csv_import_run_id' => $run->id,
+                    'phase' => $phase,
+                    'stage' => 'finaliser',
+                ]);
 
                 $finaliserFailure = $e;
             }
@@ -680,33 +701,105 @@ class CsvImportUploadService
             Log::error('csv-import: could not end a run', [
                 'csv_import_run_id' => $run->id,
                 'phase' => $phase,
-                'exception' => $e->getMessage(),
-                'finaliser_exception' => $finaliserFailure?->getMessage(),
                 'consequence' => 'The run may not have reached a terminal phase. A live run blocks every future '
                     .'import at this cooperative until the stale-upload TTL expires, so if it is still open it '
                     .'has to be cancelled again once the underlying fault is fixed.',
+            ] + ImportErrorDigest::context($e) + self::finaliserContext($finaliserFailure));
+
+            ImportErrorDigest::recordDiagnostics($e, [
+                'csv_import_run_id' => $run->id,
+                'phase' => $phase,
+                'stage' => 'terminal-phase-fallback',
             ]);
 
             /*
              * The finaliser's own exception in preference to this one: it is
              * the root cause, and this second failure is almost always the same
-             * fault seen a second time. Both messages are in the line above, so
-             * nothing is lost by choosing.
+             * fault seen a second time. BOTH are still described on the line
+             * above — the fallback's digest under `exception`, the finaliser's
+             * under `finaliser_*` — and both full texts have already gone to
+             * the diagnostic channel, so nothing is lost by choosing.
              */
             throw $finaliserFailure ?? $e;
         }
 
         if ($finaliserFailure !== null) {
+            /*
+             * The digest, never the message. This is the line H2 was raised
+             * about: it fires precisely when finalise() threw, and finalise()
+             * ends in an `insert into audit_logs` — so the throwable on hand
+             * here is the one whose message is a row of bound values. Its full
+             * text already went to the diagnostic channel where it was caught,
+             * so there is nothing to repeat and nothing to lose.
+             */
             Log::error('csv-import: a run ended without its summary audit row', [
                 'csv_import_run_id' => $run->id,
                 'phase' => $run->phase,
-                'exception' => $finaliserFailure->getMessage(),
                 'consequence' => 'The run reached a terminal phase and its slot is free, but `audit_logs` holds '
                     .'no record that this cooperative\'s uploaded membership and loan data was ended this way, '
                     .'or by whom. The run row and its notes are the only remaining evidence; reconcile from '
                     .'those.',
-            ]);
+            ] + ImportErrorDigest::context($finaliserFailure));
         }
+    }
+
+    /**
+     * The digest of the finaliser's own failure, key-prefixed so it cannot
+     * collide with the digest of the exception logged beside it.
+     *
+     * Two throwables share one log line there: `exception`/`sql_state`/
+     * `driver_code` describe the write that just failed, `finaliser_*` the one
+     * that failed before it. Merging them unprefixed would silently drop one,
+     * and the one it dropped would be the root cause.
+     *
+     * @return array<string, string>
+     */
+    private static function finaliserContext(?Throwable $finaliserFailure): array
+    {
+        if ($finaliserFailure === null) {
+            return [];
+        }
+
+        $prefixed = [];
+
+        foreach (ImportErrorDigest::context($finaliserFailure) as $key => $value) {
+            $prefixed['finaliser_'.$key] = $value;
+        }
+
+        return $prefixed;
+    }
+
+    /**
+     * The IP of the human whose request is driving this, or null when nobody's
+     * request is.
+     *
+     * `request()->ip()` IS NOT NULL OFF A REQUEST — the trap this exists to
+     * close, and one an earlier comment on finaliseRun() had exactly backwards.
+     * Laravel's SetRequestForConsole bootstrapper synthesises a request with
+     * Request::create(), whose server defaults set REMOTE_ADDR to the literal
+     * `127.0.0.1`; AuditLogService::log() documents the same behaviour from the
+     * other side. So a scheduled reaper calling in here would stamp
+     * `127.0.0.1` on every reclaim it audits — in the single row that exists to
+     * say who did this — rather than falling back to the run's `initiated_ip`.
+     *
+     * Nothing reaches that today: both finaliseRun() callers are
+     * HTTP-originated. But isStaleUpload() is public and a scheduled
+     * stale-upload reaper is the obvious next thing to build, and code that
+     * cannot fall into a trap beats a comment warning about it.
+     *
+     * THE TEST IS THE ROUTE, NOT app()->runningInConsole(). runningInConsole()
+     * reads PHP_SAPI, which is `cli` under the test runner too — so it would
+     * call every feature test "console", null the operator's IP on the HTTP
+     * path, and leave that path permanently uncovered, since no test can run
+     * under a non-cli SAPI. A synthesised console request has matched no route
+     * and its resolver returns null; a request the router dispatched has one,
+     * in production and under test alike.
+     */
+    private function actorIpAddress(): ?string
+    {
+        $request = request();
+
+        return $request->route() === null ? null : $request->ip();
     }
 
     /**
@@ -893,7 +986,22 @@ class CsvImportUploadService
 
             return $runs->count();
         } catch (Throwable $e) {
-            report($e);
+            /*
+             * The same rule as every other catch on this path, for the same
+             * reason: report() puts the message on the shared channel. The
+             * query above binds run ids, phases and a cutoff, so a realistic
+             * throw here carries no member data today — but this is a sweep
+             * across the tables that hold it, and what keeps that true is
+             * tests/Unit/CsvImportExceptionMessageArchTest.php rather than
+             * whoever edits next remembering.
+             */
+            Log::error('csv-import: the abandoned-storage sweep failed', [
+                'consequence' => 'Assembled CSVs and chunk files belonging to finished runs are still on the '
+                    .'private disk. The next import or scheduled tick sweeps again; if it keeps failing that is '
+                    .'a disk or permissions fault to fix, not a run to re-import.',
+            ] + ImportErrorDigest::context($e));
+
+            ImportErrorDigest::recordDiagnostics($e, ['sweep' => 'abandoned-storage']);
 
             return 0;
         }

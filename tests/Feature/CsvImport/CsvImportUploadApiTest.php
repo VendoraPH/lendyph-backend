@@ -10,14 +10,18 @@ use App\Models\Role;
 use App\Models\User;
 use App\Services\AuditLogService;
 use App\Services\CsvImport\CsvImportUploadService;
+use Illuminate\Database\QueryException;
+use Illuminate\Http\Request;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
+use PDOException;
 use RuntimeException;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
+use Throwable;
 
 /**
  * The resumable chunked upload: POST /api/imports, the chunk PUT, and assemble.
@@ -37,6 +41,15 @@ class CsvImportUploadApiTest extends TestCase
      * producing several chunks with a short final one.
      */
     private const CHUNK = 65536;
+
+    /**
+     * The member whose record must never reach a log.
+     *
+     * The exact cells a duplicate-key QueryException substitutes into its own
+     * message on this feature: name, birthdate, contact number, address and
+     * income, as a single line of text.
+     */
+    private const MEMBER_ROW = 'Dela Cruz, Maria, 1979-04-02, 09171234567, 12 Rizal St, 18000.00';
 
     protected function setUp(): void
     {
@@ -1050,11 +1063,67 @@ class CsvImportUploadApiTest extends TestCase
         [$call] = $finaliser->calls;
 
         $this->assertSame($other->id, $call['user_id']);
-        $this->assertNotNull($call['ip_address']);
+        $this->assertSame(request()->ip(), $call['ip_address']);
 
         $this->assertSame(
             $other->id,
             AuditLog::where('auditable_id', $runId)->where('action', 'csv_import_cancelled')->firstOrFail()->user_id,
+        );
+    }
+
+    /**
+     * The same cancel with no request behind it: nobody's IP, not the loopback.
+     *
+     * `request()->ip()` IS NOT NULL off a request, which is the trap
+     * CsvImportUploadService::actorIpAddress() exists to close and which the
+     * comment it replaced had exactly backwards. Laravel's SetRequestForConsole
+     * synthesises a request with Request::create(), whose server defaults make
+     * `ip()` the literal `127.0.0.1` — so a scheduled stale-upload reaper, the
+     * obvious next use of the public isStaleUpload(), would stamp the loopback
+     * address of whichever box ran it onto every reclaim it audits, in the one
+     * row that exists to say who did this.
+     *
+     * Nothing reaches it today — both finaliseRun() callers are HTTP — so this
+     * calls the service directly with a container request no router has
+     * touched, which is the state the console leaves behind.
+     *
+     * `initiated_ip` is moved off the loopback first, deliberately. The run was
+     * opened over HTTP from 127.0.0.1, so leaving it there would let the bug
+     * and the fix produce the same audit row and the assertion would pass
+     * either way.
+     */
+    public function test_a_cancel_with_no_request_behind_it_falls_back_to_where_the_run_was_opened(): void
+    {
+        $finaliser = $this->fakeFinaliser();
+        $this->app->instance('App\Services\CsvImport\CsvImportProcessor', $finaliser);
+
+        $runId = $this->postJson('/api/imports', $this->openRunPayload('a', 'b'))
+            ->assertCreated()
+            ->json('run.id');
+
+        $run = CsvImportRun::findOrFail($runId);
+        $run->forceFill(['initiated_ip' => '203.0.113.9'])->save();
+
+        $this->app->instance('request', Request::create(config('app.url'), 'GET'));
+
+        // The trap, proven rather than described.
+        $this->assertSame('127.0.0.1', request()->ip(), 'A synthesised request reports the loopback, not null.');
+        $this->assertNull(request()->route(), 'And it has matched no route — which is the discriminator used.');
+
+        app(CsvImportUploadService::class)->cancelRun($run);
+
+        [$call] = $finaliser->calls;
+
+        $this->assertNull(
+            $call['ip_address'],
+            'Nothing drove this but the scheduler, so no IP may be claimed for it; finalise() falls back to the '
+            .'run\'s own initiated_ip.',
+        );
+
+        $this->assertSame(
+            '203.0.113.9',
+            AuditLog::where('auditable_id', $runId)->where('action', 'csv_import_cancelled')->firstOrFail()->ip_address,
+            'The audit row must name where the import was actually opened from, not the box that reaped it.',
         );
     }
 
@@ -1106,11 +1175,11 @@ class CsvImportUploadApiTest extends TestCase
      * these tests reproduce, and why the double throws before touching
      * anything.
      */
-    private function throwingFinaliser(string $message): object
+    private function throwingFinaliser(string|Throwable $failure): object
     {
-        return new class($message)
+        return new class(is_string($failure) ? new RuntimeException($failure) : $failure)
         {
-            public function __construct(private readonly string $message) {}
+            public function __construct(private readonly Throwable $failure) {}
 
             public function finalise(
                 CsvImportRun $run,
@@ -1119,9 +1188,65 @@ class CsvImportUploadApiTest extends TestCase
                 ?int $userId = null,
                 ?string $ipAddress = null,
             ): ?CsvImportRun {
-                throw new RuntimeException($this->message);
+                throw $this->failure;
             }
         };
+    }
+
+    /**
+     * A database refusal, built the way the driver builds one.
+     *
+     * The PDOException carries `errorInfo`; QueryException copies it and
+     * SUBSTITUTES THE BINDINGS INTO THE SQL for its own message — still true on
+     * Laravel 13, whose `$maskBindings` defaults to false. So the message these
+     * produce is the real shape, not a string that has been written to look
+     * like one, and asserting that it does not reach a log means something.
+     */
+    private function queryException(
+        string $sqlState,
+        int $driverCode,
+        string $detail,
+        string $sql = 'select 1',
+        array $bindings = [],
+    ): QueryException {
+        $driver = new PDOException("SQLSTATE[{$sqlState}]: {$detail}");
+        $driver->errorInfo = [$sqlState, $driverCode, $detail];
+
+        return new QueryException('mysql', $sql, $bindings, $driver);
+    }
+
+    /**
+     * The exact failure H2 was raised about: the summary audit write hits a
+     * duplicate key, and the exception's message is the row's bound values.
+     */
+    private function auditWriteCarryingAMemberRecord(): QueryException
+    {
+        return $this->queryException(
+            '23000',
+            1062,
+            "Integrity constraint violation: 1062 Duplicate entry '".self::MEMBER_ROW."' for key 'uniq'",
+            'insert into `audit_logs` (`old_values`) values (?)',
+            [self::MEMBER_ROW],
+        );
+    }
+
+    /**
+     * Assert a log context describes a failure without reproducing it.
+     *
+     * @param  array<string, mixed>  $context
+     */
+    private function assertContextIsSafe(array $context, string $prefix, string $class, string $sqlState, string $driverCode): void
+    {
+        $this->assertSame($class, $context[$prefix.'exception'] ?? null, "`{$prefix}exception` must name the class.");
+        $this->assertSame($sqlState, $context[$prefix.'sql_state'] ?? null, "`{$prefix}sql_state` must carry the SQLSTATE.");
+        $this->assertSame($driverCode, $context[$prefix.'driver_code'] ?? null, "`{$prefix}driver_code` must carry the driver's number.");
+
+        $this->assertStringNotContainsString(
+            self::MEMBER_ROW,
+            (string) json_encode($context),
+            'The exception message reached the shared log channel, which is exactly what ImportErrorDigest exists '
+            .'to prevent: `single` is one file, never rotated, mode 644.',
+        );
     }
 
     public function test_a_finaliser_that_throws_still_frees_the_slot_and_reports_the_missing_audit_row(): void
@@ -1145,7 +1270,7 @@ class CsvImportUploadApiTest extends TestCase
          */
         $this->app->instance(
             'App\Services\CsvImport\CsvImportProcessor',
-            $this->throwingFinaliser('SQLSTATE[HY000]: could not write to audit_logs'),
+            $this->throwingFinaliser($this->auditWriteCarryingAMemberRecord()),
         );
 
         $this->deleteJson("/api/imports/{$runId}")
@@ -1164,12 +1289,34 @@ class CsvImportUploadApiTest extends TestCase
             AuditLog::where('auditable_id', $runId)->where('action', 'csv_import_cancelled')->count(),
         );
 
+        $logged = null;
+
         Log::shouldHaveReceived('error')
-            ->withArgs(fn (string $message, array $context): bool => str_contains($message, 'without its summary audit row')
-                && $context['csv_import_run_id'] === $runId
-                && str_contains((string) $context['exception'], 'audit_logs')
-                && array_key_exists('consequence', $context))
+            ->withArgs(function (string $message, array $context) use ($runId, &$logged): bool {
+                if (! str_contains($message, 'without its summary audit row') || $context['csv_import_run_id'] !== $runId) {
+                    return false;
+                }
+
+                $logged = $context;
+
+                return true;
+            })
             ->once();
+
+        $this->assertArrayHasKey('consequence', $logged);
+
+        /*
+         * And it says WHAT failed without saying what was in the row. The
+         * finaliser above threw the real thing — a duplicate-key QueryException
+         * whose message is the bound values of an `insert into audit_logs`, so
+         * a member's name, birthdate, contact number, address and income as one
+         * line — and this line goes to the shared `single` channel, which never
+         * rotates and is world-readable. The class, the SQLSTATE and the
+         * driver's number are what an engineer actually needs to act; the text
+         * itself is available on the opt-in `csv-import` channel and nowhere
+         * else.
+         */
+        $this->assertContextIsSafe($logged, '', QueryException::class, '23000', '1062');
     }
 
     public function test_a_cancel_that_cannot_be_written_at_all_does_not_claim_to_have_succeeded(): void
@@ -1182,7 +1329,7 @@ class CsvImportUploadApiTest extends TestCase
 
         $this->app->instance(
             'App\Services\CsvImport\CsvImportProcessor',
-            $this->throwingFinaliser('SQLSTATE[HY000]: server has gone away'),
+            $this->throwingFinaliser($this->queryException('HY000', 2006, 'MySQL server has gone away')),
         );
 
         /**
@@ -1206,15 +1353,39 @@ class CsvImportUploadApiTest extends TestCase
          * A DIFFERENT sentence to the test above, deliberately. "ended without
          * its summary audit row" and "could not end a run" call for different
          * responses — one is a compliance gap to reconcile, the other is a
-         * cooperative that cannot start an import — and both messages travel on
-         * the line so the root cause is not lost to the retry.
+         * cooperative that cannot start an import — and BOTH failures are
+         * described on the line so the root cause is not lost to the retry.
+         *
+         * Described, not quoted. Two throwables share this context and the
+         * `finaliser_` prefix is what keeps them apart: without it the second
+         * digest would overwrite the first and the one it overwrote would be
+         * the root cause. They are deliberately given different SQLSTATEs here,
+         * because two exceptions of the same class would let a context that
+         * merged them wrongly still pass.
          */
+        $logged = null;
+
         Log::shouldHaveReceived('error')
-            ->withArgs(fn (string $message, array $context): bool => str_contains($message, 'could not end a run')
-                && $context['csv_import_run_id'] === $runId
-                && str_contains((string) $context['exception'], 'Lock wait timeout')
-                && str_contains((string) $context['finaliser_exception'], 'server has gone away'))
+            ->withArgs(function (string $message, array $context) use ($runId, &$logged): bool {
+                if (! str_contains($message, 'could not end a run') || $context['csv_import_run_id'] !== $runId) {
+                    return false;
+                }
+
+                $logged = $context;
+
+                return true;
+            })
             ->once();
+
+        // The write that just failed...
+        $this->assertSame(RuntimeException::class, $logged['exception']);
+
+        // ...and the finaliser's own failure, kept distinct from it.
+        $this->assertContextIsSafe($logged, 'finaliser_', QueryException::class, 'HY000', '2006');
+
+        // Neither message travels, including the one that is merely noisy.
+        $this->assertStringNotContainsString('Lock wait timeout', (string) json_encode($logged));
+        $this->assertStringNotContainsString('gone away', (string) json_encode($logged));
 
         /**
          * And emphatically NOT the other incident. That one is reported only
@@ -1259,11 +1430,31 @@ class CsvImportUploadApiTest extends TestCase
         // Loud, though. The files are still on the volume and somebody has to
         // know — a failed unlink that nobody hears about is member data left in
         // plaintext with nothing saying so.
+        $logged = null;
+
         Log::shouldHaveReceived('error')
-            ->withArgs(fn (string $message, array $context): bool => str_contains($message, 'release')
-                && $context['csv_import_run_id'] === $runId
-                && str_contains((string) $context['exception'], 'Input/output error'))
+            ->withArgs(function (string $message, array $context) use ($runId, &$logged): bool {
+                if (! str_contains($message, 'release') || $context['csv_import_run_id'] !== $runId) {
+                    return false;
+                }
+
+                $logged = $context;
+
+                return true;
+            })
             ->once();
+
+        /*
+         * Loud about WHAT broke, silent about the row that broke it. This
+         * listener is the one CSV-import site the arch test cannot reach — it
+         * lives in a shared provider — so this assertion is what holds the rule
+         * there. The class and the consequence are on the line; the exception's
+         * own text is not, because on a QueryException that text is the failing
+         * SQL with the member's record substituted into it.
+         */
+        $this->assertSame(RuntimeException::class, $logged['exception']);
+        $this->assertArrayHasKey('consequence', $logged);
+        $this->assertStringNotContainsString('Input/output error', (string) json_encode($logged));
     }
 
     public function test_a_rolled_back_terminal_transition_leaves_the_runs_files_on_disk(): void

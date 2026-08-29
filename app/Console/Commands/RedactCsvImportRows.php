@@ -5,6 +5,7 @@ namespace App\Console\Commands;
 use App\Models\CsvImportRow;
 use App\Models\CsvImportRun;
 use App\Services\CsvImport\CsvImportRowRedactor;
+use App\Services\CsvImport\ImportErrorDigest;
 use Illuminate\Console\Attributes\Description;
 use Illuminate\Console\Attributes\Signature;
 use Illuminate\Console\Command;
@@ -12,6 +13,7 @@ use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Throwable;
 
 #[Signature('imports:redact-rows
     {--days=30 : Days a run must have been finished before its staged rows are redacted}
@@ -44,10 +46,22 @@ class RedactCsvImportRows extends Command
      * WHAT IT DOES NOT COVER, stated so nobody assumes otherwise: this is a
      * clock, not an erasure path. A member who asks to be forgotten before the
      * clock expires is handled by BorrowerPurgeService, which redacts their
-     * staged rows through the same definition at the moment they are deleted.
-     * The gap between the two is a row whose import FAILED, so it never linked
-     * to a borrower and no erasure can find it by foreign key; that row waits
-     * for this command. Shortening `--days` is what narrows that window.
+     * staged rows through the same definition at the moment they are deleted —
+     * and which finds them whether or not the import ever linked them to a
+     * borrower, because `csv_import_rows.external_account_no` is recorded for
+     * every staged row. What is left for this command is the row that names
+     * nobody on file at all: a line whose account number never became a member
+     * and never will.
+     *
+     * THE WINDOW IS NOT 30 DAYS FOR EVERY RUN, and the difference is worth
+     * writing down rather than rediscovering. `--days` counts from the run's
+     * TERMINAL transition, not from the upload. A run an admin simply abandoned
+     * has no terminal transition until `imports:process` writes it off, and that
+     * sweep runs at `--prune-days=14`. So an abandoned run's staged rows — a
+     * full membership register, readable by any admin through the error report —
+     * live for roughly 14 + 30 = 44 days, not 30. That is policy rather than a
+     * bug, and both numbers are operator-tunable, but a retention window quoted
+     * as "30 days" is wrong for the case most likely to produce one.
      */
     public function handle(CsvImportRowRedactor $redactor): int
     {
@@ -91,12 +105,30 @@ class RedactCsvImportRows extends Command
                 $rowsAffected += $this->redact($redactor, $fileIds);
                 $this->markRunRedacted($run);
                 $runsAffected++;
-            } catch (\Throwable $e) {
-                $this->error("  failed run #{$run->id}: {$e->getMessage()}");
+            } catch (Throwable $e) {
+                /*
+                 * Never $e->getMessage(), on either line. A QueryException's
+                 * message is the failing SQL with its bindings substituted in,
+                 * and this command's statements bind rows out of the widest
+                 * table of personal data in the schema — so interpolating it
+                 * would print a member onto an operator's terminal and write
+                 * them into a log that never rotates. That the redactor's own
+                 * bindings happen to be file ids, nulls and timestamps today is
+                 * not a rule anything enforces; the rule is this class. See
+                 * ImportErrorDigest.
+                 */
+                $this->error("  failed run #{$run->id}: {$this->describe($e)}");
 
                 Log::warning('imports:redact-rows failed to redact a run', [
                     'csv_import_run_id' => $run->id,
-                    'exception' => $e->getMessage(),
+                ] + ImportErrorDigest::context($e));
+
+                // The full message is not discarded — it goes to the dedicated,
+                // opt-in, restricted channel, which is the only sanctioned place
+                // for it.
+                ImportErrorDigest::recordDiagnostics($e, [
+                    'csv_import_run_id' => $run->id,
+                    'command' => 'imports:redact-rows',
                 ]);
 
                 $failed++;
@@ -227,5 +259,30 @@ class RedactCsvImportRows extends Command
     private function terminalAt(CsvImportRun $run): Carbon
     {
         return $run->finished_at ?? $run->updated_at ?? now();
+    }
+
+    /**
+     * One line naming a failure, with nothing in it that came out of the
+     * database.
+     *
+     * Both halves are safe by construction and are the same two ImportErrorDigest
+     * itself composes in forRun(): a driver error NUMBER, e.g. `1205`, and an
+     * exception CLASS, which is a symbol out of this repository. Neither can be
+     * a value out of a member's row.
+     *
+     * Written here rather than delegated to ImportErrorDigest::forRun() only
+     * because that method's prose belongs to the importer — "This run was
+     * stopped… nothing further was written" — and a redaction sweep that failed
+     * part way through has, by design, already redacted everything it reached.
+     * Telling an operator otherwise would be wrong in the one direction that
+     * matters for a retention job.
+     */
+    private function describe(Throwable $e): string
+    {
+        $code = ImportErrorDigest::driverCode($e);
+
+        return $code === null
+            ? 'unexpected error ('.class_basename($e).')'
+            : "database error ({$code})";
     }
 }

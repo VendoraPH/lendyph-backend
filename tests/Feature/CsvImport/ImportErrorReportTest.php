@@ -3,7 +3,12 @@
 namespace Tests\Feature\CsvImport;
 
 use App\Models\CsvImportFile;
+use App\Models\CsvImportRow;
 use App\Models\CsvImportRun;
+use App\Services\CsvImport\ErrorReportBuilder;
+use Illuminate\Database\QueryException;
+use Illuminate\Support\Facades\Log;
+use PDOException;
 use Tests\TestCase;
 use Tests\Traits\StagesCsvImportRuns;
 
@@ -296,5 +301,105 @@ class ImportErrorReportTest extends TestCase
 
         $this->getJson("/api/imports/{$this->run->id}/errors")->assertForbidden();
         $this->get("/api/imports/{$this->run->id}/errors.csv")->assertForbidden();
+    }
+
+    /**
+     * The download's own failure path must not leak the query that failed.
+     *
+     * This catch is the most dangerous one on the CSV-import path, and the
+     * reason is structural rather than a matter of degree. Every other catch
+     * here handles run-level metadata — a phase, an id, a count — so a realistic
+     * throw carries those. This one wraps a GENERATOR that is streaming staged
+     * member rows, so the query in flight when it throws is a query about a
+     * person. It used to call `report($e)`, which hands the exception to the
+     * framework's default handler, which writes `$e->getMessage()` to the
+     * DEFAULT channel: `single`, one file, never rotated, mode 644. A
+     * QueryException's message is the failing SQL with the bindings substituted
+     * in.
+     *
+     * `report()` rather than `getMessage()` is why the original sweep missed it
+     * — a different spelling of the same sink — and why the arch test in
+     * tests/Unit scans for both. That test pins the TOKEN; this one pins the
+     * BEHAVIOUR, including that the download still ends with an honest final row
+     * instead of a stack trace appended to a CSV of members' names.
+     */
+    public function test_a_download_that_fails_midway_leaks_neither_the_member_nor_the_query(): void
+    {
+        $first = $this->stageRow($this->loans, 2, $this->loanValues(['loan_no' => 'L-1', 'account_no' => 'A-001']), [
+            'errors' => [['loan_amount', 'money_invalid', 'Not an amount.']],
+        ]);
+
+        $second = $this->stageRow($this->loans, 3, $this->loanValues(['loan_no' => 'L-2', 'account_no' => 'A-002']), [
+            'errors' => [['loan_amount', 'money_invalid', 'Not an amount.']],
+        ]);
+
+        $driver = new PDOException('SQLSTATE[HY000]: General error: 1205 Lock wait timeout exceeded');
+        $driver->errorInfo = ['HY000', 1205, 'Lock wait timeout exceeded; try restarting transaction'];
+
+        $failure = new QueryException(
+            'mysql',
+            'select * from `csv_import_rows` where `id` > ? and `raw` = ?',
+            [41, '["A-002","L-2","Dela Cruz","Maria","09171234567"]'],
+            $driver,
+        );
+
+        $this->assertStringContainsString('Dela Cruz', $failure->getMessage(), 'The fixture has to actually carry a member, or this test proves nothing.');
+
+        /*
+         * Throws on the SECOND row, so the export has genuinely begun: the
+         * response is already streaming and the first row is already on the
+         * wire when it fails. A builder that threw on the first row would test
+         * a different, easier path.
+         */
+        $this->app->bind(ErrorReportBuilder::class, fn () => new class($failure, $first->id) extends ErrorReportBuilder
+        {
+            public function __construct(private readonly QueryException $failure, private readonly int $survives) {}
+
+            public function issuesFor(CsvImportRow $row, ?CsvImportFile $file, ?string $severity = null): array
+            {
+                if ($row->id !== $this->survives) {
+                    throw $this->failure;
+                }
+
+                return parent::issuesFor($row, $file, $severity);
+            }
+        });
+
+        Log::spy();
+
+        $body = $this->get("/api/imports/{$this->run->id}/errors.csv")->streamedContent();
+
+        // What the operator downloads: the rows that made it, then an honest
+        // final line — never a stack trace in a spreadsheet.
+        $this->assertStringContainsString('L-1', $body);
+        $this->assertStringContainsString('export_failed', $body);
+        $this->assertStringContainsString('This report stopped early and is incomplete.', $body);
+        $this->assertStringNotContainsString('Dela Cruz', $body, "The failing query was appended to the operator's CSV.");
+        $this->assertStringNotContainsString('Lock wait timeout', $body);
+
+        Log::shouldHaveReceived('warning')->withArgs(function (string $message, array $context) use ($second): bool {
+            $encoded = json_encode($context);
+
+            $this->assertStringNotContainsString('Dela Cruz', $encoded, 'The failing query was written to the shared log.');
+            $this->assertStringNotContainsString('09171234567', $encoded);
+            $this->assertStringNotContainsString('Lock wait timeout', $encoded);
+
+            // The digest, and the diagnostics that make the failure findable.
+            $this->assertSame('1205', $context['driver_code'] ?? null);
+            $this->assertSame('HY000', $context['sql_state'] ?? null);
+            $this->assertSame($this->run->id, $context['csv_import_run_id'] ?? null);
+
+            /*
+             * The row that THREW, not the last one that succeeded — a surrogate
+             * id, never a value out of the file, and the only thing in the
+             * shared log that tells an engineer where the export died. Asserted
+             * as the second row precisely because the off-by-one is invisible
+             * otherwise: emit() stamps this on entry, so the useful row is
+             * named rather than the one before it.
+             */
+            $this->assertSame($second->id, $context['last_row_id'] ?? null);
+
+            return true;
+        })->once();
     }
 }

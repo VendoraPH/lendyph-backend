@@ -8,6 +8,7 @@ use App\Models\CsvImportRun;
 use Generator;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Support\Facades\Log;
 use Throwable;
 
 /**
@@ -322,8 +323,10 @@ class ErrorReportBuilder
             ->reorder('id')
             ->lazyById(self::CHUNK);
 
+        $lastRowId = null;
+
         try {
-            yield from $this->emit($rows, $files, $severity);
+            yield from $this->emit($rows, $files, $severity, $lastRowId);
         } catch (Throwable $e) {
             /**
              * The response has already begun by the time this generator runs,
@@ -331,9 +334,54 @@ class ErrorReportBuilder
              * appended to a CSV of members' names, birthdates and phone
              * numbers, which the operator then opens in Excel. With APP_DEBUG
              * on it is a very detailed one. The download ends with an honest
-             * final row instead, and the exception is logged where it belongs.
+             * final row instead, and the exception is described where it
+             * belongs.
+             *
+             * NOT `report($e)`, which was the same leak wearing a different
+             * name. report() hands the exception to the framework's default
+             * handler, which writes `$e->getMessage()` to the DEFAULT channel —
+             * `single`: one file, never rotated, no scrubbing, mode 644. A
+             * QueryException's message is the failing SQL with the bindings
+             * substituted in, and of every site on this path THIS is the one
+             * holding a member when it throws: the generator above is streaming
+             * staged rows, so the query that failed is a query about a person,
+             * not about a run. Every other catch on this path is handling
+             * run-level metadata — ids, counts, phases.
+             *
+             * So the same treatment as those: the digest on the shared line,
+             * the full text only to the opt-in `csv-import` channel. See
+             * ImportErrorDigest, which is where the whole argument lives.
              */
-            report($e);
+            Log::warning('csv-import: an error report download stopped early', [
+                'csv_import_run_id' => $run->id,
+                /*
+                 * Safe to name, and worth naming. `severity` and `kind` are a
+                 * closed vocabulary validated at the request boundary, and
+                 * `last_row_id` is a surrogate key — the autoincrement, not
+                 * anything out of the file. It is the difference between an
+                 * operator being told to download it again forever and an
+                 * engineer being able to look at the row that poisoned the
+                 * export.
+                 *
+                 * It is the row the export had REACHED, which is deliberately
+                 * not the same as the last row it finished. emit() stamps it on
+                 * entry to each row, so a throw raised while turning that row
+                 * into issue lines names THAT row — the useful answer — and a
+                 * throw raised while lazyById() fetches the next chunk names the
+                 * last row completed, which is the only honest answer available
+                 * there. Stated because the difference is one row and somebody
+                 * will chase it.
+                 */
+                'severity' => $severity,
+                'kind' => $filters['kind'] ?? null,
+                'last_row_id' => $lastRowId,
+            ] + ImportErrorDigest::context($e));
+
+            ImportErrorDigest::recordDiagnostics($e, [
+                'csv_import_run_id' => $run->id,
+                'stage' => 'error-report-download',
+                'last_row_id' => $lastRowId,
+            ]);
 
             yield ['', '', '', '', self::SEVERITY_ERROR, 'export_failed', '', 'This report stopped early and is incomplete. Please download it again.', ''];
         }
@@ -342,11 +390,20 @@ class ErrorReportBuilder
     /**
      * @param  iterable<int, CsvImportRow>  $rows
      * @param  array<int, CsvImportFile>  $files
+     * @param  int|null  $lastRowId  By reference, so the caller's catch can say
+     *                               how far the download actually got. Stamped
+     *                               on ENTRY to each row, so a throw from
+     *                               issuesFor() names the offending row rather
+     *                               than the one before it. A surrogate id and
+     *                               nothing else — see the log line in
+     *                               csvRows().
      * @return Generator<int, list<string>>
      */
-    private function emit(iterable $rows, array $files, ?string $severity): Generator
+    private function emit(iterable $rows, array $files, ?string $severity, ?int &$lastRowId = null): Generator
     {
         foreach ($rows as $row) {
+            $lastRowId = (int) $row->id;
+
             foreach ($this->issuesFor($row, $files[$row->csv_import_file_id] ?? null, $severity) as $issue) {
                 yield [
                     $issue['file'],
