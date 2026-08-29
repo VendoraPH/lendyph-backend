@@ -9,9 +9,11 @@ use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Gate;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\ServiceProvider;
 use Illuminate\Support\Str;
+use Throwable;
 
 class AppServiceProvider extends ServiceProvider
 {
@@ -120,27 +122,48 @@ class AppServiceProvider extends ServiceProvider
         /**
          * Retention for CSV migration uploads.
          *
-         * The moment a run reaches a terminal phase, the files it uploaded stop
-         * being useful and start being a liability: an assembled customers CSV
-         * is every member's name, birthdate, contact number and income in
-         * plaintext, and once those rows are staged into `csv_import_rows` the
-         * file has done its job. Hung off the model rather than written into
-         * each transition so that whoever moves a run to `completed` or
-         * `failed` — the importer, a future admin action, anything — cannot
-         * forget to clean up. Cancellation calls the same method directly, so
-         * it never depends on this listener being wired.
+         * The moment a run is DECIDED — completed, or cancelled by an operator
+         * — the files it uploaded stop being useful and start being a
+         * liability: an assembled customers CSV is every member's name,
+         * birthdate, contact number and income in plaintext, and once those
+         * rows are staged into `csv_import_rows` the file has done its job.
+         * Hung off the model rather than written into each transition so that
+         * whoever moves a run to a terminal phase — the importer, a future
+         * admin action, anything — cannot forget to clean up. Cancellation
+         * calls the same method directly, so it never depends on this listener
+         * being wired.
+         *
+         * DELIBERATELY NARROWER THAN `CLOSED_PHASES`. This keyed off that list,
+         * which includes `failed`, and the processor writes a run off as
+         * `failed` on ANY Throwable — so a single deadlock or lock-wait timeout
+         * deleted both assembled source files the instant it was caught,
+         * leaving a half-imported book with nothing to re-run from. Verified
+         * from a console process, not theorised: the file existed before the
+         * save and was gone after it. `failed` runs now keep their files and
+         * are collected by the reconciling sweep once
+         * `imports.failed_run_retention_hours` has passed. The staged rows are
+         * untouched either way, so nothing is lost by waiting.
+         *
+         * See CsvImportUploadService::STORAGE_RELEASE_PHASES — the list is
+         * published there rather than written out here, so this listener cannot
+         * drift from the sweep that backs it up.
          *
          * `wasChanged('phase')` so this fires on the transition rather than on
          * every subsequent save of an already-finished run.
          *
          * The one gap worth knowing: Eloquent model events do not fire for mass
-         * updates. `CsvImportRun::query()->update(['phase' => 'failed'])` will
-         * NOT trigger this; `$run->update(...)` or `save()` will. That gap is
-         * real rather than theoretical — the importer's abandoned-run cleanup
-         * marks runs `failed` from a scheduled command — so it is covered from
-         * the other side by CsvImportUploadService::releaseAbandonedStorage(),
-         * a reconciling sweep that runs when the next import is opened. This
+         * updates. `CsvImportRun::query()->update(['phase' => 'completed'])`
+         * will NOT trigger this; `$run->update(...)` or `save()` will. It is
+         * covered from the other side by
+         * CsvImportUploadService::releaseAbandonedStorage(), a reconciling
+         * sweep that walks from the run row to what is actually on disk. This
          * listener is the timely path; that sweep is the guaranteed one.
+         *
+         * (The importer's 14-day prune is NOT an example of that gap — it saves
+         * per row, so this listener does fire for it. What matters about the
+         * prune is the other thing: it saves inside a transaction, which is why
+         * releaseStorage() defers its unlinks to `DB::afterCommit` rather than
+         * unlinking where it is called.)
          *
          * Safe to reach here from a console or queue process as well as a web
          * request. The uid trap on this disk is about CREATING files a
@@ -150,17 +173,47 @@ class AppServiceProvider extends ServiceProvider
          * `csv_import_rows` still holds the same personal data row by row and
          * needs its own retention decision, which is a policy call rather than
          * something this listener can make.
+         *
+         * HOUSEKEEPING MUST NOT BE ABLE TO FAIL THE IMPORT IT IS TIDYING UP
+         * AFTER. A `saved` listener runs inside the save, so anything thrown
+         * here propagates out of `$run->save()` and out of whatever was calling
+         * it. The processor completes a run by saving it into `completed`
+         * inside its own try/catch; an unlink that failed on a disk error, a
+         * permissions change or an NFS blip would therefore turn a run that had
+         * already written every member and every loan correctly into `failed`.
+         * The data is committed and only the bookkeeping is wrong, which is the
+         * worst available shape — the operator sees "failed" and may reasonably
+         * re-run.
+         *
+         * So it is caught, logged at `error` with the run and the reason, and
+         * the save proceeds. The trade is deliberate and only goes one way: a
+         * file left on the volume is recoverable, and
+         * releaseAbandonedStorage() is precisely the thing that will find it on
+         * the next import or the next scheduled tick. A wrongly-failed run is
+         * not recoverable without somebody editing a phase by hand.
          */
         CsvImportRun::saved(function (CsvImportRun $run): void {
             if (! $run->wasChanged('phase')) {
                 return;
             }
 
-            if (! in_array($run->phase, CsvImportUploadService::CLOSED_PHASES, true)) {
+            if (! in_array($run->phase, CsvImportUploadService::STORAGE_RELEASE_PHASES, true)) {
                 return;
             }
 
-            app(CsvImportUploadService::class)->releaseStorage($run);
+            try {
+                app(CsvImportUploadService::class)->releaseStorage($run);
+            } catch (Throwable $e) {
+                Log::error('csv-import: could not release a finished run\'s storage', [
+                    'csv_import_run_id' => $run->id,
+                    'phase' => $run->phase,
+                    'exception' => $e->getMessage(),
+                    'consequence' => 'The run\'s uploaded CSVs are still on the private disk. They hold member '
+                        .'names, birthdates, contact numbers and incomes. releaseAbandonedStorage() will '
+                        .'reconcile them on the next import or scheduled tick; if it keeps failing, that is a '
+                        .'disk or permissions fault to fix rather than a run to re-import.',
+                ]);
+            }
         });
 
         // API rate limiters
