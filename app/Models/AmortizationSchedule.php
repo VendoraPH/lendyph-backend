@@ -116,6 +116,72 @@ class AmortizationSchedule extends Model
     }
 
     /**
+     * SQL for whether a schedule may be PENALISED at all — the pre-import
+     * arrears exclusion.
+     *
+     * A loan migrated in from a cooperative's existing book arrives part-way
+     * through its life, with due dates already months in the past, so it is
+     * immediately overdue by every measure here. `loans.imported_arrears_baseline`
+     * is the date the coop's own bookkeeping stops and ours starts: whatever
+     * penalties they charged before it are already inside the balances they
+     * handed over, and charging again double-bills a real member overnight.
+     * A schedule due STRICTLY BEFORE the baseline is therefore a pre-import
+     * arrear — not penalised, not stamped `overdue`, and not counted toward
+     * defaulting.
+     *
+     * Note what this deliberately does NOT govern, exactly as with
+     * self::pastGraceSql() above. The baseline changes when a borrower is
+     * PENALISED and when they are called LATE. It does not change whether the
+     * money is OWED — so Loan::scopePastDue(), the Due/Past Due report
+     * (ReportService::duePastDueQuery()), the aging report and
+     * LoanResource's `overdue_amount` all still see these schedules, and must.
+     * The coop has to chase that money; it just may not be charged for it
+     * twice. Do not penalise is not do not show.
+     *
+     * Written `IS NULL OR …` so every loan that was NOT imported — the entire
+     * existing book, and everything originated here afterwards — is unaffected
+     * by construction rather than by a caller remembering to branch.
+     *
+     * Takes NO bindings, unlike self::pastGraceSql(). Both
+     * `amortization_schedules` and `loans` must be in scope where this lands —
+     * inside a `whereHas` on either side of the relation, or after an explicit
+     * join.
+     *
+     * `due_date` is left bare on the left of the comparison for the same
+     * indexability reason pastGraceSql() gives: the baseline is a constant per
+     * correlated probe, so this stays a range on
+     * `amortization_schedules.due_date` instead of forfeiting the index.
+     */
+    public static function penalisableSql(): string
+    {
+        return '(`loans`.`imported_arrears_baseline` IS NULL '
+            .'OR `amortization_schedules`.`due_date` >= `loans`.`imported_arrears_baseline`)';
+    }
+
+    /**
+     * Whether one schedule may be penalised — the PHP mirror of
+     * self::penalisableSql(), for callers that already hold the loan and so do
+     * not need `loans` in the query at all.
+     *
+     * A null baseline is a loan that was not imported, which is every loan the
+     * system originated itself, and returns true — so this is safe to call
+     * unconditionally rather than behind an `isImported()` check.
+     *
+     * Both operands are DATE columns on the database side, so both are
+     * compared at day precision here to keep the twin genuinely equivalent to
+     * the SQL. That differs from self::pastGraceCutoff(), which passes its
+     * as-of value through at whatever precision it arrived with — there the
+     * as-of is a caller-supplied payment timestamp, not a stored DATE, and
+     * normalising it would move the same-day boundary. Neither argument is
+     * mutated.
+     */
+    public static function isPenalisable(?Carbon $baseline, Carbon $dueDate): bool
+    {
+        return $baseline === null
+            || $dueDate->copy()->startOfDay()->gte($baseline->copy()->startOfDay());
+    }
+
+    /**
      * The already-loaded schedules that are LATE — still owing, and past both
      * the due date and the loan's grace period.
      *

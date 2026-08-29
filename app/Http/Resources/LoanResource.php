@@ -13,6 +13,8 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'id', type: 'integer'),
         new OA\Property(property: 'application_number', type: 'string'),
         new OA\Property(property: 'loan_account_number', type: 'string', nullable: true),
+        new OA\Property(property: 'external_loan_no', type: 'string', nullable: true, description: "The cooperative's own reference for a loan migrated in by the CSV importer. Kept separate from `loan_account_number`, which is a generated LN- sequence."),
+        new OA\Property(property: 'is_imported', type: 'boolean', description: 'True when this loan was migrated in from an existing book rather than originated here, so its amortization schedule is reconstructed and its pre-import arrears are not penalised.'),
         new OA\Property(property: 'interest_rate', type: 'number'),
         new OA\Property(property: 'interest_method', type: 'string'),
         new OA\Property(property: 'term', type: 'integer'),
@@ -146,6 +148,12 @@ class LoanResource extends JsonResource
             'id' => $this->id,
             'application_number' => $this->application_number,
             'loan_account_number' => $this->loan_account_number,
+            'external_loan_no' => $this->external_loan_no,
+            // Lets the UI label a reconstructed schedule — see
+            // Loan::isImported(). A label only: the penalty and default paths
+            // read the baseline through
+            // AmortizationSchedule::isPenalisable(), never this flag.
+            'is_imported' => $this->isImported(),
             'interest_rate' => $this->interest_rate,
             'interest_method' => $this->interest_method,
             'term' => $this->term,
