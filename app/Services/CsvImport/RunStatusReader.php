@@ -23,16 +23,6 @@ use Illuminate\Support\Facades\DB;
 class RunStatusReader
 {
     /**
-     * How many missing chunk indexes are listed before the list is truncated.
-     *
-     * Must equal CsvImportUploadService::MISSING_CHUNK_LIST_LIMIT. It only
-     * applies on the fallback path below — when the upload service is present
-     * it does this itself — but a client must never see two truncation
-     * thresholds depending on which endpoint answered.
-     */
-    private const MISSING_CHUNK_LIST_LIMIT = 500;
-
-    /**
      * Phases in which a run is over, one way or another.
      *
      * Mirrors CsvImportUploadService::CLOSED_PHASES and defers to it when that
@@ -72,7 +62,7 @@ class RunStatusReader
             $filePayloads[$file->kind] = $this->filePayload(
                 $file,
                 $counts[$file->id] ?? [],
-                $upload['files'][$file->kind] ?? null,
+                $upload['files'][$file->kind],
             );
         }
 
@@ -199,9 +189,8 @@ class RunStatusReader
      * Calling through is how the two endpoints stay one description of a run
      * rather than two that agree until someone edits one of them.
      *
-     * Resolved by name rather than injected, and only when the class exists, so
-     * this branch can be developed and tested before the upload work merges.
-     * Once it has, the fallback below is dead code and should be deleted.
+     * Resolved by name rather than injected, a holdover from this reader being
+     * built before the upload service existed.
      *
      * @return array{chunk_size?: int, files?: array<string, array<string, mixed>>}
      */
@@ -223,12 +212,12 @@ class RunStatusReader
      * owns — this block is a superset of its contract, never a variant of it.
      *
      * @param  array<string, int>  $counts  "{status}|{result}" => count
-     * @param  array<string, mixed>|null  $uploadBlock
+     * @param  array<string, mixed>  $uploadBlock
      * @return array<string, mixed>
      */
-    private function filePayload(CsvImportFile $file, array $counts, ?array $uploadBlock): array
+    private function filePayload(CsvImportFile $file, array $counts, array $uploadBlock): array
     {
-        return ($uploadBlock ?? $this->fallbackUploadBlock($file)) + [
+        return $uploadBlock + [
             'staging' => [
                 'delimiter' => $file->delimiter,
                 'encoding_note' => $file->encoding_note,
@@ -237,79 +226,6 @@ class RunStatusReader
                 'column_count' => $file->column_count === null ? null : (int) $file->column_count,
             ],
             'counts' => $this->shapeCounts($counts),
-        ];
-    }
-
-    /**
-     * The upload block, computed here, for as long as CsvImportUploadService is
-     * not on this branch yet.
-     *
-     * Deliberately the same keys, the same cap and the same assembled-file rule
-     * as CsvImportUploadService::runPayload(), so swapping to it changes no
-     * response and no test. DELETE THIS once the upload work has merged.
-     *
-     * @return array<string, mixed>
-     */
-    private function fallbackUploadBlock(CsvImportFile $file): array
-    {
-        $assembled = $file->assembled_path !== null;
-        $totalChunks = (int) $file->total_chunks;
-
-        $received = $assembled ? [] : DB::table('csv_import_file_chunks')
-            ->where('csv_import_file_id', $file->id)
-            ->orderBy('chunk_index')
-            ->pluck('chunk_index')
-            ->map(fn ($index): int => (int) $index)
-            ->all();
-
-        $missing = [];
-        $missingCount = 0;
-
-        if (! $assembled) {
-            /**
-             * Walked as gaps between the indexes that arrived rather than by
-             * counting 0..total_chunks-1, so the work is bounded by what was
-             * actually received plus the list cap — never by a declared chunk
-             * count. The upload endpoints now compute `total_chunks` server-side
-             * from `size_bytes`, so a hostile value can no longer reach this
-             * table; this stays as the cheaper shape regardless.
-             */
-            $expected = 0;
-
-            foreach ($received as $index) {
-                while ($expected < $index) {
-                    $missingCount++;
-
-                    if (count($missing) < self::MISSING_CHUNK_LIST_LIMIT) {
-                        $missing[] = $expected;
-                    }
-
-                    $expected++;
-                }
-
-                $expected = max($expected, $index + 1);
-            }
-
-            $missingCount += max(0, $totalChunks - $expected);
-
-            while ($expected < $totalChunks && count($missing) < self::MISSING_CHUNK_LIST_LIMIT) {
-                $missing[] = $expected++;
-            }
-        }
-
-        return [
-            'id' => $file->id,
-            'kind' => $file->kind,
-            'original_filename' => $file->original_filename,
-            'size_bytes' => (int) $file->size_bytes,
-            'sha256' => $file->sha256,
-            'chunk_size' => (int) $file->chunk_size,
-            'total_chunks' => $totalChunks,
-            'assembled' => $assembled,
-            'received_chunks' => $assembled ? $totalChunks : count($received),
-            'missing_chunks' => $missing,
-            'missing_chunk_count' => $missingCount,
-            'missing_chunks_truncated' => $missingCount > count($missing),
         ];
     }
 
