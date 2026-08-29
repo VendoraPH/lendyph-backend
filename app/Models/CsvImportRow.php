@@ -37,6 +37,7 @@ class CsvImportRow extends Model
         'borrower_id',
         'loan_id',
         'attempts',
+        'redacted_at',
     ];
 
     protected function casts(): array
@@ -48,6 +49,7 @@ class CsvImportRow extends Model
             'normalized' => 'array',
             'errors' => 'array',
             'attempts' => 'integer',
+            'redacted_at' => 'datetime',
         ];
     }
 
@@ -75,5 +77,22 @@ class CsvImportRow extends Model
     public function scopePending($query)
     {
         return $query->whereNull('result');
+    }
+
+    /**
+     * Rows whose personal columns are still populated.
+     *
+     * The idempotency guard for both sweeps that blank them —
+     * `imports:redact-rows` and BorrowerPurgeService, through
+     * CsvImportRowRedactor, which is where what a redaction actually DOES is
+     * documented. Redaction only ever moves a row from unredacted to redacted,
+     * so re-running one is free and an interrupted one resumes where it stopped
+     * rather than rewriting what it already did — and `redacted_at` keeps the
+     * date of the FIRST redaction, which is what an erasure request has to be
+     * answered with.
+     */
+    public function scopeUnredacted($query)
+    {
+        return $query->whereNull('redacted_at');
     }
 }

@@ -3,8 +3,8 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Api\Traits\CsvExportTrait;
+use App\Http\Controllers\Api\Traits\ResolvesImportRuns;
 use App\Http\Controllers\Controller;
-use App\Models\CsvImportRun;
 use App\Services\CsvImport\ErrorReportBuilder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -22,6 +22,9 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
 class CsvImportErrorReportController extends Controller
 {
     use CsvExportTrait;
+
+    /** The run id is resolved AFTER the permission check — see the trait. */
+    use ResolvesImportRuns;
 
     public function __construct(private ErrorReportBuilder $report) {}
 
@@ -45,9 +48,11 @@ class CsvImportErrorReportController extends Controller
             new OA\Response(response: 403, description: 'Forbidden'),
         ],
     )]
-    public function index(Request $request, CsvImportRun $run): JsonResponse
+    public function index(Request $request, int $run): JsonResponse
     {
         $this->authorize('imports:process');
+
+        $run = $this->importRun($run);
 
         $filters = $this->validatedFilters($request);
         $perPage = min(max((int) ($filters['per_page'] ?? 25), 1), 100);
@@ -107,9 +112,11 @@ class CsvImportErrorReportController extends Controller
             new OA\Response(response: 403, description: 'Forbidden'),
         ],
     )]
-    public function export(Request $request, CsvImportRun $run): StreamedResponse
+    public function export(Request $request, int $run): StreamedResponse
     {
         $this->authorize('imports:process');
+
+        $run = $this->importRun($run);
 
         /**
          * Validated before a byte is streamed. The generator below runs after

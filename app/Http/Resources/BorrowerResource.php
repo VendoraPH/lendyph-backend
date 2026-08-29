@@ -25,6 +25,12 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'approved_by_user', type: 'object', nullable: true, description: 'The reviewer who approved the registration, as a UserResource. Present only when the `approvedBy` relation is eager-loaded; absent otherwise, never lazily fetched.'),
         new OA\Property(property: 'rejected_by_user', type: 'object', nullable: true, description: 'The reviewer who rejected the registration, as a UserResource. Present only when the `rejectedBy` relation is eager-loaded; absent otherwise, never lazily fetched.'),
         new OA\Property(property: 'rejection_reason', type: 'string', nullable: true, description: 'Reason captured when a registration is rejected'),
+        new OA\Property(property: 'is_imported', type: 'boolean', description: 'True when this member was carried in by a CSV migration rather than registered through this system. '
+            .'Imported members are created `active` with no documents and no KYC review, so `approved_at`/`approved_by` on them record who '
+            .'ran the migration and the date the extract represents — not an identity check.'),
+        new OA\Property(property: 'has_valid_id', type: 'boolean', description: 'Whether a `valid_id` document is on file. Present only when the caller loaded the `documents` relation or '
+            .'the `valid_id_documents_count` count; absent otherwise, never lazily fetched. `is_imported && has_valid_id === false` is the '
+            .'"imported, KYC not on file" backlog.'),
         new OA\Property(property: 'branch_id', type: 'integer', nullable: true, description: 'Foreign key to the assigned branch (null for anonymous submissions awaiting admin review)'),
         new OA\Property(property: 'photo_url', type: 'string', nullable: true),
         new OA\Property(property: 'photo', type: 'string', nullable: true, description: 'Alias for photo_url'),
@@ -48,6 +54,26 @@ class BorrowerResource extends JsonResource
         // Signed, expiring link minted by Borrower::photoUrl — the file is on
         // the private disk and has no directly reachable URL.
         $photoUrl = $this->photo_url;
+
+        /**
+         * Whether a valid ID is on file, from whatever the caller already
+         * loaded — and null, meaning "not asked", when they loaded neither.
+         *
+         * Never a query of its own. A `$this->documents()->where(...)` here
+         * would be one round trip per row on a 100-member page, on the list
+         * endpoint, which is exactly how a badge becomes an outage. `show()`
+         * loads the documents; `index()` asks for the count
+         * (`valid_id_documents_count`); anything else omits the key rather than
+         * guessing, because guessing `false` would tell an operator that every
+         * member in a payload the loader forgot is missing their KYC.
+         */
+        $validIdOnFile = match (true) {
+            $this->resource->relationLoaded('documents') => $this->documents->contains(
+                fn ($document): bool => $document->type === 'valid_id',
+            ),
+            $this->resource->valid_id_documents_count !== null => (int) $this->resource->valid_id_documents_count > 0,
+            default => null,
+        };
 
         return [
             'id' => $this->id,
@@ -111,6 +137,34 @@ class BorrowerResource extends JsonResource
             'approved_by_user' => new UserResource($this->whenLoaded('approvedBy')),
             'rejected_by_user' => new UserResource($this->whenLoaded('rejectedBy')),
             'rejection_reason' => $this->rejection_reason,
+
+            /*
+             * The imported-member backlog, in two fields the members list can
+             * badge on directly.
+             *
+             * `approved_at` and `approved_by` alone cannot express this. The CSV
+             * importer stamps both — see CsvImportRun::admissionStamp() — so an
+             * imported member reads exactly like a reviewed one, which is the
+             * honest record of who admitted them but says nothing about whether
+             * anyone ever saw an ID. They never had one: the importer creates
+             * members with no documents at all, and approveRegistration() would
+             * refuse every one of them for that reason.
+             *
+             * `is_imported` is still derived from `external_account_no` — that
+             * is the only signal on the row — but it is derived HERE rather than
+             * by every client that wants to draw the badge. The two are not the
+             * same thing: `external_account_no` is a legacy join key an operator
+             * can type onto a member who was never imported, which is exactly
+             * what it is exposed for, so its meaning is "has a legacy account
+             * number" and this field's meaning is "came in through a migration".
+             * They agree today; when they stop, one definition changes and no
+             * client does.
+             *
+             * `has_valid_id` is the half that is genuinely new, and the half an
+             * operator acts on.
+             */
+            'is_imported' => $this->external_account_no !== null,
+            'has_valid_id' => $this->when($validIdOnFile !== null, $validIdOnFile),
             'branch_id' => $this->branch_id,
             'branch' => new BranchResource($this->whenLoaded('branch')),
             'co_makers' => CoMakerResource::collection($this->whenLoaded('coMakers')),

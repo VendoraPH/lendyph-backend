@@ -23,26 +23,6 @@ use Illuminate\Support\Facades\DB;
 class RunStatusReader
 {
     /**
-     * Phases in which a run is over, one way or another.
-     *
-     * Mirrors CsvImportUploadService::CLOSED_PHASES and defers to it when that
-     * class is present, so `cancelled` — added with the cancel endpoint — is
-     * handled here the moment it exists rather than falling through to the
-     * still-running branch and telling an operator that a cancelled import is
-     * waiting on them for a product mapping.
-     *
-     * @return list<string>
-     */
-    private function closedPhases(): array
-    {
-        if (class_exists(CsvImportUploadService::class)) {
-            return CsvImportUploadService::CLOSED_PHASES;
-        }
-
-        return ['completed', 'failed', 'cancelled'];
-    }
-
-    /**
      * @return array<string, mixed>
      */
     public function payload(CsvImportRun $run): array
@@ -70,7 +50,14 @@ class RunStatusReader
         $mapping = ProductMappingResolver::normalizeStoredMapping($run->product_mapping);
 
         $loanRowsStaged = (int) ($filePayloads['loans']['counts']['total'] ?? 0);
-        $isClosed = in_array($run->phase, $this->closedPhases(), true);
+        /*
+         * CsvImportRun::closedPhases(), which defers to
+         * CsvImportUploadService::CLOSED_PHASES when that class is present. It
+         * used to be a private copy here; `imports:redact-rows` needed the same
+         * list, and a second copy of a phase list is the thing that silently
+         * stops being true the next time a phase is added.
+         */
+        $isClosed = in_array($run->phase, CsvImportRun::closedPhases(), true);
 
         $lastAdvancedAt = $this->lastAdvancedAt($run, $files);
         $now = now();
@@ -87,6 +74,22 @@ class RunStatusReader
             'started_at' => $run->started_at?->toIso8601String(),
             'finished_at' => $run->finished_at?->toIso8601String(),
             'failure_reason' => $run->failure_reason,
+
+            /**
+             * When `imports:redact-rows` blanked this run's staged rows, or null
+             * while they still hold the file's contents.
+             *
+             * Published because the error report visibly changes on that date
+             * and an operator is owed the reason. Every count and every group
+             * still reconciles — redaction keeps `line_number`, `status`,
+             * `result`, `result_category` and each note's field and code
+             * precisely so they do — but the sentence beside each issue and the
+             * Original Value column beside it are gone, because that is where
+             * the member's own cell was quoted. A screen that cannot say why
+             * looks like a bug in the report rather than a retention policy
+             * doing its job.
+             */
+            'rows_redacted_at' => $run->rows_redacted_at?->toIso8601String(),
 
             /**
              * Whether the run is over, by any route — completed, failed, or

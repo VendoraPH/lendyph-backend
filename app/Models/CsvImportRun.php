@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Services\CsvImport\CsvImportUploadService;
 use Carbon\CarbonInterface;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -33,6 +34,7 @@ class CsvImportRun extends Model
         'initiated_ip',
         'started_at',
         'finished_at',
+        'rows_redacted_at',
         'failure_reason',
         'notes',
     ];
@@ -45,6 +47,7 @@ class CsvImportRun extends Model
             'cursor_row_id' => 'integer',
             'started_at' => 'datetime',
             'finished_at' => 'datetime',
+            'rows_redacted_at' => 'datetime',
             'notes' => 'array',
         ];
     }
@@ -78,6 +81,31 @@ class CsvImportRun extends Model
     public function loansFile(): HasOne
     {
         return $this->hasOne(CsvImportFile::class)->where('kind', 'loans');
+    }
+
+    /**
+     * Phases in which a run is over, one way or another.
+     *
+     * THE one copy of that list on this side of the feature. It mirrors
+     * CsvImportUploadService::CLOSED_PHASES and defers to it whenever that class
+     * is present, so `cancelled` — added after the fact, with the cancel
+     * endpoint — is honoured here the moment it exists rather than being missed
+     * by a hardcoded pair. The literal below is the fallback for branches the
+     * upload work has not merged into yet, and is dead the moment it has.
+     *
+     * Read by RunStatusReader for `is_closed` and by `imports:redact-rows` for
+     * "finished long enough ago to redact"; a run that is not closed is still
+     * being worked on and its staged rows are still the resume set.
+     *
+     * @return list<string>
+     */
+    public static function closedPhases(): array
+    {
+        if (class_exists(CsvImportUploadService::class)) {
+            return CsvImportUploadService::CLOSED_PHASES;
+        }
+
+        return ['completed', 'failed', 'cancelled'];
     }
 
     /**

@@ -46,3 +46,10 @@ Schedule::command('registrations:prune')->dailyAt('03:30');
  * the budget is what keeps a healthy tick nowhere near it.
  */
 Schedule::command('imports:process')->everyMinute()->withoutOverlapping(10);
+
+// Blank the personal data staged in csv_import_rows once an import run has been
+// finished for a month. The uploaded CSV is deleted the moment a run closes, but
+// staging had already copied every member's name, birthdate, contact number and
+// income into those rows, and nothing removed them. Runs at 03:45, after the
+// registration prune, so the two retention jobs never overlap on the same box.
+Schedule::command('imports:redact-rows')->dailyAt('03:45');

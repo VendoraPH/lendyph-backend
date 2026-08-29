@@ -33,6 +33,48 @@ class ErrorReportBuilder
 
     public const SEVERITY_WARNING = 'warning';
 
+    /**
+     * A loan written outside the bounds its mapped LoanProduct configures.
+     *
+     * A PUBLISHED CONTRACT, and the reader half of it. The importer bypasses
+     * LoanService::createLoan(), so its `min_amount`/`max_amount`/`min_term`/
+     * `max_term`/rate-range guards never fire — deliberately, and that stays: a
+     * migration has to be able to carry a decade of historical loans that
+     * today's product rules would reject, and the cooperative this exists for
+     * has exactly one product, ₱1,000–75,000 over 30 monthly periods. Enforcing
+     * would make the migration impossible rather than safe.
+     *
+     * What was missing is the trace. The breach was counted at mapping time by
+     * ProductMappingResolver::compatibility() — a forecast, made before the
+     * import runs and against the mapping as it stood then — and then nothing
+     * recorded which rows actually landed out of bounds. The importer writes
+     * this string into `csv_import_rows.result_category` on the row it just
+     * imported; this class turns it into a WARNING line, so the run's own error
+     * report carries the reviewable list instead of the number being a forecast
+     * nobody can expand.
+     *
+     * A warning and never an error: the loan is on the books and correct as the
+     * cooperative recorded it. It is the product configuration it disagrees
+     * with, and that is an operator's judgement, not a failure.
+     *
+     * Survives redaction. `result_category` is one of the four columns
+     * `imports:redact-rows` keeps, so this list still reconciles after the
+     * personal data is gone — only the interpolated message reverts to the
+     * generic sentence below.
+     */
+    public const CATEGORY_OUT_OF_PRODUCT_BOUNDS = 'out_of_product_bounds';
+
+    /**
+     * Results that mean the row was actually written.
+     *
+     * `failed` and `skipped` are excluded because both already emit a line of
+     * their own from `result_category`, and a row must not be reported twice
+     * for one category.
+     *
+     * @var list<string>
+     */
+    private const WRITTEN_RESULTS = ['imported', 'matched_existing', 'already_imported'];
+
     /** Rows read per chunk when summarising or streaming. */
     private const CHUNK = 500;
 
@@ -114,7 +156,15 @@ class ErrorReportBuilder
                      * matched.
                      */
                     $q->orWhereRaw('JSON_LENGTH(`normalized`, ?) > 0', ['$.warnings'])
-                        ->orWhere('result', 'skipped');
+                        ->orWhere('result', 'skipped')
+                        /*
+                         * A column read rather than a JSON one, so this leg
+                         * costs nothing beyond the scan the warnings leg above
+                         * already forces — and unlike that one it still matches
+                         * after `imports:redact-rows` has blanked `normalized`,
+                         * because `result_category` is a column redaction keeps.
+                         */
+                        ->orWhere('result_category', self::CATEGORY_OUT_OF_PRODUCT_BOUNDS);
                 }
             })
             ->orderBy('csv_import_file_id')
@@ -391,6 +441,24 @@ class ErrorReportBuilder
                     'field' => '__row',
                     'code' => (string) ($row->result_category ?: 'skipped'),
                     'message' => (string) ($row->result_message ?: 'This row was skipped.'),
+                ], $shape, $normalized, $raw);
+            }
+
+            /**
+             * The loan landed, and it disagrees with its product.
+             *
+             * Gated on the row having been WRITTEN. A `failed` or `skipped` row
+             * carrying this category has already produced its own line above
+             * from the same column, and emitting a second one would double the
+             * group's count against a single row.
+             */
+            if ($row->result_category === self::CATEGORY_OUT_OF_PRODUCT_BOUNDS
+                && in_array((string) $row->result, self::WRITTEN_RESULTS, true)) {
+                $issues[] = $this->issue($base, self::SEVERITY_WARNING, [
+                    'field' => '__row',
+                    'code' => self::CATEGORY_OUT_OF_PRODUCT_BOUNDS,
+                    'message' => (string) ($row->result_message
+                        ?: 'This loan was imported outside the limits configured on its loan product.'),
                 ], $shape, $normalized, $raw);
             }
         }

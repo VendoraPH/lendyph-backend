@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Http\Controllers\Api\Traits\ResolvesImportRuns;
 use App\Http\Controllers\Controller;
 use App\Models\CsvImportRun;
 use App\Models\LoanProduct;
@@ -28,6 +29,9 @@ use OpenApi\Attributes as OA;
  */
 class CsvImportMappingController extends Controller
 {
+    /** The run id is resolved AFTER the permission check — see the trait. */
+    use ResolvesImportRuns;
+
     public function __construct(private ProductMappingResolver $resolver) {}
 
     #[OA\Get(
@@ -48,11 +52,11 @@ class CsvImportMappingController extends Controller
             new OA\Response(response: 404, description: 'Not found'),
         ],
     )]
-    public function show(CsvImportRun $run): JsonResponse
+    public function show(int $run): JsonResponse
     {
         $this->authorize('imports:process');
 
-        return response()->json(['data' => $this->resolver->payload($run)]);
+        return response()->json(['data' => $this->resolver->payload($this->importRun($run))]);
     }
 
     #[OA\Put(
@@ -78,9 +82,11 @@ class CsvImportMappingController extends Controller
             new OA\Response(response: 422, description: 'Unmapped strings, or an id that does not exist'),
         ],
     )]
-    public function update(Request $request, CsvImportRun $run): JsonResponse
+    public function update(Request $request, int $run): JsonResponse
     {
         $this->authorize('imports:process');
+
+        $run = $this->importRun($run);
 
         if (in_array($run->phase, ['completed', 'cancelled'], true)) {
             return response()->json([
