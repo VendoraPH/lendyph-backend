@@ -59,6 +59,20 @@ class RoleAndPermissionSeeder extends Seeder
 
             // Settings
             'settings:view', 'settings:update', 'settings:delete',
+
+            // CSV migration importer — bulk-creating borrowers and loans from a
+            // legacy system's export. Held by admins only; see
+            // 2026_08_29_100005_add_imports_process_permission.
+            //
+            // Listed HERE as well as in that migration on purpose. The migration
+            // is what grants it on staging and production, which are already
+            // migrated and will never re-run a seeder; this list is what a fresh
+            // database and the whole test suite build from. Either one alone is
+            // a half-measure — and the `collaterals:*` permissions below are
+            // already living proof, granted by a migration and missing from this
+            // list, so `Permission::all()` on a freshly seeded box depends on
+            // that migration having run first.
+            'imports:process',
         ];
 
         $guard = 'web';
