@@ -143,10 +143,13 @@ class CsvImportUploadService
     /**
      * The importer's processor, and the method on it that ends a run.
      *
-     * Named as strings rather than imported because the processor lands on a
-     * different branch to this service; see self::finaliseRun(). Merge-window
-     * scaffolding, to be replaced with a real import and constructor injection
-     * once both halves are on `csv-import/backend`.
+     * Named as strings rather than imported because this began as merge-window
+     * scaffolding — the processor landed on a different branch to this service.
+     * The branches have met and the strings STAY; self::finaliseRun() records
+     * why, and what the seam does and does not protect. There is no pending
+     * conversion to a constructor-injected CsvImportProcessor: that instruction
+     * was withdrawn on the merits, and the hardening it was standing in for —
+     * guarding the CALL rather than the resolution — is done.
      */
     private const PROCESSOR = 'App\Services\CsvImport\CsvImportProcessor';
 
@@ -552,29 +555,84 @@ class CsvImportUploadService
      * concurrent tick finalised as `failed` in the meantime is left as `failed`
      * rather than overwritten with our answer.
      *
-     * ## MERGE-WINDOW SCAFFOLDING
+     * ## WHY IT IS STILL RESOLVED BY NAME
      *
-     * Resolved by name, and the same shape ProcessCsvImports uses to reach this
-     * service from its side — the two halves of this feature are on different
-     * branches, and an import of a class that is not on this branch yet is a
-     * lie to every reader and every tool. Skipped LOUDLY if it cannot be
-     * reached, because a silent no-op is how a bad merge turns into an import
-     * with no audit trail at all, which is the exact thing this method exists
-     * to prevent.
+     * It began as merge-window scaffolding — the two halves of this feature were
+     * on different branches, and an import of a class that is not on this branch
+     * yet is a lie to every reader and every tool. The branches have met, and
+     * the indirection STAYS. An earlier version of this note told you to replace
+     * it with a constructor-injected CsvImportProcessor; THAT INSTRUCTION IS
+     * WITHDRAWN, and it is withdrawn on the merits rather than because it was
+     * inconvenient:
+     *
+     *  - CANCELLING MUST NOT BE ABLE TO 500. A run left in `uploading` blocks
+     *    every future import at this cooperative until the stale-upload TTL
+     *    expires, so the escape hatch is exactly the thing that may not depend
+     *    on anything it does not have to. Resolution failing here degrades to a
+     *    loud warning and a run that still reaches `cancelled`; a typed
+     *    constructor parameter that cannot be built takes the endpoint down
+     *    instead, and takes the cooperative's next import with it.
+     *  - IT COSTS NOTHING TO KEEP. This is one resolution per cancellation, on a
+     *    path a human triggers by hand.
+     *  - THE CONVERSION IS NOT FREE. It was attempted and measured: four
+     *    failures, all `Argument #1 ($processor) must be of type
+     *    CsvImportProcessor, class@anonymous given`. The doubles below are bare
+     *    anonymous classes on purpose — the property under test is that this
+     *    method calls a NAMED METHOD with NAMED ARGUMENTS on whatever answers,
+     *    and a subclass of the real processor would test inheritance instead.
+     *    Converting means rewriting those, and DELETING
+     *    test_cancelling_still_finishes_when_the_shared_finaliser_cannot_be_reached
+     *    outright, because typed injection makes the state it pins unreachable.
+     *    That is a real loss of coverage bought for no gain.
+     *
+     * ## RESOLUTION AND EXECUTION ARE GUARDED SEPARATELY
+     *
+     * The resolution guard above was, on its own, protecting the half that
+     * cannot realistically fail: CsvImportProcessor is in this repository,
+     * autoloaded, and its four constructor dependencies are all defaulted. The
+     * half that CAN fail is the call, and it was outside any try/catch — so a
+     * database error inside finalise() propagated, the cancel 500'd, and the
+     * run stayed live, which is the exact outcome the first bullet above says
+     * may not happen. Both are guarded now, and the catch is not a blanket
+     * swallow, because the naive version reintroduces the audit gap this whole
+     * method exists to close. What it does instead:
+     *
+     *  - finalise() writes the audit row and the phase in ONE transaction, so a
+     *    throw from either rolls back BOTH and leaves the run live. The
+     *    post-condition below then runs exactly as it always has, and whether
+     *    it succeeds is what tells the two incidents apart — empirically,
+     *    rather than by guessing at which line inside finalise() broke.
+     *  - IF THE POST-CONDITION WRITES THE PHASE, the slot is freed and the run
+     *    is finished; what is missing is the summary audit row, and that is
+     *    logged as its own incident. A logged gap beats a blocked tenant.
+     *  - IF THE POST-CONDITION ALSO FAILS, swallowing would buy nothing — the
+     *    fallback write fails for whatever reason the finaliser's did. It is
+     *    logged as a DIFFERENT incident and the original exception is rethrown,
+     *    so the caller gets a 500 and the operator retries rather than being
+     *    told a run was cancelled when it is still open.
+     *
+     * The two log lines are deliberately different sentences. "ended without
+     * its summary audit row" and "could not end a run" are different incidents
+     * with different responses — one is a compliance gap to reconcile, the
+     * other is a cooperative that cannot start an import — and one generic
+     * message makes them indistinguishable at 2am.
+     *
+     * THE HONEST LIMIT: if the database is down, neither path works and the
+     * cancel legitimately fails. That is fine and is not what this guards. What
+     * it guards is the NARROW failure — an audit write failing independently of
+     * the phase write — where the difference between a logged gap and a wedged
+     * cooperative is entirely down to this catch.
      *
      * Arguments are NAMED, deliberately. Positional ones would keep working and
      * silently mean something else if a parameter were ever inserted ahead of
      * them, and "silently attributes the audit row to the wrong person" is the
      * worst available failure here; a renamed parameter throws instead, which
      * is the failure we want.
-     *
-     * Once both branches are on `csv-import/backend`, replace the resolution
-     * with a constructor-injected CsvImportProcessor and a direct
-     * `$this->processor->finalise(...)`; keep the post-condition check.
      */
     private function finaliseRun(CsvImportRun $run, string $phase, ?string $failureReason = null): void
     {
         $finaliser = $this->resolveFinaliser();
+        $finaliserFailure = null;
 
         if ($finaliser === null) {
             Log::warning('csv-import: could not reach the shared run finaliser', [
@@ -586,26 +644,69 @@ class CsvImportUploadService
                     .'record that this cooperative\'s uploaded membership and loan data was discarded, or by whom.',
             ]);
         } else {
-            $finaliser->{self::FINALISER}(
-                $run,
-                $phase,
-                failureReason: $failureReason,
-                userId: auth()->id(),
-                ipAddress: request()->ip(),
-            );
+            try {
+                $finaliser->{self::FINALISER}(
+                    $run,
+                    $phase,
+                    failureReason: $failureReason,
+                    userId: auth()->id(),
+                    ipAddress: request()->ip(),
+                );
+            } catch (Throwable $e) {
+                /*
+                 * Reported as well as logged below, and the two are not
+                 * redundant. The outcome lines say what happened to the RUN,
+                 * which is what an operator needs; only the trace says where
+                 * inside finalise() it broke, which is what the next engineer
+                 * needs. Neither answers the other's question.
+                 */
+                report($e);
+
+                $finaliserFailure = $e;
+            }
         }
 
-        $run->refresh();
+        try {
+            $run->refresh();
 
-        if (in_array($run->phase, self::CLOSED_PHASES, true)) {
-            return;
+            if (! in_array($run->phase, self::CLOSED_PHASES, true)) {
+                $run->forceFill([
+                    'phase' => $phase,
+                    'finished_at' => now(),
+                    'failure_reason' => $failureReason,
+                ])->save();
+            }
+        } catch (Throwable $e) {
+            Log::error('csv-import: could not end a run', [
+                'csv_import_run_id' => $run->id,
+                'phase' => $phase,
+                'exception' => $e->getMessage(),
+                'finaliser_exception' => $finaliserFailure?->getMessage(),
+                'consequence' => 'The run may not have reached a terminal phase. A live run blocks every future '
+                    .'import at this cooperative until the stale-upload TTL expires, so if it is still open it '
+                    .'has to be cancelled again once the underlying fault is fixed.',
+            ]);
+
+            /*
+             * The finaliser's own exception in preference to this one: it is
+             * the root cause, and this second failure is almost always the same
+             * fault seen a second time. Both messages are in the line above, so
+             * nothing is lost by choosing.
+             */
+            throw $finaliserFailure ?? $e;
         }
 
-        $run->forceFill([
-            'phase' => $phase,
-            'finished_at' => now(),
-            'failure_reason' => $failureReason,
-        ])->save();
+        if ($finaliserFailure !== null) {
+            Log::error('csv-import: a run ended without its summary audit row', [
+                'csv_import_run_id' => $run->id,
+                'phase' => $run->phase,
+                'exception' => $finaliserFailure->getMessage(),
+                'consequence' => 'The run reached a terminal phase and its slot is free, but `audit_logs` holds '
+                    .'no record that this cooperative\'s uploaded membership and loan data was ended this way, '
+                    .'or by whom. The run row and its notes are the only remaining evidence; reconcile from '
+                    .'those.',
+            ]);
+        }
     }
 
     /**

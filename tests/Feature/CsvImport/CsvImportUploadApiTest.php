@@ -926,7 +926,7 @@ class CsvImportUploadApiTest extends TestCase
             /** @var list<array<string, mixed>> */
             public array $calls = [];
 
-            /** Mirrors CsvImportProcessor::finalise() on `csv-import/w2-runner`. */
+            /** Mirrors CsvImportProcessor::finalise(). */
             public function finalise(
                 CsvImportRun $run,
                 string $phase,
@@ -1096,6 +1096,134 @@ class CsvImportUploadApiTest extends TestCase
                 && $context['phase'] === 'cancelled'
                 && array_key_exists('consequence', $context))
             ->once();
+    }
+
+    /**
+     * A finaliser that resolves fine and then breaks while it works.
+     *
+     * The real one writes the audit row and the phase in ONE transaction, so a
+     * throw from either rolls both back and leaves the run live — which is what
+     * these tests reproduce, and why the double throws before touching
+     * anything.
+     */
+    private function throwingFinaliser(string $message): object
+    {
+        return new class($message)
+        {
+            public function __construct(private readonly string $message) {}
+
+            public function finalise(
+                CsvImportRun $run,
+                string $phase,
+                ?string $failureReason = null,
+                ?int $userId = null,
+                ?string $ipAddress = null,
+            ): ?CsvImportRun {
+                throw new RuntimeException($this->message);
+            }
+        };
+    }
+
+    public function test_a_finaliser_that_throws_still_frees_the_slot_and_reports_the_missing_audit_row(): void
+    {
+        Log::spy();
+
+        $customers = $this->payload(self::CHUNK * 2, 'customers');
+
+        $runId = $this->postJson('/api/imports', $this->openRunPayload($customers, 'x'))
+            ->assertCreated()
+            ->json('run.id');
+
+        $this->sendChunk($runId, 'customers', 0, $this->slice($customers)[0])->assertCreated();
+
+        /**
+         * The narrow failure this guard is for: the audit write fails on its
+         * own. Resolution is fine — the class is here and constructs — so the
+         * resolution guard sees nothing, and before the call was wrapped this
+         * propagated, 500'd the cancel, and left the run in `uploading`
+         * blocking every future import at this cooperative until the TTL.
+         */
+        $this->app->instance(
+            'App\Services\CsvImport\CsvImportProcessor',
+            $this->throwingFinaliser('SQLSTATE[HY000]: could not write to audit_logs'),
+        );
+
+        $this->deleteJson("/api/imports/{$runId}")
+            ->assertOk()
+            ->assertJsonPath('cancelled', true)
+            ->assertJsonPath('run.phase', 'cancelled');
+
+        // The slot is genuinely free, which is the whole point of preferring a
+        // logged gap to a blocked tenant.
+        $this->assertSame('cancelled', CsvImportRun::findOrFail($runId)->phase);
+        $this->postJson('/api/imports', $this->openRunPayload($customers, 'x'))->assertCreated();
+
+        // And the gap is real, so it had better be logged rather than assumed.
+        $this->assertSame(
+            0,
+            AuditLog::where('auditable_id', $runId)->where('action', 'csv_import_cancelled')->count(),
+        );
+
+        Log::shouldHaveReceived('error')
+            ->withArgs(fn (string $message, array $context): bool => str_contains($message, 'without its summary audit row')
+                && $context['csv_import_run_id'] === $runId
+                && str_contains((string) $context['exception'], 'audit_logs')
+                && array_key_exists('consequence', $context))
+            ->once();
+    }
+
+    public function test_a_cancel_that_cannot_be_written_at_all_does_not_claim_to_have_succeeded(): void
+    {
+        Log::spy();
+
+        $runId = $this->postJson('/api/imports', $this->openRunPayload('a', 'b'))
+            ->assertCreated()
+            ->json('run.id');
+
+        $this->app->instance(
+            'App\Services\CsvImport\CsvImportProcessor',
+            $this->throwingFinaliser('SQLSTATE[HY000]: server has gone away'),
+        );
+
+        /**
+         * Now the fallback write fails too. Swallowing here would buy nothing —
+         * the post-condition fails for whatever reason the finaliser's write
+         * did — and would be actively worse than the 500, because the client
+         * would be told the run was cancelled while it is still open and still
+         * blocking.
+         */
+        CsvImportRun::updating(function (): void {
+            throw new RuntimeException('Lock wait timeout exceeded on csv_import_runs');
+        });
+
+        $this->deleteJson("/api/imports/{$runId}")->assertStatus(500);
+
+        // Left in a state the operator can act on: still live, so a retry once
+        // the fault is fixed cancels it properly.
+        $this->assertSame('uploading', CsvImportRun::findOrFail($runId)->phase);
+
+        /**
+         * A DIFFERENT sentence to the test above, deliberately. "ended without
+         * its summary audit row" and "could not end a run" call for different
+         * responses — one is a compliance gap to reconcile, the other is a
+         * cooperative that cannot start an import — and both messages travel on
+         * the line so the root cause is not lost to the retry.
+         */
+        Log::shouldHaveReceived('error')
+            ->withArgs(fn (string $message, array $context): bool => str_contains($message, 'could not end a run')
+                && $context['csv_import_run_id'] === $runId
+                && str_contains((string) $context['exception'], 'Lock wait timeout')
+                && str_contains((string) $context['finaliser_exception'], 'server has gone away'))
+            ->once();
+
+        /**
+         * And emphatically NOT the other incident. That one is reported only
+         * after the phase write succeeds, so the run still being `uploading`
+         * above is what proves it cannot have been reached — a stronger check
+         * than asserting the absence of a log line, because it pins the
+         * condition the line is derived from rather than the line.
+         */
+        $this->assertNotContains(CsvImportRun::findOrFail($runId)->phase, CsvImportUploadService::CLOSED_PHASES);
     }
 
     public function test_a_failing_storage_release_does_not_fail_the_run_it_was_tidying_up_after(): void
