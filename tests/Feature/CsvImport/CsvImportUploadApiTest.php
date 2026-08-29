@@ -2,16 +2,20 @@
 
 namespace Tests\Feature\CsvImport;
 
+use App\Models\AuditLog;
 use App\Models\CsvImportFile;
 use App\Models\CsvImportFileChunk;
 use App\Models\CsvImportRun;
 use App\Models\Role;
 use App\Models\User;
+use App\Services\AuditLogService;
 use App\Services\CsvImport\CsvImportUploadService;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
+use RuntimeException;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
@@ -903,8 +907,434 @@ class CsvImportUploadApiTest extends TestCase
         $this->assertSame('uploading', CsvImportRun::findOrFail($runId)->phase);
     }
 
+    // ------------------------------------------------------- the audit trail
+
+    /**
+     * Stand-in for the importer's processor while the two halves of this
+     * feature live on different branches.
+     *
+     * It does what the real finaliser does and nothing else: records the call,
+     * writes ONE summary audit row naming the outcome, and makes the terminal
+     * transition. The point under test is that cancelling reaches the shared
+     * finaliser at all, with the right phase, at a moment when the run is still
+     * live enough for it to act — not how the processor counts its rows.
+     */
+    private function fakeFinaliser(): object
+    {
+        return new class
+        {
+            /** @var list<array<string, mixed>> */
+            public array $calls = [];
+
+            /** Mirrors CsvImportProcessor::finalise() on `csv-import/w2-runner`. */
+            public function finalise(
+                CsvImportRun $run,
+                string $phase,
+                ?string $failureReason = null,
+                ?int $userId = null,
+                ?string $ipAddress = null,
+            ): ?CsvImportRun {
+                $this->calls[] = [
+                    'run_id' => $run->id,
+                    'phase' => $phase,
+                    'phase_before' => $run->phase,
+                    'failure_reason' => $failureReason,
+                    'user_id' => $userId,
+                    'ip_address' => $ipAddress,
+                ];
+
+                // The real one returns without writing when the run is already
+                // terminal, which is what makes calling it BEFORE the
+                // transition load-bearing.
+                if (in_array($run->phase, CsvImportUploadService::CLOSED_PHASES, true)) {
+                    return null;
+                }
+
+                AuditLogService::log(
+                    action: "csv_import_{$phase}",
+                    auditable: $run,
+                    newValues: ['run_id' => $run->id],
+                    description: "CSV migration run #{$run->id} {$phase}.",
+                    userId: $userId ?? $run->initiated_by,
+                    ipAddress: $ipAddress ?? $run->initiated_ip,
+                );
+
+                $run->forceFill([
+                    'phase' => $phase,
+                    'finished_at' => now(),
+                    'failure_reason' => $failureReason,
+                ])->save();
+
+                return $run;
+            }
+        };
+    }
+
+    public function test_cancelling_a_run_writes_the_shared_summary_audit_row(): void
+    {
+        $finaliser = $this->fakeFinaliser();
+        $this->app->instance('App\Services\CsvImport\CsvImportProcessor', $finaliser);
+
+        $customers = $this->payload(self::CHUNK * 2, 'customers');
+
+        $runId = $this->postJson('/api/imports', $this->openRunPayload($customers, 'x'))
+            ->assertCreated()
+            ->json('run.id');
+
+        $this->sendChunk($runId, 'customers', 0, $this->slice($customers)[0])->assertCreated();
+
+        $this->deleteJson("/api/imports/{$runId}")
+            ->assertOk()
+            ->assertJsonPath('cancelled', true)
+            ->assertJsonPath('run.phase', 'cancelled');
+
+        $this->assertCount(1, $finaliser->calls, 'One finalise() per ending, never two.');
+
+        [$call] = $finaliser->calls;
+
+        $this->assertSame($runId, $call['run_id']);
+        $this->assertSame('cancelled', $call['phase']);
+
+        /**
+         * The part that actually matters: the run was still `uploading` when
+         * the finaliser saw it. finalise() re-reads under a lock and returns
+         * WITHOUT writing anything if the phase is already terminal, so moving
+         * the phase first would skip the audit row and silently recreate the
+         * gap this closes.
+         */
+        $this->assertSame('uploading', $call['phase_before']);
+
+        // The reason travels with the call rather than being written around it,
+        // so it lands in the same locked write as the phase and the audit row.
+        $this->assertStringContainsString('Cancelled by an operator', (string) $call['failure_reason']);
+        $this->assertSame(
+            $call['failure_reason'],
+            CsvImportRun::findOrFail($runId)->failure_reason,
+        );
+
+        $audit = AuditLog::where('auditable_type', (new CsvImportRun)->getMorphClass())
+            ->where('auditable_id', $runId)
+            ->get();
+
+        $this->assertCount(1, $audit, 'Exactly one summary row per run, on cancellation as on completion.');
+        $this->assertSame('csv_import_cancelled', $audit->first()->action);
+        $this->assertSame($this->admin->id, $audit->first()->user_id);
+    }
+
+    public function test_the_cancellation_audit_row_names_who_cancelled_not_who_opened_the_run(): void
+    {
+        $finaliser = $this->fakeFinaliser();
+        $this->app->instance('App\Services\CsvImport\CsvImportProcessor', $finaliser);
+
+        // Opened by the seeded super admin...
+        $runId = $this->postJson('/api/imports', $this->openRunPayload('a', 'b'))
+            ->assertCreated()
+            ->json('run.id');
+
+        $this->assertSame($this->admin->id, CsvImportRun::findOrFail($runId)->initiated_by);
+
+        // ...cancelled by somebody else entirely.
+        $other = User::factory()->create(['branch_id' => $this->branch->id]);
+        $other->assignRole(Role::where('name', 'admin')->firstOrFail());
+
+        $this->actingAs($other)->deleteJson("/api/imports/{$runId}")->assertOk();
+
+        /**
+         * finalise() defaults the actor to the run's `initiated_by`, which is
+         * correct for the scheduler — the processor works long after the admin
+         * who asked for the import has gone home — and would be a lie here.
+         * The cancelling operator is very often not the one who opened the run,
+         * and this is the single row that says who did it, so the actor has to
+         * be passed rather than defaulted.
+         */
+        [$call] = $finaliser->calls;
+
+        $this->assertSame($other->id, $call['user_id']);
+        $this->assertNotNull($call['ip_address']);
+
+        $this->assertSame(
+            $other->id,
+            AuditLog::where('auditable_id', $runId)->where('action', 'csv_import_cancelled')->firstOrFail()->user_id,
+        );
+    }
+
+    public function test_cancelling_still_finishes_when_the_shared_finaliser_cannot_be_reached(): void
+    {
+        Log::spy();
+
+        $runId = $this->postJson('/api/imports', $this->openRunPayload('a', 'b'))
+            ->assertCreated()
+            ->json('run.id');
+
+        /**
+         * Something is there, but it cannot finalise — which is the state the
+         * resolution guard actually exists for, and the one this test can pin
+         * both before and after the branches meet. Asserting the class is
+         * simply ABSENT would be a test that quietly stops testing anything the
+         * day the processor lands.
+         */
+        $this->app->instance('App\Services\CsvImport\CsvImportProcessor', new class {});
+
+        /**
+         * Cancelling must still work. A run left in `uploading` blocks every
+         * future import at this cooperative until the stale-upload TTL expires,
+         * so a missing finaliser cannot be allowed to take the escape hatch
+         * down with it.
+         */
+        $this->deleteJson("/api/imports/{$runId}")
+            ->assertOk()
+            ->assertJsonPath('cancelled', true)
+            ->assertJsonPath('run.phase', 'cancelled');
+
+        $this->assertSame('cancelled', CsvImportRun::findOrFail($runId)->phase);
+
+        // But it must be LOUD. A silent no-op here is how a bad merge becomes an
+        // import feature with no audit trail that nobody notices until an audit.
+        Log::shouldHaveReceived('warning')
+            ->withArgs(fn (string $message, array $context): bool => str_contains($message, 'finaliser')
+                && $context['csv_import_run_id'] === $runId
+                && $context['phase'] === 'cancelled'
+                && array_key_exists('consequence', $context))
+            ->once();
+    }
+
+    public function test_a_failing_storage_release_does_not_fail_the_run_it_was_tidying_up_after(): void
+    {
+        Log::spy();
+
+        $customers = $this->payload(self::CHUNK + 12, 'customers');
+        $runId = $this->uploadBothFiles($customers, $this->payload(100, 'loans'));
+        $this->postJson("/api/imports/{$runId}/assemble")->assertOk();
+
+        /**
+         * A `saved` listener runs INSIDE the save, so anything it throws comes
+         * back out of `$run->save()`. The processor completes a run by saving
+         * it into `completed` inside its own try/catch — so an unlink failing
+         * on a disk error, a permissions change or an NFS blip would turn a run
+         * that had already written every member and every loan correctly into
+         * `failed`. The data is committed and only the bookkeeping is wrong,
+         * which is the worst shape available: the operator sees "failed" and
+         * may reasonably re-run.
+         */
+        $this->app->instance(CsvImportUploadService::class, new class extends CsvImportUploadService
+        {
+            public function releaseStorage(CsvImportRun $run): array
+            {
+                throw new RuntimeException('Input/output error unlinking csv-imports/1/customers.csv');
+            }
+        });
+
+        CsvImportRun::findOrFail($runId)->update(['phase' => 'completed']);
+
+        $this->assertSame('completed', CsvImportRun::findOrFail($runId)->phase, 'Housekeeping must not fail the import it is tidying up after.');
+
+        // Loud, though. The files are still on the volume and somebody has to
+        // know — a failed unlink that nobody hears about is member data left in
+        // plaintext with nothing saying so.
+        Log::shouldHaveReceived('error')
+            ->withArgs(fn (string $message, array $context): bool => str_contains($message, 'release')
+                && $context['csv_import_run_id'] === $runId
+                && str_contains((string) $context['exception'], 'Input/output error'))
+            ->once();
+    }
+
+    public function test_a_rolled_back_terminal_transition_leaves_the_runs_files_on_disk(): void
+    {
+        $customers = $this->payload(self::CHUNK + 12, 'customers');
+        $runId = $this->uploadBothFiles($customers, $this->payload(100, 'loans'));
+        $this->postJson("/api/imports/{$runId}/assemble")->assertOk();
+
+        $this->assertCount(2, Storage::disk('private')->allFiles());
+
+        /**
+         * Every terminal transition now runs inside the processor's shared
+         * finalise(), which holds a `lockForUpdate` and a terminal re-check in
+         * a transaction — so the retention listener's unlinks happen PRE-COMMIT
+         * on those paths, including the 14-day prune, which saves per row and
+         * does fire this listener.
+         *
+         * If they were not deferred, a rollback would leave the run
+         * non-terminal with its files already gone: a run that still looks
+         * resumable, whose bytes are not there. Unrecoverable, because the
+         * filesystem has no rollback. Deferring is the same trade
+         * BorrowerPurgeService documents — an orphan file is a wasted megabyte
+         * that releaseAbandonedStorage() will find, an orphan row is a phantom
+         * nothing can.
+         */
+        try {
+            DB::transaction(function () use ($runId): void {
+                CsvImportRun::findOrFail($runId)->update(['phase' => 'completed']);
+
+                throw new RuntimeException('the tick rolled back after the save');
+            });
+        } catch (RuntimeException $e) {
+            $this->assertStringContainsString('rolled back', $e->getMessage());
+        }
+
+        $this->assertSame('assembled', CsvImportRun::findOrFail($runId)->phase);
+        $this->assertCount(2, Storage::disk('private')->allFiles(), 'A rolled-back transition must not have unlinked anything.');
+
+        $file = CsvImportFile::where('csv_import_run_id', $runId)->where('kind', 'customers')->firstOrFail();
+        $this->assertNotNull($file->assembled_path);
+        $this->assertSame($customers, Storage::disk('private')->get($file->assembled_path));
+
+        // Deferred, not skipped: the same transition that commits does release.
+        DB::transaction(function () use ($runId): void {
+            CsvImportRun::findOrFail($runId)->update(['phase' => 'completed']);
+        });
+
+        $this->assertSame([], Storage::disk('private')->allFiles());
+        $this->assertNull($file->fresh()->assembled_path);
+    }
+
+    // ------------------------------------------------------- discovery
+
+    public function test_the_open_run_can_be_discovered_without_knowing_its_id(): void
+    {
+        $customers = $this->payload(self::CHUNK * 2, 'customers');
+
+        $runId = $this->postJson('/api/imports', $this->openRunPayload($customers, 'x'))
+            ->assertCreated()
+            ->json('run.id');
+
+        $this->sendChunk($runId, 'customers', 0, $this->slice($customers)[0])->assertCreated();
+
+        /**
+         * The only discovery path when local storage is gone — a cleared
+         * browser, another device, or a different admin picking up somebody's
+         * abandoned migration. Without it an open run is invisible AND
+         * blocking, because opening a new one 409s while it exists.
+         *
+         * The `active=1` the client sends is accepted and ignored: the open run
+         * is the only thing this endpoint has to report.
+         */
+        $discovered = $this->getJson('/api/imports?active=1')->assertOk();
+
+        $discovered
+            ->assertJsonPath('run.id', $runId)
+            ->assertJsonPath('run.phase', 'uploading')
+            ->assertJsonPath('run.is_closed', false);
+
+        // Same contract as the per-run read, not a second one: the client
+        // resumes an upload straight off this response.
+        $this->assertSame(self::CHUNK, $discovered->json('chunk_size'));
+        $this->assertSame([1], $discovered->json('files.customers.missing_chunks'));
+        $this->assertSame(2, $discovered->json('files.customers.total_chunks'));
+    }
+
+    public function test_discovery_reports_nothing_open_once_the_run_is_finished(): void
+    {
+        $this->getJson('/api/imports')->assertOk()->assertJsonPath('run', null);
+
+        $runId = $this->postJson('/api/imports', $this->openRunPayload('a', 'b'))
+            ->assertCreated()
+            ->json('run.id');
+
+        $this->getJson('/api/imports')->assertOk()->assertJsonPath('run.id', $runId);
+
+        $this->deleteJson("/api/imports/{$runId}")->assertOk();
+
+        $this->getJson('/api/imports')->assertOk()->assertJsonPath('run', null);
+    }
+
+    public function test_discovery_and_the_creation_guard_never_disagree(): void
+    {
+        $runId = $this->postJson('/api/imports', $this->openRunPayload('a', 'b'))
+            ->assertCreated()
+            ->json('run.id');
+
+        /**
+         * Both read OPEN_PHASES. If they ever diverged, an operator would be
+         * told there is no import running while POST kept refusing them — which
+         * is strictly worse than having no discovery endpoint at all, because
+         * it names nothing they can cancel.
+         */
+        foreach (CsvImportUploadService::OPEN_PHASES as $phase) {
+            CsvImportRun::whereKey($runId)->update(['phase' => $phase]);
+
+            $this->getJson('/api/imports')
+                ->assertOk()
+                ->assertJsonPath('run.id', $runId)
+                ->assertJsonPath('run.phase', $phase);
+
+            $this->postJson('/api/imports', $this->openRunPayload('a', 'b'))
+                ->assertStatus(409)
+                ->assertJsonPath('run_id', $runId);
+        }
+
+        foreach (CsvImportUploadService::CLOSED_PHASES as $phase) {
+            CsvImportRun::whereKey($runId)->update(['phase' => $phase]);
+
+            $this->getJson('/api/imports')->assertOk()->assertJsonPath('run', null);
+        }
+    }
+
+    public function test_a_loan_officer_cannot_discover_the_open_run(): void
+    {
+        $this->postJson('/api/imports', $this->openRunPayload('a', 'b'))->assertCreated();
+
+        $officer = User::factory()->create(['branch_id' => $this->branch->id]);
+        $officer->assignRole(Role::where('name', 'loan_officer')->firstOrFail());
+
+        $this->actingAs($officer)->getJson('/api/imports')->assertForbidden();
+    }
+
+    // ------------------------------------------------------- id oracle
+
+    public function test_an_unprivileged_caller_cannot_tell_a_real_run_from_an_imaginary_one(): void
+    {
+        $runId = $this->postJson('/api/imports', $this->openRunPayload('a', 'b'))
+            ->assertCreated()
+            ->json('run.id');
+
+        $officer = User::factory()->create(['branch_id' => $this->branch->id]);
+        $officer->assignRole(Role::where('name', 'loan_officer')->firstOrFail());
+
+        /**
+         * Route-model binding used to resolve before any permission check, so
+         * these two answered differently — 403 for a run that exists, 404 for
+         * one that does not — and that difference is a free oracle for how many
+         * migrations a deployment has run and when, readable by any
+         * authenticated user.
+         */
+        foreach ([$runId, $runId + 9999] as $candidate) {
+            $this->actingAs($officer)->deleteJson("/api/imports/{$candidate}")->assertForbidden();
+            $this->actingAs($officer)->postJson("/api/imports/{$candidate}/assemble")->assertForbidden();
+            $this->actingAs($officer)
+                ->putJson("/api/imports/{$candidate}/files/customers/chunks/0", ['sha256' => str_repeat('a', 64)])
+                ->assertForbidden();
+        }
+
+        // And the run is untouched by any of it.
+        $this->assertSame('uploading', CsvImportRun::findOrFail($runId)->phase);
+    }
+
+    public function test_an_operator_still_gets_a_404_for_a_run_that_does_not_exist(): void
+    {
+        // Closing the oracle must not turn a genuine "no such run" into
+        // something an authorised operator has to guess at.
+        $this->deleteJson('/api/imports/999999')
+            ->assertNotFound()
+            ->assertJsonPath('message', 'Import run #999999 was not found.');
+
+        $this->postJson('/api/imports/999999/assemble')->assertNotFound();
+    }
+
+    public function test_a_non_numeric_run_id_is_not_a_route_match(): void
+    {
+        // The constraint the status and mapping routes use, applied here too:
+        // two route groups that look alike and behave differently is its own
+        // hazard.
+        $this->deleteJson('/api/imports/not-a-run')->assertNotFound();
+        $this->postJson('/api/imports/not-a-run/assemble')->assertNotFound();
+        $this->putJson('/api/imports/not-a-run/files/customers/chunks/0')->assertNotFound();
+    }
+
     public function test_an_upload_abandoned_past_the_ttl_stops_blocking_the_next_one(): void
     {
+        $finaliser = $this->fakeFinaliser();
+        $this->app->instance('App\Services\CsvImport\CsvImportProcessor', $finaliser);
+
         $customers = $this->payload(self::CHUNK * 2, 'customers');
 
         $abandoned = $this->postJson('/api/imports', $this->openRunPayload($customers, 'x'))
@@ -931,12 +1361,99 @@ class CsvImportUploadApiTest extends TestCase
         $this->assertSame('cancelled', $reclaimed->phase);
         $this->assertStringContainsString('Abandoned mid-upload', (string) $reclaimed->failure_reason);
 
+        // Reclaiming is the OTHER route to `cancelled`, and it discards
+        // somebody else's upload — so it goes through the same finaliser and
+        // leaves the same summary audit row rather than doing it quietly.
+        $this->assertSame(
+            [$abandoned, 'cancelled'],
+            [$finaliser->calls[0]['run_id'], $finaliser->calls[0]['phase']],
+        );
+        $this->assertStringContainsString('Abandoned mid-upload', (string) $finaliser->calls[0]['failure_reason']);
+
         // The reclaimed run's data goes with it; only the new run's slot remains.
         $this->assertSame(0, CsvImportFileChunk::where('csv_import_file_id', '!=', 0)
             ->whereIn('csv_import_file_id', CsvImportFile::where('csv_import_run_id', $abandoned)->pluck('id'))
             ->count());
         $this->assertSame([], Storage::disk('private')->allFiles());
         $this->assertNotSame($abandoned, $response->json('run.id'));
+    }
+
+    public function test_a_rolled_back_open_leaves_the_reclaimed_runs_chunks_intact_on_disk(): void
+    {
+        $customers = $this->payload(self::CHUNK * 2, 'customers');
+
+        $abandoned = $this->postJson('/api/imports', $this->openRunPayload($customers, 'x'))
+            ->assertCreated()
+            ->json('run.id');
+
+        $this->sendChunk($abandoned, 'customers', 0, $this->slice($customers)[0])->assertCreated();
+
+        $stale = now()->subMinutes(config('imports.stale_upload_after_minutes') + 60);
+        CsvImportRun::whereKey($abandoned)->update(['updated_at' => $stale]);
+        CsvImportFileChunk::query()->update(['created_at' => $stale]);
+
+        $chunkPath = CsvImportFileChunk::query()->firstOrFail()->path;
+        Storage::disk('private')->assertExists($chunkPath);
+
+        /**
+         * Blow up createRun()'s transaction AFTER the stale run has been
+         * reclaimed and its storage released.
+         *
+         * Contrived here, plausible in production: two browser tabs both
+         * POST /imports, both take `lockForUpdate` over the same rows, and one
+         * of them loses a deadlock. That is the whole hazard — the filesystem
+         * has no rollback, so unlinking inline meant the loser's rollback
+         * restored the stale run's chunk ROWS with their bytes already gone.
+         * assembleFile() then reports "recorded but missing from disk" forever,
+         * and re-uploading cannot repair it, because storeChunk() answers a
+         * matching re-send of a chunk it still holds a row for as a duplicate
+         * no-op. The run could only be cancelled.
+         */
+        $deadlock = true;
+
+        CsvImportRun::creating(function () use (&$deadlock): void {
+            if ($deadlock) {
+                throw new RuntimeException('deadlock found when trying to get lock');
+            }
+        });
+
+        $thrown = null;
+
+        try {
+            app(CsvImportUploadService::class)->createRun([
+                'branch_id' => $this->branch->id,
+                'files' => [
+                    'customers' => ['filename' => 'c.csv', 'size_bytes' => 10, 'sha256' => hash('sha256', 'c')],
+                    'loans' => ['filename' => 'l.csv', 'size_bytes' => 10, 'sha256' => hash('sha256', 'l')],
+                ],
+            ], $this->admin->id, '127.0.0.1');
+        } catch (RuntimeException $e) {
+            $thrown = $e;
+        }
+
+        $this->assertNotNull($thrown, 'The rolled-back open should have propagated its exception.');
+        $this->assertStringContainsString('deadlock', $thrown->getMessage());
+
+        // The rows came back...
+        $this->assertSame(1, CsvImportFileChunk::count());
+        $this->assertSame('uploading', CsvImportRun::findOrFail($abandoned)->phase);
+
+        // ...and so must the bytes they name, or the run is unrepairable.
+        Storage::disk('private')->assertExists($chunkPath);
+        $this->assertSame(
+            $this->slice($customers)[0],
+            Storage::disk('private')->get($chunkPath),
+        );
+
+        // And the reclaim still releases the bytes on a transaction that
+        // actually commits — deferring the unlink must not mean skipping it.
+        $deadlock = false;
+
+        $this->postJson('/api/imports', $this->openRunPayload($customers, 'x'))
+            ->assertCreated()
+            ->assertJsonPath('reclaimed_run_id', $abandoned);
+
+        Storage::disk('private')->assertMissing($chunkPath);
     }
 
     public function test_an_upload_still_making_progress_is_never_reclaimed(): void
@@ -998,7 +1515,7 @@ class CsvImportUploadApiTest extends TestCase
         $this->assertSame(hash('sha256', $customers), $file->assembled_sha256);
     }
 
-    public function test_a_failed_run_gives_up_its_assembled_member_data_too(): void
+    public function test_a_failed_run_keeps_its_source_files_so_a_transient_error_is_not_data_loss(): void
     {
         $customers = $this->payload(self::CHUNK + 12, 'customers');
         $loans = $this->payload(100, 'loans');
@@ -1006,12 +1523,58 @@ class CsvImportUploadApiTest extends TestCase
         $runId = $this->uploadBothFiles($customers, $loans);
         $this->postJson("/api/imports/{$runId}/assemble")->assertOk();
 
+        $this->assertCount(2, Storage::disk('private')->allFiles());
+
+        /**
+         * `failed` is not a decision, it is an accident.
+         *
+         * The processor writes a run off as `failed` on ANY Throwable — a
+         * deadlock, a lock-wait timeout, a momentary blip — so releasing
+         * storage on this transition meant one five-second database hiccup
+         * destroyed both assembled files, leaving a half-imported book with no
+         * source to re-run from and nothing to diagnose the failure with. This
+         * ran through the model, so the listener DID fire; it simply no longer
+         * treats `failed` as a release.
+         */
         CsvImportRun::findOrFail($runId)->update(['phase' => 'failed']);
+
+        $this->assertCount(2, Storage::disk('private')->allFiles(), 'A transient failure must not destroy the source CSVs.');
+
+        $file = CsvImportFile::where('csv_import_run_id', $runId)->where('kind', 'customers')->firstOrFail();
+
+        $this->assertNotNull($file->assembled_path);
+        $this->assertSame($customers, Storage::disk('private')->get($file->assembled_path));
+
+        // And the run is still closed as far as every client is concerned —
+        // keeping the bytes is a retention decision, not a phase.
+        $this->assertContains('failed', CsvImportUploadService::CLOSED_PHASES);
+        $this->assertNotContains('failed', CsvImportUploadService::STORAGE_RELEASE_PHASES);
+    }
+
+    public function test_a_cancelled_run_gives_up_its_assembled_member_data(): void
+    {
+        $customers = $this->payload(self::CHUNK + 12, 'customers');
+        $loans = $this->payload(100, 'loans');
+
+        $runId = $this->uploadBothFiles($customers, $loans);
+        $this->postJson("/api/imports/{$runId}/assemble")->assertOk();
+
+        $this->assertCount(2, Storage::disk('private')->allFiles());
+
+        /**
+         * The other side of the coin from the test above. Cancelling IS a
+         * decision — an operator asked for this run to go away — so there is
+         * nothing to preserve the file for, and every further minute it spends
+         * on the volume is a coop's membership register sitting in plaintext.
+         */
+        $this->deleteJson("/api/imports/{$runId}")
+            ->assertOk()
+            ->assertJsonPath('files_removed', 2);
 
         $this->assertSame([], Storage::disk('private')->allFiles());
     }
 
-    public function test_a_run_failed_by_a_mass_update_still_gives_up_its_files(): void
+    public function test_a_failed_run_gives_up_its_files_once_the_retention_window_has_passed(): void
     {
         $customers = $this->payload(self::CHUNK + 12, 'customers');
         $loans = $this->payload(100, 'loans');
@@ -1029,9 +1592,31 @@ class CsvImportUploadApiTest extends TestCase
          * and deleting only the database rows would strand the assembled CSVs
          * on the volume with nothing left pointing at them.
          */
-        CsvImportRun::whereKey($runId)->update(['phase' => 'failed']);
+        CsvImportRun::whereKey($runId)->update(['phase' => 'failed', 'finished_at' => now()]);
 
-        $this->assertCount(2, Storage::disk('private')->allFiles(), 'Precondition: the listener did not fire, as expected.');
+        /**
+         * The window first.
+         *
+         * Both callers of the sweep happen within seconds of a failure — the
+         * scheduled command sweeps at the end of the same minute-ly tick that
+         * wrote the run off, and an operator whose import just failed opens
+         * another one immediately. Without this, keeping a failed run's files
+         * would buy them about sixty seconds and change nothing.
+         */
+        $inTheWindow = $this->postJson('/api/imports', $this->openRunPayload('a', 'b'))
+            ->assertCreated()
+            ->json('run.id');
+
+        $this->assertCount(2, Storage::disk('private')->allFiles(), 'A failed run keeps its files for the retention window.');
+
+        // Hand the slot back, so the sweep below runs from a fresh import
+        // rather than a 409.
+        $this->deleteJson("/api/imports/{$inTheWindow}")->assertOk();
+
+        // Now age it past the window. The files are a coop's membership roll in
+        // plaintext, so "keep for a while" must not become "keep forever".
+        $stale = now()->subHours(config('imports.failed_run_retention_hours') + 1);
+        CsvImportRun::whereKey($runId)->update(['finished_at' => $stale, 'updated_at' => $stale]);
 
         // Opening the next import reconciles it, in a web request, where the
         // uid permits the unlink.
@@ -1041,6 +1626,28 @@ class CsvImportUploadApiTest extends TestCase
         $this->assertNull(
             CsvImportFile::where('csv_import_run_id', $runId)->where('kind', 'customers')->firstOrFail()->assembled_path,
         );
+    }
+
+    public function test_the_retention_window_falls_back_to_updated_at_when_a_run_was_failed_without_a_finish_time(): void
+    {
+        $customers = $this->payload(self::CHUNK + 12, 'customers');
+
+        $runId = $this->uploadBothFiles($customers, $this->payload(100, 'loans'));
+        $this->postJson("/api/imports/{$runId}/assemble")->assertOk();
+
+        // A mass update that sets the phase and nothing else — `finished_at`
+        // stays null, and ageing has to fall back to `updated_at` or the run's
+        // files would never be swept at all.
+        CsvImportRun::whereKey($runId)->update([
+            'phase' => 'failed',
+            'updated_at' => now()->subHours(config('imports.failed_run_retention_hours') + 1),
+        ]);
+
+        $this->assertNull(CsvImportRun::findOrFail($runId)->finished_at);
+
+        $this->postJson('/api/imports', $this->openRunPayload('a', 'b'))->assertCreated();
+
+        $this->assertSame([], Storage::disk('private')->allFiles());
     }
 
     public function test_the_payload_publishes_is_closed_from_the_shared_phase_constant(): void

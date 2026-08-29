@@ -80,6 +80,33 @@ return [
     'stale_upload_after_minutes' => (int) env('CSV_IMPORT_STALE_UPLOAD_MINUTES', 360),
 
     /**
+     * How long a FAILED run keeps its uploaded files before the reconciling
+     * sweep releases them.
+     *
+     * A run reaching `completed` or `cancelled` gives its files up immediately
+     * — the rows are staged, or an operator asked for the run to go away, and
+     * an assembled customers CSV is every member's name, birthdate, contact
+     * number and income in plaintext. `failed` is the exception, because the
+     * processor writes a run off as `failed` on ANY exception: a deadlock, a
+     * lock-wait timeout, a momentary blip. Deleting on that transition meant a
+     * five-second database hiccup destroyed both source files, leaving a
+     * half-imported book with nothing to re-run from and nothing to diagnose
+     * the failure with.
+     *
+     * 72 hours, chosen against the calendar rather than a round number: an
+     * import that dies late on a Friday is still recoverable when somebody
+     * looks at it on Monday morning. It has to be long enough to survive a
+     * weekend and short enough that a coop's membership register is not sitting
+     * on the volume indefinitely because one import failed months ago.
+     *
+     * Set to 0 to release a failed run's files at the next sweep, which is the
+     * pre-existing behaviour and is NOT recommended — the sweep runs at the end
+     * of every `imports:process` tick, so zero means the files are gone within
+     * a minute of the failure.
+     */
+    'failed_run_retention_hours' => (int) env('CSV_IMPORT_FAILED_RUN_RETENTION_HOURS', 72),
+
+    /**
      * Root directory for chunks and assembled files, on the private disk.
      *
      * The disk itself is deliberately NOT configurable — see

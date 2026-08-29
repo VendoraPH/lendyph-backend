@@ -12,6 +12,7 @@ use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use RuntimeException;
 use Throwable;
@@ -85,6 +86,31 @@ class CsvImportUploadService
     public const CLOSED_PHASES = ['completed', 'failed', 'cancelled'];
 
     /**
+     * Terminal phases whose files are released the moment the phase changes.
+     *
+     * A SUBSET of CLOSED_PHASES, and the difference is `failed`.
+     *
+     * `completed` and `cancelled` are decisions: the rows are staged, or the
+     * operator asked for the run to go away. In both cases the source file has
+     * done its job and every further minute it spends on the volume is a
+     * cooperative's membership register sitting in plaintext for no reason.
+     *
+     * `failed` is not a decision, it is an accident. The processor writes a run
+     * off as `failed` on ANY Throwable — a deadlock, a lock-wait timeout, a
+     * momentary DB blip — so releasing on `failed` meant one transient error
+     * destroyed both assembled files instantly, leaving a half-imported book
+     * with no source to re-run from and nothing to explain the failure with.
+     * Failed runs keep their files and are collected later by
+     * releaseAbandonedStorage(), which is the same cleanup path, only on a
+     * clock instead of a hair trigger.
+     *
+     * Anything ADDED to CLOSED_PHASES and not to this list inherits the
+     * cautious behaviour — files kept, swept later — which is the right default
+     * for a list nobody remembers to update.
+     */
+    public const STORAGE_RELEASE_PHASES = ['completed', 'cancelled'];
+
+    /**
      * Phases a run may be cancelled from.
      *
      * All three sit before anything reaches `borrowers` or `loans`, and none of
@@ -113,6 +139,18 @@ class CsvImportUploadService
 
     /** Zero-padding width for a chunk's filename. */
     private const CHUNK_INDEX_PAD = 6;
+
+    /**
+     * The importer's processor, and the method on it that ends a run.
+     *
+     * Named as strings rather than imported because the processor lands on a
+     * different branch to this service; see self::finaliseRun(). Merge-window
+     * scaffolding, to be replaced with a real import and constructor injection
+     * once both halves are on `csv-import/backend`.
+     */
+    private const PROCESSOR = 'App\Services\CsvImport\CsvImportProcessor';
+
+    private const FINALISER = 'finalise';
 
     /**
      * Most missing indexes listed in one response.
@@ -187,7 +225,51 @@ class CsvImportUploadService
         return $this->expectedChunkBytes($file, $index);
     }
 
-    /** The run currently occupying the importer, if any. */
+    /**
+     * A run by id, or a 404 — the replacement for route-model binding on the
+     * import routes.
+     *
+     * `SubstituteBindings` runs long before a controller action or a
+     * FormRequest, so a bound `CsvImportRun $run` parameter answers "does run
+     * #N exist?" to a caller who is about to be refused: 404 for an id nobody
+     * has used, 403 for one somebody has. That is a free oracle for how many
+     * migrations a deployment has run and when, handed to any authenticated
+     * user — a viewer, a collector, a loan officer. Resolving here instead puts
+     * the whole lookup behind `imports:process`, because nothing reaches this
+     * method until the permission check has passed.
+     *
+     * The 404 body deliberately says only that the run was not found. Which of
+     * "no such id" and "not yours" it means is not a distinction this feature
+     * has — a run belongs to the deployment, not to a person — and spelling it
+     * out would rebuild the oracle in the response body.
+     */
+    public function findRun(int $id): CsvImportRun
+    {
+        $run = CsvImportRun::query()->find($id);
+
+        if ($run === null) {
+            throw new HttpResponseException(response()->json([
+                'message' => "Import run #{$id} was not found.",
+            ], 404));
+        }
+
+        return $run;
+    }
+
+    /**
+     * The run currently occupying the importer, if any.
+     *
+     * Reads OPEN_PHASES — the same list createRun()'s concurrency guard reads,
+     * and deliberately not a second copy of it. GET /api/imports answers from
+     * here, so "what is open" and "what is blocking a new run" are one
+     * question with one answer. A discovery endpoint that disagreed with the
+     * guard would be worse than none: it would tell an operator there is
+     * nothing to cancel while POST /api/imports keeps refusing them.
+     *
+     * `orderBy('id')` matches the guard's own ordering, so if the invariant
+     * that at most one run is open were ever broken, both would name the same
+     * run rather than pointing at different ones.
+     */
     public function openRun(): ?CsvImportRun
     {
         return CsvImportRun::query()
@@ -307,6 +389,19 @@ class CsvImportUploadService
     }
 
     /**
+     * How long a run that FAILED keeps its uploaded files before the sweep
+     * takes them. See config/imports.php and STORAGE_RELEASE_PHASES.
+     *
+     * Clamped at zero rather than trusted: a negative value would put the
+     * cutoff in the future and release every failed run's files on the next
+     * sweep, silently restoring the behaviour this window exists to remove.
+     */
+    public function failedRunRetentionHours(): int
+    {
+        return max(0, (int) config('imports.failed_run_retention_hours'));
+    }
+
+    /**
      * The last moment anything actually happened on this run.
      *
      * Measured from the newest chunk to arrive, not from when the run was
@@ -356,6 +451,13 @@ class CsvImportUploadService
      * that retries a DELETE it never saw the response to is not punished for
      * it.
      *
+     * Writes the run's summary audit row through the shared finaliser, exactly
+     * as completion does — see self::finaliseRun(). Cancelling is not a quiet
+     * operation: by the time an operator can reach this endpoint, staging may
+     * already have loaded every member's record into `csv_import_rows`, and
+     * without that row nothing in `audit_logs` records that a cooperative's
+     * whole membership was uploaded, discarded, or by whom.
+     *
      * @return array{cancelled: bool, chunks_removed: int, files_removed: int}
      */
     public function cancelRun(CsvImportRun $run, ?string $reason = null): array
@@ -390,28 +492,177 @@ class CsvImportUploadService
          */
         $released = $this->releaseStorage($run);
 
-        $run->forceFill([
-            'phase' => 'cancelled',
-            'finished_at' => now(),
-            'failure_reason' => $reason ?? 'Cancelled by an operator before any members or loans were written.',
-        ])->save();
+        $this->finaliseRun(
+            $run,
+            'cancelled',
+            $reason ?? 'Cancelled by an operator before any members or loans were written.',
+        );
 
         return ['cancelled' => true, ...$released];
     }
 
     /**
-     * Free everything a finished run was holding on the private volume.
+     * Move a run to a terminal phase through the importer's shared finaliser,
+     * so the summary audit row is written the same way on every ending.
      *
-     * Runs on EVERY terminal phase, not just cancellation. An assembled CSV is
-     * a cooperative's whole membership register in plaintext — names,
-     * birthdates, contact numbers, incomes — and once its rows are staged into
-     * `csv_import_rows` the file has done its job. Keeping it afterwards is a
-     * standing disclosure risk with no remaining benefit.
+     * ## Why this calls somebody else's method
      *
-     * Note this deletes the file for a FAILED run too, which costs a diagnostic
-     * convenience: a failure has to be explained from `csv_import_rows` and the
-     * run's `notes` rather than by re-reading the source file. That is the
-     * intended trade — a file kept "just in case" is kept forever.
+     * `audit_logs` gets exactly ONE row per import run — the per-model rows are
+     * suppressed while the importer writes, because a cooperative's entire
+     * membership arriving in one night would otherwise bury the log. That makes
+     * the summary row the only trace an auditor can ask about, and it was being
+     * written from a single private method on the processor, reachable only by
+     * the one path that completes a run. Cancelling wrote nothing at all: an
+     * operator could discard a run after staging had already loaded every
+     * member's record and leave no record that it happened or who did it.
+     *
+     * The fix is to call the processor's finaliser rather than to write a
+     * second one here. Two implementations of "the audit row for this run"
+     * drift, and the one that drifts is the one nobody looks at until an audit.
+     *
+     * ## THE ACTOR IS PASSED EXPLICITLY, and must be
+     *
+     * finalise() does not fall through to AuditLogService's `auth()`/`request()`
+     * defaults. Its own defaults are the run's `initiated_by` and
+     * `initiated_ip`, which is right for the scheduler — the processor works
+     * long after the admin who asked for the import has gone home — and wrong
+     * here. Cancelling is a live web request, and the operator who cancels a
+     * run is very often not the one who opened it. Leaving these null would
+     * quietly attribute one admin's decision to another admin's name, in the
+     * single audit row that exists to say who did this.
+     *
+     * `auth()->id()` and `request()->ip()` rather than the request object,
+     * because this service is also reachable from the console; both are simply
+     * null there, which is what finalise()'s own fallback is for.
+     *
+     * ## The transition
+     *
+     * finalise() owns it, and must be called while the run is still live: it
+     * re-reads the run under a lock and returns without writing anything if it
+     * is ALREADY terminal, so setting the phase here first would skip the audit
+     * row and silently restore the gap this exists to close. The reason string
+     * goes to it rather than being written first, for the same reason — it
+     * belongs to the same locked write as the phase and the audit row.
+     *
+     * The check afterwards is what makes that contract safe to depend on rather
+     * than assume: whatever happened above, this method does not return with
+     * the run still live, because a run left in `uploading` blocks every future
+     * import at this cooperative until the stale-upload TTL expires. It tests
+     * for ANY terminal phase rather than the one asked for, so a run that a
+     * concurrent tick finalised as `failed` in the meantime is left as `failed`
+     * rather than overwritten with our answer.
+     *
+     * ## MERGE-WINDOW SCAFFOLDING
+     *
+     * Resolved by name, and the same shape ProcessCsvImports uses to reach this
+     * service from its side — the two halves of this feature are on different
+     * branches, and an import of a class that is not on this branch yet is a
+     * lie to every reader and every tool. Skipped LOUDLY if it cannot be
+     * reached, because a silent no-op is how a bad merge turns into an import
+     * with no audit trail at all, which is the exact thing this method exists
+     * to prevent.
+     *
+     * Arguments are NAMED, deliberately. Positional ones would keep working and
+     * silently mean something else if a parameter were ever inserted ahead of
+     * them, and "silently attributes the audit row to the wrong person" is the
+     * worst available failure here; a renamed parameter throws instead, which
+     * is the failure we want.
+     *
+     * Once both branches are on `csv-import/backend`, replace the resolution
+     * with a constructor-injected CsvImportProcessor and a direct
+     * `$this->processor->finalise(...)`; keep the post-condition check.
+     */
+    private function finaliseRun(CsvImportRun $run, string $phase, ?string $failureReason = null): void
+    {
+        $finaliser = $this->resolveFinaliser();
+
+        if ($finaliser === null) {
+            Log::warning('csv-import: could not reach the shared run finaliser', [
+                'csv_import_run_id' => $run->id,
+                'phase' => $phase,
+                'service' => self::PROCESSOR,
+                'method' => self::FINALISER,
+                'consequence' => 'The run is finished without its summary audit row, so `audit_logs` holds no '
+                    .'record that this cooperative\'s uploaded membership and loan data was discarded, or by whom.',
+            ]);
+        } else {
+            $finaliser->{self::FINALISER}(
+                $run,
+                $phase,
+                failureReason: $failureReason,
+                userId: auth()->id(),
+                ipAddress: request()->ip(),
+            );
+        }
+
+        $run->refresh();
+
+        if (in_array($run->phase, self::CLOSED_PHASES, true)) {
+            return;
+        }
+
+        $run->forceFill([
+            'phase' => $phase,
+            'finished_at' => now(),
+            'failure_reason' => $failureReason,
+        ])->save();
+    }
+
+    /**
+     * The importer's processor, if this deployment has one that can finalise a
+     * run. See the note on self::finaliseRun().
+     */
+    private function resolveFinaliser(): ?object
+    {
+        if (! app()->bound(self::PROCESSOR) && ! class_exists(self::PROCESSOR)) {
+            return null;
+        }
+
+        $processor = app(self::PROCESSOR);
+
+        return method_exists($processor, self::FINALISER) ? $processor : null;
+    }
+
+    /**
+     * Free everything a run that is finished with was holding on the private
+     * volume.
+     *
+     * An assembled CSV is a cooperative's whole membership register in
+     * plaintext — names, birthdates, contact numbers, incomes — and once its
+     * rows are staged into `csv_import_rows` the file has done its job. Keeping
+     * it afterwards is a standing disclosure risk with no remaining benefit.
+     *
+     * Which phases reach here is NOT this method's decision, and the
+     * distinction matters: see self::STORAGE_RELEASE_PHASES for why a `failed`
+     * run keeps its files for a while and a `completed` or `cancelled` one does
+     * not.
+     *
+     * EVERY UNLINK IS DEFERRED TO `DB::afterCommit`, and it is deferred HERE
+     * rather than at any one call site, because more than one call site needs
+     * it. This method is reachable from inside somebody else's open transaction
+     * from at least two directions:
+     *
+     *  - createRun() reaches it through reclaimStaleUpload(), inside the
+     *    transaction that holds the concurrency lock;
+     *  - the `saved` listener fires it from whatever transaction moved the
+     *    phase, and every terminal transition now runs inside the processor's
+     *    shared finalise(), which keeps a `lockForUpdate` and a terminal
+     *    re-check in a transaction. That includes the 14-day prune, which saves
+     *    per row and therefore does fire the listener.
+     *
+     * The filesystem has no rollback. Deleting inline meant a rolled-back
+     * transaction restored the
+     * chunk ROWS while their bytes stayed gone, which assembleFile() then
+     * reports as "recorded but missing from disk" and which storeChunk()
+     * cannot repair, because a matching re-send of a chunk that is still
+     * recorded is answered as a duplicate no-op. The run could only be
+     * cancelled. Same reasoning, and the same fix, as BorrowerPurgeService:
+     * orphan files beat orphan rows, because an orphan file is a wasted
+     * megabyte a sweep can find and an orphan row is a phantom nothing can.
+     *
+     * With no transaction open — a direct call from the controller — the
+     * callbacks run immediately, so the counts returned below still describe
+     * what has just been removed.
      *
      * `csv_import_rows` still holds the same personal data, row by row, and
      * needs its own retention decision. That is a policy call tracked
@@ -427,12 +678,18 @@ class CsvImportUploadService
         // Sweeps up the run's directory once nothing is left in it. Ignores a
         // non-empty directory rather than forcing it: anything still in there
         // is unexpected and should be looked at, not silently destroyed.
+        //
+        // Registered last, and deferred like the deletions above, because it
+        // can only be right once they have run: afterCommit callbacks fire in
+        // registration order.
         $disk = $this->disk();
         $directory = rtrim((string) config('imports.path_prefix'), '/').'/'.$run->id;
 
-        if ($disk->exists($directory) && $disk->allFiles($directory) === []) {
-            $disk->deleteDirectory($directory);
-        }
+        DB::afterCommit(function () use ($disk, $directory): void {
+            if ($disk->exists($directory) && $disk->allFiles($directory) === []) {
+                $disk->deleteDirectory($directory);
+            }
+        });
 
         return ['chunks_removed' => $chunks, 'files_removed' => $files];
     }
@@ -474,6 +731,21 @@ class CsvImportUploadService
      * ever find again. The coupling is deliberate and is commented at both
      * ends.
      *
+     * A `failed` RUN IS NOT SWEPT STRAIGHT AWAY, and that grace window is the
+     * whole point of keeping its files in the first place. Both call sites are
+     * things that happen within seconds of a failure — the scheduled command
+     * runs this at the end of the same minute-ly tick that wrote the run off,
+     * and an operator whose import just failed opens another one immediately —
+     * so without the window, not releasing on the `failed` transition would buy
+     * a run's source files roughly sixty seconds of life and change nothing
+     * else. Aged from `finished_at`, falling back to `updated_at` for a run
+     * failed by a mass update that set no finish time.
+     *
+     * `completed` and `cancelled` are swept with no window at all: for those
+     * the listener has already released the storage, so anything this sweep
+     * still finds is a run whose phase moved without a model event, and it has
+     * been sitting there since whenever that happened.
+     *
      * Failures are reported and swallowed. This is cleanup of somebody else's
      * abandoned run; it must never be the reason an operator cannot start
      * theirs.
@@ -485,8 +757,26 @@ class CsvImportUploadService
     public function releaseAbandonedStorage(int $limit = 25): int
     {
         try {
+            /**
+             * Derived from the two published lists rather than naming `failed`:
+             * a terminal phase added to CLOSED_PHASES and not to
+             * STORAGE_RELEASE_PHASES is one nobody has decided about yet, and
+             * holding its files for the retention window is the safe way to be
+             * undecided.
+             */
+            $deferred = array_values(array_diff(self::CLOSED_PHASES, self::STORAGE_RELEASE_PHASES));
+            $cutoff = now()->subHours($this->failedRunRetentionHours());
+
             $runs = CsvImportRun::query()
-                ->whereIn('phase', self::CLOSED_PHASES)
+                ->where(function ($query) use ($deferred, $cutoff): void {
+                    $query
+                        ->whereIn('phase', self::STORAGE_RELEASE_PHASES)
+                        ->orWhere(function ($aged) use ($deferred, $cutoff): void {
+                            $aged
+                                ->whereIn('phase', $deferred)
+                                ->whereRaw('coalesce(finished_at, updated_at) < ?', [$cutoff]);
+                        });
+                })
                 ->where(function ($query): void {
                     $query
                         ->whereHas('files', fn ($files) => $files->whereNotNull('assembled_path'))
@@ -515,23 +805,31 @@ class CsvImportUploadService
      * actually imported and costs nothing to retain, while `assembled_path` is
      * nulled because a path pointing at a deleted file is worse than no path.
      *
+     * The column is nulled first and the bytes go on commit, in that order and
+     * never the other way round: a rolled-back transaction that had already
+     * unlinked would restore an `assembled_path` naming a file that is gone.
+     * See releaseStorage().
+     *
      * @return int files removed
      */
     public function purgeAssembledFiles(CsvImportRun $run): int
     {
         $disk = $this->disk();
-        $removed = 0;
+        $paths = [];
 
         foreach ($run->files()->whereNotNull('assembled_path')->get() as $file) {
-            if ($disk->exists($file->assembled_path)) {
-                $disk->delete($file->assembled_path);
-            }
+            $paths[] = $file->assembled_path;
 
             $file->forceFill(['assembled_path' => null])->save();
-            $removed++;
         }
 
-        return $removed;
+        if ($paths !== []) {
+            DB::afterCommit(function () use ($disk, $paths): void {
+                $disk->delete($paths);
+            });
+        }
+
+        return count($paths);
     }
 
     /**
@@ -540,6 +838,22 @@ class CsvImportUploadService
      * Recorded as a cancellation with a reason that says what happened, so an
      * operator who returns to a dead browser tab and finds their run gone can
      * read why rather than guess.
+     *
+     * CALLED FROM INSIDE createRun()'s TRANSACTION, which is why every unlink
+     * in releaseStorage() is deferred to `DB::afterCommit`. Two concurrent
+     * POST /imports both take `lockForUpdate` on the same rows, so a deadlock
+     * here is plausible rather than exotic; unlinking inline meant the loser's
+     * rollback restored the stale run's chunk rows with their bytes already
+     * gone, leaving a run that could not be assembled, could not be repaired by
+     * re-uploading, and could only be cancelled.
+     *
+     * Finalised through the shared path like every other ending, so this second
+     * route to `cancelled` writes the same summary audit row rather than
+     * discarding somebody's upload silently. The actor is whoever opened the
+     * new run, which is accurate — their request is what took the slot — and
+     * the reason on the row says it was automatic rather than a decision. The
+     * audit row is written inside the same transaction, so it rolls back with
+     * the reclaim if the open fails, exactly as it should.
      */
     private function reclaimStaleUpload(CsvImportRun $run): void
     {
@@ -547,11 +861,11 @@ class CsvImportUploadService
 
         $this->releaseStorage($run);
 
-        $run->forceFill([
-            'phase' => 'cancelled',
-            'finished_at' => now(),
-            'failure_reason' => "Abandoned mid-upload: no chunk arrived for over {$minutes} minutes, so the run was reclaimed automatically to let a new import start.",
-        ])->save();
+        $this->finaliseRun(
+            $run,
+            'cancelled',
+            "Abandoned mid-upload: no chunk arrived for over {$minutes} minutes, so the run was reclaimed automatically to let a new import start.",
+        );
     }
 
     /**
@@ -883,9 +1197,17 @@ class CsvImportUploadService
      * place that knows the path layout, so deleting chunks anywhere else would
      * be a second copy of it waiting to drift.
      *
-     * Rows go first and inside a transaction, files after it. An orphaned file
-     * is a wasted megabyte; an orphaned ROW is a phantom that a later assemble
-     * would try to read and fail on.
+     * Rows go first and inside a transaction, bytes only once that is durable.
+     * An orphaned file is a wasted megabyte; an orphaned ROW is a phantom that
+     * a later assemble would try to read and fail on — and one a re-send cannot
+     * fix, because storeChunk() answers a matching re-send of a chunk it still
+     * has a row for as a duplicate no-op.
+     *
+     * `DB::afterCommit` rather than a plain call, because this is reachable
+     * from inside a caller's transaction — createRun() reaches it through
+     * reclaimStaleUpload(). Registered after the inner transaction above rather
+     * than inside it, so with an outer transaction open it attaches to the
+     * OUTER one and only fires when that commits. See releaseStorage().
      *
      * @return int chunks removed
      */
@@ -905,8 +1227,12 @@ class CsvImportUploadService
                 $file->chunks()->delete();
             });
 
-            $disk->delete($paths);
-            $disk->deleteDirectory($this->chunkDirectory($file));
+            $directory = $this->chunkDirectory($file);
+
+            DB::afterCommit(function () use ($disk, $paths, $directory): void {
+                $disk->delete($paths);
+                $disk->deleteDirectory($directory);
+            });
 
             $removed += count($paths);
         }

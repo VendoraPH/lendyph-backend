@@ -306,8 +306,29 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     | is hundreds of legitimate requests long. Any import route added later —
     | status, mapping, the error report — should be named `imports.*` and
     | carry `throttle:imports` for the same reason.
+    |
+    | `{run}` is a plain id here, NOT a bound CsvImportRun. Bindings are
+    | substituted before the controller and before its FormRequests, so a bound
+    | model would tell a caller who is about to be refused whether run #N
+    | exists — 404 for an unused id, 403 for a real one. Every action resolves
+    | the id itself, after `imports:process`. `whereNumber('run')` on all three
+    | so a non-numeric id never becomes a route match, matching the constraint
+    | the status and mapping routes use.
     */
     Route::prefix('imports')->name('imports.')->middleware('throttle:imports')->group(function () {
+        /*
+         * Discovery, and the only way to find an open run without a run id.
+         * A client normally keeps its id in local storage; a cleared browser, a
+         * different device or a different admin picking up somebody's abandoned
+         * migration all lose it, and an open run is then invisible AND blocking
+         * — `POST /` 409s while one is open, so the operator is told an import
+         * is already running with nothing they can see or cancel.
+         *
+         * Control tier, not `exports`: it is read on mount and polled
+         * adjacently, and it is a single indexed lookup.
+         */
+        Route::get('/', [CsvImportController::class, 'index'])->name('index');
+
         Route::post('/', [CsvImportController::class, 'store'])->name('store');
 
         // PUT is the documented verb and works with either body encoding: PHP
@@ -316,17 +337,22 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
         // accepted at the same URI as the compatibility path for any client
         // that cannot rely on that. See CsvImportController::resolveChunkBytes().
         Route::match(['put', 'post'], '/{run}/files/{kind}/chunks/{index}', [CsvImportController::class, 'uploadChunk'])
+            ->whereNumber('run')
             ->whereIn('kind', ['customers', 'loans'])
             ->whereNumber('index')
             ->name('chunk');
 
-        Route::post('/{run}/assemble', [CsvImportController::class, 'assemble'])->name('assemble');
+        Route::post('/{run}/assemble', [CsvImportController::class, 'assemble'])
+            ->whereNumber('run')
+            ->name('assemble');
 
         // The escape hatch for a dead browser tab. Without it, a run left in
         // `uploading` blocks every future import at this cooperative forever,
         // because POST /imports refuses a second run while one is open and
         // nothing in the UI can clear it.
-        Route::delete('/{run}', [CsvImportController::class, 'destroy'])->name('destroy');
+        Route::delete('/{run}', [CsvImportController::class, 'destroy'])
+            ->whereNumber('run')
+            ->name('destroy');
 
         // GET /imports/{run} (status, with missing_chunks per file), the
         // mapping confirmation and the error report are owned separately; they

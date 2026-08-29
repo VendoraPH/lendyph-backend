@@ -5,7 +5,6 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\CsvImport\StoreCsvImportRunRequest;
 use App\Http\Requests\CsvImport\UploadCsvImportChunkRequest;
-use App\Models\CsvImportRun;
 use App\Services\CsvImport\CsvImportUploadService;
 use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Http\JsonResponse;
@@ -22,10 +21,60 @@ use RuntimeException;
  * staging, product mapping, the import itself, the error report — lives
  * elsewhere; this controller's job ends the moment both files are on the
  * private disk and provably intact.
+ *
+ * NO ROUTE-MODEL BINDING ON `{run}`, deliberately. `SubstituteBindings` runs
+ * before both this controller and its FormRequests, so a bound
+ * `CsvImportRun $run` parameter answers "does run #N exist?" to a caller who is
+ * about to be refused anyway: 404 for an unused id, 403 for a real one. Every
+ * action here takes the id and resolves it through
+ * CsvImportUploadService::findRun() AFTER the permission check, so the lookup
+ * never happens for a caller without `imports:process`. The routes carry
+ * `whereNumber('run')` so a non-numeric id is not a route match at all.
  */
 class CsvImportController extends Controller
 {
     public function __construct(private readonly CsvImportUploadService $uploads) {}
+
+    #[OA\Get(
+        path: '/api/imports',
+        summary: 'The import run currently occupying this cooperative, if any',
+        description: <<<'TXT'
+        Returns the one run that is still in progress, in the same shape as GET /api/imports/{run}, or `{"run": null}` when nothing is open.
+
+        This is the discovery call. A client normally remembers its run id locally, but that is gone the moment the browser storage is cleared, the operator moves to another device, or a different admin picks up somebody's abandoned migration — and without this endpoint an open run is invisible AND blocking, because POST /api/imports refuses a second run while one is open. The operator would be told an import is already running, with no way to see which or to cancel it.
+
+        "Open" means exactly what the creation guard means; both read the same list of phases, so this can never report nothing to cancel while POST keeps refusing.
+        TXT,
+        tags: ['CSV Import'],
+        security: [['sanctum' => []]],
+        responses: [
+            new OA\Response(response: 200, description: 'The open run and its per-file upload state, or run: null'),
+            new OA\Response(response: 403, description: 'Requires the imports:process permission'),
+        ],
+    )]
+    public function index(): JsonResponse
+    {
+        $this->authorize('imports:process');
+
+        $run = $this->uploads->openRun();
+
+        if ($run === null) {
+            return response()->json([
+                'message' => 'No import run is open. Start one with POST /api/imports.',
+                'run' => null,
+            ]);
+        }
+
+        /**
+         * Spread, not nested, so this and GET /api/imports/{run} are one
+         * contract rather than two that have to be kept in step. The client
+         * reads `run`, `chunk_size` and `files` off either response.
+         */
+        return response()->json([
+            'message' => "Import run #{$run->id} is still in progress.",
+            ...$this->uploads->runPayload($run),
+        ]);
+    }
 
     #[OA\Post(
         path: '/api/imports',
@@ -125,11 +174,11 @@ class CsvImportController extends Controller
             new OA\Response(response: 422, description: 'Digest did not match the bytes received, or the chunk is the wrong size'),
         ],
     )]
-    public function uploadChunk(UploadCsvImportChunkRequest $request, CsvImportRun $run, string $kind, int $index): JsonResponse
+    public function uploadChunk(UploadCsvImportChunkRequest $request, int $run, string $kind, int $index): JsonResponse
     {
         $this->authorize('imports:process');
 
-        $file = $this->uploads->fileFor($run, $kind);
+        $file = $this->uploads->fileFor($this->uploads->findRun($run), $kind);
 
         [$sourcePath, $temporaryStream] = $this->resolveChunkBytes(
             $request,
@@ -189,13 +238,13 @@ class CsvImportController extends Controller
             new OA\Response(response: 422, description: 'Chunks are still missing, or an assembled file did not match its declared digest'),
         ],
     )]
-    public function assemble(CsvImportRun $run): JsonResponse
+    public function assemble(int $run): JsonResponse
     {
         $this->authorize('imports:process');
 
         return response()->json([
             'message' => 'Both files assembled and verified against their declared digests.',
-            ...$this->uploads->assemble($run),
+            ...$this->uploads->assemble($this->uploads->findRun($run)),
         ]);
     }
 
@@ -218,18 +267,20 @@ class CsvImportController extends Controller
             new OA\Response(response: 409, description: 'The run has progressed past the point where cancelling is safe'),
         ],
     )]
-    public function destroy(CsvImportRun $run): JsonResponse
+    public function destroy(int $run): JsonResponse
     {
         $this->authorize('imports:process');
 
-        $result = $this->uploads->cancelRun($run);
+        $importRun = $this->uploads->findRun($run);
+
+        $result = $this->uploads->cancelRun($importRun);
 
         return response()->json([
             'message' => $result['cancelled']
                 ? 'Import run cancelled. Its uploaded data has been deleted and a new run can now be started.'
                 : 'Import run was already cancelled.',
             ...$result,
-            ...$this->uploads->runPayload($run->fresh()), // @phpstan-ignore-line
+            ...$this->uploads->runPayload($importRun->fresh()), // @phpstan-ignore-line
         ]);
     }
 
