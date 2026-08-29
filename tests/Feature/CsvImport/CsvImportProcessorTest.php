@@ -13,8 +13,16 @@ use App\Models\ShareCapitalPledge;
 use App\Services\CsvImport\CsvImportProcessor;
 use App\Services\CsvImport\CsvImportSchema;
 use App\Services\CsvImport\CsvImportStager;
+use App\Services\CsvImport\ImportErrorDigest;
 use App\Services\CsvImport\ImportTick;
+use ArrayObject;
+use Illuminate\Database\QueryException;
+use Illuminate\Database\UniqueConstraintViolationException;
+use Illuminate\Log\Events\MessageLogged;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 use InvalidArgumentException;
 use LogicException;
 use Tests\TestCase;
@@ -159,7 +167,15 @@ class CsvImportProcessorTest extends TestCase
         $this->assertSame('imported', $stamped[2]->result);
 
         $this->assertSame('exception', $stamped[1]->result_category);
-        $this->assertStringContainsString('rather than a string', (string) $stamped[1]->result_message);
+
+        // The stamp names the LINE, never the exception. This column is
+        // rendered by the error screen and streamed by errors.csv, and a
+        // driver message in it is the member's own record — see
+        // test_a_database_error_puts_no_cell_value_in_the_row_or_the_log().
+        $this->assertSame(
+            "Row {$stamped[1]->line_number} could not be written (unexpected error). See the run log.",
+            (string) $stamped[1]->result_message,
+        );
 
         $this->assertSame(['A-001', 'A-003'], Borrower::whereNotNull('external_account_no')
             ->orderBy('external_account_no')->pluck('external_account_no')->all());
@@ -631,5 +647,434 @@ class CsvImportProcessorTest extends TestCase
 
         $this->assertSame('completed', $run->fresh()->phase);
         $this->assertSame($product->id, Loan::where('external_loan_no', 'L-1')->firstOrFail()->loan_product_id);
+    }
+
+    /**
+     * An imported member is admitted BY somebody, ON a date — and neither is
+     * "now", and neither is nobody.
+     *
+     * `status = 'active'` while `approved_at`/`approved_by` are null is not a
+     * gap in the record, it is a contradiction in it: the member is admitted and
+     * nobody admitted them. It is also not a stable gap —
+     * `registrations:backfill-approvals` fills `whereNull('approved_at')` with
+     * `created_at` and a null approver, so leaving these blank lets a later
+     * housekeeping run invent an admission dated to the night of the upload.
+     */
+    public function test_imported_members_carry_who_admitted_them_and_when(): void
+    {
+        $this->seedForImport();
+
+        $run = $this->makeRun(['as_of_date' => '2026-06-30']);
+        $this->makeFile($run, 'customers', [$this->customerRow('A-001')]);
+
+        $this->runToIdle($run);
+
+        $borrower = Borrower::where('external_account_no', 'A-001')->firstOrFail();
+
+        $this->assertSame('active', $borrower->status);
+        $this->assertSame($this->admin->id, $borrower->approved_by);
+
+        // Midnight Manila on the date the EXTRACT represents, not the moment the
+        // file happened to be uploaded. A file cut on the 30th and imported in
+        // September must not date a decade-old membership to September.
+        $this->assertNotNull($borrower->approved_at);
+        $this->assertSame('2026-06-30 00:00:00', $borrower->approved_at->toDateTimeString());
+        $this->assertTrue($borrower->approved_at->lt(now()->subDay()));
+
+        // And the backfill command now skips them, because that is the whole
+        // point of stamping rather than leaving it to housekeeping.
+        $this->assertSame(0, Borrower::whereNotNull('external_account_no')->whereNull('approved_at')->count());
+    }
+
+    /**
+     * A loan the importer writes past LoanService::createLoan()'s bounds is
+     * recorded as having broken them.
+     *
+     * Bypassing the guard is deliberate — a migration has to carry a decade of
+     * loans that today's product configuration would refuse, and refusing them
+     * would strand the members they belong to. Pretending the guard passed is
+     * not part of that bargain.
+     *
+     * The check itself belongs to ProductMappingResolver, which also powers the
+     * mapping screen's "288 loans will disagree with their product" forecast.
+     * It is reached by name during the merge window, so this binds a double at
+     * the same key the real one will answer on — asserting the WIRING, which is
+     * what is actually mine, rather than re-testing his arithmetic.
+     */
+    public function test_a_loan_outside_its_products_bounds_is_imported_and_flagged(): void
+    {
+        $this->seedForImport();
+
+        $seen = new ArrayObject(['calls' => []]);
+
+        $this->app->bind(CsvImportProcessor::BOUNDS_CHECKER, fn () => function (LoanProduct $product, mixed $amount, mixed $term, mixed $rate) use ($seen): array {
+            $seen['calls'][] = ['amount' => $amount, 'term' => $term, 'rate' => $rate];
+
+            return ['amount_above_max', 'term_above_max'];
+        });
+
+        $product = $this->salaryLoanProduct();
+        $run = $this->makeRun(['product_mapping' => ['Salary Loan' => $product->id]]);
+
+        $this->makeFile($run, 'customers', [$this->customerRow('A-001')]);
+        $this->makeFile($run, 'loans', [$this->loanRow('A-001', 'L-1', ['term_in_months' => '18'])]);
+
+        $this->runToIdle($run);
+
+        // Imported, not refused.
+        $loan = Loan::where('external_loan_no', 'L-1')->firstOrFail();
+
+        $row = CsvImportRow::where('loan_id', $loan->id)->firstOrFail();
+        $this->assertSame('imported', $row->result);
+        $this->assertSame(CsvImportProcessor::CATEGORY_OUT_OF_PRODUCT_BOUNDS, $row->result_category);
+        $this->assertStringContainsString('amount_above_max, term_above_max', (string) $row->result_message);
+        $this->assertStringContainsString($product->name, (string) $row->result_message);
+
+        // Handed the CSV's STATED term in months, never the reconstructed period
+        // count — product bounds are expressed in months and so is the column
+        // the admin is looking at. `term` on the loan is a different number in a
+        // different unit.
+        $this->assertCount(1, $seen['calls']);
+        $this->assertSame('18', (string) $seen['calls'][0]['term']);
+        $this->assertNotSame((string) $loan->term, (string) $seen['calls'][0]['term']);
+
+        // Centavos, as staged: 60,000.00 pesos.
+        $this->assertSame(6000000, $seen['calls'][0]['amount']);
+    }
+
+    /**
+     * A bounds breach OUTRANKS `imported_with_warnings`.
+     *
+     * Normalisation warnings are already on the row in `normalized.warnings` and
+     * survive whatever category the row is filed under. A bounds breach has no
+     * other trace anywhere, so filing it under the weaker category because the
+     * row also happened to warn about a phone number is the one way to lose it.
+     */
+    public function test_a_bounds_breach_outranks_a_warning_and_both_are_reported(): void
+    {
+        $this->seedForImport();
+
+        $this->app->bind(CsvImportProcessor::BOUNDS_CHECKER, fn () => fn (): array => ['rate_above_max']);
+
+        $product = $this->salaryLoanProduct();
+        $run = $this->makeRun(['product_mapping' => ['Salary Loan' => $product->id]]);
+
+        $this->makeFile($run, 'customers', [$this->customerRow('A-001')]);
+        // An unusable "Other Fee Detail" is a normalisation warning, so this row
+        // qualifies for both categories at once.
+        $this->makeFile($run, 'loans', [$this->loanRow('A-001', 'L-1', [
+            'other_fee_amount' => '250.00',
+            'other_fee_detail' => '',
+        ])]);
+
+        $this->runToIdle($run);
+
+        $row = CsvImportRow::whereNotNull('loan_id')->firstOrFail();
+
+        $this->assertSame('imported', $row->result);
+        $this->assertSame(CsvImportProcessor::CATEGORY_OUT_OF_PRODUCT_BOUNDS, $row->result_category);
+
+        // The warning is still in the message; only the category was outranked.
+        $this->assertStringContainsString('rate_above_max', (string) $row->result_message);
+        $this->assertNotSame('imported_with_warnings', $row->result_category);
+    }
+
+    /**
+     * With no bounds check reachable — the merge window — loans import exactly
+     * as before, and the absence is stated once rather than per row.
+     *
+     * A missing housekeeping check must never fatal an import; a SILENT missing
+     * check is how the mapping screen's forecast quietly stops having anything
+     * to expand into.
+     */
+    public function test_an_unreachable_bounds_check_reports_itself_once_and_imports_anyway(): void
+    {
+        $this->seedForImport();
+
+        $product = $this->salaryLoanProduct();
+        $run = $this->makeRun(['product_mapping' => ['Salary Loan' => $product->id]]);
+
+        $this->makeFile($run, 'customers', [$this->customerRow('A-001'), $this->customerRow('A-002')]);
+        $this->makeFile($run, 'loans', [$this->loanRow('A-001', 'L-1'), $this->loanRow('A-002', 'L-2')]);
+
+        $warnings = [];
+        Event::listen(function (MessageLogged $message) use (&$warnings): void {
+            if (str_contains($message->message, 'could not reach the product bounds check')) {
+                $warnings[] = $message->context;
+            }
+        });
+
+        // One processor for the whole run, exactly as the command resolves it.
+        $processor = new CsvImportProcessor;
+
+        for ($i = 0; $i < 50 && ! $processor->advance($run)->idle; $i++) {
+            $run->refresh();
+        }
+
+        $this->assertSame('completed', $run->fresh()->phase);
+        $this->assertSame(2, Loan::whereNotNull('external_loan_no')->count());
+        $this->assertSame(0, CsvImportRow::where('result_category', CsvImportProcessor::CATEGORY_OUT_OF_PRODUCT_BOUNDS)->count());
+
+        $this->assertCount(1, $warnings, 'Two loans, one warning: this must not be logged per row.');
+        $this->assertArrayHasKey('consequence', $warnings[0]);
+    }
+
+    /**
+     * One member's distinctive cells, so an assertion that they are absent is
+     * about those cells and not about a common word.
+     *
+     * @return array<string, string>
+     */
+    private function distinctiveCells(int $seed = 5): array
+    {
+        return [
+            'account_no' => "ACC-{$seed}7",
+            'first_name' => 'Juanita',
+            'last_name' => 'Santos',
+            'birthdate' => '1979-11-03',
+            'contact_number' => '09991112222',
+            'email' => 'juanita.santos@coop.ph',
+            'street_address' => '44 Rizal Ave',
+            'employer_or_business' => 'Santos Sari-Sari',
+        ];
+    }
+
+    /**
+     * Arrange a REAL duplicate-key failure on `borrowers.borrower_code`.
+     *
+     * Not a thrown stub: the whole finding is about what a driver puts in a
+     * message, so the message has to come from the driver. The setup is also a
+     * real-world state rather than a contrivance — codes out of step with ids is
+     * what a manual fix or an out-of-order migration leaves behind. The hooks
+     * derive the next code from the HIGHEST ID, so with id 2 holding
+     * BRW-000004, the next code issued is BRW-000005, which id 1 already holds.
+     *
+     * `$seed` keeps two arrangements in the same test out of each other's way:
+     * the codes it plants must be unused, and the second call cannot re-plant
+     * the first call's.
+     *
+     * @return array{CsvImportRun, CsvImportRow}
+     */
+    private function arrangeDuplicateBorrowerCode(int $seed = 5): array
+    {
+        $taken = sprintf('BRW-%06d', 900000 + $seed);
+        $highest = sprintf('BRW-%06d', 900000 + $seed - 1);
+
+        // Repair whatever a previous arrangement left behind first: the anchors
+        // below are created through the hook, so they would trip over the last
+        // sabotage before they could plant the next one.
+        $previous = Borrower::query()->orderByDesc('id')->first();
+
+        if ($previous !== null) {
+            DB::table('borrowers')->where('id', $previous->id)
+                ->update(['borrower_code' => sprintf('BRW-%06d', 990000 + $previous->id)]);
+        }
+
+        $first = Borrower::factory()->create(['branch_id' => $this->branch->id, 'first_name' => "Existing{$seed}", 'last_name' => 'Alpha']);
+        $second = Borrower::factory()->create(['branch_id' => $this->branch->id, 'first_name' => "Existing{$seed}", 'last_name' => 'Beta']);
+
+        DB::table('borrowers')->where('id', $first->id)->update(['borrower_code' => $taken]);
+        DB::table('borrowers')->where('id', $second->id)->update(['borrower_code' => $highest]);
+
+        $run = $this->makeRun();
+        $file = $this->makeFile($run, 'customers', [
+            $this->customerRow("ACC-{$seed}7", array_merge($this->distinctiveCells($seed), [
+                'monthly_income' => '44,000.00',
+                'pledge_amount' => '12,500.00',
+            ])),
+        ]);
+
+        (new CsvImportStager)->stage($file);
+
+        return [$run, CsvImportRow::where('csv_import_file_id', $file->id)->orderBy('id')->firstOrFail()];
+    }
+
+    /**
+     * A QueryException's message is the failing SQL WITH THE BINDINGS
+     * SUBSTITUTED IN, so on this importer it is the member's entire record —
+     * name, birthdate, address, contact number, employer, income — as one line
+     * of text.
+     *
+     * This asserts the leak exists at the source, which is what makes the test
+     * below mean something rather than merely pass. Everything after this point
+     * is about that string never reaching anywhere it can be read.
+     */
+    public function test_the_driver_message_really_does_contain_the_members_record(): void
+    {
+        $this->seedForImport();
+
+        [$run, $row] = $this->arrangeDuplicateBorrowerCode();
+
+        try {
+            DB::transaction(fn () => $this->processor()->writeChunk($run, [$row], CsvImportSchema::CUSTOMERS));
+            $this->fail('The duplicate code did not fail, so nothing below this proves anything.');
+        } catch (QueryException $e) {
+            foreach ($this->distinctiveCells() as $key => $value) {
+                $this->assertStringContainsString(
+                    $value,
+                    $e->getMessage(),
+                    "The setup is wrong: [{$key}] is not in the driver message, so the test is not exercising the leak."
+                );
+            }
+        }
+    }
+
+    /**
+     * ...and none of it may be persisted, logged, or handed to a browser.
+     *
+     * `csv_import_rows.result_message` is rendered by the admin error screen and
+     * streamed by `errors.csv`, so a driver message in that column returns the
+     * member's own record to whoever opens the report. The log is worse: it is
+     * the `single` channel — one file, never rotated, no scrubbing, mode 644 —
+     * and a SYSTEMIC fault (a lock wait, a deadlock under the chunk's
+     * lockForUpdate, a poisoned code sequence) fails every row it touches, so
+     * the register arrives one member per line.
+     *
+     * Both call sites are exercised: the chunk attempt fails first, then the
+     * row is retried on its own and fails again.
+     */
+    public function test_a_database_error_puts_no_cell_value_in_the_row_or_the_log(): void
+    {
+        $this->seedForImport();
+
+        [$run, $row] = $this->arrangeDuplicateBorrowerCode();
+
+        $entries = [];
+        Event::listen(function (MessageLogged $message) use (&$entries): void {
+            $entries[] = $message->message.' '.json_encode($message->context);
+        });
+
+        $this->runToIdle($run);
+
+        $stamped = CsvImportRow::whereKey($row->id)->firstOrFail();
+
+        $this->assertSame('failed', $stamped->result);
+        $this->assertSame('exception', $stamped->result_category);
+
+        // Fixed prose, keyed to the line the operator can find in their
+        // spreadsheet, plus the driver's numeric code — 1062, duplicate entry.
+        $this->assertSame(
+            "Row {$stamped->line_number} could not be written (database error 1062). See the run log.",
+            (string) $stamped->result_message,
+        );
+
+        foreach ($this->distinctiveCells() as $key => $value) {
+            $this->assertStringNotContainsString(
+                $value,
+                (string) $stamped->result_message,
+                "[{$key}] reached csv_import_rows.result_message, which the error screen renders and errors.csv streams."
+            );
+
+            foreach ($entries as $entry) {
+                $this->assertStringNotContainsString(
+                    $value,
+                    $entry,
+                    "[{$key}] reached the log. That is the `single` channel: one file, never rotated, world-readable."
+                );
+            }
+        }
+
+        // What DID reach the log is enough to tell a duplicate key from a lock
+        // wait without opening a database.
+        $logged = implode("\n", $entries);
+        $this->assertStringContainsString('csv-import: chunk rolled back', $logged);
+        $this->assertStringContainsString('csv-import: row failed and was isolated', $logged);
+        $this->assertStringContainsString('"sql_state":"23000"', $logged);
+        $this->assertStringContainsString('"driver_code":"1062"', $logged);
+        $this->assertStringContainsString(class_basename(UniqueConstraintViolationException::class), $logged);
+    }
+
+    /**
+     * The row stamp is fixed for NON-database failures too.
+     *
+     * A driver message is the worst case, not the only one: PHP's own exceptions
+     * quote their input often enough (a malformed date, a bad JSON value) that
+     * an allowlist of "safe" exception classes would be a standing invitation to
+     * get one wrong. The column an HTTP endpoint streams carries no exception
+     * text at all; the class goes to the log, where it belongs.
+     */
+    public function test_a_non_database_failure_is_stamped_with_fixed_prose_too(): void
+    {
+        $this->seedForImport();
+
+        $run = $this->makeRun();
+        $file = $this->makeFile($run, 'customers', [
+            $this->customerRow('A-001', ['first_name' => 'Ana']),
+            $this->customerRow('A-002', ['first_name' => 'Ben']),
+        ]);
+
+        (new CsvImportStager)->stage($file);
+
+        $rows = CsvImportRow::where('csv_import_file_id', $file->id)->orderBy('id')->get();
+        $this->poisonMoney($rows[1]);
+
+        $entries = [];
+        Event::listen(function (MessageLogged $message) use (&$entries): void {
+            $entries[] = $message->message.' '.json_encode($message->context);
+        });
+
+        $this->runToIdle($run);
+
+        $stamped = CsvImportRow::whereKey($rows[1]->id)->firstOrFail();
+
+        $this->assertSame('failed', $stamped->result);
+        $this->assertSame(
+            "Row {$stamped->line_number} could not be written (unexpected error). See the run log.",
+            (string) $stamped->result_message,
+        );
+
+        // The exception's own words are gone from the column and present in the
+        // log only as the class that raised them.
+        $this->assertStringNotContainsString('rather than a string', (string) $stamped->result_message);
+        $this->assertStringContainsString('InvalidArgumentException', implode("\n", $entries));
+
+        // And the row's neighbour still imported.
+        $this->assertSame(1, Borrower::where('external_account_no', 'A-001')->count());
+    }
+
+    /**
+     * The full message is not thrown away — it is moved somewhere that can hold
+     * it safely, and that somewhere is off by default.
+     *
+     * The point of the switch is that the answer to "I need the real message" is
+     * a channel with its own file, its own 0600 mode and its own retention,
+     * rather than somebody quietly putting `$e->getMessage()` back into the
+     * shared log where it would never rotate and never be scrubbed.
+     */
+    public function test_the_full_message_goes_to_the_restricted_channel_only_when_it_is_switched_on(): void
+    {
+        $this->seedForImport();
+
+        [$run, $row] = $this->arrangeDuplicateBorrowerCode();
+
+        // A real file, because "which channel did it go to" is the entire
+        // question and every channel raises the same MessageLogged event.
+        $path = storage_path('logs/testing-'.Str::random(12).'.log');
+        config()->set('logging.channels.'.ImportErrorDigest::DIAGNOSTIC_CHANNEL, [
+            'driver' => 'single',
+            'path' => $path,
+            'level' => 'debug',
+        ]);
+        Log::forgetChannel(ImportErrorDigest::DIAGNOSTIC_CHANNEL);
+
+        try {
+            config()->set('logging.csv_import_diagnostics', false);
+            $this->runToIdle($run);
+
+            $this->assertFileDoesNotExist($path, 'Diagnostics are off, so nothing may have been written at all.');
+
+            config()->set('logging.csv_import_diagnostics', true);
+            [$secondRun] = $this->arrangeDuplicateBorrowerCode(25);
+            $this->runToIdle($secondRun);
+
+            $this->assertFileExists($path);
+
+            // Deliberately unredacted — that is what the switch is FOR. The
+            // guarantee is the destination, not the contents.
+            $this->assertStringContainsString('Juanita', (string) file_get_contents($path));
+        } finally {
+            Log::forgetChannel(ImportErrorDigest::DIAGNOSTIC_CHANNEL);
+            @unlink($path);
+        }
     }
 }

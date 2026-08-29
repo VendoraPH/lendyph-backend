@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use App\Http\Controllers\Api\FileController;
+use App\Services\SequenceCode;
 use App\Traits\Auditable;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -28,6 +29,12 @@ class Borrower extends Model
      * @var list<string>
      */
     public const NON_MEMBER_STATUSES = ['pending', 'rejected'];
+
+    /**
+     * The `borrower_code` family. Named so SequenceAllocator predicts codes from
+     * the same constant the hook issues them from.
+     */
+    public const CODE_PREFIX = 'BRW';
 
     protected $fillable = [
         'registration_uuid',
@@ -83,8 +90,15 @@ class Borrower extends Model
             // Row-level lock prevents two concurrent creates from reading the same last code
             // (mirrors the Loan::booted() pattern already in use)
             $last = static::query()->orderByDesc('id')->lockForUpdate()->first();
-            $nextNum = $last ? (int) substr($last->borrower_code, 4) + 1 : 1;
-            $borrower->borrower_code = 'BRW-'.str_pad($nextNum, 6, '0', STR_PAD_LEFT);
+
+            // Parsed, not cast. `(int) substr($code, 4) + 1` answers 1 for any
+            // code it cannot read, and BRW-000001 already exists — so a single
+            // malformed row would make EVERY borrower create fail on the unique
+            // index from then on, teller and importer alike, with nothing in the
+            // error to say why. SequenceCode stops on the bad row and names it.
+            $borrower->borrower_code = $last === null
+                ? SequenceCode::first(self::CODE_PREFIX)
+                : SequenceCode::after(self::CODE_PREFIX, $last->borrower_code, "borrowers.id {$last->id}");
         });
 
         /**

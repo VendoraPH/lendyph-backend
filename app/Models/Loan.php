@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Services\SequenceCode;
 use App\Traits\Auditable;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -26,6 +27,12 @@ class Loan extends Model
      * a different question: see COLLECTIBLE_STATUSES.
      */
     public const EVER_RELEASED_STATUSES = ['released', 'ongoing', 'completed', 'defaulted', 'restructured'];
+
+    /**
+     * The `application_number` family. Named so SequenceAllocator predicts
+     * numbers from the same constant the hook issues them from.
+     */
+    public const CODE_PREFIX = 'LA';
 
     /**
      * Loans that can still owe money on a schedule.
@@ -196,8 +203,16 @@ class Loan extends Model
     {
         static::creating(function (Loan $loan) {
             $last = static::query()->orderByDesc('id')->lockForUpdate()->first();
-            $nextNum = $last ? (int) substr($last->application_number, 3) + 1 : 1;
-            $loan->application_number = 'LA-'.str_pad($nextNum, 6, '0', STR_PAD_LEFT);
+
+            // Parsed, not cast — the same guard as Borrower::booted(), for the
+            // same reason. `(int) substr($code, 3) + 1` answers 1 for anything
+            // it cannot read, and LA-000001 already exists, so one malformed
+            // application_number would make every loan create fail on the unique
+            // index from then on. SequenceCode stops on the bad row and names it
+            // rather than colliding forever.
+            $loan->application_number = $last === null
+                ? SequenceCode::first(self::CODE_PREFIX)
+                : SequenceCode::after(self::CODE_PREFIX, $last->application_number, "loans.id {$last->id}");
         });
     }
 
