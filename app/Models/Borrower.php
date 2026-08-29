@@ -31,6 +31,7 @@ class Borrower extends Model
 
     protected $fillable = [
         'registration_uuid',
+        'external_account_no',
         'first_name',
         'middle_name',
         'last_name',

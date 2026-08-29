@@ -11,6 +11,9 @@ use OpenApi\Attributes as OA;
     properties: [
         new OA\Property(property: 'id', type: 'integer'),
         new OA\Property(property: 'borrower_code', type: 'string'),
+        new OA\Property(property: 'external_account_no', type: 'string', nullable: true, description: "The coop's own account number for this member in the legacy system it was migrated from. "
+            .'Null for anyone registered through this system. Unique across borrowers when set — it is the key '
+            .'the CSV importer joins loan rows to members on, so an operator correcting one by hand must keep it unique.'),
         new OA\Property(property: 'full_name', type: 'string'),
         new OA\Property(property: 'first_name', type: 'string'),
         new OA\Property(property: 'last_name', type: 'string'),
@@ -49,6 +52,14 @@ class BorrowerResource extends JsonResource
         return [
             'id' => $this->id,
             'borrower_code' => $this->borrower_code,
+            /*
+             * Exposed so an operator can SEE and correct a bad legacy
+             * account number after an import. A wrong one here does not
+             * just mislabel a member — it is the join key, so it silently
+             * attaches that member's loans to the wrong person, and the
+             * only way to notice is to be able to read it back.
+             */
+            'external_account_no' => $this->external_account_no,
             'first_name' => $this->first_name,
             'middle_name' => $this->middle_name,
             'last_name' => $this->last_name,
