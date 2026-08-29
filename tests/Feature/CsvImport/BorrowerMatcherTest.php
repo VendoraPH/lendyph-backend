@@ -7,19 +7,9 @@ use App\Models\Borrower;
 use App\Services\CsvImport\BorrowerMatch;
 use App\Services\CsvImport\BorrowerMatcher;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Schema;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
-/**
- * DEPENDENCY: `borrowers.external_account_no` is Bruce's migration.
- *
- * Until it lands, setUp() adds the column to the TEST schema only so the
- * matching logic is actually exercised rather than sitting untested behind a
- * skip. The moment the real migration exists this scaffold does nothing and
- * the tests run against the real column — if the real definition differs, these
- * tests are where that shows up.
- */
 class BorrowerMatcherTest extends TestCase
 {
     use SetupLendyPH;
@@ -28,12 +18,6 @@ class BorrowerMatcherTest extends TestCase
     {
         parent::setUp();
         $this->seedAndLogin();
-
-        if (! Schema::hasColumn('borrowers', 'external_account_no')) {
-            Schema::table('borrowers', function ($table): void {
-                $table->string('external_account_no', 50)->nullable()->unique()->after('borrower_code');
-            });
-        }
     }
 
     private function borrower(array $attributes = []): Borrower
