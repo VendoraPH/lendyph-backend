@@ -128,13 +128,11 @@ class CsvImportProcessor
      * `csv_import_rows.result_category` for a loan that was imported but breaks
      * one of the bounds configured on the product it was mapped to.
      *
-     * The string is published by ErrorReportBuilder as
-     * CATEGORY_OUT_OF_PRODUCT_BOUNDS, which is the error report's own name for
-     * it; it is repeated rather than imported for the same reason self::RESOLVER
-     * is a string — that class is on another branch. On merge, this constant
-     * should point at ErrorReportBuilder's rather than restate it.
+     * Points at ErrorReportBuilder's constant rather than restating the string.
+     * That class publishes it as the error report's own name for this category,
+     * and the two must not be able to drift.
      */
-    public const CATEGORY_OUT_OF_PRODUCT_BOUNDS = 'out_of_product_bounds';
+    public const CATEGORY_OUT_OF_PRODUCT_BOUNDS = ErrorReportBuilder::CATEGORY_OUT_OF_PRODUCT_BOUNDS;
 
     /**
      * Container key a bounds check may be bound to, overriding self::RESOLVER.

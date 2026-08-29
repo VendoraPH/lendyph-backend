@@ -4,7 +4,6 @@ namespace App\Http\Controllers\Api\Traits;
 
 use App\Models\CsvImportRun;
 use App\Services\CsvImport\CsvImportUploadService;
-use Illuminate\Http\Exceptions\HttpResponseException;
 
 /**
  * A run by id, looked up only once the caller has been allowed to ask.
@@ -33,30 +32,6 @@ trait ResolvesImportRuns
 {
     protected function importRun(int $id): CsvImportRun
     {
-        if (class_exists(CsvImportUploadService::class)) {
-            return app(CsvImportUploadService::class)->findRun($id);
-        }
-
-        /*
-         * Deliberately identical to CsvImportUploadService::findRun(), for as
-         * long as that class is not on this branch yet — same status, same
-         * message, so swapping to it changes no response and no test. DELETE
-         * THIS BRANCH once the upload work has merged, exactly as
-         * RunStatusReader::fallbackUploadBlock() is to be deleted.
-         *
-         * The body says only that the run was not found. Which of "no such id"
-         * and "not yours" it means is not a distinction this feature has — a run
-         * belongs to the deployment, not to a person — and spelling it out would
-         * rebuild the oracle inside the response body.
-         */
-        $run = CsvImportRun::query()->find($id);
-
-        if ($run === null) {
-            throw new HttpResponseException(response()->json([
-                'message' => "Import run #{$id} was not found.",
-            ], 404));
-        }
-
-        return $run;
+        return app(CsvImportUploadService::class)->findRun($id);
     }
 }

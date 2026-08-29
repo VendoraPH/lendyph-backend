@@ -90,8 +90,7 @@ class CsvImportRun extends Model
      * CsvImportUploadService::CLOSED_PHASES and defers to it whenever that class
      * is present, so `cancelled` — added after the fact, with the cancel
      * endpoint — is honoured here the moment it exists rather than being missed
-     * by a hardcoded pair. The literal below is the fallback for branches the
-     * upload work has not merged into yet, and is dead the moment it has.
+     * by a hardcoded pair.
      *
      * Read by RunStatusReader for `is_closed` and by `imports:redact-rows` for
      * "finished long enough ago to redact"; a run that is not closed is still
@@ -109,11 +108,7 @@ class CsvImportRun extends Model
      */
     public static function closedPhases(): array
     {
-        if (class_exists(CsvImportUploadService::class)) {
-            return CsvImportUploadService::CLOSED_PHASES;
-        }
-
-        return ['completed', 'failed', 'cancelled'];
+        return CsvImportUploadService::CLOSED_PHASES;
     }
 
     /**

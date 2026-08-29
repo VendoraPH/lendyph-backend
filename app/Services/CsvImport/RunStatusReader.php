@@ -192,17 +192,13 @@ class RunStatusReader
      * Calling through is how the two endpoints stay one description of a run
      * rather than two that agree until someone edits one of them.
      *
-     * Resolved by name rather than injected, a holdover from this reader being
-     * built before the upload service existed.
+     * Resolved from the container rather than constructor-injected, a holdover
+     * from this reader being built before the upload service existed.
      *
      * @return array{chunk_size?: int, files?: array<string, array<string, mixed>>}
      */
     private function uploadPayload(CsvImportRun $run): array
     {
-        if (! class_exists(CsvImportUploadService::class)) {
-            return [];
-        }
-
         return app(CsvImportUploadService::class)->runPayload($run);
     }
 
