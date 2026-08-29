@@ -436,6 +436,29 @@ class RepaymentService
      * bare and indexable instead of wrapping it in date arithmetic.
      *
      * No grace (0 or null) reproduces the previous behaviour exactly.
+     *
+     * Schedules that predate `loans.imported_arrears_baseline` are skipped
+     * outright — see AmortizationSchedule::penalisableSql(). THIS is the method
+     * that exclusion has to reach: it is the only code anywhere that WRITES a
+     * penalty, and processRepayment() calls it as its first step inside the
+     * transaction on every single payment. The nightly loans:apply-penalties
+     * command never touches a loan whose arrears are all pre-import, so without
+     * the check here the first peso a migrated member paid would penalise their
+     * entire imported backlog, from a path that command never runs.
+     *
+     * The loan is in hand, so the PHP twin AmortizationSchedule::isPenalisable()
+     * decides it rather than a hand-rolled date comparison. The rule is applied
+     * per schedule rather than as a second query cutoff because it is a
+     * property of the row's own due date, and a null baseline — every loan not
+     * imported — makes it true, so nothing branches on whether a loan was
+     * imported.
+     *
+     * A consequence worth stating: because this is the only thing that stamps
+     * `overdue`, pre-baseline schedules stay `pending`/`partial` forever. That
+     * is fine. Loan::scopePastDue(), the Due/Past Due report and the aging
+     * report all read `due_date` directly rather than the stamp, so imported
+     * arrears still show up everywhere the coop needs to chase them — they are
+     * simply never charged for a second time.
      */
     public function applyPenalties(Loan $loan, Carbon $asOfDate): void
     {
@@ -446,11 +469,16 @@ class RepaymentService
         }
 
         $lateBefore = AmortizationSchedule::pastGraceCutoff($loan->grace_period_days, $asOfDate);
+        $arrearsBaseline = $loan->imported_arrears_baseline;
 
         $loan->amortizationSchedules()
             ->where('due_date', '<', $lateBefore)
             ->whereIn('status', ['pending', 'partial', 'overdue'])
-            ->each(function (AmortizationSchedule $schedule) use ($penaltyRate) {
+            ->each(function (AmortizationSchedule $schedule) use ($penaltyRate, $arrearsBaseline) {
+                if (! AmortizationSchedule::isPenalisable($arrearsBaseline, $schedule->due_date)) {
+                    return;
+                }
+
                 $remainingDue = (float) $schedule->principal_due - (float) $schedule->principal_paid;
                 $penalty = round($remainingDue * ($penaltyRate / 100), 2);
 
@@ -536,7 +564,16 @@ class RepaymentService
         // `overdue`, so voiding a repayment against a schedule still inside its
         // grace window would otherwise put back exactly the label the penalty
         // fix removes.
+        //
+        // The imported-arrears baseline rides along for the same reason, and it
+        // is the reason a void cannot be treated as a purely arithmetic
+        // reversal: applyPenalties() never stamped a pre-import schedule
+        // `overdue`, so re-deriving the status from the date alone would put
+        // that label back on a schedule the exclusion exists to keep clean —
+        // and the loans screen would start showing a migrated member as newly
+        // delinquent because someone voided a mistyped receipt.
         $lateBefore = AmortizationSchedule::pastGraceCutoff($loan->grace_period_days, $paymentDate);
+        $arrearsBaseline = $loan->imported_arrears_baseline;
 
         foreach ($schedules as $schedule) {
             if ($remaining <= 0) {
@@ -569,7 +606,10 @@ class RepaymentService
 
             // Recalculate schedule status
             if ($schedule->principal_paid == 0 && $schedule->interest_paid == 0 && $schedule->penalty_paid == 0) {
-                $schedule->status = $schedule->due_date->lt($lateBefore) ? 'overdue' : 'pending';
+                $isLate = $schedule->due_date->lt($lateBefore)
+                    && AmortizationSchedule::isPenalisable($arrearsBaseline, $schedule->due_date);
+
+                $schedule->status = $isLate ? 'overdue' : 'pending';
                 $schedule->penalty_amount = 0;
             } else {
                 $schedule->status = 'partial';

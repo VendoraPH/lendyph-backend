@@ -109,6 +109,8 @@ class Loan extends Model
 
     protected $fillable = [
         'loan_account_number',
+        'external_loan_no',
+        'imported_arrears_baseline',
         'borrower_id',
         'loan_product_id',
         'source_loan_id',
@@ -170,6 +172,7 @@ class Loan extends Model
             'policy_exception' => 'boolean',
             'start_date' => 'date',
             'maturity_date' => 'date',
+            'imported_arrears_baseline' => 'date',
             'approved_at' => 'datetime',
             'released_at' => 'datetime',
             'rejected_at' => 'datetime',
@@ -332,6 +335,31 @@ class Loan extends Model
     public function isRestructure(): bool
     {
         return $this->source_loan_id !== null;
+    }
+
+    /**
+     * Whether this loan was migrated in from a cooperative's existing book by
+     * the CSV importer rather than originated here. Exposed as `is_imported`
+     * on LoanResource, where the UI uses it to label a schedule as
+     * reconstructed rather than generated from the loan's own terms.
+     *
+     * True on EITHER import marker. `external_loan_no` is the coop's own
+     * reference for the loan and `imported_arrears_baseline` is the date its
+     * pre-import arrears stop; nothing but the importer ever writes either, but
+     * a coop's file need not supply a reference number for every row, and a
+     * loan imported with no arrears at all need carry no baseline. Requiring
+     * both would silently mislabel those loans as natively originated.
+     *
+     * This is a LABEL, not the penalty rule. Nothing in the penalty or default
+     * path may branch on it: those ask
+     * AmortizationSchedule::isPenalisable()/penalisableSql() about one schedule
+     * against the baseline, which is null-safe by construction and so cannot
+     * disagree with this method about which loans it covers.
+     */
+    public function isImported(): bool
+    {
+        return $this->external_loan_no !== null
+            || $this->imported_arrears_baseline !== null;
     }
 
     /**

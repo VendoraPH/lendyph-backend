@@ -28,6 +28,14 @@ class ApplyOverduePenalties extends Command
             ->where('penalty_rate', '>', 0)
             ->whereHas('amortizationSchedules', function ($q) use ($today) {
                 $q->whereRaw(AmortizationSchedule::pastGraceSql(), [$today->toDateString()])
+                    // Same reason as the grace filter beside it: a loan
+                    // migrated in from a coop's existing book is overdue on
+                    // every schedule that predates the import, and the service
+                    // will penalise none of them. Without this the whole
+                    // imported book loads as candidates every night to reach a
+                    // no-op, and the count reported below describes work that
+                    // did not happen.
+                    ->whereRaw(AmortizationSchedule::penalisableSql())
                     ->whereIn('status', AmortizationSchedule::UNPAID_STATUSES);
             })
             ->get();
