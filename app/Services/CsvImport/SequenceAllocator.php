@@ -2,8 +2,10 @@
 
 namespace App\Services\CsvImport;
 
+use App\Exceptions\MalformedSequenceCodeException;
 use App\Models\Borrower;
 use App\Models\Loan;
+use App\Services\SequenceCode;
 use Illuminate\Support\Facades\DB;
 use LogicException;
 
@@ -34,54 +36,78 @@ use LogicException;
  * codes returned here are therefore a prediction the caller can print, report
  * and reference, valid as long as the caller creates the models inside this
  * transaction, in the order the codes were handed out.
+ *
+ * WHY IT PARSES THE LAST CODE. Every increment goes through
+ * App\Services\SequenceCode, which is the same parser both model hooks use.
+ * That is not tidiness: an unparseable code — an old manual fix, a bad
+ * migration — used to read as 0 under a bare `(int) substr()`, so the next
+ * allocation restarted at 000001, which already exists. A whole chunk of
+ * fifty would then fail on the unique index, and so would the next chunk, and
+ * so would a teller's create. Sharing the parser means this class stops on the
+ * bad row exactly where the hooks do, with the same exception naming it.
  */
 class SequenceAllocator
 {
-    private const BORROWER_PREFIX = 'BRW-';
-
-    private const LOAN_PREFIX = 'LA-';
-
-    private const PAD_LENGTH = 6;
-
     /**
      * @return list<string>
+     *
+     * @throws MalformedSequenceCodeException when the highest borrower carries
+     *                                        an unparseable code
      */
     public function allocateBorrowerCodes(int $count): array
     {
         $this->assertInTransaction('borrower codes');
 
         $last = Borrower::query()->orderByDesc('id')->lockForUpdate()->first();
-        $next = $last === null ? 1 : (int) substr((string) $last->borrower_code, strlen(self::BORROWER_PREFIX)) + 1;
 
-        return $this->sequence(self::BORROWER_PREFIX, $next, $count);
+        $first = $last === null
+            ? SequenceCode::first(Borrower::CODE_PREFIX)
+            : SequenceCode::after(Borrower::CODE_PREFIX, $last->borrower_code, "borrowers.id {$last->id}");
+
+        return $this->sequence(Borrower::CODE_PREFIX, $first, $count);
     }
 
     /**
      * @return list<string>
+     *
+     * @throws MalformedSequenceCodeException when the highest loan carries an
+     *                                        unparseable application number
      */
     public function allocateApplicationNumbers(int $count): array
     {
         $this->assertInTransaction('application numbers');
 
         $last = Loan::query()->orderByDesc('id')->lockForUpdate()->first();
-        $next = $last === null ? 1 : (int) substr((string) $last->application_number, strlen(self::LOAN_PREFIX)) + 1;
 
-        return $this->sequence(self::LOAN_PREFIX, $next, $count);
+        $first = $last === null
+            ? SequenceCode::first(Loan::CODE_PREFIX)
+            : SequenceCode::after(Loan::CODE_PREFIX, $last->application_number, "loans.id {$last->id}");
+
+        return $this->sequence(Loan::CODE_PREFIX, $first, $count);
     }
 
     /**
+     * The chunk's codes, walked forward from the first one with SequenceCode
+     * itself.
+     *
+     * Every step goes back through the same parser the model hooks use rather
+     * than through local arithmetic, because the ONLY thing that makes these
+     * values useful is that they are byte-identical to what the hooks will
+     * issue. Formatting them a second way here is how a prediction quietly stops
+     * being one.
+     *
      * @return list<string>
      */
-    private function sequence(string $prefix, int $start, int $count): array
+    private function sequence(string $prefix, string $first, int $count): array
     {
         if ($count < 1) {
             return [];
         }
 
-        $codes = [];
+        $codes = [$first];
 
-        for ($offset = 0; $offset < $count; $offset++) {
-            $codes[] = $prefix.str_pad((string) ($start + $offset), self::PAD_LENGTH, '0', STR_PAD_LEFT);
+        for ($offset = 1; $offset < $count; $offset++) {
+            $codes[] = SequenceCode::after($prefix, $codes[$offset - 1], 'the code allocated immediately before it');
         }
 
         return $codes;
