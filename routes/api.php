@@ -11,6 +11,9 @@ use App\Http\Controllers\Api\BrandingController;
 use App\Http\Controllers\Api\CollateralController;
 use App\Http\Controllers\Api\CollateralTypeController;
 use App\Http\Controllers\Api\CoMakerController;
+use App\Http\Controllers\Api\CsvImportErrorReportController;
+use App\Http\Controllers\Api\CsvImportMappingController;
+use App\Http\Controllers\Api\CsvImportStatusController;
 use App\Http\Controllers\Api\DashboardController;
 use App\Http\Controllers\Api\DisclosureController;
 use App\Http\Controllers\Api\DocumentController;
@@ -34,7 +37,39 @@ use App\Http\Middleware\AllowAuthOrSubmissionToken;
 use App\Http\Middleware\CheckTokenExpiry;
 use App\Http\Middleware\EnsureUserIsActive;
 use App\Http\Middleware\OptionalSanctumAuth;
+use Illuminate\Cache\RateLimiting\Limit;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\Facades\Route;
+
+/*
+|--------------------------------------------------------------------------
+| TEMPORARY — remove when the CSV upload work merges
+|--------------------------------------------------------------------------
+|
+| `throttle:imports` is defined in AppServiceProvider by the upload branch,
+| which is not on this branch yet. Without a definition every import route
+| would 500 with "Rate limiter [imports] is not defined", so this registers the
+| same tiers under the same name — and ONLY if nothing has defined it already.
+|
+| Providers boot before routes load, so once AppServiceProvider declares
+| `imports` this guard is false and this block does nothing at all. The numbers
+| match the upload branch's control and denied tiers exactly, so behaviour is
+| identical before and after the merge; the chunk tier is deliberately absent
+| because no route in this file is a chunk upload.
+*/
+if (RateLimiter::limiter('imports') === null) {
+    RateLimiter::for('imports', function (Request $request) {
+        $user = $request->user();
+        $key = $user?->id ?: $request->ip();
+
+        if (! $user?->can('imports:process')) {
+            return Limit::perMinute(10)->by('imports:denied:'.$key);
+        }
+
+        return Limit::perMinute(120)->by('imports:ctl:'.$key);
+    });
+}
 
 Route::get('/health', HealthController::class);
 
@@ -272,6 +307,59 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     // Auto-Pay (CBS bulk loan deductions)
     Route::get('/auto-pay/preview', [AutoPayController::class, 'preview']);
     Route::post('/auto-pay/process', [AutoPayController::class, 'process']);
+
+    /*
+    |--------------------------------------------------------------------------
+    | CSV migration import — operator surface
+    |--------------------------------------------------------------------------
+    |
+    | The three things an operator does between a file landing and the loans
+    | existing: close the product-mapping gate, watch the run, and read what
+    | went wrong. Upload, chunk and assemble are owned separately and declare
+    | the same `Route::prefix('imports')->name('imports.')` group; at merge
+    | these bodies fold into that single group and this header goes away.
+    |
+    | THE NAMES ARE LOAD-BEARING. `ThrottleRequests::class.':api'` is PREPENDED
+    | to the whole api group in bootstrap/app.php, so a route-level throttle
+    | stacks on top of the shared 60/min rather than replacing it, and the lower
+    | of the two is what a caller feels. The `api` limiter raises its ceiling for
+    | routes named `imports.*` — the same mechanism `files.*` uses — so a status
+    | endpoint polled for the length of a long import would otherwise start
+    | 429-ing the very screen showing its progress.
+    |
+    | Authorisation is `$this->authorize('imports:process')` inside each
+    | controller, as everywhere else in this file. The limiter checks the same
+    | permission, so a caller who will be refused never gets the migration-sized
+    | budget.
+    */
+    Route::prefix('imports')->name('imports.')->middleware('throttle:imports')->group(function () {
+        // Polled for the whole length of an import, and a fixed number of
+        // indexed queries, so it rides the control tier alone.
+        Route::get('/{run}', [CsvImportStatusController::class, 'show'])
+            ->whereNumber('run')
+            ->name('show');
+
+        Route::whereNumber('run')->group(function () {
+            /*
+             * `throttle:exports` STACKS on the import control tier for the two
+             * heaviest reads, and the tighter one binds. Both walk the staged
+             * rows in full — the product scan is a GROUP BY over a JSON
+             * expression, the CSV streams every reported row — and both are
+             * deliberate operator actions rather than polls.
+             *
+             * GET /errors is deliberately NOT here. It is a screen a human
+             * pages through, its summary is computed on page one only, and
+             * 5/min would 429 an admin on their sixth click.
+             */
+            Route::middleware('throttle:exports')->group(function () {
+                Route::get('/{run}/product-mapping', [CsvImportMappingController::class, 'show'])->name('product-mapping.show');
+                Route::put('/{run}/product-mapping', [CsvImportMappingController::class, 'update'])->name('product-mapping.update');
+                Route::get('/{run}/errors.csv', [CsvImportErrorReportController::class, 'export'])->name('errors.export');
+            });
+
+            Route::get('/{run}/errors', [CsvImportErrorReportController::class, 'index'])->name('errors.index');
+        });
+    });
 
     // GCash Transactions
     Route::prefix('gcash')->group(function () {
