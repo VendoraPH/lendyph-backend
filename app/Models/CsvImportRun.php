@@ -97,6 +97,14 @@ class CsvImportRun extends Model
      * "finished long enough ago to redact"; a run that is not closed is still
      * being worked on and its staged rows are still the resume set.
      *
+     * NOT CsvImportUploadService::STORAGE_RELEASE_PHASES, which omits `failed`.
+     * That one is a file-retention list — a failed run keeps its uploaded CSVs
+     * for 72 hours so a transient deadlock stays recoverable — and it answers a
+     * different question. Substituted here it would make `is_closed` false for
+     * every failed run, leaving the status endpoint polled forever, and it would
+     * exempt failed runs from redaction permanently: the staged rows outlive the
+     * file, so they are exactly the copy that needs the clock.
+     *
      * @return list<string>
      */
     public static function closedPhases(): array
