@@ -2,7 +2,9 @@
 
 namespace App\Providers;
 
+use App\Models\CsvImportRun;
 use App\Services\BorrowerSubmissionTokenService;
+use App\Services\CsvImport\CsvImportUploadService;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -25,6 +27,57 @@ class AppServiceProvider extends ServiceProvider
      * unexpired signature minted for an already-authorised caller.
      */
     private const FILE_READS_PER_MINUTE = 300;
+
+    /**
+     * Chunk uploads allowed per operator per minute.
+     *
+     * A CSV migration is one long request, cut up. The largest export this API
+     * accepts is 100 MiB per file in 512 KiB chunks — two hundred PUTs for one
+     * file, four hundred for a run — and the client sends several concurrently
+     * while polling the run for progress. Against the shared 60/min `api`
+     * budget an upload throttles itself to a crawl within the first ten
+     * seconds and every other screen the same admin has open starts returning
+     * 429 alongside it.
+     *
+     * 300/min lets a run's chunks flow at roughly the rate a good connection
+     * can push them while still bounding bytes-to-disk: 300 x 512 KiB is about
+     * 150 MB a minute from one operator, and only an operator — every import
+     * route requires `imports:process`, which only super_admin and admin hold.
+     */
+    private const IMPORT_CHUNKS_PER_MINUTE = 300;
+
+    /**
+     * Everything else under /imports: opening a run, assembling, and the
+     * status polling a client does while it uploads.
+     *
+     * Kept separate from the chunk tier so a client polling every second
+     * cannot eat the budget its own upload needs, and so a runaway poll is
+     * visible as a poll rather than as a stalled upload.
+     */
+    private const IMPORT_CONTROL_CALLS_PER_MINUTE = 120;
+
+    /**
+     * The `api` limiter's ceiling for import routes.
+     *
+     * Deliberately above IMPORT_CHUNKS_PER_MINUTE + IMPORT_CONTROL_CALLS_PER_MINUTE
+     * so the two tiers above are what actually bind, and this is only the
+     * backstop that keeps an import route somebody forgets to attach
+     * `throttle:imports` to from running against no ceiling at all.
+     */
+    private const IMPORT_REQUESTS_PER_MINUTE = 480;
+
+    /**
+     * What a caller WITHOUT `imports:process` gets on an import route.
+     *
+     * The elevated tiers above are sized for a legitimate migration and are
+     * eight times the app-wide ceiling. Handing them out on the strength of the
+     * route name alone would give every authenticated user — viewer, collector,
+     * cashier — 300 requests a minute whose bodies nginx buffers and PHP writes
+     * to disk before the controller's 403 is ever reached. The permission check
+     * is what makes the elevated tier a privilege rather than a property of the
+     * URL.
+     */
+    private const IMPORT_DENIED_PER_MINUTE = 10;
 
     public function register(): void
     {
@@ -64,6 +117,52 @@ class AppServiceProvider extends ServiceProvider
             ], 429, $headers);
         };
 
+        /**
+         * Retention for CSV migration uploads.
+         *
+         * The moment a run reaches a terminal phase, the files it uploaded stop
+         * being useful and start being a liability: an assembled customers CSV
+         * is every member's name, birthdate, contact number and income in
+         * plaintext, and once those rows are staged into `csv_import_rows` the
+         * file has done its job. Hung off the model rather than written into
+         * each transition so that whoever moves a run to `completed` or
+         * `failed` — the importer, a future admin action, anything — cannot
+         * forget to clean up. Cancellation calls the same method directly, so
+         * it never depends on this listener being wired.
+         *
+         * `wasChanged('phase')` so this fires on the transition rather than on
+         * every subsequent save of an already-finished run.
+         *
+         * The one gap worth knowing: Eloquent model events do not fire for mass
+         * updates. `CsvImportRun::query()->update(['phase' => 'failed'])` will
+         * NOT trigger this; `$run->update(...)` or `save()` will. That gap is
+         * real rather than theoretical — the importer's abandoned-run cleanup
+         * marks runs `failed` from a scheduled command — so it is covered from
+         * the other side by CsvImportUploadService::releaseAbandonedStorage(),
+         * a reconciling sweep that runs when the next import is opened. This
+         * listener is the timely path; that sweep is the guaranteed one.
+         *
+         * Safe to reach here from a console or queue process as well as a web
+         * request. The uid trap on this disk is about CREATING files a
+         * root-owned 0700 directory then hides from php-fpm; deleting creates
+         * nothing and root may unlink anything.
+         *
+         * `csv_import_rows` still holds the same personal data row by row and
+         * needs its own retention decision, which is a policy call rather than
+         * something this listener can make.
+         */
+        CsvImportRun::saved(function (CsvImportRun $run): void {
+            if (! $run->wasChanged('phase')) {
+                return;
+            }
+
+            if (! in_array($run->phase, CsvImportUploadService::CLOSED_PHASES, true)) {
+                return;
+            }
+
+            app(CsvImportUploadService::class)->releaseStorage($run);
+        });
+
         // API rate limiters
         RateLimiter::for('api', function (Request $request) {
             $key = $request->user()?->id ?: $request->ip();
@@ -77,6 +176,30 @@ class AppServiceProvider extends ServiceProvider
             // bytes off disk and stay worth capping.
             if ($request->routeIs('files.*')) {
                 return Limit::perMinute(self::FILE_READS_PER_MINUTE)->by('files:'.$key);
+            }
+
+            /**
+             * Import routes are metered by the `imports` limiter below; this
+             * branch exists because that limiter alone would be inert.
+             *
+             * `ThrottleRequests::class.':api'` is PREPENDED to the whole api
+             * middleware group in bootstrap/app.php, so it applies to every
+             * route in routes/api.php whether or not the route also names a
+             * limiter of its own. A route-level `throttle:imports` therefore
+             * stacks on top of this one rather than replacing it, and the
+             * lower of the two is what a caller feels — 60/min, which is a
+             * fifth of what one upload needs. Raising the ceiling has to
+             * happen here, exactly as it does for `files.*` above.
+             *
+             * Its own `by()` prefix, so it cannot share a counter with either
+             * tier of the `imports` limiter.
+             */
+            if ($request->routeIs('imports.*')) {
+                if (! $request->user()?->can('imports:process')) {
+                    return Limit::perMinute(self::IMPORT_DENIED_PER_MINUTE)->by('imports:api:denied:'.$key);
+                }
+
+                return Limit::perMinute(self::IMPORT_REQUESTS_PER_MINUTE)->by('imports:api:'.$key);
             }
 
             return Limit::perMinute(60)->by($key);
@@ -130,6 +253,52 @@ class AppServiceProvider extends ServiceProvider
                 Limit::perMinutes(5, 10)->by('auth:cred:'.$credential),
                 Limit::perMinutes(5, 40)->by('auth:ip:'.$request->ip()),
             ];
+        });
+
+        /**
+         * CSV migration import — the chunked upload and everything around it.
+         *
+         * Keyed on the authenticated user id, never the address. Every route
+         * under /imports sits inside the `auth:sanctum` group, and
+         * `Illuminate\Contracts\Auth\Middleware\AuthenticatesRequests`
+         * precedes `ThrottleRequests` in the framework's middleware priority
+         * list, so the user is already resolved by the time this closure runs.
+         * Keying on the address would be actively wrong here: TRUSTED_PROXIES
+         * ships empty and every browser call arrives through the frontend's
+         * server-side rewrite, so `$request->ip()` is one value for the whole
+         * deployment and one admin's import would throttle another's.
+         *
+         * One Limit is returned, not two — the tier is chosen by route rather
+         * than layered. Two tiers here would have to carry different `by()`
+         * prefixes or silently collapse into a single counter that every
+         * request decrements twice, the trap documented on
+         * `public-registration` above; picking one avoids the question
+         * entirely, and the two budgets are meant to be independent anyway.
+         *
+         * The IP fallback is unreachable while these routes stay behind
+         * `auth:sanctum`, and exists so that a future unauthenticated import
+         * route cannot key on null and hand every caller one shared bucket.
+         */
+        RateLimiter::for('imports', function (Request $request) {
+            $user = $request->user();
+            $key = $user?->id ?: $request->ip();
+
+            /**
+             * The elevated tiers are for people who can actually run an import.
+             * ThrottleRequests sorts ahead of SubstituteBindings and long ahead
+             * of the controller's authorize(), so without this check a caller
+             * who will certainly be refused still gets the migration-sized
+             * budget — and spends it writing chunk bodies to disk.
+             */
+            if (! $user?->can('imports:process')) {
+                return Limit::perMinute(self::IMPORT_DENIED_PER_MINUTE)->by('imports:denied:'.$key);
+            }
+
+            if ($request->routeIs('imports.chunk')) {
+                return Limit::perMinute(self::IMPORT_CHUNKS_PER_MINUTE)->by('imports:chunk:'.$key);
+            }
+
+            return Limit::perMinute(self::IMPORT_CONTROL_CALLS_PER_MINUTE)->by('imports:ctl:'.$key);
         });
 
         RateLimiter::for('exports', function (Request $request) {

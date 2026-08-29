@@ -11,6 +11,7 @@ use App\Http\Controllers\Api\BrandingController;
 use App\Http\Controllers\Api\CollateralController;
 use App\Http\Controllers\Api\CollateralTypeController;
 use App\Http\Controllers\Api\CoMakerController;
+use App\Http\Controllers\Api\CsvImportController;
 use App\Http\Controllers\Api\DashboardController;
 use App\Http\Controllers\Api\DisclosureController;
 use App\Http\Controllers\Api\DocumentController;
@@ -288,6 +289,49 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::get('/settings/approval-workflow', [ApprovalWorkflowController::class, 'show']);
     Route::put('/settings/approval-workflow', [ApprovalWorkflowController::class, 'update']);
     Route::delete('/settings/approval-workflow', [ApprovalWorkflowController::class, 'destroy']);
+
+    /*
+    |--------------------------------------------------------------------------
+    | CSV migration import — upload
+    |--------------------------------------------------------------------------
+    |
+    | Opening a run, receiving each file a chunk at a time, and reassembling
+    | them. Gated on `imports:process` inside the controller with
+    | `$this->authorize()`, like every other endpoint here — this file carries no
+    | `permission:` middleware anywhere and this is not the place to start.
+    |
+    | The names matter twice over. `throttle:imports` reads the route name to
+    | decide which tier a call belongs to, and the `api` limiter matches
+    | `imports.*` to stop the shared 60/min ceiling from capping an upload that
+    | is hundreds of legitimate requests long. Any import route added later —
+    | status, mapping, the error report — should be named `imports.*` and
+    | carry `throttle:imports` for the same reason.
+    */
+    Route::prefix('imports')->name('imports.')->middleware('throttle:imports')->group(function () {
+        Route::post('/', [CsvImportController::class, 'store'])->name('store');
+
+        // PUT is the documented verb and works with either body encoding: PHP
+        // itself populates $_FILES only for POST, but symfony/http-foundation
+        // parses PUT bodies through PHP 8.4's request_parse_body(). POST is
+        // accepted at the same URI as the compatibility path for any client
+        // that cannot rely on that. See CsvImportController::resolveChunkBytes().
+        Route::match(['put', 'post'], '/{run}/files/{kind}/chunks/{index}', [CsvImportController::class, 'uploadChunk'])
+            ->whereIn('kind', ['customers', 'loans'])
+            ->whereNumber('index')
+            ->name('chunk');
+
+        Route::post('/{run}/assemble', [CsvImportController::class, 'assemble'])->name('assemble');
+
+        // The escape hatch for a dead browser tab. Without it, a run left in
+        // `uploading` blocks every future import at this cooperative forever,
+        // because POST /imports refuses a second run while one is open and
+        // nothing in the UI can clear it.
+        Route::delete('/{run}', [CsvImportController::class, 'destroy'])->name('destroy');
+
+        // GET /imports/{run} (status, with missing_chunks per file), the
+        // mapping confirmation and the error report are owned separately; they
+        // belong in this group.
+    });
 
     // Branding (organization logo + identity printed on reports and documents)
     Route::get('/settings/branding', [BrandingController::class, 'show']);
