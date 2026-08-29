@@ -151,7 +151,7 @@ class CsvImportReader
         if ($disk !== self::PII_DISK) {
             throw new CsvFileRejectedException(
                 'insecure_disk',
-                "Migration CSVs may only be read from the [".self::PII_DISK."] disk, not [{$disk}]. "
+                'Migration CSVs may only be read from the ['.self::PII_DISK."] disk, not [{$disk}]. "
                 .'These files carry every member\'s name, birthdate, address and income, and the other disks '
                 .'are either web-reachable or unversioned.',
             );

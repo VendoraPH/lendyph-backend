@@ -156,7 +156,6 @@ final class NormalizedRow
     }
 
     /**
-     * @param  mixed  $notes
      * @return list<RowNote>
      */
     private static function notesFromPayload(mixed $notes): array
