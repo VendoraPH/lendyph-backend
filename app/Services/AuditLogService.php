@@ -8,6 +8,68 @@ use Illuminate\Database\Eloquent\Model;
 class AuditLogService
 {
     /**
+     * Whether the Auditable trait's automatic per-model rows are suppressed.
+     *
+     * Held here rather than on the trait itself because a static property
+     * declared in a trait is a SEPARATE variable in every class that uses it —
+     * `Borrower::$flag` and `Loan::$flag` would be two different booleans, so a
+     * single scope could never cover both models at once. One flag on the class
+     * the trait already calls into covers every auditable model there is.
+     */
+    private static bool $modelAuditingSuppressed = false;
+
+    /**
+     * Run a callback with the Auditable trait's automatic rows turned off,
+     * leaving every other model event — and every DIRECT call to self::log() —
+     * running exactly as normal.
+     *
+     * This exists for the CSV importer and the reasoning is worth keeping.
+     *
+     * The obvious ways to stop 12,000 borrower-created audit rows are
+     * `Model::withoutEvents()` and `saveQuietly()`, and both are silently
+     * catastrophic here: `Borrower::booted()`'s `created` hook is also what
+     * creates the member's ShareCapitalPledge, so suppressing model events
+     * suppresses the pledge too. Nothing errors. The members import, the import
+     * reports success, and every "Pledge Amt" in the file is simply gone — and
+     * it cannot be recovered afterwards, because `pledges:backfill` hardcodes
+     * `amount = 0`. The damage would surface months later as members whose
+     * share capital target reads zero.
+     *
+     * So the suppression is placed at the ONE thing that should not run rather
+     * than at the event that carries it. Every other `created`, `updated` and
+     * `deleted` hook still fires, including any added later, and a direct
+     * self::log() — the importer's single summary row — is untouched.
+     *
+     * Re-entrant and exception-safe: the previous value is restored in a
+     * `finally`, so a throw inside the callback cannot leave auditing off for
+     * the rest of the process.
+     *
+     * @template TReturn
+     *
+     * @param  callable(): TReturn  $callback
+     * @return TReturn
+     */
+    public static function withoutModelAuditing(callable $callback): mixed
+    {
+        $previous = self::$modelAuditingSuppressed;
+        self::$modelAuditingSuppressed = true;
+
+        try {
+            return $callback();
+        } finally {
+            self::$modelAuditingSuppressed = $previous;
+        }
+    }
+
+    /**
+     * Read by App\Traits\Auditable's three listeners, and by nothing else.
+     */
+    public static function modelAuditingIsSuppressed(): bool
+    {
+        return self::$modelAuditingSuppressed;
+    }
+
+    /**
      * Write one audit entry.
      *
      * `$userId` and `$ipAddress` are trailing and optional, and default to the
