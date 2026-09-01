@@ -38,6 +38,31 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | CSV Import Diagnostics
+    |--------------------------------------------------------------------------
+    |
+    | Whether the CSV importer may write UNREDACTED exception detail to the
+    | `csv-import` channel below. Off, and it must stay off on any deployment
+    | holding real member data.
+    |
+    | A Laravel QueryException's message is the failing SQL with the bindings
+    | substituted in, so for this importer one row-level database error carries
+    | the member's whole record — name, birthdate, address, contact number,
+    | income. A systemic fault (lock wait, deadlock, a poisoned code sequence)
+    | produces one such line per member. See ImportErrorDigest.
+    |
+    | Turn it on only to diagnose a specific incident, on a box with test data
+    | or with the operator's informed consent, and turn it off afterwards. The
+    | importer's ordinary logging never needs it: it records the exception class
+    | and the driver's numeric error code, which is enough to tell a duplicate
+    | key from a lock-wait timeout.
+    |
+    */
+
+    'csv_import_diagnostics' => env('LOG_CSV_IMPORT_DIAGNOSTICS', false),
+
+    /*
+    |--------------------------------------------------------------------------
     | Log Channels
     |--------------------------------------------------------------------------
     |
@@ -79,6 +104,34 @@ return [
             'username' => env('LOG_SLACK_USERNAME', env('APP_NAME', 'Laravel')),
             'emoji' => env('LOG_SLACK_EMOJI', ':boom:'),
             'level' => env('LOG_LEVEL', 'critical'),
+            'replace_placeholders' => true,
+        ],
+
+        /*
+         * The CSV importer's diagnostic channel — see 'csv_import_diagnostics'
+         * above, which gates whether anything is ever written here.
+         *
+         * Everything about it is the opposite of `single`, deliberately:
+         *
+         *  - ITS OWN FILE, so member data cannot end up interleaved with the
+         *    log every other part of the app writes to and everyone tails.
+         *  - 0600 rather than 644. `single` is world-readable, which is
+         *    tolerable for ordinary application logging and is not tolerable
+         *    for a file that may contain a membership register.
+         *  - DAILY WITH RETENTION. `single` is one file that never rotates, so
+         *    anything written into it is there until somebody deletes it by
+         *    hand. These expire.
+         *
+         * The mode applies to files this channel CREATES. A file already
+         * present keeps its own permissions, so if this is ever enabled on a
+         * box where the file exists, check it.
+         */
+        'csv-import' => [
+            'driver' => 'daily',
+            'path' => storage_path('logs/csv-import.log'),
+            'level' => env('LOG_LEVEL', 'debug'),
+            'days' => env('LOG_CSV_IMPORT_DAYS', 7),
+            'permission' => 0600,
             'replace_placeholders' => true,
         ],
 

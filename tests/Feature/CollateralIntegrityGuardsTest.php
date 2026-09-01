@@ -910,6 +910,17 @@ it('has no path writing an active loan status outside the ones that are accounte
     sort($occurrences);
 
     expect($occurrences)->toBe([
+        // CsvImportProcessor::importLoanRow(): a migrated loan is INSERTED
+        // straight as `ongoing`. Deliberately UNGUARDED, and it is the one case
+        // where that is provable rather than argued: this is a Loan::create(),
+        // so the loan holds no collateral at the moment it becomes active —
+        // `loan_collaterals` is a pivot and the importer never writes it, the
+        // migration CSV having no collateral column at all. A loan with zero
+        // collaterals cannot become the second active holder of anything.
+        //
+        // The moment this importer learns to attach collateral, that stops
+        // being true and this line has to move to the guarded list.
+        'app/Services/CsvImport/CsvImportProcessor.php:944 — \'status\' => \'ongoing\',',
         // release(): approved → released. Its lock is the first statement of the
         // transaction; the assertion runs at the end, after
         // closeRestructuredSource() has taken any restructure source out of the
