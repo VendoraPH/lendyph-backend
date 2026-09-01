@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Services\SequenceCode;
 use App\Traits\Auditable;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -26,6 +27,12 @@ class Loan extends Model
      * a different question: see COLLECTIBLE_STATUSES.
      */
     public const EVER_RELEASED_STATUSES = ['released', 'ongoing', 'completed', 'defaulted', 'restructured'];
+
+    /**
+     * The `application_number` family. Named so SequenceAllocator predicts
+     * numbers from the same constant the hook issues them from.
+     */
+    public const CODE_PREFIX = 'LA';
 
     /**
      * Loans that can still owe money on a schedule.
@@ -109,6 +116,8 @@ class Loan extends Model
 
     protected $fillable = [
         'loan_account_number',
+        'external_loan_no',
+        'imported_arrears_baseline',
         'borrower_id',
         'loan_product_id',
         'source_loan_id',
@@ -170,6 +179,7 @@ class Loan extends Model
             'policy_exception' => 'boolean',
             'start_date' => 'date',
             'maturity_date' => 'date',
+            'imported_arrears_baseline' => 'date',
             'approved_at' => 'datetime',
             'released_at' => 'datetime',
             'rejected_at' => 'datetime',
@@ -193,8 +203,16 @@ class Loan extends Model
     {
         static::creating(function (Loan $loan) {
             $last = static::query()->orderByDesc('id')->lockForUpdate()->first();
-            $nextNum = $last ? (int) substr($last->application_number, 3) + 1 : 1;
-            $loan->application_number = 'LA-'.str_pad($nextNum, 6, '0', STR_PAD_LEFT);
+
+            // Parsed, not cast — the same guard as Borrower::booted(), for the
+            // same reason. `(int) substr($code, 3) + 1` answers 1 for anything
+            // it cannot read, and LA-000001 already exists, so one malformed
+            // application_number would make every loan create fail on the unique
+            // index from then on. SequenceCode stops on the bad row and names it
+            // rather than colliding forever.
+            $loan->application_number = $last === null
+                ? SequenceCode::first(self::CODE_PREFIX)
+                : SequenceCode::after(self::CODE_PREFIX, $last->application_number, "loans.id {$last->id}");
         });
     }
 
@@ -332,6 +350,31 @@ class Loan extends Model
     public function isRestructure(): bool
     {
         return $this->source_loan_id !== null;
+    }
+
+    /**
+     * Whether this loan was migrated in from a cooperative's existing book by
+     * the CSV importer rather than originated here. Exposed as `is_imported`
+     * on LoanResource, where the UI uses it to label a schedule as
+     * reconstructed rather than generated from the loan's own terms.
+     *
+     * True on EITHER import marker. `external_loan_no` is the coop's own
+     * reference for the loan and `imported_arrears_baseline` is the date its
+     * pre-import arrears stop; nothing but the importer ever writes either, but
+     * a coop's file need not supply a reference number for every row, and a
+     * loan imported with no arrears at all need carry no baseline. Requiring
+     * both would silently mislabel those loans as natively originated.
+     *
+     * This is a LABEL, not the penalty rule. Nothing in the penalty or default
+     * path may branch on it: those ask
+     * AmortizationSchedule::isPenalisable()/penalisableSql() about one schedule
+     * against the baseline, which is null-safe by construction and so cannot
+     * disagree with this method about which loans it covers.
+     */
+    public function isImported(): bool
+    {
+        return $this->external_loan_no !== null
+            || $this->imported_arrears_baseline !== null;
     }
 
     /**

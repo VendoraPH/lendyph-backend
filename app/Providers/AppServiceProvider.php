@@ -2,14 +2,19 @@
 
 namespace App\Providers;
 
+use App\Models\CsvImportRun;
 use App\Services\BorrowerSubmissionTokenService;
+use App\Services\CsvImport\CsvImportUploadService;
+use App\Services\CsvImport\ImportErrorDigest;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Gate;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\ServiceProvider;
 use Illuminate\Support\Str;
+use Throwable;
 
 class AppServiceProvider extends ServiceProvider
 {
@@ -25,6 +30,57 @@ class AppServiceProvider extends ServiceProvider
      * unexpired signature minted for an already-authorised caller.
      */
     private const FILE_READS_PER_MINUTE = 300;
+
+    /**
+     * Chunk uploads allowed per operator per minute.
+     *
+     * A CSV migration is one long request, cut up. The largest export this API
+     * accepts is 100 MiB per file in 512 KiB chunks — two hundred PUTs for one
+     * file, four hundred for a run — and the client sends several concurrently
+     * while polling the run for progress. Against the shared 60/min `api`
+     * budget an upload throttles itself to a crawl within the first ten
+     * seconds and every other screen the same admin has open starts returning
+     * 429 alongside it.
+     *
+     * 300/min lets a run's chunks flow at roughly the rate a good connection
+     * can push them while still bounding bytes-to-disk: 300 x 512 KiB is about
+     * 150 MB a minute from one operator, and only an operator — every import
+     * route requires `imports:process`, which only super_admin and admin hold.
+     */
+    private const IMPORT_CHUNKS_PER_MINUTE = 300;
+
+    /**
+     * Everything else under /imports: opening a run, assembling, and the
+     * status polling a client does while it uploads.
+     *
+     * Kept separate from the chunk tier so a client polling every second
+     * cannot eat the budget its own upload needs, and so a runaway poll is
+     * visible as a poll rather than as a stalled upload.
+     */
+    private const IMPORT_CONTROL_CALLS_PER_MINUTE = 120;
+
+    /**
+     * The `api` limiter's ceiling for import routes.
+     *
+     * Deliberately above IMPORT_CHUNKS_PER_MINUTE + IMPORT_CONTROL_CALLS_PER_MINUTE
+     * so the two tiers above are what actually bind, and this is only the
+     * backstop that keeps an import route somebody forgets to attach
+     * `throttle:imports` to from running against no ceiling at all.
+     */
+    private const IMPORT_REQUESTS_PER_MINUTE = 480;
+
+    /**
+     * What a caller WITHOUT `imports:process` gets on an import route.
+     *
+     * The elevated tiers above are sized for a legitimate migration and are
+     * eight times the app-wide ceiling. Handing them out on the strength of the
+     * route name alone would give every authenticated user — viewer, collector,
+     * cashier — 300 requests a minute whose bodies nginx buffers and PHP writes
+     * to disk before the controller's 403 is ever reached. The permission check
+     * is what makes the elevated tier a privilege rather than a property of the
+     * URL.
+     */
+    private const IMPORT_DENIED_PER_MINUTE = 10;
 
     public function register(): void
     {
@@ -64,6 +120,124 @@ class AppServiceProvider extends ServiceProvider
             ], 429, $headers);
         };
 
+        /**
+         * Retention for CSV migration uploads.
+         *
+         * The moment a run is DECIDED — completed, or cancelled by an operator
+         * — the files it uploaded stop being useful and start being a
+         * liability: an assembled customers CSV is every member's name,
+         * birthdate, contact number and income in plaintext, and once those
+         * rows are staged into `csv_import_rows` the file has done its job.
+         * Hung off the model rather than written into each transition so that
+         * whoever moves a run to a terminal phase — the importer, a future
+         * admin action, anything — cannot forget to clean up. Cancellation
+         * calls the same method directly, so it never depends on this listener
+         * being wired.
+         *
+         * DELIBERATELY NARROWER THAN `CLOSED_PHASES`. This keyed off that list,
+         * which includes `failed`, and the processor writes a run off as
+         * `failed` on ANY Throwable — so a single deadlock or lock-wait timeout
+         * deleted both assembled source files the instant it was caught,
+         * leaving a half-imported book with nothing to re-run from. Verified
+         * from a console process, not theorised: the file existed before the
+         * save and was gone after it. `failed` runs now keep their files and
+         * are collected by the reconciling sweep once
+         * `imports.failed_run_retention_hours` has passed. The staged rows are
+         * untouched either way, so nothing is lost by waiting.
+         *
+         * See CsvImportUploadService::STORAGE_RELEASE_PHASES — the list is
+         * published there rather than written out here, so this listener cannot
+         * drift from the sweep that backs it up.
+         *
+         * `wasChanged('phase')` so this fires on the transition rather than on
+         * every subsequent save of an already-finished run.
+         *
+         * The one gap worth knowing: Eloquent model events do not fire for mass
+         * updates. `CsvImportRun::query()->update(['phase' => 'completed'])`
+         * will NOT trigger this; `$run->update(...)` or `save()` will. It is
+         * covered from the other side by
+         * CsvImportUploadService::releaseAbandonedStorage(), a reconciling
+         * sweep that walks from the run row to what is actually on disk. This
+         * listener is the timely path; that sweep is the guaranteed one.
+         *
+         * (The importer's 14-day prune is NOT an example of that gap — it saves
+         * per row, so this listener does fire for it. What matters about the
+         * prune is the other thing: it saves inside a transaction, which is why
+         * releaseStorage() defers its unlinks to `DB::afterCommit` rather than
+         * unlinking where it is called.)
+         *
+         * Safe to reach here from a console or queue process as well as a web
+         * request. The uid trap on this disk is about CREATING files a
+         * root-owned 0700 directory then hides from php-fpm; deleting creates
+         * nothing and root may unlink anything.
+         *
+         * `csv_import_rows` still holds the same personal data row by row and
+         * needs its own retention decision, which is a policy call rather than
+         * something this listener can make.
+         *
+         * HOUSEKEEPING MUST NOT BE ABLE TO FAIL THE IMPORT IT IS TIDYING UP
+         * AFTER. A `saved` listener runs inside the save, so anything thrown
+         * here propagates out of `$run->save()` and out of whatever was calling
+         * it. The processor completes a run by saving it into `completed`
+         * inside its own try/catch; an unlink that failed on a disk error, a
+         * permissions change or an NFS blip would therefore turn a run that had
+         * already written every member and every loan correctly into `failed`.
+         * The data is committed and only the bookkeeping is wrong, which is the
+         * worst available shape — the operator sees "failed" and may reasonably
+         * re-run.
+         *
+         * So it is caught, logged at `error` with the run and the reason, and
+         * the save proceeds. The trade is deliberate and only goes one way: a
+         * file left on the volume is recoverable, and
+         * releaseAbandonedStorage() is precisely the thing that will find it on
+         * the next import or the next scheduled tick. A wrongly-failed run is
+         * not recoverable without somebody editing a phase by hand.
+         */
+        CsvImportRun::saved(function (CsvImportRun $run): void {
+            if (! $run->wasChanged('phase')) {
+                return;
+            }
+
+            if (! in_array($run->phase, CsvImportUploadService::STORAGE_RELEASE_PHASES, true)) {
+                return;
+            }
+
+            try {
+                app(CsvImportUploadService::class)->releaseStorage($run);
+            } catch (Throwable $e) {
+                /*
+                 * The digest, not the message. This listener fires on a phase
+                 * write to a run whose staged rows are the cooperative's
+                 * membership, and it logs to the DEFAULT channel — `single`:
+                 * one file, never rotated, mode 644. A QueryException reaching
+                 * here would carry the failing SQL with its bindings
+                 * substituted. See ImportErrorDigest.
+                 *
+                 * This site is outside the reach of
+                 * tests/Unit/CsvImportExceptionMessageArchTest.php on purpose —
+                 * it is a shared provider, and an arch test that fails somebody
+                 * for an unrelated line in another feature gets deleted. What
+                 * holds it instead is
+                 * CsvImportUploadApiTest::test_a_failing_storage_release_does_not_fail_the_run_it_was_tidying_up_after(),
+                 * which pins the shape of this very context.
+                 */
+                Log::error('csv-import: could not release a finished run\'s storage', [
+                    'csv_import_run_id' => $run->id,
+                    'phase' => $run->phase,
+                    'consequence' => 'The run\'s uploaded CSVs are still on the private disk. They hold member '
+                        .'names, birthdates, contact numbers and incomes. releaseAbandonedStorage() will '
+                        .'reconcile them on the next import or scheduled tick; if it keeps failing, that is a '
+                        .'disk or permissions fault to fix rather than a run to re-import.',
+                ] + ImportErrorDigest::context($e));
+
+                ImportErrorDigest::recordDiagnostics($e, [
+                    'csv_import_run_id' => $run->id,
+                    'phase' => $run->phase,
+                    'stage' => 'storage-release',
+                ]);
+            }
+        });
+
         // API rate limiters
         RateLimiter::for('api', function (Request $request) {
             $key = $request->user()?->id ?: $request->ip();
@@ -77,6 +251,30 @@ class AppServiceProvider extends ServiceProvider
             // bytes off disk and stay worth capping.
             if ($request->routeIs('files.*')) {
                 return Limit::perMinute(self::FILE_READS_PER_MINUTE)->by('files:'.$key);
+            }
+
+            /**
+             * Import routes are metered by the `imports` limiter below; this
+             * branch exists because that limiter alone would be inert.
+             *
+             * `ThrottleRequests::class.':api'` is PREPENDED to the whole api
+             * middleware group in bootstrap/app.php, so it applies to every
+             * route in routes/api.php whether or not the route also names a
+             * limiter of its own. A route-level `throttle:imports` therefore
+             * stacks on top of this one rather than replacing it, and the
+             * lower of the two is what a caller feels — 60/min, which is a
+             * fifth of what one upload needs. Raising the ceiling has to
+             * happen here, exactly as it does for `files.*` above.
+             *
+             * Its own `by()` prefix, so it cannot share a counter with either
+             * tier of the `imports` limiter.
+             */
+            if ($request->routeIs('imports.*')) {
+                if (! $request->user()?->can('imports:process')) {
+                    return Limit::perMinute(self::IMPORT_DENIED_PER_MINUTE)->by('imports:api:denied:'.$key);
+                }
+
+                return Limit::perMinute(self::IMPORT_REQUESTS_PER_MINUTE)->by('imports:api:'.$key);
             }
 
             return Limit::perMinute(60)->by($key);
@@ -130,6 +328,52 @@ class AppServiceProvider extends ServiceProvider
                 Limit::perMinutes(5, 10)->by('auth:cred:'.$credential),
                 Limit::perMinutes(5, 40)->by('auth:ip:'.$request->ip()),
             ];
+        });
+
+        /**
+         * CSV migration import — the chunked upload and everything around it.
+         *
+         * Keyed on the authenticated user id, never the address. Every route
+         * under /imports sits inside the `auth:sanctum` group, and
+         * `Illuminate\Contracts\Auth\Middleware\AuthenticatesRequests`
+         * precedes `ThrottleRequests` in the framework's middleware priority
+         * list, so the user is already resolved by the time this closure runs.
+         * Keying on the address would be actively wrong here: TRUSTED_PROXIES
+         * ships empty and every browser call arrives through the frontend's
+         * server-side rewrite, so `$request->ip()` is one value for the whole
+         * deployment and one admin's import would throttle another's.
+         *
+         * One Limit is returned, not two — the tier is chosen by route rather
+         * than layered. Two tiers here would have to carry different `by()`
+         * prefixes or silently collapse into a single counter that every
+         * request decrements twice, the trap documented on
+         * `public-registration` above; picking one avoids the question
+         * entirely, and the two budgets are meant to be independent anyway.
+         *
+         * The IP fallback is unreachable while these routes stay behind
+         * `auth:sanctum`, and exists so that a future unauthenticated import
+         * route cannot key on null and hand every caller one shared bucket.
+         */
+        RateLimiter::for('imports', function (Request $request) {
+            $user = $request->user();
+            $key = $user?->id ?: $request->ip();
+
+            /**
+             * The elevated tiers are for people who can actually run an import.
+             * ThrottleRequests sorts ahead of SubstituteBindings and long ahead
+             * of the controller's authorize(), so without this check a caller
+             * who will certainly be refused still gets the migration-sized
+             * budget — and spends it writing chunk bodies to disk.
+             */
+            if (! $user?->can('imports:process')) {
+                return Limit::perMinute(self::IMPORT_DENIED_PER_MINUTE)->by('imports:denied:'.$key);
+            }
+
+            if ($request->routeIs('imports.chunk')) {
+                return Limit::perMinute(self::IMPORT_CHUNKS_PER_MINUTE)->by('imports:chunk:'.$key);
+            }
+
+            return Limit::perMinute(self::IMPORT_CONTROL_CALLS_PER_MINUTE)->by('imports:ctl:'.$key);
         });
 
         RateLimiter::for('exports', function (Request $request) {

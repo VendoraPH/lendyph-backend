@@ -1,0 +1,109 @@
+<?php
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+
+/**
+ * One line of one uploaded CSV, staged before anything reaches the real tables.
+ *
+ * `line_number` is the physical line in the submitted file, header included —
+ * the number the admin's spreadsheet shows, and the only one that belongs in an
+ * error message. `record_number` is the data ordinal after the header is
+ * skipped. They are stored separately rather than derived from one another
+ * because that derivation is how error reports end up off by one.
+ *
+ * A NULL `result` means the row has not been decided yet; that is the resume
+ * marker the importer restarts from.
+ *
+ * `external_account_no` is the member's account number as this line stated it,
+ * copied out at staging time. It is NOT a duplicate of `borrower_id`: that
+ * column is only populated when the row produced or matched a borrower, and
+ * five of the import pass's outcomes leave it NULL on a row that still holds a
+ * member's whole line — a line rejected at staging, an ambiguous identity match,
+ * a loan whose member was not found, a row abandoned after repeated attempts,
+ * and a row that threw while being written. This column is what an erasure
+ * matches those rows on, and it is written by the STAGER, so it does not depend
+ * on which outcome the row ends up with. See BorrowerPurgeService.
+ *
+ * Deliberately NOT Auditable. Auditing would write one audit row per staged
+ * CSV line — doubling the write volume of the very operation this table exists
+ * to make cheap, and telling an operator nothing the row itself does not.
+ */
+class CsvImportRow extends Model
+{
+    protected $fillable = [
+        'csv_import_file_id',
+        'line_number',
+        'record_number',
+        'external_account_no',
+        'raw',
+        'normalized',
+        'status',
+        'errors',
+        'result',
+        'result_category',
+        'result_message',
+        'borrower_id',
+        'loan_id',
+        'attempts',
+        'redacted_at',
+    ];
+
+    protected function casts(): array
+    {
+        return [
+            'line_number' => 'integer',
+            'record_number' => 'integer',
+            'raw' => 'array',
+            'normalized' => 'array',
+            'errors' => 'array',
+            'attempts' => 'integer',
+            'redacted_at' => 'datetime',
+        ];
+    }
+
+    public function file(): BelongsTo
+    {
+        return $this->belongsTo(CsvImportFile::class, 'csv_import_file_id');
+    }
+
+    public function borrower(): BelongsTo
+    {
+        return $this->belongsTo(Borrower::class);
+    }
+
+    public function loan(): BelongsTo
+    {
+        return $this->belongsTo(Loan::class);
+    }
+
+    /**
+     * Rows this run has not decided yet — the resume set.
+     *
+     * Hits the `(csv_import_file_id, status, result)` index, so finding where a
+     * crashed import left off never scans the rows already behind it.
+     */
+    public function scopePending($query)
+    {
+        return $query->whereNull('result');
+    }
+
+    /**
+     * Rows whose personal columns are still populated.
+     *
+     * The idempotency guard for both sweeps that blank them —
+     * `imports:redact-rows` and BorrowerPurgeService, through
+     * CsvImportRowRedactor, which is where what a redaction actually DOES is
+     * documented. Redaction only ever moves a row from unredacted to redacted,
+     * so re-running one is free and an interrupted one resumes where it stopped
+     * rather than rewriting what it already did — and `redacted_at` keeps the
+     * date of the FIRST redaction, which is what an erasure request has to be
+     * answered with.
+     */
+    public function scopeUnredacted($query)
+    {
+        return $query->whereNull('redacted_at');
+    }
+}

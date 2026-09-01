@@ -11,6 +11,10 @@ use App\Http\Controllers\Api\BrandingController;
 use App\Http\Controllers\Api\CollateralController;
 use App\Http\Controllers\Api\CollateralTypeController;
 use App\Http\Controllers\Api\CoMakerController;
+use App\Http\Controllers\Api\CsvImportController;
+use App\Http\Controllers\Api\CsvImportErrorReportController;
+use App\Http\Controllers\Api\CsvImportMappingController;
+use App\Http\Controllers\Api\CsvImportStatusController;
 use App\Http\Controllers\Api\DashboardController;
 use App\Http\Controllers\Api\DisclosureController;
 use App\Http\Controllers\Api\DocumentController;
@@ -288,6 +292,106 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::get('/settings/approval-workflow', [ApprovalWorkflowController::class, 'show']);
     Route::put('/settings/approval-workflow', [ApprovalWorkflowController::class, 'update']);
     Route::delete('/settings/approval-workflow', [ApprovalWorkflowController::class, 'destroy']);
+
+    /*
+    |--------------------------------------------------------------------------
+    | CSV migration import
+    |--------------------------------------------------------------------------
+    |
+    | The whole operator journey: opening a run, receiving each file a chunk at
+    | a time, reassembling it, then closing the product-mapping gate, watching
+    | the run and reading what went wrong. Gated on `imports:process` inside
+    | each controller with `$this->authorize()`, like every other endpoint here
+    | — this file carries no `permission:` middleware anywhere and this is not
+    | the place to start. The limiter checks the same permission, so a caller
+    | who will be refused never gets the migration-sized budget.
+    |
+    | THE NAMES ARE LOAD-BEARING, twice over. `throttle:imports` reads the route
+    | name to decide which tier a call belongs to. And
+    | `ThrottleRequests::class.':api'` is PREPENDED to the whole api group in
+    | bootstrap/app.php, so a route-level throttle STACKS on top of the shared
+    | 60/min rather than replacing it, and the lower of the two is what a caller
+    | feels — which is why the `api` limiter also raises its ceiling for routes
+    | named `imports.*`, the same mechanism `files.*` uses. Without that, an
+    | upload hundreds of requests long throttles itself to a crawl, and a status
+    | endpoint polled for the length of a long import starts 429-ing the very
+    | screen showing its progress. Any import route added later should be named
+    | `imports.*` and carry `throttle:imports` for the same reason.
+    |
+    | `{run}` is a plain id here, NOT a bound CsvImportRun. Bindings are
+    | substituted before the controller and before its FormRequests, so a bound
+    | model would tell a caller who is about to be refused whether run #N
+    | exists — 404 for an unused id, 403 for a real one. Every action resolves
+    | the id itself, after `imports:process`. `whereNumber('run')` on all three
+    | so a non-numeric id never becomes a route match, matching the constraint
+    | the status and mapping routes use.
+    */
+    Route::prefix('imports')->name('imports.')->middleware('throttle:imports')->group(function () {
+        /*
+         * Discovery, and the only way to find an open run without a run id.
+         * A client normally keeps its id in local storage; a cleared browser, a
+         * different device or a different admin picking up somebody's abandoned
+         * migration all lose it, and an open run is then invisible AND blocking
+         * — `POST /` 409s while one is open, so the operator is told an import
+         * is already running with nothing they can see or cancel.
+         *
+         * Control tier, not `exports`: it is read on mount and polled
+         * adjacently, and it is a single indexed lookup.
+         */
+        Route::get('/', [CsvImportController::class, 'index'])->name('index');
+
+        Route::post('/', [CsvImportController::class, 'store'])->name('store');
+
+        // PUT is the documented verb and works with either body encoding: PHP
+        // itself populates $_FILES only for POST, but symfony/http-foundation
+        // parses PUT bodies through PHP 8.4's request_parse_body(). POST is
+        // accepted at the same URI as the compatibility path for any client
+        // that cannot rely on that. See CsvImportController::resolveChunkBytes().
+        Route::match(['put', 'post'], '/{run}/files/{kind}/chunks/{index}', [CsvImportController::class, 'uploadChunk'])
+            ->whereNumber('run')
+            ->whereIn('kind', ['customers', 'loans'])
+            ->whereNumber('index')
+            ->name('chunk');
+
+        Route::post('/{run}/assemble', [CsvImportController::class, 'assemble'])
+            ->whereNumber('run')
+            ->name('assemble');
+
+        // The escape hatch for a dead browser tab. Without it, a run left in
+        // `uploading` blocks every future import at this cooperative forever,
+        // because POST /imports refuses a second run while one is open and
+        // nothing in the UI can clear it.
+        Route::delete('/{run}', [CsvImportController::class, 'destroy'])
+            ->whereNumber('run')
+            ->name('destroy');
+
+        // Polled for the whole length of an import, and a fixed number of
+        // indexed queries, so it rides the control tier alone.
+        Route::get('/{run}', [CsvImportStatusController::class, 'show'])
+            ->whereNumber('run')
+            ->name('show');
+
+        Route::whereNumber('run')->group(function () {
+            /*
+             * `throttle:exports` STACKS on the import control tier for the two
+             * heaviest reads, and the tighter one binds. Both walk the staged
+             * rows in full — the product scan is a GROUP BY over a JSON
+             * expression, the CSV streams every reported row — and both are
+             * deliberate operator actions rather than polls.
+             *
+             * GET /errors is deliberately NOT here. It is a screen a human
+             * pages through, its summary is computed on page one only, and
+             * 5/min would 429 an admin on their sixth click.
+             */
+            Route::middleware('throttle:exports')->group(function () {
+                Route::get('/{run}/product-mapping', [CsvImportMappingController::class, 'show'])->name('product-mapping.show');
+                Route::put('/{run}/product-mapping', [CsvImportMappingController::class, 'update'])->name('product-mapping.update');
+                Route::get('/{run}/errors.csv', [CsvImportErrorReportController::class, 'export'])->name('errors.export');
+            });
+
+            Route::get('/{run}/errors', [CsvImportErrorReportController::class, 'index'])->name('errors.index');
+        });
+    });
 
     // Branding (organization logo + identity printed on reports and documents)
     Route::get('/settings/branding', [BrandingController::class, 'show']);

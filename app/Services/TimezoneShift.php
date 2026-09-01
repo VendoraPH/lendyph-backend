@@ -121,6 +121,16 @@ class TimezoneShift
      */
     public const EXCLUDED_COLUMNS = [
         'borrower_submission_tokens' => ['created_at', 'expires_at', 'updated_at'],
+        // The CSV migration importer's own bookkeeping. These tables were created
+        // on 2026-08-29, three weeks after the cutover completed (2026-08-06 on
+        // every deployment), and the shift is one-shot — the `timezone_shifts`
+        // marker stops it running twice. So they cannot hold a row written by the
+        // old UTC application, and shifting them would move correct Manila
+        // timestamps 8h into the past. Same reasoning as `timezone_shifts` below.
+        'csv_import_file_chunks' => ['created_at', 'updated_at'],
+        'csv_import_files' => ['created_at', 'updated_at'],
+        'csv_import_rows' => ['created_at', 'redacted_at', 'updated_at'],
+        'csv_import_runs' => ['created_at', 'finished_at', 'rows_redacted_at', 'started_at', 'updated_at'],
         'failed_jobs' => ['failed_at'],
         'password_reset_tokens' => ['created_at'],
         'personal_access_tokens' => ['created_at', 'expires_at', 'last_used_at', 'updated_at'],
