@@ -6,6 +6,7 @@ use App\Models\Borrower;
 use App\Models\BorrowerSubmissionToken;
 use App\Services\AuditLogService;
 use App\Services\BorrowerPurgeService;
+use App\Services\Diagnostics\ErrorDigest;
 use Illuminate\Console\Attributes\Description;
 use Illuminate\Console\Attributes\Signature;
 use Illuminate\Console\Command;
@@ -134,19 +135,77 @@ class PruneAbandonedRegistrations extends Command
 
                 $pruned++;
             } catch (\Throwable $e) {
-                $this->error("  failed {$borrower->borrower_code}: {$e->getMessage()}");
+                /*
+                 * Fixed prose and a numeric code, never $e->getMessage().
+                 *
+                 * The reflex reading of this block is that it cannot leak a
+                 * member: the purge runs with `audit: false`, so the borrower
+                 * goes through deleteQuietly() and no Auditable hook copies
+                 * their full attributes into `audit_logs.old_values`. That is
+                 * true, and it is not enough.
+                 *
+                 *  - AuditLogService::log() above is a DIRECT call, inside this
+                 *    same try. Neither `audit: false` nor deleteQuietly()
+                 *    suppresses it — both suppress the TRAIT'S hooks, and this
+                 *    is not one of them. What keeps its INSERT harmless today
+                 *    is only that this one call passes a lone `borrower_code`
+                 *    with a null `oldValues`: a property of one call's
+                 *    arguments, not a structural guarantee. Enrich that audit
+                 *    row — the obvious, reasonable change — and the full leak
+                 *    is back, with nothing anywhere to warn whoever does it.
+                 *  - The exposure is not zero even today. purge() redacts
+                 *    staged import rows on a predicate keyed by
+                 *    `external_account_no`, which is the cooperative's own
+                 *    identifier for the member and which CsvImportRowRedactor
+                 *    classifies as personal data, so a failure of THAT
+                 *    statement quotes it. And purge()'s DB::afterCommit()
+                 *    unlink is deferred to the transaction opened here, so it
+                 *    runs inside this try — though NOT by the mechanism the
+                 *    obvious reading suggests. An ordinary filesystem error
+                 *    never reaches this catch: the `private` disk sets
+                 *    `'throw' => false`, so FilesystemAdapter::delete() and
+                 *    deleteDirectory() swallow UnableToDeleteFile and
+                 *    UnableToDeleteDirectory and return false. What is NOT
+                 *    swallowed is Flysystem normalising the path first —
+                 *    CorruptedPathDetected (a control character in the stored
+                 *    path) and PathTraversalDetected (a `..` segment) are
+                 *    plain RuntimeExceptions that the adapter does not catch,
+                 *    and both embed the offending PATH in their message.
+                 *
+                 * The sink made it worse than the average log leak. Log::warning
+                 * writes the shared `single` channel: mode 644, a single file
+                 * that never rotates, so whatever reached it stayed until
+                 * somebody deleted it by hand. See ErrorDigest.
+                 */
+                $this->error('  failed: '.ErrorDigest::forSubject(
+                    $e, $borrower->borrower_code, 'pruned', 'See the application log.'
+                ));
 
                 /*
                  * The console output goes nowhere: the scheduler runs from root
                  * cron as `schedule:run >> /dev/null 2>&1`, so a failing prune
                  * is invisible and the non-zero exit code is discarded too.
                  * Laravel's log is the only channel anyone can actually read
-                 * after the fact.
+                 * after the fact — which is why what goes to it is the
+                 * exception class, the SQLSTATE and the driver's numeric code,
+                 * enough to tell a restricted delete from a lock wait without
+                 * quoting anything.
                  */
                 Log::warning('registrations:prune failed to purge a borrower', [
                     'borrower_code' => $borrower->borrower_code,
-                    'exception' => $e->getMessage(),
-                ]);
+                ] + ErrorDigest::context($e));
+
+                /*
+                 * And the full text, if an operator has genuinely switched it
+                 * on for this incident. The borrower flag rather than the
+                 * importer's: this writes about a member's own row, and the two
+                 * switches are separate so that enabling one never arms the
+                 * other. See config/logging.php.
+                 */
+                ErrorDigest::recordDiagnostics($e, [
+                    'source' => 'registrations.prune',
+                    'borrower_code' => $borrower->borrower_code,
+                ], flag: ErrorDigest::BORROWER_DIAGNOSTICS_FLAG);
 
                 $failed++;
             }
