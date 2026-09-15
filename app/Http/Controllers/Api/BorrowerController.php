@@ -12,12 +12,14 @@ use App\Models\Borrower;
 use App\Models\Document;
 use App\Services\BorrowerPurgeService;
 use App\Services\BorrowerSubmissionTokenService;
+use App\Services\Diagnostics\ErrorDigest;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\ValidationException;
 use OpenApi\Attributes as OA;
@@ -685,7 +687,32 @@ DESC,
                 $borrower->update(['status' => 'inactive']);
                 $deactivated[] = $id;
             } catch (\Throwable $e) {
-                $failed[] = ['id' => $id, 'reason' => $e->getMessage()];
+                /*
+                 * Fixed prose, never $e->getMessage(). The update's own SQL
+                 * names one harmless column, but the Auditable trait's
+                 * `updated` hook fires a second INSERT that copies the
+                 * borrower's FULL attribute set into `audit_logs.old_values` —
+                 * name, birthdate, address, contact number, income. A
+                 * QueryException's message is the failing SQL with the bindings
+                 * substituted in, so when it is that insert which fails, the
+                 * message is the member's entire record — and this array is
+                 * returned in the HTTP response body. See ErrorDigest.
+                 */
+                $failed[] = [
+                    'id' => $id,
+                    'reason' => ErrorDigest::forSubject(
+                        $e, "Borrower {$id}", 'deactivated', 'See the application log.'
+                    ),
+                ];
+
+                Log::error('borrowers: bulk deactivate failed for one borrower', [
+                    'borrower_id' => $id,
+                ] + ErrorDigest::context($e));
+
+                ErrorDigest::recordDiagnostics($e, [
+                    'source' => 'borrowers.bulk-deactivate',
+                    'borrower_id' => $id,
+                ], flag: ErrorDigest::BORROWER_DIAGNOSTICS_FLAG);
             }
         }
 
@@ -734,7 +761,38 @@ DESC,
 
                 $deleted[] = $id;
             } catch (\Throwable $e) {
-                $failed[] = ['id' => $id, 'reason' => $e->getMessage()];
+                /*
+                 * Fixed prose, never $e->getMessage() — and the stakes here are
+                 * higher than on a log leak, because this array is returned in
+                 * the HTTP response body.
+                 *
+                 * Two ways the message carries the member. The Auditable trait's
+                 * `deleted` hook copies the borrower's FULL attribute set into
+                 * `audit_logs.old_values`, so a failure of THAT insert is a
+                 * QueryException whose SQL — bindings substituted in — is the
+                 * whole record. And a purge fails routinely: `loans.borrower_id`
+                 * is restrictOnDelete, so any member with a loan raises 1451,
+                 * which is the common case rather than the exotic one.
+                 *
+                 * The code is the one variable part, and the operator needs it:
+                 * 1451 means "this member still has a loan", which is theirs to
+                 * act on, while 1205 means "retry". See ErrorDigest.
+                 */
+                $failed[] = [
+                    'id' => $id,
+                    'reason' => ErrorDigest::forSubject(
+                        $e, "Borrower {$id}", 'deleted', 'See the application log.'
+                    ),
+                ];
+
+                Log::error('borrowers: bulk delete failed for one borrower', [
+                    'borrower_id' => $id,
+                ] + ErrorDigest::context($e));
+
+                ErrorDigest::recordDiagnostics($e, [
+                    'source' => 'borrowers.bulk-destroy',
+                    'borrower_id' => $id,
+                ], flag: ErrorDigest::BORROWER_DIAGNOSTICS_FLAG);
             }
         }
 
