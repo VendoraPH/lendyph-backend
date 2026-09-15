@@ -29,8 +29,18 @@ jobs:
           set -uo pipefail
 
           # host|branch|label
+          #
+          # Keep comments OUT of the string below. The reader loop skips only
+          # EMPTY lines, so a '#' line would be read as a hostname and curled.
+          #
+          # The portfolio row tracks `development`, not `main`, as of
+          # 2026-09-16: /var/www/lendyph-backend and the portfolio frontend were
+          # moved so the -staging directory name stops contradicting the branch.
+          # It is the only deployment here whose branch is not what its
+          # "prod-like" hostname suggests, and it is the owner's demo, so it is
+          # allowed to run ahead of every other box on this list.
           DEPLOYMENTS='
-          api-lendyph.abedubas.dev|main|portfolio
+          api-lendyph.abedubas.dev|development|portfolio
           api.lendyph.com|main|lendy.ph prod
           staging-api.lendyph.com|development|lendy.ph staging
           api.binhs-coop.lendyph.com|main|binhs-coop prod
