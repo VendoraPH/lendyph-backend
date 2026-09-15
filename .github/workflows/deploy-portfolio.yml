@@ -4,22 +4,34 @@ name: Deploy Portfolio API
 # environment).
 #   domain : api-lendyph.abedubas.dev
 #   dir    : /var/www/lendyph-backend   (VPS 76.13.22.110)
-#   branch : main
+#   branch : development
 #
-# Manual-only on purpose. This used to fire on every push to `main`, which put
-# a personal demo box in the product's release train; the real environments now
-# live in deploy-production.yml (api.lendyph.com) and deploy-staging.yml
-# (staging-api.lendyph.com). Deploy this one when you actually want the demo
-# refreshed.
+# Tracks `development`, deliberately. The real environments are
+# deploy-production.yml (api.lendyph.com) and deploy-staging.yml
+# (staging-api.lendyph.com); this one is the owner's demo and is allowed to run
+# ahead of them.
+#
+# It is paired with the portfolio FRONTEND (lendyph-staging.abedubas.dev), which
+# moved to `development` at the same time, 2026-09-16. The pairing is the point:
+# a portfolio frontend on `development` talking to a portfolio API on `main`
+# breaks the first time `development` adds an endpoint the API does not have.
+# Move these two together or not at all.
 #
 # Unlike the other two Lendyph API instances, /var/www/lendyph-backend has no
-# on-VPS deploy.sh, so the steps stay inline here.
+# on-VPS deploy.sh — confirmed absent on the box 2026-09-16 — so the steps stay
+# inline here and this file is the whole deploy path.
 on:
   push:
-    # Tracks main, like the other production deployments. Previously
-    # dispatch-only, which is why this box silently fell behind — and why its
-    # one-shot files:move-private step never ran here.
-    branches: [main]
+    # Tracks `development` as of 2026-09-16, matching the portfolio frontend.
+    # It tracked `main` before that, and was dispatch-only before that, which is
+    # why this box silently fell behind — and why its one-shot files:move-private
+    # step never ran here.
+    #
+    # `development` moves considerably more often than `main`, so this box now
+    # deploys far more frequently. That is fine for a demo: the work here is a
+    # composer install plus migrations, it holds no build lock, and its
+    # concurrency group keeps two runs from interleaving over the checkout.
+    branches: [development]
     paths-ignore: ['.github/**']
   workflow_dispatch:
 
@@ -40,12 +52,29 @@ jobs:
         set -e
 
         DEPLOY_DIR=/var/www/lendyph-backend
-        DEPLOY_BRANCH=main
+        DEPLOY_BRANCH=development
 
         cd "$DEPLOY_DIR"
-        # Discard any local changes (e.g. regenerated api-docs.json) to avoid pull conflicts
-        git fetch origin main
-        git reset --hard origin/main
+        # Discard any local changes (e.g. regenerated api-docs.json) to avoid pull conflicts.
+        #
+        # This fetches one ref by name. That is why this directory had no
+        # refs/remotes/origin/development at all until now — it had only ever
+        # fetched `main`. The box's remote.origin.fetch is the default
+        # +refs/heads/*:refs/remotes/origin/*, so fetching `development` by name
+        # also creates and then maintains refs/remotes/origin/development, which
+        # the dispatch path of the assertion below needs in order to resolve a
+        # branch tip. It runs in this same ssh session, before that check.
+        git fetch origin development
+        # `checkout -f -B`, NOT `git reset --hard`. reset moves the commit but
+        # leaves HEAD on whatever branch it was already on — which here was a
+        # local branch literally named `main`. App\Services\DeploymentIdentity
+        # reads the branch straight out of .git/HEAD, so a reset would leave
+        # /api/health reporting branch "main" while serving development's code,
+        # and the branch assertion in the health step below would then fail on
+        # every single deploy. `-B` repoints HEAD at refs/heads/development and
+        # makes the move real. Idempotent whichever branch the directory was
+        # last left on.
+        git checkout -f -B development origin/development
         COMPOSER_ALLOW_SUPERUSER=1 composer install --no-dev --optimize-autoloader --no-interaction
         php artisan migrate --force
         # Symlink public/storage -> storage/app/public so uploaded photos and
@@ -80,7 +109,7 @@ jobs:
         # healthy from every angle except the deployed commit.
         #
         # Deliberately NOT an equality test against this run's commit. The deploy does
-        # `git fetch origin <branch>` + `git reset --hard origin/<branch>`, so it ships
+        # `git fetch origin <branch>` + `git checkout -f -B <branch> origin/<branch>`, so it ships
         # the branch tip AT THE MOMENT IT RUNS, not the commit that triggered this run;
         # and the concurrency group queues deploys rather than cancelling them, so a
         # queued older run can legitimately ship newer code. Ancestry is the honest
@@ -103,19 +132,29 @@ jobs:
         if [ "${EXPECTED_REF:-}" != "$DEPLOY_BRANCH" ]; then
           # This run's ref is NOT the branch this directory tracks, so this run's commit
           # is not expected to appear in this history at all and ancestry would be a
-          # guaranteed false failure. Not hypothetically: workflow_dispatch defaults to
-          # the repository's default branch, which is `main` in both repos, and `main`
-          # is PERMANENTLY ahead of `development` here — every promotion merges
-          # development -> main through a GitHub merge commit that is never merged back,
-          # so origin/main's tip is by construction never an ancestor of development.
-          # Measured 2026-09-16: 6 such commits in the backend, 10 in the frontend, with
-          # 0 flowing the other way. A hand-dispatched staging deploy — which is how
-          # binhs-coop is actually released — would therefore fail EVERY time on a
-          # deploy that did exactly the right thing. `git fetch origin <branch>` also
-          # fetches only that one ref, so the other branch's object may not exist on the
-          # box at all (/var/www/binhs-coop-backend and /var/www/lendyph-backend have no
-          # refs/remotes/origin/development), which would fail with a confusing
-          # "Not a valid commit name" instead.
+          # guaranteed false failure.
+          #
+          # Moving this deployment from `main` to `development` did NOT retire this
+          # branch — it swapped which side triggers it. workflow_dispatch defaults to
+          # the repository's default branch, which is `main`, while this directory now
+          # tracks `development`, so every hand-dispatched portfolio refresh lands
+          # here. (Before the move it was the reverse.) Either way the mismatch is
+          # unfixable by ancestry: `main` is PERMANENTLY ahead of `development` because
+          # every promotion merges development -> main through a GitHub merge commit
+          # that is never merged back, so origin/main's tip is by construction never an
+          # ancestor of development. Measured 2026-09-16: 6 such commits in this repo,
+          # 0 flowing the other way. Asserting ancestry would red a deploy that did
+          # exactly the right thing.
+          #
+          # The fallback below needs refs/remotes/origin/$DEPLOY_BRANCH to exist, and
+          # this directory is exactly the case where that could not be assumed: as of
+          # 2026-09-16 /var/www/lendyph-backend had refs/remotes/origin/{HEAD,main,
+          # staging,staging-prep/2026-04-25} and no `development` at all, because
+          # `git fetch origin <branch>` only ever brought down the one ref it was asked
+          # for. The fetch above now asks for `development`, and under this box's
+          # default +refs/heads/*:refs/remotes/origin/* refspec that creates the
+          # remote-tracking ref on the first run and maintains it after. Without that
+          # fetch change this check would fail with "<no such ref on this box>".
           #
           # Assert what is still true and still worth asserting: the reset landed on the
           # tip the deploy just fetched, in this same ssh session.
@@ -242,11 +281,14 @@ jobs:
       # be read as one. Its real value is that the public hostname is alive,
       # boots, and is backed by the right checkout.
       #
-      # It also cannot tell sibling deployments apart: api.lendyph.com,
-      # api.binhs-coop.lendyph.com and api-lendyph.abedubas.dev all track `main`
-      # and all report the same commit/branch/env, so a hostname misrouted to a
-      # sibling on the same branch passes this step. Only the in-SSH check is
-      # directory-specific.
+      # It can only partly tell sibling deployments apart. api.lendyph.com and
+      # api.binhs-coop.lendyph.com track `main` while this one now tracks
+      # `development`, so the branch assertion below would catch a misroute to
+      # one of THOSE — which it could not before 2026-09-16, when all three
+      # tracked `main` and reported identical commit/branch/env. It still cannot
+      # catch a misroute to staging-api.lendyph.com or
+      # api.binhs-coop-staging.lendyph.com, which also track `development` and
+      # would report the same trio. Only the in-SSH check is directory-specific.
       #
       # Gated on step OUTCOMES so it still runs when the first ssh leg failed
       # and the retry rescued the deploy, and is skipped when both legs failed
@@ -258,9 +300,25 @@ jobs:
           EXPECTED_SHA: ${{ github.sha }}
           EXPECTED_REF: ${{ github.ref_name }}
           HEALTH_HOST: api-lendyph.abedubas.dev
-          DEPLOY_BRANCH: main
+          # Must match DEPLOY_BRANCH in the ssh script above. /api/health reports
+          # the branch from .git/HEAD, which is why that script uses
+          # `checkout -f -B` rather than `reset --hard` — see the note there.
+          DEPLOY_BRANCH: development
           # This demo box reports APP_ENV=production, not 'portfolio' or
           # 'demo' — read live from /api/health, not assumed.
+          #
+          # Yes, `production` alongside DEPLOY_BRANCH: development. That is not
+          # a contradiction and it is not drift: branch and environment are
+          # separate facts. The branch says which code this box runs; APP_ENV
+          # says which config it runs it under. A demo is deliberately built the
+          # way the real thing is built — debug off, caches on, real error
+          # handling — so production config off a development branch is the
+          # correct combination for it, and verified as the live value across
+          # the fleet (.env and the cached config both) on 2026-09-16.
+          #
+          # So do not "fix" this to match the branch. It asserts something true,
+          # and because it is read from /api/health rather than assumed, it is
+          # also the only check here that proves `config:cache` actually re-ran.
           EXPECTED_ENV: production
         run: |
           set -uo pipefail
