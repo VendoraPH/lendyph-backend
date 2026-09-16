@@ -47,7 +47,7 @@ class GCashReportController extends Controller
                 'start_date' => $report['start_date'],
                 'end_date' => $report['end_date'],
                 'transactions' => GCashTransactionResource::collection(
-                    $report['transactions']->load(['borrower', 'transactor']),
+                    $report['transactions']->load(['borrower', 'nonMember', 'transactor']),
                 ),
             ],
         ]);
@@ -68,7 +68,7 @@ class GCashReportController extends Controller
         $this->authorize('gcash:view');
 
         return GCashTransactionResource::collection(
-            $this->gcash->pendingReport()->load(['borrower', 'transactor']),
+            $this->gcash->pendingReport()->load(['borrower', 'nonMember', 'transactor']),
         );
     }
 }

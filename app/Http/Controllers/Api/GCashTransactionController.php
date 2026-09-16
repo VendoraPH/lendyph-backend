@@ -39,7 +39,7 @@ class GCashTransactionController extends Controller
         $this->authorize('gcash:view');
 
         $transactions = GCashTransaction::query()
-            ->with(['borrower', 'transactor'])
+            ->with(['borrower', 'nonMember', 'transactor'])
             ->when($request->query('type'), fn ($q, $t) => $q->where('type', $t))
             ->when($request->query('status'), fn ($q, $s) => $q->where('status', $s))
             ->when($request->query('borrower_id'), fn ($q, $b) => $q->where('borrower_id', $b))
@@ -79,7 +79,7 @@ class GCashTransactionController extends Controller
     public function store(StoreGCashTransactionRequest $request): JsonResponse
     {
         $tx = $this->gcash->createTransaction($request->validated(), $request->user());
-        $tx->load(['borrower', 'transactor']);
+        $tx->load(['borrower', 'nonMember', 'transactor']);
 
         return (new GCashTransactionResource($tx))
             ->response()
@@ -105,7 +105,7 @@ class GCashTransactionController extends Controller
         $this->authorize('gcash:transact');
 
         $tx = $this->gcash->markPaid($transaction, request()->user());
-        $tx->load(['borrower', 'transactor', 'paidByUser']);
+        $tx->load(['borrower', 'nonMember', 'transactor', 'paidByUser']);
 
         return response()->json([
             'message' => 'Transaction marked as paid.',

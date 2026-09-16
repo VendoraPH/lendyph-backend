@@ -20,6 +20,7 @@ use App\Http\Controllers\Api\DisclosureController;
 use App\Http\Controllers\Api\DocumentController;
 use App\Http\Controllers\Api\FeeController;
 use App\Http\Controllers\Api\FileController;
+use App\Http\Controllers\Api\GCashNonMemberController;
 use App\Http\Controllers\Api\GCashReportController;
 use App\Http\Controllers\Api\GCashTierController;
 use App\Http\Controllers\Api\GCashTransactionController;
@@ -254,6 +255,9 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     // Collateral Types
     Route::get('/collateral-types', [CollateralTypeController::class, 'index']);
     Route::post('/collateral-types', [CollateralTypeController::class, 'store']);
+    // Must precede /{collateralType}: Laravel matches in registration order, so
+    // a wildcard registered first would capture "reorder" as an id.
+    Route::post('/collateral-types/reorder', [CollateralTypeController::class, 'reorder']);
     Route::get('/collateral-types/{collateralType}', [CollateralTypeController::class, 'show']);
     Route::put('/collateral-types/{collateralType}', [CollateralTypeController::class, 'update']);
     Route::delete('/collateral-types/{collateralType}', [CollateralTypeController::class, 'destroy']);
@@ -282,6 +286,10 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
         Route::get('/transactions', [GCashTransactionController::class, 'index']);
         Route::post('/transactions', [GCashTransactionController::class, 'store']);
         Route::patch('/transactions/{transaction}/paid', [GCashTransactionController::class, 'markPaid']);
+        Route::get('/non-members', [GCashNonMemberController::class, 'index']);
+        Route::post('/non-members', [GCashNonMemberController::class, 'store']);
+        Route::put('/non-members/{nonMember}', [GCashNonMemberController::class, 'update']);
+        Route::delete('/non-members/{nonMember}', [GCashNonMemberController::class, 'destroy']);
         Route::get('/tiers', [GCashTierController::class, 'index']);
         Route::put('/tiers', [GCashTierController::class, 'replace']);
         Route::get('/reports/income', [GCashReportController::class, 'income']);

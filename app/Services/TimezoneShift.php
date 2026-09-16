@@ -132,6 +132,10 @@ class TimezoneShift
         'csv_import_rows' => ['created_at', 'redacted_at', 'updated_at'],
         'csv_import_runs' => ['created_at', 'finished_at', 'rows_redacted_at', 'started_at', 'updated_at'],
         'failed_jobs' => ['failed_at'],
+        // Added 2026-09-16, well after the cutover completed (2026-08-06 on every
+        // deployment), so this table cannot hold a row written by the old UTC
+        // application. Same reasoning as the csv_import_* tables above.
+        'gcash_non_members' => ['created_at', 'deleted_at', 'updated_at'],
         'password_reset_tokens' => ['created_at'],
         'personal_access_tokens' => ['created_at', 'expires_at', 'last_used_at', 'updated_at'],
         // The shift's own bookkeeping, written after the cutover by definition.

@@ -3,6 +3,7 @@
 namespace Database\Factories;
 
 use App\Models\Borrower;
+use App\Models\GCashNonMember;
 use App\Models\GCashTransaction;
 use App\Models\User;
 use Illuminate\Database\Eloquent\Factories\Factory;
@@ -28,5 +29,17 @@ class GCashTransactionFactory extends Factory
             'paid_at' => null,
             'paid_by_user_id' => null,
         ];
+    }
+
+    /**
+     * A walk-in transaction: the party is a non-member, so `borrower_id` must be
+     * null or the table's exactly-one-party CHECK constraint rejects the row.
+     */
+    public function forNonMember(?GCashNonMember $nonMember = null): static
+    {
+        return $this->state(fn (array $attributes): array => [
+            'borrower_id' => null,
+            'gcash_non_member_id' => $nonMember?->id ?? GCashNonMember::factory(),
+        ]);
     }
 }

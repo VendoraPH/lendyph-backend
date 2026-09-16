@@ -89,3 +89,59 @@ it('viewer can list types but cannot create', function () {
         'amount_field_label' => 'b',
     ])->assertForbidden();
 });
+
+it('reorders collateral types to the given id sequence', function () {
+    $ids = CollateralType::orderBy('display_order')->orderBy('name')->pluck('id')->all();
+    $reversed = array_reverse($ids);
+
+    $response = $this->postJson('/api/collateral-types/reorder', ['ids' => $reversed])->assertOk();
+
+    expect(collect($response->json('data'))->pluck('id')->all())->toBe($reversed);
+    expect(CollateralType::find($reversed[0])->display_order)->toBe(1);
+    expect(CollateralType::find($reversed[1])->display_order)->toBe(2);
+});
+
+it('persists the new order for the next listing', function () {
+    $ids = CollateralType::orderBy('display_order')->orderBy('name')->pluck('id')->all();
+    $reversed = array_reverse($ids);
+
+    $this->postJson('/api/collateral-types/reorder', ['ids' => $reversed])->assertOk();
+
+    $listed = collect($this->getJson('/api/collateral-types')->json('data'))->pluck('id')->all();
+
+    expect($listed)->toBe($reversed);
+});
+
+it('rejects a reorder that omits a collateral type', function () {
+    $ids = CollateralType::pluck('id')->all();
+    array_pop($ids);
+
+    $this->postJson('/api/collateral-types/reorder', ['ids' => $ids])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['ids']);
+});
+
+it('rejects a reorder containing an unknown id', function () {
+    $ids = [...CollateralType::pluck('id')->all(), 999999];
+
+    $this->postJson('/api/collateral-types/reorder', ['ids' => $ids])->assertStatus(422);
+});
+
+it('rejects a reorder that repeats an id', function () {
+    $ids = CollateralType::pluck('id')->all();
+    $ids[count($ids) - 1] = $ids[0];
+
+    $this->postJson('/api/collateral-types/reorder', ['ids' => $ids])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['ids.'.(count($ids) - 1)]);
+});
+
+it('viewer cannot reorder collateral types', function () {
+    $viewer = User::factory()->create();
+    $viewer->assignRole('viewer');
+    $this->actingAs($viewer);
+
+    $this->postJson('/api/collateral-types/reorder', [
+        'ids' => CollateralType::pluck('id')->all(),
+    ])->assertForbidden();
+});
