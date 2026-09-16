@@ -274,10 +274,28 @@ class LoanApprovalStepController extends Controller
 
             // The server's full answer, not just the client's role check: a step
             // is only actionable if the viewer holds the role AND the step is
-            // pending AND the loan is still in review.
+            // pending AND the loan is in the status that step belongs to.
             'can_act' => $step->status === LoanApprovalStep::STATUS_PENDING
-                && $loan->status === 'for_review'
+                && self::loanStatusAllowsActingOn($step, $loan)
                 && $this->chain->canAct($step, $viewer),
         ];
+    }
+
+    /**
+     * Which loan status each kind of step belongs to.
+     *
+     * The release step is the whole reason this is not a single `for_review`
+     * check. Approving the LAST approve step takes the loan to `approved` and
+     * leaves the release step pending — so a flat `for_review` test reports
+     * `can_act: false` on it for everyone, admins included. The frontend gates
+     * the Release action on this flag alone (`can_act ?? clientRoleCheck`, and
+     * `false` is not nullish so it never falls back), which means the button
+     * never renders and a chain can never be completed through the UI.
+     */
+    private static function loanStatusAllowsActingOn(LoanApprovalStep $step, Loan $loan): bool
+    {
+        return $step->kind === LoanApprovalStep::KIND_RELEASE
+            ? $loan->status === 'approved'
+            : $loan->status === 'for_review';
     }
 }

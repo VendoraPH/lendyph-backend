@@ -747,6 +747,66 @@ class LoanApprovalChainTest extends TestCase
         );
     }
 
+    /**
+     * The release step must be actionable once the loan reaches `approved`.
+     *
+     * Found by QA, and it was a blocking defect: `can_act` tested a flat
+     * `loans.status === 'for_review'`, but approving the last approve step
+     * moves the loan to `approved` and leaves the release step pending — so
+     * the flag came back false on it for EVERY user, admins included. The
+     * frontend gates the Release action on this flag alone
+     * (`can_act ?? clientRoleCheck`; `false` is not nullish, so it never falls
+     * back), which meant no chain could ever be completed through the UI.
+     */
+    public function test_the_pending_release_step_is_actionable_by_the_role_that_holds_it(): void
+    {
+        $loan = $this->submittedLoan();
+        $this->approveAs('manager', $loan);
+        $this->approveAs('bod1', $loan);
+
+        $this->assertSame('approved', $loan->fresh()->status);
+
+        $state = $this->actingAs($this->userWithRole('general_bookkeeper'))
+            ->getJson("/api/loans/{$loan->id}/approval-steps")
+            ->assertOk()
+            ->json('data.current_steps');
+
+        $release = collect($state)->firstWhere('kind', 'release');
+
+        $this->assertSame('pending', $release['status']);
+        $this->assertTrue($release['can_act'], 'The Release action would not render for anyone.');
+    }
+
+    public function test_an_admin_can_act_on_the_pending_release_step(): void
+    {
+        $loan = $this->submittedLoan();
+        $this->approveAs('manager', $loan);
+        $this->approveAs('bod1', $loan);
+
+        $state = $this->actingAs($this->admin)
+            ->getJson("/api/loans/{$loan->id}/approval-steps")
+            ->assertOk()
+            ->json('data.current_steps');
+
+        $this->assertTrue(collect($state)->firstWhere('kind', 'release')['can_act']);
+    }
+
+    public function test_an_approve_step_is_not_actionable_once_the_loan_has_left_review(): void
+    {
+        $loan = $this->submittedLoan();
+        $this->approveAs('manager', $loan);
+        $this->approveAs('bod1', $loan);
+
+        $state = $this->actingAs($this->admin)
+            ->getJson("/api/loans/{$loan->id}/approval-steps")
+            ->assertOk()
+            ->json('data.current_steps');
+
+        foreach (collect($state)->where('kind', 'approve') as $step) {
+            $this->assertFalse($step['can_act'], 'An approve step stayed actionable after the loan was approved.');
+        }
+    }
+
     private function submittedLoan(bool $policyException = false): Loan
     {
         $product = LoanProduct::factory()->create([
