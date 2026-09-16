@@ -925,7 +925,7 @@ it('has no path writing an active loan status outside the ones that are accounte
         // transaction; the assertion runs at the end, after
         // closeRestructuredSource() has taken any restructure source out of the
         // active set.
-        'app/Services/LoanService.php:650 — \'status\' => \'released\',',
+        'app/Services/LoanService.php:707 — \'status\' => \'released\',',
         // processRepayment(): released → ongoing. Deliberately UNGUARDED — both
         // are already active, so it cannot add a holder.
         'app/Services/RepaymentService.php:185 — $loan->update([\'status\' => \'ongoing\']);',
