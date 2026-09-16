@@ -23,6 +23,7 @@ class GCashTransaction extends Model
         'total_amount',
         'status',
         'borrower_id',
+        'gcash_non_member_id',
         'transactor_user_id',
         'remarks',
         'paid_at',
@@ -43,6 +44,20 @@ class GCashTransaction extends Model
     public function borrower(): BelongsTo
     {
         return $this->belongsTo(Borrower::class);
+    }
+
+    /**
+     * The walk-in this transaction served, when it was not a member.
+     *
+     * Exactly one of `borrower` / `nonMember` is set on every row — enforced by
+     * StoreGCashTransactionRequest and a CHECK constraint on the table.
+     *
+     * `withTrashed`, so a transaction still names its party after that walk-in
+     * has been removed from the list.
+     */
+    public function nonMember(): BelongsTo
+    {
+        return $this->belongsTo(GCashNonMember::class, 'gcash_non_member_id')->withTrashed();
     }
 
     public function transactor(): BelongsTo
