@@ -22,7 +22,7 @@ class GCashService
         return DB::transaction(function () use ($type, $amount, $payload, $actor, $isPending) {
             $tier = $this->resolveTier($amount);
 
-            if ($duplicate = $this->detectDuplicate($payload['borrower_id'], $type, $amount)) {
+            if ($duplicate = $this->detectDuplicate($payload, $type, $amount)) {
                 throw new HttpResponseException(response()->json([
                     'message' => 'Possible duplicate transaction within the last 60 seconds.',
                     'data' => ['existing_id' => $duplicate->id],
@@ -50,7 +50,8 @@ class GCashService
                 'charge_amount' => $charge,
                 'total_amount' => $total,
                 'status' => $status,
-                'borrower_id' => $payload['borrower_id'],
+                'borrower_id' => $payload['borrower_id'] ?? null,
+                'gcash_non_member_id' => $payload['gcash_non_member_id'] ?? null,
                 'transactor_user_id' => $actor->id,
                 'remarks' => $payload['remarks'] ?? null,
             ]);
@@ -204,10 +205,26 @@ class GCashService
         return $prefix.str_pad((string) $next, 4, '0', STR_PAD_LEFT);
     }
 
-    private function detectDuplicate(int $borrowerId, string $type, float $amount): ?GCashTransaction
+    /**
+     * The same party, type and amount inside a minute is almost always a
+     * double-tap at the counter rather than two real transactions.
+     *
+     * Scoped to whichever party the payload carries. Matching on the party
+     * COLUMN rather than its value matters: without it a walk-in's second
+     * transaction would be compared against `borrower_id IS NULL`, which every
+     * other walk-in's row also satisfies, and unrelated customers would block
+     * each other at the window.
+     *
+     * @param  array{borrower_id?: int|null, gcash_non_member_id?: int|null}  $payload
+     */
+    private function detectDuplicate(array $payload, string $type, float $amount): ?GCashTransaction
     {
+        $borrowerId = $payload['borrower_id'] ?? null;
+        $nonMemberId = $payload['gcash_non_member_id'] ?? null;
+
         return GCashTransaction::query()
-            ->where('borrower_id', $borrowerId)
+            ->when($borrowerId, fn ($q) => $q->where('borrower_id', $borrowerId))
+            ->when($nonMemberId, fn ($q) => $q->where('gcash_non_member_id', $nonMemberId))
             ->where('type', $type)
             ->where('amount', $amount)
             ->where('transaction_date', '>=', now()->subSeconds(60))

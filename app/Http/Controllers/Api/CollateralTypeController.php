@@ -3,12 +3,14 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\CollateralType\ReorderCollateralTypesRequest;
 use App\Http\Requests\CollateralType\StoreCollateralTypeRequest;
 use App\Http\Requests\CollateralType\UpdateCollateralTypeRequest;
 use App\Http\Resources\CollateralTypeResource;
 use App\Models\CollateralType;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 use OpenApi\Attributes as OA;
 
@@ -28,6 +30,42 @@ class CollateralTypeController extends Controller
     public function index(): AnonymousResourceCollection
     {
         $this->authorize('collaterals:view');
+
+        return CollateralTypeResource::collection(
+            CollateralType::orderBy('display_order')->orderBy('name')->get()
+        );
+    }
+
+    #[OA\Post(
+        path: '/api/collateral-types/reorder',
+        summary: 'Reorder collateral types',
+        description: 'Persists the order produced by reordering rows on the settings screen. Send every id in its new order; display_order is assigned 1..n from the array position.',
+        tags: ['Collateral Types'],
+        security: [['sanctum' => []]],
+        requestBody: new OA\RequestBody(
+            required: true,
+            content: new OA\JsonContent(
+                required: ['ids'],
+                properties: [
+                    new OA\Property(property: 'ids', type: 'array', items: new OA\Items(type: 'integer'), example: [3, 1, 2]),
+                ],
+            ),
+        ),
+        responses: [
+            new OA\Response(response: 200, description: 'Reordered collateral type list'),
+            new OA\Response(response: 403, description: 'Missing settings:update permission'),
+            new OA\Response(response: 422, description: 'Unknown or duplicated id'),
+        ],
+    )]
+    public function reorder(ReorderCollateralTypesRequest $request): AnonymousResourceCollection
+    {
+        $ids = $request->validated()['ids'];
+
+        DB::transaction(function () use ($ids): void {
+            foreach ($ids as $position => $id) {
+                CollateralType::whereKey($id)->update(['display_order' => $position + 1]);
+            }
+        });
 
         return CollateralTypeResource::collection(
             CollateralType::orderBy('display_order')->orderBy('name')->get()

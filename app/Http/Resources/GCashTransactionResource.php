@@ -17,7 +17,8 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'charge_amount', type: 'number'),
         new OA\Property(property: 'total_amount', type: 'number'),
         new OA\Property(property: 'status', type: 'string', enum: ['pending', 'paid', 'completed']),
-        new OA\Property(property: 'borrower_id', type: 'integer'),
+        new OA\Property(property: 'borrower_id', type: 'integer', nullable: true),
+        new OA\Property(property: 'gcash_non_member_id', type: 'integer', nullable: true, description: 'Set instead of borrower_id when the counter served a walk-in.'),
         new OA\Property(property: 'transactor_user_id', type: 'integer'),
         new OA\Property(property: 'remarks', type: 'string', nullable: true),
         new OA\Property(property: 'paid_at', type: 'string', format: 'date-time', nullable: true),
@@ -43,6 +44,12 @@ class GCashTransactionResource extends JsonResource
                 'id' => $this->borrower->id,
                 'full_name' => $this->borrower->full_name,
                 'borrower_code' => $this->borrower->borrower_code,
+            ]),
+            'gcash_non_member_id' => $this->gcash_non_member_id,
+            'non_member' => $this->whenLoaded('nonMember', fn () => [
+                'id' => $this->nonMember->id,
+                'full_name' => $this->nonMember->full_name,
+                'mobile_number' => $this->nonMember->mobile_number,
             ]),
             'transactor_user_id' => $this->transactor_user_id,
             'transactor_user' => $this->whenLoaded('transactor', fn () => [
