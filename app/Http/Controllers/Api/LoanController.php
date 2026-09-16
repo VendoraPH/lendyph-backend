@@ -21,6 +21,7 @@ use App\Services\LoanService;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Validation\Rule;
 use OpenApi\Attributes as OA;
@@ -536,11 +537,11 @@ DESC,
             new OA\Response(response: 422, description: 'Invalid status transition'),
         ],
     )]
-    public function submit(Loan $loan): JsonResponse
+    public function submit(Request $request, Loan $loan): JsonResponse
     {
         $this->authorize('loans:update');
 
-        $this->loanService->submitForReview($loan);
+        $this->loanService->submitForReview($loan, $request->user());
 
         return response()->json(['message' => 'Loan submitted for review.', 'data' => new LoanResource($loan)]);
     }

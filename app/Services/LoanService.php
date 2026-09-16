@@ -523,12 +523,36 @@ class LoanService
         return $validated;
     }
 
-    public function submitForReview(Loan $loan): Loan
+    /**
+     * `draft -> for_review`, and the point at which the loan's approval chain
+     * comes into existence.
+     *
+     * Wrapped in a transaction — it was a bare update before — because the
+     * status flip and the chain snapshot have to commit together. A loan that
+     * reached `for_review` with no rows in `loan_approval_steps` would be
+     * un-actionable by anyone: there would be no pending step for an approver
+     * to sign, and no way back to `draft` to re-seed one.
+     *
+     * `$submitter` is optional and defaults to the authenticated user so the
+     * existing callers — the controller, DemoSeeder and a dozen tests — keep
+     * working unchanged; the chain's submit step is recorded against whoever
+     * it resolves to.
+     */
+    public function submitForReview(Loan $loan, ?User $submitter = null): Loan
     {
         $this->guardStatus($loan, 'draft', 'submit for review');
-        $loan->update(['status' => 'for_review']);
 
-        return $loan;
+        return DB::transaction(function () use ($loan, $submitter) {
+            $loan->update(['status' => 'for_review']);
+
+            // Resolved here rather than constructor-injected: LoanApprovalChainService
+            // depends on THIS class to run the for_review -> approved transition when
+            // the chain reaches its release step, and two constructor-injected services
+            // pointing at each other is a container resolution loop.
+            app(LoanApprovalChainService::class)->seed($loan, $submitter);
+
+            return $loan;
+        });
     }
 
     public function approve(Loan $loan, User $approver, ?string $remarks): Loan
@@ -646,6 +670,13 @@ class LoanService
             if ($lockedSource) {
                 $this->closeRestructuredSource($loan, $lockedSource, $releaser);
             }
+
+            // Close out the approval chain's `release` step, which this action
+            // IS. Without it a released loan keeps a pending release step
+            // forever and the loan detail page contradicts `loans.status`.
+            // Placed before the assertion below so that guard stays the last
+            // statement in the transaction, as its comment requires.
+            app(LoanApprovalChainService::class)->markReleased($loan, $releaser);
 
             // `approved` → `released` is a transition INTO Loan::ACTIVE_STATUSES,
             // and it writes no `loan_collaterals` row, so the guard on
