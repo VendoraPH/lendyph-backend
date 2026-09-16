@@ -38,28 +38,66 @@ return [
 
     /*
     |--------------------------------------------------------------------------
-    | CSV Import Diagnostics
+    | Restricted Diagnostics
     |--------------------------------------------------------------------------
     |
-    | Whether the CSV importer may write UNREDACTED exception detail to the
-    | `csv-import` channel below. Off, and it must stay off on any deployment
-    | holding real member data.
+    | Whether UNREDACTED exception detail may be written to the `csv-import`
+    | channel below. Off, and it must stay off on any deployment holding real
+    | member data.
     |
     | A Laravel QueryException's message is the failing SQL with the bindings
-    | substituted in, so for this importer one row-level database error carries
-    | the member's whole record — name, birthdate, address, contact number,
-    | income. A systemic fault (lock wait, deadlock, a poisoned code sequence)
-    | produces one such line per member. See ImportErrorDigest.
+    | substituted in, so one row-level database error carries the member's whole
+    | record — name, birthdate, address, contact number, income. A systemic
+    | fault (lock wait, deadlock, a poisoned code sequence) produces one such
+    | line per member. See App\Services\Diagnostics\ErrorDigest.
     |
-    | Turn it on only to diagnose a specific incident, on a box with test data
-    | or with the operator's informed consent, and turn it off afterwards. The
-    | importer's ordinary logging never needs it: it records the exception class
-    | and the driver's numeric error code, which is enough to tell a duplicate
-    | key from a lock-wait timeout.
+    | NOT ONLY THE IMPORTER any more. The borrower bulk endpoints write here
+    | too, because `Auditable` copies a borrower's full attributes into
+    | `audit_logs.old_values` and a failure of THAT insert is the same
+    | disclosure by a different route. So does `registrations:prune`, for a
+    | different reason worth stating precisely: it suppresses the Auditable
+    | hooks and is still not safe, because it makes a DIRECT
+    | AuditLogService::log() call that no `audit: false` touches, and because
+    | its own delete path quotes the member's external account number.
+    |
+    | ONE CHANNEL, ONE FLAG PER WRITER — and both halves of that are
+    | deliberate, because the two names fail in opposite directions:
+    |
+    |  - The CHANNEL keeps its importer spelling. Renaming it is a
+    |    deployment-coordinated change rather than a refactor: it is configured
+    |    on ten separate boxes, and a rename that silently switches off a sink
+    |    somebody enabled for a live incident is the one failure mode a
+    |    diagnostics switch must not have. It is a misnomer on purpose.
+    |  - The FLAG is per writer, because REUSING one fails the same way round
+    |    the other. A box where an operator set the import flag to chase an
+    |    import incident must not thereby arm a second, unrelated writer — an
+    |    admin-triggered borrower endpoint capturing whole member records
+    |    nobody asked about. "Only to diagnose a specific incident", below,
+    |    means nothing unless the switch is as specific as the incident.
+    |
+    | Callers may pass their own channel and their own flag; see
+    | ErrorDigest::recordDiagnostics().
+    |
+    | Turn either on only to diagnose a specific incident, on a box with test
+    | data or with the operator's informed consent, and turn it off afterwards.
+    | Ordinary logging never needs them: it records the exception class and the
+    | driver's numeric error code, which is enough to tell a duplicate key from
+    | a lock-wait timeout from a restricted delete.
     |
     */
 
+    // The CSV importer. See App\Services\CsvImport\ImportErrorDigest.
     'csv_import_diagnostics' => env('LOG_CSV_IMPORT_DIAGNOSTICS', false),
+
+    /*
+     * Everything that writes a BORROWER'S OWN ROW: the bulk deactivate/delete
+     * endpoints and registrations:prune.
+     *
+     * New, and therefore set nowhere. That is the point of it being new: it
+     * starts off on every deployment, including any that is already running
+     * with the import flag turned on.
+     */
+    'borrower_diagnostics' => env('LOG_BORROWER_DIAGNOSTICS', false),
 
     /*
     |--------------------------------------------------------------------------
@@ -108,8 +146,11 @@ return [
         ],
 
         /*
-         * The CSV importer's diagnostic channel — see 'csv_import_diagnostics'
-         * above, which gates whether anything is ever written here.
+         * The restricted diagnostic channel — see the flags above, one per
+         * writer, which gate whether anything is ever written here, and which
+         * explain why this channel still carries the importer's name now that
+         * the borrower paths share the file. Lines are tagged with a `source`
+         * so they stay attributable.
          *
          * Everything about it is the opposite of `single`, deliberately:
          *

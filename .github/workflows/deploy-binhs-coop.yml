@@ -47,8 +47,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Deploy to VPS via SSH
+        id: deploy
         uses: appleboy/ssh-action@v1
+        # github.sha and github.ref_name reach the box through the action's
+        # envs: input rather than being interpolated into the script text, so
+        # the remote shell receives them as real variables and there is no
+        # template value for it to mis-quote or word-split.
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+          EXPECTED_REF: ${{ github.ref_name }}
         with:
+          envs: EXPECTED_SHA,EXPECTED_REF
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
@@ -56,10 +65,94 @@ jobs:
           command_timeout: 20m
           script: |
             set -e
+
             if [ "${{ env.TARGET }}" = "production" ]; then
-              bash /var/www/binhs-coop-backend/deploy.sh
+              DEPLOY_DIR=/var/www/binhs-coop-backend
+              DEPLOY_BRANCH=main
             else
-              bash /var/www/binhs-coop-backend-staging/deploy.sh
+              DEPLOY_DIR=/var/www/binhs-coop-backend-staging
+              DEPLOY_BRANCH=development
+            fi
+
+            bash "$DEPLOY_DIR/deploy.sh"
+
+            # --- Did this deploy actually land? -----------------------------------------
+            # Nothing here used to assert the OUTCOME of a deploy. A green job proved that
+            # ssh connected and the deploy script exited 0 — not that the checkout moved.
+            # Every production verification this week was done by hand (reading /api/health,
+            # or `git rev-parse HEAD` over ssh) precisely because the job could not answer
+            # it: `Deploy Portfolio` failed with `dial tcp :22 i/o timeout` and its re-run
+            # failed the same way, four attempts across two runs; five other jobs failed on
+            # four occasions in one day and every one was fixed by a re-run with nothing
+            # changed; and a `Deploy binhs-coop` run was once dropped outright by a shared
+            # concurrency group, leaving the client's production frontend simply never
+            # updated. A box left on old code still returns HTTP 200 and still looks
+            # healthy from every angle except the deployed commit.
+            #
+            # Deliberately NOT an equality test against this run's commit. The deploy does
+            # `git fetch origin <branch>` + `git reset --hard origin/<branch>`, so it ships
+            # the branch tip AT THE MOMENT IT RUNS, not the commit that triggered this run;
+            # and the concurrency group queues deploys rather than cancelling them, so a
+            # queued older run can legitimately ship newer code. Ancestry is the honest
+            # assertion: HEAD must CONTAIN this run's commit, and is allowed to be ahead.
+            #
+            # This lives in the workflow rather than in deploy.sh because the on-VPS scripts
+            # are unversioned — they exist only on the box and can change without review.
+            # This is the copy that goes through review.
+            echo "=== Verifying $DEPLOY_DIR advanced to contain $EXPECTED_SHA ==="
+            cd "$DEPLOY_DIR"
+
+            if [ -z "${EXPECTED_SHA:-}" ]; then
+              echo "DEPLOY VERIFICATION FAILED: EXPECTED_SHA never reached the box."
+              echo "It travels via the ssh-action's envs: input — check it is listed there."
+              exit 1
+            fi
+
+            DEPLOYED_SHA=$(git rev-parse HEAD)
+
+            if [ "${EXPECTED_REF:-}" != "$DEPLOY_BRANCH" ]; then
+              # This run's ref is NOT the branch this directory tracks, so this run's commit
+              # is not expected to appear in this history at all and ancestry would be a
+              # guaranteed false failure. Not hypothetically: workflow_dispatch defaults to
+              # the repository's default branch, which is `main` in both repos, and `main`
+              # is PERMANENTLY ahead of `development` here — every promotion merges
+              # development -> main through a GitHub merge commit that is never merged back,
+              # so origin/main's tip is by construction never an ancestor of development.
+              # Measured 2026-09-16: 6 such commits in the backend, 10 in the frontend, with
+              # 0 flowing the other way. A hand-dispatched staging deploy — which is how
+              # binhs-coop is actually released — would therefore fail EVERY time on a
+              # deploy that did exactly the right thing. `git fetch origin <branch>` also
+              # fetches only that one ref, so the other branch's object may not exist on the
+              # box at all (/var/www/binhs-coop-backend and /var/www/lendyph-backend have no
+              # refs/remotes/origin/development), which would fail with a confusing
+              # "Not a valid commit name" instead.
+              #
+              # Assert what is still true and still worth asserting: the reset landed on the
+              # tip the deploy just fetched, in this same ssh session.
+              echo "NOTE: this run is on '${EXPECTED_REF:-<unset>}' but $DEPLOY_DIR tracks '$DEPLOY_BRANCH',"
+              echo "      so ancestry is not assertable here; asserting HEAD == origin/$DEPLOY_BRANCH instead."
+              BRANCH_TIP=$(git rev-parse --verify --quiet "refs/remotes/origin/$DEPLOY_BRANCH" || true)
+              if [ -z "$BRANCH_TIP" ] || [ "$DEPLOYED_SHA" != "$BRANCH_TIP" ]; then
+                echo "DEPLOY VERIFICATION FAILED: HEAD is $DEPLOYED_SHA but origin/$DEPLOY_BRANCH is ${BRANCH_TIP:-<no such ref on this box>}."
+                echo "The deploy reported success but the checkout is not on the tip it just fetched."
+                exit 1
+              fi
+              echo "OK: $DEPLOY_DIR HEAD $DEPLOYED_SHA == origin/$DEPLOY_BRANCH"
+            else
+              # Checked separately from the ancestry test so a stale box gets a message that
+              # says so, rather than git's "Not a valid commit name".
+              if ! git cat-file -e "${EXPECTED_SHA}^{commit}" 2>/dev/null; then
+                echo "DEPLOY VERIFICATION FAILED: $DEPLOY_DIR has no object for this run's commit $EXPECTED_SHA."
+                echo "The fetch never brought it down, so this checkout cannot be serving it."
+                exit 1
+              fi
+              if ! git merge-base --is-ancestor "$EXPECTED_SHA" "$DEPLOYED_SHA"; then
+                echo "DEPLOY VERIFICATION FAILED: $DEPLOY_DIR is serving $DEPLOYED_SHA,"
+                echo "which does not contain this run's commit $EXPECTED_SHA."
+                echo "The deploy reported success but the checkout did not advance."
+                exit 1
+              fi
+              echo "OK: $DEPLOY_DIR HEAD $DEPLOYED_SHA contains $EXPECTED_SHA"
             fi
 
       # The retry below used to fire ~2 min after the first attempt — inside the
@@ -77,8 +170,17 @@ jobs:
       # deploy.sh is idempotent, so retry once to ride out transient blips.
       - name: Deploy to VPS via SSH (retry on transient failure)
         if: failure()
+        id: deploy_retry
         uses: appleboy/ssh-action@v1
+        # github.sha and github.ref_name reach the box through the action's
+        # envs: input rather than being interpolated into the script text, so
+        # the remote shell receives them as real variables and there is no
+        # template value for it to mis-quote or word-split.
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+          EXPECTED_REF: ${{ github.ref_name }}
         with:
+          envs: EXPECTED_SHA,EXPECTED_REF
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
@@ -86,8 +188,219 @@ jobs:
           command_timeout: 20m
           script: |
             set -e
+
             if [ "${{ env.TARGET }}" = "production" ]; then
-              bash /var/www/binhs-coop-backend/deploy.sh
+              DEPLOY_DIR=/var/www/binhs-coop-backend
+              DEPLOY_BRANCH=main
             else
-              bash /var/www/binhs-coop-backend-staging/deploy.sh
+              DEPLOY_DIR=/var/www/binhs-coop-backend-staging
+              DEPLOY_BRANCH=development
             fi
+
+            bash "$DEPLOY_DIR/deploy.sh"
+
+            # --- Did this deploy actually land? -----------------------------------------
+            # Nothing here used to assert the OUTCOME of a deploy. A green job proved that
+            # ssh connected and the deploy script exited 0 — not that the checkout moved.
+            # Every production verification this week was done by hand (reading /api/health,
+            # or `git rev-parse HEAD` over ssh) precisely because the job could not answer
+            # it: `Deploy Portfolio` failed with `dial tcp :22 i/o timeout` and its re-run
+            # failed the same way, four attempts across two runs; five other jobs failed on
+            # four occasions in one day and every one was fixed by a re-run with nothing
+            # changed; and a `Deploy binhs-coop` run was once dropped outright by a shared
+            # concurrency group, leaving the client's production frontend simply never
+            # updated. A box left on old code still returns HTTP 200 and still looks
+            # healthy from every angle except the deployed commit.
+            #
+            # Deliberately NOT an equality test against this run's commit. The deploy does
+            # `git fetch origin <branch>` + `git reset --hard origin/<branch>`, so it ships
+            # the branch tip AT THE MOMENT IT RUNS, not the commit that triggered this run;
+            # and the concurrency group queues deploys rather than cancelling them, so a
+            # queued older run can legitimately ship newer code. Ancestry is the honest
+            # assertion: HEAD must CONTAIN this run's commit, and is allowed to be ahead.
+            #
+            # This lives in the workflow rather than in deploy.sh because the on-VPS scripts
+            # are unversioned — they exist only on the box and can change without review.
+            # This is the copy that goes through review.
+            echo "=== Verifying $DEPLOY_DIR advanced to contain $EXPECTED_SHA ==="
+            cd "$DEPLOY_DIR"
+
+            if [ -z "${EXPECTED_SHA:-}" ]; then
+              echo "DEPLOY VERIFICATION FAILED: EXPECTED_SHA never reached the box."
+              echo "It travels via the ssh-action's envs: input — check it is listed there."
+              exit 1
+            fi
+
+            DEPLOYED_SHA=$(git rev-parse HEAD)
+
+            if [ "${EXPECTED_REF:-}" != "$DEPLOY_BRANCH" ]; then
+              # This run's ref is NOT the branch this directory tracks, so this run's commit
+              # is not expected to appear in this history at all and ancestry would be a
+              # guaranteed false failure. Not hypothetically: workflow_dispatch defaults to
+              # the repository's default branch, which is `main` in both repos, and `main`
+              # is PERMANENTLY ahead of `development` here — every promotion merges
+              # development -> main through a GitHub merge commit that is never merged back,
+              # so origin/main's tip is by construction never an ancestor of development.
+              # Measured 2026-09-16: 6 such commits in the backend, 10 in the frontend, with
+              # 0 flowing the other way. A hand-dispatched staging deploy — which is how
+              # binhs-coop is actually released — would therefore fail EVERY time on a
+              # deploy that did exactly the right thing. `git fetch origin <branch>` also
+              # fetches only that one ref, so the other branch's object may not exist on the
+              # box at all (/var/www/binhs-coop-backend and /var/www/lendyph-backend have no
+              # refs/remotes/origin/development), which would fail with a confusing
+              # "Not a valid commit name" instead.
+              #
+              # Assert what is still true and still worth asserting: the reset landed on the
+              # tip the deploy just fetched, in this same ssh session.
+              echo "NOTE: this run is on '${EXPECTED_REF:-<unset>}' but $DEPLOY_DIR tracks '$DEPLOY_BRANCH',"
+              echo "      so ancestry is not assertable here; asserting HEAD == origin/$DEPLOY_BRANCH instead."
+              BRANCH_TIP=$(git rev-parse --verify --quiet "refs/remotes/origin/$DEPLOY_BRANCH" || true)
+              if [ -z "$BRANCH_TIP" ] || [ "$DEPLOYED_SHA" != "$BRANCH_TIP" ]; then
+                echo "DEPLOY VERIFICATION FAILED: HEAD is $DEPLOYED_SHA but origin/$DEPLOY_BRANCH is ${BRANCH_TIP:-<no such ref on this box>}."
+                echo "The deploy reported success but the checkout is not on the tip it just fetched."
+                exit 1
+              fi
+              echo "OK: $DEPLOY_DIR HEAD $DEPLOYED_SHA == origin/$DEPLOY_BRANCH"
+            else
+              # Checked separately from the ancestry test so a stale box gets a message that
+              # says so, rather than git's "Not a valid commit name".
+              if ! git cat-file -e "${EXPECTED_SHA}^{commit}" 2>/dev/null; then
+                echo "DEPLOY VERIFICATION FAILED: $DEPLOY_DIR has no object for this run's commit $EXPECTED_SHA."
+                echo "The fetch never brought it down, so this checkout cannot be serving it."
+                exit 1
+              fi
+              if ! git merge-base --is-ancestor "$EXPECTED_SHA" "$DEPLOYED_SHA"; then
+                echo "DEPLOY VERIFICATION FAILED: $DEPLOY_DIR is serving $DEPLOYED_SHA,"
+                echo "which does not contain this run's commit $EXPECTED_SHA."
+                echo "The deploy reported success but the checkout did not advance."
+                exit 1
+              fi
+              echo "OK: $DEPLOY_DIR HEAD $DEPLOYED_SHA contains $EXPECTED_SHA"
+            fi
+
+      # --- Does the PUBLIC hostname serve this commit? ----------------------
+      # The in-SSH assertion above reads the checkout directly. This reads it
+      # again from the outside, through DNS, nginx and php-fpm.
+      #
+      # What it proves, precisely: the public name resolves, the web tier is up,
+      # Laravel boots far enough to answer JSON, `config:cache` re-ran (env is
+      # served from bootstrap/cache/config.php), and the checkout behind that
+      # hostname contains this run's commit.
+      #
+      # What it does NOT prove: that the running bytecode is new.
+      # App\Services\DeploymentIdentity reads .git/HEAD off the filesystem on
+      # every request, so `commit` and `branch` describe exactly the same
+      # checkout the in-SSH step just asserted — read a second time, through the
+      # public edge. This is not an opcache or stale-bytecode check and must not
+      # be read as one. Its real value is that the public hostname is alive,
+      # boots, and is backed by the right checkout.
+      #
+      # It also cannot tell sibling deployments apart: api.lendyph.com,
+      # api.binhs-coop.lendyph.com and api-lendyph.abedubas.dev all track `main`
+      # and all report the same commit/branch/env, so a hostname misrouted to a
+      # sibling on the same branch passes this step. Only the in-SSH check is
+      # directory-specific.
+      #
+      # Gated on step OUTCOMES so it still runs when the first ssh leg failed
+      # and the retry rescued the deploy, and is skipped when both legs failed
+      # so it cannot bury the real error under a health failure.
+      - name: Verify the binhs-coop API serves this commit
+        if: ${{ !cancelled() && (steps.deploy.outcome == 'success' || steps.deploy_retry.outcome == 'success') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ github.sha }}
+          EXPECTED_REF: ${{ github.ref_name }}
+          TARGET: ${{ env.TARGET }}
+        run: |
+          set -uo pipefail
+
+          # Both legs of this workflow serve one of two hosts, picked the same way
+          # the deploy above picks its directory.
+          if [ "$TARGET" = "production" ]; then
+            HEALTH_HOST=api.binhs-coop.lendyph.com
+            DEPLOY_BRANCH=main
+            EXPECTED_ENV=production
+          else
+            HEALTH_HOST=api.binhs-coop-staging.lendyph.com
+            DEPLOY_BRANCH=development
+            EXPECTED_ENV=staging
+          fi
+
+          ATTEMPTS=6
+          attempt=0
+
+          while :; do
+            attempt=$((attempt + 1))
+            # Truncated before every attempt: curl leaves the output file untouched
+            # when the connection never opens (DNS failure, TLS failure, timeout), so
+            # without this the failure report would print the PREVIOUS attempt's body
+            # and read as though the host had answered.
+            : > "$RUNNER_TEMP/health.json"
+            code=$(curl -sS --max-time 20 -o "$RUNNER_TEMP/health.json" -w '%{http_code}' \
+              "https://${HEALTH_HOST}/api/health") || code=000
+
+            problem=""
+            if [ "$code" != "200" ]; then
+              problem="HTTP $code from https://${HEALTH_HOST}/api/health"
+            else
+              got_status=$(jq -r '.status // ""' "$RUNNER_TEMP/health.json" 2>/dev/null || true)
+              got_branch=$(jq -r '.branch // ""' "$RUNNER_TEMP/health.json" 2>/dev/null || true)
+              got_env=$(jq -r '.env // ""'    "$RUNNER_TEMP/health.json" 2>/dev/null || true)
+              got_commit=$(jq -r '.commit // ""' "$RUNNER_TEMP/health.json" 2>/dev/null || true)
+
+              if [ "$got_status" != "ok" ]; then
+                problem="status is '${got_status}', expected 'ok'"
+              elif [ "$got_branch" != "$DEPLOY_BRANCH" ]; then
+                problem="branch is '${got_branch}', expected '${DEPLOY_BRANCH}'"
+              elif [ "$got_env" != "$EXPECTED_ENV" ]; then
+                # app()->environment() resolves from bootstrap/cache/config.php, so this
+                # is also the one assertion here that `config:cache` actually re-ran.
+                problem="env is '${got_env}', expected '${EXPECTED_ENV}'"
+              elif [ "$EXPECTED_REF" != "$DEPLOY_BRANCH" ]; then
+                # Same ref guard as the in-SSH step, for the same reason: dispatching from
+                # the default branch `main` onto a directory that tracks `development`
+                # means this run's commit is not in that history and never will be.
+                echo "NOTE: this run is on '${EXPECTED_REF}' but ${HEALTH_HOST} tracks '${DEPLOY_BRANCH}';"
+                echo "      commit containment is not assertable here and was asserted in-SSH instead."
+                echo "ok: https://${HEALTH_HOST}/api/health -> ${got_commit} / ${got_branch} / ${got_env}"
+                exit 0
+              elif [ "$got_commit" = "${EXPECTED_SHA:0:7}" ]; then
+                # Fast path, and the common one: no API call at all. /api/health reports a
+                # 7-char short SHA, so this must compare against github.sha truncated to 7.
+                echo "ok: https://${HEALTH_HOST}/api/health -> ${got_commit} / ${got_branch} / ${got_env} (this run's commit)"
+                exit 0
+              else
+                # The box may legitimately be AHEAD (the branch tip moved between this run
+                # being queued and the deploy running), so this is containment, not
+                # equality — the same rule as the in-SSH ancestry check. The runner has no
+                # clone to compute that locally (these jobs never run actions/checkout),
+                # so it asks GitHub. Same idiom as fleet-drift-check.yml.
+                rel=$(gh api "repos/${GITHUB_REPOSITORY}/compare/${EXPECTED_SHA}...${got_commit}" --jq .status 2>/dev/null || true)
+                case "${rel:-}" in
+                  ahead|identical)
+                    echo "ok: https://${HEALTH_HOST}/api/health -> ${got_commit} / ${got_branch} / ${got_env} (${rel} of this run's ${EXPECTED_SHA:0:7}; the branch tip moved, which is allowed)"
+                    exit 0
+                    ;;
+                  behind|diverged)
+                    problem="serves ${got_commit}, which is '${rel}' relative to this run's ${EXPECTED_SHA:0:7} — it does not contain this commit"
+                    ;;
+                  *)
+                    problem="could not compare ${got_commit} against ${EXPECTED_SHA:0:7} (GitHub compare returned '${rel:-<nothing>}')"
+                    ;;
+                esac
+              fi
+            fi
+
+            if [ "$attempt" -ge "$ATTEMPTS" ]; then
+              echo "::error title=Post-deploy health check failed::${HEALTH_HOST}: ${problem}"
+              echo "last response body (verbatim):"
+              # `cat` on an empty file succeeds, so test for content first —
+            # otherwise a connection that never opened prints a bare header.
+            if [ -s "$RUNNER_TEMP/health.json" ]; then cat "$RUNNER_TEMP/health.json"; else echo "(no body captured)"; fi
+              echo
+              exit 1
+            fi
+
+            echo "attempt ${attempt}/${ATTEMPTS}: ${problem} — retrying in 10s"
+            sleep 10
+          done

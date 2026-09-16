@@ -1,6 +1,8 @@
 <?php
 
+use App\Http\Controllers\Api\BorrowerController;
 use App\Services\CsvImport\ImportErrorDigest;
+use App\Services\Diagnostics\ErrorDigest;
 
 /**
  * Nothing on the CSV-import path may put an exception's own text into a log.
@@ -53,13 +55,43 @@ use App\Services\CsvImport\ImportErrorDigest;
  *
  * Every file under app/Services/CsvImport/ — GLOBBED, so a service added later
  * is covered without anyone remembering to add it — plus the CSV-import console
- * commands, which catch the same exceptions and log them to the same channel.
+ * commands, which catch the same exceptions and log them to the same channel,
+ * plus app/Services/Diagnostics/, which is where the sanctioned sink now lives.
+ *
+ * That last one is not scope creep, it is the scope FOLLOWING THE CODE. The
+ * general half of ImportErrorDigest moved to ErrorDigest when the borrower bulk
+ * endpoints turned out to have the same defect in a worse place — in the
+ * response body rather than a log. The one permitted `getMessage()` call moved
+ * with it. Had the glob stayed as it was, this test would have gone on passing
+ * while no longer reading the line it exists to bound, which is the failure mode
+ * an arch test is least able to notice about itself.
  *
  * AppServiceProvider's CSV-import listener is deliberately NOT scanned. It is a
  * shared file whose other owners have unrelated reasons to call getMessage(),
  * and an arch test that fails somebody for a line in another feature is an arch
  * test that gets deleted. That site is pinned behaviourally instead — see
  * CsvImportUploadApiTest::test_a_failing_storage_release_does_not_fail_the_run_it_was_tidying_up_after().
+ *
+ * ## Two kinds of source: globbed whole, and bounded by reflection
+ *
+ * BorrowerController is scanned too, and it is the file this rule was RE-learnt
+ * on: bulkDeactivate() and bulkDestroy() put $e->getMessage() straight into the
+ * HTTP RESPONSE BODY, which is strictly worse than the log leaks above — a log
+ * needs shell access, a response body is handed to whoever called the endpoint.
+ * Until now its only guard was behavioural, and a behavioural guard covers the
+ * methods somebody wrote a test for.
+ *
+ * It is NOT globbed, and app/Http/Controllers/ is not swept. Same argument as
+ * the AppServiceProvider exclusion: that directory is full of files whose other
+ * owners have their own reasons to read an exception, and an arch test that
+ * fails an unrelated team for an unrelated line gets deleted rather than
+ * obeyed. So the two methods are bounded BY REFLECTION to their own line
+ * ranges — the same tool the sanctioned-sink exemption already uses — and this
+ * test claims ownership of nothing else in the file. Rename either method and
+ * the reflection throws, which is the right way to find out.
+ *
+ * (The file is still called CsvImportExceptionMessageArchTest, which is now a
+ * half-truth. The rule was the importer's first; it is the application's.)
  *
  * No database and no application boot: this reads the files' own source.
  */
@@ -74,10 +106,27 @@ $csvImportSources = static function (): array {
 
     $files = glob($root.'/app/Services/CsvImport/*.php') ?: [];
 
-    // The console side, named rather than globbed: app/Console/Commands holds a
-    // dozen commands that have nothing to do with importing, and sweeping the
-    // directory would quietly claim ownership of all of them.
-    foreach (['ProcessCsvImports.php', 'RedactCsvImportRows.php'] as $command) {
+    // The shared diagnostics half, globbed for the same reason: it holds the
+    // ONE sanctioned getMessage() call in the application, so a second class
+    // landing beside it must not arrive unscanned.
+    $files = [...$files, ...(glob($root.'/app/Services/Diagnostics/*.php') ?: [])];
+
+    /*
+     * The console side, named rather than globbed: app/Console/Commands holds a
+     * dozen commands that have nothing to do with importing, and sweeping the
+     * directory would quietly claim ownership of all of them.
+     *
+     * PruneAbandonedRegistrations is not an importer and is here anyway. It
+     * writes a BORROWER'S row, which is the subject this rule is really about,
+     * and it was converted to ErrorDigest in the same change that added the
+     * borrower diagnostics flag — but nothing pinned that conversion. The bulk
+     * endpoint tests only exercise bulk endpoints, and none of the prune's own
+     * 15 cases assert on its catch block, so putting `$e->getMessage()` back
+     * left the entire suite green. A converted call site with no guard is a
+     * call site that un-converts itself the first time somebody debugs a prune
+     * failure at 3am. Its catch binds `$e`, so all three scans below apply.
+     */
+    foreach (['ProcessCsvImports.php', 'RedactCsvImportRows.php', 'PruneAbandonedRegistrations.php'] as $command) {
         $path = $root.'/app/Console/Commands/'.$command;
 
         if (is_file($path)) {
@@ -88,6 +137,57 @@ $csvImportSources = static function (): array {
     sort($files);
 
     return $files;
+};
+
+/**
+ * Files scanned only BETWEEN the line numbers of named methods, and the ranges
+ * they are scanned between.
+ *
+ * Reflection rather than a hardcoded pair of line numbers, so that editing
+ * anything above these methods cannot silently slide the window off them.
+ *
+ * @return array<string, list<array{0: int, 1: int}>>
+ */
+$boundedSources = static function (): array {
+    static $bounded = null;
+
+    if ($bounded !== null) {
+        return $bounded;
+    }
+
+    $bounded = [];
+
+    foreach ([BorrowerController::class => ['bulkDeactivate', 'bulkDestroy']] as $class => $methods) {
+        foreach ($methods as $method) {
+            $reflection = new ReflectionMethod($class, $method);
+
+            $bounded[$reflection->getFileName()][] = [$reflection->getStartLine(), $reflection->getEndLine()];
+        }
+    }
+
+    return $bounded;
+};
+
+/**
+ * Whether a hit is somewhere this test actually claims.
+ *
+ * True for every line of a file scanned whole; true only inside the declared
+ * ranges for a file scanned in part.
+ */
+$inScope = static function (string $file, int $line) use ($boundedSources): bool {
+    $ranges = $boundedSources()[$file] ?? null;
+
+    if ($ranges === null) {
+        return true;
+    }
+
+    foreach ($ranges as [$start, $end]) {
+        if ($line >= $start && $line <= $end) {
+            return true;
+        }
+    }
+
+    return false;
 };
 
 /**
@@ -177,11 +277,28 @@ $callsToFunction = static function (string $file, string $name): array {
  * hardcoded list of names would go stale the first time somebody writes
  * `catch (Throwable $problem)`, and would go stale silently.
  *
- * Parameters typed `Throwable` are deliberately NOT included. The only ones on
- * this path are ImportErrorDigest's own, which is the sanctioned handler — the
- * class this test exists to push everything towards — and whose one permitted
- * read is already bounded by reflection below. A new leak does not arrive as a
- * parameter; it arrives in a catch block.
+ * Parameters typed `Throwable` ARE included, and the argument for leaving them
+ * out did not survive contact with the file layout it assumed.
+ *
+ * It ran: the only Throwable parameters on this path belong to the sanctioned
+ * handler, whose one permitted read is bounded by reflection anyway, and a new
+ * leak arrives in a catch block rather than as a parameter. The second half is
+ * still a fair bet. The first half stopped being true, and worse, it took this
+ * test's coverage of ErrorDigest.php with it: that file's only catch is
+ * `} catch (Throwable) {` with NO binding, so `$names` came back empty and the
+ * whole file was skipped by the caller below. The class holding the
+ * application's one deliberate getMessage() was the one file this test did not
+ * read — and nothing said so, because `$scanned` stays comfortably non-zero on
+ * the strength of the importer's many catch blocks.
+ *
+ * That gap was reachable, not theoretical: `(string) $e` or `['exception' => $e]`
+ * inside context() or forSubject() would have passed all three tests here, and
+ * context() goes to the SHARED log while forSubject() goes into a RESPONSE BODY.
+ *
+ * Including them costs nothing. `$stringificationsOf()` flags a bare variable
+ * only where the next significant token closes the expression (`,`, `]`, `)`)
+ * after a `=>`, so passing `$e` on to another call — `self::driverCode($e)` —
+ * is not a hit, and neither is `$e::class` or `$e->getCode()`.
  *
  * @return list<string>
  */
@@ -214,6 +331,42 @@ $throwableVariables = static function (string $file): array {
             if ($tokens[$i]->text === ')') {
                 break;
             }
+        }
+    }
+
+    /*
+     * Parameters typed `Throwable`: `f(Throwable $e)`, `f(?Throwable $e)`,
+     * `f(Throwable|PDOException $e)`.
+     *
+     * Walked forward through the remainder of the type to the variable it
+     * declares, IF it declares one — which is what makes `catch (Throwable)`
+     * with no binding contribute nothing rather than mis-bind to whatever
+     * follows the parenthesis.
+     */
+    foreach ($tokens as $position => $token) {
+        if (! $token->is(T_STRING) || $token->text !== 'Throwable') {
+            continue;
+        }
+
+        $before = $significant($tokens, $position - 1, -1);
+
+        // `use Throwable;`, `instanceof Throwable`, `new Throwable`: none of
+        // these introduce a variable holding one.
+        if ($before !== null && $tokens[$before]->is([T_USE, T_INSTANCEOF, T_NEW, T_DOUBLE_COLON])) {
+            continue;
+        }
+
+        for ($i = $position + 1; $i < count($tokens); $i++) {
+            if ($tokens[$i]->is([T_WHITESPACE, T_COMMENT, T_DOC_COMMENT, T_STRING, T_NS_SEPARATOR, T_ELLIPSIS])
+                || in_array($tokens[$i]->text, ['|', '&', '?'], true)) {
+                continue;
+            }
+
+            if ($tokens[$i]->is(T_VARIABLE)) {
+                $names[] = $tokens[$i]->text;
+            }
+
+            break;
         }
     }
 
@@ -310,23 +463,60 @@ $stringificationsOf = static function (string $file, array $names): array {
     return $lines;
 };
 
+/**
+ * Everything this test reads: the files scanned whole, plus the files scanned
+ * only between the line ranges $boundedSources() declares.
+ *
+ * @return list<string>
+ */
+$allSources = static function () use ($csvImportSources, $boundedSources): array {
+    $files = [...$csvImportSources(), ...array_keys($boundedSources())];
+
+    sort($files);
+
+    return $files;
+};
+
 $relative = static fn (string $file): string => str_replace(dirname(__DIR__, 2).'/', '', $file);
 
-it('never puts an exception message into a CSV-import log', function () use ($csvImportSources, $callsTo, $relative) {
-    $files = $csvImportSources();
+it('never puts an exception message into a log or a response body', function () use ($allSources, $inScope, $callsTo, $relative) {
+    $files = $allSources();
 
-    expect($files)->not->toBeEmpty('No CSV-import sources were found — the glob path is wrong.');
+    expect($files)->not->toBeEmpty('No sources were found — the glob path is wrong.');
 
     /*
-     * ImportErrorDigest::recordDiagnostics() IS the sanctioned sink: it is off
-     * unless LOG_CSV_IMPORT_DIAGNOSTICS is set, and it writes its own file with
-     * its own permissions and retention. It is exempt, and the exemption is
-     * bounded BY REFLECTION to that one method's line range so it cannot spread
-     * to the rest of the class. If the method is ever renamed or moved this
-     * throws, which is the right way to find out.
+     * recordDiagnostics() IS the sanctioned sink: it is off unless
+     * LOG_CSV_IMPORT_DIAGNOSTICS is set, and it writes its own file with its own
+     * permissions and retention. It is exempt, and the exemption is bounded BY
+     * REFLECTION to that one method's line range so it cannot spread to the rest
+     * of the class. If the method is ever renamed or moved this throws, which is
+     * the right way to find out.
+     *
+     * TWO of them now, and only one does any reading. ErrorDigest's is the real
+     * sink; ImportErrorDigest's is the importer's facade over it and calls no
+     * message at all today. Its entry is kept anyway, because the tripwire in
+     * the paragraph above is the point: deleting the entry of a delegating
+     * method is how the exemption would come to be re-added by hand, unbounded,
+     * the first time somebody inlines the delegation.
+     *
+     * @var list<ReflectionMethod>
      */
-    $sink = new ReflectionMethod(ImportErrorDigest::class, 'recordDiagnostics');
-    $sinkFile = $sink->getFileName();
+    $sinks = [
+        new ReflectionMethod(ErrorDigest::class, 'recordDiagnostics'),
+        new ReflectionMethod(ImportErrorDigest::class, 'recordDiagnostics'),
+    ];
+
+    $sanctioned = static function (string $file, int $line) use ($sinks): bool {
+        foreach ($sinks as $sink) {
+            if ($file === $sink->getFileName()
+                && $line >= $sink->getStartLine()
+                && $line <= $sink->getEndLine()) {
+                return true;
+            }
+        }
+
+        return false;
+    };
 
     /*
      * EMPTY, and kept rather than deleted.
@@ -363,7 +553,7 @@ it('never puts an exception message into a CSV-import log', function () use ($cs
          */
         foreach (['getMessage', '__toString', 'getTraceAsString'] as $reader) {
             foreach ($callsTo($file, $reader) as $line) {
-                if ($file === $sinkFile && $line >= $sink->getStartLine() && $line <= $sink->getEndLine()) {
+                if (! $inScope($file, $line) || $sanctioned($file, $line)) {
                     continue;
                 }
 
@@ -388,14 +578,15 @@ it('never puts an exception message into a CSV-import log', function () use ($cs
 
     if ($offending !== []) {
         $this->fail(
-            "An exception's own text is being read on the CSV-import path:\n\n  "
+            "An exception's own text is being read where it may not be:\n\n  "
             .implode("\n  ", $offending)
             ."\n\nA QueryException's message is the failing SQL with the bindings substituted in, so on this "
             ."feature that string is a member's whole record — and everywhere it is logged is the shared "
             ."`single` channel, which never rotates and is world-readable.\n\nUse "
-            .'ImportErrorDigest::context($e) in the log context, which emits the exception class, the SQLSTATE '
-            .'and the driver code; and ImportErrorDigest::recordDiagnostics($e, [...]) if the full text is '
-            .'genuinely needed, which routes it to the opt-in `csv-import` channel instead.'
+            .'ErrorDigest::context($e) in the log context (ImportErrorDigest::context($e) on the import path, '
+            .'which forwards to it), emitting the exception class, the SQLSTATE and the driver code; and '
+            .'recordDiagnostics($e, [...]) if the full text is genuinely needed, which routes it to the opt-in '
+            .'restricted channel instead.'
         );
     }
 
@@ -409,7 +600,7 @@ it('never puts an exception message into a CSV-import log', function () use ($cs
     );
 });
 
-it('never reports a CSV-import exception to the default channel', function () use ($csvImportSources, $callsToFunction, $relative) {
+it('never reports one of these exceptions to the default channel', function () use ($allSources, $inScope, $callsToFunction, $relative) {
     /*
      * report() is the same leak by another route. Laravel's default handler
      * logs `$e->getMessage()` to the DEFAULT channel — `single` again — so
@@ -436,8 +627,11 @@ it('never reports a CSV-import exception to the default channel', function () us
     $offending = [];
     $seen = [];
 
-    foreach ($csvImportSources() as $file) {
-        $lines = $callsToFunction($file, 'report');
+    foreach ($allSources() as $file) {
+        $lines = array_values(array_filter(
+            $callsToFunction($file, 'report'),
+            static fn (int $line): bool => $inScope($file, $line),
+        ));
 
         if ($lines === []) {
             continue;
@@ -471,7 +665,7 @@ it('never reports a CSV-import exception to the default channel', function () us
     );
 });
 
-it('never stringifies a CSV-import exception into a log context', function () use ($csvImportSources, $throwableVariables, $stringificationsOf, $relative) {
+it('never stringifies one of these exceptions into a log context', function () use ($allSources, $inScope, $throwableVariables, $stringificationsOf, $relative) {
     /*
      * The third and fourth spellings of the same sink, and the reason they are
      * here is how the third one was found: BY HAND, during a review sweep, not
@@ -489,12 +683,12 @@ it('never stringifies a CSV-import exception into a log context', function () us
      * NO ALLOWLIST. Both were clean when this was written — nothing to grandfather
      * in, so nothing to prune later.
      */
-    $files = $csvImportSources();
+    $files = $allSources();
 
-    expect($files)->not->toBeEmpty('No CSV-import sources were found — the glob path is wrong.');
+    expect($files)->not->toBeEmpty('No sources were found — the glob path is wrong.');
 
     $offending = [];
-    $scanned = 0;
+    $scannedFiles = [];
 
     foreach ($files as $file) {
         $names = $throwableVariables($file);
@@ -503,25 +697,49 @@ it('never stringifies a CSV-import exception into a log context', function () us
             continue;
         }
 
-        $scanned++;
+        $scannedFiles[] = $file;
 
         foreach ($stringificationsOf($file, $names) as $line) {
+            if (! $inScope($file, $line)) {
+                continue;
+            }
+
             $offending[] = $relative($file).':'.$line;
         }
     }
 
     /*
-     * The scan has to have had something to look at. If the catch-clause
-     * discovery ever stops finding variables — a tokeniser change, a refactor
-     * to `catch (Throwable)` with no binding everywhere — this test would go
-     * green by looking at nothing, which is the failure mode an arch test can
-     * least afford.
+     * The scan has to have had something to look at. If the discovery above
+     * ever stops finding variables — a tokeniser change, a refactor to
+     * `catch (Throwable)` with no binding everywhere — this test would go green
+     * by looking at nothing, which is the failure mode an arch test can least
+     * afford.
      */
-    expect($scanned)->toBeGreaterThan(0, 'No file yielded a caught-throwable variable, so this test scanned nothing.');
+    expect($scannedFiles)->not->toBeEmpty('No file yielded a throwable variable, so this test scanned nothing.');
+
+    /*
+     * ...and a count is not enough, which is the specific way this test was
+     * already blind.
+     *
+     * ErrorDigest.php's only catch is `} catch (Throwable) {` with no binding.
+     * While discovery read catch bindings alone, that file yielded no names and
+     * was skipped whole — the one file holding a deliberate getMessage() call,
+     * unscanned — and `$scanned > 0` never noticed, because the importer's many
+     * catch blocks kept the number healthy. A tripwire that counts cannot see
+     * the absence of a particular file, so this one names it, by reflection so
+     * that moving the class fails loudly rather than silently dropping it.
+     */
+    $this->assertContains(
+        (new ReflectionClass(ErrorDigest::class))->getFileName(),
+        $scannedFiles,
+        'The class holding the application\'s one sanctioned getMessage() yielded no throwable variable, so this '
+        .'test skipped it entirely. That is how it was blind before: a file whose only catch has no binding '
+        .'disappears from the scan, and a count-based tripwire cannot tell. Check $throwableVariables().'
+    );
 
     if ($offending !== []) {
         $this->fail(
-            "An exception object is being stringified into a CSV-import log:\n\n  "
+            "An exception object is being stringified into a log or a response:\n\n  "
             .implode("\n  ", $offending)
             ."\n\nA Throwable's string form is its message AND its full stack trace, and on this feature the "
             ."message is the failing SQL with the bindings substituted in — a member's whole record.\n\nUse "
@@ -532,4 +750,44 @@ it('never stringifies a CSV-import exception into a log context', function () us
     }
 
     expect($offending)->toBe([]);
+});
+
+it('claims every bulk borrower endpoint there is', function () use ($boundedSources) {
+    /*
+     * The bounded scope above names two methods. This is what stops that being
+     * a list somebody forgets.
+     *
+     * The reason BorrowerController is scanned at all is that its only previous
+     * guard was behavioural, and a behavioural guard covers the methods
+     * somebody wrote a test for: a THIRD bulk method could ship with
+     * `$e->getMessage()` in its response and nothing would say a word.
+     * Reflection-bounded ranges fix the coverage of these two and reproduce
+     * exactly that gap for the next one — so the gap is closed here instead,
+     * by asserting the list is complete rather than merely correct.
+     *
+     * Deliberately NOT a glob of the controller. Adding a bulk endpoint should
+     * cost one line in this array plus whatever it takes to make the scan pass;
+     * it should not silently enrol every unrelated method in the file.
+     */
+    $declared = [];
+
+    foreach ((new ReflectionClass(BorrowerController::class))->getMethods() as $method) {
+        if ($method->getDeclaringClass()->getName() === BorrowerController::class
+            && str_starts_with($method->getName(), 'bulk')) {
+            $declared[] = $method->getName();
+        }
+    }
+
+    sort($declared);
+
+    expect($declared)->toBe(
+        ['bulkDeactivate', 'bulkDestroy'],
+        'BorrowerController has gained or lost a bulk endpoint. Every one of them returns a per-id `failed` '
+        .'array straight to the caller, which is where this whole rule was re-learnt — an exception message in '
+        .'that array is a member record in an HTTP response body. Add it to $boundedSources() above so its '
+        .'lines are actually scanned, then update this list.'
+    );
+
+    // And the ranges really did resolve to that file, rather than to nothing.
+    expect($boundedSources())->toHaveCount(1);
 });
