@@ -50,6 +50,60 @@ class AccountingAccountMapping extends Model
         'accounts_payable',
     ];
 
+    /**
+     * What each role's account has to BE, beyond merely being postable.
+     *
+     * ## Why the type has to be checked and why it is not enough to be careful
+     *
+     * The posting engine trusts this table without question: a rule asks for
+     * `allowance_credit_losses` and posts to whatever comes back. Nothing
+     * downstream re-examines the account, and nothing can — by the time the
+     * entry exists it is a balanced journal against a real account, and it
+     * balances, and every report renders it without complaint.
+     *
+     * So the damage is silent and it is arithmetic. `AccountRules::signedBalance()`
+     * reads `normal_balance`, which is derived from `type` + `is_contra`. Point
+     * `allowance_credit_losses` at an ordinary (non-contra) asset and the
+     * allowance becomes debit-normal: Net Loans Receivable comes out as gross
+     * PLUS the provision instead of minus, overstating the portfolio by twice
+     * the allowance on the dashboard and the balance sheet at once. Point
+     * `cash` at an income account and every collection credits revenue twice
+     * while the cash never appears. Neither fails. Both just report.
+     *
+     * The three checks:
+     *
+     * - `type` — the statement classification. Always required.
+     * - `is_contra` — required `true` for the allowance, which is the whole
+     *   reason that account exists: it is an asset carrying a credit balance
+     *   that SUBTRACTS from the assets above it.
+     * - `cash_kind` — required, and matching the role, for the four settlement
+     *   accounts. `cash_kind` is what puts an account on the Cash & Bank screen
+     *   and into the dashboard's cash figures, so a `gcash` role pointing at an
+     *   account with no `cash_kind` would take collections that never show up
+     *   in the money the organisation thinks it holds.
+     *
+     * Keyed by role and covering every entry in {@see self::ROLES}; a role
+     * added there without a shape here is refused outright rather than waved
+     * through, so the two lists cannot drift.
+     *
+     * @var array<string, array{type: string, is_contra?: bool, cash_kind?: string}>
+     */
+    public const ROLE_SHAPES = [
+        'cash' => ['type' => 'asset', 'cash_kind' => 'cash'],
+        'gcash' => ['type' => 'asset', 'cash_kind' => 'gcash'],
+        'maya' => ['type' => 'asset', 'cash_kind' => 'maya'],
+        'bank' => ['type' => 'asset', 'cash_kind' => 'bank'],
+        'loans_receivable' => ['type' => 'asset'],
+        'interest_receivable' => ['type' => 'asset'],
+        'penalty_receivable' => ['type' => 'asset'],
+        'interest_income' => ['type' => 'income'],
+        'penalty_income' => ['type' => 'income'],
+        'processing_fee_income' => ['type' => 'income'],
+        'credit_loss_expense' => ['type' => 'expense'],
+        'allowance_credit_losses' => ['type' => 'asset', 'is_contra' => true],
+        'accounts_payable' => ['type' => 'liability'],
+    ];
+
     protected $fillable = [
         'role',
         'accounting_account_id',

@@ -6,6 +6,7 @@ use App\Models\AccountingAccount;
 use App\Models\AccountingAccountMapping;
 use App\Services\AuditLogService;
 use Illuminate\Database\Eloquent\Collection;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Support\Facades\DB;
 
@@ -195,11 +196,33 @@ final class ChartOfAccountsSeeder
      */
     public function seed(?int $createdBy = null): Collection
     {
+        try {
+            return $this->seedInTransaction($createdBy);
+        } catch (UniqueConstraintViolationException) {
+            /*
+             * TWO SEEDS AT ONCE — a double-clicked button, or a retried request.
+             *
+             * The check below is a SELECT, so both callers can pass it before
+             * either inserts. `accounting_accounts.code` is uniquely indexed, so
+             * the database settles it correctly and only one chart is ever
+             * created — but the loser's unhandled QueryException surfaced as a
+             * 500 on what is, from the operator's point of view, exactly the
+             * situation the 409 exists to describe. The whole losing attempt
+             * rolled back inside the transaction, so re-answering here reports
+             * the outcome rather than papering over a partial write.
+             */
+            throw $this->alreadySeeded();
+        }
+    }
+
+    /**
+     * @throws HttpResponseException when a chart already exists
+     */
+    private function seedInTransaction(?int $createdBy): Collection
+    {
         return DB::transaction(function () use ($createdBy) {
             if ($this->hasChart()) {
-                throw new HttpResponseException(response()->json([
-                    'message' => 'This organisation already has a chart of accounts. Seeding again would overwrite accounts that may already carry history.',
-                ], 409));
+                throw $this->alreadySeeded();
             }
 
             $idByCode = [];
@@ -256,5 +279,21 @@ final class ChartOfAccountsSeeder
 
             return AccountingAccount::query()->inCodeOrder()->get();
         });
+    }
+
+    /**
+     * Refusing to seed over an existing chart.
+     *
+     * 409 rather than 422: nothing about the request is invalid, the resource
+     * simply already exists. Merging instead would resurrect accounts an
+     * administrator deliberately removed and re-point posting roles they
+     * deliberately changed — silently, over a chart that may already carry
+     * history.
+     */
+    private function alreadySeeded(): HttpResponseException
+    {
+        return new HttpResponseException(response()->json([
+            'message' => 'This organisation already has a chart of accounts. Seeding again would overwrite accounts that may already carry history.',
+        ], 409));
     }
 }

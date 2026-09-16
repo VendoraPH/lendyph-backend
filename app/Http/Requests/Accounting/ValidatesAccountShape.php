@@ -22,7 +22,7 @@ trait ValidatesAccountShape
      *
      * @var list<string>
      */
-    private const SHAPE_FIELDS = ['code', 'type', 'parent_id', 'cash_kind', 'is_group', 'is_active'];
+    private const SHAPE_FIELDS = ['code', 'type', 'parent_id', 'cash_kind', 'is_group', 'is_active', 'is_contra'];
 
     /**
      * @param  AccountingAccount|null  $existing  the row being updated, if any.
@@ -46,6 +46,7 @@ trait ValidatesAccountShape
         $cashKind = $this->finalValue('cash_kind', $existing?->cash_kind);
         $isGroup = (bool) $this->finalValue('is_group', $existing?->is_group ?? false);
         $isActive = (bool) $this->finalValue('is_active', $existing?->is_active ?? true);
+        $isContra = (bool) $this->finalValue('is_contra', $existing?->is_contra ?? false);
 
         $this->assertCodeAgreesWithType($validator, $code, $type);
         $this->assertParentIsAGroupOfTheSameType($validator, $parentId, $type, $existing);
@@ -54,6 +55,7 @@ trait ValidatesAccountShape
         if ($existing !== null) {
             $this->assertHeadingsKeepTheirChildren($validator, $existing, $isGroup);
             $this->assertMappedAccountStaysPostable($validator, $existing, $isGroup, $isActive);
+            $this->assertHistoryKeepsItsSign($validator, $existing, $type, $isContra);
         }
     }
 
@@ -234,5 +236,59 @@ trait ValidatesAccountShape
                 );
             }
         }
+    }
+
+    /**
+     * An account that has been posted to cannot change `type` or `is_contra`.
+     *
+     * Both derive `normal_balance`, and `normal_balance` is applied to
+     * HISTORICAL lines every time a balance is computed — the trial balance,
+     * the general ledger and the dashboard all read the account as it is NOW to
+     * interpret movements recorded years ago. So one PUT retroactively re-signs
+     * every balance this account has ever carried: a ₱2,000,000 debit-normal
+     * receivable becomes a ₱2,000,000 credit, the balance sheet moves ₱4M in a
+     * single step, and the ledger rows themselves are untouched and look
+     * perfectly ordinary. Nothing in the audit trail says a figure changed,
+     * because no figure was stored — only its interpretation moved.
+     *
+     * `is_group` and `is_active` are already guarded for mapped accounts by
+     * {@see self::assertMappedAccountStaysPostable()}; this is the same
+     * treatment for the two fields that rewrite history rather than merely
+     * breaking the next posting, and it applies to EVERY account with lines,
+     * mapped or not.
+     *
+     * The remedy is the ordinary one: deactivate the account, create a
+     * correctly typed one, and move the balance across with a journal entry —
+     * which leaves both halves on the record, as a correction should.
+     */
+    private function assertHistoryKeepsItsSign(
+        Validator $validator,
+        AccountingAccount $existing,
+        string $type,
+        bool $isContra,
+    ): void {
+        $typeChanged = $type !== $existing->type;
+        $contraChanged = $isContra !== (bool) $existing->is_contra;
+
+        if (! $typeChanged && ! $contraChanged) {
+            return;
+        }
+
+        if (! $existing->hasTransactions()) {
+            return;
+        }
+
+        $field = $typeChanged ? 'type' : 'is_contra';
+        $what = $typeChanged
+            ? "re-classify it from {$existing->type} to {$type}"
+            : ($isContra ? 'make it a contra account' : 'stop it being a contra account');
+
+        $validator->errors()->add(
+            $field,
+            "{$existing->code} {$existing->name} already has journal entries against it, so you cannot {$what}. "
+            .'Both fields decide which way the account grows, and that is applied to every entry it has EVER '
+            .'carried — changing one now would silently re-sign all of its history. Deactivate this account and '
+            .'move the balance to a correctly classified one with a journal entry instead.',
+        );
     }
 }

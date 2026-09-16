@@ -37,6 +37,13 @@ final class Money
     private const MAX_PESO_DIGITS = 15;
 
     /**
+     * The ceiling itself: one peso past the largest {@see self::MAX_PESO_DIGITS}
+     * allows, so `>= MAX_PESOS` is "too many digits" for a number the same way
+     * `strlen() > MAX_PESO_DIGITS` is for a string.
+     */
+    private const MAX_PESOS = 1_000_000_000_000_000;
+
+    /**
      * Parses request input or a decimal string into centavos.
      *
      * Returns `null` for anything that is not a usable amount — blank,
@@ -61,12 +68,29 @@ final class Money
             return null;
         }
 
+        // The ceiling applies to ALL THREE branches, not only to strings.
+        //
+        // It used to guard the string path alone, which was the path nobody
+        // could reach it from: `json_decode` hands a controller an int or a
+        // float, and those two went through unbounded. A JSON number past
+        // 2^53 is already a float by the time PHP sees it, so `* 100` lands on
+        // a value whose last centavos are noise — and the result is a plausible
+        // integer that silently differs from what was sent, on the one field in
+        // this system where "close" has no meaning. Unreachable until something
+        // wired Money to journal-line input; the journals module is that thing.
         if (is_int($value)) {
-            return $value < 0 ? null : $value * 100;
+            return $value < 0 || $value >= self::MAX_PESOS ? null : $value * 100;
         }
 
         if (is_float($value)) {
-            if (! is_finite($value) || $value < 0) {
+            // Note the float branch is only exactly representable well below
+            // this bound — a double holds whole centavos up to 2^53, i.e. about
+            // ₱90 trillion. The ceiling is stated identically to the other two
+            // branches so all three refuse the same inputs; anything a caller
+            // sends as a float above ₱90tn was already approximate when it
+            // arrived, and no ceiling here can un-approximate it. Send large
+            // amounts as strings.
+            if (! is_finite($value) || $value < 0 || $value >= self::MAX_PESOS) {
                 return null;
             }
 

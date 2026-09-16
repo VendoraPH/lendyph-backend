@@ -128,6 +128,16 @@ class TimezoneShift
         // csv_import_* tables below.
         'accounting_account_mappings' => ['created_at', 'updated_at'],
         'accounting_accounts' => ['created_at', 'updated_at'],
+        // Same reasoning, and one addition: `posted_at` is a real instant (the
+        // moment an entry entered the books) and WOULD be a shift candidate on
+        // any table old enough to need it — this one is not. Note that
+        // `accounting_journals.date` is deliberately absent from both maps: it
+        // is a DATE, the calendar day the transaction belongs to, chosen by the
+        // person posting rather than derived from a clock. Shifting an
+        // accounting date would move entries between reporting periods, which
+        // is the accounting equivalent of moving a payment to the wrong day.
+        'accounting_journal_lines' => ['created_at', 'updated_at'],
+        'accounting_journals' => ['created_at', 'posted_at', 'updated_at'],
         'borrower_submission_tokens' => ['created_at', 'expires_at', 'updated_at'],
         // The CSV migration importer's own bookkeeping. These tables were created
         // on 2026-08-29, three weeks after the cutover completed (2026-08-06 on

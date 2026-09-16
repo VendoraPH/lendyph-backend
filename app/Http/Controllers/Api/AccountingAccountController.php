@@ -8,6 +8,8 @@ use App\Http\Requests\Accounting\UpdateAccountingAccountRequest;
 use App\Http\Resources\AccountingAccountResource;
 use App\Models\AccountingAccount;
 use App\Services\Accounting\ChartOfAccountsSeeder;
+use App\Services\Accounting\TrialBalanceBuilder;
+use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Validation\ValidationException;
@@ -24,6 +26,8 @@ use OpenApi\Attributes as OA;
  */
 class AccountingAccountController extends Controller
 {
+    public function __construct(private TrialBalanceBuilder $trialBalance) {}
+
     #[OA\Get(
         path: '/api/accounting/accounts',
         summary: 'List chart of accounts',
@@ -54,9 +58,17 @@ class AccountingAccountController extends Controller
 
         $perPage = min((int) ($filters['per_page'] ?? 15), 100);
 
-        return AccountingAccountResource::collection(
-            AccountingAccount::query()->inCodeOrder()->paginate($perPage)
-        );
+        $accounts = AccountingAccount::query()
+            // One extra query for the whole page instead of one per row. The
+            // alternative is an `exists` per account inside the resource, which
+            // is 60 queries on a default chart and invisible until production.
+            ->withCount('journalLines')
+            ->inCodeOrder()
+            ->paginate($perPage);
+
+        $this->attachBalances($accounts->getCollection());
+
+        return AccountingAccountResource::collection($accounts);
     }
 
     #[OA\Post(
@@ -95,6 +107,8 @@ class AccountingAccountController extends Controller
             ['created_by' => $request->user()?->id],
         ));
 
+        $account->loadCount('journalLines');
+
         return (new AccountingAccountResource($account))
             ->response()
             ->setStatusCode(201);
@@ -118,6 +132,11 @@ class AccountingAccountController extends Controller
 
         $accounts = $seeder->seed(request()->user()?->id);
 
+        // Every count is zero on a chart that was created a moment ago. Loaded
+        // anyway so the field is PRESENT and says so, rather than absent and
+        // leaving the client to guess.
+        $accounts->loadCount('journalLines');
+
         return AccountingAccountResource::collection($accounts)
             ->response()
             ->setStatusCode(201);
@@ -139,6 +158,9 @@ class AccountingAccountController extends Controller
     public function show(AccountingAccount $account): AccountingAccountResource
     {
         $this->authorize('chart_of_accounts:view');
+
+        $account->loadCount('journalLines');
+        $this->attachBalances(new Collection([$account]));
 
         return new AccountingAccountResource($account);
     }
@@ -163,13 +185,15 @@ class AccountingAccountController extends Controller
     {
         $account->update($request->validated());
 
-        return new AccountingAccountResource($account->refresh());
+        $account->refresh()->loadCount('journalLines');
+
+        return new AccountingAccountResource($account);
     }
 
     #[OA\Delete(
         path: '/api/accounting/accounts/{id}',
         summary: 'Delete an account',
-        description: 'Refuses (422) when the account has children or when a posting role resolves to it. Both are restricted by foreign keys as well; these checks turn what would be a 500 into something a screen can render.',
+        description: 'Refuses (422) when the account has children, when a posting role resolves to it, or when any journal line — draft or posted — references it. All three are restricted by foreign keys as well; these checks turn what would be a 500 into something a screen can render. An account with history can only be deactivated.',
         tags: ['Accounting'],
         security: [['sanctum' => []]],
         parameters: [
@@ -178,7 +202,7 @@ class AccountingAccountController extends Controller
         responses: [
             new OA\Response(response: 200, description: 'Account deleted'),
             new OA\Response(response: 403, description: 'Missing chart_of_accounts:delete'),
-            new OA\Response(response: 422, description: 'Account has children or is referenced by a posting role'),
+            new OA\Response(response: 422, description: 'Account has children, is referenced by a posting role, or has journal lines'),
         ],
     )]
     public function destroy(AccountingAccount $account): JsonResponse
@@ -203,8 +227,66 @@ class AccountingAccountController extends Controller
             ]);
         }
 
+        $lines = $account->journalLines()->count();
+
+        if ($lines > 0) {
+            // The third restricting foreign key, and the one that matters most.
+            // Deleting an account with history would destroy ONE HALF of
+            // entries that still exist: the books would stop balancing and the
+            // missing side would be unrecoverable, because a journal line is
+            // the only record that the other side ever had a counterpart.
+            //
+            // Draft lines count, because the foreign key counts them — a check
+            // that ignored drafts would answer 200 here and then 500 on the
+            // DELETE. Deactivating is the remedy: it stops the account taking
+            // new history while keeping what it has.
+            throw ValidationException::withMessages([
+                'account' => "{$account->code} {$account->name} has {$lines} journal line(s) against it and cannot be deleted. Deactivate it instead — an account with history keeps its history.",
+            ]);
+        }
+
         $account->delete();
 
         return response()->json(['message' => 'Account deleted successfully.']);
+    }
+
+    /**
+     * Hangs each account's signed balance on it, for the resource to emit.
+     *
+     * From {@see TrialBalanceBuilder}, not from an aggregate of its own, and
+     * that is the whole point: the Cash & Bank screen sums these into one
+     * headline figure that sits a click away from the balance sheet. Two
+     * aggregates would eventually disagree over a reversal or a group account,
+     * and both figures would be plausible.
+     *
+     * Balances are ALL-TIME rather than as of a date — a money account's
+     * balance is what it holds, not what it held at some cut-off — and cover
+     * every branch, because the chart is organisation-wide.
+     *
+     * Accounts with no movement are absent from the aggregate and are set to 0
+     * here, not left null: "never posted to" and "posted to and netted out" are
+     * the same balance to a reader, and an absent field would be rendered as
+     * "not asked for".
+     *
+     * @param  Collection<int, AccountingAccount>  $accounts
+     */
+    private function attachBalances(Collection $accounts): void
+    {
+        if ($accounts->isEmpty()) {
+            return;
+        }
+
+        $balances = $this->trialBalance->signedBalances(
+            null,
+            null,
+            $accounts->pluck('id')->map(static fn ($id): int => (int) $id)->all(),
+        );
+
+        foreach ($accounts as $account) {
+            // A heading has no balance of its own — what a screen shows against
+            // one is the total of its subtree, computed from the rows beneath
+            // it. Emitting 0 would be read as "this heading holds nothing".
+            $account->balance = $account->is_group ? null : ($balances[$account->id] ?? 0);
+        }
     }
 }
