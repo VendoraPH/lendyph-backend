@@ -111,15 +111,26 @@ class LoanApprovalChainTest extends TestCase
         }
     }
 
-    public function test_the_chain_roles_hold_only_loans_view_before_the_accounting_branch_lands(): void
+    public function test_the_chain_roles_hold_only_what_they_need_before_the_accounting_branch_lands(): void
     {
-        foreach (['loan_processor', 'bod1', 'bod7'] as $roleName) {
+        // Board roles sign; they do not prepare. Their authority comes from
+        // holding the role named on the step, not from a permission.
+        foreach (['bod1', 'bod7'] as $roleName) {
             $this->assertSame(
                 ['loans:view'],
                 Role::where('name', $roleName)->firstOrFail()->permissions->pluck('name')->all(),
                 "{$roleName} holds more than loans:view.",
             );
         }
+
+        // loan_processor is the FIRST step of both default chains, and
+        // LoanController@submit checks `loans:update` — with view alone it
+        // could not start the chain it exists to start.
+        $this->assertEqualsCanonicalizing(
+            ['loans:view', 'loans:update'],
+            Role::where('name', 'loan_processor')->firstOrFail()->permissions->pluck('name')->all(),
+            'loan_processor needs exactly view + update: never loans:approve, which would hand it the single-shot endpoint.',
+        );
     }
 
     public function test_manager_picks_up_the_read_only_accounting_permissions_once_they_exist(): void
@@ -147,13 +158,19 @@ class LoanApprovalChainTest extends TestCase
 
         // Board roles get no accounting access at all, and the accounting
         // branch's preparer/approver split must not be widened from here.
-        foreach (['loan_processor', 'bod1', 'bod7'] as $roleName) {
+        foreach (['bod1', 'bod7'] as $roleName) {
             $this->assertSame(
                 ['loans:view'],
                 Role::where('name', $roleName)->firstOrFail()->fresh('permissions')->permissions->pluck('name')->all(),
                 "{$roleName} was granted accounting access it must not have.",
             );
         }
+
+        $this->assertEqualsCanonicalizing(
+            ['loans:view', 'loans:update'],
+            Role::where('name', 'loan_processor')->firstOrFail()->fresh('permissions')->permissions->pluck('name')->all(),
+            'loan_processor was granted accounting access it must not have.',
+        );
     }
 
     public function test_the_steps_own_role_may_act(): void
@@ -660,6 +677,74 @@ class LoanApprovalChainTest extends TestCase
             ->assertOk();
 
         $this->assertSame(0, LoanApprovalStep::where('loan_id', $loan->id)->count());
+    }
+
+    /**
+     * The chain is decorative if one `loans:approve` holder can jump it.
+     *
+     * `loan_officer` holds that permission, so before this guard a
+     * policy-exception loan sitting at step 2 of 10 could be taken straight to
+     * `approved` by one person, with the chain rows untouched and no record
+     * that the other eight approvers were never asked.
+     */
+    public function test_the_single_shot_approve_endpoint_is_refused_mid_chain(): void
+    {
+        $loan = $this->submittedLoan(policyException: true);
+
+        $this->actingAs($this->userWithRole('loan_officer'));
+
+        $this->patchJson("/api/loans/{$loan->id}/approve", ['approval_remarks' => 'skip'])
+            ->assertStatus(422);
+
+        $this->assertSame('for_review', $loan->fresh()->status);
+        $this->assertNull($loan->fresh()->approved_by);
+    }
+
+    public function test_an_admin_may_still_approve_in_one_shot(): void
+    {
+        // Same BYPASS_ROLES the chain honours in canAct(): an admin can already
+        // sign every step in sequence, so doing it in one call is a shortcut,
+        // not an escalation.
+        $loan = $this->submittedLoan(policyException: true);
+
+        app(LoanService::class)->approve($loan, $this->admin, 'Straight through');
+
+        $this->assertSame('approved', $loan->fresh()->status);
+    }
+
+    public function test_the_chain_still_reaches_approved_through_its_own_steps(): void
+    {
+        $loan = $this->submittedLoan();
+
+        // Walk every remaining approve step in order.
+        while (($step = $this->pendingStep($loan)) && $step->kind === LoanApprovalStep::KIND_APPROVE) {
+            $this->approveAs($step->role, $loan)->assertOk();
+        }
+
+        $this->assertSame('approved', $loan->fresh()->status);
+    }
+
+    public function test_a_loan_with_no_chain_can_still_be_approved_directly(): void
+    {
+        $loan = $this->submittedLoan();
+        $loan->approvalSteps()->delete();
+
+        $this->actingAs($this->userWithRole('loan_officer'));
+
+        $this->patchJson("/api/loans/{$loan->id}/approve", ['approval_remarks' => 'legacy'])
+            ->assertOk();
+
+        $this->assertSame('approved', $loan->fresh()->status);
+    }
+
+    public function test_loan_processor_can_submit_a_draft_into_the_chain(): void
+    {
+        $processor = $this->userWithRole('loan_processor');
+
+        $this->assertTrue(
+            $processor->can('loans:update'),
+            'loan_processor is the first step of both default chains, and submit checks loans:update.',
+        );
     }
 
     private function submittedLoan(bool $policyException = false): Loan

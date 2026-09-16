@@ -7,6 +7,7 @@ use App\Models\Borrower;
 use App\Models\Collateral;
 use App\Models\CoMaker;
 use App\Models\Loan;
+use App\Models\LoanApprovalStep;
 use App\Models\LoanProduct;
 use App\Models\User;
 use Carbon\Carbon;
@@ -585,6 +586,8 @@ class LoanService
             );
         }
 
+        $this->guardApprovalChainIsClear($loan, $approver);
+
         $loan->update([
             'status' => 'approved',
             'approved_by' => $approver->id,
@@ -593,6 +596,60 @@ class LoanService
         ]);
 
         return $loan;
+    }
+
+    /**
+     * Refuse a single-shot approval while the loan's approval chain is still
+     * mid-flight.
+     *
+     * `loans:approve` is held by `loan_officer`, so without this a
+     * policy-exception loan sitting at step 2 of 10 could be taken straight to
+     * `approved` by one person — the chain rows untouched, no signatures, and
+     * nothing in the audit trail to show the other eight approvers were never
+     * asked. That would make the whole chain decorative.
+     *
+     * The check is on chain STATE rather than on who is calling, which is what
+     * lets LoanApprovalChainService::approve() hand over here without a flag:
+     * by the time it does, it has marked the last `approve` step approved, so
+     * nothing is outstanding and this passes. A direct call mid-chain still has
+     * later steps sitting `waiting` and is refused.
+     *
+     * `admin` and `super_admin` are exempt, using the same BYPASS_ROLES the
+     * chain itself honours in canAct(): they may already act on every step in
+     * sequence, so doing it in one call is a shortcut rather than an
+     * escalation. Refusing them would also break every fixture in the suite —
+     * SetupLendyPH::createReleasedLoan() approves as admin on a loan whose
+     * chain is still at step 1.
+     *
+     * Loans with no chain at all — anything submitted before this shipped, and
+     * every imported loan — are unaffected.
+     */
+    private function guardApprovalChainIsClear(Loan $loan, User $approver): void
+    {
+        if ($approver->hasAnyRole(LoanApprovalStep::BYPASS_ROLES)) {
+            return;
+        }
+
+        $round = $loan->approvalSteps()->max('round');
+
+        if ($round === null) {
+            return;
+        }
+
+        $outstanding = $loan->approvalSteps()
+            ->where('round', $round)
+            ->where('kind', LoanApprovalStep::KIND_APPROVE)
+            ->whereIn('status', [
+                LoanApprovalStep::STATUS_WAITING,
+                LoanApprovalStep::STATUS_PENDING,
+            ])
+            ->exists();
+
+        if ($outstanding) {
+            throw ValidationException::withMessages([
+                'status' => 'This loan is still moving through its approval chain. Sign off on the current step instead.',
+            ]);
+        }
     }
 
     public function reject(Loan $loan, User $approver, ?string $remarks): Loan

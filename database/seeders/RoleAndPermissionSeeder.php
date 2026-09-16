@@ -271,6 +271,13 @@ class RoleAndPermissionSeeder extends Seeder
                 ['is_system' => true, 'is_active' => true, 'description' => $systemRoleAttrs[$roleName]['description']],
             )->syncPermissions(array_merge(
                 ['loans:view'],
+                // The first step of both default chains is `loan_processor`,
+                // and LoanController@submit checks `loans:update` — so without
+                // this the role named as the chain's starting point cannot
+                // start one. Deliberately not `loans:approve`, and deliberately
+                // not extended to the BOD roles: signing authority comes from
+                // holding the role named on the step, not from a permission.
+                $roleName === 'loan_processor' ? ['loans:update'] : [],
                 $roleName === 'manager' ? $managerAccountingPermissions : [],
             ));
         }

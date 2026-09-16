@@ -51,6 +51,25 @@ return new class extends Migration
         'loans:view',
     ];
 
+    /**
+     * `loan_processor` alone also needs `loans:update`, because that is what
+     * LoanController@submit checks — with only `loans:view` the role that the
+     * default chain names as its FIRST step cannot start a chain at all, and
+     * only the resubmit-after-send-back path works for it.
+     *
+     * Deliberately not `loans:approve`, and deliberately not extended to the
+     * BOD roles: a chain role's authority to sign comes from holding the role
+     * named on the step, not from a permission. `loans:approve` would hand out
+     * the single-shot PATCH /loans/{id}/approve — which is now also refused
+     * mid-chain by LoanService::guardApprovalChainIsClear(), but the narrower
+     * grant is still the right shape.
+     *
+     * @var array<string, list<string>>
+     */
+    private const EXTRA_PERMISSIONS = [
+        'loan_processor' => ['loans:update'],
+    ];
+
     public function up(): void
     {
         $guard = 'web';
@@ -89,8 +108,14 @@ return new class extends Migration
             app(PermissionRegistrar::class)->forgetCachedPermissions();
         }
 
+        $wanted = self::GRANTED_PERMISSIONS;
+
+        foreach (self::EXTRA_PERMISSIONS as $extra) {
+            $wanted = array_merge($wanted, $extra);
+        }
+
         $permissionIds = DB::table('permissions')
-            ->whereIn('name', self::GRANTED_PERMISSIONS)
+            ->whereIn('name', array_unique($wanted))
             ->where('guard_name', $guard)
             ->pluck('id', 'name');
 
@@ -99,8 +124,13 @@ return new class extends Migration
             ->where('guard_name', $guard)
             ->pluck('id', 'name');
 
-        foreach ($roleIds as $roleId) {
-            foreach (self::GRANTED_PERMISSIONS as $permName) {
+        foreach ($roleIds as $roleName => $roleId) {
+            $grants = array_merge(
+                self::GRANTED_PERMISSIONS,
+                self::EXTRA_PERMISSIONS[$roleName] ?? [],
+            );
+
+            foreach ($grants as $permName) {
                 $permId = $permissionIds[$permName] ?? null;
 
                 if (! $permId) {
