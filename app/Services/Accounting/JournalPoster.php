@@ -129,7 +129,22 @@ final class JournalPoster
      */
     public function post(AccountingJournal $journal, ?int $userId = null): AccountingJournal
     {
-        return DB::transaction(function () use ($journal, $userId): AccountingJournal {
+        return $this->commit($journal, $userId, allowInactiveAccounts: false);
+    }
+
+    /**
+     * The posting transaction itself.
+     *
+     * `$allowInactiveAccounts` is only ever true on the reversal path — see
+     * {@see self::reverse()} for why — and is private so that no caller outside
+     * this class can reach for it.
+     */
+    private function commit(
+        AccountingJournal $journal,
+        ?int $userId,
+        bool $allowInactiveAccounts,
+    ): AccountingJournal {
+        return DB::transaction(function () use ($journal, $userId, $allowInactiveAccounts): AccountingJournal {
             $fresh = $this->lock($journal->id);
 
             if ($fresh->status !== 'draft') {
@@ -153,7 +168,8 @@ final class JournalPoster
                 ]);
             }
 
-            $this->assertEveryAccountIsPostable($lines);
+            $this->assertEveryAccountIsPostable($lines, $allowInactiveAccounts);
+            $this->assertEveryAmountIsPlausible($lines);
 
             // THE TOTALS. Summed over the rows just read under lock, never over
             // anything the client sent. Integer centavos, so the sum is exact.
@@ -176,6 +192,20 @@ final class JournalPoster
             if ($totalDebit <= 0) {
                 throw ValidationException::withMessages([
                     'balance' => ['This entry records nothing — enter the amounts before posting.'],
+                ]);
+            }
+
+            // The other half of the bound: many individually legal lines whose
+            // SUM runs past it. The per-line check above cannot see this one,
+            // and this one cannot see that one — see
+            // self::assertEveryAmountIsPlausible() for why the order matters.
+            if ($totalDebit > Money::maxCentavos()) {
+                throw ValidationException::withMessages([
+                    'balance' => [
+                        'This entry totals '.Money::format($totalDebit).', which is beyond any amount this '
+                        .'system records. Check the figures — an amount that size is a typo or a unit error, '
+                        .'not a balance.',
+                    ],
                 ]);
             }
 
@@ -304,7 +334,24 @@ final class JournalPoster
                 // make a later, legitimately different reversal impossible.
             ], $mirror, $userId);
 
-            $reversal = $this->post($reversal, $userId);
+            /*
+             * Posted with the INACTIVE check relaxed, and only that one.
+             *
+             * A reversal's lines are copied from an entry that was already
+             * validated when it posted: nothing new enters the books, an
+             * existing fact is undone. Deactivating an account means "take no
+             * NEW history", and refusing on that basis would strand the
+             * operator completely — a posted entry cannot be edited, cannot be
+             * deleted, and would then not be reversible either, which is the
+             * moment a reversal is most needed. The only escape would be to
+             * reactivate the account, reverse, and deactivate again, producing
+             * the identical ledger rows by a route nobody documented.
+             *
+             * Group headings stay refused. An account CAN be turned into one
+             * after being posted to, and a heading's balance is the sum of its
+             * subtree, so a line against it is double-counted either way.
+             */
+            $reversal = $this->commit($reversal, $userId, allowInactiveAccounts: true);
 
             // The narrow write the model's immutability guard allows, and the
             // only change a posted entry ever takes.
@@ -356,7 +403,7 @@ final class JournalPoster
      *
      * @param  Collection<int, AccountingJournalLine>  $lines
      */
-    private function assertEveryAccountIsPostable($lines): void
+    private function assertEveryAccountIsPostable($lines, bool $allowInactive = false): void
     {
         $accounts = AccountingAccount::query()
             ->whereIn('id', $lines->pluck('accounting_account_id')->unique()->all())
@@ -376,11 +423,58 @@ final class JournalPoster
                 continue;
             }
 
+            // Reversals tolerate a DEACTIVATED account; see self::reverse().
+            // A heading is refused either way, because its balance is the sum
+            // of its subtree and a line against it double-counts regardless of
+            // why the line was written.
+            if ($allowInactive && ! $account->is_group) {
+                continue;
+            }
+
             throw ValidationException::withMessages([
                 'lines' => [
                     $account->is_group
                         ? "{$account->code} {$account->name} is a heading — post to one of its sub-accounts instead."
                         : "{$account->code} {$account->name} is inactive and cannot take new entries.",
+                ],
+            ]);
+        }
+    }
+
+    /**
+     * No single line may exceed what the module's arithmetic stays exact at.
+     *
+     * ## This MUST run before the totals are summed
+     *
+     * `debit`/`credit` are UNSIGNED BIGINT, so a value well past
+     * {@see Money::maxCentavos()} stores happily — and {@see Money::sum()}
+     * routes each value through a float, which ROUNDS such a value back DOWN to
+     * roughly the bound. So by the time the total exists, the evidence is gone:
+     * a line of maxCentavos + 1 sums to exactly maxCentavos, the total check
+     * finds nothing wrong, and the entry posts with a header a centavo away
+     * from its own lines. Nothing joins the two to notice.
+     *
+     * Reading the persisted line values directly, under the lock already held,
+     * is the only place the real figure is still visible.
+     *
+     * @param  Collection<int, AccountingJournalLine>  $lines
+     */
+    private function assertEveryAmountIsPlausible($lines): void
+    {
+        $max = Money::maxCentavos();
+
+        foreach ($lines as $line) {
+            $amount = max((int) $line->debit, (int) $line->credit);
+
+            if ($amount <= $max) {
+                continue;
+            }
+
+            throw ValidationException::withMessages([
+                'lines' => [
+                    "Line {$line->line_no} is ".Money::format($amount).', which is beyond any amount this '
+                    .'system records exactly. Check the figures — an amount that size is a typo or a unit '
+                    .'error, not a balance.',
                 ],
             ]);
         }

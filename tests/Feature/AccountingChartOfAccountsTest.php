@@ -499,14 +499,37 @@ class AccountingChartOfAccountsTest extends TestCase
         $this->assertSame('credit', AccountingAccount::query()->where('code', '1210')->value('normal_balance'));
     }
 
+    /**
+     * Exercised on an UNMAPPED contra account, deliberately.
+     *
+     * This used to use 1200 Allowance for Credit Losses, and that made it a
+     * test that the `allowance_credit_losses` role could be re-shaped out from
+     * under itself. Dropping `is_contra` there re-derives `normal_balance` to
+     * debit — correctly, which is the behaviour below — and the automatic
+     * engine then posts provisions to a debit-normal allowance, so
+     * `AccountingDashboardBuilder::netReceivable()` reports gross PLUS the
+     * provision. Nothing fails to balance. That route is now refused by
+     * ValidatesAccountShape::assertMappedRolesStillFit(); see
+     * AccountingAccountFieldsTest for the refusal itself.
+     *
+     * The derivation rule it was actually written to cover is unchanged, and is
+     * what this still asserts.
+     */
     public function test_changing_the_contra_flag_re_derives_the_normal_balance(): void
     {
         $this->seedChart()->assertCreated();
 
-        $allowance = $this->account('1200');
-        $this->assertSame('credit', $allowance->normal_balance);
+        $spare = AccountingAccount::query()->create([
+            'code' => '1220',
+            'name' => 'Allowance for Other Losses',
+            'type' => 'asset',
+            'is_contra' => true,
+            'parent_id' => $this->id('1000'),
+        ]);
 
-        $this->putJson("/api/accounting/accounts/{$allowance->id}", ['is_contra' => false])
+        $this->assertSame('credit', $spare->normal_balance);
+
+        $this->putJson("/api/accounting/accounts/{$spare->id}", ['is_contra' => false])
             ->assertOk()
             ->assertJsonPath('data.normal_balance', 'debit');
     }

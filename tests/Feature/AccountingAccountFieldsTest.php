@@ -276,6 +276,110 @@ class AccountingAccountFieldsTest extends TestCase
         );
     }
 
+    // ── The inverse door: re-shaping the account a role already points at ──
+
+    public function test_the_contra_flag_of_a_mapped_account_cannot_be_dropped(): void
+    {
+        // VARIANT A. On a freshly seeded chart 1200 has no lines at all, so the
+        // history guard does not fire — and the saving hook would re-derive
+        // `normal_balance` to debit, making netReceivable() compute gross minus
+        // a NEGATIVE allowance, i.e. gross PLUS the provision. Nothing fails to
+        // balance; the dashboard simply overstates the portfolio.
+        $this->putJson('/api/accounting/accounts/'.$this->account('1200'), [
+            'is_contra' => false,
+        ])->assertStatus(422)->assertJsonValidationErrors('is_contra');
+
+        $this->assertTrue(AccountingAccount::query()->find($this->account('1200'))->is_contra);
+    }
+
+    public function test_the_cash_kind_of_a_mapped_money_account_cannot_be_cleared(): void
+    {
+        // VARIANT B, which had no precondition at all — it worked with or
+        // without history. AccountingDashboardBuilder filters the cash figures
+        // on `cash_kind`, so collections would keep posting correctly to 1010
+        // and silently stop appearing in money-on-hand.
+        $this->postSimpleJournal('1010', '3010', 500000);
+
+        $this->putJson('/api/accounting/accounts/'.$this->account('1010'), [
+            'cash_kind' => null,
+        ])->assertStatus(422)->assertJsonValidationErrors('cash_kind');
+
+        $this->assertSame('cash', AccountingAccount::query()->find($this->account('1010'))->cash_kind);
+
+        // And swapping it for the wrong kind is refused too — a `cash` role
+        // resolving to a `bank` account moves money between two real cards.
+        $this->putJson('/api/accounting/accounts/'.$this->account('1010'), [
+            'cash_kind' => 'bank',
+        ])->assertStatus(422)->assertJsonValidationErrors('cash_kind');
+    }
+
+    public function test_a_mapped_account_cannot_be_reclassified_onto_another_statement(): void
+    {
+        // VARIANT C. Reclassification is legal for an unmapped account with no
+        // history — `test_an_account_with_no_entries_may_still_be_reclassified`
+        // relies on it — which is exactly what made this reachable.
+        $this->putJson('/api/accounting/accounts/'.$this->account('1110'), [
+            'code' => '4110',
+            'type' => 'income',
+            'parent_id' => $this->account('4000'),
+        ])->assertStatus(422)->assertJsonValidationErrors('type');
+
+        $this->assertSame('asset', AccountingAccount::query()->find($this->account('1110'))->type);
+    }
+
+    public function test_the_mapped_shape_guard_does_not_wait_for_history(): void
+    {
+        // The whole window before an organisation posts its first entry is when
+        // it is configuring its books — precisely when this is reachable and
+        // precisely when a history gate would be switched off.
+        $this->assertFalse($this->accountJson('1200')['has_transactions']);
+
+        $this->putJson('/api/accounting/accounts/'.$this->account('1200'), [
+            'is_contra' => false,
+        ])->assertStatus(422);
+    }
+
+    public function test_an_unmapped_account_is_still_free_to_be_re_shaped(): void
+    {
+        // The guard is about ROLES, not about accounts in general. 5030
+        // Electricity resolves no role, so an administrator correcting it is
+        // not blocked.
+        $this->putJson('/api/accounting/accounts/'.$this->account('5030'), [
+            'name' => 'Electricity and Water',
+        ])->assertOk();
+
+        $spare = AccountingAccount::query()->create([
+            'code' => '1197',
+            'name' => 'Spare Money Account',
+            'type' => 'asset',
+            'parent_id' => $this->account('1000'),
+        ]);
+
+        $this->putJson("/api/accounting/accounts/{$spare->id}", ['cash_kind' => 'wallet'])
+            ->assertOk()
+            ->assertJsonPath('data.cash_kind', 'wallet');
+    }
+
+    public function test_both_doors_to_the_same_wrong_shape_are_shut(): void
+    {
+        // The two directions are one rule. Pointing the role at a bad account
+        // and re-shaping the account under the role reach the same number, and
+        // both need permissions the same principals hold.
+        $plainAsset = AccountingAccount::query()->create([
+            'code' => '1198',
+            'name' => 'Ordinary Asset',
+            'type' => 'asset',
+            'parent_id' => $this->account('1000'),
+        ]);
+
+        $this->putJson('/api/accounting/settings/account-mapping', [
+            'allowance_credit_losses' => $plainAsset->id,
+        ])->assertStatus(422);
+
+        $this->putJson('/api/accounting/accounts/'.$this->account('1200'), ['is_contra' => false])
+            ->assertStatus(422);
+    }
+
     // ── History keeps its sign ──
 
     public function test_the_type_of_an_account_with_entries_cannot_be_changed(): void

@@ -96,56 +96,28 @@ class UpdateAccountMappingRequest extends FormRequest
      * nothing anywhere fails. What changes is the arithmetic —
      * `AccountRules::signedBalance()` reads `normal_balance`, so an
      * `allowance_credit_losses` pointed at a non-contra asset turns Net Loans
-     * Receivable into gross PLUS the allowance. See
-     * AccountingAccountMapping::ROLE_SHAPES for the full reasoning.
+     * Receivable into gross PLUS the allowance.
+     *
+     * The rule itself lives on {@see AccountingAccountMapping::roleMismatch()}
+     * because the SAME disagreement can be created from the other end, by
+     * re-shaping the account this role already points at — see
+     * ValidatesAccountShape. One statement of the rule, two doors.
+     *
+     * Errors are reported against the ROLE here, because the role is the field
+     * the settings screen submitted.
      */
     private function assertAccountFitsTheRole(Validator $v, string $role, AccountingAccount $account): void
     {
-        $shape = AccountingAccountMapping::ROLE_SHAPES[$role] ?? null;
+        $mismatch = AccountingAccountMapping::roleMismatch(
+            $role,
+            "{$account->code} {$account->name}",
+            (string) $account->type,
+            (bool) $account->is_contra,
+            $account->cash_kind,
+        );
 
-        // A role with no declared shape is refused rather than waved through:
-        // it means ROLES gained an entry that ROLE_SHAPES did not, and
-        // accepting it would let the one role nobody has thought about point
-        // anywhere at all.
-        if ($shape === null) {
-            $v->errors()->add($role, "There is no defined account shape for the {$role} role, so it cannot be set.");
-
-            return;
-        }
-
-        if ($account->type !== $shape['type']) {
-            $v->errors()->add(
-                $role,
-                "{$account->code} {$account->name} is {$account->type}, but the {$role} role has to resolve to "
-                ."an {$shape['type']} account. Posting through it would put the amount on the wrong statement, "
-                .'and the entry would still balance — so nothing would report the mistake.',
-            );
-
-            return;
-        }
-
-        if (($shape['is_contra'] ?? false) && ! $account->is_contra) {
-            $v->errors()->add(
-                $role,
-                "{$account->code} {$account->name} is not a contra account. The {$role} role must resolve to one: "
-                .'a contra asset carries a credit balance and SUBTRACTS from the assets above it, so an ordinary '
-                .'asset here would make the net figure come out as gross plus the allowance instead of minus.',
-            );
-
-            return;
-        }
-
-        $kind = $shape['cash_kind'] ?? null;
-
-        if ($kind !== null && $account->cash_kind !== $kind) {
-            $held = $account->cash_kind === null ? 'is not a money account at all' : "is a {$account->cash_kind} account";
-
-            $v->errors()->add(
-                $role,
-                "{$account->code} {$account->name} {$held}, but the {$role} role has to resolve to one whose "
-                ."cash kind is {$kind}. `cash_kind` is what puts an account on the Cash & Bank screen and into the "
-                .'dashboard cash figures, so settlements through it would never appear in the money on hand.',
-            );
+        if ($mismatch !== null) {
+            $v->errors()->add($role, $mismatch['message']);
         }
     }
 }

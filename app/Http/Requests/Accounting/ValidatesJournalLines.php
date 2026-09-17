@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests\Accounting;
 
+use App\Services\Accounting\Money;
 use Illuminate\Contracts\Validation\Validator;
 
 /**
@@ -32,8 +33,14 @@ trait ValidatesJournalLines
             // here would mean a caller sent pesos, and silently rounding pesos
             // into centavos is how an entry that balanced on screen stops
             // balancing in the books.
-            'lines.*.debit' => ['required', 'integer', 'min:0'],
-            'lines.*.credit' => ['required', 'integer', 'min:0'],
+            //
+            // `max:` is load-bearing and its absence was invisible. The columns
+            // are UNSIGNED BIGINT, so a BALANCED pair of ₱92 quadrillion lines
+            // satisfies both CHECK constraints, balances, records a non-zero
+            // amount, and posts — landing in the trial balance and on the
+            // dashboard as a real figure. Nothing downstream would refuse it.
+            'lines.*.debit' => ['required', 'integer', 'min:0', 'max:'.Money::maxCentavos()],
+            'lines.*.credit' => ['required', 'integer', 'min:0', 'max:'.Money::maxCentavos()],
         ];
     }
 

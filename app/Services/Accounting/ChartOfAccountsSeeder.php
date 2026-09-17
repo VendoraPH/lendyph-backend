@@ -198,7 +198,7 @@ final class ChartOfAccountsSeeder
     {
         try {
             return $this->seedInTransaction($createdBy);
-        } catch (UniqueConstraintViolationException) {
+        } catch (UniqueConstraintViolationException $e) {
             /*
              * TWO SEEDS AT ONCE — a double-clicked button, or a retried request.
              *
@@ -210,7 +210,19 @@ final class ChartOfAccountsSeeder
              * situation the 409 exists to describe. The whole losing attempt
              * rolled back inside the transaction, so re-answering here reports
              * the outcome rather than papering over a partial write.
+             *
+             * The re-check is what keeps this honest. Without it EVERY unique
+             * violation became "you already have a chart" — including a
+             * duplicate `code` inside the CHART constant itself, which would
+             * report that forever against a completely empty table and send
+             * whoever hit it looking for accounts that do not exist. If no
+             * chart is there, this was not a race and the real error is the
+             * useful one.
              */
+            if (! $this->hasChart()) {
+                throw $e;
+            }
+
             throw $this->alreadySeeded();
         }
     }

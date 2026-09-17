@@ -7,6 +7,7 @@ use App\Models\AccountingAccount;
 use App\Models\AccountingJournal;
 use App\Models\AccountingJournalLine;
 use App\Services\Accounting\JournalPoster;
+use App\Services\Accounting\Money;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -244,6 +245,90 @@ class AccountingJournalPostingTest extends TestCase
                 ['account_id' => $this->account('5030'), 'debit' => 100, 'credit' => 0],
             ],
         ])->assertStatus(422)->assertJsonValidationErrors('lines');
+    }
+
+    // ── Balanced is not the same as plausible ──
+
+    public function test_an_absurd_line_amount_is_refused_at_the_boundary(): void
+    {
+        // `debit`/`credit` are UNSIGNED BIGINT, so this BALANCES, satisfies
+        // both CHECK constraints, records a non-zero amount, and would post —
+        // landing on the trial balance and the dashboard as a real figure. No
+        // report anywhere would refuse it.
+        $absurd = Money::maxCentavos() + 1;
+
+        $this->postJson('/api/accounting/journals', [
+            'date' => '2026-09-15',
+            'description' => 'Ninety-two quadrillion pesos',
+            'lines' => [
+                ['account_id' => $this->account('1010'), 'debit' => $absurd, 'credit' => 0],
+                ['account_id' => $this->account('3010'), 'debit' => 0, 'credit' => $absurd],
+            ],
+        ])->assertStatus(422)->assertJsonValidationErrors(['lines.0.debit', 'lines.1.credit']);
+    }
+
+    public function test_the_largest_legitimate_amount_still_posts(): void
+    {
+        // The bound has to be a ceiling, not a guess — ₱999 trillion is absurd
+        // for a co-op and is still a number this system is willing to record.
+        $largest = Money::maxCentavos();
+
+        $response = $this->postJson('/api/accounting/journals', [
+            'date' => '2026-09-15',
+            'description' => 'At the ceiling',
+            'lines' => [
+                ['account_id' => $this->account('1010'), 'debit' => $largest, 'credit' => 0],
+                ['account_id' => $this->account('3010'), 'debit' => 0, 'credit' => $largest],
+            ],
+        ])->assertCreated();
+
+        $this->postJson('/api/accounting/journals/'.$response->json('data.id').'/post')->assertOk();
+    }
+
+    public function test_the_automatic_posting_path_is_bounded_too(): void
+    {
+        // postImmediately() never sees a FormRequest, so the line rule does not
+        // protect it. The per-line check inside post() does.
+        //
+        // Note the total check alone could NOT catch this: Money::sum() routes
+        // each value through a float, so a line one centavo past the bound sums
+        // to exactly the bound and the total looks fine. The evidence only
+        // exists before the sum.
+        $absurd = Money::maxCentavos() + 1;
+
+        $this->expectException(ValidationException::class);
+
+        app(JournalPoster::class)->postImmediately([
+            'date' => '2026-09-15',
+            'source' => 'loan_release',
+            'description' => 'Release of an impossible loan',
+            'branch_id' => $this->branch->id,
+        ], [
+            ['account_id' => $this->account('1110'), 'debit' => $absurd, 'credit' => 0],
+            ['account_id' => $this->account('1010'), 'debit' => 0, 'credit' => $absurd],
+        ], $this->admin->id);
+    }
+
+    public function test_a_total_over_the_ceiling_is_refused_even_when_every_line_is_legal(): void
+    {
+        // Each line is individually under the bound; their sum is not. The
+        // per-line rule cannot see this, which is why the total is checked
+        // separately after the recompute.
+        // Four lines, none of them over the bound on its own — the credit side
+        // has to be split too, or the per-line check fires first and this stops
+        // testing the total at all.
+        $half = intdiv(Money::maxCentavos(), 2) + 1000;
+
+        $draft = $this->draftJournal([
+            ['account_id' => $this->account('1010'), 'debit' => $half, 'credit' => 0],
+            ['account_id' => $this->account('1110'), 'debit' => $half, 'credit' => 0],
+            ['account_id' => $this->account('3010'), 'debit' => 0, 'credit' => $half],
+            ['account_id' => $this->account('3020'), 'debit' => 0, 'credit' => $half],
+        ]);
+
+        $this->postJson("/api/accounting/journals/{$draft->id}/post")
+            ->assertStatus(422)
+            ->assertJsonValidationErrors('balance');
     }
 
     // ── Immutability ──

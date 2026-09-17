@@ -172,15 +172,22 @@ return new class extends Migration
          * cannot put an unbalanced entry into the books, because MySQL 8.0.16+
          * refuses the row outright.
          *
-         * Scoped to `posted` because a draft is explicitly allowed to be
-         * out of balance while someone is still typing it. `reversed` needs no
-         * clause of its own: an entry can only reach it from `posted`, where
-         * this constraint already held, and the reversal path never touches the
-         * totals.
+         * Stated as "a DRAFT may be unbalanced" rather than "a POSTED one must
+         * balance", and the difference is not cosmetic. The narrower spelling
+         * (`status <> 'posted' OR ...`) leaves `reversed` unconstrained, so an
+         * unbalanced draft moved straight to `reversed` by a stray UPDATE would
+         * satisfy it — and `AccountingJournal::scopeHistorical()` counts
+         * `reversed`, so that row would reach the trial balance and unbalance
+         * the books. No code path does that today: the only route to `reversed`
+         * is JournalPoster::reverse(), which requires `posted` first. This is
+         * defence in depth against the route that does not exist yet.
+         *
+         * A draft is explicitly allowed to be out of balance, because someone
+         * is still typing it.
          */
         DB::statement(
             'alter table `accounting_journals` add constraint `accounting_journals_posted_balanced_chk` '
-            ."check (`status` <> 'posted' or `total_debit` = `total_credit`)"
+            ."check (`status` = 'draft' or `total_debit` = `total_credit`)"
         );
     }
 

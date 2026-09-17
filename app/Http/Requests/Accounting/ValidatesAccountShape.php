@@ -3,6 +3,7 @@
 namespace App\Http\Requests\Accounting;
 
 use App\Models\AccountingAccount;
+use App\Models\AccountingAccountMapping;
 use App\Services\Accounting\AccountRules;
 use Illuminate\Contracts\Validation\Validator;
 
@@ -56,6 +57,7 @@ trait ValidatesAccountShape
             $this->assertHeadingsKeepTheirChildren($validator, $existing, $isGroup);
             $this->assertMappedAccountStaysPostable($validator, $existing, $isGroup, $isActive);
             $this->assertHistoryKeepsItsSign($validator, $existing, $type, $isContra);
+            $this->assertMappedRolesStillFit($validator, $existing, $type, $isContra, $cashKind);
         }
     }
 
@@ -261,6 +263,72 @@ trait ValidatesAccountShape
      * correctly typed one, and move the balance across with a journal entry —
      * which leaves both halves on the record, as a correction should.
      */
+    /**
+     * An account a posting role resolves to has to keep the SHAPE that role
+     * means.
+     *
+     * The inverse of the check on the settings screen, and it has to exist
+     * separately because the same wrong outcome is reachable from either end.
+     * `UpdateAccountMappingRequest` stops a role being pointed at an account of
+     * the wrong shape; this stops the account UNDER a role being re-shaped into
+     * the wrong thing. Closing one door and leaving the other is not a defence —
+     * both need permissions held by the same principals, so it is only a longer
+     * walk to the same number.
+     *
+     * Three moves this closes, none of which fail anywhere:
+     *
+     * - Clearing `cash_kind` on 1010. `AccountingDashboardBuilder` filters the
+     *   cash figures on `cash_kind`, so collections keep posting correctly and
+     *   silently stop appearing in money-on-hand.
+     * - Dropping `is_contra` on 1200. The saving hook re-derives
+     *   `normal_balance` to debit, and Net Loans Receivable becomes gross PLUS
+     *   the provision instead of minus.
+     * - Re-typing a mapped account. The role then resolves to an account on the
+     *   wrong statement.
+     *
+     * UNCONDITIONAL — deliberately not gated on {@see AccountingAccount::hasTransactions()}.
+     * On a freshly seeded chart nothing has been posted yet, so a history gate
+     * would leave the whole window before the first entry wide open, which is
+     * exactly when an organisation is configuring its books. The damage here is
+     * to FUTURE postings, not past ones; that is the opposite precondition from
+     * {@see self::assertHistoryKeepsItsSign()}, and the reason these are two
+     * checks rather than one.
+     *
+     * Reported against the account attribute at fault, with the same remedy
+     * {@see self::assertMappedAccountStaysPostable()} gives: re-point the role
+     * first.
+     */
+    private function assertMappedRolesStillFit(
+        Validator $validator,
+        AccountingAccount $existing,
+        string $type,
+        bool $isContra,
+        mixed $cashKind,
+    ): void {
+        $roles = $existing->mappings()->pluck('role')->all();
+
+        if ($roles === []) {
+            return;
+        }
+
+        $kind = ($cashKind === null || $cashKind === '') ? null : (string) $cashKind;
+        $label = "{$existing->code} {$existing->name}";
+
+        foreach ($roles as $role) {
+            $mismatch = AccountingAccountMapping::roleMismatch($role, $label, $type, $isContra, $kind);
+
+            if ($mismatch === null) {
+                continue;
+            }
+
+            $validator->errors()->add(
+                $mismatch['field'] === 'role' ? 'type' : $mismatch['field'],
+                "{$label} is the account for {$role}. {$mismatch['message']} "
+                .'Point that role somewhere else before changing this account.',
+            );
+        }
+    }
+
     private function assertHistoryKeepsItsSign(
         Validator $validator,
         AccountingAccount $existing,

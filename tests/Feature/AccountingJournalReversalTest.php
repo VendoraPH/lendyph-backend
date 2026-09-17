@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Models\AccountingAccount;
 use App\Models\AccountingJournal;
 use App\Services\Accounting\TrialBalanceBuilder;
 use Tests\TestCase;
@@ -178,6 +179,47 @@ class AccountingJournalReversalTest extends TestCase
 
         $rows = collect(app(TrialBalanceBuilder::class)->build('2026-12-31')['rows'])->keyBy('account_code');
         $this->assertSame(350000, $rows['5030']['debit']);
+    }
+
+    public function test_an_entry_can_still_be_reversed_after_its_account_is_deactivated(): void
+    {
+        $original = $this->postSimpleJournal('5030', '1010', 350000);
+
+        AccountingAccount::query()->whereKey($this->account('5030'))->update(['is_active' => false]);
+
+        // Deactivating means "take no NEW history". A reversal undoes a fact
+        // already in the books rather than adding one, and refusing it would
+        // strand the operator: the entry cannot be edited, cannot be deleted,
+        // and would not be reversible either — at the exact moment a reversal
+        // is most needed. The only escape would be to reactivate, reverse and
+        // deactivate again, producing identical rows by an undocumented route.
+        $this->postJson("/api/accounting/journals/{$original->id}/reverse")->assertCreated();
+
+        $this->assertSame('reversed', $original->fresh()->status);
+
+        // Posting something NEW against that account is still refused.
+        $draft = $this->draftJournal([
+            ['account_id' => $this->account('5030'), 'debit' => 100, 'credit' => 0],
+            ['account_id' => $this->account('1010'), 'debit' => 0, 'credit' => 100],
+        ]);
+
+        $this->postJson("/api/accounting/journals/{$draft->id}/post")
+            ->assertStatus(422)
+            ->assertJsonValidationErrors('lines');
+    }
+
+    public function test_a_reversal_is_still_refused_against_an_account_turned_into_a_heading(): void
+    {
+        $original = $this->postSimpleJournal('5030', '1010', 350000);
+
+        AccountingAccount::query()->whereKey($this->account('5030'))->update(['is_group' => true]);
+
+        // A heading's balance is the sum of its subtree, so a line against it
+        // is double-counted no matter why the line was written. This is the one
+        // postable check the reversal path keeps.
+        $this->postJson("/api/accounting/journals/{$original->id}/reverse")
+            ->assertStatus(422)
+            ->assertJsonValidationErrors('lines');
     }
 
     public function test_a_bookkeeper_may_draft_but_may_neither_post_nor_reverse(): void

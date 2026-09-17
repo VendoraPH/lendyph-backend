@@ -112,6 +112,28 @@ class AccountingJournalRulesTest extends TestCase
         $this->assertNull(Money::toCentavos(NAN));
     }
 
+    public function test_the_ledger_ceiling_is_where_the_arithmetic_stops_being_exact(): void
+    {
+        // maxCentavos() is what guards the ledger — the journals module never
+        // calls toCentavos(), because a line arrives already converted. It sits
+        // BELOW the parse ceiling on purpose: `sum()` routes values through a
+        // float to accept the numeric strings a `decimal:2` cast produces, and
+        // that round trip is only lossless under 2^53 centavos.
+        $max = Money::maxCentavos();
+
+        $this->assertSame(9_007_199_254_740_992, $max);
+        $this->assertLessThan(Money::toCentavos('999999999999999'), $max);
+
+        // Exact at the bound...
+        $this->assertSame($max, Money::sum([$max]));
+
+        // ...and demonstrably NOT exact one centavo past it, which is the whole
+        // reason the bound is here and not higher. A total stored a few
+        // centavos from what its own lines add up to would survive every report
+        // in the system, because none of them join the header to the lines.
+        $this->assertNotSame($max + 1, Money::sum([$max + 1]));
+    }
+
     // ── Totalling the two sides ──
 
     public function test_totals_are_exact_over_many_lines(): void
