@@ -52,6 +52,7 @@ trait ValidatesAccountShape
         $this->assertCodeAgreesWithType($validator, $code, $type);
         $this->assertParentIsAGroupOfTheSameType($validator, $parentId, $type, $existing);
         $this->assertGroupsHoldNoMoney($validator, $isGroup, $cashKind);
+        $this->assertOnlyAssetsHoldMoney($validator, $type, $cashKind);
 
         if ($existing !== null) {
             $this->assertHeadingsKeepTheirChildren($validator, $existing, $isGroup);
@@ -185,6 +186,26 @@ trait ValidatesAccountShape
             $validator->errors()->add(
                 'cash_kind',
                 'A group heading cannot be a money account. Its balance is the total of the accounts beneath it, not a balance of its own.',
+            );
+        }
+    }
+
+    /**
+     * Only an asset can be a money account.
+     *
+     * `cash_kind` is what AccountingDashboardBuilder::sumByCashKind() adds into
+     * the cash figures, so marking a liability, income or expense account as
+     * one reports its balance as money on hand. The role-shape check catches
+     * this for MAPPED accounts; this covers the rest, and covers create as well
+     * as update, where no mapping exists yet to check against.
+     */
+    private function assertOnlyAssetsHoldMoney(Validator $validator, string $type, mixed $cashKind): void
+    {
+        if ($type !== 'asset' && $cashKind !== null && $cashKind !== '') {
+            $validator->errors()->add(
+                'cash_kind',
+                "A {$type} account cannot be a money account. `cash_kind` puts a balance into the Cash & Bank "
+                .'screen and the dashboard cash figures, which would report this balance as money on hand.',
             );
         }
     }

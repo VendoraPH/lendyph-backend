@@ -189,6 +189,23 @@ class AccountingAccountMapping extends Model
 
         $kind = $shape['cash_kind'] ?? null;
 
+        // The inverse of the check below, and the reason the shape has to say
+        // what a role must NOT be as well as what it must. Variant B of the
+        // original finding stripped `cash_kind` off a money account so its
+        // balance vanished from money-on-hand; this is the same door from the
+        // other side — put a `cash_kind` on an account whose role has none,
+        // and AccountingDashboardBuilder::sumByCashKind() folds it in. Do it
+        // to `loans_receivable` and the whole net loan portfolio is reported
+        // as cash in the bank.
+        if ($kind === null && $cashKind !== null) {
+            return [
+                'field' => 'cash_kind',
+                'message' => "{$label} is the {$role} account, which is not a money account — but it is marked "
+                    ."as a {$cashKind} account. `cash_kind` is what puts a balance into the dashboard cash "
+                    .'figures, so this would report the balance as money on hand.',
+            ];
+        }
+
         if ($kind !== null && $cashKind !== $kind) {
             $held = $cashKind === null ? 'is not a money account at all' : "is a {$cashKind} account";
 

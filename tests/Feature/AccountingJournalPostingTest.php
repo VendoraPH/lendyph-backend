@@ -547,4 +547,31 @@ class AccountingJournalPostingTest extends TestCase
         // aggregate that does not join the header.
         $this->assertSame(0, AccountingJournalLine::query()->where('accounting_journal_id', $draft->id)->count());
     }
+
+    /**
+     * The line count is the last way the per-line ceiling and the total
+     * ceiling could be played off against each other: every line legal, but
+     * enough of them that the summed total overflows PHP's integer range,
+     * wraps, and slips under the total check.
+     */
+    public function test_an_entry_with_too_many_lines_is_refused(): void
+    {
+        $cash = $this->account('1010');
+        $income = $this->account('4010');
+
+        $lines = [];
+
+        for ($i = 0; $i < JournalPoster::MAX_LINES + 1; $i++) {
+            $lines[] = ['account_id' => $cash, 'debit' => 100, 'credit' => 0];
+            $lines[] = ['account_id' => $income, 'debit' => 0, 'credit' => 100];
+        }
+
+        $this->postJson('/api/accounting/journals', [
+            'date' => now()->toDateString(),
+            'description' => 'Too many lines',
+            'lines' => $lines,
+        ])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors('lines');
+    }
 }

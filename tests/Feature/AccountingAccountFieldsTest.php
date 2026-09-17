@@ -439,4 +439,55 @@ class AccountingAccountFieldsTest extends TestCase
             'is_active' => false,
         ])->assertOk()->assertJsonPath('data.is_active', false);
     }
+
+    /**
+     * Variant B inverted, and worse: instead of stripping `cash_kind` off a
+     * money account so its balance vanishes, put one ON a non-money account so
+     * its balance is counted as cash. Do it to `loans_receivable` and the whole
+     * net loan portfolio reports as money in the bank.
+     */
+    public function test_a_mapped_non_money_account_cannot_be_made_a_money_account(): void
+    {
+        $receivable = AccountingAccount::where('code', '1110')->firstOrFail();
+
+        $this->putJson("/api/accounting/accounts/{$receivable->id}", [
+            'code' => $receivable->code,
+            'name' => $receivable->name,
+            'type' => $receivable->type,
+            'cash_kind' => 'bank',
+        ])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors('cash_kind');
+
+        $this->assertNull($receivable->fresh()->cash_kind);
+    }
+
+    public function test_a_non_asset_account_cannot_be_a_money_account(): void
+    {
+        $income = AccountingAccount::where('code', '4010')->firstOrFail();
+
+        $this->putJson("/api/accounting/accounts/{$income->id}", [
+            'code' => $income->code,
+            'name' => $income->name,
+            'type' => 'income',
+            'cash_kind' => 'cash',
+        ])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors('cash_kind');
+    }
+
+    public function test_a_money_account_cannot_be_created_on_a_non_asset_type(): void
+    {
+        $expenses = AccountingAccount::where('code', '5000')->firstOrFail();
+
+        $this->postJson('/api/accounting/accounts', [
+            'code' => '5199',
+            'name' => 'Not A Wallet',
+            'type' => 'expense',
+            'parent_id' => $expenses->id,
+            'cash_kind' => 'gcash',
+        ])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors('cash_kind');
+    }
 }

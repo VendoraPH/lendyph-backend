@@ -42,6 +42,9 @@ use Illuminate\Validation\ValidationException;
  */
 final class JournalPoster
 {
+    /** Keeps MAX_LINES * Money::maxCentavos() inside PHP_INT_MAX, so the sum is exact. */
+    public const MAX_LINES = 500;
+
     /**
      * Creates a draft.
      *
@@ -170,6 +173,7 @@ final class JournalPoster
 
             $this->assertEveryAccountIsPostable($lines, $allowInactiveAccounts);
             $this->assertEveryAmountIsPlausible($lines);
+            $this->assertTheLineCountCannotOverflowTheSum($lines);
 
             // THE TOTALS. Summed over the rows just read under lock, never over
             // anything the client sent. Integer centavos, so the sum is exact.
@@ -459,6 +463,34 @@ final class JournalPoster
      *
      * @param  Collection<int, AccountingJournalLine>  $lines
      */
+    /**
+     * Cap the line count so the summed total stays an exact integer.
+     *
+     * Every line is already <= Money::maxCentavos() (2^53), but PHP_INT_MAX is
+     * ~2^63 — so roughly 1024 lines at the cap overflow the integer range.
+     * Money::sum() accumulates with `+=`, flips to float on overflow, and is
+     * declared `: int`, so the ceiling check further down would then measure a
+     * wrapped value rather than the real total, and a header could be posted
+     * that disagrees with its own lines.
+     *
+     * MAX_LINES * maxCentavos() is ~4.5e18, comfortably inside PHP_INT_MAX, so
+     * the sum below is always exact. Mirrors the `max:500` on the request, and
+     * is repeated here because postImmediately() — the automatic posting path —
+     * never passes through a FormRequest.
+     */
+    private function assertTheLineCountCannotOverflowTheSum($lines): void
+    {
+        if ($lines->count() <= self::MAX_LINES) {
+            return;
+        }
+
+        throw ValidationException::withMessages([
+            'lines' => [
+                'An entry may carry at most '.self::MAX_LINES.' lines.',
+            ],
+        ]);
+    }
+
     private function assertEveryAmountIsPlausible($lines): void
     {
         $max = Money::maxCentavos();

@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests\Accounting;
 
+use App\Services\Accounting\JournalPoster;
 use App\Services\Accounting\Money;
 use Illuminate\Contracts\Validation\Validator;
 
@@ -25,7 +26,14 @@ trait ValidatesJournalLines
     protected function lineRules(): array
     {
         return [
-            'lines' => ['required', 'array', 'min:2'],
+            // `max:` here is the other half of the per-line ceiling below.
+            // Money::maxCentavos() is 2^53 and PHP_INT_MAX is ~2^63, so ~1024
+            // lines each at the cap overflow PHP's integer range: Money::sum()
+            // accumulates with `+=`, flips to float, and the total check then
+            // measures a wrapped value instead of the real one. Capping the
+            // count keeps the true sum inside 2^53 * 500, far below the point
+            // where that can happen.
+            'lines' => ['required', 'array', 'min:2', 'max:'.JournalPoster::MAX_LINES],
             'lines.*.account_id' => ['required', 'integer', 'exists:accounting_accounts,id'],
             'lines.*.description' => ['nullable', 'string', 'max:255'],
             // INTEGER CENTAVOS, both of them, and `min:0` rather than `min:1`
