@@ -595,6 +595,14 @@ class LoanService
             'approval_remarks' => $remarks,
         ]);
 
+        // Keep the chain agreeing with the loan. Only reachable via the
+        // admin/super_admin exemption above or a chainless loan; a chain left
+        // mid-flight against an `approved` loan is actionable by nobody and
+        // strands the release step out of reach of the UI. Resolved from the
+        // container for the same reason `seed()` is: the chain service depends
+        // on this one.
+        app(LoanApprovalChainService::class)->markApprovedOutOfBand($loan, $approver);
+
         return $loan;
     }
 

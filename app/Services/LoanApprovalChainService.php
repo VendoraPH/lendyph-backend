@@ -270,6 +270,67 @@ class LoanApprovalChainService
      *
      * No-op for loans released before this table existed, which have no chain.
      */
+    /**
+     * Close out the chain when the loan was approved by the single-shot
+     * endpoint rather than step by step.
+     *
+     * `admin` and `super_admin` may still take a loan straight to `approved`
+     * (LoanService::guardApprovalChainIsClear exempts them). Without this the
+     * chain is left disagreeing with the loan: the approve steps stay
+     * `pending` while `loans.status` says `approved`, and because `can_act`
+     * requires `for_review` for an approve step, that step becomes actionable
+     * by nobody — including the admin who just approved. The UI reads the
+     * first pending step as the current one, so it renders "waiting for
+     * Manager" forever and never reaches the release panel. The loan is
+     * releasable by API and unreleasable through the app.
+     *
+     * Marking the remaining approvers with the actor who overrode them is the
+     * honest record: it says the chain was short-circuited and by whom, rather
+     * than leaving signatures that were never given.
+     */
+    public function markApprovedOutOfBand(Loan $loan, User $approver): void
+    {
+        $round = $this->currentRound($loan);
+
+        $outstanding = $loan->approvalSteps()
+            ->where('round', $round)
+            ->whereIn('kind', [LoanApprovalStep::KIND_SUBMIT, LoanApprovalStep::KIND_APPROVE])
+            ->whereIn('status', [LoanApprovalStep::STATUS_WAITING, LoanApprovalStep::STATUS_PENDING])
+            ->orderBy('step_order')
+            ->get();
+
+        if ($outstanding->isEmpty()) {
+            return;
+        }
+
+        foreach ($outstanding as $step) {
+            $step->update([
+                'status' => LoanApprovalStep::STATUS_APPROVED,
+                'acted_by' => $approver->id,
+                'acted_at' => now(),
+                'remarks' => $step->remarks ?? 'Approved directly, bypassing the remaining chain.',
+            ]);
+        }
+
+        $loan->approvalSteps()
+            ->where('round', $round)
+            ->where('kind', LoanApprovalStep::KIND_RELEASE)
+            ->where('status', LoanApprovalStep::STATUS_WAITING)
+            ->update(['status' => LoanApprovalStep::STATUS_PENDING]);
+
+        AuditLogService::log(
+            action: 'loan_chain_short_circuited',
+            auditable: $loan,
+            newValues: [
+                'round' => $round,
+                'steps_closed' => $outstanding->pluck('step_id')->all(),
+            ],
+            description: "Approval chain on loan {$loan->application_number} was closed out by a direct approval "
+                ."({$outstanding->count()} step(s) bypassed).",
+            userId: $approver->id,
+        );
+    }
+
     public function markReleased(Loan $loan, User $releaser): void
     {
         $step = $loan->approvalSteps()

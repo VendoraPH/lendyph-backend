@@ -807,6 +807,51 @@ class LoanApprovalChainTest extends TestCase
         }
     }
 
+    /**
+     * QA finding: a legacy admin approval used to strand the loan.
+     *
+     * The chain stayed mid-flight against an `approved` loan, so every approve
+     * step was actionable by nobody (can_act requires `for_review` for those),
+     * the UI read the first pending step as current and showed "waiting for
+     * Manager" to the admin who had just approved, and the release panel was
+     * never reached. Releasable by API, unreleasable through the app.
+     */
+    public function test_a_direct_admin_approval_closes_out_the_chain(): void
+    {
+        $loan = $this->submittedLoan(policyException: true);
+
+        app(LoanService::class)->approve($loan, $this->admin, 'Straight through');
+
+        $loan->refresh();
+        $this->assertSame('approved', $loan->status);
+
+        $outstanding = $loan->approvalSteps()
+            ->whereIn('kind', [LoanApprovalStep::KIND_SUBMIT, LoanApprovalStep::KIND_APPROVE])
+            ->whereIn('status', [LoanApprovalStep::STATUS_WAITING, LoanApprovalStep::STATUS_PENDING])
+            ->count();
+
+        $this->assertSame(0, $outstanding, 'Approve steps were left actionable by nobody.');
+
+        $release = $loan->approvalSteps()->where('kind', LoanApprovalStep::KIND_RELEASE)->firstOrFail();
+        $this->assertSame(LoanApprovalStep::STATUS_PENDING, $release->status);
+    }
+
+    public function test_the_release_step_is_reachable_after_a_direct_admin_approval(): void
+    {
+        $loan = $this->submittedLoan(policyException: true);
+        app(LoanService::class)->approve($loan, $this->admin, 'Straight through');
+
+        $state = $this->actingAs($this->userWithRole('cashier'))
+            ->getJson("/api/loans/{$loan->id}/approval-steps")
+            ->assertOk()
+            ->json('data.current_steps');
+
+        $release = collect($state)->firstWhere('kind', 'release');
+
+        $this->assertSame('pending', $release['status']);
+        $this->assertTrue($release['can_act'], 'The Release action would not render after a direct approval.');
+    }
+
     private function submittedLoan(bool $policyException = false): Loan
     {
         $product = LoanProduct::factory()->create([
