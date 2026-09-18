@@ -78,6 +78,11 @@ class User extends Authenticatable
      */
     protected $attributes = [
         'must_change_password' => false,
+
+        // Same reasoning, and the same trap: a freshly created in-memory User
+        // would otherwise carry null here while its row carries 0, and
+        // SignedFileLink stamps this value into every link it mints.
+        'file_link_version' => 0,
     ];
 
     protected function casts(): array
@@ -87,6 +92,7 @@ class User extends Authenticatable
             'last_login_at' => 'datetime',
             'password' => 'hashed',
             'must_change_password' => 'boolean',
+            'file_link_version' => 'integer',
         ];
     }
 

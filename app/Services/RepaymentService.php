@@ -6,6 +6,7 @@ use App\Models\AmortizationSchedule;
 use App\Models\Loan;
 use App\Models\Repayment;
 use App\Models\User;
+use App\Services\Accounting\AutomaticPoster;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -23,6 +24,7 @@ class RepaymentService
         ?string $remarks = null,
         string $method = 'cash',
         ?string $referenceNumber = null,
+        bool $postToBooks = true,
     ): Repayment {
         if (! in_array($loan->status, ['released', 'ongoing'])) {
             throw ValidationException::withMessages([
@@ -32,7 +34,7 @@ class RepaymentService
 
         $paymentDate = Carbon::parse($paymentDate);
 
-        return DB::transaction(function () use ($loan, $amountPaid, $paymentDate, $user, $remarks, $method, $referenceNumber) {
+        return DB::transaction(function () use ($loan, $amountPaid, $paymentDate, $user, $remarks, $method, $referenceNumber, $postToBooks) {
             // Step 1: Compute penalties on overdue schedules
             $this->applyPenalties($loan, $paymentDate);
 
@@ -189,6 +191,44 @@ class RepaymentService
             // The frontend computes the actual excess allocation and posts to /api/share-capital/ledger
             // separately after this endpoint returns. Do not auto-credit here.
 
+            /*
+             * THE BOOKS. Explicit, and the LAST thing in this transaction.
+             *
+             * Last because the entry is built from the persisted repayment row —
+             * `amount_paid` against `principal_applied` / `interest_applied` /
+             * `penalty_applied` / `overpayment` — and those are only final once
+             * the allocation loop above has run and the row has been written.
+             *
+             * ## This is exactly why it is not an observer
+             *
+             * previewAllocation() calls this method inside a transaction it then
+             * ROLLS BACK, so the preview matches the real allocation exactly. A
+             * `Repayment::created` observer would fire during that preview and
+             * post a journal for a payment nobody made. Being inside the same
+             * transaction is what makes the preview leave no trace: the rollback
+             * takes the journal and its lines with it, by the same mechanism
+             * that takes the repayment row.
+             *
+             * A throw rolls the payment back rather than recording a collection
+             * the books do not mention.
+             */
+            // The loan is already in memory, so hand it over rather than let
+            // the poster lazy-load it. AutoPayService::run() calls this method
+            // in a loop over every auto-pay loan, and an avoidable SELECT per
+            // repayment multiplies by the size of the batch.
+            $repayment->setRelation('loan', $loan);
+
+            $poster = app(AutomaticPoster::class);
+
+            // previewAllocation() passes false. It still runs every rule — so a
+            // preview refuses exactly where a real payment would — but writes
+            // no journal, because JournalPoster::allocateJournalNo() takes a
+            // row lock on the ledger's numbering hot row and a preview is a
+            // read-only affordance called far more often than a payment.
+            $postToBooks
+                ? $poster->loanCollection($repayment, $user->id)
+                : $poster->assertCollectionIsPostable($repayment);
+
             return $repayment;
         });
     }
@@ -216,7 +256,7 @@ class RepaymentService
         DB::beginTransaction();
 
         try {
-            $repayment = $this->processRepayment($loan, $amountPaid, $paymentDate, $user);
+            $repayment = $this->processRepayment($loan, $amountPaid, $paymentDate, $user, postToBooks: false);
 
             return [
                 'amount_paid' => (float) $repayment->amount_paid,
@@ -319,6 +359,29 @@ class RepaymentService
                 'voided_by' => $user->id,
                 'voided_at' => now(),
             ]);
+
+            /*
+             * Undo the collection in the books, in the same transaction that
+             * undoes it in the portfolio.
+             *
+             * A REVERSAL, not a delete: a posted entry is never edited or
+             * removed, so the original collection and its mirror both stay on
+             * the record and net to zero. That is what makes the void auditable
+             * rather than merely current — and JournalPoster::reverse() is the
+             * only thing that knows how to build one from the STORED lines.
+             *
+             * Without this, voiding a payment would leave the collection on the
+             * books forever: cash and income overstated by the whole payment,
+             * the loan balance restored by reverseAllocation() above, and the
+             * two silently disagreeing. Returns null, harmlessly, for a payment
+             * taken before this organisation adopted accounting.
+             */
+            app(AutomaticPoster::class)->reverseFor(
+                $repayment,
+                'loan_collection',
+                $user->id,
+                $reason,
+            );
 
             // If loan was completed, revert appropriately based on remaining payments
             if ($loan->status === 'completed') {

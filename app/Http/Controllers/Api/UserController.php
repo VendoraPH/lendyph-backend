@@ -362,6 +362,20 @@ class UserController extends Controller
             $user->forceFill([
                 'password' => $request->password,
                 'must_change_password' => true,
+                // Revoke the signed KYC file links minted for this user as
+                // well as their tokens. A signed URL carries its whole
+                // credential in the signature, so deleting tokens could not
+                // reach one that had already been handed out: a link issued
+                // moments before the reset kept streaming borrower identity
+                // documents for the rest of its 30-minute window, to whoever
+                // held it. Bumping the counter invalidates all of them at once.
+                //
+                // Deliberately NOT done in AuthController::changePassword: that
+                // path keeps the caller's current session alive on purpose, and
+                // links should die exactly when the session that could have
+                // produced them is forcibly revoked. Here every token goes, so
+                // every link goes with them.
+                'file_link_version' => $user->file_link_version + 1,
             ])->save();
 
             $user->tokens()->delete();
