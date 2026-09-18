@@ -73,6 +73,18 @@ class RoleAndPermissionSeeder extends Seeder
             // list, so `Permission::all()` on a freshly seeded box depends on
             // that migration having run first.
             'imports:process',
+
+            // Accounting. Listed here for the same reason `imports:process` is:
+            // 2026_09_16_200002_add_accounting_permissions grants these on
+            // staging and production, which are already migrated and will never
+            // re-run a seeder, while this list is what a fresh database and the
+            // whole test suite build from. Either one alone is a half-measure.
+            'accounting:view', 'accounting:reconcile', 'accounting:close', 'accounting:settings',
+            'chart_of_accounts:view', 'chart_of_accounts:create',
+            'chart_of_accounts:update', 'chart_of_accounts:delete',
+            'journals:view', 'journals:create', 'journals:post', 'journals:reverse',
+            'expenses:view', 'expenses:create', 'expenses:update',
+            'cash_accounts:view', 'cash_accounts:transfer',
         ];
 
         $guard = 'web';
@@ -234,6 +246,23 @@ class RoleAndPermissionSeeder extends Seeder
             'share_capital:view',
             'auto_pay:view',
             'collaterals:view',
+
+            // Accounting, at bookkeeper level: drafts entries, records expenses
+            // and reconciles accounts. Pointedly WITHOUT `journals:post`,
+            // `journals:reverse` or `accounting:close`. Drafting is reversible
+            // and nothing reaches the ledger until someone else posts it;
+            // posting makes an entry immutable, reversing writes a second entry
+            // against it, and closing locks a period. Preparer and approver
+            // being different people is what this split makes real, and
+            // granting any of the three here would quietly undo it.
+            'accounting:view',
+            'accounting:reconcile',
+            'chart_of_accounts:view',
+            'journals:view',
+            'journals:create',
+            'expenses:view',
+            'expenses:create',
+            'cash_accounts:view',
         ]);
 
         /**

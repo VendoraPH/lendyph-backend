@@ -1,5 +1,9 @@
 <?php
 
+use App\Http\Controllers\Api\AccountingAccountController;
+use App\Http\Controllers\Api\AccountingJournalController;
+use App\Http\Controllers\Api\AccountingReportController;
+use App\Http\Controllers\Api\AccountingSettingsController;
 use App\Http\Controllers\Api\ApprovalWorkflowController;
 use App\Http\Controllers\Api\AuditLogController;
 use App\Http\Controllers\Api\AuthController;
@@ -412,6 +416,73 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
 
             Route::get('/{run}/errors', [CsvImportErrorReportController::class, 'index'])->name('errors.index');
         });
+    });
+
+    /*
+    |--------------------------------------------------------------------------
+    | Accounting
+    |--------------------------------------------------------------------------
+    |
+    | The double-entry foundation: the chart of accounts and the posting
+    | defaults every automatic entry resolves through. Gated on the
+    | `chart_of_accounts:*` and `accounting:settings` permissions inside the
+    | controllers with `$this->authorize()`, like every other endpoint in this
+    | file — no `permission:` middleware appears here and this is not the place
+    | to start.
+    |
+    | The list endpoint answers with the raw Laravel paginator envelope
+    | ({data, links, meta}); `POST /accounts/seed` answers with a flat
+    | {data: Account[]} instead, because it returns the whole chart at once and
+    | there is nothing to page through.
+    */
+    Route::prefix('accounting')->group(function () {
+        Route::get('/accounts', [AccountingAccountController::class, 'index']);
+        Route::post('/accounts', [AccountingAccountController::class, 'store']);
+
+        // MUST precede /accounts/{account}. Laravel matches in registration
+        // order, so a wildcard registered first captures "seed" as an id — the
+        // same trap /collateral-types/reorder documents above. `whereNumber`
+        // on the wildcards is the second lock.
+        Route::post('/accounts/seed', [AccountingAccountController::class, 'seed']);
+
+        Route::get('/accounts/{account}', [AccountingAccountController::class, 'show'])->whereNumber('account');
+        Route::put('/accounts/{account}', [AccountingAccountController::class, 'update'])->whereNumber('account');
+        Route::delete('/accounts/{account}', [AccountingAccountController::class, 'destroy'])->whereNumber('account');
+
+        /*
+         * Journals. Posting and reversing are separate VERBS, not a status
+         * field on the update, because a posted entry is immutable: `reverse`
+         * writes a second, mirrored entry rather than editing the first, and
+         * `PUT /journals/{id}` refuses anything that is not a draft.
+         *
+         * Permissions are `journals:view|create|post|reverse`, checked in the
+         * controller and the form requests with `$this->authorize()` /
+         * `authorize()`, like every other endpoint in this file. Posting and
+         * reversing are separate permissions on purpose — an accounting clerk
+         * drafts entries all day and must not be able to put them into the
+         * books unreviewed. See the accountant role in the permissions
+         * migration, which holds `journals:create` and NOT `journals:post`.
+         */
+        Route::get('/journals', [AccountingJournalController::class, 'index']);
+        Route::post('/journals', [AccountingJournalController::class, 'store']);
+        Route::get('/journals/{journal}', [AccountingJournalController::class, 'show'])->whereNumber('journal');
+        Route::put('/journals/{journal}', [AccountingJournalController::class, 'update'])->whereNumber('journal');
+        Route::post('/journals/{journal}/post', [AccountingJournalController::class, 'post'])->whereNumber('journal');
+        Route::post('/journals/{journal}/reverse', [AccountingJournalController::class, 'reverse'])->whereNumber('journal');
+
+        /*
+         * Reporting, all gated on `accounting:view`.
+         *
+         * No balance-sheet or income-statement route, deliberately: both are
+         * regroupings of the trial balance and are built client-side from the
+         * rows /trial-balance returns, so a figure has exactly one origin.
+         */
+        Route::get('/general-ledger', [AccountingReportController::class, 'generalLedger']);
+        Route::get('/trial-balance', [AccountingReportController::class, 'trialBalance']);
+        Route::get('/dashboard', [AccountingReportController::class, 'dashboard']);
+
+        Route::get('/settings/account-mapping', [AccountingSettingsController::class, 'showAccountMapping']);
+        Route::put('/settings/account-mapping', [AccountingSettingsController::class, 'updateAccountMapping']);
     });
 
     // Branding (organization logo + identity printed on reports and documents)
