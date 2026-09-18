@@ -143,6 +143,8 @@ class TimezoneShift
         // payment to the wrong day.
         'accounting_expense_payments' => ['created_at', 'updated_at'],
         'accounting_expenses' => ['created_at', 'updated_at'],
+        'accounting_reconciliation_lines' => ['created_at', 'updated_at'],
+        'accounting_reconciliations' => ['created_at', 'updated_at'],
         // Same reasoning, and one addition: `posted_at` is a real instant (the
         // moment an entry entered the books) and WOULD be a shift candidate on
         // any table old enough to need it — this one is not. Note that
