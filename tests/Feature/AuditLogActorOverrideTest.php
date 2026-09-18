@@ -4,8 +4,6 @@ use App\Models\AuditLog;
 use App\Models\Branch;
 use App\Models\User;
 use App\Services\AuditLogService;
-use Database\Seeders\DatabaseSeeder;
-use Illuminate\Support\Facades\Artisan;
 use Tests\TestCase;
 
 /**
@@ -24,8 +22,6 @@ use Tests\TestCase;
 uses(TestCase::class);
 
 beforeEach(function () {
-    Artisan::call('migrate:fresh');
-    $this->seed(DatabaseSeeder::class);
     $this->admin = User::where('username', 'super_admin')->first();
     $this->branch = Branch::first();
 });

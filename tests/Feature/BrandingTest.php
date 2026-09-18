@@ -4,9 +4,7 @@ namespace Tests\Feature;
 
 use App\Models\BrandingSetting;
 use App\Models\User;
-use Database\Seeders\DatabaseSeeder;
 use Illuminate\Http\UploadedFile;
-use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
@@ -18,10 +16,8 @@ class BrandingTest extends TestCase
     {
         parent::setUp();
 
-        // Mirrors Tests\Traits\SetupLendyPH::seedAndLogin() seeding, but leaves
-        // authentication per-test so the public/unauthenticated path is genuine.
-        Artisan::call('migrate:fresh');
-        $this->seed(DatabaseSeeder::class);
+        // Deliberately no actingAs() here, unlike SetupLendyPH::seedAndLogin():
+        // authentication is per-test so the public path is genuinely anonymous.
         Storage::fake('public');
 
         $this->admin = User::where('username', 'super_admin')->firstOrFail();

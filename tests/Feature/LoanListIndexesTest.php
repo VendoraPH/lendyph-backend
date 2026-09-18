@@ -2,7 +2,6 @@
 
 namespace Tests\Feature;
 
-use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
 use Tests\TestCase;
 
@@ -30,13 +29,6 @@ class LoanListIndexesTest extends TestCase
         'loan_products_name_index' => ['loan_products', 'name'],
         'amortization_schedules_loan_id_status_due_date_index' => ['amortization_schedules', 'loan_id,status,due_date'],
     ];
-
-    protected function setUp(): void
-    {
-        parent::setUp();
-
-        Artisan::call('migrate:fresh');
-    }
 
     public function test_the_loan_list_indexes_exist_with_their_columns_in_order(): void
     {
