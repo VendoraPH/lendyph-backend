@@ -7,7 +7,6 @@ use App\Models\CsvImportFileChunk;
 use App\Models\CsvImportRow;
 use App\Models\CsvImportRun;
 use Illuminate\Database\QueryException;
-use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Tests\TestCase;
@@ -30,10 +29,6 @@ use Tests\TestCase;
  *    file per run, so the importer never has to guess which is authoritative.
  */
 uses(TestCase::class);
-
-beforeEach(function () {
-    Artisan::call('migrate:fresh');
-});
 
 /**
  * A fresh instance of a shipped migration.

@@ -5,9 +5,7 @@ use App\Models\BorrowerSubmissionToken;
 use App\Models\Branch;
 use App\Models\User;
 use App\Services\BorrowerSubmissionTokenService;
-use Database\Seeders\DatabaseSeeder;
 use Illuminate\Http\UploadedFile;
-use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
@@ -27,8 +25,6 @@ use Tests\TestCase;
 uses(TestCase::class);
 
 beforeEach(function () {
-    Artisan::call('migrate:fresh');
-    $this->seed(DatabaseSeeder::class);
     $this->branch = Branch::first();
     $this->admin = User::where('username', 'super_admin')->first();
     Storage::fake('private');

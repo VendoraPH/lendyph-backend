@@ -14,6 +14,20 @@ class SequenceAllocatorTest extends TestCase
 {
     use SetupLendyPH;
 
+    /**
+     * The first spec asserts what the allocator does with NO transaction open,
+     * so it cannot run inside the one RefreshDatabase opens — there it would
+     * always find a transaction and pass for the wrong reason. The other three
+     * open their own transaction and nest happily on a savepoint.
+     */
+    protected function setUp(): void
+    {
+        $this->wrapsEachTestInTransaction =
+            $this->name() !== 'test_allocating_outside_a_transaction_fails_loudly';
+
+        parent::setUp();
+    }
+
     public function test_allocating_outside_a_transaction_fails_loudly(): void
     {
         // lockForUpdate() outside a transaction is not an error, it is a no-op:

@@ -8,8 +8,6 @@ use App\Models\Loan;
 use App\Models\LoanProduct;
 use App\Models\User;
 use App\Services\LoanService;
-use Database\Seeders\DatabaseSeeder;
-use Illuminate\Support\Facades\Artisan;
 
 trait SetupLendyPH
 {
@@ -17,10 +15,15 @@ trait SetupLendyPH
 
     protected Branch $branch;
 
+    /**
+     * Grab the seeded baseline and authenticate as the super admin.
+     *
+     * The schema and the seed are Tests\TestCase's job now (one `migrate:fresh
+     * --seeder` per worker process, each test wrapped in a transaction), so
+     * this no longer rebuilds anything.
+     */
     protected function seedAndLogin(): void
     {
-        Artisan::call('migrate:fresh');
-        $this->seed(DatabaseSeeder::class);
         $this->branch = Branch::first();
         $this->admin = User::where('username', 'super_admin')->first();
         $this->actingAs($this->admin);
