@@ -42,6 +42,10 @@ class StoreAccountingAccountRequest extends FormRequest
             'is_active' => ['sometimes', 'boolean'],
             'parent_id' => ['nullable', 'integer', Rule::exists('accounting_accounts', 'id')],
             'cash_kind' => ['nullable', Rule::in(AccountRules::CASH_KINDS)],
+            // Prose, and the only free-text field on an account. Capped here
+            // rather than by the column (which is TEXT) so someone who pastes
+            // an essay is told so instead of having it silently truncated.
+            'description' => ['nullable', 'string', 'max:500'],
         ];
     }
 

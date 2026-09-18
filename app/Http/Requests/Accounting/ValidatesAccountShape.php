@@ -3,6 +3,7 @@
 namespace App\Http\Requests\Accounting;
 
 use App\Models\AccountingAccount;
+use App\Models\AccountingAccountMapping;
 use App\Services\Accounting\AccountRules;
 use Illuminate\Contracts\Validation\Validator;
 
@@ -22,7 +23,7 @@ trait ValidatesAccountShape
      *
      * @var list<string>
      */
-    private const SHAPE_FIELDS = ['code', 'type', 'parent_id', 'cash_kind', 'is_group', 'is_active'];
+    private const SHAPE_FIELDS = ['code', 'type', 'parent_id', 'cash_kind', 'is_group', 'is_active', 'is_contra'];
 
     /**
      * @param  AccountingAccount|null  $existing  the row being updated, if any.
@@ -46,14 +47,18 @@ trait ValidatesAccountShape
         $cashKind = $this->finalValue('cash_kind', $existing?->cash_kind);
         $isGroup = (bool) $this->finalValue('is_group', $existing?->is_group ?? false);
         $isActive = (bool) $this->finalValue('is_active', $existing?->is_active ?? true);
+        $isContra = (bool) $this->finalValue('is_contra', $existing?->is_contra ?? false);
 
         $this->assertCodeAgreesWithType($validator, $code, $type);
         $this->assertParentIsAGroupOfTheSameType($validator, $parentId, $type, $existing);
         $this->assertGroupsHoldNoMoney($validator, $isGroup, $cashKind);
+        $this->assertOnlyAssetsHoldMoney($validator, $type, $cashKind);
 
         if ($existing !== null) {
             $this->assertHeadingsKeepTheirChildren($validator, $existing, $isGroup);
             $this->assertMappedAccountStaysPostable($validator, $existing, $isGroup, $isActive);
+            $this->assertHistoryKeepsItsSign($validator, $existing, $type, $isContra);
+            $this->assertMappedRolesStillFit($validator, $existing, $type, $isContra, $cashKind);
         }
     }
 
@@ -186,6 +191,26 @@ trait ValidatesAccountShape
     }
 
     /**
+     * Only an asset can be a money account.
+     *
+     * `cash_kind` is what AccountingDashboardBuilder::sumByCashKind() adds into
+     * the cash figures, so marking a liability, income or expense account as
+     * one reports its balance as money on hand. The role-shape check catches
+     * this for MAPPED accounts; this covers the rest, and covers create as well
+     * as update, where no mapping exists yet to check against.
+     */
+    private function assertOnlyAssetsHoldMoney(Validator $validator, string $type, mixed $cashKind): void
+    {
+        if ($type !== 'asset' && $cashKind !== null && $cashKind !== '') {
+            $validator->errors()->add(
+                'cash_kind',
+                "A {$type} account cannot be a money account. `cash_kind` puts a balance into the Cash & Bank "
+                .'screen and the dashboard cash figures, which would report this balance as money on hand.',
+            );
+        }
+    }
+
+    /**
      * A heading with children cannot stop being a heading: it would become
      * postable while still displaying the sum of everything below it, so its
      * own entries and its children's would be added together.
@@ -234,5 +259,125 @@ trait ValidatesAccountShape
                 );
             }
         }
+    }
+
+    /**
+     * An account that has been posted to cannot change `type` or `is_contra`.
+     *
+     * Both derive `normal_balance`, and `normal_balance` is applied to
+     * HISTORICAL lines every time a balance is computed — the trial balance,
+     * the general ledger and the dashboard all read the account as it is NOW to
+     * interpret movements recorded years ago. So one PUT retroactively re-signs
+     * every balance this account has ever carried: a ₱2,000,000 debit-normal
+     * receivable becomes a ₱2,000,000 credit, the balance sheet moves ₱4M in a
+     * single step, and the ledger rows themselves are untouched and look
+     * perfectly ordinary. Nothing in the audit trail says a figure changed,
+     * because no figure was stored — only its interpretation moved.
+     *
+     * `is_group` and `is_active` are already guarded for mapped accounts by
+     * {@see self::assertMappedAccountStaysPostable()}; this is the same
+     * treatment for the two fields that rewrite history rather than merely
+     * breaking the next posting, and it applies to EVERY account with lines,
+     * mapped or not.
+     *
+     * The remedy is the ordinary one: deactivate the account, create a
+     * correctly typed one, and move the balance across with a journal entry —
+     * which leaves both halves on the record, as a correction should.
+     */
+    /**
+     * An account a posting role resolves to has to keep the SHAPE that role
+     * means.
+     *
+     * The inverse of the check on the settings screen, and it has to exist
+     * separately because the same wrong outcome is reachable from either end.
+     * `UpdateAccountMappingRequest` stops a role being pointed at an account of
+     * the wrong shape; this stops the account UNDER a role being re-shaped into
+     * the wrong thing. Closing one door and leaving the other is not a defence —
+     * both need permissions held by the same principals, so it is only a longer
+     * walk to the same number.
+     *
+     * Three moves this closes, none of which fail anywhere:
+     *
+     * - Clearing `cash_kind` on 1010. `AccountingDashboardBuilder` filters the
+     *   cash figures on `cash_kind`, so collections keep posting correctly and
+     *   silently stop appearing in money-on-hand.
+     * - Dropping `is_contra` on 1200. The saving hook re-derives
+     *   `normal_balance` to debit, and Net Loans Receivable becomes gross PLUS
+     *   the provision instead of minus.
+     * - Re-typing a mapped account. The role then resolves to an account on the
+     *   wrong statement.
+     *
+     * UNCONDITIONAL — deliberately not gated on {@see AccountingAccount::hasTransactions()}.
+     * On a freshly seeded chart nothing has been posted yet, so a history gate
+     * would leave the whole window before the first entry wide open, which is
+     * exactly when an organisation is configuring its books. The damage here is
+     * to FUTURE postings, not past ones; that is the opposite precondition from
+     * {@see self::assertHistoryKeepsItsSign()}, and the reason these are two
+     * checks rather than one.
+     *
+     * Reported against the account attribute at fault, with the same remedy
+     * {@see self::assertMappedAccountStaysPostable()} gives: re-point the role
+     * first.
+     */
+    private function assertMappedRolesStillFit(
+        Validator $validator,
+        AccountingAccount $existing,
+        string $type,
+        bool $isContra,
+        mixed $cashKind,
+    ): void {
+        $roles = $existing->mappings()->pluck('role')->all();
+
+        if ($roles === []) {
+            return;
+        }
+
+        $kind = ($cashKind === null || $cashKind === '') ? null : (string) $cashKind;
+        $label = "{$existing->code} {$existing->name}";
+
+        foreach ($roles as $role) {
+            $mismatch = AccountingAccountMapping::roleMismatch($role, $label, $type, $isContra, $kind);
+
+            if ($mismatch === null) {
+                continue;
+            }
+
+            $validator->errors()->add(
+                $mismatch['field'] === 'role' ? 'type' : $mismatch['field'],
+                "{$label} is the account for {$role}. {$mismatch['message']} "
+                .'Point that role somewhere else before changing this account.',
+            );
+        }
+    }
+
+    private function assertHistoryKeepsItsSign(
+        Validator $validator,
+        AccountingAccount $existing,
+        string $type,
+        bool $isContra,
+    ): void {
+        $typeChanged = $type !== $existing->type;
+        $contraChanged = $isContra !== (bool) $existing->is_contra;
+
+        if (! $typeChanged && ! $contraChanged) {
+            return;
+        }
+
+        if (! $existing->hasTransactions()) {
+            return;
+        }
+
+        $field = $typeChanged ? 'type' : 'is_contra';
+        $what = $typeChanged
+            ? "re-classify it from {$existing->type} to {$type}"
+            : ($isContra ? 'make it a contra account' : 'stop it being a contra account');
+
+        $validator->errors()->add(
+            $field,
+            "{$existing->code} {$existing->name} already has journal entries against it, so you cannot {$what}. "
+            .'Both fields decide which way the account grows, and that is applied to every entry it has EVER '
+            .'carried — changing one now would silently re-sign all of its history. Deactivate this account and '
+            .'move the balance to a correctly classified one with a journal entry instead.',
+        );
     }
 }

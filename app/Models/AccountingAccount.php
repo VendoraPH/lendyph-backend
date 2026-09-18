@@ -23,7 +23,9 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
  * @property bool $is_group
  * @property bool $is_active
  * @property string|null $cash_kind
+ * @property string|null $description
  * @property int|null $created_by
+ * @property int|null $journal_lines_count
  */
 class AccountingAccount extends Model
 {
@@ -57,6 +59,7 @@ class AccountingAccount extends Model
         'is_group',
         'is_active',
         'cash_kind',
+        'description',
         'created_by',
     ];
 
@@ -111,6 +114,49 @@ class AccountingAccount extends Model
     public function mappings(): HasMany
     {
         return $this->hasMany(AccountingAccountMapping::class, 'accounting_account_id');
+    }
+
+    /**
+     * Every journal line that references this account.
+     *
+     * The relation behind `has_transactions`, and behind the guard that stops
+     * an account's `type` or `is_contra` changing once it has history.
+     *
+     * DRAFT lines count, deliberately, and it matters for both readers. The
+     * foreign key is `restrictOnDelete`, so a line in an unposted draft blocks
+     * the delete exactly as a posted one does — a `has_transactions` that
+     * ignored drafts would tell the UI deletion is safe and then 500 on it. And
+     * a draft is a posting waiting to happen: re-signing an account the
+     * afternoon before its pending entries post is the same mistake as
+     * re-signing it afterwards, found a day later.
+     *
+     * @return HasMany<AccountingJournalLine, $this>
+     */
+    public function journalLines(): HasMany
+    {
+        return $this->hasMany(AccountingJournalLine::class, 'accounting_account_id');
+    }
+
+    /**
+     * Whether any journal line references this account.
+     *
+     * An account with history can only be DEACTIVATED, never deleted: removing
+     * it would destroy one half of entries that still exist, so the books would
+     * stop balancing with the missing side unrecoverable. This is the read side
+     * of that rule — the database enforces it with a restricting foreign key,
+     * and the controller turns the resulting error into something a screen can
+     * render.
+     *
+     * Prefers a `withCount('journalLines')` the caller already loaded, so a
+     * page of sixty accounts costs one extra query rather than sixty.
+     */
+    public function hasTransactions(): bool
+    {
+        if ($this->journal_lines_count !== null) {
+            return (int) $this->journal_lines_count > 0;
+        }
+
+        return $this->journalLines()->exists();
     }
 
     /** Whether a journal line may reference this account. */

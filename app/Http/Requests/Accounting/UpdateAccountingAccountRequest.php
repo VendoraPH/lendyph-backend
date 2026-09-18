@@ -44,6 +44,7 @@ class UpdateAccountingAccountRequest extends FormRequest
             'is_active' => ['sometimes', 'boolean'],
             'parent_id' => ['sometimes', 'nullable', 'integer', Rule::exists('accounting_accounts', 'id')],
             'cash_kind' => ['sometimes', 'nullable', Rule::in(AccountRules::CASH_KINDS)],
+            'description' => ['sometimes', 'nullable', 'string', 'max:500'],
         ];
     }
 
