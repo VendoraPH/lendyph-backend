@@ -68,7 +68,20 @@ use Illuminate\Support\Carbon;
  */
 final class AutomaticPoster
 {
-    public function __construct(private readonly JournalPoster $poster = new JournalPoster) {}
+    /**
+     * No default. `= new JournalPoster` used to sit here, and it was fine right
+     * up until JournalPoster gained a constructor dependency (PeriodGuard, so a
+     * closed period actually refuses postings). A defaulted parameter lets the
+     * container skip resolution and hand over the default instead, so every
+     * caller got a JournalPoster built with zero arguments and every loan
+     * release, collection and void answered 500.
+     *
+     * Nothing constructs this class directly — LoanService and RepaymentService
+     * both reach it through `app(AutomaticPoster::class)` — so there is no
+     * reason to carry a default, and carrying one silently opts out of exactly
+     * the dependency wiring that keeps the period lock honest.
+     */
+    public function __construct(private readonly JournalPoster $poster) {}
 
     /**
      * The journal for a release, or null when this organisation keeps no books.
