@@ -189,7 +189,10 @@ class RoleAndPermissionSeeder extends Seeder
             'auto_credit:process',
             'auto_pay:view', 'auto_pay:toggle',
             'gcash:view',
-            'fees:view', 'fees:create', 'fees:update', 'fees:delete',
+            // `fees:view` only. Fee rules set what every borrower is charged, so
+            // creating/editing/deleting them is an admin decision, not a per-application
+            // one. Revoked from already-migrated boxes by 2026_09_19_090000.
+            'fees:view',
             'collaterals:view', 'collaterals:create', 'collaterals:update',
         ]);
 
