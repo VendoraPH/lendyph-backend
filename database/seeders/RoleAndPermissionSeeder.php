@@ -101,7 +101,7 @@ class RoleAndPermissionSeeder extends Seeder
             'loan_officer' => ['description' => 'Creates and processes loan applications; manages borrowers and share capital.'],
             'cashier' => ['description' => 'Records payments, releases approved loans, and reconciles cash.'],
             'collector' => ['description' => 'Collects payments on the field and marks collection status.'],
-            'viewer' => ['description' => 'Read-only access to operational data and audit logs.'],
+            'viewer' => ['description' => 'Read-only access to operational data.'],
             'general_bookkeeper' => ['description' => 'Releases loans after BOD approval in the normal workflow.'],
 
             // Approval-chain roles. ApprovalWorkflowSetting's default chains
@@ -227,7 +227,12 @@ class RoleAndPermissionSeeder extends Seeder
             'reports:view',
             'fees:view',
             'share_capital:view',
-            'audit_logs:view',
+            // Pointedly WITHOUT `audit_logs:view`. The audit log quotes the
+            // values that changed, so reading it reads the data it describes —
+            // which is not what the lowest-privilege role is for. Audit access
+            // stays with admin and the manager-level roles.
+            // See 2026_09_18_200001_revoke_audit_logs_view_from_viewer, which
+            // is what removes it on the deployments that are already migrated.
             'auto_pay:view',
             'gcash:view',
             'collaterals:view',

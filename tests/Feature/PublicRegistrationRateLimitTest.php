@@ -1,9 +1,16 @@
 <?php
 
+use App\Http\Middleware\AllowAuthOrSubmissionToken;
+use App\Http\Middleware\CheckTokenExpiry;
+use App\Http\Middleware\EnsureUserIsActive;
+use App\Http\Middleware\OptionalSanctumAuth;
+use App\Http\Middleware\RequirePasswordChange;
 use App\Models\Borrower;
 use App\Models\Branch;
 use App\Models\User;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Routing\Middleware\ThrottleRequests;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
@@ -245,6 +252,134 @@ it('does not throttle an authenticated operator creating borrowers in bulk', fun
             'contact_number' => '0917'.str_pad((string) (100 + $i), 7, '0', STR_PAD_LEFT),
             'email' => "bulk{$i}@example.com",
         ])->assertCreated();
+    }
+});
+
+/**
+ * The same exemption, driven by a real Bearer token.
+ *
+ * The example above cannot detect the bug this one exists for. `actingAs()`
+ * attaches the user to the default guard BEFORE the kernel runs, so
+ * `$request->user()` is populated inside the limiter no matter where
+ * OptionalSanctumAuth sits in the stack — it passes with the middleware order
+ * broken and with it fixed, and it did pass throughout the period the exemption
+ * was dead in production.
+ *
+ * A Bearer token is the only way to prove the ordering. It forces the limiter
+ * to depend on OptionalSanctumAuth having already run, which is exactly what
+ * SortedMiddleware used to prevent: ThrottleRequests (priority 7) was hoisted
+ * above SubstituteBindings (priority 10) and, in the process, stepped over
+ * OptionalSanctumAuth, which was in no priority list at all. The limiter then
+ * saw a null user, skipped `Limit::none()`, and metered staff on the anonymous
+ * per-IP bucket. See the prependToPriorityList() calls in bootstrap/app.php.
+ */
+it('does not throttle a bearer-authenticated operator creating borrowers in bulk', function () {
+    $operator = User::where('username', 'super_admin')->first();
+    $token = $operator->createToken('auth-token', ['*'], now()->addDay())->plainTextToken;
+
+    $branchId = Branch::first()->id;
+
+    // Twelve is past the anonymous burst tier of eight, so the ninth call is
+    // the one that used to come back 429.
+    for ($i = 1; $i <= 12; $i++) {
+        // Production builds a fresh container per request. This harness reuses
+        // one application, so OptionalSanctumAuth's Auth::setUser() from the
+        // previous iteration would still be on the default guard when the
+        // limiter runs — the limiter would read a user it had not resolved yet
+        // and the example would pass with the ordering broken. Clearing the
+        // guards restores the per-request boundary this is meant to test.
+        Auth::forgetGuards();
+
+        $this->withToken($token)->postJson('/api/borrowers', [
+            'branch_id' => $branchId,
+            'first_name' => 'Bearer'.$i,
+            'last_name' => 'Operator',
+            'contact_number' => '0918'.str_pad((string) (100 + $i), 7, '0', STR_PAD_LEFT),
+            'email' => "bearer{$i}@example.com",
+        ])->assertCreated();
+    }
+});
+
+/**
+ * The ordering invariant itself, asserted directly on the routes that depend
+ * on it.
+ *
+ * The example above proves it behaviourally for POST /borrowers, where the
+ * anonymous burst tier is small enough (8 per 10 minutes) to run into inside a
+ * test. The two upload routes cannot be proved that way cheaply — their
+ * anonymous tier is 120/hour, and 121 requests would trip the 60/min `api`
+ * limiter long before it. So this asserts the invariant those limiters actually
+ * rely on: identity is resolved BEFORE the meter runs.
+ *
+ * Reading the sorted stack is the point. Declaration order in routes/api.php is
+ * already correct and always was; it is Router::resolveMiddleware() running the
+ * stack through SortedMiddleware that used to undo it. Anything that asserted
+ * the declared order would have passed throughout the bug.
+ */
+it('resolves identity before the throttle on every public-registration route', function () {
+    $router = app('router');
+
+    $expectations = [
+        'api/borrowers' => OptionalSanctumAuth::class,
+        'api/borrowers/{borrower}/photo' => AllowAuthOrSubmissionToken::class,
+        'api/borrowers/{borrower}/valid-ids' => AllowAuthOrSubmissionToken::class,
+    ];
+
+    foreach ($expectations as $uri => $authMiddleware) {
+        $route = collect($router->getRoutes())->first(
+            fn ($r) => $r->uri() === $uri && in_array('POST', $r->methods()),
+        );
+
+        expect($route)->not->toBeNull("route POST /{$uri} not found");
+
+        // The EFFECTIVE stack, after the priority sort the framework applies.
+        $stack = array_values(array_filter(
+            $router->gatherRouteMiddleware($route),
+            'is_string',
+        ));
+
+        $authAt = array_search($authMiddleware, $stack, true);
+        $throttleAt = collect($stack)->search(
+            fn ($m) => str_starts_with($m, ThrottleRequests::class.':'),
+        );
+
+        expect($authAt)->not->toBeFalse("{$authMiddleware} missing from POST /{$uri}")
+            ->and($throttleAt)->not->toBeFalse("no throttle on POST /{$uri}")
+            ->and($authAt)->toBeLessThan(
+                $throttleAt,
+                "POST /{$uri}: {$authMiddleware} must sort ahead of ThrottleRequests, ".
+                'otherwise the limiter sees a null $request->user() and meters '.
+                'authenticated staff on the anonymous per-IP bucket. Effective order: '.
+                implode(' -> ', $stack),
+            );
+    }
+});
+
+/**
+ * RequirePasswordChange must stay LAST on these stacks.
+ *
+ * routes/api.php explains why at length: "your session expired" (401) and "your
+ * account was deactivated" (403) both outrank "you owe us a new password", and a
+ * deactivated user must be turned away rather than handed a change-password
+ * screen that would let them back in. The priority-list change above moves
+ * middleware around on exactly these routes, so this pins the part of the order
+ * that must NOT move.
+ */
+it('keeps RequirePasswordChange last on the public-registration routes', function () {
+    $router = app('router');
+
+    foreach (['api/borrowers', 'api/borrowers/{borrower}/photo', 'api/borrowers/{borrower}/valid-ids'] as $uri) {
+        $route = collect($router->getRoutes())->first(
+            fn ($r) => $r->uri() === $uri && in_array('POST', $r->methods()),
+        );
+
+        $stack = array_values(array_filter($router->gatherRouteMiddleware($route), 'is_string'));
+
+        expect(array_slice($stack, -3))->toBe([
+            CheckTokenExpiry::class,
+            EnsureUserIsActive::class,
+            RequirePasswordChange::class,
+        ], "tail of POST /{$uri} changed; effective order: ".implode(' -> ', $stack));
     }
 });
 
