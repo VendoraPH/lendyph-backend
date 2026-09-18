@@ -1,5 +1,7 @@
 <?php
 
+use App\Http\Controllers\Api\AccountingAccountController;
+use App\Http\Controllers\Api\AccountingSettingsController;
 use App\Http\Controllers\Api\ApprovalWorkflowController;
 use App\Http\Controllers\Api\AuditLogController;
 use App\Http\Controllers\Api\AuthController;
@@ -399,6 +401,41 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
 
             Route::get('/{run}/errors', [CsvImportErrorReportController::class, 'index'])->name('errors.index');
         });
+    });
+
+    /*
+    |--------------------------------------------------------------------------
+    | Accounting
+    |--------------------------------------------------------------------------
+    |
+    | The double-entry foundation: the chart of accounts and the posting
+    | defaults every automatic entry resolves through. Gated on the
+    | `chart_of_accounts:*` and `accounting:settings` permissions inside the
+    | controllers with `$this->authorize()`, like every other endpoint in this
+    | file — no `permission:` middleware appears here and this is not the place
+    | to start.
+    |
+    | The list endpoint answers with the raw Laravel paginator envelope
+    | ({data, links, meta}); `POST /accounts/seed` answers with a flat
+    | {data: Account[]} instead, because it returns the whole chart at once and
+    | there is nothing to page through.
+    */
+    Route::prefix('accounting')->group(function () {
+        Route::get('/accounts', [AccountingAccountController::class, 'index']);
+        Route::post('/accounts', [AccountingAccountController::class, 'store']);
+
+        // MUST precede /accounts/{account}. Laravel matches in registration
+        // order, so a wildcard registered first captures "seed" as an id — the
+        // same trap /collateral-types/reorder documents above. `whereNumber`
+        // on the wildcards is the second lock.
+        Route::post('/accounts/seed', [AccountingAccountController::class, 'seed']);
+
+        Route::get('/accounts/{account}', [AccountingAccountController::class, 'show'])->whereNumber('account');
+        Route::put('/accounts/{account}', [AccountingAccountController::class, 'update'])->whereNumber('account');
+        Route::delete('/accounts/{account}', [AccountingAccountController::class, 'destroy'])->whereNumber('account');
+
+        Route::get('/settings/account-mapping', [AccountingSettingsController::class, 'showAccountMapping']);
+        Route::put('/settings/account-mapping', [AccountingSettingsController::class, 'updateAccountMapping']);
     });
 
     // Branding (organization logo + identity printed on reports and documents)

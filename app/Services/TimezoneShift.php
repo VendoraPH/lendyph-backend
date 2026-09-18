@@ -120,6 +120,14 @@ class TimezoneShift
      * @var array<string, list<string>>
      */
     public const EXCLUDED_COLUMNS = [
+        // Added 2026-09-16, well after the cutover completed (2026-08-06 on
+        // every deployment), and the shift is one-shot — the `timezone_shifts`
+        // marker stops it running twice. Neither table can hold a row written
+        // by the old UTC application, and shifting them would move correct
+        // Manila timestamps 8h into the past. Same reasoning as the
+        // csv_import_* tables below.
+        'accounting_account_mappings' => ['created_at', 'updated_at'],
+        'accounting_accounts' => ['created_at', 'updated_at'],
         'borrower_submission_tokens' => ['created_at', 'expires_at', 'updated_at'],
         // The CSV migration importer's own bookkeeping. These tables were created
         // on 2026-08-29, three weeks after the cutover completed (2026-08-06 on
