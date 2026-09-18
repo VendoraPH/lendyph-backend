@@ -19,6 +19,7 @@ use Illuminate\Support\Facades\DB;
     {--role=* : Narrow to accounts holding this role. Repeatable. Omit it to cover every account holding any role.}
     {--except=* : Spare one account, by email or username. Repeatable.}
     {--include-roleless : Also flag accounts that hold no role at all. Cannot be combined with --role.}
+    {--skip-roleless : Proceed and leave role-less accounts unflagged, on purpose, having read the list.}
     {--force : Skip the interactive confirmations. Required for a non-interactive production run.}')]
 #[Description('Require privileged accounts to choose a new password before they can use the app again — always preview with --dry-run first')]
 class RequirePasswordChangeForPrivilegedAccounts extends Command
@@ -54,12 +55,37 @@ class RequirePasswordChangeForPrivilegedAccounts extends Command
      *
      * This is a *require a change*, not a *reset*. It does not touch anybody's
      * password, so a cracked hash keeps working for login until its owner
-     * actually changes it — the flag only stops that session doing anything
-     * else. Closing the window completely means resetting every password to a
-     * value nobody knows and distributing them out of band, which locks the
-     * cooperative out of its own system until each person is reached by phone.
-     * That is a business decision, not a command-line one; this is the milder
-     * half the owner asked for and its limit should be read out loud.
+     * actually changes it. Closing the window completely means resetting every
+     * password to a value nobody knows and distributing them out of band, which
+     * locks the cooperative out of its own system until each person is reached
+     * by phone. That is a business decision, not a command-line one; this is
+     * the milder half the owner asked for and its limit should be read out
+     * loud. Three parts of that limit, stated precisely rather than implied:
+     *
+     * - **The escape hatch is open to the attacker too.** Whoever cracked the
+     *   hash knows `current_password`, so they can call `/auth/change-password`
+     *   themselves: it clears the flag, sets a password only they know, and
+     *   deletes every other token the victim holds. There is no self-service
+     *   reset in this app, so the victim's only route back is an admin running
+     *   `POST /users/{user}/reset-password`. This is still a net gain — before
+     *   the flag a cracked credential bought silent, indefinite access and
+     *   nobody ever found out; after it, using one requires an act that is
+     *   recorded and that the victim notices the same morning. But it converts
+     *   a silent compromise into a loud one rather than preventing it, so
+     *   "I suddenly cannot log in" during the rollout window is a suspected
+     *   account takeover, not a helpdesk ticket. Note that `audit_logs.ip_address`
+     *   cannot tell the two apart on these deployments: TRUSTED_PROXIES is
+     *   empty and every browser call arrives via the Next.js rewrite, so every
+     *   row carries the frontend server's address.
+     * - **"Locked out of everything" has two carve-outs.** `POST /auth/login`
+     *   and `GET /auth/me` still answer, returning the account's own record.
+     *   And signed KYC file links already minted keep streaming for the rest of
+     *   their 30-minute TTL, because they authenticate by signature and key on
+     *   `file_link_version`, which this command deliberately does not bump.
+     * - **Clearing the flag only helps if the new password differs.** That is
+     *   enforced by `different:current_password` in ChangePasswordRequest,
+     *   added alongside this command. Without it the whole rotation completes
+     *   with every exposed credential still live, and reports success.
      *
      * It also deliberately leaves two things alone:
      *
@@ -121,7 +147,7 @@ class RequirePasswordChangeForPrivilegedAccounts extends Command
         if (($unknownRoles = $this->unknownRoles($roleNames)) !== []) {
             $this->error('Refusing to run: no such role on this deployment — '.implode(', ', $unknownRoles));
             $this->newLine();
-            $this->line('Roles that DO exist here: '.Role::query()->orderBy('name')->pluck('name')->implode(', '));
+            $this->line('Roles that DO exist here: '.implode(', ', $this->availableRoles()));
             $this->line('Roles differ per deployment, so a name that is right on one box may not exist on the next.');
             $this->line('A --role nobody holds would flag nobody and report success, which reads exactly like "done".');
 
@@ -146,15 +172,36 @@ class RequirePasswordChangeForPrivilegedAccounts extends Command
         }
 
         if ($meOption !== '' && strcasecmp($meOption, self::NO_OPERATOR_ACCOUNT) !== 0) {
-            $operator = $this->findAccount($meOption);
+            $operator = $this->resolveAccountOption('me', $meOption);
 
             if ($operator === null) {
-                $this->error("Refusing to run: no account on this deployment matches --me={$meOption}.");
                 $this->newLine();
                 $this->line('Almost certainly a typo, and the consequence of guessing is the whole point of');
                 $this->line('this guard: a --me that matches nobody protects nobody, so the run would flag you');
                 $this->line('along with everyone else. Check the address, or pass --me='.self::NO_OPERATOR_ACCOUNT.' if you');
                 $this->line('really have no account here.');
+
+                return self::FAILURE;
+            }
+
+            // `--me` spares an account from THIS run; it cannot undo a previous
+            // one, and it cannot undo an administrator's password reset, which
+            // sets the very same flag. An operator whose account is already
+            // flagged would otherwise read "SPARED — your account (--me)",
+            // believe the guard had covered them, and close the terminal still
+            // locked out of everything but the change-password screen — which
+            // is the exact outcome the whole --me apparatus exists to prevent,
+            // arrived at through the apparatus itself.
+            if ($operator->must_change_password && ! $this->option('force')) {
+                $this->error("Refusing to run: your own account ({$operator->email}) is ALREADY flagged.");
+                $this->newLine();
+                $this->line('--me only spares you from this run. It cannot clear a flag that is already set —');
+                $this->line('nothing can, except changing your own password through the app. Left as it is, you');
+                $this->line('are locked out of everything but the change-password screen, and this run would');
+                $this->line('have told you that you were protected.');
+                $this->newLine();
+                $this->line('Change your own password first, then re-run. If you know this and want to proceed');
+                $this->line('while still locked out, add --force.');
 
                 return self::FAILURE;
             }
@@ -169,10 +216,9 @@ class RequirePasswordChangeForPrivilegedAccounts extends Command
         $spared = [];
 
         foreach ($this->normalisedList($this->option('except')) as $needle) {
-            $account = $this->findAccount($needle);
+            $account = $this->resolveAccountOption('except', $needle);
 
             if ($account === null) {
-                $this->error("Refusing to run: no account on this deployment matches --except={$needle}.");
                 $this->newLine();
                 $this->line('An --except that matches nobody spares nobody — it would flag the very account');
                 $this->line('you named to protect, and report success while doing it.');
@@ -181,6 +227,21 @@ class RequirePasswordChangeForPrivilegedAccounts extends Command
             }
 
             $spared[$account->id] = $account;
+        }
+
+        // --except wins over --include-me in the classification below, so this
+        // combination is an instruction to lock yourself out and an instruction
+        // to spare yourself, in the same command. The run would spare you and
+        // then spend three separate lines — the header, the blast radius and
+        // the confirmation prompt — telling you it was about to lock you out.
+        // Wrong output at the exact moment the operator is reading carefully is
+        // worse than no output, so neither reading is guessed at.
+        if ($includeMe && $operator !== null && isset($spared[$operator->id])) {
+            $this->error('Refusing to run: --include-me and --except both name your own account.');
+            $this->newLine();
+            $this->line('Those are opposite instructions. Drop whichever one you did not mean.');
+
+            return self::FAILURE;
         }
 
         $candidates = $this->candidates($roleNames, $includeRoleless);
@@ -227,8 +288,9 @@ class RequirePasswordChangeForPrivilegedAccounts extends Command
             $this->newLine();
             $this->warn(sprintf('%d account(s) hold no role at all and were NOT flagged.', count($roleless)));
             $this->line('  No deployment has borrower logins, so these are not members — they are staff');
-            $this->line('  accounts whose role is missing. Look at them before you trust this run to have');
-            $this->line('  covered everyone, then re-run with --include-roleless if they should be flagged.');
+            $this->line('  accounts whose role is missing. Their hashes were in the same table as everybody');
+            $this->line('  else\'s, because Auditable wrote a full user row on every create and update');
+            $this->line('  regardless of role, so "no role" means unclassified rather than unexposed.');
         }
 
         if ($dryRun) {
@@ -249,7 +311,32 @@ class RequirePasswordChangeForPrivilegedAccounts extends Command
             ));
             $this->line('Re-run without --dry-run, adding --me=<your email>, to apply it.');
 
+            if ($meOption === '') {
+                $this->newLine();
+                $this->warn('This preview does not model --me, so it is one account WIDER than the real run.');
+                $this->line('Your own row above says it would be flagged; with --me it will be spared. Preview');
+                $this->line('again with the --me you intend to use if you want the two lists to match exactly.');
+            }
+
             return self::SUCCESS;
+        }
+
+        // A real run stops here rather than exiting 0 with exposed accounts left
+        // behind. This is a ten-box manual rollout: the only thing carried from
+        // one box to the next is the operator's memory of what the last one
+        // said, and "I left N accounts alone" that exits 0 is indistinguishable
+        // from "I covered everyone" by the time you are on box seven. Every
+        // other ambiguity in this command aborts and makes the human decide;
+        // an unclassified account is an ambiguity.
+        if ($roleless !== [] && ! $this->option('skip-roleless')) {
+            $this->newLine();
+            $this->error(sprintf('Refusing to run: %d account(s) hold no role and this run would leave them exposed.', count($roleless)));
+            $this->newLine();
+            $this->line('Decide, rather than letting the exit code say "done" while they are untouched:');
+            $this->line('  --include-roleless  flag them too (they are staff; there are no borrower logins)');
+            $this->line('  --skip-roleless     leave them, on purpose, having looked at the list above');
+
+            return self::FAILURE;
         }
 
         if ($toFlag === []) {
@@ -265,7 +352,17 @@ class RequirePasswordChangeForPrivilegedAccounts extends Command
 
         $this->announceBlastRadius(count($toFlag), $includeMe, $operator);
 
-        if (! $this->confirmToProceed('Forcing a password change on every privileged account')) {
+        // `true` rather than the default callback, which only asks when
+        // APP_ENV is literally `production`. Three reasons it must not be
+        // environment-conditional: locking yourself out of staging at 2am is
+        // not meaningfully better, which is the argument confirmSelfLock()
+        // already makes below; the fleet is ten deployments and `.env.example`
+        // ships APP_ENV=local, so one box with drifted env would lose its last
+        // prompt precisely where it matters; and `--me=none` is a legitimate,
+        // widest-possible-blast-radius invocation whose only other gate is that
+        // the string is non-empty. --force still bypasses it, and under
+        // --no-interaction the prompt takes its default, which is cancel.
+        if (! $this->confirmToProceed('Forcing a password change on every privileged account', true)) {
             return self::FAILURE;
         }
 
@@ -287,8 +384,10 @@ class RequirePasswordChangeForPrivilegedAccounts extends Command
 
         // One transaction so the deployment is never left half-locked: either
         // every account in the cohort is flagged or none is, and an operator
-        // reading the summary never has to wonder which half they got.
-        DB::transaction(function () use ($toFlag): void {
+        // reading the summary never has to wonder which half they got. The
+        // attribution row below is inside it too, so the trail cannot end up
+        // holding a receipt for a rotation that rolled back.
+        DB::transaction(function () use ($toFlag, $alreadyFlagged, $protected, $excepted, $roleless, $operator, $meOption, $roleNames): void {
             foreach ($toFlag as $user) {
                 // forceFill(), not update(). `must_change_password` is outside
                 // User::$fillable on purpose — read the comment there — so a
@@ -298,31 +397,49 @@ class RequirePasswordChangeForPrivilegedAccounts extends Command
                 // designed to force into the open, and this is the open part.
                 $user->forceFill(['must_change_password' => true])->save();
             }
+
+            // The per-user `updated` rows the Auditable trait writes carry no
+            // user_id — auth() resolves to nobody on the console — so on their
+            // own the trail would show a dozen accounts locked by no one. This
+            // row is the attribution, which is what AuditLogService::log()'s
+            // $userId and $ipAddress overrides exist for.
+            //
+            // `user_id` is an operator CLAIM, not an authenticated identity:
+            // anyone with shell access can pass any --me. It is worth recording
+            // and worth not over-reading. `deployment` is here because this is
+            // a ten-box rollout and "which box was this?" is the one question a
+            // later fleet-wide audit has to answer — the same lesson as the
+            // private-files rollout, where the code shipped and one box served
+            // borrower IDs for weeks afterwards.
+            AuditLogService::log(
+                'password_change_required',
+                newValues: [
+                    'flagged_user_ids' => array_map(static fn (User $user) => $user->id, $toFlag),
+                    'flagged' => count($toFlag),
+                    'already_flagged' => count($alreadyFlagged),
+                    'spared' => count($protected) + count($excepted) + count($roleless),
+                    'role_filter' => $roleNames === [] ? null : $roleNames,
+                    'roleless_left_unflagged' => count($roleless),
+                    'operator_claim' => $operator?->email ?? ('--me='.$meOption),
+                    'deployment' => config('app.name').' ('.config('app.env').') @ '.gethostname(),
+                ],
+                description: sprintf(
+                    'users:require-password-change flagged %d account(s) after the audit-log hash exposure',
+                    count($toFlag),
+                ),
+                userId: $operator?->id,
+                // Not request()->ip(). Laravel synthesises a console request
+                // whose default makes that the literal 127.0.0.1, so the row
+                // would claim the loopback address of whichever box ran it —
+                // and on these deployments a real IP would be meaningless
+                // anyway, because TRUSTED_PROXIES ships empty and every
+                // browser call already records the frontend server's address.
+                ipAddress: 'console',
+            );
         });
 
-        // The per-user `updated` rows the Auditable trait writes carry no
-        // user_id — auth() resolves to nobody on the console — so on their own
-        // the trail would show a dozen accounts locked by no one. This row is
-        // the attribution: it names the operator who ran it, which is exactly
-        // what AuditLogService::log()'s $userId override exists for.
-        AuditLogService::log(
-            'password_change_required',
-            newValues: [
-                'flagged_user_ids' => array_map(static fn (User $user) => $user->id, $toFlag),
-                'flagged' => count($toFlag),
-                'already_flagged' => count($alreadyFlagged),
-                'spared' => count($protected) + count($excepted) + count($roleless),
-                'role_filter' => $roleNames === [] ? null : $roleNames,
-            ],
-            description: sprintf(
-                'users:require-password-change flagged %d account(s) after the audit-log hash exposure',
-                count($toFlag),
-            ),
-            userId: $operator?->id,
-        );
-
         $this->newLine();
-        $this->info(sprintf('Flagged %d account(s) — each must set a new password before it can use the app again.', count($toFlag)));
+        $this->info(sprintf('Flagged %d account(s) — each must now change their password before the app will do anything else for them.', count($toFlag)));
 
         $this->reportSkipped($alreadyFlagged, $protected, $excepted, $roleless);
 
@@ -348,6 +465,27 @@ class RequirePasswordChangeForPrivilegedAccounts extends Command
     }
 
     /**
+     * The roles a user on this deployment can actually hold.
+     *
+     * Constrained to the `web` guard because that is the only guard in
+     * config/auth.php and the one Spatie's `role()` scope resolves against. A
+     * row with any other `guard_name` is constructible — `Role::$fillable`
+     * includes it — and would otherwise pass validation here and then throw
+     * RoleDoesNotExist from inside the query builder, turning a typo into a
+     * stack trace instead of the sentence below.
+     *
+     * @return list<string>
+     */
+    private function availableRoles(): array
+    {
+        return Role::query()
+            ->where('guard_name', 'web')
+            ->orderBy('name')
+            ->pluck('name')
+            ->all();
+    }
+
+    /**
      * @param  list<string>  $roleNames
      * @return list<string>
      */
@@ -357,7 +495,7 @@ class RequirePasswordChangeForPrivilegedAccounts extends Command
             return [];
         }
 
-        return array_values(array_diff($roleNames, Role::query()->pluck('name')->all()));
+        return array_values(array_diff($roleNames, $this->availableRoles()));
     }
 
     /**
@@ -367,15 +505,56 @@ class RequirePasswordChangeForPrivilegedAccounts extends Command
      * with (`super_admin`) at least as reliably as the mailbox on the account,
      * and every extra keystroke between them and a correct `--me` is a chance
      * to get it wrong.
+     *
+     * Returns every match rather than `first()`. Two rows cannot collide today
+     * — `username` is `alpha_dash` so it cannot contain `@`, `email` must pass
+     * the `email` rule, and both columns are UNIQUE — but that is a property of
+     * two validation rule sets anyone may edit, not of this query, which is the
+     * same argument `User::$fillable` makes about itself. Silently taking the
+     * first of two would spare or flag an account the operator did not name.
+     *
+     * @return Collection<int, User>
      */
-    private function findAccount(string $needle): ?User
+    private function findAccounts(string $needle): Collection
     {
         return User::query()
             ->with('roles')
             ->where(function ($query) use ($needle): void {
                 $query->where('email', $needle)->orWhere('username', $needle);
             })
-            ->first();
+            ->orderBy('id')
+            ->get();
+    }
+
+    /**
+     * Resolve exactly one account for an option, or explain why not.
+     *
+     * Both failure modes abort the run rather than shrug, because both end the
+     * same way: an option that was supposed to name somebody names nobody, and
+     * the account the operator meant to single out is treated like everyone
+     * else while the command reports success.
+     */
+    private function resolveAccountOption(string $option, string $needle): ?User
+    {
+        $matches = $this->findAccounts($needle);
+
+        if ($matches->count() === 1) {
+            return $matches->first();
+        }
+
+        if ($matches->isEmpty()) {
+            $this->error("Refusing to run: no account on this deployment matches --{$option}={$needle}.");
+
+            return null;
+        }
+
+        $this->error("Refusing to run: --{$option}={$needle} matches {$matches->count()} accounts.");
+        $this->newLine();
+        $this->line('  '.$matches->map(fn (User $user) => "#{$user->id} {$user->email} / {$user->username}")->implode(PHP_EOL.'  '));
+        $this->line('One account\'s username is another account\'s email address. Name the one you mean by id');
+        $this->line('through the admin UI, or fix the collision, before running this.');
+
+        return null;
     }
 
     /**
@@ -524,6 +703,13 @@ class RequirePasswordChangeForPrivilegedAccounts extends Command
         $this->line('  member of staff who uses this deployment, all at once.');
         $this->line('  Nothing here undoes it: an account clears its own flag only by changing its');
         $this->line('  own password through the app. Run it when someone can answer the phone.');
+        $this->newLine();
+        $this->line('  Timing matters. Anyone still signed in goes straight to the change-password');
+        $this->line('  screen without touching the login limiter. Anyone whose token has idled out');
+        $this->line('  has to log in first, and login is metered at 40 attempts per 5 minutes for the');
+        $this->line('  WHOLE deployment — trusted proxies are empty, so every staff member shares one');
+        $this->line('  bucket. Run this mid-morning while people are working, not before opening, or');
+        $this->line('  the entire coop queues behind that limit at 8am while trying to recover.');
 
         if ($includeMe && $operator !== null) {
             // No "see below": the self-lock warning only exists on a live run,

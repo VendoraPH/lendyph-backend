@@ -55,7 +55,12 @@ class RequirePasswordChangeCommandTest extends TestCase
      */
     private function runCommand(array $parameters = [], int $expectedExit = Command::SUCCESS): string
     {
-        $exitCode = Artisan::call(self::COMMAND, $parameters);
+        // --force by default. confirmToProceed() is unconditional now, not
+        // production-only, so an un-forced real run would sit on a prompt and
+        // take its default — cancel — in every test that is about something
+        // else. The gate itself is covered by the two specs under
+        // "The confirmation gate", which deliberately do not use this helper.
+        $exitCode = Artisan::call(self::COMMAND, $parameters + ['--force' => true]);
         $output = Artisan::output();
 
         $this->assertSame($expectedExit, $exitCode, "Unexpected exit code. Output was:\n{$output}");
@@ -330,6 +335,7 @@ class RequirePasswordChangeCommandTest extends TestCase
         $operator = $this->makeStaff('mgarcia', 'admin');
 
         $this->artisan(self::COMMAND, ['--me' => 'mgarcia', '--include-me' => true])
+            ->expectsConfirmation('Are you sure you want to run this command?', 'yes')
             ->expectsConfirmation('Lock mgarcia@binhscoop.ph out until it changes its own password?', 'no')
             ->assertFailed();
 
@@ -345,6 +351,7 @@ class RequirePasswordChangeCommandTest extends TestCase
         $operator = $this->makeStaff('mgarcia', 'admin');
 
         $this->artisan(self::COMMAND, ['--me' => 'mgarcia', '--include-me' => true])
+            ->expectsConfirmation('Are you sure you want to run this command?', 'yes')
             ->expectsConfirmation('Lock mgarcia@binhscoop.ph out until it changes its own password?', 'yes')
             ->assertSuccessful();
 
@@ -460,14 +467,46 @@ class RequirePasswordChangeCommandTest extends TestCase
 
     // ── Accounts holding no role ────────────────────────────────────────────
 
-    public function test_an_account_with_no_role_is_left_alone_and_reported(): void
+    public function test_an_account_with_no_role_is_reported_and_stops_a_real_run(): void
     {
+        // Exiting 0 having left exposed accounts behind is the one outcome a
+        // remediation command must not have: on box seven of ten, "I skipped 2"
+        // and "I covered everyone" are the same exit code and nobody remembers
+        // which one box three printed.
         $orphan = $this->makeStaff('orphan', null);
 
-        $output = $this->runCommand(['--me' => 'super_admin']);
+        $output = $this->runCommand(['--me' => 'super_admin'], Command::FAILURE);
 
         $this->assertStringContainsString('hold no role at all and were NOT flagged', $output);
+        $this->assertStringContainsString('would leave them exposed', $output);
         $this->assertFalse($orphan->fresh()->must_change_password);
+
+        // ...and nobody else was flagged either. The abort happens before the
+        // write, so the operator gets to decide with the deployment untouched.
+        $this->assertSame([], array_filter($this->flagState()));
+    }
+
+    public function test_skip_roleless_is_the_deliberate_way_past_that(): void
+    {
+        $orphan = $this->makeStaff('orphan', null);
+        $cashier = $this->makeStaff('rsantos');
+
+        $output = $this->runCommand(['--me' => 'super_admin', '--skip-roleless' => true]);
+
+        $this->assertTrue($cashier->fresh()->must_change_password);
+        $this->assertFalse($orphan->fresh()->must_change_password);
+        $this->assertStringContainsString('1 holds no role, so outside the rule', $output);
+    }
+
+    public function test_the_dry_run_reports_roleless_accounts_without_failing(): void
+    {
+        // The preview must always show you the whole picture; it is the real
+        // run that has to stop and ask.
+        $this->makeStaff('orphan', null);
+
+        $output = $this->runCommand(['--dry-run' => true]);
+
+        $this->assertStringContainsString('hold no role at all and were NOT flagged', $output);
     }
 
     public function test_include_roleless_takes_them_too(): void
@@ -477,6 +516,109 @@ class RequirePasswordChangeCommandTest extends TestCase
         $this->runCommand(['--me' => 'super_admin', '--include-roleless' => true]);
 
         $this->assertTrue($orphan->fresh()->must_change_password);
+    }
+
+    // ── The confirmation gate ───────────────────────────────────────────────
+
+    public function test_a_real_run_asks_before_writing_even_outside_production(): void
+    {
+        // confirmToProceed() is passed `true` rather than its default
+        // production-only callback. The fleet is ten boxes and .env.example
+        // ships APP_ENV=local, so an environment-conditional gate is one env
+        // drift away from not existing on the box where it mattered.
+        $cashier = $this->makeStaff('rsantos');
+
+        $this->assertNotSame('production', $this->app->environment());
+
+        $this->artisan(self::COMMAND, ['--me' => 'super_admin'])
+            ->expectsConfirmation('Are you sure you want to run this command?', 'no')
+            ->assertFailed();
+
+        $this->assertFalse($cashier->fresh()->must_change_password);
+    }
+
+    public function test_confirming_that_prompt_lets_the_run_through(): void
+    {
+        $cashier = $this->makeStaff('rsantos');
+
+        $this->artisan(self::COMMAND, ['--me' => 'super_admin'])
+            ->expectsConfirmation('Are you sure you want to run this command?', 'yes')
+            ->assertSuccessful();
+
+        $this->assertTrue($cashier->fresh()->must_change_password);
+    }
+
+    // ── Guards found in security review ─────────────────────────────────────
+
+    public function test_a_me_account_that_is_already_flagged_aborts_instead_of_reporting_spared(): void
+    {
+        // --me spares you from THIS run; it cannot clear a flag already set by
+        // a previous run or by an admin's password reset. Reporting "SPARED" to
+        // an operator who is in fact locked out is the exact failure the whole
+        // --me apparatus exists to prevent, reached through the apparatus.
+        $operator = $this->makeStaff('mgarcia', 'admin');
+        $operator->forceFill(['must_change_password' => true])->saveQuietly();
+
+        $cashier = $this->makeStaff('rsantos');
+
+        // Explicitly un-forced: --force is the documented way past this guard,
+        // and runCommand() supplies it by default for every other spec. The
+        // abort happens during option resolution, before any prompt.
+        $output = $this->runCommand(['--me' => 'mgarcia', '--force' => false], Command::FAILURE);
+
+        $this->assertStringContainsString('is ALREADY flagged', $output);
+        $this->assertStringNotContainsString('SPARED', $output);
+        $this->assertFalse($cashier->fresh()->must_change_password);
+    }
+
+    public function test_include_me_and_except_naming_the_same_account_is_refused(): void
+    {
+        // Opposite instructions. --except wins in classification, so the run
+        // would spare the operator while three separate lines told them they
+        // were about to be locked out.
+        $this->makeStaff('mgarcia', 'admin');
+
+        $output = $this->runCommand([
+            '--me' => 'mgarcia',
+            '--include-me' => true,
+            '--except' => ['mgarcia@binhscoop.ph'],
+        ], Command::FAILURE);
+
+        $this->assertStringContainsString('both name your own account', $output);
+    }
+
+    public function test_the_dry_run_says_it_does_not_model_me_sparing(): void
+    {
+        // The documented workflow is preview, arrow-up, add --me. Without this
+        // note the preview silently shows a cohort one account wider than the
+        // run that follows it, including the operator's own row.
+        $this->makeStaff('rsantos');
+
+        $output = $this->runCommand(['--dry-run' => true]);
+
+        $this->assertStringContainsString('one account WIDER than the real run', $output);
+    }
+
+    public function test_the_dry_run_omits_that_note_when_me_was_given(): void
+    {
+        $this->makeStaff('rsantos');
+
+        $output = $this->runCommand(['--dry-run' => true, '--me' => 'super_admin']);
+
+        $this->assertStringNotContainsString('WIDER than the real run', $output);
+    }
+
+    public function test_the_blast_radius_warns_about_the_shared_login_rate_limit(): void
+    {
+        // Not revoking tokens mostly avoids this, but anyone whose token idled
+        // out has to log in, and login is metered deployment-wide because
+        // TRUSTED_PROXIES is empty.
+        $this->makeStaff('rsantos');
+
+        $output = $this->runCommand(['--dry-run' => true]);
+
+        $this->assertStringContainsString('40 attempts per 5 minutes', $output);
+        $this->assertStringContainsString('mid-morning', $output);
     }
 
     public function test_include_roleless_cannot_be_combined_with_role(): void
@@ -505,6 +647,7 @@ class RequirePasswordChangeCommandTest extends TestCase
         $output = $this->runCommand([
             '--me' => 'mgarcia',
             '--except' => ['lreyes@binhscoop.ph'],
+            '--skip-roleless' => true,
         ]);
 
         $this->assertStringContainsString('Flagged 1 account(s)', $output);
@@ -539,14 +682,72 @@ class RequirePasswordChangeCommandTest extends TestCase
         // The incident that caused this command in the first place. Flagging
         // goes through Eloquent, so every save fires the Auditable `updated`
         // hook, which stores whole model rows.
+        $staff = $this->makeStaff('rsantos');
+
+        $this->runCommand(['--me' => 'super_admin']);
+
+        $rows = AuditLog::where('auditable_type', User::class)
+            ->where('auditable_id', $staff->id)
+            ->get();
+
+        $this->assertNotEmpty($rows, 'expected the flag write to be audited at all');
+
+        // Assert the KEYS are absent, not that no value looks like bcrypt.
+        // Auditable's redaction is key-based (User::$auditRedacted), so it holds
+        // whatever the hash driver is; a `%$2y$%` probe would pass vacuously the
+        // day someone sets argon2 in config/hashing.php while the real
+        // guarantee was quietly broken.
+        foreach ($rows as $row) {
+            foreach (['old_values', 'new_values'] as $column) {
+                $this->assertArrayNotHasKey('password', $row->{$column} ?? []);
+                $this->assertArrayNotHasKey('remember_token', $row->{$column} ?? []);
+            }
+        }
+    }
+
+    public function test_the_attribution_row_names_the_deployment_and_does_not_claim_an_ip(): void
+    {
+        // A ten-box manual rollout: "which box was this?" is the one question a
+        // later fleet-wide audit has to answer, and request()->ip() on the
+        // console is the synthesised request's literal 127.0.0.1.
         $this->makeStaff('rsantos');
 
         $this->runCommand(['--me' => 'super_admin']);
 
-        $this->assertSame(0, AuditLog::query()
-            ->where('old_values', 'like', '%$2y$%')
-            ->orWhere('new_values', 'like', '%$2y$%')
-            ->count());
+        $summary = AuditLog::where('action', 'password_change_required')->sole();
+
+        $this->assertSame('console', $summary->ip_address);
+        $this->assertStringContainsString(config('app.env'), $summary->new_values['deployment']);
+        $this->assertSame('super_admin@lendyph.com', $summary->new_values['operator_claim']);
+    }
+
+    public function test_the_attribution_row_records_the_operator_claim_even_for_me_none(): void
+    {
+        // --me=none has the widest blast radius the command can produce and
+        // leaves user_id null, so the claim is the only trace of who ran it.
+        $this->makeStaff('rsantos');
+
+        $this->runCommand(['--me' => 'none']);
+
+        $summary = AuditLog::where('action', 'password_change_required')->sole();
+
+        // `userId: null` falls back to auth()->id(), which is nobody on a real
+        // console but IS somebody here — the suite authenticates in setUp. That
+        // fallback is exactly why the claim is recorded separately: it is the
+        // only field that survives the difference.
+        $this->assertSame('--me=none', $summary->new_values['operator_claim']);
+    }
+
+    public function test_the_attribution_row_rolls_back_with_the_flags(): void
+    {
+        // It lives inside the transaction, so the trail can never hold a
+        // receipt for a rotation that did not land.
+        $this->makeStaff('rsantos');
+
+        $this->runCommand(['--me' => 'super_admin']);
+
+        $this->assertSame(1, AuditLog::where('action', 'password_change_required')->count());
+        $this->assertSame(1, User::where('must_change_password', true)->count());
     }
 
     // ── End to end: the flag actually locks the door ────────────────────────
@@ -584,6 +785,71 @@ class RequirePasswordChangeCommandTest extends TestCase
 
         // ...and normal access is back, on the same token.
         $this->bearer($token)->getJson('/api/borrowers')->assertOk();
+    }
+
+    public function test_a_flagged_account_cannot_clear_the_flag_by_reusing_the_exposed_password(): void
+    {
+        // The finding that decides whether any of this was worth doing.
+        //
+        // The reason these accounts are flagged is that their bcrypt hash left
+        // `audit_logs` and has to be assumed cracked. Without
+        // `different:current_password` on ChangePasswordRequest, the user
+        // clears the flag by typing the SAME password into both fields: the
+        // hash is recomputed, `must_change_password` goes false, a
+        // `password_changed` row is written, and the credential the attacker
+        // holds is still live. Ten deployments would report a completed
+        // rotation having rotated nothing — and would retire the suspicion that
+        // was the only thing left to catch it.
+        $cashier = $this->makeStaff('rsantos');
+        $token = $this->loginAndGetToken($cashier);
+        $originalHash = $cashier->fresh()->password;
+
+        $this->app['auth']->forgetGuards();
+        $this->runCommand(['--me' => 'super_admin']);
+
+        $this->bearer($token)->postJson('/api/auth/change-password', [
+            'current_password' => self::PASSWORD,
+            'new_password' => self::PASSWORD,
+            'new_password_confirmation' => self::PASSWORD,
+        ])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors('new_password');
+
+        $cashier->refresh();
+
+        // Still flagged, still the same hash, still locked out. The rotation
+        // is not satisfiable by a no-op.
+        $this->assertTrue($cashier->must_change_password);
+        $this->assertSame($originalHash, $cashier->password);
+        $this->bearer($token)->getJson('/api/borrowers')->assertStatus(423);
+
+        // ...and a genuinely different password still works, so the rule
+        // narrows the exit without closing it.
+        $this->bearer($token)->postJson('/api/auth/change-password', [
+            'current_password' => self::PASSWORD,
+            'new_password' => 'chosen-by-me-456',
+            'new_password_confirmation' => 'chosen-by-me-456',
+        ])->assertOk();
+
+        $this->assertFalse($cashier->fresh()->must_change_password);
+        $this->bearer($token)->getJson('/api/borrowers')->assertOk();
+    }
+
+    public function test_an_unflagged_user_also_cannot_change_their_password_to_the_same_one(): void
+    {
+        // The rule lives on the request, not on the flag, so it applies to
+        // ordinary password changes too. Stated as a spec so nobody later
+        // "scopes it to the incident" and reopens the hole for the next one.
+        $staff = $this->makeStaff('rsantos');
+        $token = $this->loginAndGetToken($staff);
+
+        $this->bearer($token)->postJson('/api/auth/change-password', [
+            'current_password' => self::PASSWORD,
+            'new_password' => self::PASSWORD,
+            'new_password_confirmation' => self::PASSWORD,
+        ])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors('new_password');
     }
 
     public function test_an_operator_spared_by_me_keeps_working_over_http(): void
