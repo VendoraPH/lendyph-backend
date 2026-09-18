@@ -84,6 +84,15 @@ class RoleAndPermissionSeeder extends Seeder
             'chart_of_accounts:update', 'chart_of_accounts:delete',
             'journals:view', 'journals:create', 'journals:post', 'journals:reverse',
             'expenses:view', 'expenses:create', 'expenses:update',
+            // Settling a payable — taking money OUT of a cash account against a
+            // liability. Its own permission rather than part of
+            // `expenses:update` for the same reason `journals:post` is separate
+            // from `journals:create`: recording what is owed and paying it are
+            // not the same act, and nobody should do both to their own
+            // paperwork. Granted to super_admin and admin only; see
+            // 2026_09_18_210002_add_expense_payment_permission, which is what
+            // grants it on the already-migrated deployments.
+            'expenses:pay',
             'cash_accounts:view', 'cash_accounts:transfer',
         ];
 
