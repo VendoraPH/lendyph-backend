@@ -7,6 +7,7 @@ use App\Models\Loan;
 use App\Models\User;
 use Carbon\Carbon;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
 use Throwable;
 
@@ -169,6 +170,16 @@ class AutoPayService
                 ];
             } catch (Throwable $e) {
                 $failed++;
+
+                // The message is the whole value of this exception. A refused
+                // posting (CannotPostToTheBooksException) carries the one
+                // sentence that says WHICH accounting setting is missing —
+                // swallowing it turns a five-minute fix into "N failed" with
+                // nothing to act on, across an entire overnight run.
+                Log::warning('Auto-pay skipped a loan after an error.', [
+                    'loan_id' => $loan->id,
+                    'error' => $e->getMessage(),
+                ]);
             }
         }
 
