@@ -4,6 +4,7 @@ use App\Http\Controllers\Api\AccountingAccountController;
 use App\Http\Controllers\Api\AccountingBookController;
 use App\Http\Controllers\Api\AccountingExpenseController;
 use App\Http\Controllers\Api\AccountingJournalController;
+use App\Http\Controllers\Api\AccountingReconciliationController;
 use App\Http\Controllers\Api\AccountingReportController;
 use App\Http\Controllers\Api\AccountingSettingsController;
 use App\Http\Controllers\Api\ApprovalWorkflowController;
@@ -598,6 +599,20 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
         Route::get('/expenses/{expense}', [AccountingExpenseController::class, 'show'])->whereNumber('expense');
         Route::put('/expenses/{expense}', [AccountingExpenseController::class, 'update'])->whereNumber('expense');
         Route::post('/expenses/{expense}/pay', [AccountingExpenseController::class, 'pay'])->whereNumber('expense');
+
+        /*
+         * Reconciliation, all on `accounting:reconcile` — the same permission
+         * the screen's RouteGuard uses, and one the bookkeeper already holds.
+         * Reconciling proves the books against an outside record; it never
+         * adjusts them, so none of these writes a journal and none of them
+         * needs a posting permission.
+         */
+        Route::get('/reconciliations', [AccountingReconciliationController::class, 'index']);
+        Route::post('/reconciliations', [AccountingReconciliationController::class, 'store']);
+        Route::get('/reconciliations/{reconciliation}', [AccountingReconciliationController::class, 'show'])
+            ->whereNumber('reconciliation');
+        Route::post('/reconciliations/{reconciliation}/match', [AccountingReconciliationController::class, 'match'])
+            ->whereNumber('reconciliation');
 
     });
 
