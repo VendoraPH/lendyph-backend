@@ -120,6 +120,24 @@ class TimezoneShift
      * @var array<string, list<string>>
      */
     public const EXCLUDED_COLUMNS = [
+        // Added 2026-09-16, well after the cutover completed (2026-08-06 on
+        // every deployment), and the shift is one-shot — the `timezone_shifts`
+        // marker stops it running twice. Neither table can hold a row written
+        // by the old UTC application, and shifting them would move correct
+        // Manila timestamps 8h into the past. Same reasoning as the
+        // csv_import_* tables below.
+        'accounting_account_mappings' => ['created_at', 'updated_at'],
+        'accounting_accounts' => ['created_at', 'updated_at'],
+        // Same reasoning, and one addition: `posted_at` is a real instant (the
+        // moment an entry entered the books) and WOULD be a shift candidate on
+        // any table old enough to need it — this one is not. Note that
+        // `accounting_journals.date` is deliberately absent from both maps: it
+        // is a DATE, the calendar day the transaction belongs to, chosen by the
+        // person posting rather than derived from a clock. Shifting an
+        // accounting date would move entries between reporting periods, which
+        // is the accounting equivalent of moving a payment to the wrong day.
+        'accounting_journal_lines' => ['created_at', 'updated_at'],
+        'accounting_journals' => ['created_at', 'posted_at', 'updated_at'],
         'borrower_submission_tokens' => ['created_at', 'expires_at', 'updated_at'],
         // The CSV migration importer's own bookkeeping. These tables were created
         // on 2026-08-29, three weeks after the cutover completed (2026-08-06 on
@@ -136,6 +154,12 @@ class TimezoneShift
         // deployment), so this table cannot hold a row written by the old UTC
         // application. Same reasoning as the csv_import_* tables above.
         'gcash_non_members' => ['created_at', 'deleted_at', 'updated_at'],
+        // Added 2026-09-16 with the server-side loan approval chain, well after
+        // the cutover completed (2026-08-06 on every deployment), so this table
+        // cannot hold a row written by the old UTC application — the chain was
+        // browser-local localStorage until now and never had a server row at
+        // all. Same reasoning as the csv_import_* tables above.
+        'loan_approval_steps' => ['acted_at', 'created_at', 'updated_at'],
         'password_reset_tokens' => ['created_at'],
         'personal_access_tokens' => ['created_at', 'expires_at', 'last_used_at', 'updated_at'],
         // The shift's own bookkeeping, written after the cutover by definition.
