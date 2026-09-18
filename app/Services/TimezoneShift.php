@@ -143,6 +143,10 @@ class TimezoneShift
         // payment to the wrong day.
         'accounting_expense_payments' => ['created_at', 'updated_at'],
         'accounting_expenses' => ['created_at', 'updated_at'],
+        // `closed_at` and `reopened_at` ARE real instants — the moments someone
+        // signed a month off and took that back — and WOULD be shift candidates
+        // on a table old enough to need it. This one is not.
+        'accounting_periods' => ['closed_at', 'created_at', 'reopened_at', 'updated_at'],
         'accounting_reconciliation_lines' => ['created_at', 'updated_at'],
         'accounting_reconciliations' => ['created_at', 'updated_at'],
         // Same reasoning, and one addition: `posted_at` is a real instant (the

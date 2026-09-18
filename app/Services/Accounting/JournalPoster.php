@@ -46,6 +46,23 @@ final class JournalPoster
     public const MAX_LINES = 500;
 
     /**
+     * The closed-period lock lives HERE, and that placement is the whole reason
+     * it works.
+     *
+     * A closed period that still accepts postings is not closed, and there are
+     * a dozen ways into the books: the manual entry screen, an expense, a fund
+     * transfer, a reversal, and every automatic entry a loan release or a
+     * collection raises. Checking the period in each of those is a list that
+     * would be incomplete the first time somebody added a thirteenth. This
+     * class is already the ONE writer of journals, so a check here is a check
+     * on all of them, including the ones not written yet.
+     *
+     * @see PeriodGuard for why an absent period does NOT lock, and why the read
+     *      takes a shared lock.
+     */
+    public function __construct(private PeriodGuard $periods) {}
+
+    /**
      * Creates a draft.
      *
      * A draft affects nothing: it has no number, it is excluded from every
@@ -65,6 +82,16 @@ final class JournalPoster
     public function draft(array $attributes, array $lines, ?int $userId = null): AccountingJournal
     {
         return DB::transaction(function () use ($attributes, $lines, $userId): AccountingJournal {
+            // Checked on the DRAFT as well as on the post, so that someone
+            // typing an entry into a month that was closed last week is told
+            // now rather than after they have finished filling it in. The post
+            // is still checked independently — a draft created while the period
+            // was open and submitted after it closed has to be refused, and
+            // only the check in commit() sees that.
+            if (isset($attributes['date'])) {
+                $this->periods->assertOpen((string) $attributes['date']);
+            }
+
             $journal = AccountingJournal::create(array_merge(
                 ['source' => 'manual'],
                 $attributes,
@@ -103,6 +130,15 @@ final class JournalPoster
                 throw ValidationException::withMessages([
                     'journal' => [$this->immutableMessage($fresh)],
                 ]);
+            }
+
+            // Re-dating a draft INTO a closed period is the same act as
+            // creating one there, and is refused for the same reason. Only the
+            // incoming date is checked: a draft that already sits in a closed
+            // month may still be edited out of it, which is how someone fixes
+            // exactly this mistake.
+            if (isset($attributes['date'])) {
+                $this->periods->assertOpen((string) $attributes['date']);
             }
 
             $fresh->update($attributes);
@@ -155,6 +191,27 @@ final class JournalPoster
                     'journal' => [$this->immutableMessage($fresh)],
                 ]);
             }
+
+            /*
+             * THE CLOSED-PERIOD LOCK.
+             *
+             * Read from the STORED date rather than from anything a caller
+             * passed, and read here rather than at draft time, because the two
+             * moments are days apart in normal use: a bookkeeper drafts an
+             * entry on the 30th and it is approved on the 3rd, by which time
+             * the month may have been signed off. Only this check sees that.
+             *
+             * The read takes a shared lock that is held for the rest of this
+             * transaction, and PeriodCalendar::close() takes an exclusive one,
+             * so a post and a close cannot overtake each other — see
+             * PeriodGuard.
+             */
+            $this->periods->assertOpen(
+                $fresh->date instanceof \DateTimeInterface
+                    ? $fresh->date->format('Y-m-d')
+                    : substr((string) $fresh->date, 0, 10),
+                $fresh->journal_no ?: 'This entry',
+            );
 
             // Re-read under a lock. The in-memory copy the caller holds may
             // have been loaded before someone else edited the draft, and the

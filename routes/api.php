@@ -1,8 +1,10 @@
 <?php
 
 use App\Http\Controllers\Api\AccountingAccountController;
+use App\Http\Controllers\Api\AccountingCashAccountController;
 use App\Http\Controllers\Api\AccountingExpenseController;
 use App\Http\Controllers\Api\AccountingJournalController;
+use App\Http\Controllers\Api\AccountingPeriodController;
 use App\Http\Controllers\Api\AccountingReconciliationController;
 use App\Http\Controllers\Api\AccountingReportController;
 use App\Http\Controllers\Api\AccountingSettingsController;
@@ -564,6 +566,30 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
             ->whereNumber('reconciliation');
         Route::post('/reconciliations/{reconciliation}/match', [AccountingReconciliationController::class, 'match'])
             ->whereNumber('reconciliation');
+
+        /*
+         * Periods, on `accounting:close`.
+         *
+         * No create route, and none is missing: the months the books span are a
+         * fact about the ledger rather than a decision, so PeriodCalendar
+         * provisions them on read. Closing LOCKS — PeriodGuard is consulted
+         * inside JournalPoster, the one writer of journals, so a closed month
+         * refuses the manual entry screen, an expense, a transfer, a reversal
+         * and every automatic posting alike.
+         */
+        Route::get('/periods', [AccountingPeriodController::class, 'index']);
+        Route::post('/periods/{period}/close', [AccountingPeriodController::class, 'close'])->whereNumber('period');
+        Route::post('/periods/{period}/reopen', [AccountingPeriodController::class, 'reopen'])->whereNumber('period');
+
+        /*
+         * Moving money between the organisation's own accounts. Returns the
+         * posted JournalEntry, which is what `accountingService.transfer` is
+         * typed to receive.
+         *
+         * `GET /cash-accounts` is NOT here — it belongs with the chart of
+         * accounts, being that list filtered to the rows carrying a `cash_kind`.
+         */
+        Route::post('/cash-accounts/transfer', [AccountingCashAccountController::class, 'transfer']);
 
     });
 
