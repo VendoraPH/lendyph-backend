@@ -3,6 +3,7 @@
 namespace App\Http\Requests\Accounting;
 
 use App\Services\Accounting\AccountRules;
+use App\Services\Accounting\CashFlowCategories;
 use Illuminate\Contracts\Validation\Validator;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
@@ -42,6 +43,13 @@ class StoreAccountingAccountRequest extends FormRequest
             'is_active' => ['sometimes', 'boolean'],
             'parent_id' => ['nullable', 'integer', Rule::exists('accounting_accounts', 'id')],
             'cash_kind' => ['nullable', Rule::in(AccountRules::CASH_KINDS)],
+            // Optional. Left out, the saving hook derives it from `type` and
+            // `cash_kind` — see CashFlowCategories. Unlike `normal_balance`
+            // above this IS accepted from a client, because it is a judgement
+            // about what the money was for rather than arithmetic, and the
+            // whole reason it is stored is that an accountant may disagree with
+            // the default.
+            'cash_flow_category' => ['nullable', Rule::in(CashFlowCategories::ALL)],
             // Prose, and the only free-text field on an account. Capped here
             // rather than by the column (which is TEXT) so someone who pastes
             // an essay is told so instead of having it silently truncated.

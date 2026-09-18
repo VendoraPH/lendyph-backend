@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use App\Services\Accounting\AccountRules;
+use App\Services\Accounting\CashFlowCategories;
 use App\Traits\Auditable;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -23,6 +24,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
  * @property bool $is_group
  * @property bool $is_active
  * @property string|null $cash_kind
+ * @property string|null $cash_flow_category
  * @property string|null $description
  * @property int|null $created_by
  * @property int|null $journal_lines_count
@@ -59,6 +61,11 @@ class AccountingAccount extends Model
         'is_group',
         'is_active',
         'cash_kind',
+        // Which activity a movement through this account belongs to. Fillable
+        // because it is EDITABLE — the seeded value is a default and the whole
+        // design assumes an accountant will disagree with some of them. See
+        // App\Services\Accounting\CashFlowCategories.
+        'cash_flow_category',
         'description',
         'created_by',
     ];
@@ -92,6 +99,28 @@ class AccountingAccount extends Model
                 (string) $account->type,
                 (bool) $account->is_contra,
             );
+
+            // Derived only when MISSING, which is the difference between this
+            // and `normal_balance` above.
+            //
+            // `normal_balance` is never accepted from a client because a stored
+            // value that disagreed with the type would invert the account's
+            // sign on two statements at once. A cash flow classification cannot
+            // be wrong in that arithmetic sense — it is a judgement about what
+            // the money was for, and the entire point of exposing it is that an
+            // accountant may disagree with the default. So an explicit value is
+            // kept and only an absent one is filled in.
+            //
+            // Filling it in at all is what stops an account being silently
+            // dropped out of the cash flow statement for carrying no
+            // classification, which would take its amount off the report while
+            // leaving it in the net change.
+            if ($account->cash_flow_category === null) {
+                $account->cash_flow_category = CashFlowCategories::defaultFor(
+                    (string) $account->type,
+                    $account->cash_kind,
+                );
+            }
         });
     }
 
