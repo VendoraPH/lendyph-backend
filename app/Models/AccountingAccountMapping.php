@@ -48,6 +48,7 @@ class AccountingAccountMapping extends Model
         'credit_loss_expense',
         'allowance_credit_losses',
         'accounts_payable',
+        'borrower_advances',
     ];
 
     /**
@@ -102,6 +103,24 @@ class AccountingAccountMapping extends Model
         'credit_loss_expense' => ['type' => 'expense'],
         'allowance_credit_losses' => ['type' => 'asset', 'is_contra' => true],
         'accounts_payable' => ['type' => 'liability'],
+
+        /*
+         * Money received that has not settled anything yet.
+         *
+         * `repayments.amount_paid` is not bounded by what is owed —
+         * StoreRepaymentRequest allows any amount over a centavo — and the
+         * excess is stored as `repayments.overpayment`. It is cash the
+         * organisation is holding on the borrower's behalf, so it is a
+         * LIABILITY, not income: crediting it anywhere on the income statement
+         * would report money as earned that the borrower can still ask back.
+         *
+         * Deliberately NOT `accounts_payable`. That role is a trade payable,
+         * owned by the expenses side of this module, and an obligation to a
+         * supplier is not an obligation to a borrower. Sharing one account
+         * would make the payables ageing report unreadable and would put two
+         * streams' postings in the same balance.
+         */
+        'borrower_advances' => ['type' => 'liability'],
     ];
 
     protected $fillable = [

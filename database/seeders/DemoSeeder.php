@@ -11,6 +11,7 @@ use App\Models\User;
 use App\Services\LoanService;
 use App\Services\RepaymentService;
 use Illuminate\Database\Seeder;
+use RuntimeException;
 
 class DemoSeeder extends Seeder
 {
@@ -33,7 +34,19 @@ class DemoSeeder extends Seeder
         $this->command->info('Seeding demo data...');
 
         $loanService = app(LoanService::class);
+
+        // Every row below is scoped to a branch. On a database that has been
+        // migrated but not seeded there is none, and the failure would
+        // otherwise be "Attempt to read property id on null" from whichever
+        // block happened to run first.
         $branch = Branch::first();
+
+        if (! $branch) {
+            throw new RuntimeException(
+                'DemoSeeder needs a branch and found none. '
+                .'Run `php artisan db:seed` first — BranchSeeder creates it.'
+            );
+        }
 
         // ── Users ──
         $officer = User::firstOrCreate(['username' => 'officer'], [
@@ -129,7 +142,29 @@ class DemoSeeder extends Seeder
             );
         });
 
-        $admin = User::where('username', 'admin')->first();
+        /**
+         * The staff member every demo loan is attributed to.
+         *
+         * This used to look for username `admin`, which no seeder creates —
+         * AdminUserSeeder creates `super_admin`. So it was always null on a
+         * fresh database, and the very next call handed that null to
+         * LoanService::createLoan(User $user), which is typed: the seeder died
+         * with a TypeError before writing a single loan.
+         *
+         * Resolved by ROLE rather than by username, so it keeps working on the
+         * instances whose original administrator predates that rename (see
+         * 2026_04_10_021859_reactivate_admin_user), and fails with a sentence
+         * someone can act on rather than a TypeError from three frames away.
+         */
+        $admin = User::role(['super_admin', 'admin'])->first()
+            ?? User::where('username', 'super_admin')->first();
+
+        if (! $admin) {
+            throw new RuntimeException(
+                'DemoSeeder needs an administrator to attribute its loans to and found none. '
+                .'Run `php artisan db:seed` first — AdminUserSeeder creates super_admin.'
+            );
+        }
 
         // ── Loans in various statuses ──
         // Loan 1: Released + ongoing (Rosario, salary loan, 3 months ago)

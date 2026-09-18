@@ -174,6 +174,11 @@ final class ChartOfAccountsSeeder
         'credit_loss_expense' => '5140',
         'allowance_credit_losses' => '1200',
         'accounts_payable' => '2010',
+        // 2300 Other Liabilities, an account the chart already carries. Mapping
+        // an existing account rather than seeding a new one keeps self::CHART
+        // identical to the frontend's DEFAULT_CHART_OF_ACCOUNTS, which
+        // AccountingChartOfAccountsTest asserts code for code and name for name.
+        'borrower_advances' => '2300',
     ];
 
     /** Whether this organisation already has a chart. */

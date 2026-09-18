@@ -10,6 +10,7 @@ use App\Models\Loan;
 use App\Models\LoanApprovalStep;
 use App\Models\LoanProduct;
 use App\Models\User;
+use App\Services\Accounting\AutomaticPoster;
 use Carbon\Carbon;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Support\Facades\DB;
@@ -759,6 +760,34 @@ class LoanService
             // and out of ACTIVE_STATUSES, so what is asserted is the state this
             // transaction is actually about to commit. A throw still rolls the
             // whole release back, status write and loan account number included.
+            /*
+             * THE BOOKS. Explicit, and inside this transaction on purpose.
+             *
+             * Position matters twice over:
+             *
+             * - AFTER applyInsuranceOnRelease(), which withholds the premium by
+             *   REWRITING `net_proceeds` and `total_deductions` on the loan.
+             *   Post before it and the entry credits cash with money that never
+             *   left the drawer and omits the premium from income — and it
+             *   balances, so no report would ever show it.
+             * - AFTER the loan account number is issued, so the journal's
+             *   reference is the LN the borrower's papers carry.
+             *
+             * It stays BEFORE the assertion below, which that comment requires
+             * to be the last statement in this transaction. A throw from here
+             * rolls the whole release back — status, loan account number,
+             * schedule and all — which is the intended failure: refuse to
+             * release money the books cannot record, rather than release it and
+             * leave the two disagreeing with nothing to point at the
+             * difference.
+             *
+             * NOT an observer. CsvImportProcessor bulk-creates historical
+             * `released` loans without coming through here, and must not post a
+             * journal for a disbursement that happened years ago under someone
+             * else's books.
+             */
+            app(AutomaticPoster::class)->loanRelease($loan, $releaser->id);
+
             CollateralPledgeGuard::assertNoDoublePledge($lockedCollateralIds, $loan);
 
             return $loan;
