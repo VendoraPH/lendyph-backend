@@ -19,6 +19,16 @@ class User extends Authenticatable
     /** @use HasFactory<UserFactory> */
     use Auditable, HasApiTokens, HasFactory, HasRoles, Notifiable;
 
+    /**
+     * Never written to `audit_logs`. See Auditable::redactForAudit().
+     *
+     * Both are secrets the trail has no business keeping: the bcrypt hash is
+     * crackable offline, and `remember_token` is a live credential.
+     *
+     * @var list<string>
+     */
+    protected array $auditRedacted = ['password', 'remember_token'];
+
     protected $fillable = [
         'first_name',
         'last_name',
