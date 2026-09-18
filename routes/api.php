@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\Api\AccountingAccountController;
 use App\Http\Controllers\Api\AccountingBookController;
+use App\Http\Controllers\Api\AccountingExpenseController;
 use App\Http\Controllers\Api\AccountingJournalController;
 use App\Http\Controllers\Api\AccountingReportController;
 use App\Http\Controllers\Api\AccountingSettingsController;
@@ -553,6 +554,51 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
 
         Route::get('/settings/account-mapping', [AccountingSettingsController::class, 'showAccountMapping']);
         Route::put('/settings/account-mapping', [AccountingSettingsController::class, 'updateAccountMapping']);
+
+        /*
+        |----------------------------------------------------------------------
+        | Accounting — the write modules
+        |----------------------------------------------------------------------
+        |
+        | Expenses, reconciliation, periods, fund transfer, and the two
+        | statements that cannot be regrouped out of a trial balance. Kept as
+        | ONE contiguous block because three other streams are editing this file
+        | at the same time.
+        |
+        | Permissions are checked in the controllers and form requests with
+        | `$this->authorize()` / `authorize()`, like every other endpoint in
+        | this file — no `permission:` middleware appears here.
+        |
+        | `whereNumber` on every wildcard, and no literal segment is registered
+        | after one, so nothing can be captured as an id. `/cash-accounts/
+        | transfer` is a literal under a prefix with no wildcard at all.
+        */
+
+        /*
+         * Expenses and payables. `expenses:view|create|update|pay`.
+         *
+         * Recording an expense posts its journal in the same transaction, which
+         * is why there is no separate "post" verb here and why `PUT` accepts
+         * only the descriptive fields — the figures ARE the posted entry, and a
+         * posted entry is immutable. Correcting one means reversing the journal
+         * and recording it again.
+         *
+         * `/pay` is a separate permission from `update` on purpose: settling a
+         * payable takes money out of a cash account, and that is the step
+         * nobody should be able to take on their own paperwork. Same split as
+         * `journals:create` versus `journals:post`.
+         *
+         * The list answers with the raw Laravel paginator envelope and the
+         * Expenses screen DRAINS it — it totals the outstanding balance
+         * client-side, so a single page would be a headline figure that is
+         * simply short.
+         */
+        Route::get('/expenses', [AccountingExpenseController::class, 'index']);
+        Route::post('/expenses', [AccountingExpenseController::class, 'store']);
+        Route::get('/expenses/{expense}', [AccountingExpenseController::class, 'show'])->whereNumber('expense');
+        Route::put('/expenses/{expense}', [AccountingExpenseController::class, 'update'])->whereNumber('expense');
+        Route::post('/expenses/{expense}/pay', [AccountingExpenseController::class, 'pay'])->whereNumber('expense');
+
     });
 
     // Branding (organization logo + identity printed on reports and documents)

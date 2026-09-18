@@ -128,6 +128,21 @@ class TimezoneShift
         // csv_import_* tables below.
         'accounting_account_mappings' => ['created_at', 'updated_at'],
         'accounting_accounts' => ['created_at', 'updated_at'],
+        // The accounting write modules, added 2026-09-18 — same reasoning as
+        // the two above and as the csv_import_* tables below: created well
+        // after the cutover completed (2026-08-06 on every deployment), and the
+        // shift is one-shot, so none of them can hold a row written by the old
+        // UTC application. Shifting them would move correct Manila timestamps
+        // eight hours into the past.
+        //
+        // Note which columns are ABSENT from these lists, and why. Every
+        // `date`, `due_date`, `start_date` and `end_date` on these tables is a
+        // DATE — a user-supplied calendar date, never timezone-derived.
+        // Shifting an accounting date would move an expense or an entry between
+        // reporting periods, which is the accounting equivalent of moving a
+        // payment to the wrong day.
+        'accounting_expense_payments' => ['created_at', 'updated_at'],
+        'accounting_expenses' => ['created_at', 'updated_at'],
         // Same reasoning, and one addition: `posted_at` is a real instant (the
         // moment an entry entered the books) and WOULD be a shift candidate on
         // any table old enough to need it — this one is not. Note that
