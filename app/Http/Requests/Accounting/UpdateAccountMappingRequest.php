@@ -52,7 +52,7 @@ class UpdateAccountMappingRequest extends FormRequest
             }
 
             // One query for the whole payload rather than one per role: this
-            // endpoint can carry all thirteen at once.
+            // endpoint can carry every role at once.
             $accounts = AccountingAccount::query()->whereKey($ids)->get()->keyBy('id');
 
             foreach ($submitted as $role => $id) {

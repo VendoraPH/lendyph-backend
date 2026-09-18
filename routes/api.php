@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\Api\AccountingAccountController;
+use App\Http\Controllers\Api\AccountingBookController;
 use App\Http\Controllers\Api\AccountingJournalController;
 use App\Http\Controllers\Api\AccountingReportController;
 use App\Http\Controllers\Api\AccountingSettingsController;
@@ -501,6 +502,54 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
         Route::get('/general-ledger', [AccountingReportController::class, 'generalLedger']);
         Route::get('/trial-balance', [AccountingReportController::class, 'trialBalance']);
         Route::get('/dashboard', [AccountingReportController::class, 'dashboard']);
+
+        /*
+         * ── Accounting reports, part two ──────────────────────────────────
+         *
+         * Kept as one contiguous block on purpose: several streams are editing
+         * this file at once, and a merge conflict over a solid block is
+         * mechanical while one over four routes interleaved with other
+         * people's is not. Add to the bottom of this block, not into it.
+         *
+         * The BIR books of account. One path per book so the books screen can
+         * pick by tab without a switch statement per call site; both answer the
+         * same `{data: AccountingBook}` shape, because `book-report.tsx`
+         * renders every book through ONE component keyed by `BookKind`. The
+         * cash receipts and cash disbursements books are the other half of the
+         * set and are not routed yet — they need the automatic posting engine
+         * to tell a receipt from a disbursement by source.
+         *
+         * Note these are the FIRST accounting routes with a static segment
+         * under a sub-prefix. They cannot collide with `/accounts/{account}`
+         * (different prefix), but keep books under `/books/` rather than
+         * flattening them, or `general-ledger` the book and `general-ledger`
+         * the paginated per-account report above would fight for one path.
+         */
+        Route::get('/books/general-journal', [AccountingBookController::class, 'generalJournal']);
+        Route::get('/books/general-ledger', [AccountingBookController::class, 'generalLedger']);
+
+        /*
+         * Aged receivables. Gated on `accounting:view` like the reports above,
+         * but note it reads the LENDING tables rather than the journals — it is
+         * a portfolio measure answering on an accounting screen, and it will
+         * not reconcile to Loans Receivable on the trial balance until the
+         * automatic posting engine lands.
+         */
+        Route::get('/loans/aging', [AccountingReportController::class, 'receivableAging']);
+
+        /*
+         * The money accounts. `cash_accounts:view`, NOT `chart_of_accounts:view`
+         * — a branch manager gets the Cash & Bank screen without the chart, and
+         * the permission vocabulary has carried that pair unused since the
+         * accounting permissions migration precisely for this endpoint.
+         *
+         * Lives on AccountingAccountController because it is a filtered read of
+         * `accounting_accounts` and reuses that controller's balance attachment
+         * verbatim; a separate controller would have meant a second aggregate
+         * over the journal lines, and two ways of computing one balance
+         * eventually disagree.
+         */
+        Route::get('/cash-accounts', [AccountingAccountController::class, 'cashAccounts']);
 
         Route::get('/settings/account-mapping', [AccountingSettingsController::class, 'showAccountMapping']);
         Route::put('/settings/account-mapping', [AccountingSettingsController::class, 'updateAccountMapping']);
