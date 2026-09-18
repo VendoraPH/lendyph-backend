@@ -55,6 +55,16 @@ class BorrowerBulkErrorDisclosureTest extends TestCase
     use SetupLendyPH;
 
     /**
+     * Opted out of the per-test transaction: breakTheAuditTrail() shrinks
+     * `audit_logs.old_values` with an ALTER TABLE, and MySQL implicitly commits
+     * the open transaction on DDL. Left inside one, the savepoints the
+     * service's own DB::transaction() takes are destroyed underneath it and the
+     * driver message these specs read becomes "SAVEPOINT trans2 does not
+     * exist" instead of the leak they exist to catch.
+     */
+    protected bool $wrapsEachTestInTransaction = false;
+
+    /**
      * The member's record, as distinctive strings. Every one of these must be
      * findable in the raw driver message and findable nowhere else.
      *

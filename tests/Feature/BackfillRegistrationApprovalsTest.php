@@ -3,7 +3,6 @@
 use App\Models\Borrower;
 use App\Models\Branch;
 use App\Models\User;
-use Database\Seeders\DatabaseSeeder;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
 use Tests\TestCase;
@@ -19,8 +18,6 @@ use Tests\TestCase;
 uses(TestCase::class);
 
 beforeEach(function () {
-    Artisan::call('migrate:fresh');
-    $this->seed(DatabaseSeeder::class);
     $this->branch = Branch::first();
     $this->admin = User::where('username', 'super_admin')->first();
     $this->actingAs($this->admin);

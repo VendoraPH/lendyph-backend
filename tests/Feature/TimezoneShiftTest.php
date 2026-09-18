@@ -25,6 +25,19 @@ class TimezoneShiftTest extends TestCase
     use SetupLendyPH;
 
     /**
+     * The one file in this suite that opts out of the per-test transaction.
+     *
+     * These specs are ABOUT the schema: they drop `gcash_transactions` to prove
+     * a mapped table that does not exist yet is tolerated, and they run the real
+     * migration's up() and down(), which create and drop `timezone_shifts`.
+     * MySQL implicitly commits the open transaction on any DDL, so a rollback
+     * would not undo any of that — this file needs a genuine `migrate:fresh`
+     * before each test, which is what Tests\TestCase gives it when this is
+     * false. It is the reason that flag exists; nothing else should set it.
+     */
+    protected bool $wrapsEachTestInTransaction = false;
+
+    /**
      * A UTC wall clock from well before the cutover, and the Manila wall clock
      * for the same instant.
      */
