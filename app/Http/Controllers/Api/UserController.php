@@ -11,6 +11,7 @@ use App\Models\User;
 use App\Services\AuditLogService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 use OpenApi\Attributes as OA;
 
@@ -304,10 +305,35 @@ class UserController extends Controller
         return response()->json(['message' => 'User reactivated successfully.']);
     }
 
+    /**
+     * A password set by somebody other than its owner is temporary by
+     * definition, so the reset arms `must_change_password` in the same breath.
+     *
+     * Three things about the shape of this, all of them deliberate:
+     *
+     * 1. ONE write, not two. Password and flag go into the same UPDATE, so
+     *    there is no instant at which the admin-chosen password is live but
+     *    unflagged — which is the only ordering that could actually leak a
+     *    usable credential.
+     * 2. `forceFill()`, not `update()`. `must_change_password` is outside
+     *    `User::$fillable` on purpose (see the model), and mass assignment
+     *    would drop it silently, leaving a reset that does nothing — the same
+     *    bug `last_login_at` shipped with. `save()` rather than `saveQuietly()`
+     *    keeps the Auditable `updated` row this handler has always produced.
+     * 3. Flag first, tokens second, both inside a transaction. If the token
+     *    delete were to fail, the rollback takes the flag with it rather than
+     *    leaving a half-applied reset. And in the microseconds between the two,
+     *    a request arriving on a not-yet-revoked token is already flagged, so
+     *    RequirePasswordChange refuses it — the window fails closed.
+     */
     #[OA\Post(
         path: '/api/users/{id}/reset-password',
         summary: 'Reset user password',
-        description: 'Reset a user password (admin action)',
+        description: 'Reset a user password (admin action). The new password is TEMPORARY: it sets '
+            .'`must_change_password` on the target, who is then refused every authenticated request '
+            .'with **423 Locked** (`code: password_change_required`) until they call '
+            .'`POST /api/auth/change-password`. Only `GET /api/auth/me`, that endpoint, and '
+            .'`POST /api/auth/logout` remain reachable in the meantime.',
         tags: ['Users'],
         security: [['sanctum' => []]],
         parameters: [
@@ -332,8 +358,14 @@ class UserController extends Controller
     )]
     public function resetPassword(ResetPasswordRequest $request, User $user): JsonResponse
     {
-        $user->update(['password' => $request->password]);
-        $user->tokens()->delete();
+        DB::transaction(function () use ($request, $user) {
+            $user->forceFill([
+                'password' => $request->password,
+                'must_change_password' => true,
+            ])->save();
+
+            $user->tokens()->delete();
+        });
 
         AuditLogService::log('updated', $user, description: "Password reset for {$user->username}");
 

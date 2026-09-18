@@ -19,6 +19,13 @@ class UserResource extends JsonResource
             'mobile_number' => $this->mobile_number,
             'status' => $this->status,
             'last_login_at' => $this->last_login_at,
+            // Added here rather than bolted onto the login response, because
+            // this one resource already IS the envelope for both places the
+            // client needs it: GET /auth/me serialises it as `data.*`, and
+            // AuthController::login nests it as `user.*`. The frontend's
+            // `User` interface is a field-for-field mirror of this array, so
+            // it picks the flag up in every context it already reads a user.
+            'must_change_password' => (bool) $this->must_change_password,
             'branch' => new BranchResource($this->whenLoaded('branch')),
             'roles' => $this->whenLoaded('roles', fn () => $this->roles->pluck('name')),
             'permissions' => $this->when(

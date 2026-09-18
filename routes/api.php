@@ -44,6 +44,7 @@ use App\Http\Middleware\AllowAuthOrSubmissionToken;
 use App\Http\Middleware\CheckTokenExpiry;
 use App\Http\Middleware\EnsureUserIsActive;
 use App\Http\Middleware\OptionalSanctumAuth;
+use App\Http\Middleware\RequirePasswordChange;
 use Illuminate\Support\Facades\Route;
 
 Route::get('/health', HealthController::class);
@@ -87,17 +88,37 @@ Route::middleware('signed')->group(function () {
 // They shared `public-registration` until one applicant's create + photo +
 // valid IDs spent most of a 5-per-10-minute per-IP budget, and the next
 // person to open the form was refused. See App\Providers\AppServiceProvider.
+//
+// RequirePasswordChange rides along for the same reason EnsureUserIsActive
+// does. These three sit OUTSIDE the auth group but still serve authenticated
+// operators on their normal paths, so leaving it off would mean an operator
+// whose password was just reset is refused everywhere in the product except
+// creating borrowers and uploading their documents — the lock would have a
+// hole in it exactly where borrower PII is written. It is a no-op without a
+// user attached, so the anonymous registration flow is untouched.
 Route::post('/borrowers', [BorrowerController::class, 'store'])
-    ->middleware([OptionalSanctumAuth::class, 'throttle:public-registration', CheckTokenExpiry::class, EnsureUserIsActive::class]);
+    ->middleware([OptionalSanctumAuth::class, 'throttle:public-registration', CheckTokenExpiry::class, EnsureUserIsActive::class, RequirePasswordChange::class]);
 
 Route::post('/borrowers/{borrower}/photo', [BorrowerController::class, 'uploadPhoto'])
-    ->middleware([AllowAuthOrSubmissionToken::class, 'throttle:registration-uploads', CheckTokenExpiry::class, EnsureUserIsActive::class]);
+    ->middleware([AllowAuthOrSubmissionToken::class, 'throttle:registration-uploads', CheckTokenExpiry::class, EnsureUserIsActive::class, RequirePasswordChange::class]);
 
 Route::post('/borrowers/{borrower}/valid-ids', [BorrowerController::class, 'uploadValidId'])
-    ->middleware([AllowAuthOrSubmissionToken::class, 'throttle:registration-uploads', CheckTokenExpiry::class, EnsureUserIsActive::class]);
+    ->middleware([AllowAuthOrSubmissionToken::class, 'throttle:registration-uploads', CheckTokenExpiry::class, EnsureUserIsActive::class, RequirePasswordChange::class]);
 
 // Protected routes
-Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::class])->group(function () {
+//
+// RequirePasswordChange runs LAST of the three, and the order is the point.
+// "Your session expired" (401) and "your account was deactivated" (403) are
+// both truths about the token or the account that outrank "you owe us a new
+// password" — a deactivated user must be turned away, not sent to a
+// change-password screen that would let them back in. It also means the
+// middleware only ever sees a live token on a live account, so a 423 is always
+// actionable by the person who received it.
+//
+// It allowlists GET /auth/me, POST /auth/change-password and POST /auth/logout
+// by controller action; everything else in this group, including PATCH
+// /auth/me and POST /auth/refresh, is refused while the flag is set.
+Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::class, RequirePasswordChange::class])->group(function () {
 
     // Auth
     Route::post('/auth/logout', [AuthController::class, 'logout']);

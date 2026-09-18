@@ -39,7 +39,14 @@ class AuthController extends Controller
                 content: new OA\JsonContent(
                     properties: [
                         new OA\Property(property: 'token', type: 'string'),
-                        new OA\Property(property: 'user', type: 'object'),
+                        new OA\Property(
+                            property: 'user',
+                            description: 'The full user record. `user.must_change_password` is true when an '
+                                .'administrator reset this password: the token below is valid, but every '
+                                .'request outside GET /api/auth/me, POST /api/auth/change-password and '
+                                .'POST /api/auth/logout answers 423 until the password is changed.',
+                            type: 'object',
+                        ),
                     ],
                 ),
             ),
@@ -114,7 +121,8 @@ class AuthController extends Controller
     #[OA\Get(
         path: '/api/auth/me',
         summary: 'Current user',
-        description: 'Get the authenticated user profile with roles and permissions',
+        description: 'Get the authenticated user profile with roles and permissions. Reachable even while '
+            .'`data.must_change_password` is true — it is how a locked client finds out why it is locked.',
         tags: ['Auth'],
         security: [['sanctum' => []]],
         responses: [
@@ -167,7 +175,10 @@ class AuthController extends Controller
     #[OA\Post(
         path: '/api/auth/change-password',
         summary: 'Change current user password',
-        description: 'Verify current password, then update to new. Revokes all other sanctum tokens as a security precaution; the current session stays valid.',
+        description: 'Verify current password, then update to new. Revokes all other sanctum tokens as a '
+            .'security precaution; the current session stays valid. Also clears `must_change_password` — this '
+            .'is the only endpoint that does, and the only one besides GET /auth/me and POST /auth/logout '
+            .'that a user carrying that flag may call.',
         tags: ['Auth'],
         security: [['sanctum' => []]],
         requestBody: new OA\RequestBody(
@@ -190,7 +201,20 @@ class AuthController extends Controller
     public function changePassword(ChangePasswordRequest $request): JsonResponse
     {
         $user = $request->user();
-        $user->update(['password' => Hash::make($request->input('new_password'))]);
+
+        // The one and only place `must_change_password` is cleared, and it is
+        // cleared here because this is the one and only place the user proves
+        // they chose the password themselves — `current_password` in
+        // ChangePasswordRequest means the caller knew the old one too.
+        //
+        // Set in the same UPDATE as the password so the two cannot disagree,
+        // and via forceFill() because the column is outside User::$fillable:
+        // an `update()` would drop it without erroring and leave the user
+        // locked out with a password they had just successfully changed.
+        $user->forceFill([
+            'password' => Hash::make($request->input('new_password')),
+            'must_change_password' => false,
+        ])->save();
 
         // Keep current session alive; invalidate all other tokens.
         // currentAccessToken() is a PersonalAccessToken for API-token auth
@@ -224,6 +248,7 @@ class AuthController extends Controller
                 ),
             ),
             new OA\Response(response: 401, description: 'Unauthenticated'),
+            new OA\Response(response: 423, description: 'Password change required — change the password first, then log in again'),
         ],
     )]
     public function refresh(): JsonResponse
