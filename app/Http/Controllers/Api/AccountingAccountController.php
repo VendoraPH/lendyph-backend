@@ -114,6 +114,80 @@ class AccountingAccountController extends Controller
             ->setStatusCode(201);
     }
 
+    #[OA\Get(
+        path: '/api/accounting/cash-accounts',
+        summary: 'The money accounts, with their balances',
+        description: "Cash on hand, bank accounts, GCash and Maya — every account carrying a `cash_kind` — in code order, with `balance` in integer CENTAVOS. Returns the raw Laravel paginator envelope ({data, links, meta}); the Cash & Bank screen drains it by following `meta.last_page`, because it sums the balances into one headline figure and a short page would understate the co-op's cash position. Balances come from the SAME TrialBalanceBuilder aggregate the trial balance and the chart of accounts read, so this screen cannot drift from them. INACTIVE money accounts are included — see the method.",
+        tags: ['Accounting'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 1)),
+            new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15, maximum: 100)),
+        ],
+        responses: [
+            new OA\Response(response: 200, description: 'Paginated money accounts'),
+            new OA\Response(response: 401, description: 'Unauthenticated'),
+            new OA\Response(response: 403, description: 'Missing cash_accounts:view'),
+        ],
+    )]
+    public function cashAccounts(): AnonymousResourceCollection
+    {
+        // `cash_accounts:view`, not `chart_of_accounts:view`. The two are
+        // genuinely different reads: a branch manager is granted the Cash &
+        // Bank screen without being given the chart to edit, and the permission
+        // vocabulary has carried this pair since the accounting permissions
+        // migration specifically so this endpoint could use it.
+        $this->authorize('cash_accounts:view');
+
+        $filters = request()->validate([
+            'page' => ['nullable', 'integer', 'min:1'],
+            // `min:1` matters for the same reason it does on index(): a
+            // `per_page` of 0 reaches Builder::paginate() as
+            // `$perPage ?: $model->getPerPage()` and silently becomes 15.
+            'per_page' => ['nullable', 'integer', 'min:1'],
+        ]);
+
+        $perPage = min((int) ($filters['per_page'] ?? 15), 100);
+
+        $accounts = AccountingAccount::query()
+            ->withCount('journalLines')
+            // The money accounts are exactly the ones carrying a `cash_kind`,
+            // which is what the dedicated index on that column exists for.
+            // Selecting by code range or by name instead would break the moment
+            // an organisation renamed "GCash" or added a second bank account.
+            ->whereNotNull('cash_kind')
+            // Headings are excluded because their balance is the sum of their
+            // subtree: a group with a `cash_kind` would double-count every
+            // account beneath it in the screen's total. attachBalances() gives
+            // a group a null balance anyway, which the screen would render as
+            // ₱0.00 — a card claiming the co-op holds nothing.
+            ->where('is_group', false)
+            // NO `is_active` filter, and that is a deliberate call rather than
+            // an oversight.
+            //
+            // The screen's headline is "Total across all money accounts". A
+            // deactivated GCash wallet that still holds ₱3,000 is money the
+            // co-op has, and it is on the trial balance whether or not the
+            // account accepts new entries — so excluding it would make two
+            // screens in this module disagree about the cash position with
+            // nothing to say which was right, which is the exact failure the
+            // `signedBalances()` reuse below exists to prevent.
+            //
+            // The cost is that a retired account can be offered as a transfer
+            // destination once that endpoint exists. That is the better of the
+            // two failures: it is LOUD and recoverable — the transfer is
+            // refused, because AccountRules::isPostable() requires `is_active`
+            // — whereas a silently short total is a wrong number on screen,
+            // formatted, with nothing about it that looks partial. `is_active`
+            // rides along on every row, so the picker can filter on it.
+            ->inCodeOrder()
+            ->paginate($perPage);
+
+        $this->attachBalances($accounts->getCollection());
+
+        return AccountingAccountResource::collection($accounts);
+    }
+
     #[OA\Post(
         path: '/api/accounting/accounts/seed',
         summary: 'Seed the default chart of accounts',

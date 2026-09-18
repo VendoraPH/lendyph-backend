@@ -6,6 +6,7 @@ use App\Models\AccountingAccount;
 use App\Models\AccountingAccountMapping;
 use App\Services\Accounting\AccountRules;
 use Illuminate\Contracts\Validation\Validator;
+use Tests\Feature\AccountingReparentMappedAccountTest;
 
 /**
  * The cross-field rules an account has to satisfy, shared by create and update.
@@ -59,6 +60,7 @@ trait ValidatesAccountShape
             $this->assertMappedAccountStaysPostable($validator, $existing, $isGroup, $isActive);
             $this->assertHistoryKeepsItsSign($validator, $existing, $type, $isContra);
             $this->assertMappedRolesStillFit($validator, $existing, $type, $isContra, $cashKind);
+            $this->assertMappedRolesKeepTheirPlace($validator, $existing, $parentId);
         }
     }
 
@@ -346,6 +348,87 @@ trait ValidatesAccountShape
                 $mismatch['field'] === 'role' ? 'type' : $mismatch['field'],
                 "{$label} is the account for {$role}. {$mismatch['message']} "
                 .'Point that role somewhere else before changing this account.',
+            );
+        }
+    }
+
+    /**
+     * Roles whose reported figure is defined by WHERE the mapped account sits,
+     * not just by the account itself.
+     *
+     * `AccountingDashboardBuilder::receivableAccountIds()` reports gross loans
+     * receivable as every postable sibling under the parent of the account
+     * `loans_receivable` points at. That fan-out is deliberate — moving a loan
+     * from current to past due is a journal between 1110 and 1120, and counting
+     * only the mapped account would make the portfolio shrink every time a
+     * borrower fell behind — but it means the figure is defined by the PARENT.
+     *
+     * Add a role here if a report ever starts reading its account's neighbours.
+     *
+     * @var list<string>
+     */
+    private const ROLES_ANCHORED_TO_THEIR_PARENT = [
+        'loans_receivable',
+    ];
+
+    /**
+     * An account whose role reads its neighbours cannot be moved to a new set
+     * of neighbours.
+     *
+     * The shape guards above ask whether the account is still the right KIND of
+     * thing for its role. This asks the question they do not: whether it is
+     * still in the right PLACE. Nothing else covered `parent_id` —
+     * {@see self::assertParentIsAGroupOfTheSameType()} only requires the new
+     * parent to be a group of the same type, which "1000 Assets" satisfies.
+     *
+     * So re-parenting 1110 from "1100 Loans Receivable" to "1000 Assets" was
+     * accepted, and Cash on Hand, GCash, Maya, Bank Accounts and Prepaid
+     * Expenses were all folded into the loan portfolio on the dashboard's
+     * headline card. Nothing failed and nothing looked wrong; the number was
+     * simply a different number, on the card an operator glances at first.
+     *
+     * Refused rather than silently re-derived, with the same remedy the other
+     * mapped-account guards give: re-point the role first. Reported against
+     * `parent_id`, the field actually at fault.
+     *
+     * Fires ONLY on an actual move, and that is load-bearing. The same review
+     * that raised this gap also noted (as informational, not a defect) that
+     * these guards run against the WHOLE post-save shape on every update, so a
+     * blanket new constraint would make an already-mapped account that no
+     * longer fits completely uneditable — including its `name` and
+     * `description` — until the role is repointed. Comparing the current parent
+     * against the wanted one keeps renames and every other in-place edit
+     * working; {@see AccountingReparentMappedAccountTest} pins
+     * that.
+     */
+    private function assertMappedRolesKeepTheirPlace(
+        Validator $validator,
+        AccountingAccount $existing,
+        mixed $parentId,
+    ): void {
+        $current = $existing->parent_id === null ? null : (int) $existing->parent_id;
+        $wanted = ($parentId === null || $parentId === '') ? null : (int) $parentId;
+
+        if ($current === $wanted) {
+            return;
+        }
+
+        $anchored = $existing->mappings()
+            ->pluck('role')
+            ->intersect(self::ROLES_ANCHORED_TO_THEIR_PARENT);
+
+        if ($anchored->isEmpty()) {
+            return;
+        }
+
+        $label = "{$existing->code} {$existing->name}";
+
+        foreach ($anchored as $role) {
+            $validator->errors()->add(
+                'parent_id',
+                "{$label} is the account for {$role}, and that figure is reported across "
+                .'every account under its heading. Moving it to another heading would change '
+                .'which accounts are counted. Point that role somewhere else before moving this account.',
             );
         }
     }

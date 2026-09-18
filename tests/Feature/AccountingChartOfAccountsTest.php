@@ -243,7 +243,7 @@ class AccountingChartOfAccountsTest extends TestCase
         $this->seedChart()->assertStatus(409);
 
         $this->assertSame(count(self::EXPECTED_CHART), AccountingAccount::query()->count());
-        $this->assertSame(13, AccountingAccountMapping::query()->count());
+        $this->assertSame(count(AccountingAccountMapping::ROLES), AccountingAccountMapping::query()->count());
     }
 
     /**
@@ -635,14 +635,19 @@ class AccountingChartOfAccountsTest extends TestCase
 
     // ── The posting account mapping ──
 
-    public function test_all_thirteen_mappings_resolve_after_seeding(): void
+    public function test_every_mapping_resolves_after_seeding(): void
     {
         $this->seedChart()->assertCreated();
 
         $mapping = $this->getJson('/api/accounting/settings/account-mapping')->assertOk()->json('data');
 
         $this->assertSame(AccountingAccountMapping::ROLES, array_keys($mapping));
-        $this->assertCount(13, $mapping);
+
+        // Counted off the constant rather than a literal. The literal was 13,
+        // and adding `borrower_advances` to ROLES reddened this test from a
+        // file the change never touched — the count is a restatement of the
+        // line above it, so it can only ever go stale.
+        $this->assertCount(count(AccountingAccountMapping::ROLES), $mapping);
 
         $expected = [];
         foreach (ChartOfAccountsSeeder::DEFAULT_MAPPING_CODES as $role => $code) {
@@ -751,7 +756,7 @@ class AccountingChartOfAccountsTest extends TestCase
         $this->assertCount(1, $rows);
         $this->assertSame($this->admin->id, $rows->first()->user_id);
         $this->assertSame(count(self::EXPECTED_CHART), $rows->first()->new_values['accounts']);
-        $this->assertSame(13, $rows->first()->new_values['mappings']);
+        $this->assertSame(count(AccountingAccountMapping::ROLES), $rows->first()->new_values['mappings']);
 
         $this->assertSame(
             0,

@@ -6,14 +6,18 @@ use App\Models\CsvImportRun;
 use App\Services\BorrowerSubmissionTokenService;
 use App\Services\CsvImport\CsvImportUploadService;
 use App\Services\CsvImport\ImportErrorDigest;
+use App\Services\TokenIdleWindow;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\ServiceProvider;
 use Illuminate\Support\Str;
+use Laravel\Sanctum\Events\TokenAuthenticated;
+use Laravel\Sanctum\PersonalAccessToken;
 use Throwable;
 
 class AppServiceProvider extends ServiceProvider
@@ -96,6 +100,22 @@ class AppServiceProvider extends ServiceProvider
         // net for the platform team.
         Gate::before(function ($user) {
             return $user->hasRole('super_admin') ? true : null;
+        });
+
+        /**
+         * Capture `last_used_at` while it still says what it said when the
+         * request arrived.
+         *
+         * Sanctum's Guard fires this event and then IMMEDIATELY overwrites the
+         * column with now(), so this listener is the only point at which the
+         * stored value is observable. CheckTokenExpiry reads what is captured
+         * here; without it the idle timeout always measures zero elapsed time.
+         * See App\Services\TokenIdleWindow.
+         */
+        Event::listen(function (TokenAuthenticated $event): void {
+            if ($event->token instanceof PersonalAccessToken) {
+                TokenIdleWindow::capture(request(), $event->token);
+            }
         });
 
         /**
