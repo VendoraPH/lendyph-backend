@@ -7,8 +7,6 @@ use App\Models\CsvImportFile;
 use App\Models\CsvImportRun;
 use App\Models\User;
 use App\Services\CsvImport\CsvImportSchema;
-use Database\Seeders\DatabaseSeeder;
-use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Storage;
 
 /**
@@ -35,9 +33,6 @@ trait BuildsCsvImports
      */
     protected function seedForImport(): void
     {
-        Artisan::call('migrate:fresh');
-        $this->seed(DatabaseSeeder::class);
-
         $this->branch = Branch::first();
         $this->admin = User::where('username', 'super_admin')->first();
 

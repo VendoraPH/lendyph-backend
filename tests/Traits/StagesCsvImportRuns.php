@@ -13,8 +13,6 @@ use App\Services\CsvImport\CsvImportSchema;
 use App\Services\CsvImport\CsvImportStager;
 use App\Services\CsvImport\NormalizedRow;
 use App\Services\CsvImport\RowNote;
-use Database\Seeders\DatabaseSeeder;
-use Illuminate\Support\Facades\Artisan;
 
 /**
  * Builds staged import runs for the operator-surface tests.
@@ -33,9 +31,6 @@ trait StagesCsvImportRuns
 
     protected function seedAndLoginAsImportAdmin(): void
     {
-        Artisan::call('migrate:fresh');
-        $this->seed(DatabaseSeeder::class);
-
         $this->importBranch = Branch::first();
         $this->importAdmin = User::where('username', 'super_admin')->firstOrFail();
 

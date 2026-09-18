@@ -7,15 +7,11 @@ use App\Models\Repayment;
 use App\Models\User;
 use App\Services\LoanService;
 use App\Services\RepaymentService;
-use Database\Seeders\DatabaseSeeder;
-use Illuminate\Support\Facades\Artisan;
 use Tests\TestCase;
 
 uses(TestCase::class);
 
 beforeEach(function () {
-    Artisan::call('migrate:fresh');
-    $this->seed(DatabaseSeeder::class);
     $this->branch = Branch::first();
     $this->admin = User::where('username', 'super_admin')->first();
     $this->actingAs($this->admin);

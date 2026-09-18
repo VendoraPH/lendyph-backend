@@ -10,8 +10,6 @@ use App\Models\GCashTransaction;
 use App\Models\Loan;
 use App\Models\ShareCapitalLedger;
 use App\Services\BorrowerPurgeService;
-use Database\Seeders\DatabaseSeeder;
-use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
@@ -22,8 +20,6 @@ class PruneAbandonedRegistrationsTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        Artisan::call('migrate:fresh');
-        $this->seed(DatabaseSeeder::class);
         $this->branch = Branch::first();
         Storage::fake('private');
     }

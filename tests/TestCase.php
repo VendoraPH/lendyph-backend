@@ -2,62 +2,74 @@
 
 namespace Tests;
 
+use Database\Seeders\DatabaseSeeder;
+use Illuminate\Contracts\Console\Kernel;
+use Illuminate\Database\Seeder;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Foundation\Testing\RefreshDatabaseState;
 use Illuminate\Foundation\Testing\TestCase as BaseTestCase;
-use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\ParallelTesting;
 
 abstract class TestCase extends BaseTestCase
 {
-    /**
-     * Worker databases already ensured to exist, so CREATE DATABASE only runs
-     * once per worker process rather than on every test.
-     *
-     * @var array<string, true>
-     */
-    private static array $ensuredWorkerDatabases = [];
-
-    protected function setUp(): void
-    {
-        parent::setUp();
-
-        $this->useParallelWorkerDatabase();
+    use RefreshDatabase {
+        refreshDatabase as protected refreshDatabaseInsideTransaction;
     }
 
     /**
-     * Point this worker at its own database when running under
-     * `php artisan test --parallel`.
+     * Seeded ONCE per worker process, as part of the single `migrate:fresh`
+     * RefreshDatabase runs before the first test.
      *
-     * This suite resets state with a manual `migrate:fresh` in SetupLendyPH
-     * rather than the RefreshDatabase trait, so Laravel's built-in per-worker
-     * database isolation (which is gated on those traits) never kicks in. Without
-     * this, every parallel worker would share the single `lendyph_testing`
-     * database and their concurrent `migrate:fresh` calls would corrupt each
-     * other. A normal sequential run has no token, so this is a no-op there.
+     * This suite used to rebuild the schema and re-run this seeder in every
+     * single test — 1.5s of DDL under every ~50ms assertion. The seeded rows
+     * are now a fixed baseline each test starts from, and each test's own
+     * writes are rolled back with its transaction.
+     *
+     * @var class-string<Seeder>
      */
-    private function useParallelWorkerDatabase(): void
-    {
-        $token = ParallelTesting::token();
+    protected $seeder = DatabaseSeeder::class;
 
-        if (empty($token)) {
+    /**
+     * Whether this test may run inside the transaction RefreshDatabase opens.
+     *
+     * False buys back the old behaviour — a real `migrate:fresh` and reseed
+     * before the test, no wrapping transaction — at the old price of ~1.5s, so
+     * only the tests that genuinely cannot live inside a transaction set it.
+     * There are four, and each states its reason at the declaration:
+     *
+     *  - TimezoneShiftTest and BorrowerBulkErrorDisclosureTest change the
+     *    SCHEMA mid-test, and MySQL implicitly commits on any DDL — a rollback
+     *    would not undo it, and it destroys the savepoints nested
+     *    DB::transaction() calls rely on.
+     *  - One spec in CsvImportUploadApiTest needs a second connection to SEE
+     *    this one's rows, which an uncommitted transaction forbids.
+     *  - One spec in SequenceAllocatorTest is about there being no transaction.
+     *
+     * Set it before parent::setUp(); that is where refreshDatabase() is called.
+     */
+    protected bool $wrapsEachTestInTransaction = true;
+
+    /**
+     * Prepare the database for a test.
+     *
+     * Invoked by the framework's `setUpTraits()` because of the RefreshDatabase
+     * trait above. The transactional path is the trait's own; the opt-out path
+     * reproduces the suite's historical behaviour — a real `migrate:fresh` plus
+     * seed per test — for the handful of tests that need DDL of their own.
+     */
+    public function refreshDatabase(): void
+    {
+        if ($this->wrapsEachTestInTransaction) {
+            $this->refreshDatabaseInsideTransaction();
+
             return;
         }
 
-        $connection = config('database.default');
-        $baseDatabase = config("database.connections.{$connection}.database");
-        $workerDatabase = "{$baseDatabase}_test_{$token}";
+        $this->artisan('migrate:fresh', $this->migrateFreshUsing());
 
-        // We're still connected to the (existing) base database here, so we can
-        // create the worker database from this connection before switching to it.
-        if (! isset(self::$ensuredWorkerDatabases[$workerDatabase])) {
-            DB::connection($connection)->statement(
-                "create database if not exists `{$workerDatabase}` "
-                .'character set utf8mb4 collate utf8mb4_unicode_ci'
-            );
+        $this->app[Kernel::class]->setArtisan(null);
 
-            self::$ensuredWorkerDatabases[$workerDatabase] = true;
-        }
-
-        config()->set("database.connections.{$connection}.database", $workerDatabase);
-        DB::purge($connection);
+        // This test is free to drop tables, so the next transactional test in
+        // this process cannot assume the schema or the seeded baseline survived.
+        RefreshDatabaseState::$migrated = false;
     }
 }
