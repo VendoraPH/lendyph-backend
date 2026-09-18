@@ -2,11 +2,10 @@
 
 namespace App\Models;
 
-use App\Http\Controllers\Api\FileController;
+use App\Services\SignedFileLink;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\MorphTo;
-use Illuminate\Support\Facades\URL;
 
 class Document extends Model
 {
@@ -38,9 +37,8 @@ class Document extends Model
      */
     protected function url(): Attribute
     {
-        return Attribute::get(fn () => URL::temporarySignedRoute(
+        return Attribute::get(fn () => SignedFileLink::to(
             'files.document',
-            now()->addMinutes(FileController::LINK_TTL_MINUTES),
             ['document' => $this->getKey()],
         ));
     }
