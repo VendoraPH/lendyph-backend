@@ -30,6 +30,7 @@ use App\Http\Controllers\Api\GCashTierController;
 use App\Http\Controllers\Api\GCashTransactionController;
 use App\Http\Controllers\Api\HealthController;
 use App\Http\Controllers\Api\LoanAdjustmentController;
+use App\Http\Controllers\Api\LoanApprovalStepController;
 use App\Http\Controllers\Api\LoanController;
 use App\Http\Controllers\Api\LoanProductController;
 use App\Http\Controllers\Api\PromissoryNoteController;
@@ -174,6 +175,18 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::patch('/loans/{loan}/auto-pay', [LoanController::class, 'toggleAutoPay']);
     Route::get('/loans/{loan}/amortization-preview', [LoanController::class, 'amortizationPreview']);
     Route::get('/loans/{loan}/amortization-schedule', [LoanController::class, 'amortizationSchedule']);
+
+    // Multi-step BOD approval chain.
+    //
+    // The child parameter is `{approvalStep}`, not `{step}`, because
+    // scopeBindings() resolves it through Str::plural(Str::camel($param)) —
+    // `approvalStep` finds Loan::approvalSteps(), `step` would look for a
+    // steps() relation that does not exist and throw. Scoping is what makes a
+    // step id from a DIFFERENT loan 404 at the router instead of reaching the
+    // controller.
+    Route::get('/loans/{loan}/approval-steps', [LoanApprovalStepController::class, 'index']);
+    Route::patch('/loans/{loan}/approval-steps/{approvalStep}/approve', [LoanApprovalStepController::class, 'approve'])->scopeBindings();
+    Route::patch('/loans/{loan}/approval-steps/{approvalStep}/send-back', [LoanApprovalStepController::class, 'sendBack'])->scopeBindings();
 
     // Repayments
     Route::get('/repayments', [RepaymentController::class, 'listAll']);
