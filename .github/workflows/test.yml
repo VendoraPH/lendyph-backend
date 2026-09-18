@@ -15,6 +15,10 @@ concurrency:
 jobs:
   pest:
     runs-on: ubuntu-latest
+    # A stuck run used to burn an hour in silence: GitHub withholds the logs
+    # until a run completes, so an unbounded job is also an unreadable one.
+    # Fail at 45 and hand back the log instead.
+    timeout-minutes: 45
 
     steps:
       - uses: actions/checkout@v7
@@ -34,7 +38,8 @@ jobs:
             --innodb-flush-log-at-trx-commit=0 \
             --innodb-doublewrite=0 \
             --skip-log-bin \
-            --innodb-buffer-pool-size=512M
+            --innodb-buffer-pool-size=512M \
+            --lock-wait-timeout=120
           echo "Waiting for MySQL to accept connections..."
           for i in $(seq 1 60); do
             if docker exec mysql-test mysqladmin ping -h 127.0.0.1 --silent 2>/dev/null; then
@@ -102,4 +107,9 @@ jobs:
           php artisan key:generate
 
       - name: Run tests (parallel)
-        run: php artisan test --parallel
+        # --processes is pinned. Unset, Pest takes the runner's core count, and
+        # this suite is bottlenecked on MySQL DDL rather than CPU: every test
+        # calls migrate:fresh (SetupLendyPH.php), so more workers means more
+        # concurrent DROP/CREATE against one server. Measured locally, 6 workers
+        # (1080s) came out SLOWER than 4 (1039s).
+        run: php artisan test --parallel --processes=4
