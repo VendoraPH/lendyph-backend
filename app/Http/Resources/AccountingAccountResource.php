@@ -37,6 +37,12 @@ class AccountingAccountResource extends JsonResource
             'is_group' => (bool) $this->is_group,
             'is_active' => (bool) $this->is_active,
             'cash_kind' => $this->cash_kind,
+            // Which section of the cash flow statement a movement through this
+            // account lands in. Emitted on every account, not only on request,
+            // because the point of storing it is that somebody reviews it —
+            // and a classification you cannot see is one nobody will ever
+            // correct. One of operating | investing | financing | cash.
+            'cash_flow_category' => $this->cash_flow_category,
             'description' => $this->description,
             // Whether any journal line — draft or posted — references this
             // account. The read side of the restricting foreign key that stops

@@ -4,6 +4,7 @@ namespace App\Http\Requests\Accounting;
 
 use App\Models\AccountingAccount;
 use App\Services\Accounting\AccountRules;
+use App\Services\Accounting\CashFlowCategories;
 use Illuminate\Contracts\Validation\Validator;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
@@ -44,6 +45,17 @@ class UpdateAccountingAccountRequest extends FormRequest
             'is_active' => ['sometimes', 'boolean'],
             'parent_id' => ['sometimes', 'nullable', 'integer', Rule::exists('accounting_accounts', 'id')],
             'cash_kind' => ['sometimes', 'nullable', Rule::in(AccountRules::CASH_KINDS)],
+            /*
+             * The cash flow classification, and THIS is the endpoint that makes
+             * the defaults reviewable rather than decreed.
+             *
+             * `sometimes` and not `nullable`: an explicit null would mean "no
+             * classification", and an account with none drops off the cash flow
+             * statement while its amount stays inside the net change — a
+             * difference with nothing naming the account responsible. Omit the
+             * field to leave it alone; send a value to change it.
+             */
+            'cash_flow_category' => ['sometimes', Rule::in(CashFlowCategories::ALL)],
             'description' => ['sometimes', 'nullable', 'string', 'max:500'],
         ];
     }

@@ -9,6 +9,7 @@ use App\Http\Controllers\Api\AccountingPeriodController;
 use App\Http\Controllers\Api\AccountingReconciliationController;
 use App\Http\Controllers\Api\AccountingReportController;
 use App\Http\Controllers\Api\AccountingSettingsController;
+use App\Http\Controllers\Api\AccountingStatementController;
 use App\Http\Controllers\Api\ApprovalWorkflowController;
 use App\Http\Controllers\Api\AuditLogController;
 use App\Http\Controllers\Api\AuthController;
@@ -640,6 +641,19 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
          */
         Route::post('/cash-accounts/transfer', [AccountingCashAccountController::class, 'transfer']);
 
+        /*
+         * The two statements the client cannot build for itself, on
+         * `accounting:view`.
+         *
+         * Still no balance-sheet or income-statement route, for the same reason
+         * given above: both are regroupings of the trial balance and are built
+         * from it in `src/lib/accounting/statements.ts`, so a figure has exactly
+         * one origin. These two are not regroupings — cash flow needs a
+         * classification that lives on the account, and changes in equity needs
+         * opening balances as well as the movements between them.
+         */
+        Route::get('/statements/cash-flow', [AccountingStatementController::class, 'cashFlow']);
+        Route::get('/statements/equity-changes', [AccountingStatementController::class, 'equityChanges']);
     });
 
     // Branding (organization logo + identity printed on reports and documents)
