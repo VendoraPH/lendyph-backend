@@ -2,8 +2,8 @@
 
 namespace App\Models;
 
-use App\Http\Controllers\Api\FileController;
 use App\Services\SequenceCode;
+use App\Services\SignedFileLink;
 use App\Traits\Auditable;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -12,7 +12,6 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Database\Eloquent\Relations\MorphMany;
-use Illuminate\Support\Facades\URL;
 
 class Borrower extends Model
 {
@@ -138,9 +137,8 @@ class Borrower extends Model
     protected function photoUrl(): Attribute
     {
         return Attribute::get(fn () => $this->photo_path
-            ? URL::temporarySignedRoute(
+            ? SignedFileLink::to(
                 'files.borrower-photo',
-                now()->addMinutes(FileController::LINK_TTL_MINUTES),
                 ['borrower' => $this->getKey()],
             )
             : null);
