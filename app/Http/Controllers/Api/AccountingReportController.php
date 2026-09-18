@@ -7,6 +7,7 @@ use App\Http\Resources\LedgerEntryResource;
 use App\Models\AccountingAccount;
 use App\Services\Accounting\AccountingDashboardBuilder;
 use App\Services\Accounting\GeneralLedgerBuilder;
+use App\Services\Accounting\ReceivableAgingBuilder;
 use App\Services\Accounting\TrialBalanceBuilder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
@@ -23,9 +24,19 @@ use OpenApi\Attributes as OA;
  * balance-sheet figure can come from. Adding endpoints for them would create a
  * second source of truth for numbers that have to agree exactly.
  *
- * All three read `status IN ('posted','reversed')`. A reversed entry is a
+ * Those three read `status IN ('posted','reversed')`. A reversed entry is a
  * posted historical fact whose mirror nets it to zero; counting only `posted`
  * would include every reversal while excluding what it reverses.
+ *
+ * `receivableAging()` is the odd one out and is worth flagging: it reads the
+ * LENDING tables — `amortization_schedules` and `loans` — not the journals. It
+ * lives here because it answers on an accounting screen and is gated on
+ * `accounting:view` like its neighbours, but it is a portfolio measure rather
+ * than a ledger one, and it will not agree with Loans Receivable on the trial
+ * balance until the automatic posting engine lands. Note the unit change that
+ * comes with it: lending money is `decimal:2` PESOS, accounting money is
+ * integer CENTAVOS, and the conversion is made once inside
+ * {@see ReceivableAgingBuilder}.
  */
 class AccountingReportController extends Controller
 {
@@ -33,6 +44,7 @@ class AccountingReportController extends Controller
         private TrialBalanceBuilder $trialBalance,
         private GeneralLedgerBuilder $generalLedger,
         private AccountingDashboardBuilder $dashboard,
+        private ReceivableAgingBuilder $receivableAging,
     ) {}
 
     #[OA\Get(
@@ -156,6 +168,38 @@ class AccountingReportController extends Controller
 
         return response()->json([
             'data' => $this->dashboard->build(
+                $this->asOf($filters),
+                $filters['branch_id'] ?? null,
+            ),
+        ]);
+    }
+
+    #[OA\Get(
+        path: '/api/accounting/loans/aging',
+        summary: 'Receivable aging by days past due',
+        description: "Outstanding loan receivables split into the buckets a provisioning policy needs. Answers `{data: Aging}`. All six buckets are always present, in report order, even when empty, so the table has a stable shape. Amounts are integer CENTAVOS — this is the one accounting report that reads the LENDING tables, where money is `decimal:2` pesos, and the conversion happens once inside the builder. `count` is outstanding INSTALMENTS, not loans, because the screen's footer sums the column. Days past due are measured from the bare due date, deliberately ignoring each product's grace period, exactly as `ReportService::agingReport()` does.",
+        tags: ['Accounting'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'as_of', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date'), description: 'Defaults to today.'),
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
+        ],
+        responses: [
+            new OA\Response(response: 200, description: 'The aged receivables report'),
+            new OA\Response(response: 403, description: 'Missing accounting:view'),
+        ],
+    )]
+    public function receivableAging(): JsonResponse
+    {
+        $this->authorize('accounting:view');
+
+        $filters = request()->validate([
+            'as_of' => ['nullable', 'date'],
+            'branch_id' => ['nullable', 'integer'],
+        ]);
+
+        return response()->json([
+            'data' => $this->receivableAging->build(
                 $this->asOf($filters),
                 $filters['branch_id'] ?? null,
             ),
