@@ -2,15 +2,11 @@
 
 use App\Enums\LoanFrequency;
 use App\Models\User;
-use Database\Seeders\DatabaseSeeder;
-use Illuminate\Support\Facades\Artisan;
 use Tests\TestCase;
 
 uses(TestCase::class);
 
 beforeEach(function () {
-    Artisan::call('migrate:fresh');
-    $this->seed(DatabaseSeeder::class);
     $this->admin = User::where('username', 'super_admin')->first();
     $this->actingAs($this->admin);
 });

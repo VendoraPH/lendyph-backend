@@ -319,6 +319,17 @@ class Loan extends Model
     }
 
     /**
+     * Every step of every revision round of this loan's approval chain,
+     * in the order the chain runs. Written only by LoanApprovalChainService.
+     */
+    public function approvalSteps(): HasMany
+    {
+        return $this->hasMany(LoanApprovalStep::class)
+            ->orderBy('round')
+            ->orderBy('step_order');
+    }
+
+    /**
      * Debits and credits recorded against this loan, oldest first — a ledger
      * only makes sense read forwards.
      */

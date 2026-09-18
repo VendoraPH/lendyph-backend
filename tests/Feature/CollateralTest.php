@@ -5,8 +5,6 @@ use App\Models\Collateral;
 use App\Models\CollateralType;
 use App\Models\Role;
 use App\Models\User;
-use Database\Seeders\DatabaseSeeder;
-use Illuminate\Support\Facades\Artisan;
 use Spatie\Permission\Models\Permission;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
@@ -186,8 +184,6 @@ it('viewer can list collaterals', function () {
 });
 
 it('admin role can be updated with collateral permissions (regression for the original 422)', function () {
-    Artisan::call('migrate:fresh');
-    $this->seed(DatabaseSeeder::class);
     $admin = User::where('username', 'super_admin')->first();
     $this->actingAs($admin);
 

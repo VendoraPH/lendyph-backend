@@ -1,5 +1,15 @@
 <?php
 
+use App\Http\Controllers\Api\AccountingAccountController;
+use App\Http\Controllers\Api\AccountingBookController;
+use App\Http\Controllers\Api\AccountingCashAccountController;
+use App\Http\Controllers\Api\AccountingExpenseController;
+use App\Http\Controllers\Api\AccountingJournalController;
+use App\Http\Controllers\Api\AccountingPeriodController;
+use App\Http\Controllers\Api\AccountingReconciliationController;
+use App\Http\Controllers\Api\AccountingReportController;
+use App\Http\Controllers\Api\AccountingSettingsController;
+use App\Http\Controllers\Api\AccountingStatementController;
 use App\Http\Controllers\Api\ApprovalWorkflowController;
 use App\Http\Controllers\Api\AuditLogController;
 use App\Http\Controllers\Api\AuthController;
@@ -26,6 +36,7 @@ use App\Http\Controllers\Api\GCashTierController;
 use App\Http\Controllers\Api\GCashTransactionController;
 use App\Http\Controllers\Api\HealthController;
 use App\Http\Controllers\Api\LoanAdjustmentController;
+use App\Http\Controllers\Api\LoanApprovalStepController;
 use App\Http\Controllers\Api\LoanController;
 use App\Http\Controllers\Api\LoanProductController;
 use App\Http\Controllers\Api\PromissoryNoteController;
@@ -39,6 +50,7 @@ use App\Http\Middleware\AllowAuthOrSubmissionToken;
 use App\Http\Middleware\CheckTokenExpiry;
 use App\Http\Middleware\EnsureUserIsActive;
 use App\Http\Middleware\OptionalSanctumAuth;
+use App\Http\Middleware\RequirePasswordChange;
 use Illuminate\Support\Facades\Route;
 
 Route::get('/health', HealthController::class);
@@ -82,17 +94,37 @@ Route::middleware('signed')->group(function () {
 // They shared `public-registration` until one applicant's create + photo +
 // valid IDs spent most of a 5-per-10-minute per-IP budget, and the next
 // person to open the form was refused. See App\Providers\AppServiceProvider.
+//
+// RequirePasswordChange rides along for the same reason EnsureUserIsActive
+// does. These three sit OUTSIDE the auth group but still serve authenticated
+// operators on their normal paths, so leaving it off would mean an operator
+// whose password was just reset is refused everywhere in the product except
+// creating borrowers and uploading their documents — the lock would have a
+// hole in it exactly where borrower PII is written. It is a no-op without a
+// user attached, so the anonymous registration flow is untouched.
 Route::post('/borrowers', [BorrowerController::class, 'store'])
-    ->middleware([OptionalSanctumAuth::class, 'throttle:public-registration', CheckTokenExpiry::class, EnsureUserIsActive::class]);
+    ->middleware([OptionalSanctumAuth::class, 'throttle:public-registration', CheckTokenExpiry::class, EnsureUserIsActive::class, RequirePasswordChange::class]);
 
 Route::post('/borrowers/{borrower}/photo', [BorrowerController::class, 'uploadPhoto'])
-    ->middleware([AllowAuthOrSubmissionToken::class, 'throttle:registration-uploads', CheckTokenExpiry::class, EnsureUserIsActive::class]);
+    ->middleware([AllowAuthOrSubmissionToken::class, 'throttle:registration-uploads', CheckTokenExpiry::class, EnsureUserIsActive::class, RequirePasswordChange::class]);
 
 Route::post('/borrowers/{borrower}/valid-ids', [BorrowerController::class, 'uploadValidId'])
-    ->middleware([AllowAuthOrSubmissionToken::class, 'throttle:registration-uploads', CheckTokenExpiry::class, EnsureUserIsActive::class]);
+    ->middleware([AllowAuthOrSubmissionToken::class, 'throttle:registration-uploads', CheckTokenExpiry::class, EnsureUserIsActive::class, RequirePasswordChange::class]);
 
 // Protected routes
-Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::class])->group(function () {
+//
+// RequirePasswordChange runs LAST of the three, and the order is the point.
+// "Your session expired" (401) and "your account was deactivated" (403) are
+// both truths about the token or the account that outrank "you owe us a new
+// password" — a deactivated user must be turned away, not sent to a
+// change-password screen that would let them back in. It also means the
+// middleware only ever sees a live token on a live account, so a 423 is always
+// actionable by the person who received it.
+//
+// It allowlists GET /auth/me, POST /auth/change-password and POST /auth/logout
+// by controller action; everything else in this group, including PATCH
+// /auth/me and POST /auth/refresh, is refused while the flag is set.
+Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::class, RequirePasswordChange::class])->group(function () {
 
     // Auth
     Route::post('/auth/logout', [AuthController::class, 'logout']);
@@ -170,6 +202,18 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::patch('/loans/{loan}/auto-pay', [LoanController::class, 'toggleAutoPay']);
     Route::get('/loans/{loan}/amortization-preview', [LoanController::class, 'amortizationPreview']);
     Route::get('/loans/{loan}/amortization-schedule', [LoanController::class, 'amortizationSchedule']);
+
+    // Multi-step BOD approval chain.
+    //
+    // The child parameter is `{approvalStep}`, not `{step}`, because
+    // scopeBindings() resolves it through Str::plural(Str::camel($param)) —
+    // `approvalStep` finds Loan::approvalSteps(), `step` would look for a
+    // steps() relation that does not exist and throw. Scoping is what makes a
+    // step id from a DIFFERENT loan 404 at the router instead of reaching the
+    // controller.
+    Route::get('/loans/{loan}/approval-steps', [LoanApprovalStepController::class, 'index']);
+    Route::patch('/loans/{loan}/approval-steps/{approvalStep}/approve', [LoanApprovalStepController::class, 'approve'])->scopeBindings();
+    Route::patch('/loans/{loan}/approval-steps/{approvalStep}/send-back', [LoanApprovalStepController::class, 'sendBack'])->scopeBindings();
 
     // Repayments
     Route::get('/repayments', [RepaymentController::class, 'listAll']);
@@ -399,6 +443,217 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
 
             Route::get('/{run}/errors', [CsvImportErrorReportController::class, 'index'])->name('errors.index');
         });
+    });
+
+    /*
+    |--------------------------------------------------------------------------
+    | Accounting
+    |--------------------------------------------------------------------------
+    |
+    | The double-entry foundation: the chart of accounts and the posting
+    | defaults every automatic entry resolves through. Gated on the
+    | `chart_of_accounts:*` and `accounting:settings` permissions inside the
+    | controllers with `$this->authorize()`, like every other endpoint in this
+    | file — no `permission:` middleware appears here and this is not the place
+    | to start.
+    |
+    | The list endpoint answers with the raw Laravel paginator envelope
+    | ({data, links, meta}); `POST /accounts/seed` answers with a flat
+    | {data: Account[]} instead, because it returns the whole chart at once and
+    | there is nothing to page through.
+    */
+    Route::prefix('accounting')->group(function () {
+        Route::get('/accounts', [AccountingAccountController::class, 'index']);
+        Route::post('/accounts', [AccountingAccountController::class, 'store']);
+
+        // MUST precede /accounts/{account}. Laravel matches in registration
+        // order, so a wildcard registered first captures "seed" as an id — the
+        // same trap /collateral-types/reorder documents above. `whereNumber`
+        // on the wildcards is the second lock.
+        Route::post('/accounts/seed', [AccountingAccountController::class, 'seed']);
+
+        Route::get('/accounts/{account}', [AccountingAccountController::class, 'show'])->whereNumber('account');
+        Route::put('/accounts/{account}', [AccountingAccountController::class, 'update'])->whereNumber('account');
+        Route::delete('/accounts/{account}', [AccountingAccountController::class, 'destroy'])->whereNumber('account');
+
+        /*
+         * Journals. Posting and reversing are separate VERBS, not a status
+         * field on the update, because a posted entry is immutable: `reverse`
+         * writes a second, mirrored entry rather than editing the first, and
+         * `PUT /journals/{id}` refuses anything that is not a draft.
+         *
+         * Permissions are `journals:view|create|post|reverse`, checked in the
+         * controller and the form requests with `$this->authorize()` /
+         * `authorize()`, like every other endpoint in this file. Posting and
+         * reversing are separate permissions on purpose — an accounting clerk
+         * drafts entries all day and must not be able to put them into the
+         * books unreviewed. See the accountant role in the permissions
+         * migration, which holds `journals:create` and NOT `journals:post`.
+         */
+        Route::get('/journals', [AccountingJournalController::class, 'index']);
+        Route::post('/journals', [AccountingJournalController::class, 'store']);
+        Route::get('/journals/{journal}', [AccountingJournalController::class, 'show'])->whereNumber('journal');
+        Route::put('/journals/{journal}', [AccountingJournalController::class, 'update'])->whereNumber('journal');
+        Route::post('/journals/{journal}/post', [AccountingJournalController::class, 'post'])->whereNumber('journal');
+        Route::post('/journals/{journal}/reverse', [AccountingJournalController::class, 'reverse'])->whereNumber('journal');
+
+        /*
+         * Reporting, all gated on `accounting:view`.
+         *
+         * No balance-sheet or income-statement route, deliberately: both are
+         * regroupings of the trial balance and are built client-side from the
+         * rows /trial-balance returns, so a figure has exactly one origin.
+         */
+        Route::get('/general-ledger', [AccountingReportController::class, 'generalLedger']);
+        Route::get('/trial-balance', [AccountingReportController::class, 'trialBalance']);
+        Route::get('/dashboard', [AccountingReportController::class, 'dashboard']);
+
+        /*
+         * ── Accounting reports, part two ──────────────────────────────────
+         *
+         * Kept as one contiguous block on purpose: several streams are editing
+         * this file at once, and a merge conflict over a solid block is
+         * mechanical while one over four routes interleaved with other
+         * people's is not. Add to the bottom of this block, not into it.
+         *
+         * The BIR books of account. One path per book so the books screen can
+         * pick by tab without a switch statement per call site; both answer the
+         * same `{data: AccountingBook}` shape, because `book-report.tsx`
+         * renders every book through ONE component keyed by `BookKind`. The
+         * cash receipts and cash disbursements books are the other half of the
+         * set and are not routed yet — they need the automatic posting engine
+         * to tell a receipt from a disbursement by source.
+         *
+         * Note these are the FIRST accounting routes with a static segment
+         * under a sub-prefix. They cannot collide with `/accounts/{account}`
+         * (different prefix), but keep books under `/books/` rather than
+         * flattening them, or `general-ledger` the book and `general-ledger`
+         * the paginated per-account report above would fight for one path.
+         */
+        Route::get('/books/general-journal', [AccountingBookController::class, 'generalJournal']);
+        Route::get('/books/general-ledger', [AccountingBookController::class, 'generalLedger']);
+
+        /*
+         * Aged receivables. Gated on `accounting:view` like the reports above,
+         * but note it reads the LENDING tables rather than the journals — it is
+         * a portfolio measure answering on an accounting screen, and it will
+         * not reconcile to Loans Receivable on the trial balance until the
+         * automatic posting engine lands.
+         */
+        Route::get('/loans/aging', [AccountingReportController::class, 'receivableAging']);
+
+        /*
+         * The money accounts. `cash_accounts:view`, NOT `chart_of_accounts:view`
+         * — a branch manager gets the Cash & Bank screen without the chart, and
+         * the permission vocabulary has carried that pair unused since the
+         * accounting permissions migration precisely for this endpoint.
+         *
+         * Lives on AccountingAccountController because it is a filtered read of
+         * `accounting_accounts` and reuses that controller's balance attachment
+         * verbatim; a separate controller would have meant a second aggregate
+         * over the journal lines, and two ways of computing one balance
+         * eventually disagree.
+         */
+        Route::get('/cash-accounts', [AccountingAccountController::class, 'cashAccounts']);
+
+        Route::get('/settings/account-mapping', [AccountingSettingsController::class, 'showAccountMapping']);
+        Route::put('/settings/account-mapping', [AccountingSettingsController::class, 'updateAccountMapping']);
+
+        /*
+        |----------------------------------------------------------------------
+        | Accounting — the write modules
+        |----------------------------------------------------------------------
+        |
+        | Expenses, reconciliation, periods, fund transfer, and the two
+        | statements that cannot be regrouped out of a trial balance. Kept as
+        | ONE contiguous block because three other streams are editing this file
+        | at the same time.
+        |
+        | Permissions are checked in the controllers and form requests with
+        | `$this->authorize()` / `authorize()`, like every other endpoint in
+        | this file — no `permission:` middleware appears here.
+        |
+        | `whereNumber` on every wildcard, and no literal segment is registered
+        | after one, so nothing can be captured as an id. `/cash-accounts/
+        | transfer` is a literal under a prefix with no wildcard at all.
+        */
+
+        /*
+         * Expenses and payables. `expenses:view|create|update|pay`.
+         *
+         * Recording an expense posts its journal in the same transaction, which
+         * is why there is no separate "post" verb here and why `PUT` accepts
+         * only the descriptive fields — the figures ARE the posted entry, and a
+         * posted entry is immutable. Correcting one means reversing the journal
+         * and recording it again.
+         *
+         * `/pay` is a separate permission from `update` on purpose: settling a
+         * payable takes money out of a cash account, and that is the step
+         * nobody should be able to take on their own paperwork. Same split as
+         * `journals:create` versus `journals:post`.
+         *
+         * The list answers with the raw Laravel paginator envelope and the
+         * Expenses screen DRAINS it — it totals the outstanding balance
+         * client-side, so a single page would be a headline figure that is
+         * simply short.
+         */
+        Route::get('/expenses', [AccountingExpenseController::class, 'index']);
+        Route::post('/expenses', [AccountingExpenseController::class, 'store']);
+        Route::get('/expenses/{expense}', [AccountingExpenseController::class, 'show'])->whereNumber('expense');
+        Route::put('/expenses/{expense}', [AccountingExpenseController::class, 'update'])->whereNumber('expense');
+        Route::post('/expenses/{expense}/pay', [AccountingExpenseController::class, 'pay'])->whereNumber('expense');
+
+        /*
+         * Reconciliation, all on `accounting:reconcile` — the same permission
+         * the screen's RouteGuard uses, and one the bookkeeper already holds.
+         * Reconciling proves the books against an outside record; it never
+         * adjusts them, so none of these writes a journal and none of them
+         * needs a posting permission.
+         */
+        Route::get('/reconciliations', [AccountingReconciliationController::class, 'index']);
+        Route::post('/reconciliations', [AccountingReconciliationController::class, 'store']);
+        Route::get('/reconciliations/{reconciliation}', [AccountingReconciliationController::class, 'show'])
+            ->whereNumber('reconciliation');
+        Route::post('/reconciliations/{reconciliation}/match', [AccountingReconciliationController::class, 'match'])
+            ->whereNumber('reconciliation');
+
+        /*
+         * Periods, on `accounting:close`.
+         *
+         * No create route, and none is missing: the months the books span are a
+         * fact about the ledger rather than a decision, so PeriodCalendar
+         * provisions them on read. Closing LOCKS — PeriodGuard is consulted
+         * inside JournalPoster, the one writer of journals, so a closed month
+         * refuses the manual entry screen, an expense, a transfer, a reversal
+         * and every automatic posting alike.
+         */
+        Route::get('/periods', [AccountingPeriodController::class, 'index']);
+        Route::post('/periods/{period}/close', [AccountingPeriodController::class, 'close'])->whereNumber('period');
+        Route::post('/periods/{period}/reopen', [AccountingPeriodController::class, 'reopen'])->whereNumber('period');
+
+        /*
+         * Moving money between the organisation's own accounts. Returns the
+         * posted JournalEntry, which is what `accountingService.transfer` is
+         * typed to receive.
+         *
+         * `GET /cash-accounts` is NOT here — it belongs with the chart of
+         * accounts, being that list filtered to the rows carrying a `cash_kind`.
+         */
+        Route::post('/cash-accounts/transfer', [AccountingCashAccountController::class, 'transfer']);
+
+        /*
+         * The two statements the client cannot build for itself, on
+         * `accounting:view`.
+         *
+         * Still no balance-sheet or income-statement route, for the same reason
+         * given above: both are regroupings of the trial balance and are built
+         * from it in `src/lib/accounting/statements.ts`, so a figure has exactly
+         * one origin. These two are not regroupings — cash flow needs a
+         * classification that lives on the account, and changes in equity needs
+         * opening balances as well as the movements between them.
+         */
+        Route::get('/statements/cash-flow', [AccountingStatementController::class, 'cashFlow']);
+        Route::get('/statements/equity-changes', [AccountingStatementController::class, 'equityChanges']);
     });
 
     // Branding (organization logo + identity printed on reports and documents)

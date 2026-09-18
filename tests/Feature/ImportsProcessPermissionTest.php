@@ -1,8 +1,6 @@
 <?php
 
 use App\Models\Role;
-use Database\Seeders\DatabaseSeeder;
-use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
 use Spatie\Permission\Models\Permission;
 use Spatie\Permission\PermissionRegistrar;
@@ -25,11 +23,6 @@ use Tests\TestCase;
  * to drift.
  */
 uses(TestCase::class);
-
-beforeEach(function () {
-    Artisan::call('migrate:fresh');
-    $this->seed(DatabaseSeeder::class);
-});
 
 function importsPermissionMigration(): object
 {

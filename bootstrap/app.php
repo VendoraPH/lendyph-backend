@@ -1,5 +1,7 @@
 <?php
 
+use App\Http\Middleware\AllowAuthOrSubmissionToken;
+use App\Http\Middleware\OptionalSanctumAuth;
 use App\Http\Middleware\SecurityHeaders;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
@@ -56,6 +58,33 @@ return Application::configure(basePath: dirname(__DIR__))
         // browser-supplied `X-Forwarded-For: 6.6.6.6` becomes
         // "6.6.6.6, <browser-ip>" and the real browser IP is still what wins.
         $middleware->trustProxies(headers: Request::HEADER_X_FORWARDED_FOR);
+
+        // Keep the optional-auth middleware AHEAD of ThrottleRequests.
+        //
+        // routes/api.php declares the public-registration stacks as
+        // [OptionalSanctumAuth, throttle:..., ...] precisely so the limiter can
+        // see $request->user() and hand operators Limit::none(). Declaring it
+        // is not enough: Router::resolveMiddleware() runs the gathered stack
+        // through SortedMiddleware, which reorders by the framework's priority
+        // list. ThrottleRequests sits at priority 7 and SubstituteBindings at
+        // 10, and the api group contributes SubstituteBindings ahead of the
+        // route's own middleware — so the sorter hoists `throttle:...` above
+        // SubstituteBindings and, in doing so, steps straight over
+        // OptionalSanctumAuth, which is not in the priority list at all and is
+        // therefore never considered.
+        //
+        // The observable effect was that BOTH registration limiters ran with a
+        // null $request->user(): the `Limit::none()` operator exemption in
+        // AppServiceProvider could never fire, so authenticated staff were
+        // metered on the anonymous per-IP buckets. Naming these two here puts
+        // them in the priority list immediately before ThrottleRequests, which
+        // is what makes the declared order actually survive the sort.
+        //
+        // This does not disturb the auth:sanctum group: Authenticate already
+        // outranks ThrottleRequests via the AuthenticatesRequests contract at
+        // priority 6.
+        $middleware->prependToPriorityList(ThrottleRequests::class, OptionalSanctumAuth::class);
+        $middleware->prependToPriorityList(ThrottleRequests::class, AllowAuthOrSubmissionToken::class);
 
         $middleware->alias([
             'role' => RoleMiddleware::class,

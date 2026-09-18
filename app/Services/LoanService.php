@@ -7,8 +7,10 @@ use App\Models\Borrower;
 use App\Models\Collateral;
 use App\Models\CoMaker;
 use App\Models\Loan;
+use App\Models\LoanApprovalStep;
 use App\Models\LoanProduct;
 use App\Models\User;
+use App\Services\Accounting\AutomaticPoster;
 use Carbon\Carbon;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Support\Facades\DB;
@@ -523,12 +525,36 @@ class LoanService
         return $validated;
     }
 
-    public function submitForReview(Loan $loan): Loan
+    /**
+     * `draft -> for_review`, and the point at which the loan's approval chain
+     * comes into existence.
+     *
+     * Wrapped in a transaction — it was a bare update before — because the
+     * status flip and the chain snapshot have to commit together. A loan that
+     * reached `for_review` with no rows in `loan_approval_steps` would be
+     * un-actionable by anyone: there would be no pending step for an approver
+     * to sign, and no way back to `draft` to re-seed one.
+     *
+     * `$submitter` is optional and defaults to the authenticated user so the
+     * existing callers — the controller, DemoSeeder and a dozen tests — keep
+     * working unchanged; the chain's submit step is recorded against whoever
+     * it resolves to.
+     */
+    public function submitForReview(Loan $loan, ?User $submitter = null): Loan
     {
         $this->guardStatus($loan, 'draft', 'submit for review');
-        $loan->update(['status' => 'for_review']);
 
-        return $loan;
+        return DB::transaction(function () use ($loan, $submitter) {
+            $loan->update(['status' => 'for_review']);
+
+            // Resolved here rather than constructor-injected: LoanApprovalChainService
+            // depends on THIS class to run the for_review -> approved transition when
+            // the chain reaches its release step, and two constructor-injected services
+            // pointing at each other is a container resolution loop.
+            app(LoanApprovalChainService::class)->seed($loan, $submitter);
+
+            return $loan;
+        });
     }
 
     public function approve(Loan $loan, User $approver, ?string $remarks): Loan
@@ -561,6 +587,8 @@ class LoanService
             );
         }
 
+        $this->guardApprovalChainIsClear($loan, $approver);
+
         $loan->update([
             'status' => 'approved',
             'approved_by' => $approver->id,
@@ -568,7 +596,69 @@ class LoanService
             'approval_remarks' => $remarks,
         ]);
 
+        // Keep the chain agreeing with the loan. Only reachable via the
+        // admin/super_admin exemption above or a chainless loan; a chain left
+        // mid-flight against an `approved` loan is actionable by nobody and
+        // strands the release step out of reach of the UI. Resolved from the
+        // container for the same reason `seed()` is: the chain service depends
+        // on this one.
+        app(LoanApprovalChainService::class)->markApprovedOutOfBand($loan, $approver);
+
         return $loan;
+    }
+
+    /**
+     * Refuse a single-shot approval while the loan's approval chain is still
+     * mid-flight.
+     *
+     * `loans:approve` is held by `loan_officer`, so without this a
+     * policy-exception loan sitting at step 2 of 10 could be taken straight to
+     * `approved` by one person — the chain rows untouched, no signatures, and
+     * nothing in the audit trail to show the other eight approvers were never
+     * asked. That would make the whole chain decorative.
+     *
+     * The check is on chain STATE rather than on who is calling, which is what
+     * lets LoanApprovalChainService::approve() hand over here without a flag:
+     * by the time it does, it has marked the last `approve` step approved, so
+     * nothing is outstanding and this passes. A direct call mid-chain still has
+     * later steps sitting `waiting` and is refused.
+     *
+     * `admin` and `super_admin` are exempt, using the same BYPASS_ROLES the
+     * chain itself honours in canAct(): they may already act on every step in
+     * sequence, so doing it in one call is a shortcut rather than an
+     * escalation. Refusing them would also break every fixture in the suite —
+     * SetupLendyPH::createReleasedLoan() approves as admin on a loan whose
+     * chain is still at step 1.
+     *
+     * Loans with no chain at all — anything submitted before this shipped, and
+     * every imported loan — are unaffected.
+     */
+    private function guardApprovalChainIsClear(Loan $loan, User $approver): void
+    {
+        if ($approver->hasAnyRole(LoanApprovalStep::BYPASS_ROLES)) {
+            return;
+        }
+
+        $round = $loan->approvalSteps()->max('round');
+
+        if ($round === null) {
+            return;
+        }
+
+        $outstanding = $loan->approvalSteps()
+            ->where('round', $round)
+            ->where('kind', LoanApprovalStep::KIND_APPROVE)
+            ->whereIn('status', [
+                LoanApprovalStep::STATUS_WAITING,
+                LoanApprovalStep::STATUS_PENDING,
+            ])
+            ->exists();
+
+        if ($outstanding) {
+            throw ValidationException::withMessages([
+                'status' => 'This loan is still moving through its approval chain. Sign off on the current step instead.',
+            ]);
+        }
     }
 
     public function reject(Loan $loan, User $approver, ?string $remarks): Loan
@@ -647,6 +737,13 @@ class LoanService
                 $this->closeRestructuredSource($loan, $lockedSource, $releaser);
             }
 
+            // Close out the approval chain's `release` step, which this action
+            // IS. Without it a released loan keeps a pending release step
+            // forever and the loan detail page contradicts `loans.status`.
+            // Placed before the assertion below so that guard stays the last
+            // statement in the transaction, as its comment requires.
+            app(LoanApprovalChainService::class)->markReleased($loan, $releaser);
+
             // `approved` → `released` is a transition INTO Loan::ACTIVE_STATUSES,
             // and it writes no `loan_collaterals` row, so the guard on
             // CollateralController::attach() never sees it. Without this, a loan
@@ -663,6 +760,34 @@ class LoanService
             // and out of ACTIVE_STATUSES, so what is asserted is the state this
             // transaction is actually about to commit. A throw still rolls the
             // whole release back, status write and loan account number included.
+            /*
+             * THE BOOKS. Explicit, and inside this transaction on purpose.
+             *
+             * Position matters twice over:
+             *
+             * - AFTER applyInsuranceOnRelease(), which withholds the premium by
+             *   REWRITING `net_proceeds` and `total_deductions` on the loan.
+             *   Post before it and the entry credits cash with money that never
+             *   left the drawer and omits the premium from income — and it
+             *   balances, so no report would ever show it.
+             * - AFTER the loan account number is issued, so the journal's
+             *   reference is the LN the borrower's papers carry.
+             *
+             * It stays BEFORE the assertion below, which that comment requires
+             * to be the last statement in this transaction. A throw from here
+             * rolls the whole release back — status, loan account number,
+             * schedule and all — which is the intended failure: refuse to
+             * release money the books cannot record, rather than release it and
+             * leave the two disagreeing with nothing to point at the
+             * difference.
+             *
+             * NOT an observer. CsvImportProcessor bulk-creates historical
+             * `released` loans without coming through here, and must not post a
+             * journal for a disbursement that happened years ago under someone
+             * else's books.
+             */
+            app(AutomaticPoster::class)->loanRelease($loan, $releaser->id);
+
             CollateralPledgeGuard::assertNoDoublePledge($lockedCollateralIds, $loan);
 
             return $loan;

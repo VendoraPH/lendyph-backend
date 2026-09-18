@@ -51,8 +51,17 @@ class CsvImportUploadApiTest extends TestCase
      */
     private const MEMBER_ROW = 'Dela Cruz, Maria, 1979-04-02, 09171234567, 12 Rizal St, 18000.00';
 
+    /**
+     * One spec here opens a SECOND connection and expects it to see this
+     * connection's rows, which an uncommitted per-test transaction makes
+     * impossible — its insert blocks on our locks until it times out. That one
+     * runs against a really-migrated database; the other 57 stay transactional.
+     */
     protected function setUp(): void
     {
+        $this->wrapsEachTestInTransaction =
+            $this->name() !== 'test_two_requests_racing_the_same_index_resolve_through_the_unique_index';
+
         parent::setUp();
         $this->seedAndLogin();
 
