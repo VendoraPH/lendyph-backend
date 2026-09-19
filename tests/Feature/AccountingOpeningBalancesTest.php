@@ -485,6 +485,20 @@ class AccountingOpeningBalancesTest extends TestCase
         $this->assertSame(0, AccountingJournal::query()->count());
     }
 
+    public function test_an_account_repeated_with_one_row_empty_is_still_a_duplicate(): void
+    {
+        // Falls out of recording every named code before the zero-row skip
+        // (which is what makes "3050,,0" count as setting the plug). Stricter
+        // than dropping the empty row silently, and the right way round: two
+        // rows for one account is a question, not an instruction.
+        $file = $this->csv("1010,0,0\n1010,400000.00,\n");
+
+        $output = $this->runCommand(['--file' => $file, '--as-of' => self::AS_OF], Command::FAILURE);
+
+        $this->assertStringContainsString('appears twice', $output);
+        $this->assertSame(0, AccountingJournal::query()->count());
+    }
+
     public function test_an_oversized_file_is_refused_before_it_is_opened(): void
     {
         // fgetcsv() has no per-record length bound, so a file with no line
@@ -642,6 +656,57 @@ class AccountingOpeningBalancesTest extends TestCase
         // Rolled back with the refused transaction, injected row and all — so
         // the assertion that matters is that this run wrote nothing of its own.
         $this->assertSame(0, AccountingJournalLine::query()->count());
+    }
+
+    public function test_the_plug_account_row_is_locked_before_the_journals_are_re_read(): void
+    {
+        /*
+         * THE REGRESSION GUARD ON THE LOCK ITSELF.
+         *
+         * The spec above proves the in-transaction check refuses a journal that
+         * appears mid-flight — but it injects that journal inside the command's
+         * own transaction, so it passes whether or not the 3050 row is locked.
+         * The lock is the part that makes two SEPARATE runs queue instead of
+         * race, and it cannot be exercised from inside a single transaction.
+         *
+         * So this asserts the mechanism rather than the outcome: an exclusive
+         * lock is taken on a row that EXISTS (accounting_accounts) before the
+         * locking read of accounting_journals. Swap back to locking the
+         * `source` index gap and the order here inverts — which at READ
+         * COMMITTED takes no lock at all, and at REPEATABLE READ deadlocks two
+         * real runs rather than refusing one.
+         */
+        $locking = [];
+
+        DB::listen(static function ($query) use (&$locking): void {
+            if (str_contains(strtolower($query->sql), 'for update')) {
+                $locking[] = $query->sql;
+            }
+        });
+
+        $this->runCommand(['--file' => $this->canonicalCsv(), '--as-of' => self::AS_OF]);
+
+        $this->assertNotEmpty($locking, 'The command took no locking read at all.');
+
+        $this->assertStringContainsString(
+            'accounting_accounts',
+            $locking[0],
+            "The FIRST locking read must be the 3050 account row. Locking reads, in order:\n"
+            .implode("\n", $locking),
+        );
+
+        $journalsAt = null;
+
+        foreach ($locking as $index => $sql) {
+            if (str_contains($sql, 'accounting_journals')) {
+                $journalsAt = $index;
+
+                break;
+            }
+        }
+
+        $this->assertNotNull($journalsAt, 'The journals were never re-read under a lock.');
+        $this->assertGreaterThan(0, $journalsAt, 'The journals were locked before the account row.');
     }
 
     // ── --dry-run ───────────────────────────────────────────────────────────

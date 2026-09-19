@@ -447,7 +447,7 @@ class RecordOpeningBalances extends Command
                         'different report, or a column was inserted — and read positionally it would put',
                         'somebody\'s balance in the wrong column of the wrong account.',
                         '',
-                        '  Got: '.mb_strimwidth(implode(' | ', $cells), 0, self::MAX_ECHOED_RECORD, '…'),
+                        '  Got: '.$this->echoable(implode(' | ', $cells)),
                     ]);
 
                     return null;
@@ -599,7 +599,7 @@ class RecordOpeningBalances extends Command
         }
 
         if (! $this->commasAreThousandsSeparators($cell)) {
-            $this->refuse(sprintf('Line %d: [%s] uses a comma as a decimal point in the %s column.', $lineNo, $cell, $side), [
+            $this->refuse(sprintf('Line %d: [%s] uses a comma as a decimal point in the %s column.', $lineNo, $this->echoable($cell), $side), [
                 'Amounts here are written the way the app writes them — "1,500.50", comma for',
                 'thousands and dot for centavos. A European "1.500,50" or "10,50" is not refused by',
                 'the parser, it is MISREAD by it: Money::toCentavos() strips every comma as grouping',
@@ -618,7 +618,7 @@ class RecordOpeningBalances extends Command
         $centavos = Money::toCentavos($cell);
 
         if ($centavos === null) {
-            $this->refuse(sprintf('Line %d: [%s] is not an amount I can read in the %s column.', $lineNo, $cell, $side), [
+            $this->refuse(sprintf('Line %d: [%s] is not an amount I can read in the %s column.', $lineNo, $this->echoable($cell), $side), [
                 'Amounts are positive pesos — 1500, 1500.50, "₱1,500.50" all read. A negative does',
                 'not: direction belongs to the column, so a -1500 debit is a 1500 credit, and',
                 'accepting both spellings would let two different-looking files post the same entry.',
@@ -685,6 +685,33 @@ class RecordOpeningBalances extends Command
     private function labelKey(string $value): string
     {
         return strtolower((string) preg_replace('/[^A-Za-z0-9]/', '', $value));
+    }
+
+    /**
+     * File-supplied text, made safe to print to a terminal.
+     *
+     * Everything echoed by a refusal came out of the CSV, and a CSV is not
+     * necessarily a CSV — the checks above exist precisely because the wrong
+     * file gets passed. Raw bytes from one would otherwise reach the terminal
+     * unfiltered, ANSI escapes and all, so a "malformed row" message could be
+     * made to repaint the screen it is being read on. Control characters go to
+     * `?` and the result is clipped, because none of this changes what the
+     * operator needs to see: which cell, and roughly what was in it.
+     */
+    private function echoable(string $value): string
+    {
+        if (! mb_check_encoding($value, 'UTF-8')) {
+            // Invalid UTF-8 would make the /u pattern below fail outright and
+            // return null, throwing away the whole value rather than cleaning
+            // it. Substitutes the bad bytes instead.
+            $value = mb_convert_encoding($value, 'UTF-8', 'UTF-8');
+        }
+
+        // \p{C} is control, format and surrogate — which covers ESC, and so
+        // covers every escape sequence built on it.
+        $clean = preg_replace('/\p{C}/u', '?', $value) ?? '';
+
+        return mb_strimwidth($clean, 0, self::MAX_ECHOED_RECORD, '…');
     }
 
     private function humanBytes(int $bytes): string
@@ -1140,7 +1167,11 @@ class RecordOpeningBalances extends Command
                 description: sprintf(
                     'accounting:opening-balances posted %s carrying %s onto the books as of %s',
                     $journal->journal_no,
-                    Money::format($plan['total_debit']),
+                    // From the journal, like the totals above. The two cannot
+                    // diverge in practice — the poster refuses an unbalanced
+                    // entry — but the whole point of this row is that it holds
+                    // what landed rather than what was intended.
+                    Money::format((int) $journal->total_debit),
                     $asOf,
                 ),
                 // Not request()->ip(). Laravel synthesises a console request
