@@ -80,6 +80,25 @@ class RoleAndPermissionSeeder extends Seeder
             // re-run a seeder, while this list is what a fresh database and the
             // whole test suite build from. Either one alone is a half-measure.
             'accounting:view', 'accounting:reconcile', 'accounting:close', 'accounting:settings',
+
+            // NOT here, deliberately: credit_scoring:view / :override / :settings.
+            //
+            // The frontend already ships the whole Credit Scoring module — seven
+            // sidebar items, eight pages — and this API serves none of its eleven
+            // endpoints. The only thing keeping those items hidden is that this
+            // list has never contained the permission: the sidebar filters on what
+            // the server sends, and RouteGuard reads the same value, so it is not a
+            // second line of defence. Add the strings here and seven dead menu items
+            // appear across admin, manager and loan_officer at the next seed.
+            //
+            // The module's design spec does tell you to grant them. It was written
+            // before the endpoints were deferred and has since been corrected; the
+            // contract is in docs/CREDIT_SCORING_BACKEND_HANDOFF.md in the frontend
+            // repo. Ship the routes and these permissions in the same change.
+            //
+            // CreditScoringNotSeededTest enforces this and fails the moment one is
+            // granted without a matching route. It goes quiet by itself once the
+            // routes exist, so it needs no cleanup.
             'chart_of_accounts:view', 'chart_of_accounts:create',
             'chart_of_accounts:update', 'chart_of_accounts:delete',
             'journals:view', 'journals:create', 'journals:post', 'journals:reverse',

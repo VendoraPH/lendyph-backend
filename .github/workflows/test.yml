@@ -107,9 +107,86 @@ jobs:
           php artisan key:generate
 
       - name: Run tests (parallel)
-        # --processes is pinned. Unset, Pest takes the runner's core count, and
-        # this suite is bottlenecked on MySQL DDL rather than CPU: every test
-        # calls migrate:fresh (SetupLendyPH.php), so more workers means more
-        # concurrent DROP/CREATE against one server. Measured locally, 6 workers
-        # (1080s) came out SLOWER than 4 (1039s).
-        run: php artisan test --parallel --processes=4
+        # --processes stays at FOUR, but the old reason for it is no longer true
+        # and has been replaced with a measured one.
+        #
+        # The previous note said "every test calls migrate:fresh
+        # (SetupLendyPH.php), so more workers means more concurrent DROP/CREATE
+        # against one server", measuring 6 workers (1080s) slower than 4 (1039s).
+        # That regime is gone: the suite moved to RefreshDatabase, the schema is
+        # built once per worker, and each test runs in a transaction. The DDL
+        # bottleneck those figures came from no longer exists.
+        #
+        # Re-measured on the full suite, same machine, same image, back to back:
+        # 4 processes 60.8s, 8 processes 61.2s, both 1873 passed. Parity, so
+        # there is nothing to gain by raising it. Treat those as an upper bound
+        # rather than a prediction for CI: this ran on a developer Mac, and a
+        # GitHub standard runner has fewer cores, where 4 is already the
+        # oversubscribed end. Re-measure here before changing the number.
+        #
+        # MIN_TESTS is a FLOOR, not an expected count. The suite grows; this only
+        # has to be high enough to catch a run that collapsed. Raise it when it
+        # drifts far below the real total, and do not pin it to the exact number.
+        env:
+          MIN_TESTS: "1800"
+        run: |
+          set -uo pipefail
+
+          # Captured, not trusted. `artisan test` exits 0 over real failures
+          # (verified repeatedly on this project), so the exit code cannot gate
+          # this job and the summary line has to be read instead.
+          php artisan test --parallel --processes=4 2>&1 | tee pest-output.log
+          echo
+
+          # Strip ANSI colour before matching. Pest writes "\e[90mTests:\e[39m",
+          # so the escape sequence sits between the line start and the word and a
+          # pattern anchored with ^[[:space:]]*Tests: matches NOTHING. That failure
+          # is silent and reads exactly like a suite that never produced a summary,
+          # which is the very thing this check exists to detect.
+          sed -E 's/\x1b\[[0-9;]*m//g' pest-output.log > pest-output.plain.log
+
+          summary="$(grep -aE '^[[:space:]]*Tests:' pest-output.plain.log | tail -1 || true)"
+
+          if [ -z "$summary" ]; then
+            echo "::error::The suite produced no 'Tests:' summary line. It did not"
+            echo "::error::finish - most likely it died mid-run (OOM, a worker crash,"
+            echo "::error::or a fatal during bootstrap). A green exit code here means"
+            echo "::error::nothing; see pest-output.log in this run's artifacts."
+            exit 1
+          fi
+
+          echo "Summary: $summary"
+
+          if echo "$summary" | grep -qaE 'failed|errored'; then
+            echo "::error::Tests failed or errored: $summary"
+            exit 1
+          fi
+
+          passed="$(echo "$summary" | sed -E 's/.*[^0-9]([0-9]+) passed.*/\1/')"
+          case "$passed" in
+            ''|*[!0-9]*)
+              echo "::error::Could not read a passed count from: $summary"
+              exit 1
+              ;;
+          esac
+
+          if [ "$passed" -lt "$MIN_TESTS" ]; then
+            echo "::error::Only $passed tests ran, floor is $MIN_TESTS. The suite"
+            echo "::error::did not collapse loudly, but it ran far less than it should."
+            echo "::error::Something stopped collecting tests - check for a bootstrap"
+            echo "::error::failure or a suite/path change before lowering this floor."
+            exit 1
+          fi
+
+          echo "OK: $passed tests passed (floor $MIN_TESTS)."
+
+      - name: Upload test output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pest-output
+          path: |
+            pest-output.log
+            pest-output.plain.log
+          if-no-files-found: ignore
+          retention-days: 7
