@@ -18,9 +18,29 @@ class UpdateUserRequest extends FormRequest
      */
     use MasksUserExistence;
 
+    /**
+     * `users:view` as well as `users:update`, and the second one is not
+     * redundant.
+     *
+     * `UserController::update()` answers 200 with the full UserResource —
+     * `roles` included. `users:update` alone therefore bought a read of any
+     * account this caller is 404'd from on `GET /users/{id}`, for the price of
+     * one real edit. It also left a field-equality oracle behind: a one-key
+     * body like `{"branch_id": 3}` answers 422 "nothing to update" when the
+     * guess is right and 200 when it is wrong, writing nothing either way, so
+     * a caller could read a column by guessing it.
+     *
+     * Requiring both closes the read and the oracle together, because both need
+     * the same caller. Raised in security review.
+     *
+     * Costs nothing today: `users:*` appears exactly once in
+     * RoleAndPermissionSeeder, in the full permission catalogue, so only admin
+     * and super_admin hold any of them and both hold all of them. The split is
+     * something the roles screen can create, not something that exists.
+     */
     public function authorize(): bool
     {
-        return $this->user()->can('users:update');
+        return $this->user()->can('users:update') && $this->user()->can('users:view');
     }
 
     public function rules(): array
@@ -75,6 +95,16 @@ class UpdateUserRequest extends FormRequest
                     $this->denyAsMissingUser();
                 }
 
+                // Compares against the FIRST role only, which is exact for every
+                // user this application can produce — `store` assigns one and
+                // `update` syncs one. It is not exact for a target holding more
+                // than one, which Spatie permits and a seeder, console command
+                // or direct insert can create: `syncRoles()` is unconditionally
+                // detach-then-assign, so repeating the first role reads as "no
+                // change" here while the controller would in fact have DROPPED
+                // the others. Deliberately not branched for — a guard for a
+                // state nothing creates is a guard nothing exercises — but it
+                // is the one place this check and `save()` disagree.
                 $changesRole = $this->has('role')
                     && $this->input('role') !== $target->getRoleNames()->first();
 

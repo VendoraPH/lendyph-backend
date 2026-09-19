@@ -86,6 +86,72 @@ class AppServiceProvider extends ServiceProvider
      */
     private const IMPORT_DENIED_PER_MINUTE = 10;
 
+    /**
+     * What a caller with NO user-management permission gets on `users.*`.
+     *
+     * The five `{user}` routes now answer such a caller with the same 404 a
+     * missing id produces (App\Http\Requests\Concerns\MasksUserExistence), so
+     * an individual probe learns nothing. The SWEEP was left untouched: these
+     * routes name no limiter of their own, so a walk of sequential ids ran at
+     * the flat `api` ceiling on the last line of that closure — 60 a minute,
+     * 3,600 an hour, from any valid token on the deployment. A coop's staff
+     * list is a few dozen accounts; an hour at that rate covers every id it
+     * will ever issue, many times over.
+     *
+     * 10/min is IMPORT_DENIED_PER_MINUTE's number, reused rather than a second
+     * one invented beside it: both answer the same question — what a caller who
+     * cannot use an endpoint at all may spend finding that out. It costs
+     * legitimate traffic nothing, because a caller holding none of
+     * USER_MANAGEMENT_PERMISSIONS is refused by every route in the family
+     * anyway; all it changes is how long the refusals take to collect.
+     *
+     * Its own `by()` prefix, so being cut off here leaves the same caller the
+     * full 60/min they need for the screens they CAN use — and so a sweep
+     * cannot be hidden inside ordinary traffic on a shared counter.
+     */
+    private const USER_ROUTES_DENIED_PER_MINUTE = 10;
+
+    /**
+     * The permissions that make a `users.*` route somebody's job.
+     *
+     * There is no single `imports:process` to test the way the import branch
+     * does: the seven routes gate on five different permissions — index/show
+     * `users:view`, store `users:create`, update `users:update`,
+     * deactivate/reactivate `users:delete`, reset-password
+     * `users:reset_password`.
+     *
+     * So the limiter asks "does this caller hold ANY of them", NOT "does this
+     * caller hold the one THIS route needs". That is a deliberate choice rather
+     * than an approximation of the per-route check:
+     *
+     *  - Holding none of them means being refused by every route in the family,
+     *    so the low ceiling cannot bite anyone with work to do here. Picking a
+     *    single permission instead — `users:view`, the obvious candidate —
+     *    would throttle a role built with `users:reset_password` alone down to
+     *    10/min on the one endpoint it exists to use. Roles are editable from
+     *    the UI, so that is a real shape, not a hypothetical one.
+     *  - A per-route mapping would restate the authorisation rules that live in
+     *    App\Http\Requests\User\*, in a second place that cannot fail loudly
+     *    when the two diverge. It would also buy nothing against the sweep this
+     *    exists for: a caller who can enumerate through GET /users/{user}
+     *    already holds `users:view`, and can just call GET /users instead.
+     *
+     * Consequence worth stating plainly: this does NOT mean "the caller is
+     * authorised for the route they called". Someone holding only
+     * `users:view` keeps the ordinary 60/min on reset-password too, where they
+     * will be refused. That is accepted — they are refused with a 404 that
+     * tells them nothing they could not already read from GET /users.
+     *
+     * @var list<string>
+     */
+    private const USER_MANAGEMENT_PERMISSIONS = [
+        'users:view',
+        'users:create',
+        'users:update',
+        'users:delete',
+        'users:reset_password',
+    ];
+
     public function register(): void
     {
         //
@@ -295,6 +361,29 @@ class AppServiceProvider extends ServiceProvider
                 }
 
                 return Limit::perMinute(self::IMPORT_REQUESTS_PER_MINUTE)->by('imports:api:'.$key);
+            }
+
+            /**
+             * User management, for a caller who holds none of the permissions
+             * any of these routes require.
+             *
+             * The shape is the import branch's, the direction is the opposite:
+             * this raises NOTHING. A permitted caller falls through to the
+             * shared 60/min on the line below, deliberately, so that nobody's
+             * total budget grows — a second 60/min bucket keyed `users:` would
+             * hand every admin 120/min between the two. The only thing this
+             * branch does is LOWER the ceiling for a caller who cannot use
+             * these routes at all.
+             *
+             * `$request->user()` is readable here for the same reason it is in
+             * the `imports` limiter: AuthenticatesRequests sits ahead of
+             * ThrottleRequests in the framework's middleware priority list, so
+             * the token is already resolved — while SubstituteBindings, the
+             * FormRequest and the 404 that actually refuses the probe are all
+             * still several layers away.
+             */
+            if ($request->routeIs('users.*') && ! $request->user()?->canAny(self::USER_MANAGEMENT_PERMISSIONS)) {
+                return Limit::perMinute(self::USER_ROUTES_DENIED_PER_MINUTE)->by('users:api:denied:'.$key);
             }
 
             return Limit::perMinute(60)->by($key);

@@ -366,15 +366,30 @@ it('does not hand an empty-body PUT the record it refuses to GET', function () {
     $this->getJson("/api/users/{$target->id}")->assertNotFound();
 
     // ...so the endpoint they MAY write with must not read it out for them.
+    //
+    // This asserted 422 when it was written: the no-op guard starved the read
+    // without removing the caller's right to be here. Security review pointed
+    // out the rest of it — a one-key body like {"branch_id": 3} answers 422
+    // when the guess is right and 200 when it is wrong, so the record was still
+    // readable a column at a time. UpdateUserRequest::authorize() now requires
+    // `users:view` as well, which refuses the caller outright and closes the
+    // guessing game with it. 404, and the same 404 a missing id gives.
     $response = $this->putJson("/api/users/{$target->id}", []);
 
     $body = $response->getContent();
 
-    expect($response->status())->toBe(422)
+    expect($response->status())->toBe(404)
         ->and($response->json('data'))->toBeNull()
         ->and($body)->not->toContain($target->email)
         ->and($body)->not->toContain($target->username)
         ->and($body)->not->toContain('cashier');
+
+    // And the field-equality probe is gone with it: a correct guess is no
+    // longer distinguishable from a wrong one, because neither is answered.
+    $correctGuess = $this->putJson("/api/users/{$target->id}", ['branch_id' => $target->branch_id]);
+    $wrongGuess = $this->putJson("/api/users/{$target->id}", ['branch_id' => 1]);
+
+    expect($correctGuess->getContent())->toBe($wrongGuess->getContent());
 });
 
 it('refuses a PUT that would change nothing, and writes nothing either way', function () {
