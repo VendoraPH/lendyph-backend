@@ -2,48 +2,23 @@
 
 namespace App\Http\Requests\User;
 
+use App\Http\Requests\Concerns\MasksUserExistence;
 use App\Models\User;
-use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Validator;
 
 class ResetPasswordRequest extends FormRequest
 {
+    /**
+     * A caller without `users:reset_password` is answered with the SAME 404 a
+     * missing id produces, rather than a 403 that confirms the account exists.
+     * The rationale — and why `abort(404)` will not do — lives on the trait.
+     */
+    use MasksUserExistence;
+
     public function authorize(): bool
     {
         return $this->user()->can('users:reset_password');
-    }
-
-    /**
-     * Answer an unauthorised caller with the SAME 404 a missing id produces.
-     *
-     * `{user}` is resolved by implicit route-model binding, which runs before
-     * this request is authorised. That split the outcomes for a caller without
-     * `users:reset_password` into two distinguishable answers:
-     *
-     *   POST /api/users/4/reset-password      -> 403 "This action is unauthorized."
-     *   POST /api/users/99999/reset-password  -> 404 "No query results for model [App\Models\User] 99999"
-     *
-     * which is a user-existence oracle for anyone holding any valid token. The
-     * ids are sequential, so walking them enumerates the organisation's entire
-     * staff list — how many accounts exist and which ids are live — from an
-     * endpoint the caller is not allowed to use at all.
-     *
-     * Throwing the binding's own exception rather than `abort(404)` is what
-     * makes the two indistinguishable: the handler turns ModelNotFoundException
-     * into a NotFoundHttpException carrying this exact message, so the status,
-     * the body and the shape all match byte for byte. An `abort(404)` here
-     * would answer `{"message": ""}` and simply move the oracle.
-     *
-     * A caller who DOES hold the permission still gets the honest 404 from the
-     * binding — they are allowed to know an id does not exist.
-     */
-    protected function failedAuthorization(): never
-    {
-        throw (new ModelNotFoundException)->setModel(
-            User::class,
-            array_filter([$this->route('user')?->getKey()]),
-        );
     }
 
     public function rules(): array

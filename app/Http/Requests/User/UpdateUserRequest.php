@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests\User;
 
+use App\Http\Requests\Concerns\MasksUserExistence;
 use App\Models\User;
 use App\Rules\AssignableRole;
 use Illuminate\Foundation\Http\FormRequest;
@@ -10,6 +11,13 @@ use Illuminate\Validation\Validator;
 
 class UpdateUserRequest extends FormRequest
 {
+    /**
+     * A caller without `users:update` is answered with the SAME 404 a missing
+     * id produces, rather than a 403 that confirms the account exists. The
+     * rationale — and why `abort(404)` will not do — lives on the trait.
+     */
+    use MasksUserExistence;
+
     public function authorize(): bool
     {
         return $this->user()->can('users:update');
