@@ -252,4 +252,54 @@ class UserRouteRefusalAuditTest extends TestCase
             str_replace('99999', '{id}', $missing->getContent()),
         );
     }
+
+    /**
+     * A target refusal and a permission miss are different events, and the log
+     * has to say which happened.
+     *
+     * They answer the SAME 404 on the wire on purpose — that is the control.
+     * The distinction lives only in the audit trail, and it is the more useful
+     * half: an ordinary permission miss is someone with the wrong role clicking
+     * a button they can see, while a run of target refusals is somebody working
+     * their way toward the platform account.
+     *
+     * This nearly did not exist. `denyAsMissingUser()` was added as a separate
+     * throw site in the same release that added the recording, so the four
+     * requests that call it recorded NOTHING — the higher-signal event was the
+     * one with no trace.
+     */
+    public function test_a_target_refusal_is_recorded_under_its_own_action(): void
+    {
+        AuditLog::query()->delete();
+
+        $superAdmin = User::where('username', 'super_admin')->firstOrFail();
+
+        $admin = $this->target('active');
+        $admin->syncRoles(['admin']);
+        $this->actingAs($admin);
+
+        // Holds users:update; may not use it against the platform account.
+        $this->putJson("/api/users/{$superAdmin->id}", ['first_name' => 'Nope'])
+            ->assertNotFound();
+
+        // Holds nothing at all.
+        $ordinary = $this->target('active');
+        $this->actingAs($this->outsider);
+        $this->putJson("/api/users/{$ordinary->id}", ['first_name' => 'Nope'])
+            ->assertNotFound();
+
+        $targetRefusals = AuditLog::where('action', 'user_target_refused')->get();
+        $accessDenials = AuditLog::where('action', 'user_access_denied')->get();
+
+        $this->assertCount(1, $targetRefusals, 'The super_admin refusal should record user_target_refused.');
+        $this->assertCount(1, $accessDenials, 'The permission miss should record user_access_denied.');
+
+        $this->assertSame($admin->id, $targetRefusals->first()->user_id);
+        $this->assertSame($this->outsider->id, $accessDenials->first()->user_id);
+
+        // Neither names the target — that would rebuild the oracle inside the
+        // log, and upgrade it from an id to a name.
+        $this->assertNull($targetRefusals->first()->auditable_type);
+        $this->assertNull($accessDenials->first()->auditable_type);
+    }
 }

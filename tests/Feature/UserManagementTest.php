@@ -192,7 +192,44 @@ class UserManagementTest extends TestCase
 
     // ---------------------------------------------------------------------
     // Taking over the super_admin account without changing any role
+    //
+    // All four refusals below used to be 422s carrying copy that named the
+    // target — "Only a super_admin can edit a super_admin account." They are
+    // now the binding's own 404, byte for byte, so a client admin cannot even
+    // establish WHICH id belongs to the platform team. See
+    // App\Http\Requests\Concerns\MasksUserExistence::denyAsMissingUser().
+    //
+    // Each one therefore asserts the refusal matches the 404 an id that was
+    // never used produces, not merely that the status is 404: a 404 with a
+    // different body is still an oracle.
     // ---------------------------------------------------------------------
+
+    /**
+     * The 404 body for an id no row has ever had, with the id normalised out.
+     *
+     * APP_DEBUG is on under phpunit.xml, which appends `exception`, `file`,
+     * `line` and a stack trace that legitimately differs between the two
+     * throw sites. That is a debug-only artefact no deployment serves, so it
+     * is switched off for the comparison.
+     */
+    private function assertMasksAsMissingUser(callable $probe, int $realId): void
+    {
+        config(['app.debug' => false]);
+
+        $normalise = fn (string $body, int $id) => str_replace((string) $id, '{id}', $body);
+
+        $refused = $probe($realId);
+        $missing = $probe(99999);
+
+        $refused->assertNotFound();
+        $missing->assertNotFound();
+
+        $this->assertSame(
+            $normalise($missing->getContent(), 99999),
+            $normalise($refused->getContent(), $realId),
+            'the refusal must be indistinguishable from a never-used id',
+        );
+    }
 
     public function test_an_admin_cannot_demote_a_super_admin(): void
     {
@@ -200,23 +237,29 @@ class UserManagementTest extends TestCase
         // the platform team's role would remove the only account able to give
         // it back.
         $admin = $this->userWithRole('admin');
+        $this->actingAs($admin);
 
-        $this->actingAs($admin)
-            ->putJson("/api/users/{$this->admin->id}", ['role' => 'viewer'])
-            ->assertUnprocessable()
-            ->assertJsonValidationErrors(['user']);
+        $this->assertMasksAsMissingUser(
+            fn (int $id) => $this->putJson("/api/users/{$id}", ['role' => 'viewer']),
+            $this->admin->id,
+        );
 
         $this->assertTrue($this->admin->fresh()->hasRole('super_admin'));
     }
 
     public function test_an_admin_cannot_edit_a_super_admins_record_at_all(): void
     {
+        // Still sends a real body: the guard is about WHO is being edited, not
+        // about whether the payload is empty. The no-op rejection added
+        // alongside this must not be what refuses it, or this stops testing
+        // the super_admin boundary at all.
         $admin = $this->userWithRole('admin');
+        $this->actingAs($admin);
 
-        $this->actingAs($admin)
-            ->putJson("/api/users/{$this->admin->id}", ['email' => 'attacker@evil.test'])
-            ->assertUnprocessable()
-            ->assertJsonValidationErrors(['user']);
+        $this->assertMasksAsMissingUser(
+            fn (int $id) => $this->putJson("/api/users/{$id}", ['email' => 'attacker@evil.test']),
+            $this->admin->id,
+        );
 
         $this->assertNotSame('attacker@evil.test', $this->admin->fresh()->email);
     }
@@ -230,13 +273,15 @@ class UserManagementTest extends TestCase
 
         $this->assertTrue($admin->can('users:reset_password'));
 
-        $this->actingAs($admin)
-            ->postJson("/api/users/{$this->admin->id}/reset-password", [
+        $this->actingAs($admin);
+
+        $this->assertMasksAsMissingUser(
+            fn (int $id) => $this->postJson("/api/users/{$id}/reset-password", [
                 'password' => 'pwned12345',
                 'password_confirmation' => 'pwned12345',
-            ])
-            ->assertUnprocessable()
-            ->assertJsonValidationErrors(['user']);
+            ]),
+            $this->admin->id,
+        );
 
         $this->assertSame($originalHash, $this->admin->fresh()->password);
     }
@@ -244,10 +289,12 @@ class UserManagementTest extends TestCase
     public function test_an_admin_cannot_deactivate_a_super_admin(): void
     {
         $admin = $this->userWithRole('admin');
+        $this->actingAs($admin);
 
-        $this->actingAs($admin)
-            ->patchJson("/api/users/{$this->admin->id}/deactivate")
-            ->assertUnprocessable();
+        $this->assertMasksAsMissingUser(
+            fn (int $id) => $this->patchJson("/api/users/{$id}/deactivate"),
+            $this->admin->id,
+        );
 
         $this->assertSame('active', $this->admin->fresh()->status);
     }

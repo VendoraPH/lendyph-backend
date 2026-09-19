@@ -134,6 +134,13 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::post('/auth/refresh', [AuthController::class, 'refresh']);
 
     // Users
+    // Two constraints, both load-bearing, from different changes.
+    //
+    // `whereNumber('user')` for the same reason `{run}` carries it below: an
+    // unconstrained `{user}` matches `[^/]++`, and MySQL resolves
+    // `where('id', '7abc')` numerically, so a non-numeric segment reaches a real
+    // row while echoing back whatever was sent. Defence in depth only — it does
+    // not stop `007`, which is why MasksUserExistence echoes the raw segment.
     //
     // The three non-resource routes carry explicit names so that ALL of user
     // management answers to one `users.*` predicate. `apiResource` names its
@@ -142,10 +149,10 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     // including neither deactivate nor reactivate nor reset-password, the three
     // that actually change an account. The `api` rate limiter in
     // AppServiceProvider is the caller that needs the predicate to be whole.
-    Route::apiResource('users', UserController::class)->except(['destroy']);
-    Route::patch('/users/{user}/deactivate', [UserController::class, 'deactivate'])->name('users.deactivate');
-    Route::patch('/users/{user}/reactivate', [UserController::class, 'reactivate'])->name('users.reactivate');
-    Route::post('/users/{user}/reset-password', [UserController::class, 'resetPassword'])->name('users.reset-password');
+    Route::apiResource('users', UserController::class)->except(['destroy'])->whereNumber('user');
+    Route::patch('/users/{user}/deactivate', [UserController::class, 'deactivate'])->name('users.deactivate')->whereNumber('user');
+    Route::patch('/users/{user}/reactivate', [UserController::class, 'reactivate'])->name('users.reactivate')->whereNumber('user');
+    Route::post('/users/{user}/reset-password', [UserController::class, 'resetPassword'])->name('users.reset-password')->whereNumber('user');
 
     // Branches
     Route::apiResource('branches', BranchController::class)->except(['destroy']);
