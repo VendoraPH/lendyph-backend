@@ -41,7 +41,13 @@ class AccountingJournalController extends Controller
             new OA\Parameter(name: 'from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'status', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['draft', 'posted', 'reversed'])),
-            new OA\Parameter(name: 'source', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
+            new OA\Parameter(
+                name: 'source',
+                in: 'query',
+                required: false,
+                description: 'Any value of the column enum. Ten are ever written: loan_release, loan_collection, loan_fee, gcash, expense, payable, transfer, credit_loss, manual, reversal. The rest are accepted and return an empty page — notably `penalty`, which is reserved by design because penalties post as a line inside the loan_collection entry rather than as an entry of their own.',
+                schema: new OA\Schema(type: 'string', enum: AccountingJournal::SOURCES),
+            ),
             new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
             new OA\Parameter(name: 'page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 1)),
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15, maximum: 100)),
@@ -59,6 +65,27 @@ class AccountingJournalController extends Controller
             'from' => ['nullable', 'date'],
             'to' => ['nullable', 'date'],
             'status' => ['nullable', Rule::in(AccountingJournal::STATUSES)],
+            /*
+             * Every enum value, INCLUDING the eight nothing writes.
+             *
+             * `?source=penalty` is accepted and returns an empty page, which
+             * looks like a bug and is not one. Penalties are cash basis — they
+             * are a LINE inside the `loan_collection` journal, never a journal
+             * of their own — so "no entries have source=penalty" is the true
+             * answer to the question asked, and 422 would instead claim the
+             * question is invalid when the column plainly permits the value.
+             * {@see AccountingJournal::SOURCES} names all eight and why.
+             *
+             * Narrowing this list to the ten that are written would also break
+             * twice over: `opening_balance` is being implemented right now and
+             * would 422 the day it ships, and any historical row on any of the
+             * ten deployments holding one of these values would become
+             * unfilterable while still appearing in the unfiltered register —
+             * a read API refusing to describe data it is showing.
+             *
+             * Rule::in still does the job validation owes here: it bounds the
+             * value to the enum and rejects everything else.
+             */
             'source' => ['nullable', Rule::in(AccountingJournal::SOURCES)],
             'branch_id' => ['nullable', 'integer'],
             'page' => ['nullable', 'integer', 'min:1'],
@@ -255,6 +282,12 @@ class AccountingJournalController extends Controller
             'creator:id,first_name,last_name',
             'poster:id,first_name,last_name',
         ]);
+
+        // `postable_label` is whenLoaded-guarded, so without this the field
+        // would be absent here and present on the register — the same resource
+        // answering two different shapes. Not part of the `load()` above on
+        // purpose: see AccountingJournal::attachPostables().
+        $journal->loadPostable();
 
         return (new JournalEntryResource($journal))->response()->setStatusCode($status);
     }
