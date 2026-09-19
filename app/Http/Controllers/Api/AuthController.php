@@ -103,7 +103,7 @@ class AuthController extends Controller
     #[OA\Post(
         path: '/api/auth/logout',
         summary: 'Logout',
-        description: 'Revoke the current access token',
+        description: 'Revoke the credential this request arrived on: the access token for a bearer caller, or the session (plus a rotated CSRF token) for a session caller.',
         tags: ['Auth'],
         security: [['sanctum' => []]],
         responses: [

@@ -167,8 +167,17 @@ it('lets an active session caller through', function () {
  * and stayed logged in.
  */
 it('logs a session caller out instead of erroring', function () {
-    $this->actingAs($this->operator)
-        ->postJson('/api/auth/logout')
+    $this->actingAs($this->operator);
+
+    // Assert the TRANSITION, not the end state. A freshly resolved `web` guard
+    // with no session also reports check() === false, so asserting only the
+    // "after" is load-bearing purely by accident of guard memoisation: the day
+    // somebody adds Auth::forgetGuards() to a beforeEach, this spec would keep
+    // passing with the entire else branch deleted. Pinning `true` first makes
+    // that impossible.
+    expect(Auth::guard('web')->check())->toBeTrue();
+
+    $this->postJson('/api/auth/logout')
         ->assertOk()
         ->assertJson(['message' => 'Logged out successfully.']);
 
