@@ -53,19 +53,43 @@ class ReactivateUserRequest extends FormRequest
      * After this, a 200 from this route always corresponds to a real state
      * change, which is the property the audit trail assumes.
      *
-     * Deliberately NOT masked as a 404 the way the super_admin refusal is:
-     * "this account is already active" is honest feedback for a caller who is
-     * allowed to be here, and unlike deactivation there is no super_admin tier
-     * on this route to conceal (restoring access takes nothing away from the
-     * account being acted on).
+     * "This account is already active" is honest feedback for a caller who is
+     * allowed to be here, so it is NOT masked as a 404 the way the super_admin
+     * refusal is — restoring access takes nothing away from the account being
+     * acted on.
+     *
+     * But it is only honest once the super_admin is out of the way first, and
+     * that ordering is the whole point of the callback below. This route has no
+     * super_admin tier of its own, while `update`, `deactivate` and
+     * `reset-password` all answer 404 for "missing OR super_admin". Left
+     * unguarded, the pair composes into exactly the oracle those 404s remove:
+     *
+     *     PUT /users/{id} {}  -> 404  AND  PATCH /users/{id}/reactivate -> 422
+     *         => the id is the super_admin
+     *     PUT {} -> 422        => live, and not the super_admin
+     *     both  -> 404         => no such id
+     *
+     * Free, no write, no audit row. Raised in security review. So the target
+     * guard runs first and masks, and only a target this caller may actually
+     * manage ever reaches the already-active message.
      */
     public function after(): array
     {
         return [
             function (Validator $validator): void {
                 $target = $this->route('user');
+                $actor = $this->user();
 
-                if (! $target instanceof User || $target->status !== 'active') {
+                if (! $target instanceof User || ! $actor instanceof User) {
+                    return;
+                }
+
+                // First, and masking: see the composition note above.
+                if (! $actor->canManageAccount($target)) {
+                    $this->denyAsMissingUser();
+                }
+
+                if ($target->status !== 'active') {
                     return;
                 }
 

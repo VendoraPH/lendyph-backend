@@ -510,3 +510,63 @@ it('hides a super_admin target behind the same 404 on every route that guards it
     expect($platform->fresh()->email)->not->toBe('attacker@evil.test')
         ->and($platform->fresh()->status)->toBe('active');
 });
+
+/**
+ * Raised in security review: the masking echoed the RESOLVED model's key while
+ * Laravel's own binding miss echoes the raw URL segment, so a leading zero told
+ * you whether the id was live.
+ *
+ *     GET /api/users/007   user 7 exists  ->  "... [App\Models\User] 7"
+ *     GET /api/users/007   user 7 missing ->  "... [App\Models\User] 007"
+ *
+ * No `users:*` permission needed, repeatable, unaudited, walks the whole id
+ * range. Reproduced against a real server before the fix.
+ *
+ * Note what this asserts and why it is not "two probes, identical bodies": two
+ * different ids cannot produce identical bodies, because each correctly echoes
+ * its own segment. The oracle was that a LIVE id echoed something OTHER than
+ * what was sent. So that is the assertion — and it is why the `$normalise`
+ * helper used elsewhere in this file must not be applied here: normalising the
+ * id out is exactly what hid this.
+ */
+it('echoes the id the caller sent, not the one the database resolved', function () {
+    $target = ($this->makeTarget)('active');
+
+    $this->actingAs($this->outsider);
+
+    foreach (["0{$target->id}", "00{$target->id}"] as $padded) {
+        $response = $this->getJson("/api/users/{$padded}");
+
+        expect($response->status())->toBe(404);
+        expect($response->json('message'))
+            ->toContain($padded)
+            ->and($response->json('message'))
+            ->not->toBe("No query results for model [App\\Models\\User] {$target->id}");
+    }
+});
+
+/**
+ * Raised in the same review: this route has no super_admin tier of its own, so
+ * a 422 here against an id that `update` answers 404 for identifies the
+ * super_admin outright. The guard in ReactivateUserRequest::after() closes it;
+ * this pins the property rather than the implementation.
+ */
+it('does not let reactivate identify the account the other routes hide', function () {
+    $superAdmin = User::where('username', 'super_admin')->firstOrFail();
+    $admin = ($this->makeTarget)('active');
+    $admin->syncRoles(['admin']);
+
+    $this->actingAs($admin);
+
+    $onSuperAdmin = $this->patchJson("/api/users/{$superAdmin->id}/reactivate");
+    $onMissing = $this->patchJson('/api/users/99999/reactivate');
+
+    expect($onSuperAdmin->status())->toBe(404)
+        ->and($onMissing->status())->toBe(404);
+
+    // Byte-identical apart from the id each one echoes.
+    $normaliseId = fn (string $body, int|string $id) => str_replace((string) $id, '{id}', $body);
+
+    expect($normaliseId($onSuperAdmin->getContent(), $superAdmin->id))
+        ->toBe($normaliseId($onMissing->getContent(), 99999));
+});

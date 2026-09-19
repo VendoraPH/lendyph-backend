@@ -54,10 +54,7 @@ trait MasksUserExistence
      */
     protected function failedAuthorization(): never
     {
-        throw (new ModelNotFoundException)->setModel(
-            User::class,
-            array_filter([$this->route('user')?->getKey()]),
-        );
+        $this->refuseAsMissingUser();
     }
 
     /**
@@ -86,9 +83,45 @@ trait MasksUserExistence
      */
     protected function denyAsMissingUser(): never
     {
+        $this->refuseAsMissingUser();
+    }
+
+    /**
+     * The wire format, in one place.
+     *
+     * Both refusals above must be byte-identical to the 404 a never-used id
+     * produces, and that is a property of the MESSAGE, not of the call site.
+     * Keeping the two throws as separate methods preserves the distinction that
+     * matters — one is an access denial, the other is not, and anything
+     * watching `failedAuthorization()` should see only the first — while making
+     * the format impossible to get right in one and wrong in the other.
+     *
+     * It was wrong in both. Echoing `$this->route('user')->getKey()` echoes the
+     * RESOLVED model's key, which `getCasts()` has already normalised to an
+     * integer. Laravel's own binding miss echoes the raw URL segment
+     * (ImplicitRouteBinding::resolveForRoute -> `[$parameterValue]`), and
+     * `{user}` compiles to `[^/]++` with no numeric constraint, while MySQL
+     * resolves `where('id', '007')` numerically. So:
+     *
+     *     GET /api/users/007   user 7 exists  ->  "... [App\Models\User] 7"
+     *     GET /api/users/007   user 7 missing ->  "... [App\Models\User] 007"
+     *
+     * One request per id, no `users:*` permission needed, repeatable, and it
+     * walks the whole sequential range. Reproduced against a real server before
+     * this fix. The routes also carry `whereNumber('user')` now, which is worth
+     * having but is NOT the fix on its own: `007` is still `[0-9]+`.
+     */
+    private function refuseAsMissingUser(): never
+    {
+        // `originalParameters` is snapshotted in Route::bind() at match time,
+        // before SubstituteBindings overwrites the parameter with the model,
+        // so this is the segment the caller actually sent.
+        $attempted = $this->route()?->originalParameter('user')
+            ?? $this->route('user')?->getKey();
+
         throw (new ModelNotFoundException)->setModel(
             User::class,
-            array_filter([$this->route('user')?->getKey()]),
+            array_filter([$attempted], static fn ($value) => $value !== null && $value !== ''),
         );
     }
 }
