@@ -9,10 +9,12 @@ use App\Services\Accounting\ChartOfAccountsSeeder;
 use App\Services\Accounting\JournalPoster;
 use App\Services\Accounting\Money;
 use App\Services\AuditLogService;
+use App\Services\DeploymentIdentity;
 use Illuminate\Console\Attributes\Description;
 use Illuminate\Console\Attributes\Signature;
 use Illuminate\Console\Command;
 use Illuminate\Console\ConfirmableTrait;
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -56,6 +58,28 @@ class RecordOpeningBalances extends Command
 
     /** `reference` is `string(64)`; a longer filename is truncated rather than refused. */
     private const MAX_REFERENCE = 64;
+
+    /**
+     * The largest file this will open. See the check in handle() — fgetcsv()
+     * has no per-record length bound, so the row cap cannot protect memory on
+     * a file with no line breaks in it.
+     */
+    private const MAX_FILE_BYTES = 1_048_576;
+
+    /** How much of a malformed record is echoed back in the error. */
+    private const MAX_ECHOED_RECORD = 200;
+
+    /**
+     * Every account code the file NAMES, including rows that carried no
+     * balance and so never became a journal line.
+     *
+     * Not the same set as the codes in the entry, and the difference is load
+     * bearing: "3050,,0" names the plug account without contributing to it,
+     * and that still has to count as the operator setting it. See readRows().
+     *
+     * @var list<string>
+     */
+    private array $codesNamedByFile = [];
 
     /**
      * Record what a cooperative already had, so the books do not start at zero.
@@ -136,6 +160,29 @@ class RecordOpeningBalances extends Command
             ]);
         }
 
+        /*
+         * Sized before it is opened, because the row cap cannot save us here.
+         *
+         * fgetcsv() reads a whole RECORD per call with no length bound, so a
+         * file with no line breaks in it — a different export, a binary, a
+         * truncated download — is pulled into memory in one go, before the
+         * MAX_LINES check has seen a single row. An OOM kill mid-read is the
+         * message-less failure that check exists to avoid.
+         *
+         * 1 MiB is roughly thirty times the largest legitimate file: 500 rows
+         * of "1010,400000.00," is about 8 KB.
+         */
+        if (($bytes = filesize($path)) !== false && $bytes > self::MAX_FILE_BYTES) {
+            return $this->refuse(
+                sprintf('--file is %s, and the ceiling is %s.', $this->humanBytes($bytes), $this->humanBytes(self::MAX_FILE_BYTES)),
+                [
+                    'An opening-balance file is a few kilobytes — a co-op chart of accounts is dozens',
+                    'of rows. Something this size is a different export, which would be read',
+                    'positionally and posted as balances if it happened to parse.',
+                ],
+            );
+        }
+
         $asOf = $this->parseAsOf(trim((string) $this->option('as-of')));
 
         if ($asOf === null) {
@@ -203,6 +250,24 @@ class RecordOpeningBalances extends Command
 
         try {
             $journal = $this->post($poster, $plan, $asOf, $path);
+        } catch (QueryException $e) {
+            /*
+             * A lock timeout, a deadlock, or any other driver error. The
+             * transaction has rolled back, so nothing was written — but without
+             * this the operator gets a stack trace dumped over the preview they
+             * are still reading, which is the exact failure the catch below was
+             * written to prevent.
+             */
+            $this->newLine();
+            $this->error('The database refused the write — nothing was posted.');
+            $this->newLine();
+            $this->line('  '.$e->getMessage());
+            $this->newLine();
+            $this->line('  Nothing was written, so this is safe to re-run. Check first whether another');
+            $this->line('  operator got there: `php artisan accounting:opening-balances --dry-run ...` will');
+            $this->line('  say so rather than guessing.');
+
+            return self::FAILURE;
         } catch (ValidationException $e) {
             /*
              * The poster's refusals arrive as a ValidationException, which on
@@ -333,6 +398,7 @@ class RecordOpeningBalances extends Command
 
         $rows = [];
         $seen = [];
+        $this->codesNamedByFile = [];
         $lineNo = 0;
         $skipped = [];
         $isFirstRecord = true;
@@ -381,7 +447,7 @@ class RecordOpeningBalances extends Command
                         'different report, or a column was inserted — and read positionally it would put',
                         'somebody\'s balance in the wrong column of the wrong account.',
                         '',
-                        '  Got: '.implode(' | ', $cells),
+                        '  Got: '.mb_strimwidth(implode(' | ', $cells), 0, self::MAX_ECHOED_RECORD, '…'),
                     ]);
 
                     return null;
@@ -412,16 +478,21 @@ class RecordOpeningBalances extends Command
                     return null;
                 }
 
-                if ($debit === 0 && $credit === 0) {
-                    // Unambiguous, unlike everything else refused above: an
-                    // account with no balance contributes nothing, and the
-                    // poster would refuse a line of zero on both sides anyway.
-                    // Reported rather than silently dropped.
-                    $skipped[] = $code;
-
-                    continue;
-                }
-
+                /*
+                 * RECORDED BEFORE THE ZERO-ROW SKIP, and the order is the
+                 * whole point.
+                 *
+                 * `$seen` is both the duplicate check and the record of which
+                 * accounts this file NAMES — and plan() reads the latter to
+                 * decide whether the operator set 3050 themselves. Skipping a
+                 * zero row before this line would drop "3050,,0" — an operator
+                 * stating there is no opening equity — and the difference would
+                 * then be computed and posted to 3050 anyway, silently
+                 * overwriting the one figure they went to the trouble of
+                 * supplying. That is precisely the outcome the plug rule exists
+                 * to refuse, arrived at by way of a row that looked like
+                 * nothing.
+                 */
                 if (isset($seen[$code])) {
                     $this->refuse(sprintf('Account %s appears twice — lines %d and %d.', $code, $seen[$code], $lineNo), [
                         'One balance per account. Two rows could mean "add them up" or could mean one of',
@@ -433,6 +504,18 @@ class RecordOpeningBalances extends Command
                 }
 
                 $seen[$code] = $lineNo;
+
+                if ($debit === 0 && $credit === 0) {
+                    // Unambiguous, unlike everything else refused above: an
+                    // account with no balance contributes nothing, and the
+                    // poster would refuse a line of zero on both sides anyway.
+                    // Reported rather than silently dropped — and still counted
+                    // above as a code this file names.
+                    $skipped[] = $code;
+
+                    continue;
+                }
+
                 $rows[] = ['line' => $lineNo, 'code' => $code, 'debit' => $debit, 'credit' => $credit];
 
                 /*
@@ -473,6 +556,18 @@ class RecordOpeningBalances extends Command
             ));
         }
 
+        /*
+         * strval over the keys, and it is not decoration.
+         *
+         * `$seen` is keyed by account code, and PHP silently converts a
+         * numeric-looking string key to an INTEGER — so array_keys() answers
+         * [1010, 2300, 3050] rather than ['1010', '2300', '3050']. The strict
+         * in_array() in plan() then never matches self::PLUG_CODE, and a file
+         * that names 3050 is treated as one that does not: the plug is computed
+         * and posted over the operator's own figure, silently.
+         */
+        $this->codesNamedByFile = array_map(strval(...), array_keys($seen));
+
         if ($rows === []) {
             $this->refuse('The file holds no balances.', [
                 'Every row was blank, a heading, or zero on both sides. An entry that records',
@@ -503,6 +598,23 @@ class RecordOpeningBalances extends Command
             return 0;
         }
 
+        if (! $this->commasAreThousandsSeparators($cell)) {
+            $this->refuse(sprintf('Line %d: [%s] uses a comma as a decimal point in the %s column.', $lineNo, $cell, $side), [
+                'Amounts here are written the way the app writes them — "1,500.50", comma for',
+                'thousands and dot for centavos. A European "1.500,50" or "10,50" is not refused by',
+                'the parser, it is MISREAD by it: Money::toCentavos() strips every comma as grouping',
+                'before it looks at the number, so "10,50" becomes ten hundred and fifty pesos and',
+                '"1.500,50" becomes one peso fifty.',
+                '',
+                'That is the worst shape a mistake can take here. It parses, it posts, and the',
+                'residual disappears into the computed plug — which is the "a balance left out of',
+                'the file shows up as a plug figure that looks plausible" failure this whole',
+                'command is built to make visible.',
+            ]);
+
+            return null;
+        }
+
         $centavos = Money::toCentavos($cell);
 
         if ($centavos === null) {
@@ -516,6 +628,45 @@ class RecordOpeningBalances extends Command
         }
 
         return $centavos;
+    }
+
+    /**
+     * Whether every comma in a cell is a thousands separator.
+     *
+     * {@see Money::toCentavos()} strips commas as noise before it parses, which
+     * is right for "₱1,500.50" and catastrophic for a decimal comma: the value
+     * is not rejected, it is quietly reinterpreted. Only the multi-group form
+     * ("2.100.000,00") trips the parser's own regex, because it leaves two
+     * dots; the single-group forms sail through wrong.
+     *
+     *   "1,500.50"  → ₱1,500.50    correct
+     *   "1.500,50"  → ₱1.50        a thousandth of the intended figure
+     *   "10,50"     → ₱1,050.00    a hundred times it
+     *   "1 500,50"  → ₱150,050.00
+     *
+     * Two rules settle it, and both are unambiguous in a peso file:
+     *
+     *  1. A comma after a dot is a decimal comma. Nothing else spells that.
+     *  2. A thousands separator is always followed by exactly three digits.
+     *     "10,50" has two, so it is somebody typing ₱10.50.
+     */
+    private function commasAreThousandsSeparators(string $cell): bool
+    {
+        $lastComma = strrpos($cell, ',');
+
+        if ($lastComma === false) {
+            return true;
+        }
+
+        $lastDot = strrpos($cell, '.');
+
+        if ($lastDot !== false && $lastDot < $lastComma) {
+            return false;
+        }
+
+        // strspn counts the LEADING run of digits, so "500.50" answers 3 and
+        // "50" answers 2 — which is the distinction being drawn.
+        return strspn(substr($cell, $lastComma + 1), '0123456789') === 3;
     }
 
     /** Whether the first record is column headings rather than a balance. */
@@ -534,6 +685,13 @@ class RecordOpeningBalances extends Command
     private function labelKey(string $value): string
     {
         return strtolower((string) preg_replace('/[^A-Za-z0-9]/', '', $value));
+    }
+
+    private function humanBytes(int $bytes): string
+    {
+        return $bytes >= 1_048_576
+            ? round($bytes / 1_048_576, 1).' MiB'
+            : round($bytes / 1024).' KiB';
     }
 
     private function stripBom(string $value): string
@@ -645,14 +803,16 @@ class RecordOpeningBalances extends Command
         $lines = [];
         $fileDebit = 0;
         $fileCredit = 0;
-        $fileNamesPlug = false;
+
+        // From every code the file named, not merely from the rows that
+        // survived into the entry — see self::$codesNamedByFile.
+        $fileNamesPlug = in_array(self::PLUG_CODE, $this->codesNamedByFile, true);
 
         foreach ($rows as $row) {
             $account = $accounts->get($row['code']);
 
             $fileDebit += $row['debit'];
             $fileCredit += $row['credit'];
-            $fileNamesPlug = $fileNamesPlug || $row['code'] === self::PLUG_CODE;
 
             $lines[] = [
                 'code' => (string) $account->code,
@@ -839,17 +999,59 @@ class RecordOpeningBalances extends Command
     {
         return DB::transaction(function () use ($poster, $plan, $asOf, $path): AccountingJournal {
             /*
+             * SERIALISE ON A ROW THAT EXISTS — and it has to be a real row.
+             *
+             * The obvious way to make this once-only is to lock what we are
+             * looking for: `where('source', 'opening_balance')->lockForUpdate()`.
+             * That does not work, and the way it fails is worth spelling out
+             * because it looks like it works on a developer's machine.
+             *
+             * `source` is indexed but not unique, so on the first run that
+             * query matches NOTHING. A locking read over zero rows takes a GAP
+             * lock, and gap locks have two properties that defeat it:
+             *
+             *  - They do not conflict with each other. Two runs both take the
+             *    same gap, both then try to insert into it, and each blocks on
+             *    the other — a deadlock, not a refusal. One operator gets a
+             *    QueryException over the top of the preview.
+             *  - They do not exist at all under READ COMMITTED. Nothing in this
+             *    repo pins the isolation level, and RC is one line of my.cnf or
+             *    one managed-database parameter group away on any of ten boxes.
+             *    There, both runs read "none yet", both insert, and the co-op's
+             *    cash and portfolio are silently doubled in books that still
+             *    balance — the exact outcome this guard exists to prevent,
+             *    reached THROUGH the guard.
+             *
+             * So the lock is taken on the 3050 account row instead. It exists
+             * (plan() has already resolved it), an exclusive lock on a real row
+             * conflicts properly, and it behaves identically at both isolation
+             * levels. Two runs queue rather than race.
+             */
+            $plugAccount = AccountingAccount::query()
+                ->where('code', self::PLUG_CODE)
+                ->lockForUpdate()
+                ->first();
+
+            if ($plugAccount === null) {
+                // Deleted between the preview and the confirmation. Cannot
+                // happen in practice; refused rather than assumed, because the
+                // alternative is posting without the lock this depends on.
+                throw ValidationException::withMessages([
+                    'account' => [self::PLUG_CODE.' Opening Balance Equity no longer exists. Nothing was written.'],
+                ]);
+            }
+
+            /*
              * THE SAME CHECK AS AT THE TOP, AND IT IS NOT REDUNDANT.
              *
-             * `source` carries no unique index — it cannot, since every other
-             * source is written thousands of times — so nothing in the database
-             * stops a second opening balance. The check above answers the
-             * ordinary case (an operator re-running the command); this one,
-             * under a lock taken inside the write transaction, answers the case
-             * that check cannot: two operators on two shells, both past the
-             * preview, both about to post. Without it they both read "none
-             * yet", both write, and the co-op's entire opening position is
-             * doubled in books that still balance.
+             * The check in handle() answers the ordinary case — an operator
+             * re-running the command. This one answers the case that check
+             * cannot: two operators on two shells, both past the preview, both
+             * about to post. The lock above means the second one arrives here
+             * only after the first has committed, and this is a LOCKING read,
+             * which is always a current read rather than the transaction's
+             * snapshot — so it sees that committed journal at READ COMMITTED
+             * and at REPEATABLE READ alike, and refuses.
              */
             $racing = AccountingJournal::query()
                 ->where('source', self::SOURCE)
@@ -859,8 +1061,8 @@ class RecordOpeningBalances extends Command
             if ($racing !== null) {
                 throw ValidationException::withMessages([
                     'source' => [
-                        'An opening balance was posted while this run was waiting at the confirmation'
-                        .' prompt ('.($racing->journal_no ?: 'draft #'.$racing->id).'). Nothing was written.',
+                        'Another run posted an opening balance while this one was waiting ('
+                        .($racing->journal_no ?: 'draft #'.$racing->id).'). Nothing was written.',
                     ],
                 ]);
             }
@@ -869,7 +1071,16 @@ class RecordOpeningBalances extends Command
                 [
                     'date' => $asOf,
                     'source' => self::SOURCE,
-                    'reference' => substr(basename($path), 0, self::MAX_REFERENCE),
+                    // mb_substr, not substr. `reference` is VARCHAR(64) —
+                    // SIXTY-FOUR CHARACTERS, not bytes — and cutting bytes
+                    // through the middle of a multi-byte filename leaves a
+                    // dangling lead byte that MySQL rejects outright under
+                    // STRICT_TRANS_TABLES. That would surface as an unhandled
+                    // driver error AFTER the operator confirmed, blaming the
+                    // data for something the filename did. Same call
+                    // JournalPoster::reversalDescription() makes, for the same
+                    // reason.
+                    'reference' => mb_substr(basename($path), 0, self::MAX_REFERENCE),
                     'description' => 'Opening balances as of '.$asOf,
                     // NULL on purpose. Opening balances belong to the
                     // organisation, not to one of its branches — this is a
@@ -902,15 +1113,29 @@ class RecordOpeningBalances extends Command
                     'as_of' => $asOf,
                     'source_file' => basename($path),
                     'lines' => count($plan['lines']),
-                    'total_debit' => $plan['total_debit'],
-                    'total_credit' => $plan['total_credit'],
+                    // From the JOURNAL, not from $plan. JournalPoster
+                    // recomputes the authoritative totals from the persisted
+                    // lines; $plan is what this command intended. For an entry
+                    // that happens once, ever, the trail should hold what
+                    // actually landed.
+                    'total_debit' => (int) $journal->total_debit,
+                    'total_credit' => (int) $journal->total_credit,
                     'plug_account' => self::PLUG_CODE,
                     'plug_amount' => $plan['plug']['amount'] ?? 0,
                     'plug_side' => $plan['plug']['side'] ?? null,
                     // Ten deployments share this code. "Which box was this?" is
                     // the question a later fleet-wide audit has to answer, and
                     // the one the private-files rollout learned the hard way.
-                    'deployment' => config('app.name').' ('.config('app.env').') @ '.gethostname(),
+                    //
+                    // DeploymentIdentity rather than gethostname(): it is what
+                    // /api/health and the fleet drift check already report, so
+                    // the answer is in the same terms the fleet is already
+                    // described in — and commit + branch identify a box more
+                    // usefully than a hostname does. It also keeps server
+                    // infrastructure names out of a row that `GET /audit-logs`
+                    // hands to anyone holding the view permission.
+                    'deployment' => (new DeploymentIdentity(base_path()))->toArray()
+                        + ['app' => config('app.name')],
                 ],
                 description: sprintf(
                     'accounting:opening-balances posted %s carrying %s onto the books as of %s',

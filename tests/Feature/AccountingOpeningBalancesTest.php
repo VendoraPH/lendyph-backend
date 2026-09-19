@@ -10,7 +10,11 @@ use App\Models\AuditLog;
 use App\Services\Accounting\JournalPoster;
 use App\Services\Accounting\TrialBalanceBuilder;
 use Illuminate\Console\Command;
+use Illuminate\Database\Events\TransactionBeginning;
 use Illuminate\Support\Facades\Artisan;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Event;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 use Tests\Traits\PostsJournals;
 use Tests\Traits\SetupLendyPH;
@@ -410,6 +414,104 @@ class AccountingOpeningBalancesTest extends TestCase
         $this->assertSame(0, AccountingJournal::query()->count());
     }
 
+    /**
+     * @return list<array{0: string}>
+     */
+    public static function decimalCommaProvider(): array
+    {
+        return [
+            'european, one group' => ['1.500,50'],
+            'decimal comma, no grouping' => ['10,50'],
+            'space-grouped european' => ['1 500,50'],
+            'centavos after a comma' => ['400000,00'],
+        ];
+    }
+
+    #[DataProvider('decimalCommaProvider')]
+    public function test_a_comma_used_as_a_decimal_point_is_refused_rather_than_misread(string $amount): void
+    {
+        /*
+         * The nastiest input this command takes, because it is not rejected by
+         * the money parser — it is silently reinterpreted. Money::toCentavos()
+         * strips commas as thousands separators before parsing, so "10,50"
+         * posts ₱1,050.00 and "1.500,50" posts ₱1.50, and the residual vanishes
+         * into the computed plug looking entirely plausible.
+         */
+        // QUOTED, because a decimal comma is also a field separator — which is
+        // how a spreadsheet writes such a cell, and the only way it reaches the
+        // amount parser rather than the width check.
+        $file = $this->csv('1010,"'.$amount.'",'.PHP_EOL.'2300,,150000.00'.PHP_EOL);
+
+        $output = $this->runCommand(['--file' => $file, '--as-of' => self::AS_OF], Command::FAILURE);
+
+        $this->assertStringContainsString('comma as a decimal point', $output);
+        $this->assertSame(0, AccountingJournal::query()->count());
+    }
+
+    public function test_ordinary_grouped_and_peso_signed_amounts_still_post(): void
+    {
+        // The other half of the rule above: the way the app itself formats
+        // money has to keep working, or the guard has cost more than it saved.
+        // A quoted cell with a peso sign and a thousands separator — what
+        // Intl.NumberFormat and Money::format() both emit.
+        $file = $this->csv(
+            '1010,"₱1,500.50",'.PHP_EOL
+            .'2300,,"1,000.50"'.PHP_EOL,
+        );
+
+        $this->runCommand(['--file' => $file, '--as-of' => self::AS_OF]);
+
+        $this->assertSame([
+            '1010' => ['debit' => 150_050, 'credit' => 0],
+            '2300' => ['debit' => 0, 'credit' => 100_050],
+            '3050' => ['debit' => 0, 'credit' => 50_000],
+        ], $this->journalLines(AccountingJournal::query()->sole()));
+    }
+
+    public function test_a_zero_valued_plug_row_still_counts_as_the_file_setting_the_plug(): void
+    {
+        /*
+         * "3050,,0" is an operator stating there is no opening equity. The row
+         * carries no balance, so it never becomes a journal line — but if that
+         * made it invisible, the difference would be computed and posted to
+         * 3050 anyway, overwriting the very thing they said. It has to take the
+         * "the file sets the plug, so it must balance" path.
+         */
+        $file = $this->csv("1010,400000.00,\n2300,,150000.00\n3050,,0\n");
+
+        $output = $this->runCommand(['--file' => $file, '--as-of' => self::AS_OF], Command::FAILURE);
+
+        $this->assertStringContainsString('Debits and credits differ by', $output);
+        $this->assertSame(0, AccountingJournal::query()->count());
+    }
+
+    public function test_an_oversized_file_is_refused_before_it_is_opened(): void
+    {
+        // fgetcsv() has no per-record length bound, so a file with no line
+        // breaks is read whole in one call — before the row cap can see it.
+        $this->runCommand(
+            ['--file' => $this->csv(str_repeat('1010,1.00,x', 200_000)), '--as-of' => self::AS_OF],
+            Command::FAILURE,
+        );
+    }
+
+    public function test_a_long_multibyte_filename_does_not_abort_the_post(): void
+    {
+        /*
+         * `reference` is VARCHAR(64) — sixty-four CHARACTERS. Cutting bytes
+         * leaves a dangling lead byte that MySQL rejects outright under
+         * STRICT_TRANS_TABLES, and it would do so after the operator had
+         * confirmed, blaming the data for something the filename did.
+         */
+        $path = sys_get_temp_dir().'/'.str_repeat('ñ', 80).'.csv';
+        file_put_contents($path, "1010,400000.00,\n2300,,150000.00\n");
+        $this->tempFiles[] = $path;
+
+        $this->runCommand(['--file' => $path, '--as-of' => self::AS_OF]);
+
+        $this->assertSame(64, mb_strlen((string) AccountingJournal::query()->sole()->reference));
+    }
+
     public function test_a_file_of_the_wrong_width_is_refused_rather_than_read_positionally(): void
     {
         // Four cells with something in the last one. A TRAILING EMPTY is
@@ -489,6 +591,57 @@ class AccountingOpeningBalancesTest extends TestCase
 
         $this->assertStringContainsString('no balances', $output);
         $this->assertSame(0, AccountingJournal::query()->count());
+    }
+
+    // ── Two operators at once ───────────────────────────────────────────────
+
+    public function test_an_opening_balance_that_lands_mid_transaction_is_refused_by_the_in_transaction_guard(): void
+    {
+        /*
+         * The pre-flight check in handle() cannot see this one: the journal
+         * appears AFTER it ran and before this run posts. In production that is
+         * two operators on two shells; here it is an insert hung off the
+         * command's own transaction opening, which puts the row in exactly the
+         * same place in the sequence.
+         *
+         * This is the path the row lock on 3050 exists to make reachable. Lock
+         * the `source` index gap instead and two real runs deadlock rather than
+         * refuse — and under READ COMMITTED they do not even do that, they both
+         * commit.
+         */
+        $injected = false;
+
+        Event::listen(TransactionBeginning::class, function () use (&$injected): void {
+            if ($injected) {
+                return;
+            }
+
+            $injected = true;
+
+            DB::table('accounting_journals')->insert([
+                'journal_no' => 'JE-000999',
+                'date' => self::AS_OF,
+                'source' => 'opening_balance',
+                'description' => 'Posted by another operator a moment ago',
+                'status' => 'posted',
+                'total_debit' => 100,
+                'total_credit' => 100,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+        });
+
+        $output = $this->runCommand(
+            ['--file' => $this->canonicalCsv(), '--as-of' => self::AS_OF],
+            Command::FAILURE,
+        );
+
+        $this->assertTrue($injected, 'The race was actually simulated.');
+        $this->assertStringContainsString('Another run posted an opening balance', $output);
+
+        // Rolled back with the refused transaction, injected row and all — so
+        // the assertion that matters is that this run wrote nothing of its own.
+        $this->assertSame(0, AccountingJournalLine::query()->count());
     }
 
     // ── --dry-run ───────────────────────────────────────────────────────────
@@ -604,7 +757,18 @@ class AccountingOpeningBalancesTest extends TestCase
 
         // Ten deployments share this code and this is a once-per-box act, so
         // "which box was this?" has to be answerable later.
+        // From the journal, not from the plan: for a once-ever entry the trail
+        // should hold what actually landed.
+        $journal = AccountingJournal::query()->sole();
+        $this->assertSame((int) $journal->total_debit, $entry->new_values['total_debit']);
+        $this->assertSame((int) $journal->total_credit, $entry->new_values['total_credit']);
+
+        // DeploymentIdentity, the same terms /api/health and the fleet drift
+        // check already describe a box in — and no server hostname in a row
+        // GET /audit-logs hands to anyone holding the view permission.
         $this->assertArrayHasKey('deployment', $entry->new_values);
+        $this->assertArrayHasKey('env', $entry->new_values['deployment']);
+        $this->assertArrayHasKey('branch', $entry->new_values['deployment']);
         $this->assertSame('console', $entry->ip_address);
     }
 }
