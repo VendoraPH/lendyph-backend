@@ -134,10 +134,18 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::post('/auth/refresh', [AuthController::class, 'refresh']);
 
     // Users
+    //
+    // The three non-resource routes carry explicit names so that ALL of user
+    // management answers to one `users.*` predicate. `apiResource` names its
+    // four for free (users.index/store/show/update) and these three were left
+    // anonymous, so `routeIs('users.*')` silently covered four of the seven —
+    // including neither deactivate nor reactivate nor reset-password, the three
+    // that actually change an account. The `api` rate limiter in
+    // AppServiceProvider is the caller that needs the predicate to be whole.
     Route::apiResource('users', UserController::class)->except(['destroy']);
-    Route::patch('/users/{user}/deactivate', [UserController::class, 'deactivate']);
-    Route::patch('/users/{user}/reactivate', [UserController::class, 'reactivate']);
-    Route::post('/users/{user}/reset-password', [UserController::class, 'resetPassword']);
+    Route::patch('/users/{user}/deactivate', [UserController::class, 'deactivate'])->name('users.deactivate');
+    Route::patch('/users/{user}/reactivate', [UserController::class, 'reactivate'])->name('users.reactivate');
+    Route::post('/users/{user}/reset-password', [UserController::class, 'resetPassword'])->name('users.reset-password');
 
     // Branches
     Route::apiResource('branches', BranchController::class)->except(['destroy']);
