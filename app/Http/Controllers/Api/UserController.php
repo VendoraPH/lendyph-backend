@@ -15,7 +15,6 @@ use App\Services\AuditLogService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Validation\ValidationException;
 use OpenApi\Attributes as OA;
 
 /**
@@ -221,8 +220,9 @@ class UserController extends Controller
             new OA\Response(response: 200, description: 'User updated'),
             new OA\Response(response: 401, description: 'Unauthenticated'),
             new OA\Response(response: 403, description: 'Caller account is deactivated'),
-            new OA\Response(response: 404, description: 'Not found. Also returned when the caller lacks permission for this endpoint, so the two are indistinguishable.'),
-            new OA\Response(response: 422, description: 'Validation error'),
+            new OA\Response(response: 404, description: 'Not found. Also returned when the caller lacks permission for this endpoint, and when the '
+                .'target is a `super_admin` the caller may not manage, so all three are indistinguishable.'),
+            new OA\Response(response: 422, description: 'Validation error, including a payload that would change nothing'),
         ],
     )]
     public function update(UpdateUserRequest $request, User $user): UserResource
@@ -273,21 +273,15 @@ class UserController extends Controller
             new OA\Response(response: 200, description: 'User deactivated'),
             new OA\Response(response: 401, description: 'Unauthenticated'),
             new OA\Response(response: 403, description: 'Caller account is deactivated'),
-            new OA\Response(response: 404, description: 'Not found. Also returned when the caller lacks permission for this endpoint, so the two are indistinguishable.'),
-            new OA\Response(response: 422, description: 'Target is a super_admin and the caller is not'),
+            new OA\Response(response: 404, description: 'Not found. Also returned when the caller lacks permission for this endpoint, and when the '
+                .'target is a `super_admin` the caller may not manage, so all three are indistinguishable.'),
         ],
     )]
     public function deactivate(DeactivateUserRequest $request, User $user): JsonResponse
     {
-        // Deactivation revokes the target's tokens on their next request, so a
-        // client admin could otherwise lock the platform team out of their own
-        // deployment. Same boundary as editing or resetting that account.
-        if (! auth()->user()->canManageAccount($user)) {
-            throw ValidationException::withMessages([
-                'user' => 'Only a super_admin can deactivate a super_admin.',
-            ]);
-        }
-
+        // The super_admin guard that used to sit here moved into
+        // DeactivateUserRequest::after(), which answers it as a 404 rather than
+        // a 422 that names the platform account. See that class.
         $user->update(['status' => 'inactive']);
         $user->tokens()->delete();
 
@@ -308,6 +302,7 @@ class UserController extends Controller
             new OA\Response(response: 401, description: 'Unauthenticated'),
             new OA\Response(response: 403, description: 'Caller account is deactivated'),
             new OA\Response(response: 404, description: 'Not found. Also returned when the caller lacks permission for this endpoint, so the two are indistinguishable.'),
+            new OA\Response(response: 422, description: 'The account is already active, so there is nothing to reactivate'),
         ],
     )]
     public function reactivate(ReactivateUserRequest $request, User $user): JsonResponse
@@ -365,7 +360,8 @@ class UserController extends Controller
             new OA\Response(response: 200, description: 'Password reset successfully'),
             new OA\Response(response: 401, description: 'Unauthenticated'),
             new OA\Response(response: 403, description: 'Caller account is deactivated'),
-            new OA\Response(response: 404, description: 'Not found. Also returned when the caller lacks permission for this endpoint, so the two are indistinguishable.'),
+            new OA\Response(response: 404, description: 'Not found. Also returned when the caller lacks permission for this endpoint, and when the '
+                .'target is a `super_admin` the caller may not manage, so all three are indistinguishable.'),
             new OA\Response(response: 422, description: 'Validation error'),
         ],
     )]
