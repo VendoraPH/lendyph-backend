@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Services\Accounting\PostingRules;
 use App\Traits\Auditable;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -33,6 +34,29 @@ class AccountingAccountMapping extends Model
      * role no rule can ask for. Adding one is a deliberate change to the
      * contract on both sides, which is why it is a constant rather than
      * whatever happens to be in the table.
+     *
+     * ## Two of these are mapped and never posted to, on purpose
+     *
+     * `penalty_receivable` and `interest_receivable` are seeded, mapped (to
+     * 1160 and 1150) and resolved by no posting rule anywhere. That is not an
+     * oversight and not an unfinished feature — it is the accrual model this
+     * organisation REJECTED.
+     *
+     * Penalties and interest are both recognised on a CASH basis: each is
+     * credited to its income account (`penalty_income`, `interest_income`) as a
+     * LINE inside the `loan_collection` journal, at the moment the money
+     * arrives. Nothing accrues a receivable, so nothing relieves one.
+     * {@see PostingRules::loanCollection()} carries
+     * the full rationale; read it before wiring either role into a rule,
+     * because a posting that debits a receivable needs the matching relief on
+     * collection, and half of that pair overstates assets forever.
+     *
+     * They stay in the list because both accounts are already seeded and both
+     * roles already mapped on every deployment: removing them means a migration
+     * that deletes live rows, for a chart that would still carry the accounts.
+     * The frontend's `AccountMapping` type also mirrors this list key for key,
+     * so dropping one is a contract change on both sides — and an administrator
+     * pointing them somewhere is harmless while no rule asks.
      */
     public const ROLES = [
         'cash',
@@ -95,6 +119,15 @@ class AccountingAccountMapping extends Model
         'maya' => ['type' => 'asset', 'cash_kind' => 'maya'],
         'bank' => ['type' => 'asset', 'cash_kind' => 'bank'],
         'loans_receivable' => ['type' => 'asset'],
+
+        /*
+         * Shapes for two roles nothing posts to. See the note on self::ROLES:
+         * interest and penalties are recognised on a CASH basis, as lines
+         * inside the collection journal, so neither receivable is ever debited
+         * or relieved. The shape is still declared because ROLES and
+         * ROLE_SHAPES are required to cover each other exactly — a role without
+         * a shape is refused outright rather than waved through.
+         */
         'interest_receivable' => ['type' => 'asset'],
         'penalty_receivable' => ['type' => 'asset'],
         'interest_income' => ['type' => 'income'],

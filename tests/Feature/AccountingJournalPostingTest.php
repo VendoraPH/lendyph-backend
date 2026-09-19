@@ -4,10 +4,15 @@ namespace Tests\Feature;
 
 use App\Exceptions\PostedJournalIsImmutableException;
 use App\Models\AccountingAccount;
+use App\Models\AccountingExpense;
 use App\Models\AccountingJournal;
 use App\Models\AccountingJournalLine;
+use App\Models\Branch;
+use App\Models\Loan;
+use App\Models\Repayment;
 use App\Services\Accounting\JournalPoster;
 use App\Services\Accounting\Money;
+use App\Services\RepaymentService;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -400,6 +405,337 @@ class AccountingJournalPostingTest extends TestCase
 
         $this->assertSame(2, $draft->fresh()->lines()->count());
         $this->assertTrue($draft->fresh()->delete());
+    }
+
+    // ── The register: GET /api/accounting/journals ──
+
+    /**
+     * Every field the resource promises, on the endpoint the Journals screen
+     * actually calls.
+     *
+     * Nothing asserted this list before — no test anywhere had called
+     * `GET /api/accounting/journals`, so a field could be dropped from
+     * JournalEntryResource and the whole suite would stay green while the
+     * register lost a column.
+     */
+    public function test_the_register_answers_the_documented_field_set(): void
+    {
+        $this->postSimpleJournal('5030', '1010', 350000);
+
+        $this->getJson('/api/accounting/journals')
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonStructure([
+                'data' => [
+                    [
+                        'id', 'journal_no', 'date', 'source', 'reference', 'description',
+                        'branch_id', 'branch_name', 'status',
+                        'lines' => [['id', 'account_id', 'account_code', 'account_name', 'description', 'debit', 'credit']],
+                        'total_debit', 'total_credit',
+                        'reverses_journal_id', 'reversed_by_journal_id',
+                        'postable_type', 'postable_id', 'postable_label',
+                        'created_by', 'created_at', 'posted_by', 'posted_at',
+                    ],
+                ],
+                'links',
+                'meta' => ['current_page', 'last_page', 'per_page', 'total'],
+            ]);
+    }
+
+    /**
+     * The whole point of the exposure: an entry names the document that caused
+     * it, in the API's own vocabulary rather than the application's.
+     */
+    public function test_a_loan_release_entry_names_the_loan_it_came_from(): void
+    {
+        $loan = $this->createReleasedLoan();
+
+        $entry = collect($this->getJson('/api/accounting/journals')->assertOk()->json('data'))
+            ->firstWhere('source', 'loan_release');
+
+        $this->assertNotNull($entry, 'Releasing a loan wrote no loan_release entry.');
+
+        $this->assertSame('loan', $entry['postable_type']);
+        $this->assertSame($loan->id, $entry['postable_id']);
+        $this->assertSame($loan->loan_account_number, $entry['postable_label']);
+
+        // The column really does hold the FQCN — this application has no morph
+        // map — so the alias is doing work rather than passing a value through.
+        $this->assertSame(Loan::class, AccountingJournal::findOrFail($entry['id'])->postable_type);
+    }
+
+    public function test_a_collection_entry_names_the_receipt_it_came_from(): void
+    {
+        $loan = $this->createReleasedLoan();
+        $repayment = app(RepaymentService::class)
+            ->processRepayment($loan->fresh(), 5000, now()->toDateString(), $this->admin);
+
+        $entry = collect($this->getJson('/api/accounting/journals')->assertOk()->json('data'))
+            ->firstWhere('source', 'loan_collection');
+
+        $this->assertNotNull($entry, 'A repayment wrote no loan_collection entry.');
+
+        // The RECEIPT, not the loan — which is also what the idempotency index
+        // keys on. See AutomaticPoster::loanCollection().
+        $this->assertSame('repayment', $entry['postable_type']);
+        $this->assertSame($repayment->id, $entry['postable_id']);
+        $this->assertSame($repayment->receipt_number, $entry['postable_label']);
+
+        $this->assertSame(Repayment::class, AccountingJournal::findOrFail($entry['id'])->postable_type);
+    }
+
+    /**
+     * No internal class name reaches the wire, on any entry, ever.
+     *
+     * This is the assertion that fails if someone "simplifies" the resource by
+     * emitting `$this->postable_type` straight from the column.
+     */
+    public function test_the_register_never_emits_a_fully_qualified_class_name(): void
+    {
+        $this->createReleasedLoan();
+        $this->postSimpleJournal('5030', '1010', 1000);
+
+        $body = $this->getJson('/api/accounting/journals')->assertOk()->getContent();
+
+        $this->assertStringNotContainsString('App\\\\Models', $body);
+        $this->assertStringNotContainsString('App\Models', $body);
+    }
+
+    /**
+     * The three legitimate ways an entry has no source document. All of them
+     * answer null on all three fields — never a missing key, which a typed
+     * client would read as a different shape.
+     */
+    public function test_an_entry_with_no_source_document_answers_null_rather_than_omitting_the_fields(): void
+    {
+        // 1. A manual entry: nobody ever set one.
+        $manual = $this->postSimpleJournal('5030', '1010', 350000);
+
+        // 2. A reversal: JournalPoster::reverse() refuses to copy the
+        //    original's postable on purpose, so a reversal of an entry that HAS
+        //    one still has none.
+        $this->postJson("/api/accounting/journals/{$manual->id}/reverse", ['reason' => 'Keyed twice'])
+            ->assertCreated()
+            ->assertJsonPath('data.source', 'reversal')
+            ->assertJsonPath('data.postable_type', null)
+            ->assertJsonPath('data.postable_id', null)
+            ->assertJsonPath('data.postable_label', null);
+
+        // 3. A fund transfer, through the OTHER controller that returns this
+        //    same resource. It is the document rather than being raised by one.
+        $this->postSimpleJournal('1020', '3010', 5000000, ['date' => '2026-09-01']);
+
+        $this->postJson('/api/accounting/cash-accounts/transfer', [
+            'date' => '2026-09-18',
+            'from_account_id' => $this->account('1020'),
+            'to_account_id' => $this->account('1040'),
+            'amount' => 1000050,
+            'description' => 'GCash to bank sweep',
+        ])
+            ->assertCreated()
+            ->assertJsonPath('data.postable_type', null)
+            ->assertJsonPath('data.postable_id', null)
+            ->assertJsonPath('data.postable_label', null);
+
+        // And on the register, where the keys must be PRESENT and null rather
+        // than absent — assertJsonPath(null) passes for a missing key too, so
+        // the presence check has to be made separately.
+        foreach ($this->getJson('/api/accounting/journals')->assertOk()->json('data') as $entry) {
+            $this->assertArrayHasKey('postable_type', $entry);
+            $this->assertArrayHasKey('postable_id', $entry);
+            $this->assertArrayHasKey('postable_label', $entry);
+        }
+
+        $this->getJson("/api/accounting/journals/{$manual->id}")
+            ->assertOk()
+            ->assertJsonPath('data.postable_type', null)
+            ->assertJsonPath('data.postable_label', null);
+    }
+
+    /**
+     * Resolving the source documents costs ONE query per type, however many
+     * rows the page holds.
+     *
+     * This is the property that separates a real batch load from a lazy one
+     * that merely looks fine on a two-row fixture. It is measured two ways,
+     * because each catches something the other misses: the per-table counts
+     * prove the postables themselves are not fetched per row, and the total
+     * proves nothing ELSE on the page became per-row either.
+     *
+     * The register is warmed first — permissions and the authenticated user
+     * are resolved and cached on the first request of a test, which is worth
+     * several queries and would otherwise be counted against the smaller page.
+     */
+    public function test_the_register_resolves_postables_without_going_n_plus_1(): void
+    {
+        $registerQueries = function (int $perType): array {
+            AccountingJournal::query()->delete();
+
+            for ($i = 1; $i <= $perType; $i++) {
+                $this->postSimpleJournal('1110', '1010', 1000 + $i, [
+                    'source' => 'loan_release',
+                    'postable_type' => Loan::class,
+                    'postable_id' => 1000 + $i,
+                ]);
+                $this->postSimpleJournal('1110', '1010', 2000 + $i, [
+                    'source' => 'loan_collection',
+                    'postable_type' => Repayment::class,
+                    'postable_id' => 2000 + $i,
+                ]);
+                $this->postSimpleJournal('5030', '1010', 3000 + $i, [
+                    'source' => 'expense',
+                    'postable_type' => AccountingExpense::class,
+                    'postable_id' => 3000 + $i,
+                ]);
+                // Null postables, which must cost nothing at all — they are a
+                // large share of a real register.
+                $this->postSimpleJournal('5030', '1010', 4000 + $i);
+            }
+
+            DB::enableQueryLog();
+            DB::flushQueryLog();
+
+            $this->getJson('/api/accounting/journals?per_page=100')->assertOk();
+
+            $queries = array_column(DB::getQueryLog(), 'query');
+            DB::disableQueryLog();
+
+            return $queries;
+        };
+
+        // Warm the permission and user caches; the count below is about the
+        // page, not about the first request of the test.
+        $this->getJson('/api/accounting/journals')->assertOk();
+
+        $one = $registerQueries(1);
+        $six = $registerQueries(6);
+
+        foreach (['loans', 'repayments', 'accounting_expenses'] as $table) {
+            $hits = count(array_filter($six, fn (string $q): bool => str_contains($q, "from `{$table}`")));
+
+            $this->assertSame(1, $hits, "Six {$table} postables on one page cost {$hits} queries; one batch is the point.");
+        }
+
+        // AccountingExpensePayment has no label column, so it is never queried
+        // for at all rather than fetched and discarded.
+        $this->assertSame(
+            0,
+            count(array_filter($six, fn (string $q): bool => str_contains($q, 'from `accounting_expense_payments`'))),
+        );
+
+        $this->assertSame(
+            count($one),
+            count($six),
+            'The register cost '.count($one).' queries for 4 entries and '.count($six).' for 24. '
+            .'A count that grows with the page is the whole bug.'
+        );
+    }
+
+    /**
+     * AutomaticPoster::loanFee(), creditLossProvision(), fundTransfer() and
+     * walletCharge() all take an untyped `Model $postable`, so any class can
+     * reach this column. An unmapped one must degrade, not throw.
+     */
+    public function test_an_unmapped_postable_class_degrades_instead_of_breaking_the_register(): void
+    {
+        // A real class, deliberately absent from POSTABLE_LABEL_COLUMNS.
+        $this->postSimpleJournal('5030', '1010', 250000, [
+            'source' => 'credit_loss',
+            'postable_type' => Branch::class,
+            'postable_id' => $this->branch->id,
+        ]);
+
+        $entry = $this->getJson('/api/accounting/journals')->assertOk()->json('data.0');
+
+        // Snake-cased basename: readable, no namespace, and explicitly not part
+        // of the contract — the fix is to curate it into POSTABLE_ALIASES.
+        $this->assertSame('branch', $entry['postable_type']);
+        $this->assertSame($this->branch->id, $entry['postable_id']);
+        $this->assertNull($entry['postable_label']);
+    }
+
+    /**
+     * THE REASON THIS IS NOT `with('postable')`.
+     *
+     * There is no morph map in this application — `Relation::enforceMorphMap()`
+     * is called nowhere — so `postable_type` holds a fully-qualified class name
+     * and every live database is full of them. Eloquent's morphTo eager-load
+     * resolves each distinct type with `new $class`, which is a fatal Error,
+     * not a null, when that class has been renamed or removed. A single such
+     * row would answer 500 for the WHOLE page, for every user, on a register
+     * that renders fine today because nothing dereferences the relation.
+     *
+     * Verified: swapping AccountingJournal::attachPostables() back to
+     * `with('postable')` fails this test with
+     * `Class "App\Models\SomeRenamedModel" not found`.
+     */
+    public function test_a_postable_class_that_no_longer_exists_does_not_take_the_register_down(): void
+    {
+        $this->postSimpleJournal('5030', '1010', 250000, [
+            'source' => 'credit_loss',
+            'postable_type' => 'App\Models\SomeRenamedModel',
+            'postable_id' => 77,
+        ]);
+
+        $entry = $this->getJson('/api/accounting/journals')
+            ->assertOk()
+            ->json('data.0');
+
+        $this->assertSame('some_renamed_model', $entry['postable_type']);
+        $this->assertSame(77, $entry['postable_id']);
+        $this->assertNull($entry['postable_label']);
+
+        // And the single-entry route, which resolves the postable separately.
+        $this->getJson("/api/accounting/journals/{$entry['id']}")
+            ->assertOk()
+            ->assertJsonPath('data.postable_type', 'some_renamed_model')
+            ->assertJsonPath('data.postable_label', null);
+    }
+
+    /**
+     * A postable pointing at a row that is not there — the class is real, the
+     * id resolves to nothing. The type and id still answer, because they are
+     * read off the COLUMN rather than the relation.
+     */
+    public function test_a_source_document_that_no_longer_exists_still_names_its_type(): void
+    {
+        $this->postSimpleJournal('1110', '1010', 600000, [
+            'source' => 'loan_release',
+            'postable_type' => Loan::class,
+            'postable_id' => 4242,
+        ]);
+
+        $this->getJson('/api/accounting/journals')
+            ->assertOk()
+            ->assertJsonPath('data.0.postable_type', 'loan')
+            ->assertJsonPath('data.0.postable_id', 4242)
+            ->assertJsonPath('data.0.postable_label', null);
+    }
+
+    /**
+     * `?source=penalty` is accepted and returns nothing, and that is the
+     * correct answer rather than a bug.
+     *
+     * Penalties are cash basis: a penalty is a LINE inside the
+     * `loan_collection` journal, credited to `penalty_income` at collection,
+     * and no entry is ever written with this source. See
+     * AccountingJournal::SOURCES and PostingRules::loanCollection(). The filter
+     * stays permissive deliberately — the note in
+     * AccountingJournalController::index() gives the reasoning.
+     */
+    public function test_the_source_filter_accepts_a_reserved_value_and_returns_an_empty_page(): void
+    {
+        $this->postSimpleJournal('5030', '1010', 350000);
+
+        $this->getJson('/api/accounting/journals?source=penalty')
+            ->assertOk()
+            ->assertJsonCount(0, 'data')
+            ->assertJsonPath('meta.total', 0);
+
+        // And garbage is still refused, which is the job validation owes here.
+        $this->getJson('/api/accounting/journals?source=not_a_source')
+            ->assertStatus(422)
+            ->assertJsonValidationErrors('source');
     }
 
     // ── Idempotency ──

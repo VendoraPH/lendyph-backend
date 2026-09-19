@@ -70,6 +70,20 @@ final class ChartOfAccountsSeeder
         // These three hang off 1000, NOT off 1100. They are not loan principal,
         // and rolling them into Loans Receivable would overstate the portfolio
         // by the interest and penalties it has not collected yet.
+        //
+        // 1150 and 1160 are seeded, mapped (`interest_receivable`,
+        // `penalty_receivable`) and NEVER POSTED TO. Interest and penalties are
+        // recognised on a cash basis — credited to `interest_income` and
+        // `penalty_income` as lines inside the `loan_collection` journal, at
+        // collection — so no rule ever debits either receivable. See the note
+        // on AccountingAccountMapping::ROLES and the rationale in
+        // PostingRules::loanCollection() before wiring either one up.
+        //
+        // They are still seeded because this chart is asserted code for code
+        // and name for name against the frontend's DEFAULT_CHART_OF_ACCOUNTS
+        // (AccountingChartOfAccountsTest), and because both already exist on
+        // every deployment: dropping them would be a migration against live
+        // charts to remove two accounts carrying a zero balance.
         ['code' => '1150', 'name' => 'Interest Receivable', 'type' => 'asset', 'parent' => '1000'],
         ['code' => '1160', 'name' => 'Penalty Receivable', 'type' => 'asset', 'parent' => '1000'],
         ['code' => '1170', 'name' => 'Other Receivables', 'type' => 'asset', 'parent' => '1000'],
@@ -166,6 +180,9 @@ final class ChartOfAccountsSeeder
         'maya' => '1030',
         'bank' => '1040',
         'loans_receivable' => '1110',
+        // Mapped, and resolved by no posting rule. Both are the accrual model
+        // this organisation rejected; see the note beside 1150/1160 in
+        // self::CHART.
         'interest_receivable' => '1150',
         'penalty_receivable' => '1160',
         'interest_income' => '4010',

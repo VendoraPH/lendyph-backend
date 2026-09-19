@@ -64,6 +64,13 @@ class AccountingCashAccountController extends Controller
             'poster:id,first_name,last_name',
         ]);
 
+        // A transfer never HAS a postable — FundTransferRecorder writes none on
+        // purpose — so this resolves to null every time. Called anyway so the
+        // whenLoaded-guarded `postable_label` is PRESENT and null rather than
+        // absent, which keeps this response the same shape as the Journals
+        // screen's.
+        $journal->loadPostable();
+
         return (new JournalEntryResource($journal))->response()->setStatusCode(201);
     }
 }
