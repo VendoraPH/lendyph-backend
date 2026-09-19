@@ -356,7 +356,7 @@ it('resolves identity before the throttle on every public-registration route', f
 });
 
 /**
- * RequirePasswordChange must stay LAST on these stacks.
+ * RequirePasswordChange must stay LAST OF THE THREE GATES on these stacks.
  *
  * routes/api.php explains why at length: "your session expired" (401) and "your
  * account was deactivated" (403) both outrank "you owe us a new password", and a
@@ -364,9 +364,20 @@ it('resolves identity before the throttle on every public-registration route', f
  * screen that would let them back in. The priority-list change above moves
  * middleware around on exactly these routes, so this pins the part of the order
  * that must NOT move.
+ *
+ * This used to read `array_slice($stack, -3)`, which was only ever a proxy: the
+ * three gates happened to be the tail because they were the only middleware on
+ * these routes missing from the priority list. Naming them there (the
+ * user-existence fix — see UserRouteEnumerationTest) moved them ahead of
+ * SubstituteBindings, so the tail is now binding and the slice compared the
+ * wrong three entries. The invariant this spec exists for did not change, so
+ * it is stated directly instead of positionally: filter the stack to the gates
+ * and check THEIR order.
  */
-it('keeps RequirePasswordChange last on the public-registration routes', function () {
+it('keeps RequirePasswordChange last of the three gates on the public-registration routes', function () {
     $router = app('router');
+
+    $gates = [CheckTokenExpiry::class, EnsureUserIsActive::class, RequirePasswordChange::class];
 
     foreach (['api/borrowers', 'api/borrowers/{borrower}/photo', 'api/borrowers/{borrower}/valid-ids'] as $uri) {
         $route = collect($router->getRoutes())->first(
@@ -375,11 +386,20 @@ it('keeps RequirePasswordChange last on the public-registration routes', functio
 
         $stack = array_values(array_filter($router->gatherRouteMiddleware($route), 'is_string'));
 
-        expect(array_slice($stack, -3))->toBe([
-            CheckTokenExpiry::class,
-            EnsureUserIsActive::class,
-            RequirePasswordChange::class,
-        ], "tail of POST /{$uri} changed; effective order: ".implode(' -> ', $stack));
+        $effective = 'effective order: '.implode(' -> ', $stack);
+
+        expect(array_values(array_intersect($stack, $gates)))->toBe(
+            $gates,
+            "gate order on POST /{$uri} changed; {$effective}",
+        );
+
+        // ...and nothing wedged itself between them.
+        $indexes = array_map(fn (string $gate) => array_search($gate, $stack, true), $gates);
+
+        expect($indexes[2] - $indexes[0])->toBe(
+            2,
+            "the three gates are no longer contiguous on POST /{$uri}; {$effective}",
+        );
     }
 });
 

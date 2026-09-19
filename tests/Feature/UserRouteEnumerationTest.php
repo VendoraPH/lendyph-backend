@@ -24,7 +24,12 @@
  * status codes: 404 with a different message is still an oracle.
  */
 
+use App\Http\Middleware\CheckTokenExpiry;
+use App\Http\Middleware\EnsureUserIsActive;
+use App\Http\Middleware\RequirePasswordChange;
 use App\Models\User;
+use Illuminate\Routing\Middleware\SubstituteBindings;
+use Illuminate\Routing\Middleware\ThrottleRequests;
 use Illuminate\Testing\TestResponse;
 use Spatie\Permission\Models\Role;
 use Tests\TestCase;
@@ -193,35 +198,41 @@ it('does not leak existence through the unauthenticated path either', function (
         ->and($real->getContent())->toBe($fake->getContent());
 })->with('user routes');
 
-it('documents the one oracle these requests cannot close, in the middleware order', function (
+it('answers a locked caller identically whether or not the id exists', function (
     string $verb,
     string $template,
     array $payload,
     string $status,
 ) {
-    // NOT a passing-grade assertion — a characterisation test of a defect that
-    // is real, reported, and deliberately not fixed on this branch. If it ever
-    // fails, somebody has closed the gap: read this, then change it to expect
-    // two identical answers.
+    // This used to be a characterisation test of a defect, asserting 423 vs 404.
+    // The defect is fixed; this is now the property.
     //
-    // Laravel sorts the gathered middleware stack by its priority list.
-    // Authenticate sits at 6 and SubstituteBindings at 10, which is why an
-    // unauthenticated probe is 401 for every id (spec above) — but this
-    // application's three post-auth gates (CheckTokenExpiry,
-    // EnsureUserIsActive, RequirePasswordChange) are not in that list at all,
-    // so binding is hoisted ABOVE them. A missing id is a 404 before they run;
-    // a live id reaches them and is refused with their own status. Existence
-    // is the difference between the two:
+    // Laravel sorts the gathered middleware stack by its priority list, and
+    // this application's three post-auth gates (CheckTokenExpiry,
+    // EnsureUserIsActive, RequirePasswordChange) were absent from it. Their
+    // absence is what made them run AFTER route-model binding — binding was
+    // never hoisted over them, which is how the previous version of this
+    // comment put it and it was wrong. The `api` group SUPPLIES
+    // SubstituteBindings and a group's middleware is gathered outermost, while
+    // the gates are declared on the nested group at routes/api.php:127, so
+    // binding was in front from the start. Being unlisted is what made that
+    // position unrecoverable: an unlisted middleware keeps the index it was
+    // gathered at, and listed middleware step over it.
+    //
+    // The consequence was that a missing id was a 404 before the gates ran
+    // while a live id reached them and was refused with their own status, so
+    // existence was the difference between the two answers:
     //
     //   password-change pending  ->  423 vs 404   (token survives: repeatable)
     //   account deactivated      ->  403 vs 404   (token is revoked: one shot)
     //   token idle-expired       ->  401 vs 404   (token is revoked: one shot)
     //
-    // Only the first is a practical enumerator, and it needs a live token
-    // belonging to real staff mid-reset. Closing it means reordering the
-    // priority list in bootstrap/app.php, which moves those three gates ahead
-    // of binding on EVERY route in the API, not just these five — a change
-    // with its own blast radius, and its own review.
+    // Only the first was a practical enumerator — RequirePasswordChange does
+    // not revoke the token, so the probe could walk the whole sequential id
+    // range on one live token belonging to staff mid-reset. bootstrap/app.php
+    // now names all three in the priority list, immediately ahead of
+    // SubstituteBindings, so the gate answers first and says the same thing for
+    // every id. The spec below pins the ordering itself.
     $target = ($this->makeTarget)($status);
 
     $this->outsider->forceFill(['must_change_password' => true])->save();
@@ -232,6 +243,93 @@ it('documents the one oracle these requests cannot close, in the middleware orde
     $real = hitUserRoute($this, $verb, $template, $payload, $target->id);
     $fake = hitUserRoute($this, $verb, $template, $payload, 99999);
 
+    // Byte-identical bodies, not just equal statuses — the 423 payload is
+    // static (message, `code`, `must_change_password`) and carries nothing
+    // drawn from the target, so there is nothing legitimate for it to differ
+    // on. A 423 that started echoing the id would re-open the oracle at the
+    // same URL.
     expect($real->status())->toBe(423)
-        ->and($fake->status())->toBe(404);
+        ->and($fake->status())->toBe(423)
+        ->and($real->getContent())->toBe($fake->getContent());
 })->with('user routes');
+
+/**
+ * The ordering invariant itself, read off the stack the framework actually
+ * builds.
+ *
+ * Asserting the declared order in routes/api.php would be worthless: it was
+ * already "correct" throughout the bug, and Router::resolveMiddleware() running
+ * the stack through SortedMiddleware is what undid it. So this reads the
+ * EFFECTIVE stack via gatherRouteMiddleware().
+ *
+ * It sweeps every registered route rather than the five in the dataset on
+ * purpose. The priority list is global — naming a middleware there moves it on
+ * every route that carries it, which here is 215 routes, 117 of them bound.
+ * That blast radius is the reason this change needed its own review, and a
+ * sweep is the only assertion that covers it.
+ */
+it('runs the post-auth gates before route-model binding on every route that has them', function () {
+    $router = app('router');
+
+    // Declaration order at routes/api.php:127, which must survive the sort:
+    // "session expired" (401) and "account deactivated" (403) both outrank
+    // "you owe us a new password", and a deactivated user must be turned away
+    // rather than sent to a change-password screen that would let them back in.
+    $gates = [CheckTokenExpiry::class, EnsureUserIsActive::class, RequirePasswordChange::class];
+
+    $swept = 0;
+
+    foreach ($router->getRoutes() as $route) {
+        $stack = array_values(array_filter($router->gatherRouteMiddleware($route), 'is_string'));
+
+        $gateIndexes = array_map(fn (string $gate) => array_search($gate, $stack, true), $gates);
+        $bindingAt = array_search(SubstituteBindings::class, $stack, true);
+
+        if (in_array(false, $gateIndexes, true) || $bindingAt === false) {
+            continue;
+        }
+
+        $swept++;
+
+        $label = implode('|', $route->methods()).' /'.$route->uri();
+        $effective = 'effective order: '.implode(' -> ', $stack);
+
+        expect(max($gateIndexes))->toBeLessThan(
+            $bindingAt,
+            "{$label}: all three post-auth gates must sort ahead of SubstituteBindings, ".
+            'or a missing id 404s before they run while a live id reaches them — '.
+            "which is a user-existence oracle. {$effective}",
+        );
+
+        expect($gateIndexes)->toBe(
+            collect($gateIndexes)->sort()->values()->all(),
+            "{$label}: the three gates must keep their declared relative order, ".
+            "RequirePasswordChange last. {$effective}",
+        );
+
+        // The other half of the placement. The gates were put between the
+        // throttle entries and SubstituteBindings, not in front of the meter:
+        // six named limiters in AppServiceProvider branch on whether
+        // $request->user() is populated, and moving a gate above `throttle:*`
+        // would change which bucket an authenticated caller is metered on.
+        $throttleAt = collect($stack)->search(
+            fn (string $m) => str_starts_with($m, ThrottleRequests::class.':'),
+        );
+
+        if ($throttleAt !== false) {
+            expect(min($gateIndexes))->toBeGreaterThan(
+                $throttleAt,
+                "{$label}: the gates must stay BEHIND the throttle — the limiters in ".
+                "AppServiceProvider depend on the identity resolved before them. {$effective}",
+            );
+        }
+    }
+
+    // A loop that matched nothing would pass every assertion above.
+    expect($swept)->toBeGreaterThan(
+        100,
+        'expected the gated routes to be swept; found '.$swept.'. If the auth '.
+        'group was restructured this number moves, but zero means this spec '.
+        'stopped testing anything.',
+    );
+});
