@@ -85,14 +85,14 @@ class CreditScoringNotSeededTest extends TestCase
 
         $this->assertNotEmpty($routes, sprintf(
             "These credit_scoring permissions are seeded:\n\n  %s\n\n"
-            ."but this API serves no /credit-scoring route at all. Granting them exposes "
-            ."seven sidebar items whose pages call endpoints that answer 404 — and the "
-            ."frontend only degrades politely on 404/501, so anything else (a 403 from a "
-            ."permission check that exists without a route behind it, or a 500) renders as "
+            .'but this API serves no /credit-scoring route at all. Granting them exposes '
+            .'seven sidebar items whose pages call endpoints that answer 404 — and the '
+            .'frontend only degrades politely on 404/501, so anything else (a 403 from a '
+            .'permission check that exists without a route behind it, or a 500) renders as '
             ."a broken screen.\n\n"
             ."The endpoints the frontend expects:\n\n  %s\n\n"
-            ."See docs/CREDIT_SCORING_BACKEND_HANDOFF.md in the frontend repo. Ship the "
-            ."routes and the permissions together, or neither.",
+            .'See docs/CREDIT_SCORING_BACKEND_HANDOFF.md in the frontend repo. Ship the '
+            .'routes and the permissions together, or neither.',
             implode("\n  ", $permissions),
             implode("\n  ", self::EXPECTED_ENDPOINTS),
         ));

@@ -70,11 +70,11 @@ test('every Pest-style feature test binds the application test case', function (
     $offenders = pestStyleFeatureFilesMissingTestCase();
 
     expect($offenders)->toBe([], sprintf(
-        "These feature tests run without the application, the database or "
+        'These feature tests run without the application, the database or '
         ."RefreshDatabase, and will pass while asserting nothing:\n\n  %s\n\n"
-        ."Add `uses(Tests\\TestCase::class);` near the top of each. Do NOT solve "
-        ."this with a tests/Pest.php folder binding — Pest rejects the run when a "
-        ."file also declares it, which every other feature test here does.",
+        .'Add `uses(Tests\\TestCase::class);` near the top of each. Do NOT solve '
+        .'this with a tests/Pest.php folder binding — Pest rejects the run when a '
+        .'file also declares it, which every other feature test here does.',
         implode("\n  ", $offenders)
     ));
 });
