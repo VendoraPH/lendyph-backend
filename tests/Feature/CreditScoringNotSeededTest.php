@@ -41,8 +41,15 @@ use Tests\TestCase;
 class CreditScoringNotSeededTest extends TestCase
 {
     /**
-     * The eleven paths the frontend already calls, from
+     * The endpoints the frontend actually calls, from
      * `src/config/api-endpoints.ts` -> API_ENDPOINTS.CREDIT_SCORING.
+     *
+     * Eleven paths are declared there; only ten are reachable. ALERTS_LIST
+     * (GET /credit-scoring/alerts) has no service method and no caller anywhere
+     * in the frontend -- alerts arrive embedded in the risk-monitoring response
+     * -- so it is a leftover constant rather than a gap, and is deliberately not
+     * listed here. See docs/CREDIT_SCORING_BACKEND_HANDOFF.md in the frontend
+     * repo, which says not to build it.
      */
     private const EXPECTED_ENDPOINTS = [
         'GET    /credit-scoring/dashboard',
@@ -52,7 +59,6 @@ class CreditScoringNotSeededTest extends TestCase
         'GET    /credit-scoring/borrowers/{borrower}/policy-flags',
         'GET    /credit-scoring/score-history',
         'GET    /credit-scoring/risk-monitoring',
-        'GET    /credit-scoring/alerts',
         'GET    /credit-scoring/scorecard-config',
         'PUT    /credit-scoring/scorecard-config',
         'GET    /credit-scoring/settings',
