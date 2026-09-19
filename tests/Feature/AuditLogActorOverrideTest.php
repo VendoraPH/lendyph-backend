@@ -100,9 +100,13 @@ it('falls back to the request ip when no ip address is passed', function () {
  * still stamps both the actor and the address from `auth()` and `request()`,
  * exactly as before the two parameters existed.
  *
- * Driven through a real token rather than actingAs(), because logout deletes
- * the current access token and actingAs() hands it a TransientToken instead of
- * a real one.
+ * Driven through a real token rather than actingAs(). That used to be
+ * compulsory — logout called delete() straight on currentAccessToken(), and
+ * actingAs() hands it a TransientToken, which has no delete() and made the
+ * request die with a 500. It is no longer compulsory (see
+ * EnsureUserIsActiveTest), and it is kept anyway: a session caller now takes
+ * logout's other branch, which ends the session instead of deleting a token,
+ * and it is the token branch this example is pinning the audit stamp on.
  */
 it('leaves an existing call site stamping the request actor', function () {
     $token = $this->postJson('/api/auth/login', [

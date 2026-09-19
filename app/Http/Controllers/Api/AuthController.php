@@ -9,7 +9,11 @@ use App\Http\Requests\Auth\UpdateMeRequest;
 use App\Http\Resources\UserResource;
 use App\Models\User;
 use App\Services\AuditLogService;
+use Illuminate\Contracts\Auth\StatefulGuard;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
+use Illuminate\Support\Arr;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Hash;
 use Laravel\Sanctum\PersonalAccessToken;
 use OpenApi\Attributes as OA;
@@ -107,13 +111,50 @@ class AuthController extends Controller
             new OA\Response(response: 401, description: 'Unauthenticated'),
         ],
     )]
-    public function logout(): JsonResponse
+    public function logout(Request $request): JsonResponse
     {
-        $user = auth()->user();
+        $user = $request->user();
 
         AuditLogService::log('logout', $user, description: "User {$user->username} logged out");
 
-        $user->currentAccessToken()->delete();
+        // Revoke the credential this request arrived on — but WHICH credential
+        // that is depends on how the caller authenticated.
+        //
+        // currentAccessToken() is a PersonalAccessToken for API-token auth or a
+        // TransientToken for session-based (SPA) auth; only the former has a row
+        // to delete, and delete() on the latter is a fatal Error.
+        $currentToken = $user->currentAccessToken();
+
+        if ($currentToken instanceof PersonalAccessToken) {
+            $currentToken->delete();
+        } else {
+            // A session caller has no bearer token: the SESSION is the
+            // credential, so returning "Logged out successfully." without
+            // ending it would be a lie — the caller would still be signed in
+            // on the next request. This is the one place where doing nothing is
+            // not an acceptable answer, because logout is the request whose
+            // entire purpose is to destroy the credential.
+            //
+            // The guards are the ones Sanctum itself consults, in its own
+            // order, so this ends exactly the session that resolved this
+            // request rather than a hard-coded guess at it. Only a
+            // StatefulGuard has a session to end.
+            foreach (Arr::wrap(config('sanctum.guard', 'web')) as $guard) {
+                $guard = Auth::guard($guard);
+
+                if ($guard instanceof StatefulGuard) {
+                    $guard->logout();
+                }
+            }
+
+            // API routes carry no session middleware, so there is usually no
+            // session on the request to invalidate — only a stateful SPA call
+            // through EnsureFrontendRequestsAreStateful has one.
+            if ($request->hasSession()) {
+                $request->session()->invalidate();
+                $request->session()->regenerateToken();
+            }
+        }
 
         return response()->json(['message' => 'Logged out successfully.']);
     }
@@ -247,14 +288,39 @@ class AuthController extends Controller
                     ],
                 ),
             ),
+            new OA\Response(
+                response: 400,
+                description: 'Nothing to refresh — the caller authenticated with a session rather than an '
+                    .'API token, so there is no token to rotate. Marked by `code: no_token_to_refresh`.',
+            ),
             new OA\Response(response: 401, description: 'Unauthenticated'),
             new OA\Response(response: 423, description: 'Password change required — change the password first, then log in again'),
         ],
     )]
-    public function refresh(): JsonResponse
+    public function refresh(Request $request): JsonResponse
     {
-        $user = auth()->user();
-        $user->currentAccessToken()->delete();
+        $user = $request->user();
+        $currentToken = $user->currentAccessToken();
+
+        // Rotation needs something to rotate. A session-based (SPA) caller
+        // holds a TransientToken, which has no row to revoke — and minting one
+        // anyway would not be a refresh at all: it would silently convert a
+        // cookie session into a standalone bearer credential that outlives the
+        // session that produced it, including outliving logout. Unlike logout,
+        // where ending the session is the caller's actual intent, there is no
+        // sensible session-shaped equivalent of "rotate my token", so say so.
+        //
+        // 400 rather than 403: the caller is perfectly authorised, the request
+        // simply does not apply to how they authenticated. `code` is the marker
+        // clients branch on; the message is copy.
+        if (! $currentToken instanceof PersonalAccessToken) {
+            return response()->json([
+                'message' => 'There is no API token on this request to refresh.',
+                'code' => 'no_token_to_refresh',
+            ], 400);
+        }
+
+        $currentToken->delete();
 
         $token = $user->createToken(
             'auth-token',
