@@ -36,6 +36,15 @@ class ResetPasswordRequest extends FormRequest
      * simply log in as the platform's super_admin and pick up the Gate bypass
      * and the restructure dual-control exemption — no role ever changes, and
      * there is nothing for the role guards to catch.
+     *
+     * Refused as the binding's own 404, not a 422. The message this used to
+     * carry — "only a super_admin can reset the password of a super_admin" —
+     * identified the platform account outright, which is a better answer than
+     * the enumeration this whole family exists to prevent: one request per id
+     * and the reply says not just "this id is live" but "this id is the one
+     * worth attacking". Masking it here and nowhere else would only move that
+     * to the next URL, so `UpdateUserRequest` and `DeactivateUserRequest` do
+     * the same. See `MasksUserExistence::denyAsMissingUser()`.
      */
     public function after(): array
     {
@@ -49,10 +58,7 @@ class ResetPasswordRequest extends FormRequest
                 }
 
                 if (! $actor->canManageAccount($target)) {
-                    $validator->errors()->add(
-                        'user',
-                        'Only a super_admin can reset the password of a super_admin.',
-                    );
+                    $this->denyAsMissingUser();
                 }
             },
         ];

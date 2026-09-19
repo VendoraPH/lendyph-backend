@@ -333,3 +333,180 @@ it('runs the post-auth gates before route-model binding on every route that has 
         'stopped testing anything.',
     );
 });
+
+/**
+ * The empty-body `PUT /users/{id}` probe.
+ *
+ * Every rule in UpdateUserRequest is `sometimes` (and `mobile_number` is
+ * `nullable` without `required`), so `{}` validated, reached the `after()`
+ * hook, and returned 200 with the full UserResource while leaving the row
+ * byte-identical: `update([])` is `fill([])->save()`, `isDirty()` is false, so
+ * there is no `performUpdate()`, no `updated_at` and no audit row.
+ *
+ * That is worse than an existence oracle. It is a free, invisible READ of a
+ * record, and the read is not what the endpoint is authorised for.
+ */
+it('does not hand an empty-body PUT the record it refuses to GET', function () {
+    // `users:view` and `users:update` are separate permissions and
+    // UpdateUserRequest::authorize() checks only the second. No seeded role
+    // holds one without the other, but roles are rows an administrator creates
+    // through the UI, so the split is reachable by configuration alone.
+    $editor = User::factory()->create(['branch_id' => 1, 'status' => 'active']);
+    $editor->syncRoles([
+        tap(Role::create(['name' => 'user_editor', 'guard_name' => 'web']))
+            ->syncPermissions(['users:update']),
+    ]);
+
+    $target = ($this->makeTarget)('active');
+    $target->syncRoles([Role::findByName('cashier')]);
+
+    $this->actingAs($editor);
+
+    // The endpoint they may not read with says the record is not there...
+    $this->getJson("/api/users/{$target->id}")->assertNotFound();
+
+    // ...so the endpoint they MAY write with must not read it out for them.
+    $response = $this->putJson("/api/users/{$target->id}", []);
+
+    $body = $response->getContent();
+
+    expect($response->status())->toBe(422)
+        ->and($response->json('data'))->toBeNull()
+        ->and($body)->not->toContain($target->email)
+        ->and($body)->not->toContain($target->username)
+        ->and($body)->not->toContain('cashier');
+});
+
+it('refuses a PUT that would change nothing, and writes nothing either way', function () {
+    // Same whole-row comparison as the refusal spec above, aimed at the write
+    // path instead: a 422 must be as inert as the 200 it replaced.
+    $target = ($this->makeTarget)('active');
+    $before = $target->fresh()->getAttributes();
+
+    $this->actingAs(User::where('username', 'super_admin')->first());
+
+    $this->putJson("/api/users/{$target->id}", [])
+        ->assertUnprocessable()
+        ->assertJsonValidationErrors(['changes']);
+
+    expect($target->fresh()->getAttributes())->toBe($before);
+});
+
+it('refuses a PUT that only echoes the record back', function () {
+    // The user form posts the whole record, so this is the shape a human
+    // produces by opening the edit screen and pressing Save without touching
+    // anything. It is refused, and that is a deliberate trade: the alternative
+    // is a 200 that writes nothing, which is exactly the probe being closed.
+    // Repeating the role the target already holds still is not a role EDIT —
+    // UpdateUserRequest draws that line separately — it just is not a change.
+    $target = ($this->makeTarget)('active');
+    $target->syncRoles([Role::findByName('viewer')]);
+
+    $this->actingAs(User::where('username', 'super_admin')->first());
+
+    $this->putJson("/api/users/{$target->id}", [
+        'first_name' => $target->first_name,
+        'last_name' => $target->last_name,
+        'username' => $target->username,
+        'email' => $target->email,
+        'mobile_number' => $target->mobile_number,
+        'branch_id' => $target->branch_id,
+        'role' => 'viewer',
+    ])
+        ->assertUnprocessable()
+        ->assertJsonValidationErrors(['changes']);
+});
+
+it('still accepts a PUT that changes exactly one field', function () {
+    // The no-op guard must cost nothing real. `branch_id` is the sharp case:
+    // it arrives from JSON as whatever the client sent, and `isDirty()` is what
+    // decides — "3" against an integer 3 is not a change, 2 against 1 is.
+    $target = ($this->makeTarget)('active');
+    $target->syncRoles([Role::findByName('viewer')]);
+
+    $this->actingAs(User::where('username', 'super_admin')->first());
+
+    $this->putJson("/api/users/{$target->id}", [
+        'first_name' => 'Renamed',
+        'last_name' => $target->last_name,
+        'username' => $target->username,
+        'email' => $target->email,
+        'role' => 'viewer',
+    ])->assertOk();
+
+    expect($target->fresh()->first_name)->toBe('Renamed');
+});
+
+/**
+ * The second free probe in the family.
+ *
+ * `PATCH /users/{id}/reactivate` against an account that is already active is
+ * the same `isDirty() === false` no-op: a 200 saying "User reactivated
+ * successfully." with no write, no timestamp and no audit row. This route has
+ * no super_admin tier at all (ReactivateUserRequest says so deliberately), and
+ * the dataset at the top of this file seeds its fixture `inactive` precisely so
+ * the success path is observable — which left this case with no coverage.
+ *
+ * After the change every 200 from this route corresponds to a real state
+ * change, which is what the audit trail assumes.
+ */
+it('refuses to reactivate an account that is already active', function () {
+    $target = ($this->makeTarget)('active');
+    $before = $target->fresh()->getAttributes();
+
+    $this->actingAs(User::where('username', 'super_admin')->first());
+
+    $this->patchJson("/api/users/{$target->id}/reactivate")
+        ->assertUnprocessable()
+        ->assertJsonValidationErrors(['changes']);
+
+    expect($target->fresh()->getAttributes())->toBe($before);
+});
+
+/**
+ * The super_admin boundary, stated across the whole family rather than one
+ * route at a time.
+ *
+ * These three refusals used to be 422s whose copy named the target — "Only a
+ * super_admin can edit a super_admin account." That is a sharper answer than
+ * plain enumeration: one request per id and the reply says not just "this id is
+ * live" but "this id is the platform's". They are now the binding's own 404.
+ *
+ * Swept together because agreement is the property: masking `PUT` while
+ * `deactivate` still answered 422 would have moved the probe to the next URL,
+ * not stopped it. UserManagementTest asserts each one individually in its
+ * role-boundary context; this is the rule they have to obey as a set.
+ */
+it('hides a super_admin target behind the same 404 on every route that guards it', function () {
+    $admin = User::factory()->create(['branch_id' => 1, 'status' => 'active']);
+    $admin->syncRoles([Role::findByName('admin')]);
+
+    $platform = User::where('username', 'super_admin')->first();
+
+    $this->actingAs($admin);
+
+    $guarded = [
+        'PUT /users/{user}' => ['putJson', '/api/users/{id}', ['email' => 'attacker@evil.test']],
+        'PATCH /users/{user}/deactivate' => ['patchJson', '/api/users/{id}/deactivate', []],
+        'POST /users/{user}/reset-password' => ['postJson', '/api/users/{id}/reset-password', [
+            'password' => 'pwned12345',
+            'password_confirmation' => 'pwned12345',
+        ]],
+    ];
+
+    $normalise = fn (string $body, int $id) => str_replace((string) $id, '{id}', $body);
+
+    foreach ($guarded as $label => [$verb, $template, $payload]) {
+        $refused = hitUserRoute($this, $verb, $template, $payload, $platform->id);
+        $missing = hitUserRoute($this, $verb, $template, $payload, 99999);
+
+        expect($refused->status())->toBe(404, "{$label} did not mask the super_admin target")
+            ->and($missing->status())->toBe(404)
+            ->and($normalise($refused->getContent(), $platform->id))
+            ->toBe($normalise($missing->getContent(), 99999), "{$label} answered a different 404");
+    }
+
+    // ...and none of it landed.
+    expect($platform->fresh()->email)->not->toBe('attacker@evil.test')
+        ->and($platform->fresh()->status)->toBe('active');
+});
