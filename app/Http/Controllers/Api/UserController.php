@@ -3,7 +3,10 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\User\DeactivateUserRequest;
+use App\Http\Requests\User\ReactivateUserRequest;
 use App\Http\Requests\User\ResetPasswordRequest;
+use App\Http\Requests\User\ShowUserRequest;
 use App\Http\Requests\User\StoreUserRequest;
 use App\Http\Requests\User\UpdateUserRequest;
 use App\Http\Resources\UserResource;
@@ -15,6 +18,19 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 use OpenApi\Attributes as OA;
 
+/**
+ * Every action that binds `{user}` takes a FormRequest it never reads:
+ * ShowUserRequest, UpdateUserRequest, DeactivateUserRequest,
+ * ReactivateUserRequest, ResetPasswordRequest.
+ *
+ * Those parameters ARE the permission check — `show`, `deactivate` and
+ * `reactivate` used to call `$this->authorize()` in the body instead. They look
+ * unused and are not: deleting one does not tidy a signature, it opens the
+ * endpoint to every authenticated caller. The move is what lets a refusal be
+ * answered with the same 404 a missing id produces; see
+ * App\Http\Requests\Concerns\MasksUserExistence. `index` and `store` bind no
+ * user, have nothing to conceal, and still authorise the ordinary way.
+ */
 class UserController extends Controller
 {
     #[OA\Get(
@@ -165,14 +181,12 @@ class UserController extends Controller
         responses: [
             new OA\Response(response: 200, description: 'User details'),
             new OA\Response(response: 401, description: 'Unauthenticated'),
-            new OA\Response(response: 403, description: 'Forbidden'),
-            new OA\Response(response: 404, description: 'Not found'),
+            new OA\Response(response: 403, description: 'Caller account is deactivated'),
+            new OA\Response(response: 404, description: 'Not found. Also returned when the caller lacks permission for this endpoint, so the two are indistinguishable.'),
         ],
     )]
-    public function show(User $user): UserResource
+    public function show(ShowUserRequest $request, User $user): UserResource
     {
-        $this->authorize('users:view');
-
         $user->load('branch', 'roles', 'permissions');
 
         return new UserResource($user);
@@ -206,8 +220,8 @@ class UserController extends Controller
         responses: [
             new OA\Response(response: 200, description: 'User updated'),
             new OA\Response(response: 401, description: 'Unauthenticated'),
-            new OA\Response(response: 403, description: 'Forbidden'),
-            new OA\Response(response: 404, description: 'Not found'),
+            new OA\Response(response: 403, description: 'Caller account is deactivated'),
+            new OA\Response(response: 404, description: 'Not found. Also returned when the caller lacks permission for this endpoint, so the two are indistinguishable.'),
             new OA\Response(response: 422, description: 'Validation error'),
         ],
     )]
@@ -258,14 +272,13 @@ class UserController extends Controller
         responses: [
             new OA\Response(response: 200, description: 'User deactivated'),
             new OA\Response(response: 401, description: 'Unauthenticated'),
-            new OA\Response(response: 403, description: 'Forbidden'),
+            new OA\Response(response: 403, description: 'Caller account is deactivated'),
+            new OA\Response(response: 404, description: 'Not found. Also returned when the caller lacks permission for this endpoint, so the two are indistinguishable.'),
             new OA\Response(response: 422, description: 'Target is a super_admin and the caller is not'),
         ],
     )]
-    public function deactivate(User $user): JsonResponse
+    public function deactivate(DeactivateUserRequest $request, User $user): JsonResponse
     {
-        $this->authorize('users:delete');
-
         // Deactivation revokes the target's tokens on their next request, so a
         // client admin could otherwise lock the platform team out of their own
         // deployment. Same boundary as editing or resetting that account.
@@ -293,13 +306,12 @@ class UserController extends Controller
         responses: [
             new OA\Response(response: 200, description: 'User reactivated'),
             new OA\Response(response: 401, description: 'Unauthenticated'),
-            new OA\Response(response: 403, description: 'Forbidden'),
+            new OA\Response(response: 403, description: 'Caller account is deactivated'),
+            new OA\Response(response: 404, description: 'Not found. Also returned when the caller lacks permission for this endpoint, so the two are indistinguishable.'),
         ],
     )]
-    public function reactivate(User $user): JsonResponse
+    public function reactivate(ReactivateUserRequest $request, User $user): JsonResponse
     {
-        $this->authorize('users:delete');
-
         $user->update(['status' => 'active']);
 
         return response()->json(['message' => 'User reactivated successfully.']);
@@ -352,7 +364,8 @@ class UserController extends Controller
         responses: [
             new OA\Response(response: 200, description: 'Password reset successfully'),
             new OA\Response(response: 401, description: 'Unauthenticated'),
-            new OA\Response(response: 403, description: 'Forbidden'),
+            new OA\Response(response: 403, description: 'Caller account is deactivated'),
+            new OA\Response(response: 404, description: 'Not found. Also returned when the caller lacks permission for this endpoint, so the two are indistinguishable.'),
             new OA\Response(response: 422, description: 'Validation error'),
         ],
     )]
