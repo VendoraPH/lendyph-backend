@@ -17,6 +17,7 @@ use App\Http\Resources\LoanResource;
 use App\Models\Loan;
 use App\Services\AutoPayService;
 use App\Services\LoanAdjustmentService;
+use App\Services\LoanReleaseFeeService;
 use App\Services\LoanService;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder;
@@ -24,6 +25,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 use OpenApi\Attributes as OA;
 
 class LoanController extends Controller
@@ -608,7 +610,7 @@ DESC,
     #[OA\Patch(
         path: '/api/loans/{id}/release',
         summary: 'Release loan',
-        description: 'Release an approved loan — generates loan account number and amortization schedule. Optionally records insurance premium fields collected at release.',
+        description: 'Release an approved loan — generates loan account number and amortization schedule. Applies the fee rules configured in Settings that match this loan\'s product and conditions, ADDING them to any deductions already itemised on the loan. Optionally records insurance premium fields collected at release.',
         tags: ['Loans'],
         security: [['sanctum' => []]],
         parameters: [
@@ -623,21 +625,75 @@ DESC,
                     new OA\Property(property: 'insurance_payment_type', type: 'string', nullable: true, enum: ['full', 'partial']),
                     new OA\Property(property: 'insurance_partial_amount', type: 'number', nullable: true, description: 'Required (>0) when payment_type=partial. Must be null or 0 when payment_type=full.'),
                     new OA\Property(property: 'insurance_remaining_balance', type: 'number', nullable: true, description: '0 when full; premium_amount − partial_amount when partial.'),
+                    new OA\Property(property: 'fee_fingerprint', type: 'string', nullable: true, description: 'The `fee_fingerprint` returned by GET /api/loans/{id}/release-preview. Optional. When sent and the fee configuration has changed since that preview, the release is refused with 409 and nothing is written.'),
                 ],
             ),
         ),
         responses: [
             new OA\Response(response: 200, description: 'Loan released'),
-            new OA\Response(response: 422, description: 'Invalid status transition or insurance validation error'),
+            new OA\Response(response: 409, description: 'The fee configuration changed since the preview this release quoted'),
+            new OA\Response(response: 422, description: 'Invalid status transition, fees exceeding principal, or insurance validation error'),
         ],
     )]
     public function release(ReleaseLoanRequest $request, Loan $loan): JsonResponse
     {
-        $loan = $this->loanService->release($loan, $request->user(), $request->insurancePayload());
+        $loan = $this->loanService->release(
+            $loan,
+            $request->user(),
+            $request->insurancePayload(),
+            $request->feeFingerprint(),
+        );
         $loan->load('borrower', 'loanProduct', 'branch', 'coMakers',
             'approvedByUser', 'releasedByUser', 'amortizationSchedules');
 
         return response()->json(['message' => 'Loan released successfully.', 'data' => new LoanResource($loan)]);
+    }
+
+    #[OA\Get(
+        path: '/api/loans/{id}/release-preview',
+        summary: 'Preview the deductions a release would apply',
+        description: <<<'TXT'
+        Read-only. Returns the itemised deductions this loan would carry after release, the resulting `total_deductions` and `net_proceeds`, and a `fee_fingerprint` over the fee rules the figures were computed from.
+
+        The list is the loan's EXISTING deductions (derived from the loan product's own fee columns when the application was created) plus one item per configured fee in Settings that matches this loan's product and conditions. Fee-sourced items carry an extra `fee_id`; every item keeps the `{name, amount, type, original_value}` shape the release dialog already reads.
+
+        Runs the identical calculation the release itself runs, guard included — a fee schedule that would withhold more than the principal is refused here, in front of the cashier, rather than at the counter.
+
+        Insurance is deliberately not included: it is typed into the release dialog at release time, not configured, so there is nothing to preview.
+
+        Pass the returned `fee_fingerprint` back to `PATCH /api/loans/{id}/release` to be refused with a 409 if the fee configuration changed in between.
+        TXT,
+        tags: ['Loans'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
+        ],
+        responses: [
+            new OA\Response(response: 200, description: 'Projected deductions, totals and fee fingerprint'),
+            new OA\Response(response: 403, description: 'Missing loans:release'),
+            new OA\Response(response: 422, description: 'Loan is not awaiting release, or the fees would exceed the principal'),
+        ],
+    )]
+    public function releasePreview(Loan $loan, LoanReleaseFeeService $fees): JsonResponse
+    {
+        // `loans:release` rather than `loans:view`. The handoff asks for this to
+        // be "authorized for the releasing role", and it is the right call: this
+        // is a disbursement figure, quoted to whoever is about to count money
+        // out, and the roles that can look at a loan are a much wider set than
+        // the roles that can release one.
+        $this->authorize('loans:release');
+
+        // Only from the state a release can actually happen from. A preview run
+        // against an already-released loan would answer with fee rules that
+        // have no bearing on the money that already left the drawer — and,
+        // worse, would look like a second charge about to be made.
+        if (! $loan->is_releasable) {
+            throw ValidationException::withMessages([
+                'status' => ["Loan must be in 'approved' status to preview its release."],
+            ]);
+        }
+
+        return response()->json(['data' => $fees->preview($loan)]);
     }
 
     #[OA\Patch(
