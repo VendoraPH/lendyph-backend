@@ -674,11 +674,11 @@ class LoanService
         return $loan;
     }
 
-    public function release(Loan $loan, User $releaser, array $insurance = []): Loan
+    public function release(Loan $loan, User $releaser, array $insurance = [], ?string $feeFingerprint = null): Loan
     {
         $this->guardStatus($loan, 'approved', 'release');
 
-        return DB::transaction(function () use ($loan, $releaser, $insurance) {
+        return DB::transaction(function () use ($loan, $releaser, $insurance, $feeFingerprint) {
             // THE FIRST STATEMENT IN THIS TRANSACTION, and it has to stay that
             // way. Under REPEATABLE READ the consistent snapshot is fixed by the
             // first plain SELECT, and neither a locking read nor DML moves it —
@@ -718,6 +718,36 @@ class LoanService
                 'released_by' => $releaser->id,
                 'released_at' => now(),
             ]);
+
+            // The fee rules configured in Settings, charged here and nowhere
+            // else. Until this call existed `Fee` was an orphaned model: the
+            // Fees screen wrote rows that nothing in the application ever read,
+            // so a 2% product fee could be configured, saved, and silently
+            // ignored by every release.
+            //
+            // POSITION. Two constraints, one of them load-bearing:
+            //
+            // - BEFORE AutomaticPoster::loanRelease() below, which is not
+            //   negotiable. That rule credits cash with `net_proceeds` and
+            //   asserts `gross === net + deductions`. Charge fees after it and
+            //   the journal says money left the drawer that is still in it —
+            //   and the entry BALANCES, so no report would ever show the
+            //   difference.
+            // - BEFORE applyInsuranceOnRelease(), which is a judgement rather
+            //   than an arithmetic requirement. The two amounts are
+            //   independent, so the order moves neither total. What it decides
+            //   is which guard speaks first when the withholdings overrun the
+            //   principal. Fees come from configuration nobody is looking at;
+            //   the premium is typed into the dialog by the cashier standing
+            //   there. Reporting a fee-schedule problem as "insurance collected
+            //   exceeds the loan net proceeds" would send them to correct the
+            //   one number that is innocent.
+            //
+            // A sibling in this namespace, so no import is needed here —
+            // LoanService.php:716 above is pinned by line number in
+            // CollateralIntegrityGuardsTest's active-status census, and a `use`
+            // statement at the top of this file would move it.
+            app(LoanReleaseFeeService::class)->applyOnRelease($loan, $feeFingerprint);
 
             $this->applyInsuranceOnRelease($loan, $insurance);
 

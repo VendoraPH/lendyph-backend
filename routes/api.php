@@ -194,6 +194,7 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::patch('/loans/{loan}/submit', [LoanController::class, 'submit']);
     Route::patch('/loans/{loan}/approve', [LoanController::class, 'approve']);
     Route::patch('/loans/{loan}/reject', [LoanController::class, 'reject']);
+    Route::get('/loans/{loan}/release-preview', [LoanController::class, 'releasePreview']);
     Route::patch('/loans/{loan}/release', [LoanController::class, 'release']);
     Route::patch('/loans/{loan}/void', [LoanController::class, 'void']);
     Route::post('/loans/{loan}/extend', [LoanController::class, 'extend']);
