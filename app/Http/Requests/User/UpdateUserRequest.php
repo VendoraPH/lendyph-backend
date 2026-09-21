@@ -3,6 +3,7 @@
 namespace App\Http\Requests\User;
 
 use App\Http\Requests\Concerns\MasksUserExistence;
+use App\Http\Requests\Concerns\ResolvesBranchAssignment;
 use App\Models\User;
 use App\Rules\AssignableRole;
 use Illuminate\Foundation\Http\FormRequest;
@@ -17,6 +18,26 @@ class UpdateUserRequest extends FormRequest
      * rationale — and why `abort(404)` will not do — lives on the trait.
      */
     use MasksUserExistence;
+
+    /**
+     * Both `branch_id` and `branch_ids` are accepted; see the trait for which
+     * wins when a body carries both, and for why an UNCHANGED `branch_id` is
+     * read as a repost rather than as "narrow this user to that one branch".
+     */
+    use ResolvesBranchAssignment;
+
+    /**
+     * Rule keys that are not columns on `users`, and so cannot take part in the
+     * `isDirty()` test in {@see self::changesAnyColumn()}.
+     *
+     * `role` lives in Spatie's `model_has_roles`; `branch_ids` in `branch_user`.
+     * `branch_ids.*` is here because it is a KEY of `rules()` too — an array
+     * element rule, never an attribute — and feeding it to `only()` would have
+     * `fill()` interpret the dot as nesting.
+     *
+     * @var list<string>
+     */
+    private const NON_COLUMN_RULES = ['role', 'branch_ids', 'branch_ids.*'];
 
     /**
      * `users:view` as well as `users:update`, and the second one is not
@@ -54,6 +75,16 @@ class UpdateUserRequest extends FormRequest
             'email' => ['sometimes', 'email', 'max:255', Rule::unique('users')->ignore($userId)],
             'mobile_number' => ['nullable', 'string', 'max:20'],
             'branch_id' => ['sometimes', 'exists:branches,id'],
+            /**
+             * `min:1` rather than allowing `[]`. Clearing every branch is not
+             * an edit this endpoint has ever offered — `branch_id` is
+             * `exists:branches,id` with no `nullable`, so it cannot be blanked
+             * either — and a branchless user would render as a missing `branch`
+             * in the old auth store. Unassigning wholesale can be designed
+             * later; it is not a side effect of adding a second branch.
+             */
+            'branch_ids' => ['sometimes', 'array', 'min:1'],
+            'branch_ids.*' => ['integer', 'exists:branches,id'],
             'role' => ['sometimes', 'string', 'exists:roles,name', new AssignableRole($this->user())],
         ];
     }
@@ -119,7 +150,7 @@ class UpdateUserRequest extends FormRequest
                     return;
                 }
 
-                if (! $this->changesAnyColumn($target)) {
+                if (! $this->changesAnyColumn($target) && ! $this->changesBranchAssignment($target)) {
                     $validator->errors()->add(
                         'changes',
                         'Nothing to update. Change at least one field before saving.',
@@ -153,15 +184,57 @@ class UpdateUserRequest extends FormRequest
      * string "3" against an integer 3 is NOT a change). The clone keeps the
      * bound instance the controller re-fills untouched.
      *
-     * Columns come from `rules()` minus `role`, so a field added to the rule
-     * set is covered here without a second list to remember. `role` is excluded
-     * because it lives in a pivot table, not on the row — the caller handles it
-     * separately above.
+     * Columns come from `rules()` minus {@see self::NON_COLUMN_RULES}, so a
+     * field added to the rule set is covered here without a second list to
+     * remember. What that mechanical derivation CANNOT do is notice that a new
+     * rule key is not a column at all, which is the whole reason
+     * `changesBranchAssignment()` exists next to it.
      */
     private function changesAnyColumn(User $target): bool
     {
-        $columns = array_values(array_diff(array_keys($this->rules()), ['role']));
+        $columns = array_values(array_diff(array_keys($this->rules()), self::NON_COLUMN_RULES));
 
         return (clone $target)->fill($this->only($columns))->isDirty();
+    }
+
+    /**
+     * Would this payload actually change which branches the user is in?
+     *
+     * `branch_ids` is a pivot, so it is invisible to everything above: `fill()`
+     * drops it (not in `$fillable`, and not a column to begin with), `isDirty()`
+     * is therefore false, and a payload whose only change is branches — the
+     * single most obvious edit the new multi-branch screen makes — would be
+     * refused 422 "Nothing to update" while writing nothing. That is the same
+     * shape of bug the `role` pivot has, and it is why `role` is answered
+     * separately in `after()` rather than folded into `changesAnyColumn()`.
+     *
+     * The comparison is order- and duplicate-INSENSITIVE, because `sync()` is:
+     * `[1,2]`, `[2,1]` and `[1,1,2]` all leave the user in exactly the same two
+     * branches, so none of them is a change, while `[1]` → `[1,2]` is. Sorting
+     * both sides is what makes "the client dragged the chips into a different
+     * order" stop being an edit, and it is why the legacy column is derived as
+     * "keep the current value if it survives" rather than "first of the array"
+     * — see ResolvesBranchAssignment.
+     *
+     * Reads the CURRENT rows straight from the pivot rather than from a loaded
+     * relation, so a relation cached earlier in the request cannot answer this
+     * with a stale set.
+     */
+    private function changesBranchAssignment(User $target): bool
+    {
+        $incoming = $this->branchAssignment($target);
+
+        if ($incoming === null) {
+            return false;
+        }
+
+        $current = $target->branches()->pluck('branches.id')
+            ->map(static fn (mixed $id): int => (int) $id)
+            ->all();
+
+        sort($incoming);
+        sort($current);
+
+        return $incoming !== $current;
     }
 }

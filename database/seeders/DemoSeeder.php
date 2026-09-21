@@ -49,6 +49,12 @@ class DemoSeeder extends Seeder
         }
 
         // ── Users ──
+        //
+        // `branch_id` is a column, the assignment is `branch_user`, and
+        // firstOrCreate() only ever writes the former. Each user therefore
+        // gets an explicit sync() below — idempotent, so re-running the
+        // seeder over an existing demo database repairs the pivot rather
+        // than duplicating it.
         $officer = User::firstOrCreate(['username' => 'officer'], [
             'first_name' => 'Maria',
             'last_name' => 'Santos',
@@ -58,6 +64,7 @@ class DemoSeeder extends Seeder
             'status' => 'active',
         ]);
         $officer->syncRoles(['loan_officer']);
+        $officer->branches()->sync([$branch->id]);
 
         $cashier = User::firstOrCreate(['username' => 'cashier'], [
             'first_name' => 'Pedro',
@@ -68,6 +75,7 @@ class DemoSeeder extends Seeder
             'status' => 'active',
         ]);
         $cashier->syncRoles(['cashier']);
+        $cashier->branches()->sync([$branch->id]);
 
         $viewer = User::firstOrCreate(['username' => 'viewer'], [
             'first_name' => 'Ana',
@@ -78,6 +86,7 @@ class DemoSeeder extends Seeder
             'status' => 'active',
         ]);
         $viewer->syncRoles(['viewer']);
+        $viewer->branches()->sync([$branch->id]);
 
         // ── Loan Products ──
         $salaryLoan = LoanProduct::firstOrCreate(['name' => 'Salary Loan'], [

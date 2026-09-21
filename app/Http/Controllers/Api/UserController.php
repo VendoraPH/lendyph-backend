@@ -41,7 +41,7 @@ class UserController extends Controller
         parameters: [
             new OA\Parameter(name: 'search', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
             new OA\Parameter(name: 'status', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['active', 'inactive'])),
-            new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, description: 'Matches any user ASSIGNED to this branch, not only those whose first branch it is.', schema: new OA\Schema(type: 'integer')),
             new OA\Parameter(name: 'role', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15)),
         ],
@@ -81,7 +81,7 @@ class UserController extends Controller
         $branchId = $filters['branch_id'] ?? null;
         $role = $filters['role'] ?? null;
 
-        $users = User::with('branch', 'roles')
+        $users = User::with('branch', 'branches', 'roles')
             ->when(filled($search), function ($query) use ($search) {
                 $query->where(function ($q) use ($search) {
                     $q->where('first_name', 'like', "%{$search}%")
@@ -118,13 +118,18 @@ class UserController extends Controller
         summary: 'Create user',
         description: 'Create a new user account. `role` is limited to roles the caller may grant: '
             .'`super_admin` requires the caller to already be a `super_admin`, and no role may carry '
-            .'permissions the caller does not hold themselves.',
+            .'permissions the caller does not hold themselves.'
+            ."\n\n".'Branch assignment accepts EITHER shape: `branch_ids` (an array, one or more '
+            .'branches) or the legacy `branch_id` (a single branch). Send one — a body carrying '
+            .'neither is refused. When both arrive, `branch_ids` wins and `branch_id` is ignored. '
+            .'The response carries both shapes: `branches` is the assignment, and `branch` is its '
+            .'first member.',
         tags: ['Users'],
         security: [['sanctum' => []]],
         requestBody: new OA\RequestBody(
             required: true,
             content: new OA\JsonContent(
-                required: ['first_name', 'last_name', 'username', 'email', 'password', 'password_confirmation', 'branch_id', 'role'],
+                required: ['first_name', 'last_name', 'username', 'email', 'password', 'password_confirmation', 'role'],
                 properties: [
                     new OA\Property(property: 'first_name', type: 'string', example: 'John'),
                     new OA\Property(property: 'last_name', type: 'string', example: 'Doe'),
@@ -133,7 +138,8 @@ class UserController extends Controller
                     new OA\Property(property: 'mobile_number', type: 'string', example: '09171234567'),
                     new OA\Property(property: 'password', type: 'string', example: 'password123'),
                     new OA\Property(property: 'password_confirmation', type: 'string', example: 'password123'),
-                    new OA\Property(property: 'branch_id', type: 'integer', example: 1),
+                    new OA\Property(property: 'branch_id', type: 'integer', nullable: true, example: 1, description: 'Legacy single-branch shape. Required only when `branch_ids` is absent.'),
+                    new OA\Property(property: 'branch_ids', type: 'array', items: new OA\Items(type: 'integer'), example: [1, 2], description: 'Every branch this user is assigned to. Required only when `branch_id` is absent; wins over it when both are sent.'),
                     new OA\Property(property: 'role', type: 'string', example: 'loan_officer'),
                 ],
             ),
@@ -147,8 +153,20 @@ class UserController extends Controller
     )]
     public function store(StoreUserRequest $request): JsonResponse
     {
-        $user = User::create($request->safe()->except('role'));
+        // `branch_ids` is excluded from the fill for the same reason `role` is:
+        // it is a pivot, not a column, so `fill()` would drop it silently. The
+        // one column the branch assignment DOES own is put back explicitly —
+        // `users.branch_id` has to carry a member of the assigned set even when
+        // the client never sent the singular field. See ResolvesBranchAssignment.
+        $branchIds = $request->branchAssignment() ?? [];
+
+        $user = User::create([
+            ...$request->safe()->except('role', 'branch_ids'),
+            'branch_id' => $request->primaryBranchId(),
+        ]);
+
         $user->assignRole($request->role);
+        $user->branches()->sync($branchIds);
 
         // The Auditable trait's `created` row carries the user's columns, and
         // the role is not one of them — it lands in model_has_roles, which is
@@ -161,7 +179,21 @@ class UserController extends Controller
             description: "User {$user->username} created with role {$request->role}",
         );
 
-        $user->load('branch', 'roles');
+        // Same gap, same fix, for the other pivot: `created` records
+        // `branch_id` and nothing else, so an account opened across three
+        // branches would be recorded as having been opened in one.
+        AuditLogService::log(
+            action: 'branches_assigned',
+            auditable: $user,
+            newValues: ['branch_ids' => $branchIds],
+            description: sprintf(
+                'User %s created with %d branch assignment(s)',
+                $user->username,
+                count($branchIds),
+            ),
+        );
+
+        $user->load('branch', 'branches', 'roles');
 
         return (new UserResource($user))
             ->response()
@@ -186,7 +218,7 @@ class UserController extends Controller
     )]
     public function show(ShowUserRequest $request, User $user): UserResource
     {
-        $user->load('branch', 'roles', 'permissions');
+        $user->load('branch', 'branches', 'roles', 'permissions');
 
         return new UserResource($user);
     }
@@ -196,7 +228,13 @@ class UserController extends Controller
         summary: 'Update user',
         description: 'Update an existing user. Same `role` restrictions as user creation, plus: you may '
             .'not change the role on your own record, and only a `super_admin` may change the role of a '
-            .'`super_admin`. Non-role fields on your own record are still editable.',
+            .'`super_admin`. Non-role fields on your own record are still editable.'
+            ."\n\n".'Branch assignment accepts both shapes. `branch_ids` replaces the whole assignment '
+            .'and wins over `branch_id` when both are sent. A `branch_id` whose value DIFFERS from the '
+            .'stored one reassigns the user to that single branch; one that repeats the stored value is '
+            .'treated as a repost from a screen that cannot render more than one branch, and leaves the '
+            .'assignment untouched. Reordering the same set of ids is not a change and is refused with '
+            .'the same 422 as an empty payload.',
         tags: ['Users'],
         security: [['sanctum' => []]],
         parameters: [
@@ -211,7 +249,8 @@ class UserController extends Controller
                     new OA\Property(property: 'username', type: 'string'),
                     new OA\Property(property: 'email', type: 'string'),
                     new OA\Property(property: 'mobile_number', type: 'string'),
-                    new OA\Property(property: 'branch_id', type: 'integer'),
+                    new OA\Property(property: 'branch_id', type: 'integer', description: 'Legacy single-branch shape.'),
+                    new OA\Property(property: 'branch_ids', type: 'array', items: new OA\Items(type: 'integer'), description: 'Replaces the whole branch assignment. At least one id.'),
                     new OA\Property(property: 'role', type: 'string'),
                 ],
             ),
@@ -229,7 +268,46 @@ class UserController extends Controller
     {
         $previousRole = $user->getRoleNames()->first();
 
-        $user->update($request->safe()->except('role'));
+        // Resolved BEFORE the fill. `branchAssignment()` compares the incoming
+        // singular `branch_id` against the STORED one to tell a reassignment
+        // from a repost, and `update()` below overwrites that stored value —
+        // asking afterwards would always answer "unchanged".
+        //
+        // null means the payload said nothing about branches, which is not the
+        // same as saying "no branches": the assignment is then left alone.
+        $branchIds = $request->branchAssignment($user);
+        $previousBranchIds = $branchIds === null ? [] : $this->assignedBranchIds($user);
+
+        $user->update([
+            ...$request->safe()->except('role', 'branch_ids'),
+            ...$branchIds === null ? [] : ['branch_id' => $request->primaryBranchId($user)],
+        ]);
+
+        if ($branchIds !== null) {
+            $user->branches()->sync($branchIds);
+
+            // A branch-only edit leaves the users row non-dirty whenever the
+            // primary survives the change — adding a second branch is the
+            // ordinary case — so the Auditable trait never fires and the
+            // assignment would move with nothing recording it. Exactly the trap
+            // documented for `role` below, on the newer pivot.
+            $newBranchIds = $this->assignedBranchIds($user);
+
+            if ($newBranchIds !== $previousBranchIds) {
+                AuditLogService::log(
+                    action: 'branches_changed',
+                    auditable: $user,
+                    oldValues: ['branch_ids' => $previousBranchIds],
+                    newValues: ['branch_ids' => $newBranchIds],
+                    description: sprintf(
+                        'Branch assignment for %s changed from [%s] to [%s]',
+                        $user->username,
+                        implode(', ', $previousBranchIds),
+                        implode(', ', $newBranchIds),
+                    ),
+                );
+            }
+        }
 
         if ($request->has('role')) {
             $user->syncRoles([$request->role]);
@@ -255,9 +333,30 @@ class UserController extends Controller
             }
         }
 
-        $user->load('branch', 'roles');
+        $user->load('branch', 'branches', 'roles');
 
         return new UserResource($user);
+    }
+
+    /**
+     * The user's branch ids, sorted, straight from the pivot.
+     *
+     * Sorted so the before/after pair in the audit entry compares as sets — the
+     * order rows come back in is not part of the assignment, and a difference
+     * in it must not read as a change. Queried rather than taken off a loaded
+     * relation so the "after" side cannot be answered by a relation cached
+     * before the sync.
+     *
+     * @return list<int>
+     */
+    private function assignedBranchIds(User $user): array
+    {
+        return $user->branches()
+            ->pluck('branches.id')
+            ->map(static fn (mixed $id): int => (int) $id)
+            ->sort()
+            ->values()
+            ->all();
     }
 
     #[OA\Patch(
