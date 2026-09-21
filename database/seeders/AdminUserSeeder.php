@@ -20,5 +20,12 @@ class AdminUserSeeder extends Seeder
         ]);
 
         $admin->assignRole('super_admin');
+
+        // `branch_id` is a column; the assignment lives in `branch_user`. Setting
+        // only the column leaves the seeded super admin out of every branch —
+        // which would then be the baseline ~90 test classes inherit through
+        // SetupLendyPH, so the account the whole suite acts as would be the one
+        // account with no branches.
+        $admin->branches()->sync([1]);
     }
 }

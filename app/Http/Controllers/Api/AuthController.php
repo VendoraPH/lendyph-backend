@@ -92,7 +92,7 @@ class AuthController extends Controller
 
         AuditLogService::log('login', $user, description: "User {$user->username} logged in");
 
-        $user->load('branch', 'roles', 'permissions');
+        $user->load('branch', 'branches', 'roles', 'permissions');
 
         return response()->json([
             'token' => $token->plainTextToken,
@@ -174,7 +174,7 @@ class AuthController extends Controller
     public function me(): UserResource
     {
         $user = auth()->user();
-        $user->load('branch', 'roles', 'permissions');
+        $user->load('branch', 'branches', 'roles', 'permissions');
 
         return new UserResource($user);
     }
@@ -208,7 +208,7 @@ class AuthController extends Controller
 
         AuditLogService::log('profile_updated', $user, description: "User {$user->username} updated their profile");
 
-        $user->load('branch', 'roles', 'permissions');
+        $user->load('branch', 'branches', 'roles', 'permissions');
 
         return new UserResource($user);
     }
