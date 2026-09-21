@@ -8,6 +8,7 @@ use Illuminate\Database\Eloquent\Attributes\Hidden;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 use Laravel\Sanctum\HasApiTokens;
@@ -101,9 +102,39 @@ class User extends Authenticatable
         return Attribute::get(fn () => "{$this->first_name} {$this->last_name}");
     }
 
+    /**
+     * The FIRST of this user's branches, kept for one release.
+     *
+     * `branches()` below is the real assignment now; this is the singular shape
+     * the API still has to emit, and `users.branch_id` is still a real column
+     * holding a real id — see ResolvesBranchAssignment for which of the set ends
+     * up in it. Already-signed-in frontend sessions rehydrate a `{branch: {...}}`
+     * auth store out of localStorage with no version or migration step, so this
+     * relation is what stops them crashing the moment this deploys. It goes when
+     * the column goes, in a later release.
+     */
     public function branch(): BelongsTo
     {
         return $this->belongsTo(Branch::class);
+    }
+
+    /**
+     * Every branch this user is assigned to. The source of truth.
+     *
+     * Always a superset of `branch()` — `users.branch_id` is maintained as one
+     * member of this set, never as something outside it.
+     *
+     * Assignment is DISPLAY-ONLY. Nothing reads it to decide what a user may
+     * see or do, there are no policies and no global scopes, and that is a
+     * deliberate property rather than an oversight:
+     * tests/Feature/BranchAssignmentIsDisplayOnlyTest.php fails loudly if
+     * anyone starts scoping on it without designing that first.
+     *
+     * @return BelongsToMany<Branch, $this>
+     */
+    public function branches(): BelongsToMany
+    {
+        return $this->belongsToMany(Branch::class, 'branch_user');
     }
 
     public function scopeActive($query)
@@ -111,9 +142,25 @@ class User extends Authenticatable
         return $query->where('status', 'active');
     }
 
+    /**
+     * Users assigned to $branchId, through the pivot rather than the column.
+     *
+     * This is the `?branch_id=` filter on `GET /api/users` (the list and its
+     * `meta.stats`, which must agree). Filtering on `users.branch_id` would now
+     * answer "users whose FIRST branch is this one", which silently hides every
+     * user assigned here as anything but their first — the exact users this
+     * feature exists to create.
+     *
+     * Deliberately NOT `where('branch_id', $branchId)->orWhereHas(...)`. The
+     * column is always one of the pivot's rows, so the union would return the
+     * same set for every user this application can produce, and would differ
+     * only for a row that has a column but no pivot row — which is precisely
+     * the branchless-user bug the factory and seeder fixes exist to prevent.
+     * Papering over it here would hide it.
+     */
     public function scopeForBranch($query, int $branchId)
     {
-        return $query->where('branch_id', $branchId);
+        return $query->whereHas('branches', fn ($q) => $q->where('branches.id', $branchId));
     }
 
     /**
