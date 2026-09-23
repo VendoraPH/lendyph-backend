@@ -180,6 +180,16 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::put('/co-makers/{coMaker}', [CoMakerController::class, 'update']);
     Route::delete('/co-makers/{coMaker}', [CoMakerController::class, 'destroy']);
 
+    // Co-maker valid IDs — the borrower valid-ID contract on a second owner
+    // (App\Services\ValidIdService). Unlike the borrower upload, all three sit
+    // INSIDE this group: co-makers are added by staff, so there is no
+    // public-registration path and no submission token is accepted.
+    // `whereNumber` makes a non-numeric id a 404 rather than a TypeError 500
+    // from the `int $validIdId` parameter.
+    Route::post('/co-makers/{coMaker}/valid-ids', [CoMakerController::class, 'uploadValidId']);
+    Route::get('/co-makers/{coMaker}/valid-ids', [CoMakerController::class, 'listValidIds']);
+    Route::delete('/co-makers/{coMaker}/valid-ids/{validIdId}', [CoMakerController::class, 'deleteValidId'])->whereNumber('validIdId');
+
     // Documents
     Route::get('/borrowers/{borrower}/documents', [DocumentController::class, 'index']);
     Route::post('/borrowers/{borrower}/documents', [DocumentController::class, 'store']);
