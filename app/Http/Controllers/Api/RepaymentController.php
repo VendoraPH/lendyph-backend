@@ -33,7 +33,38 @@ class RepaymentController extends Controller
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15)),
         ],
         responses: [
-            new OA\Response(response: 200, description: 'Paginated global repayment list'),
+            new OA\Response(
+                response: 200,
+                description: 'Paginated global repayment list, newest payment date first. Every row is the full `Repayment`, allocation breakdown included — the same object GET /api/repayments/{repayment} returns — so rows never need fetching one by one. `per_page` is clamped at 100.',
+                content: new OA\JsonContent(properties: [
+                    new OA\Property(property: 'data', type: 'array', items: new OA\Items(ref: '#/components/schemas/Repayment')),
+                    new OA\Property(property: 'links', type: 'object', properties: [
+                        new OA\Property(property: 'first', type: 'string', nullable: true),
+                        new OA\Property(property: 'last', type: 'string', nullable: true),
+                        new OA\Property(property: 'prev', type: 'string', nullable: true),
+                        new OA\Property(property: 'next', type: 'string', nullable: true),
+                    ]),
+                    new OA\Property(property: 'meta', type: 'object', properties: [
+                        new OA\Property(property: 'current_page', type: 'integer'),
+                        new OA\Property(property: 'from', type: 'integer', nullable: true),
+                        new OA\Property(property: 'last_page', type: 'integer'),
+                        new OA\Property(property: 'links', type: 'array', items: new OA\Items(properties: [
+                            new OA\Property(property: 'url', type: 'string', nullable: true),
+                            new OA\Property(property: 'label', type: 'string'),
+                            new OA\Property(property: 'page', type: 'integer', nullable: true),
+                            new OA\Property(property: 'active', type: 'boolean'),
+                        ])),
+                        new OA\Property(property: 'path', type: 'string'),
+                        new OA\Property(property: 'per_page', type: 'integer'),
+                        new OA\Property(property: 'to', type: 'integer', nullable: true),
+                        new OA\Property(property: 'total', type: 'integer'),
+                        new OA\Property(property: 'stats', type: 'object', description: 'Counts per status, narrowed by `borrower_id` only', properties: [
+                            new OA\Property(property: 'posted', type: 'integer'),
+                            new OA\Property(property: 'voided', type: 'integer'),
+                        ]),
+                    ]),
+                ]),
+            ),
             new OA\Response(response: 401, description: 'Unauthenticated'),
         ],
     )]
@@ -127,7 +158,34 @@ class RepaymentController extends Controller
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15)),
         ],
         responses: [
-            new OA\Response(response: 200, description: 'Paginated repayment list'),
+            new OA\Response(
+                response: 200,
+                description: "Paginated list of the loan's repayments, OLDEST payment date first. Every row is the full `Repayment`, allocation breakdown included — the same object GET /api/repayments/{repayment} returns — so rows never need fetching one by one. `per_page` defaults to 15 and is clamped at 100; follow `meta.last_page` to read them all.",
+                content: new OA\JsonContent(properties: [
+                    new OA\Property(property: 'data', type: 'array', items: new OA\Items(ref: '#/components/schemas/Repayment')),
+                    new OA\Property(property: 'links', type: 'object', properties: [
+                        new OA\Property(property: 'first', type: 'string', nullable: true),
+                        new OA\Property(property: 'last', type: 'string', nullable: true),
+                        new OA\Property(property: 'prev', type: 'string', nullable: true),
+                        new OA\Property(property: 'next', type: 'string', nullable: true),
+                    ]),
+                    new OA\Property(property: 'meta', type: 'object', properties: [
+                        new OA\Property(property: 'current_page', type: 'integer'),
+                        new OA\Property(property: 'from', type: 'integer', nullable: true),
+                        new OA\Property(property: 'last_page', type: 'integer'),
+                        new OA\Property(property: 'links', type: 'array', items: new OA\Items(properties: [
+                            new OA\Property(property: 'url', type: 'string', nullable: true),
+                            new OA\Property(property: 'label', type: 'string'),
+                            new OA\Property(property: 'page', type: 'integer', nullable: true),
+                            new OA\Property(property: 'active', type: 'boolean'),
+                        ])),
+                        new OA\Property(property: 'path', type: 'string'),
+                        new OA\Property(property: 'per_page', type: 'integer'),
+                        new OA\Property(property: 'to', type: 'integer', nullable: true),
+                        new OA\Property(property: 'total', type: 'integer'),
+                    ]),
+                ]),
+            ),
             new OA\Response(response: 401, description: 'Unauthenticated'),
             new OA\Response(response: 404, description: 'Loan not found'),
         ],
@@ -201,7 +259,13 @@ class RepaymentController extends Controller
             new OA\Parameter(name: 'repayment', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
         ],
         responses: [
-            new OA\Response(response: 200, description: 'Repayment details'),
+            new OA\Response(
+                response: 200,
+                description: 'Repayment details — the same object each row of the repayment lists carries.',
+                content: new OA\JsonContent(properties: [
+                    new OA\Property(property: 'data', ref: '#/components/schemas/Repayment'),
+                ]),
+            ),
             new OA\Response(response: 404, description: 'Not found'),
         ],
     )]
