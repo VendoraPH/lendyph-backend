@@ -10,11 +10,16 @@ use Illuminate\Contracts\Validation\ValidationRule;
 /**
  * Accepts a `co_maker_ids` entry that is either a co-maker id or a borrower id.
  *
- * Both are legitimate: `LoanService::createLoan()` resolves the id as a CoMaker
- * first and otherwise treats it as a Borrower, creating a co-maker record from
- * that person. The co-maker pickers on the loan and restructure forms are
- * populated from borrowers and send borrower ids, so a co-makers-only rule would
- * reject every id a working form produces.
+ * RESTRUCTURE ONLY, since POST /loans stopped reading co-maker record ids. The
+ * restructure form sends both kinds in one array — it pre-fills the source
+ * loan's `co_makers[].id` and its picker adds member ids — and
+ * `LoanService::coMakerIdsForRestructure()` reads each as a co-maker first and
+ * a borrower second. That is ambiguous by construction: the two are separate
+ * sequences, so a member whose id equals some co-maker record's number passes
+ * here as that record and is linked as it — which also walks a rejected member
+ * past the check below. Settling what this field carries is a contract
+ * decision; until then this rule keeps the restructure form working.
+ * StoreLoanRequest takes non-rejected member ids only.
  *
  * What this does close: without it the field was a bare `integer`, so arbitrary
  * unvalidated ids reached that lookup — probing rows and binding whoever came
