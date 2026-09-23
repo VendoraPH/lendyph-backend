@@ -79,6 +79,10 @@ class BorrowerPurgeService
                     $paths[] = $document->file_path;
                 }
                 $coMaker->documents()->delete();
+
+                // A co-maker's valid IDs land in their own directory, which
+                // the cascade on `co_makers` would otherwise leave behind.
+                $directories[] = ValidIdService::directoryFor($coMaker);
             }
 
             foreach ($borrower->documents as $document) {
@@ -94,7 +98,7 @@ class BorrowerPurgeService
             // documents/valid_id/borrower/{id}/ and borrowers/photos/{id}/, and
             // deleting only the files leaves an empty tree behind that grows by
             // one directory per abandoned application.
-            $directories[] = "documents/valid_id/borrower/{$borrower->id}";
+            $directories[] = ValidIdService::directoryFor($borrower);
             $directories[] = "borrowers/photos/{$borrower->id}";
 
             /*
