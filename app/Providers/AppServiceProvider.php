@@ -381,6 +381,29 @@ class AppServiceProvider extends ServiceProvider
              * the token is already resolved — while SubstituteBindings, the
              * FormRequest and the 404 that actually refuses the probe are all
              * still several layers away.
+             *
+             * WHAT THIS BRANCH CANNOT SEE, deliberately: a caller with no token
+             * at all. The same ordering that makes `$request->user()` readable
+             * puts Authenticate strictly in FRONT of this closure, so a
+             * tokenless request 401s and never reaches any limiter. Resolved
+             * stack for `users.deactivate` today, in order: SecurityHeaders,
+             * EnsureFrontendRequestsAreStateful, `auth:sanctum`,
+             * `throttle:api`, the three gates, SubstituteBindings — Authenticate
+             * at index 2, ThrottleRequests at index 3, which follows from
+             * AuthenticatesRequests preceding ThrottleRequests in the priority
+             * list (indices 6 and 9 after bootstrap/app.php's prepends) and
+             * Authenticate implementing that contract.
+             *
+             * Not worth closing, and the obvious fix is forbidden anyway.
+             * Reordering is out: bootstrap/app.php explains that six named
+             * limiters branch on `$request->user()` and all of them break if
+             * the meter moves ahead of auth. And the value would be near zero
+             * even if it were free — an anonymous probe gets the same 401 for
+             * EVERY id, live or missing, so there is no answer to differentiate
+             * and nothing for a bucket to deny. It would cap request volume,
+             * which the shared 60/min and the login limiters already do, not
+             * information. This branch exists for the case where information
+             * IS on offer: a real token whose holder cannot use these routes.
              */
             if ($request->routeIs('users.*') && ! $request->user()?->canAny(self::USER_MANAGEMENT_PERMISSIONS)) {
                 return Limit::perMinute(self::USER_ROUTES_DENIED_PER_MINUTE)->by('users:api:denied:'.$key);

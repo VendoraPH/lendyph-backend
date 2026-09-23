@@ -374,13 +374,17 @@ class UserController extends Controller
             new OA\Response(response: 403, description: 'Caller account is deactivated'),
             new OA\Response(response: 404, description: 'Not found. Also returned when the caller lacks permission for this endpoint, and when the '
                 .'target is a `super_admin` the caller may not manage, so all three are indistinguishable.'),
+            new OA\Response(response: 422, description: 'The account is already inactive, so there is nothing to deactivate'),
         ],
     )]
     public function deactivate(DeactivateUserRequest $request, User $user): JsonResponse
     {
         // The super_admin guard that used to sit here moved into
         // DeactivateUserRequest::after(), which answers it as a 404 rather than
-        // a 422 that names the platform account. See that class.
+        // a 422 that names the platform account. That class also refuses an
+        // already-inactive target, so everything below runs on a real
+        // transition — including the sweep, whose deliberate absence from the
+        // refusal path is argued there.
         $user->update(['status' => 'inactive']);
         $user->tokens()->delete();
 
