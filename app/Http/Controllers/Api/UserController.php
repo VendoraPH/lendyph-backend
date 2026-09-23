@@ -94,6 +94,10 @@ class UserController extends Controller
             ->when(filled($branchId), fn ($query) => $query->forBranch($branchId))
             ->when(filled($role), fn ($query) => $query->role($role))
             ->latest()
+            // Tiebreak on the key: users created in the same second tie on
+            // `created_at`, and a partial order lets a drained list serve one
+            // twice and another never. See DeterministicPaginationTest.
+            ->orderByDesc('id')
             ->paginate(min(max((int) ($filters['per_page'] ?? 15), 1), 100));
 
         // Status count aggregation so the frontend can render status tabs without

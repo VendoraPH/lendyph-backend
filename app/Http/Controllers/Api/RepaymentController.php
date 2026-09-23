@@ -93,6 +93,11 @@ class RepaymentController extends Controller
             ->when(filled($dateTo), fn ($q) => $q->whereDate('payment_date', '<=', $dateTo));
 
         $repayments = $query->latest('payment_date')
+            // `payment_date` is a DATE, so every receipt taken on one day ties.
+            // The key makes the order total, so the drained payment history
+            // cannot serve a receipt twice or skip one. See
+            // DeterministicPaginationTest.
+            ->orderByDesc('id')
             ->paginate(min(max((int) ($filters['per_page'] ?? 15), 1), 100));
 
         // Attach status count aggregation to the meta envelope so the frontend can
@@ -134,6 +139,11 @@ class RepaymentController extends Controller
         $repayments = $loan->repayments()
             ->with('receivedByUser', 'voidedByUser', 'loan.borrower', 'loan.loanProduct', 'loan.amortizationSchedules')
             ->latest('payment_date')
+            // ASCENDING, whatever the latest() above suggests. Loan::repayments()
+            // already orders by `payment_date`, and that clause comes first, so
+            // this list is oldest-first and latest() changes nothing. The
+            // tiebreaker follows the order the list actually has.
+            ->orderBy('id')
             ->paginate(min((int) request('per_page', 15), 100));
 
         return RepaymentResource::collection($repayments);
