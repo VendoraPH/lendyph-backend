@@ -33,11 +33,12 @@ class RestructureLoanRequest extends FormRequest
         return [
             'borrower_id' => ['required', $this->nonRejectedBorrowerRule()],
             'co_maker_ids' => ['nullable', 'array'],
-            // Must exist as a co-maker OR a non-rejected borrower — both are
-            // valid inputs to createLoan(), and the co-maker picker sends
-            // borrower ids. StoreLoanRequest now carries the identical rule;
-            // it used to be a bare `integer`, which let arbitrary unvalidated
-            // ids reach that lookup.
+            // Must exist as a co-maker OR a non-rejected borrower: the
+            // restructure form sends both in this one array — the source loan's
+            // co-maker record ids, pre-filled, plus member ids from its picker.
+            // POST /loans takes member ids only; see ExistingCoMakerOrBorrower
+            // and LoanService::coMakerIdsForRestructure() for why this one does
+            // not, yet.
             'co_maker_ids.*' => ['integer', new ExistingCoMakerOrBorrower],
             'loan_product_id' => ['required', 'exists:loan_products,id'],
             'principal_amount' => ['required', 'numeric', 'min:1'],

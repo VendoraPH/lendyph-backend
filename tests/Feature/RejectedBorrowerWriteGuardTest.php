@@ -193,8 +193,9 @@ function seedGCashTiersForGuardTest(): void
 //
 // A co-maker is jointly liable for the loan, so gating the principal
 // `borrower_id` and leaving `co_maker_ids` open just moves the hole one field
-// to the right. LoanService::createLoan() resolves each id as a CoMaker first
-// and otherwise as a Borrower, creating a co-maker record from that person.
+// to the right. POST /loans reads each id as a member and finds or creates that
+// person's co-maker record; restructure still reads an id as a co-maker record
+// first and a member second. See LoanCoMakerMemberIdsTest.
 
 it('refuses a rejected borrower as a loan co-maker', function () {
     $borrower = borrowerInStatus($this->branch->id, 'active');
