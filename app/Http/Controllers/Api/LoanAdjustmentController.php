@@ -36,6 +36,9 @@ class LoanAdjustmentController extends Controller
         $adjustments = $loan->adjustments()
             ->with('adjustedByUser', 'approvedByUser')
             ->latest()
+            // Tiebreak on the key so adjustments sharing a `created_at` keep
+            // one order across pages. See DeterministicPaginationTest.
+            ->orderByDesc('id')
             ->paginate(min((int) request('per_page', 15), 100));
 
         return LoanAdjustmentResource::collection($adjustments);
