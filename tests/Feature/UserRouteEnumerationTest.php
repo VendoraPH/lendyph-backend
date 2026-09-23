@@ -30,7 +30,9 @@ use App\Http\Middleware\RequirePasswordChange;
 use App\Models\User;
 use Illuminate\Routing\Middleware\SubstituteBindings;
 use Illuminate\Routing\Middleware\ThrottleRequests;
+use Illuminate\Routing\Route;
 use Illuminate\Testing\TestResponse;
+use PHPUnit\Framework\ExpectationFailedException;
 use Spatie\Permission\Models\Role;
 use Tests\TestCase;
 
@@ -254,6 +256,125 @@ it('answers a locked caller identically whether or not the id exists', function 
 })->with('user routes');
 
 /**
+ * Every index in a gathered stack that holds a throttle entry.
+ *
+ * The plural is the whole point. bootstrap/app.php prepends `throttle:api` to
+ * the api group, so EVERY api route carries one — and seventeen of the swept
+ * routes carry a second or a third on top of it (`throttle:public-registration`,
+ * `throttle:registration-uploads`, `throttle:exports`, and everything under
+ * `imports.*`, three of which stack all three). The assertion that uses this
+ * used to locate "the" throttle with Collection::search(), which returns the
+ * FIRST match, so on every one of those routes a gate that had slipped past the
+ * SECOND entry still counted as being behind the throttle. It was checking the
+ * wrong entry, not a missing one.
+ *
+ * @param  list<string>  $stack
+ * @return list<int>
+ */
+function throttleIndexesIn(array $stack): array
+{
+    $indexes = [];
+
+    foreach ($stack as $index => $middleware) {
+        if (str_starts_with($middleware, ThrottleRequests::class.':')) {
+            $indexes[] = $index;
+        }
+    }
+
+    return $indexes;
+}
+
+/**
+ * The ordering invariant, stated over ONE gathered stack.
+ *
+ * Lifted out of the sweep below so it can be pointed at a stack the router will
+ * never build. A sweep over real routes can only ever show that today's routes
+ * are fine; it cannot show that the assertions would NOTICE one that was not,
+ * and both holes closed here were holes of exactly that kind — green every run,
+ * for the same reason. SortedMiddleware will not produce a broken stack on
+ * demand, so the only way to test the test is to hand it one. The harness under
+ * the sweep does that, and this signature is what makes it possible.
+ *
+ * @param  list<string>  $stack  a gathered, sorted stack as gatherRouteMiddleware() returns it
+ * @param  string  $label  route identifier, for the failure message
+ * @return bool whether the route was swept; false means it carries no gate at all
+ */
+function assertPostAuthGateOrder(array $stack, string $label): bool
+{
+    // Declaration order at routes/api.php:127, which must survive the sort:
+    // "session expired" (401) and "account deactivated" (403) both outrank
+    // "you owe us a new password", and a deactivated user must be turned away
+    // rather than sent to a change-password screen that would let them back in.
+    $gates = [CheckTokenExpiry::class, EnsureUserIsActive::class, RequirePasswordChange::class];
+
+    // The gates this route ACTUALLY carries, in declaration order.
+    //
+    // This used to require all three and skip the route otherwise, so a route
+    // that declared only one of them was not swept and nothing said so — a lone
+    // RequirePasswordChange behind SubstituteBindings is the same user-existence
+    // oracle on that one route. Nothing has a partial set today: all 215 gated
+    // routes carry all three, because every declaration in routes/api.php names
+    // them together. This is a guard against the next one-line route, not a live
+    // defect. Only a route with NO gate at all is skipped now.
+    $gateIndexes = [];
+
+    foreach ($gates as $gate) {
+        $at = array_search($gate, $stack, true);
+
+        if ($at !== false) {
+            $gateIndexes[] = $at;
+        }
+    }
+
+    if ($gateIndexes === []) {
+        return false;
+    }
+
+    $effective = 'effective order: '.implode(' -> ', $stack);
+
+    // Conditional because a gated route need not bind anything. It is still
+    // swept for the two assertions below — which is strictly more than the old
+    // loop did, since it skipped such a route outright.
+    $bindingAt = array_search(SubstituteBindings::class, $stack, true);
+
+    if ($bindingAt !== false) {
+        expect(max($gateIndexes))->toBeLessThan(
+            $bindingAt,
+            "{$label}: every post-auth gate on this route must sort ahead of ".
+            'SubstituteBindings, or a missing id 404s before they run while a live '.
+            "id reaches them — which is a user-existence oracle. {$effective}",
+        );
+    }
+
+    expect($gateIndexes)->toBe(
+        collect($gateIndexes)->sort()->values()->all(),
+        "{$label}: the gates must keep their declared relative order, ".
+        "RequirePasswordChange last. {$effective}",
+    );
+
+    // The other half of the placement. The gates were put between the throttle
+    // entries and SubstituteBindings, not in front of the meter: six named
+    // limiters in AppServiceProvider branch on whether $request->user() is
+    // populated, and moving a gate above `throttle:*` would change which bucket
+    // an authenticated caller is metered on.
+    //
+    // Against the LAST throttle entry, not the first: on a route carrying two or
+    // three of them, being behind `throttle:api` says nothing whatsoever about
+    // being behind `throttle:imports`.
+    $throttleIndexes = throttleIndexesIn($stack);
+
+    if ($throttleIndexes !== []) {
+        expect(min($gateIndexes))->toBeGreaterThan(
+            max($throttleIndexes),
+            "{$label}: the gates must stay BEHIND every throttle entry — the limiters ".
+            "in AppServiceProvider depend on the identity resolved before them. {$effective}",
+        );
+    }
+
+    return true;
+}
+
+/**
  * The ordering invariant itself, read off the stack the framework actually
  * builds.
  *
@@ -271,57 +392,22 @@ it('answers a locked caller identically whether or not the id exists', function 
 it('runs the post-auth gates before route-model binding on every route that has them', function () {
     $router = app('router');
 
-    // Declaration order at routes/api.php:127, which must survive the sort:
-    // "session expired" (401) and "account deactivated" (403) both outrank
-    // "you owe us a new password", and a deactivated user must be turned away
-    // rather than sent to a change-password screen that would let them back in.
-    $gates = [CheckTokenExpiry::class, EnsureUserIsActive::class, RequirePasswordChange::class];
-
     $swept = 0;
+    $sweptCarryingSeveralThrottles = 0;
 
     foreach ($router->getRoutes() as $route) {
         $stack = array_values(array_filter($router->gatherRouteMiddleware($route), 'is_string'));
 
-        $gateIndexes = array_map(fn (string $gate) => array_search($gate, $stack, true), $gates);
-        $bindingAt = array_search(SubstituteBindings::class, $stack, true);
+        $label = implode('|', $route->methods()).' /'.$route->uri();
 
-        if (in_array(false, $gateIndexes, true) || $bindingAt === false) {
+        if (! assertPostAuthGateOrder($stack, $label)) {
             continue;
         }
 
         $swept++;
 
-        $label = implode('|', $route->methods()).' /'.$route->uri();
-        $effective = 'effective order: '.implode(' -> ', $stack);
-
-        expect(max($gateIndexes))->toBeLessThan(
-            $bindingAt,
-            "{$label}: all three post-auth gates must sort ahead of SubstituteBindings, ".
-            'or a missing id 404s before they run while a live id reaches them — '.
-            "which is a user-existence oracle. {$effective}",
-        );
-
-        expect($gateIndexes)->toBe(
-            collect($gateIndexes)->sort()->values()->all(),
-            "{$label}: the three gates must keep their declared relative order, ".
-            "RequirePasswordChange last. {$effective}",
-        );
-
-        // The other half of the placement. The gates were put between the
-        // throttle entries and SubstituteBindings, not in front of the meter:
-        // six named limiters in AppServiceProvider branch on whether
-        // $request->user() is populated, and moving a gate above `throttle:*`
-        // would change which bucket an authenticated caller is metered on.
-        $throttleAt = collect($stack)->search(
-            fn (string $m) => str_starts_with($m, ThrottleRequests::class.':'),
-        );
-
-        if ($throttleAt !== false) {
-            expect(min($gateIndexes))->toBeGreaterThan(
-                $throttleAt,
-                "{$label}: the gates must stay BEHIND the throttle — the limiters in ".
-                "AppServiceProvider depend on the identity resolved before them. {$effective}",
-            );
+        if (count(throttleIndexesIn($stack)) > 1) {
+            $sweptCarryingSeveralThrottles++;
         }
     }
 
@@ -331,6 +417,282 @@ it('runs the post-auth gates before route-model binding on every route that has 
         'expected the gated routes to be swept; found '.$swept.'. If the auth '.
         'group was restructured this number moves, but zero means this spec '.
         'stopped testing anything.',
+    );
+
+    // The throttle assertion is only capable of catching anything new on a route
+    // carrying more than one throttle entry, which is the shape it used to be
+    // blind on. Seventeen swept routes are shaped like that today. This is not
+    // the coverage for that fix — the synthetic case below is, and no routing
+    // change can take it away — it records that the live fleet still exercises
+    // the shape. If a legitimate routing change takes this to zero, relax THIS
+    // guard; do not touch that spec.
+    expect($sweptCarryingSeveralThrottles)->toBeGreaterThan(
+        0,
+        'no swept route carries more than one throttle entry any more, so the '.
+        'sweep no longer distinguishes the first throttle from the last.',
+    );
+});
+
+/**
+ * ---------------------------------------------------------------------------
+ * The harness: specs that test the assertion instead of the routes.
+ * ---------------------------------------------------------------------------
+ *
+ * The sweep above was green on every run while carrying two defects, and it was
+ * green for a reason that has nothing to do with luck: every route it looks at
+ * is correctly ordered, so nothing it asserts is ever exercised in the negative.
+ * A passing sweep says "the routes are fine". It does not say "and I would have
+ * told you otherwise".
+ *
+ * These four specs say the second thing. Each hands assertPostAuthGateOrder() a
+ * stack with exactly one deliberate defect and requires it to object, on the
+ * right assertion. The stacks are REAL gathered stacks with a single middleware
+ * moved or dropped — not hand-written arrays — so they stay honest if the
+ * middleware on those routes change, and each mutation is chosen so that only
+ * one of the three assertions can fire. That last part matters: a synthetic case
+ * that trips two assertions cannot tell you which one is doing the work.
+ */
+
+/**
+ * The gathered, sorted stack of a real route — the same idiom
+ * PublicRegistrationRateLimitTest resolves its stacks with.
+ *
+ * @return list<string>
+ */
+function gateStackFor(string $method, string $uri): array
+{
+    $router = app('router');
+
+    $route = collect($router->getRoutes())->first(
+        fn (Route $candidate) => $candidate->uri() === $uri
+            && in_array($method, $candidate->methods(), true),
+    );
+
+    expect($route)->toBeInstanceOf(Route::class, "no route is registered for {$method} /{$uri}");
+
+    return array_values(array_filter($router->gatherRouteMiddleware($route), 'is_string'));
+}
+
+/**
+ * $stack with $middleware lifted out and re-inserted immediately after $anchor.
+ *
+ * @param  list<string>  $stack
+ * @return list<string>
+ */
+function gateStackWithMovedAfter(array $stack, string $middleware, string $anchor): array
+{
+    $rest = array_values(array_filter($stack, fn (string $entry) => $entry !== $middleware));
+
+    $anchorAt = array_search($anchor, $rest, true);
+
+    expect($anchorAt)->toBeInt("cannot build the synthetic stack: {$anchor} is not on it");
+
+    array_splice($rest, $anchorAt + 1, 0, [$middleware]);
+
+    return $rest;
+}
+
+/**
+ * @param  list<string>  $stack
+ * @return list<string>
+ */
+function gateStackWithout(array $stack, string ...$middleware): array
+{
+    return array_values(array_filter(
+        $stack,
+        fn (string $entry) => ! in_array($entry, $middleware, true),
+    ));
+}
+
+/**
+ * Run the invariant and hand back its complaint instead of failing the test.
+ *
+ * Only an assertion failure counts as a complaint. Anything else — a TypeError,
+ * a ValueError out of max([]) — propagates, so a helper that crashed cannot be
+ * mistaken for one that objected.
+ *
+ * @param  list<string>  $stack
+ */
+function gateOrderFailure(array $stack): ?string
+{
+    try {
+        assertPostAuthGateOrder($stack, 'synthetic');
+
+        return null;
+    } catch (ExpectationFailedException $failed) {
+        return $failed->getMessage();
+    }
+}
+
+/**
+ * Assert the invariant REJECTS $stack, and rejects it on the intended
+ * assertion rather than a neighbouring one.
+ *
+ * @param  list<string>  $stack
+ */
+function expectGateOrderRejects(array $stack, string $onTheAssertionSaying, string $context): void
+{
+    $failure = gateOrderFailure($stack);
+
+    // A positive expectation on purpose. Pest renders the message of a NEGATED
+    // one through a shortening exporter, so `->not->toBeNull($why)` cuts this
+    // down to a few characters — and this is the one message anybody reads
+    // when the harness is doing its job.
+    expect($failure)->toBeString(
+        "{$context}: the invariant ACCEPTED this stack. effective order: ".
+        implode(' -> ', $stack),
+    );
+
+    // toContain takes no custom message, and here that is an advantage: its own
+    // failure prints the complaint that DID come back, which is what you need
+    // to see when a mutation trips the wrong assertion.
+    expect((string) $failure)->toContain($onTheAssertionSaying);
+}
+
+it('holds on the unmutated stacks every synthetic case below is built from', function () {
+    // The control, and it is not ceremony. A stack that already fails can only
+    // be "rejected" again, so a mutation built on one proves nothing; and an
+    // empty stack for POST /api/auth/login would make "zero gates is skipped"
+    // below true of nothing at all.
+    foreach ([['POST', 'api/imports'], ['GET', 'api/users/{user}'], ['POST', 'api/auth/login']] as [$method, $uri]) {
+        $stack = gateStackFor($method, $uri);
+
+        expect(count($stack))->toBeGreaterThan(0, "{$method} /{$uri} gathered an empty stack")
+            ->and(gateOrderFailure($stack))->toBeNull("{$method} /{$uri} does not hold today");
+    }
+
+    // ...and the two gated ones really are swept, so "rejected" below can never
+    // be confused with "skipped".
+    expect(assertPostAuthGateOrder(gateStackFor('POST', 'api/imports'), 'control'))->toBeTrue()
+        ->and(assertPostAuthGateOrder(gateStackFor('GET', 'api/users/{user}'), 'control'))->toBeTrue();
+});
+
+it('rejects a stack with a gate wedged between two throttle entries', function () {
+    // Weakness A, and it was reachable today rather than theoretical:
+    // POST /api/imports really does carry `throttle:api` and then
+    // `throttle:imports`, and seventeen swept routes are shaped like it.
+    $real = gateStackFor('POST', 'api/imports');
+
+    $throttles = array_map(fn (int $index) => $real[$index], throttleIndexesIn($real));
+
+    expect($throttles)->toHaveCount(
+        2,
+        'this case needs a route carrying two throttle entries; POST /api/imports '.
+        'no longer does, so pick another from throttleIndexesIn()',
+    );
+
+    // One move. CheckTokenExpiry now runs between the two meters. Nothing else
+    // changes: the three gates keep their declared relative order and all three
+    // still sort ahead of SubstituteBindings, so the throttle assertion is the
+    // only one that CAN fire.
+    $wedged = gateStackWithMovedAfter($real, CheckTokenExpiry::class, $throttles[0]);
+
+    $firstThrottleAt = collect($wedged)->search(
+        fn (string $entry) => str_starts_with($entry, ThrottleRequests::class.':'),
+    );
+    $lastThrottleAt = max(throttleIndexesIn($wedged));
+    $wedgedGateAt = array_search(CheckTokenExpiry::class, $wedged, true);
+
+    // The blind spot, stated as an assertion rather than as prose: this gate IS
+    // behind the first throttle entry — which is all the old Collection::search()
+    // version ever checked, so it passed — and is NOT behind the last one.
+    expect($wedgedGateAt)->toBeGreaterThan(
+        $firstThrottleAt,
+        'the mutation no longer reproduces the blind spot: the gate must sit '.
+        'AFTER the first throttle entry, or the old assertion would have caught it too',
+    )->and($wedgedGateAt)->toBeLessThan($lastThrottleAt);
+
+    expectGateOrderRejects(
+        $wedged,
+        'must stay BEHIND every throttle entry',
+        'a gate between two throttle entries',
+    );
+
+    // And the case the old assertion DID catch is still caught, so this is a
+    // widening rather than a swap: a gate hoisted in front of the whole meter
+    // means the limiters in AppServiceProvider meter an authenticated caller on
+    // the anonymous bucket.
+    expectGateOrderRejects(
+        gateStackWithMovedAfter($real, CheckTokenExpiry::class, $real[0]),
+        'must stay BEHIND every throttle entry',
+        'a gate hoisted in front of every throttle entry',
+    );
+});
+
+it('sweeps a route that carries only some of the gates instead of skipping it', function () {
+    // Weakness B. Theoretical, and verified as theoretical: no route has a
+    // partial set today — all 215 gated routes carry all three, because every
+    // declaration in routes/api.php names them together. But the loop used to
+    // skip anything short of all three, so the day one route declares a single
+    // gate it silently leaves the sweep, and the sweep still reports green.
+    $real = gateStackFor('GET', 'api/users/{user}');
+
+    // A route carrying RequirePasswordChange on its own, correctly placed.
+    $lone = gateStackWithout($real, CheckTokenExpiry::class, EnsureUserIsActive::class);
+
+    expect(assertPostAuthGateOrder($lone, 'synthetic'))->toBeTrue(
+        'a route carrying one of the three gates must be swept, not skipped',
+    )->and(gateOrderFailure($lone))->toBeNull(
+        'a correctly ordered partial set must be swept AND pass',
+    );
+
+    // ...and that same lone gate behind the binding is the original oracle,
+    // reduced to one route. The old loop walked past this stack without a word.
+    expectGateOrderRejects(
+        gateStackWithMovedAfter($lone, RequirePasswordChange::class, SubstituteBindings::class),
+        'must sort ahead of SubstituteBindings',
+        'a lone gate behind SubstituteBindings',
+    );
+
+    // Two of the three in the wrong relative order is caught as well — a
+    // deactivated account must be turned away, not handed a change-password
+    // screen that lets it back in.
+    expectGateOrderRejects(
+        gateStackWithMovedAfter(
+            gateStackWithout($real, EnsureUserIsActive::class),
+            CheckTokenExpiry::class,
+            RequirePasswordChange::class,
+        ),
+        'declared relative order',
+        'a partial set in the wrong relative order',
+    );
+
+    // Zero gates is the only thing that may be skipped. POST /api/auth/login is
+    // a real route outside the auth group and carries none of the three.
+    expect(assertPostAuthGateOrder(gateStackFor('POST', 'api/auth/login'), 'synthetic'))
+        ->toBeFalse('a route with no gate at all has nothing to assert and must be skipped');
+});
+
+it('rejects a stack with a gate behind SubstituteBindings', function () {
+    // The property the sweep has always existed for, now proved to be catchable
+    // rather than merely asserted. This is the shape the application actually
+    // shipped before bootstrap/app.php named the three gates in the priority
+    // list: binding resolves {user} first, so a missing id 404s while a live one
+    // reaches RequirePasswordChange and comes back 423.
+    $real = gateStackFor('GET', 'api/users/{user}');
+
+    // Moved last of the three, so the gates keep their relative order and the
+    // throttle assertion still holds — only the binding assertion can fire.
+    expectGateOrderRejects(
+        gateStackWithMovedAfter($real, RequirePasswordChange::class, SubstituteBindings::class),
+        'must sort ahead of SubstituteBindings',
+        'the last gate behind SubstituteBindings',
+    );
+
+    // The pre-fix SHAPE: all three gates behind binding, still in declared
+    // order, so once again the binding assertion is the only one that can object.
+    $allThreeBehind = $real;
+    $anchor = SubstituteBindings::class;
+
+    foreach ([CheckTokenExpiry::class, EnsureUserIsActive::class, RequirePasswordChange::class] as $gate) {
+        $allThreeBehind = gateStackWithMovedAfter($allThreeBehind, $gate, $anchor);
+        $anchor = $gate;
+    }
+
+    expectGateOrderRejects(
+        $allThreeBehind,
+        'must sort ahead of SubstituteBindings',
+        'all three gates behind SubstituteBindings',
     );
 });
 
