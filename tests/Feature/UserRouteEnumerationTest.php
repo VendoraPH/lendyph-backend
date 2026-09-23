@@ -841,6 +841,110 @@ it('refuses to reactivate an account that is already active', function () {
 });
 
 /**
+ * The third, and the same probe on the other half of the pair.
+ *
+ * `PATCH /users/{id}/deactivate` against an account that is already inactive
+ * is the identical `isDirty() === false` no-op — 200 "User deactivated
+ * successfully.", no write, no timestamp, no audit row. It outlived the pass
+ * that closed reactivate for the mirror-image reason: the dataset at the top
+ * of this file seeds its fixture `active` so the SUCCESS path is observable,
+ * and `active` is the one status that never reaches this case.
+ *
+ * The token assertion is the load-bearing half. `UserController::deactivate()`
+ * sweeps `$user->tokens()` unconditionally, and on an already-inactive target
+ * that sweep is real work rather than a second no-op, so the 422 stops it
+ * happening. Leaving those rows is the deliberate trade argued in
+ * DeactivateUserRequest::after(): they are unusable — EnsureUserIsActive
+ * re-reads `status` per request and 403s whichever row is presented, then
+ * deletes it — while a 422 that wrote to the target would be an unaudited
+ * mutation on a refused request. Asserted rather than only documented, so the
+ * trade cannot be quietly reversed by someone restoring the sweep.
+ */
+it('refuses to deactivate an account that is already inactive, and leaves its tokens alone', function () {
+    $target = ($this->makeTarget)('inactive');
+    $target->createToken('stale-device');
+
+    $before = $target->fresh()->getAttributes();
+
+    $this->actingAs(User::where('username', 'super_admin')->first());
+
+    $this->patchJson("/api/users/{$target->id}/deactivate")
+        ->assertUnprocessable()
+        ->assertJsonValidationErrors(['changes']);
+
+    expect($target->fresh()->getAttributes())->toBe($before)
+        ->and($target->tokens()->count())->toBe(1);
+});
+
+/**
+ * A guard that refuses everyone is not a fix.
+ *
+ * The success path has to keep working and keep sweeping. The sweep did not
+ * move into the request class — it stayed on the 200, where a genuine
+ * transition still revokes every session the account holds in the same
+ * request, which is the only case it was ever load-bearing for.
+ */
+it('still deactivates an account that is actually active, and still sweeps its tokens', function () {
+    $target = ($this->makeTarget)('active');
+    $target->createToken('phone');
+    $target->createToken('laptop');
+
+    expect($target->tokens()->count())->toBe(2);
+
+    $this->actingAs(User::where('username', 'super_admin')->first());
+
+    $this->patchJson("/api/users/{$target->id}/deactivate")
+        ->assertOk()
+        ->assertJson(['message' => 'User deactivated successfully.']);
+
+    expect($target->fresh()->status)->toBe('inactive')
+        ->and($target->tokens()->count())->toBe(0);
+});
+
+/**
+ * The ordering inside DeactivateUserRequest, stated as the case that breaks if
+ * it is reversed.
+ *
+ * Unlike reactivate, this route has a super_admin tier of its own, so the
+ * already-inactive check has to sit BEHIND it. Ahead of it, a platform account
+ * that happened to be inactive would answer 422 "This account is already
+ * inactive." instead of the masked 404, while `PUT /users/{id}` still answered
+ * the same id 404 — a pairing no ordinary account produces, so the two together
+ * name the platform's account. That is the composition ReactivateUserRequest
+ * describes, rebuilt one route over. Both statuses must therefore produce the
+ * same 404 a never-used id produces, bodies included.
+ *
+ * The family-wide spec below cannot catch this on its own, because it only ever
+ * sees the platform account active: with the order reversed, this spec fails
+ * and that one still passes.
+ */
+it('masks a super_admin target as missing whatever its status, rather than answering the new 422', function () {
+    $admin = User::factory()->create(['branch_id' => 1, 'status' => 'active']);
+    $admin->syncRoles([Role::findByName('admin')]);
+
+    $platform = User::where('username', 'super_admin')->first();
+
+    $this->actingAs($admin);
+
+    $normalise = fn (string $body, int $id) => str_replace((string) $id, '{id}', $body);
+
+    foreach (['active', 'inactive'] as $status) {
+        $platform->update(['status' => $status]);
+
+        $refused = $this->patchJson("/api/users/{$platform->id}/deactivate");
+        $missing = $this->patchJson('/api/users/99999/deactivate');
+
+        expect($refused->status())->toBe(404, "a super_admin target that is {$status} answered {$refused->status()}")
+            ->and($missing->status())->toBe(404)
+            ->and($normalise($refused->getContent(), $platform->id))
+            ->toBe($normalise($missing->getContent(), 99999), "a super_admin target that is {$status} answered a different 404");
+
+        // ...and the refusal changed nothing either way.
+        expect($platform->fresh()->status)->toBe($status);
+    }
+});
+
+/**
  * The super_admin boundary, stated across the whole family rather than one
  * route at a time.
  *
