@@ -136,6 +136,10 @@ DESC,
             ->when($membersOnly, fn ($q) => $q->members())
             ->when(filled($branchId), fn ($q) => $q->forBranch($branchId))
             ->latest()
+            // Tiebreak on the key: members written by one CSV import share a
+            // `created_at`, and a partial order lets the drained pickers serve
+            // one twice and another never. See DeterministicPaginationTest.
+            ->orderByDesc('id')
             ->paginate(min(max((int) ($filters['per_page'] ?? 15), 1), 100));
 
         /**

@@ -46,6 +46,9 @@ class GCashTransactionController extends Controller
             ->when($request->query('start_date'), fn ($q, $d) => $q->whereDate('transaction_date', '>=', $d))
             ->when($request->query('end_date'), fn ($q, $d) => $q->whereDate('transaction_date', '<=', $d))
             ->latest('transaction_date')
+            // Tiebreak on the key so transactions stamped in the same second
+            // keep one order across pages. See DeterministicPaginationTest.
+            ->orderByDesc('id')
             ->paginate(min((int) $request->query('per_page', 25), 100));
 
         return GCashTransactionResource::collection($transactions);
