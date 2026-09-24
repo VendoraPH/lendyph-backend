@@ -13,8 +13,9 @@ use OpenApi\Attributes as OA;
         .'the same payload GET /api/repayments/{repayment} returns — so a list row never needs a detail fetch. '
         .'Each allocation total is published under three names (`principal_applied` / `principal_amount` / '
         .'`principal`, and likewise for interest and penalty); they always carry the same value. '
-        .'There is no per-repayment share-capital build-up figure: that split is computed client-side and '
-        .'recorded as a separate share-capital ledger entry.',
+        .'`scb_paid` is whatever share capital this payment credited, posted atomically with the payment '
+        .'itself, NET of any void reversal — it is 0 whenever the loan carries no `scb_amount`, the payment '
+        .'left no overpayment, or the payment that credited it has since been voided.',
     properties: [
         new OA\Property(property: 'id', type: 'integer'),
         new OA\Property(property: 'receipt_number', type: 'string'),
@@ -44,6 +45,7 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'next_interest_applied', type: 'number', description: 'Excess interest flowed to next schedule (0 when scb_amount>0)'),
         new OA\Property(property: 'next_principal_applied', type: 'number', description: 'Excess principal flowed to next schedule (0 when scb_amount>0)'),
         new OA\Property(property: 'overpayment', type: 'number', description: 'Unallocated remainder (frontend routes to SCB when scb_amount>0)'),
+        new OA\Property(property: 'scb_paid', type: 'number', description: 'Net share capital credited FROM this payment: 0 when the loan carries no scb_amount or there was no overpayment, and back to 0 once a credited payment is voided (the reversal debit nets against its own credit).'),
         new OA\Property(property: 'balance_before', type: 'number', description: 'Outstanding principal before this payment'),
         new OA\Property(property: 'balance_after', type: 'number', description: 'Outstanding principal after this payment'),
         new OA\Property(property: 'previous_balance', type: 'number', description: 'Alias for balance_before'),
@@ -125,6 +127,10 @@ class RepaymentResource extends JsonResource
             'next_interest_applied' => (float) $this->next_interest_applied,
             'next_principal_applied' => (float) $this->next_principal_applied,
             'overpayment' => (float) $this->overpayment,
+            // NET, not gross: a void's reversal debit shares this repayment's
+            // repayment_id, so a plain sum('credit') would keep reporting the
+            // original amount after voidRepayment() has already reversed it.
+            'scb_paid' => (float) ($this->shareCapitalLedgerEntries->sum('credit') - $this->shareCapitalLedgerEntries->sum('debit')),
             'balance_before' => (float) $this->balance_before,
             'balance_after' => (float) $this->balance_after,
             // Frontend-canonical aliases (consumed by payments receipt page)
