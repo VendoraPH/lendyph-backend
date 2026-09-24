@@ -111,18 +111,24 @@ it('exposes scb_amount and policy_exception in LoanResource', function () {
     expect($response->json('data.policy_exception_details'))->toBe('PE details here');
 });
 
-it('does not auto-create any SCB ledger entry on payment (frontend PR 106)', function () {
-    // Backend no longer auto-credits SCB on payment — the frontend handles it
-    // explicitly by posting to /api/share-capital/ledger with the computed excess.
+it('auto-credits share capital on a qualifying payment, in the same transaction (fix/repayment-scb-atomic)', function () {
+    // Backend now credits SCB itself, atomically with the payment — this used to be
+    // frontend-driven (a second, independent POST to /api/share-capital/ledger that
+    // could fail or 403 and leave the payment credited-less). See RepaymentService::processRepayment().
     ['loan' => $loan, 'borrower' => $borrower] = makeReleasedLoan($this->branch->id, $this->admin, [
         'scb_amount' => 250,
     ]);
 
     $ledgerBefore = ShareCapitalLedger::where('borrower_id', $borrower->id)->count();
 
-    app(RepaymentService::class)->processRepayment($loan, 25000, now()->toDateString(), $this->admin);
+    $repayment = app(RepaymentService::class)->processRepayment($loan, 25000, now()->toDateString(), $this->admin);
 
-    expect(ShareCapitalLedger::where('borrower_id', $borrower->id)->count())->toBe($ledgerBefore);
+    expect(ShareCapitalLedger::where('borrower_id', $borrower->id)->count())->toBe($ledgerBefore + 1);
+
+    $credit = ShareCapitalLedger::where('repayment_id', $repayment->id)->sole();
+    expect((float) $credit->credit)->toEqual((float) $repayment->overpayment)
+        ->and((float) $credit->debit)->toEqual(0.0)
+        ->and($credit->borrower_id)->toBe($borrower->id);
 });
 
 it('does not cascade excess to future schedules when scb_amount > 0', function () {
