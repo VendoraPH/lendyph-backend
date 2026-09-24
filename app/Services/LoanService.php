@@ -136,8 +136,8 @@ class LoanService
      * member through validation whenever some co-maker record carried their
      * number. StoreLoanRequest now accepts only non-rejected member ids.
      *
-     * Restructure is the exception, and deliberately so; see
-     * coMakerIdsForRestructure().
+     * Restructure and update share this same reading; see restructure() and
+     * updateLoan().
      *
      * @param  array<int, int|string>  $memberIds
      * @return list<int>
@@ -158,52 +158,26 @@ class LoanService
     }
 
     /**
-     * RESTRUCTURE ONLY: ids that may be a co-maker record id OR a member id,
-     * read in that order — the reading POST /loans used to share.
-     *
-     * Kept because the restructure form sends both kinds in the same array: it
-     * pre-fills the source loan's `co_makers[].id` (record ids) and its picker
-     * adds member ids. A flat list of integers cannot say which is which, so no
-     * reading of it is right for every entry, and choosing one is a contract
-     * decision rather than a fix. Until that is made this stays exactly as it
-     * was, collision hazard included: a picked member whose id equals some
-     * co-maker record's number is read as that record.
-     *
-     * @param  array<int, int|string>  $ids
-     * @return list<int>
-     */
-    private function coMakerIdsForRestructure(array $ids): array
-    {
-        $coMakerIds = [];
-
-        foreach ($ids as $id) {
-            $coMaker = CoMaker::find($id);
-
-            if ($coMaker) {
-                $coMakerIds[] = $coMaker->id;
-
-                continue;
-            }
-
-            $member = Borrower::find($id);
-
-            if ($member) {
-                $coMakerIds[] = $this->coMakerRecordFor($member)->id;
-            }
-        }
-
-        return $coMakerIds;
-    }
-
-    /**
      * The co-maker record that stands for $member on a loan, created on first
-     * use. Keyed exactly as it always has been.
+     * use.
+     *
+     * Keyed on `member_borrower_id`, NOT `borrower_id` + name. The old key
+     * carried no suffix, so a Co-makers-tab entry created under one member's
+     * profile describing someone else by name (e.g. a Jr. entering his
+     * father's Sr. record with no suffix) collided with that member later
+     * being picked as a co-maker himself — the wrong identity got bound to the
+     * loan. `member_borrower_id` is a member's OWN id and nothing else, so it
+     * cannot collide with a same-named relative's entry, which never carries
+     * one at all.
      */
     private function coMakerRecordFor(Borrower $member): CoMaker
     {
         return CoMaker::firstOrCreate(
-            ['borrower_id' => $member->id, 'first_name' => $member->first_name, 'last_name' => $member->last_name],
+            ['member_borrower_id' => $member->id],
             [
+                'borrower_id' => $member->id,
+                'first_name' => $member->first_name,
+                'last_name' => $member->last_name,
                 'address' => $member->address,
                 'contact_number' => $member->contact_number,
                 'relationship_to_borrower' => 'other',
@@ -279,7 +253,7 @@ class LoanService
                     $newLoan->coMakers()->sync($inherited);
                 }
             } elseif (! empty($validated['co_maker_ids'])) {
-                $coMakerIds = $this->coMakerIdsForRestructure($validated['co_maker_ids']);
+                $coMakerIds = $this->coMakerIdsForMembers($validated['co_maker_ids']);
 
                 if ($coMakerIds !== []) {
                     $newLoan->coMakers()->sync($coMakerIds);
@@ -527,8 +501,11 @@ class LoanService
 
         $loan->update($validated);
 
+        // MEMBER ids only, exactly as createLoan() reads them — see
+        // coMakerIdsForMembers(). UpdateLoanRequest previously left this
+        // field unvalidated as bare co-maker record ids.
         if (isset($validated['co_maker_ids'])) {
-            $loan->coMakers()->sync($validated['co_maker_ids']);
+            $loan->coMakers()->sync($this->coMakerIdsForMembers($validated['co_maker_ids']));
         }
 
         return $loan;

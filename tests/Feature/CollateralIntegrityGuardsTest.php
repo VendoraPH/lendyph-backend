@@ -927,7 +927,7 @@ it('has no path writing an active loan status outside the ones that are accounte
         // active set. The automatic accounting posting sits immediately BEFORE
         // that assertion, so the assertion is still the transaction's last
         // statement — which is what this entry is really asserting.
-        'app/Services/LoanService.php:794 — \'status\' => \'released\',',
+        'app/Services/LoanService.php:771 — \'status\' => \'released\',',
         // processRepayment(): released → ongoing. Deliberately UNGUARDED — both
         // are already active, so it cannot add a holder.
         'app/Services/RepaymentService.php:189 — $loan->update([\'status\' => \'ongoing\']);',
