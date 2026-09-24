@@ -2,11 +2,16 @@
 
 namespace App\Http\Requests\Fee;
 
+use App\Http\Requests\Fee\Concerns\GuardsAgainstProductFeeOverlap;
+use App\Models\Fee;
+use Illuminate\Contracts\Validation\Validator;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
 class UpdateFeeRequest extends FormRequest
 {
+    use GuardsAgainstProductFeeOverlap;
+
     public function authorize(): bool
     {
         return $this->user()->can('fees:update');
@@ -28,5 +33,17 @@ class UpdateFeeRequest extends FormRequest
             'conditions.loan_amount_lt' => ['nullable', 'numeric', 'min:0'],
             'conditions.loan_amount_eq' => ['nullable', 'numeric', 'min:0'],
         ];
+    }
+
+    public function withValidator(Validator $validator): void
+    {
+        /** @var Fee|null $existing */
+        $existing = $this->route('fee');
+
+        $this->guardAgainstProductFeeOverlap(
+            $validator,
+            existingName: $existing?->name,
+            existingProductIds: $existing?->applicable_product_ids,
+        );
     }
 }

@@ -3,10 +3,15 @@
 namespace App\Http\Requests\LoanProduct;
 
 use App\Enums\LoanFrequency;
+use App\Http\Requests\LoanProduct\Concerns\GuardsAgainstFeeCatalogOverlap;
+use App\Models\LoanProduct;
+use Illuminate\Contracts\Validation\Validator;
 use Illuminate\Foundation\Http\FormRequest;
 
 class UpdateLoanProductRequest extends FormRequest
 {
+    use GuardsAgainstFeeCatalogOverlap;
+
     public function authorize(): bool
     {
         return $this->user()->can('loans:update');
@@ -69,5 +74,16 @@ class UpdateLoanProductRequest extends FormRequest
         if ($this->has('is_active') && ! $this->has('status')) {
             $this->merge(['status' => $this->boolean('is_active') ? 'active' : 'inactive']);
         }
+    }
+
+    public function withValidator(Validator $validator): void
+    {
+        // The apiResource route for `loan-products` binds `{loan_product}`
+        // (ResourceRegistrar singularizes and underscores the resource
+        // name), so the resolved model lives under that snake_case key —
+        // `$this->loanProduct` would silently miss it and fall back to null.
+        $product = $this->route('loan_product');
+
+        $this->guardAgainstFeeCatalogOverlap($validator, $product instanceof LoanProduct ? $product : null);
     }
 }

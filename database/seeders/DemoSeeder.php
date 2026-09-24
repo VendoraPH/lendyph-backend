@@ -130,9 +130,31 @@ class DemoSeeder extends Seeder
         ]);
 
         // ── Fees ──
-        Fee::firstOrCreate(['name' => 'Processing Fee'], ['type' => 'percentage', 'value' => 2.0]);
-        Fee::firstOrCreate(['name' => 'Service Fee'], ['type' => 'percentage', 'value' => 1.0]);
+        //
+        // "Processing Fee" and "Service Fee" catalog rows used to live here
+        // too, sharing their names with `$salaryLoan`/`$businessLoan`'s own
+        // `processing_fee`/`service_fee` columns above. That is the exact
+        // double-charge configuration FeeOverlapDetector now rejects — both
+        // mechanisms would charge, per LoanReleaseFeeService's own docblock
+        // — and it added nothing a demo needs: the product columns already
+        // demonstrate that charging path on their own. Dropped rather than
+        // kept as a "look, it's blocked" example, because `firstOrCreate()`
+        // here bypasses the FormRequest guard entirely (see
+        // GuardsAgainstProductFeeOverlap's docblock) and would keep seeding
+        // the anti-pattern into every demo database regardless.
+        //
+        // "Notarial Fee" stays: both seeded products have `notarial_fee: 0`
+        // (neither sets it above), so this is the catalog used as the SOLE
+        // source for that charge — a legitimate pattern, not a collision.
         Fee::firstOrCreate(['name' => 'Notarial Fee'], ['type' => 'fixed', 'value' => 500]);
+
+        // A genuinely distinct example: no product column shares this name
+        // (nor does the separate, release-time "Insurance Premium" deduction
+        // LoanService::applyInsuranceOnRelease() writes — picking that name
+        // here would trade one naming collision for another), so this
+        // demonstrates the catalog's real purpose: a charge that has nothing
+        // to do with a loan product at all.
+        Fee::firstOrCreate(['name' => 'Credit Investigation Fee'], ['type' => 'fixed', 'value' => 300]);
 
         // ── Borrowers ──
         $borrowers = collect([
@@ -267,6 +289,6 @@ class DemoSeeder extends Seeder
             );
         }
 
-        $this->command->info('Demo data seeded: 3 users, 2 products, 3 fees, 8 borrowers, 5 loans, 6 pledges, 8 ledger entries.');
+        $this->command->info('Demo data seeded: 3 users, 2 products, 2 fees, 8 borrowers, 5 loans, 6 pledges, 8 ledger entries.');
     }
 }
