@@ -1144,14 +1144,22 @@ class LoanRestructureTest extends TestCase
         $this->assertSame($coMakerBorrower->last_name, $linked[0]->last_name);
     }
 
-    public function test_an_existing_co_maker_id_is_also_accepted(): void
+    public function test_a_bare_co_maker_record_id_is_now_rejected_on_restructure(): void
     {
+        // Restructure now reads `co_maker_ids` as member (borrower) ids only,
+        // exactly like POST /loans — a bare co-maker record id no longer
+        // resolves to anything.
         $source = $this->createReleasedLoan();
         $coMaker = CoMaker::factory()->create(['borrower_id' => $source->borrower_id]);
 
-        $newLoan = $this->restructure($source, ['co_maker_ids' => [$coMaker->id]]);
+        $this->postJson("/api/loans/{$source->id}/restructure", $this->payloadFor($source, [
+            'co_maker_ids' => [$coMaker->id],
+        ]))
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('co_maker_ids.0');
 
-        $this->assertSame([$coMaker->id], $newLoan->coMakers()->pluck('co_makers.id')->all());
+        $this->assertSame(0, Loan::where('source_loan_id', $source->id)->count());
+        $this->assertSame(1, CoMaker::count(), 'no new co-maker record should have been created for a rejected id');
     }
 
     public function test_a_co_maker_id_matching_nothing_at_all_is_rejected(): void

@@ -1,21 +1,29 @@
 <?php
 
 /**
- * POST /loans reads `co_maker_ids` as MEMBER (borrower) ids, and only as those.
+ * `co_maker_ids` is read as MEMBER (borrower) ids, and only as those, on every
+ * loan write that accepts it: POST /loans, restructure, and update.
  *
  * That is all the loan form's co-maker picker has ever sent: its options are
  * the member list and each slot holds a member's id. The API used to read each
- * id as a co-maker RECORD id first and fall back to a member id. The two are
- * separate sequences, and the loan form itself creates a co-maker record the
- * first time a member is picked, so the numbers collide almost at once: member
- * #7 picked on one loan gets co-maker record #1, and member #1 picked on the
- * next loan was then bound to member #7. A co-maker is jointly liable for the
- * loan, so that is the wrong person owing the money, silently.
+ * id as a co-maker RECORD id first and fall back to a member id — fixed on
+ * POST /loans first, and by restructure and update in this same change. The
+ * two are separate sequences, and the loan form itself creates a co-maker
+ * record the first time a member is picked, so the numbers collide almost at
+ * once: member #7 picked on one loan gets co-maker record #1, and member #1
+ * picked on the next loan was then bound to member #7. A co-maker is jointly
+ * liable for the loan, so that is the wrong person owing the money, silently.
  *
- * The restructure form still sends both kinds in one array (it pre-fills the
- * source loan's co-maker RECORD ids and its picker adds MEMBER ids), so
- * restructure keeps reading either until that contract is settled; the specs
- * at the bottom pin that its behaviour did not move.
+ * A second, deeper collision lived in how that co-maker record was found.
+ * `coMakerRecordFor()` used to key its `firstOrCreate()` on `borrower_id` +
+ * name, with no suffix — but the Co-makers tab (`CoMakerController::store`)
+ * writes `borrower_id` as the TAB OWNER, not the person the entry describes. A
+ * tab entry for "Juan Dela Cruz" (no suffix) entered under his son Jr.'s own
+ * borrower profile therefore collided with Jr. HIMSELF later being picked as a
+ * co-maker elsewhere, binding the wrong identity to that loan. `borrower_id`
+ * still means "tab owner" on those rows; `member_borrower_id` — a member's own
+ * id, unique, and nothing else — is what the picker now keys on instead. See
+ * the headline regression specs below.
  *
  * Several specs need a member and a co-maker record that carry the SAME number.
  * The two tables count separately, so the specs build that deliberately: a
@@ -73,6 +81,19 @@ function coMakerLinkRestructure(TestCase $test, Loan $source, array $overrides =
 }
 
 /**
+ * Create a Co-makers-tab entry under $owner's own borrower profile — exactly
+ * what CoMakerController::store() persists: `borrower_id` set to $owner (the
+ * tab owner), never to the person the entry names.
+ */
+function coMakerLinkTabEntry(TestCase $test, Borrower $owner, array $attributes = []): TestResponse
+{
+    return $test->postJson("/api/borrowers/{$owner->id}/co-makers", array_merge([
+        'first_name' => 'Juan',
+        'last_name' => 'Dela Cruz',
+    ], $attributes));
+}
+
+/**
  * Who each of the loan's co-makers is, as [member id, name].
  *
  * @return list<array{int, string}>
@@ -100,6 +121,7 @@ it('binds the member picked, not the co-maker record that carries the same numbe
 
     $loanA = coMakerLinkApply($this, $principalA, [$x->id])->assertCreated()->json('data.id');
     $xRecord = CoMaker::where('borrower_id', $x->id)->sole();
+    expect($xRecord->member_borrower_id)->toBe($x->id);
 
     // Loan B then picks the member whose id is that record's number.
     $y = coMakerLinkMemberWithId($xRecord->id);
@@ -173,22 +195,67 @@ it('still accepts a pending member as a co-maker', function () {
 });
 
 /*
- * Restructure is deliberately unchanged: its form pre-fills the source loan's
- * co-maker RECORD ids, so it still reads either kind. These pin that.
+ * The deeper root-cause bug: `coMakerRecordFor()` used to find-or-create on
+ * `borrower_id` + name, with no suffix, and the Co-makers tab writes
+ * `borrower_id` as the TAB OWNER. A tab entry describing a member's relative
+ * by name — no suffix — collided with that member's OWN co-maker record the
+ * moment they were picked as a co-maker themselves. `member_borrower_id` (a
+ * member's own id, unique, and nothing else) is what closes it. Both orders
+ * must be safe: whichever entry is created first, the other must not reuse it.
  */
 
-it('still lets restructure carry the source loan\'s co-makers by their record ids', function () {
-    // Exactly what the restructure form sends back: the source loan's
-    // `co_makers[].id` values, untouched.
+it('does not reuse a same-named Co-makers-tab entry when that member is later picked as a co-maker', function () {
+    // Jr. has a Co-makers-tab entry, filed under his OWN borrower profile,
+    // describing his father Sr. by name only — no suffix, so nothing in the
+    // old lookup key distinguished it from Jr. himself.
+    $jr = coMakerLinkMember(['first_name' => 'Juan', 'last_name' => 'Dela Cruz']);
+    $tabEntryId = coMakerLinkTabEntry($this, $jr)->assertCreated()->json('data.id');
+
+    // Jr. is independently picked as a co-maker on someone else's loan.
+    $loan = coMakerLinkApply($this, coMakerLinkMember(), [$jr->id])->assertCreated()->json('data.id');
+
+    $ownRecord = CoMaker::where('member_borrower_id', $jr->id)->sole();
+
+    expect($ownRecord->id)->not->toBe($tabEntryId)
+        ->and(CoMaker::findOrFail($tabEntryId)->member_borrower_id)->toBeNull()
+        ->and(CoMaker::count())->toBe(2)
+        ->and(Loan::findOrFail($loan)->coMakers()->pluck('co_makers.id')->all())->toBe([$ownRecord->id]);
+});
+
+it('does not let a later Co-makers-tab entry collide with an existing member co-maker record', function () {
+    // Same collision, order reversed: Jr. is picked as a co-maker FIRST, and
+    // only afterwards does the same-named tab entry get filed under him.
+    $jr = coMakerLinkMember(['first_name' => 'Juan', 'last_name' => 'Dela Cruz']);
+
+    $loan = coMakerLinkApply($this, coMakerLinkMember(), [$jr->id])->assertCreated()->json('data.id');
+    $ownRecord = CoMaker::where('member_borrower_id', $jr->id)->sole();
+
+    $tabEntryId = coMakerLinkTabEntry($this, $jr)->assertCreated()->json('data.id');
+
+    expect($tabEntryId)->not->toBe($ownRecord->id)
+        ->and(CoMaker::findOrFail($tabEntryId)->member_borrower_id)->toBeNull()
+        ->and(CoMaker::count())->toBe(2)
+        ->and(Loan::findOrFail($loan)->coMakers()->pluck('co_makers.id')->all())->toBe([$ownRecord->id]);
+});
+
+/*
+ * Restructure now reads `co_maker_ids` the same way POST /loans does: member
+ * ids only. These pin that a bare co-maker record id no longer resolves, and
+ * that a member id still does.
+ */
+
+it('no longer lets restructure carry a bare co-maker record id', function () {
+    // The restructure form used to pre-fill the source loan's `co_makers[].id`
+    // values directly; that reading is gone.
     $source = $this->createReleasedLoan();
     $record = CoMaker::findOrFail(
         coMakerLinkApply($this, coMakerLinkMember(), [coMakerLinkMember()->id])->assertCreated()->json('data.co_makers.0.id')
     );
     $source->coMakers()->sync([$record->id]);
 
-    $newLoan = coMakerLinkRestructure($this, $source, ['co_maker_ids' => [$record->id]])->assertCreated()->json('data.id');
-
-    expect(Loan::findOrFail($newLoan)->coMakers()->pluck('co_makers.id')->all())->toBe([$record->id]);
+    coMakerLinkRestructure($this, $source, ['co_maker_ids' => [$record->id]])
+        ->assertUnprocessable()
+        ->assertJsonValidationErrors(['co_maker_ids.0']);
 });
 
 it('still inherits the source loan\'s co-makers when restructure omits the field', function () {
@@ -223,4 +290,66 @@ it('still resolves a restructure member id to that member\'s own co-maker record
     $newLoan = coMakerLinkRestructure($this, $source, ['co_maker_ids' => [$member->id]])->assertCreated()->json('data.id');
 
     expect(coMakerLinkPeopleOn($newLoan))->toBe([coMakerLinkPerson($member)]);
+});
+
+/*
+ * PATCH /loans/{id} previously left `co_maker_ids` almost entirely
+ * unresolved: a raw sync() against bare co-maker record ids, validated only as
+ * `exists:co_makers,id`. It now reads member ids exactly like POST /loans.
+ */
+
+it('update binds the member picked, not a co-maker record that carries the same number', function () {
+    $principal = coMakerLinkMember();
+    $x = coMakerLinkMember(['first_name' => 'Xavier', 'last_name' => 'Ocampo']);
+    $loanId = coMakerLinkApply($this, $principal, [$x->id])->assertCreated()->json('data.id');
+    $xRecord = CoMaker::where('borrower_id', $x->id)->sole();
+
+    $y = coMakerLinkMemberWithId($xRecord->id);
+    expect($y->id)->not->toBe($x->id, 'precondition: the shared number must belong to a different member');
+
+    $this->patchJson("/api/loans/{$loanId}", ['co_maker_ids' => [$y->id]])->assertOk();
+
+    expect(coMakerLinkPeopleOn($loanId))->toBe([coMakerLinkPerson($y)]);
+});
+
+it('refuses a bare co-maker record id on update', function () {
+    $loanId = coMakerLinkApply($this, coMakerLinkMember(), [])->assertCreated()->json('data.id');
+    $coMaker = CoMaker::factory()->create(['borrower_id' => coMakerLinkMember()->id]);
+
+    $this->patchJson("/api/loans/{$loanId}", ['co_maker_ids' => [$coMaker->id]])
+        ->assertUnprocessable()
+        ->assertJsonValidationErrors(['co_maker_ids.0']);
+
+    expect(Loan::findOrFail($loanId)->coMakers()->count())->toBe(0);
+});
+
+it('refuses a rejected member as an update co-maker even when a co-maker record carries their number', function () {
+    $rejected = coMakerLinkMember(['status' => 'rejected']);
+    CoMaker::factory()->create(['id' => $rejected->id, 'borrower_id' => coMakerLinkMember()->id]);
+    $loanId = coMakerLinkApply($this, coMakerLinkMember(), [])->assertCreated()->json('data.id');
+
+    $this->patchJson("/api/loans/{$loanId}", ['co_maker_ids' => [$rejected->id]])
+        ->assertUnprocessable()
+        ->assertJsonValidationErrors(['co_maker_ids.0']);
+
+    expect(Loan::findOrFail($loanId)->coMakers()->count())->toBe(0);
+});
+
+it('update drops the co-makers when sent an empty list', function () {
+    $member = coMakerLinkMember();
+    $loanId = coMakerLinkApply($this, coMakerLinkMember(), [$member->id])->assertCreated()->json('data.id');
+    expect(Loan::findOrFail($loanId)->coMakers()->count())->toBe(1);
+
+    $this->patchJson("/api/loans/{$loanId}", ['co_maker_ids' => []])->assertOk();
+
+    expect(Loan::findOrFail($loanId)->coMakers()->count())->toBe(0);
+});
+
+it('update leaves the co-makers untouched when the key is omitted', function () {
+    $member = coMakerLinkMember();
+    $loanId = coMakerLinkApply($this, coMakerLinkMember(), [$member->id])->assertCreated()->json('data.id');
+
+    $this->patchJson("/api/loans/{$loanId}", ['purpose' => 'Updated purpose'])->assertOk();
+
+    expect(coMakerLinkPeopleOn($loanId))->toBe([coMakerLinkPerson($member)]);
 });

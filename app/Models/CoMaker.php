@@ -16,6 +16,7 @@ class CoMaker extends Model
 
     protected $fillable = [
         'borrower_id',
+        'member_borrower_id',
         'first_name',
         'middle_name',
         'last_name',
