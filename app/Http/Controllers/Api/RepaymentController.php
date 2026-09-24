@@ -103,7 +103,7 @@ class RepaymentController extends Controller
         $dateFrom = $filters['date_from'] ?? null;
         $dateTo = $filters['date_to'] ?? null;
 
-        $query = Repayment::with('loan.borrower', 'loan.loanProduct', 'loan.amortizationSchedules', 'receivedByUser', 'voidedByUser')
+        $query = Repayment::with('loan.borrower', 'loan.loanProduct', 'loan.amortizationSchedules', 'receivedByUser', 'voidedByUser', 'shareCapitalLedgerEntries')
             ->when(filled($search), function ($q) use ($search) {
                 $q->where(function ($q) use ($search) {
                     $q->where('receipt_number', 'like', "%{$search}%")
@@ -195,7 +195,7 @@ class RepaymentController extends Controller
         $this->authorize('payments:view');
 
         $repayments = $loan->repayments()
-            ->with('receivedByUser', 'voidedByUser', 'loan.borrower', 'loan.loanProduct', 'loan.amortizationSchedules')
+            ->with('receivedByUser', 'voidedByUser', 'loan.borrower', 'loan.loanProduct', 'loan.amortizationSchedules', 'shareCapitalLedgerEntries')
             ->latest('payment_date')
             // ASCENDING, whatever the latest() above suggests. Loan::repayments()
             // already orders by `payment_date`, and that clause comes first, so
@@ -243,7 +243,7 @@ class RepaymentController extends Controller
             $request->reference_number,
         );
 
-        $repayment->load('receivedByUser', 'loan.borrower', 'loan.loanProduct', 'loan.amortizationSchedules');
+        $repayment->load('receivedByUser', 'loan.borrower', 'loan.loanProduct', 'loan.amortizationSchedules', 'shareCapitalLedgerEntries');
 
         return (new RepaymentResource($repayment))
             ->response()
@@ -273,7 +273,7 @@ class RepaymentController extends Controller
     {
         $this->authorize('payments:view');
 
-        $repayment->load('loan.borrower', 'loan.loanProduct', 'loan.amortizationSchedules', 'receivedByUser', 'voidedByUser');
+        $repayment->load('loan.borrower', 'loan.loanProduct', 'loan.amortizationSchedules', 'receivedByUser', 'voidedByUser', 'shareCapitalLedgerEntries');
 
         return new RepaymentResource($repayment);
     }
@@ -308,7 +308,7 @@ class RepaymentController extends Controller
             $request->user(),
         );
 
-        $repayment->load('loan.borrower', 'loan.loanProduct', 'loan.amortizationSchedules', 'receivedByUser', 'voidedByUser');
+        $repayment->load('loan.borrower', 'loan.loanProduct', 'loan.amortizationSchedules', 'receivedByUser', 'voidedByUser', 'shareCapitalLedgerEntries');
 
         return response()->json([
             'message' => 'Repayment voided successfully.',
