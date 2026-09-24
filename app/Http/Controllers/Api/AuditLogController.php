@@ -41,6 +41,9 @@ class AuditLogController extends Controller
 
         $logs = $this->buildQuery($filters)
             ->latest('created_at')
+            // Tiebreak on the key: a single request routinely writes several
+            // audit rows in the same second. See DeterministicPaginationTest.
+            ->orderByDesc('id')
             ->paginate(min(max((int) ($filters['per_page'] ?? 15), 1), 100));
 
         /**
@@ -121,6 +124,11 @@ class AuditLogController extends Controller
 
             $this->buildQuery($filters)
                 ->orderBy('created_at')
+                // chunk() pages with LIMIT/OFFSET as well, so it needs the same
+                // total order as the list: without the key, a run of equal
+                // timestamps split by a 500-row boundary repeats some rows in
+                // the CSV and drops others.
+                ->orderBy('id')
                 ->chunk(500, function ($chunk) use ($handle) {
                     foreach ($chunk as $log) {
                         fputcsv($handle, [

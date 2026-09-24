@@ -43,6 +43,9 @@ class GCashNonMemberController extends Controller
                     ->orWhere('id_number', 'like', $like));
             })
             ->orderBy('full_name')
+            // Tiebreak on the key: walk-ins share names, and the picker drains
+            // every page. See DeterministicPaginationTest.
+            ->orderBy('id')
             ->paginate(min((int) $request->query('per_page', 25), 100));
 
         return GCashNonMemberResource::collection($nonMembers);

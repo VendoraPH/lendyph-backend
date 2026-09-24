@@ -15,6 +15,7 @@ class ShareCapitalLedger extends Model
 
     protected $fillable = [
         'borrower_id',
+        'repayment_id',
         'date',
         'description',
         'reference',
@@ -49,6 +50,11 @@ class ShareCapitalLedger extends Model
     public function borrower(): BelongsTo
     {
         return $this->belongsTo(Borrower::class);
+    }
+
+    public function repayment(): BelongsTo
+    {
+        return $this->belongsTo(Repayment::class);
     }
 
     public function createdByUser(): BelongsTo

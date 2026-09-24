@@ -193,8 +193,9 @@ function seedGCashTiersForGuardTest(): void
 //
 // A co-maker is jointly liable for the loan, so gating the principal
 // `borrower_id` and leaving `co_maker_ids` open just moves the hole one field
-// to the right. LoanService::createLoan() resolves each id as a CoMaker first
-// and otherwise as a Borrower, creating a co-maker record from that person.
+// to the right. POST /loans, restructure, and update all read each id as a
+// member and find or create that person's co-maker record. See
+// LoanCoMakerMemberIdsTest.
 
 it('refuses a rejected borrower as a loan co-maker', function () {
     $borrower = borrowerInStatus($this->branch->id, 'active');
@@ -250,6 +251,25 @@ it('refuses a rejected borrower as a restructure co-maker', function () {
         'loan_product_id' => $source->loan_product_id,
         'principal_amount' => 70800.00,
         'start_date' => now()->toDateString(),
+        'co_maker_ids' => [$rejected->id],
+    ])->assertUnprocessable()
+        ->assertJsonValidationErrors(['co_maker_ids.0']);
+
+    $this->assertDatabaseMissing('co_makers', ['borrower_id' => $rejected->id]);
+});
+
+it('refuses a rejected borrower as an update co-maker', function () {
+    $borrower = borrowerInStatus($this->branch->id, 'active');
+    $rejected = borrowerInStatus($this->branch->id, 'rejected');
+
+    $loanId = $this->postJson('/api/loans', [
+        'borrower_id' => $borrower->id,
+        'loan_product_id' => LoanProduct::factory()->create()->id,
+        'principal_amount' => 60000,
+        'start_date' => now()->toDateString(),
+    ])->assertCreated()->json('data.id');
+
+    $this->patchJson("/api/loans/{$loanId}", [
         'co_maker_ids' => [$rejected->id],
     ])->assertUnprocessable()
         ->assertJsonValidationErrors(['co_maker_ids.0']);

@@ -6,6 +6,7 @@ use App\Traits\Auditable;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Repayment extends Model
 {
@@ -80,5 +81,10 @@ class Repayment extends Model
     public function voidedByUser(): BelongsTo
     {
         return $this->belongsTo(User::class, 'voided_by');
+    }
+
+    public function shareCapitalLedgerEntries(): HasMany
+    {
+        return $this->hasMany(ShareCapitalLedger::class);
     }
 }

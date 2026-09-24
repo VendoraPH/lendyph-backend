@@ -270,7 +270,7 @@ class ReportService
     public function listOfRepayments(array $filters): LengthAwarePaginator
     {
         return $this->repaymentsQuery($filters)
-            ->with('loan.borrower', 'loan.branch', 'receivedByUser')
+            ->with('loan.borrower', 'loan.branch', 'receivedByUser', 'shareCapitalLedgerEntries')
             ->paginate($filters['per_page'] ?? 15);
     }
 

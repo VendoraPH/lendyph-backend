@@ -891,4 +891,61 @@ class LoanReleaseFeesTest extends TestCase
             AuditLog::where('action', 'release_fees')->where('auditable_id', $loan->id)->count(),
         );
     }
+
+    // ── Overlap warnings (advisory only, see FeeOverlapDetector) ─────────
+
+    /**
+     * The write-time guard (`FeeProductOverlapTest`) stops a NEW collision
+     * from being saved. This is the backstop for one that predates it — the
+     * exact setup from
+     * {@see self::test_a_settings_fee_sharing_a_name_with_a_product_column_is_not_deduplicated()},
+     * built the same way (raw `Fee::create()`, which bypasses that guard) —
+     * and it has to surface as an `overlap_warnings` entry on the preview
+     * WITHOUT moving any of the figures that protected spec pins. Proving
+     * that is the point: the warning is purely additive.
+     */
+    public function test_the_release_preview_flags_an_overlapping_fee_without_changing_the_totals(): void
+    {
+        $product = LoanProduct::factory()->create([
+            'interest_rate' => 3.0, 'interest_method' => 'straight', 'term' => 6, 'frequency' => 'monthly',
+            'penalty_rate' => 2.0, 'grace_period_days' => 3,
+            'processing_fee' => 2.0, 'service_fee' => 0, 'notarial_fee' => 0,
+        ]);
+
+        $fee = Fee::create(['name' => 'Processing Fee', 'type' => 'fixed', 'value' => 50]);
+
+        $loan = $this->approvedLoan($product, 10000);
+
+        $preview = $this->getJson("/api/loans/{$loan->id}/release-preview")->assertOk();
+
+        $warnings = $preview->json('data.overlap_warnings');
+        $this->assertCount(1, $warnings);
+        $this->assertSame($fee->id, $warnings[0]['fee_id']);
+        $this->assertSame('Processing Fee', $warnings[0]['fee_name']);
+        $this->assertStringContainsString('duplicates', $warnings[0]['message']);
+
+        // The same totals the protected spec pins for this exact setup
+        // (₱200 from the product column + ₱50 from the catalog fee),
+        // undisturbed by the warning's presence.
+        $this->assertSame('250.00', $preview->json('data.total_deductions'));
+        $this->assertSame('9750.00', $preview->json('data.net_proceeds'));
+        $this->assertCount(2, $preview->json('data.deductions'));
+    }
+
+    /** No false positive: a product WITH active fees of its own, next to a genuinely distinct catalog name. */
+    public function test_the_release_preview_reports_no_warnings_when_fees_and_product_columns_are_distinct(): void
+    {
+        $product = LoanProduct::factory()->create([
+            'interest_rate' => 3.0, 'interest_method' => 'straight', 'term' => 6, 'frequency' => 'monthly',
+            'penalty_rate' => 2.0, 'grace_period_days' => 3,
+            'processing_fee' => 2.0, 'service_fee' => 1.0, 'notarial_fee' => 0,
+        ]);
+        Fee::create(['name' => 'Insurance Premium', 'type' => 'percentage', 'value' => 1.0]);
+
+        $loan = $this->approvedLoan($product, 10000);
+
+        $preview = $this->getJson("/api/loans/{$loan->id}/release-preview")->assertOk();
+
+        $this->assertSame([], $preview->json('data.overlap_warnings'));
+    }
 }

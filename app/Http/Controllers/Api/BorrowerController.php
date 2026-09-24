@@ -2,14 +2,13 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Http\Controllers\Api\Traits\RespondsWithValidIds;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Borrower\RejectBorrowerRequest;
 use App\Http\Requests\Borrower\StoreBorrowerRequest;
 use App\Http\Requests\Borrower\UpdateBorrowerRequest;
 use App\Http\Resources\BorrowerResource;
-use App\Http\Resources\DocumentResource;
 use App\Models\Borrower;
-use App\Models\Document;
 use App\Services\BorrowerPurgeService;
 use App\Services\BorrowerSubmissionTokenService;
 use App\Services\Diagnostics\ErrorDigest;
@@ -17,7 +16,6 @@ use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
-use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
@@ -26,6 +24,8 @@ use OpenApi\Attributes as OA;
 
 class BorrowerController extends Controller
 {
+    use RespondsWithValidIds;
+
     #[OA\Get(
         path: '/api/borrowers',
         summary: 'List borrowers',
@@ -136,6 +136,10 @@ DESC,
             ->when($membersOnly, fn ($q) => $q->members())
             ->when(filled($branchId), fn ($q) => $q->forBranch($branchId))
             ->latest()
+            // Tiebreak on the key: members written by one CSV import share a
+            // `created_at`, and a partial order lets the drained pickers serve
+            // one twice and another never. See DeterministicPaginationTest.
+            ->orderByDesc('id')
             ->paginate(min(max((int) ($filters['per_page'] ?? 15), 1), 100));
 
         /**
@@ -925,77 +929,7 @@ DESC,
             $this->authorize('borrowers:update');
         }
 
-        // Mutual exclusion: legacy single-file shape vs new front/back shape
-        if ($request->hasFile('file') && $request->hasFile('front_file')) {
-            throw ValidationException::withMessages([
-                'file' => 'Use either `file` (legacy) or `front_file`/`back_file`, not both.',
-            ]);
-        }
-
-        $rules = [
-            'type' => ['required', 'string', 'max:100'],
-            'custom_type_name' => ['nullable', 'string', 'max:100', 'required_if:type,others'],
-            'id_number' => ['nullable', 'string', 'max:100'],
-            'file' => ['required_without:front_file', 'file', 'max:10240', 'mimes:jpg,jpeg,png,pdf'],
-            'front_file' => ['required_without:file', 'file', 'max:10240', 'mimes:jpg,jpeg,png,pdf'],
-            'back_file' => ['nullable', 'file', 'max:10240', 'mimes:jpg,jpeg,png,pdf'],
-        ];
-
-        $request->validate($rules);
-
-        $type = $request->input('type');
-        $customTypeName = $request->input('custom_type_name');
-        $idNumber = $request->input('id_number');
-        $isLegacy = $request->hasFile('file');
-        $storedPaths = [];
-        $documents = [];
-
-        try {
-            DB::transaction(function () use ($borrower, $request, $type, $customTypeName, $idNumber, $isLegacy, &$storedPaths, &$documents) {
-                if ($isLegacy) {
-                    $documents[] = $this->storeValidIdFile($borrower, $request->file('file'), $type, $customTypeName, $idNumber, null, $storedPaths);
-                } else {
-                    $documents[] = $this->storeValidIdFile($borrower, $request->file('front_file'), $type, $customTypeName, $idNumber, 'front', $storedPaths);
-                    if ($request->hasFile('back_file')) {
-                        $documents[] = $this->storeValidIdFile($borrower, $request->file('back_file'), $type, $customTypeName, $idNumber, 'back', $storedPaths);
-                    }
-                }
-            });
-        } catch (\Throwable $e) {
-            // Roll back any files written to disk before the DB failure
-            foreach ($storedPaths as $path) {
-                Storage::disk('private')->delete($path);
-            }
-            throw $e;
-        }
-
-        if ($isLegacy) {
-            return (new DocumentResource($documents[0]))
-                ->response()
-                ->setStatusCode(201);
-        }
-
-        return DocumentResource::collection($documents)
-            ->response()
-            ->setStatusCode(201);
-    }
-
-    private function storeValidIdFile(Borrower $borrower, UploadedFile $file, string $type, ?string $customTypeName, ?string $idNumber, ?string $side, array &$storedPaths): Document
-    {
-        $path = $file->store("documents/valid_id/borrower/{$borrower->id}", 'private');
-        $storedPaths[] = $path;
-
-        return $borrower->documents()->create([
-            'type' => 'valid_id',
-            'label' => $type,
-            'custom_type_name' => $customTypeName,
-            'id_number' => $idNumber,
-            'side' => $side,
-            'file_path' => $path,
-            'original_filename' => $file->getClientOriginalName(),
-            'mime_type' => $file->getMimeType(),
-            'file_size' => $file->getSize(),
-        ]);
+        return $this->validIdUploadResponse($request, $borrower);
     }
 
     #[OA\Get(
@@ -1038,31 +972,7 @@ DESC,
     {
         $this->authorize('borrowers:view');
 
-        $documents = $borrower->documents()
-            ->where('type', 'valid_id')
-            ->orderBy('id')
-            ->get();
-
-        $groups = $documents->groupBy(fn (Document $doc) => $doc->label.'|'.($doc->id_number ?? ''));
-
-        $validIds = $groups->map(function ($group) {
-            $front = $group->firstWhere('side', 'front')
-                ?? $group->firstWhere('side', null)
-                ?? $group->first();
-            $back = $group->firstWhere('side', 'back');
-
-            return [
-                'id' => $front->id,
-                'type' => $front->label,
-                'custom_type_name' => $front->custom_type_name,
-                'id_number' => $front->id_number,
-                'front_url' => $front->url,
-                'back_url' => $back?->url,
-                'created_at' => $front->created_at,
-            ];
-        })->values();
-
-        return response()->json(['data' => $validIds]);
+        return $this->validIdListResponse($borrower);
     }
 
     #[OA\Delete(
@@ -1086,33 +996,7 @@ DESC,
     {
         $this->authorize('borrowers:delete');
 
-        $anchor = Document::where('id', $validIdId)
-            ->where('documentable_type', Borrower::class)
-            ->where('documentable_id', $borrower->id)
-            ->where('type', 'valid_id')
-            ->firstOrFail();
-
-        $pair = Document::where('documentable_type', Borrower::class)
-            ->where('documentable_id', $borrower->id)
-            ->where('type', 'valid_id')
-            ->where('label', $anchor->label)
-            ->where(function ($q) use ($anchor) {
-                if ($anchor->id_number === null) {
-                    $q->whereNull('id_number');
-                } else {
-                    $q->where('id_number', $anchor->id_number);
-                }
-            })
-            ->get();
-
-        DB::transaction(function () use ($pair) {
-            foreach ($pair as $doc) {
-                Storage::disk('private')->delete($doc->file_path);
-                $doc->delete();
-            }
-        });
-
-        return response()->json(['message' => 'Valid ID deleted successfully.']);
+        return $this->validIdDeleteResponse($borrower, $validIdId);
     }
 
     #[OA\Get(

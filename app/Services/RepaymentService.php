@@ -3,8 +3,10 @@
 namespace App\Services;
 
 use App\Models\AmortizationSchedule;
+use App\Models\Borrower;
 use App\Models\Loan;
 use App\Models\Repayment;
+use App\Models\ShareCapitalLedger;
 use App\Models\User;
 use App\Services\Accounting\AutomaticPoster;
 use Carbon\Carbon;
@@ -187,9 +189,39 @@ class RepaymentService
                 $loan->update(['status' => 'ongoing']);
             }
 
-            // NOTE: SCB crediting is frontend-driven (see frontend PR #106).
-            // The frontend computes the actual excess allocation and posts to /api/share-capital/ledger
-            // separately after this endpoint returns. Do not auto-credit here.
+            // Share capital build-up: on an SCB-bearing loan, whatever the
+            // allocation loop above could not apply to the current schedule
+            // becomes a share capital credit instead of sitting as unallocated
+            // overpayment. Posted in THIS transaction — see the docblock above
+            // for why the whole payment has to be one all-or-nothing unit.
+            //
+            // `$hasScb` gates this, not bare `$overpayment > 0`: a full payoff
+            // plus excess cash on a loan with no SCB is ordinary overpayment,
+            // not share capital, and must not be credited here.
+            //
+            // NON_MEMBER_STATUSES mirrors the same gate
+            // StoreShareCapitalLedgerRequest::memberBorrowerRule() enforces on
+            // the standalone endpoint this replaces — a `pending` or `rejected`
+            // borrower is not a member yet and cannot hold share capital.
+            //
+            // Rounded BEFORE the `> 0` check, not after: gating on the raw
+            // float would let sub-centavo residue from the allocation loop's
+            // arithmetic (e.g. 1.0E-13) through as "an overpayment", writing a
+            // credited $0.00 row that reverseShareCapitalCredit()'s `credit >
+            // 0` lookup would then never find to clean up on a later void.
+            $scbCredit = round($overpayment, 2);
+
+            if ($hasScb && $scbCredit > 0 && ! in_array($loan->borrower->status, Borrower::NON_MEMBER_STATUSES, true)) {
+                ShareCapitalLedger::create([
+                    'borrower_id' => $loan->borrower_id,
+                    'repayment_id' => $repayment->id,
+                    'date' => $paymentDate,
+                    'description' => "Share capital build-up from payment {$repayment->receipt_number} (Loan {$loan->loan_account_number})",
+                    'debit' => 0,
+                    'credit' => $scbCredit,
+                    'created_by' => $user->id,
+                ]);
+            }
 
             /*
              * THE BOOKS. Explicit, and the LAST thing in this transaction.
@@ -349,9 +381,11 @@ class RepaymentService
             // Re-run the allocation simulation and reverse each schedule.
             $this->reverseAllocation($repayment);
 
-            // NOTE: SCB reversal is frontend-driven (see frontend PR #106).
-            // The caller that voids a repayment is responsible for posting an offsetting debit
-            // entry to /api/share-capital/ledger if this loan had SCB crediting on the original payment.
+            // Reverse whatever share capital this repayment credited — a no-op
+            // if it credited none. Blocks the whole void (throws, rolling back
+            // reverseAllocation() above too) if reversing would take the
+            // member's share capital balance negative.
+            $this->reverseShareCapitalCredit($repayment, $loan, $user);
 
             $repayment->update([
                 'status' => 'voided',
@@ -413,6 +447,78 @@ class RepaymentService
 
             return $repayment;
         });
+    }
+
+    /**
+     * Reverse the share capital this repayment credited, if any.
+     *
+     * No-op when this repayment never credited share capital — either its
+     * loan carried no `scb_amount`, or it predates this feature. Otherwise
+     * inserts an offsetting debit row for the credited amount, UNLESS doing
+     * so would take the member's share capital balance negative, in which
+     * case the void is refused outright.
+     *
+     * The balance is `SUM(credit) - SUM(debit)` across the member's whole
+     * `share_capital_ledger` history — the same computation
+     * ReportService::shareCapital() and shareCapitalByMember() use for the
+     * Share Capital report, so a void is judged against the same figure the
+     * report would show, not a second definition of "balance" that could
+     * drift from it.
+     *
+     * @throws ValidationException naming the shortfall, on `share_capital`
+     */
+    private function reverseShareCapitalCredit(Repayment $repayment, Loan $loan, User $user): void
+    {
+        $credit = ShareCapitalLedger::where('repayment_id', $repayment->id)
+            ->where('credit', '>', 0)
+            ->first();
+
+        if (! $credit) {
+            return;
+        }
+
+        $creditedAmount = (float) $credit->credit;
+
+        // Locking, not plain: this is a check-then-act against a hard
+        // non-negative invariant, so a second void (or a fresh credit) for the
+        // same borrower racing this one must wait rather than both read the
+        // same pre-reversal balance and both pass. `borrower_id` is indexed,
+        // so under InnoDB's default REPEATABLE READ this also gap-locks
+        // against a concurrent INSERT for this borrower, not just existing
+        // rows. A locking read always answers from the latest committed data
+        // regardless of this transaction's snapshot, so it is safe this far
+        // into voidRepayment() rather than needing to be its first statement —
+        // see CollateralPledgeGuard's docblock for the guard shape this would
+        // need if it were a plain read instead.
+        $currentBalance = (float) ShareCapitalLedger::where('borrower_id', $loan->borrower_id)
+            ->lockForUpdate()
+            ->selectRaw('COALESCE(SUM(credit) - SUM(debit), 0) as balance')
+            ->value('balance');
+
+        $balanceAfterReversal = round($currentBalance - $creditedAmount, 2);
+
+        if ($balanceAfterReversal < 0) {
+            throw ValidationException::withMessages([
+                'share_capital' => sprintf(
+                    'Voiding this payment would reverse a share capital credit of %s, but the '
+                        .'member\'s current share capital balance is only %s — a shortfall of %s. '
+                        .'The void is blocked to avoid taking their balance negative.',
+                    number_format($creditedAmount, 2),
+                    number_format($currentBalance, 2),
+                    number_format(abs($balanceAfterReversal), 2),
+                ),
+            ]);
+        }
+
+        ShareCapitalLedger::create([
+            'borrower_id' => $loan->borrower_id,
+            'repayment_id' => $repayment->id,
+            'date' => now()->toDateString(),
+            'description' => "Void reversal of share capital build-up from payment {$repayment->receipt_number}",
+            'debit' => $creditedAmount,
+            'credit' => 0,
+            'created_by' => $user->id,
+        ]);
     }
 
     /**
