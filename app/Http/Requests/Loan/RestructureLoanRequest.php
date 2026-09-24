@@ -4,7 +4,6 @@ namespace App\Http\Requests\Loan;
 
 use App\Enums\LoanFrequency;
 use App\Http\Requests\Concerns\ExcludesRejectedBorrowers;
-use App\Rules\ExistingCoMakerOrBorrower;
 use Illuminate\Foundation\Http\FormRequest;
 
 /**
@@ -33,13 +32,13 @@ class RestructureLoanRequest extends FormRequest
         return [
             'borrower_id' => ['required', $this->nonRejectedBorrowerRule()],
             'co_maker_ids' => ['nullable', 'array'],
-            // Must exist as a co-maker OR a non-rejected borrower: the
-            // restructure form sends both in this one array — the source loan's
-            // co-maker record ids, pre-filled, plus member ids from its picker.
-            // POST /loans takes member ids only; see ExistingCoMakerOrBorrower
-            // and LoanService::coMakerIdsForRestructure() for why this one does
-            // not, yet.
-            'co_maker_ids.*' => ['integer', new ExistingCoMakerOrBorrower],
+            // MEMBER ids only — all the loan form's co-maker picker sends —
+            // never a co-maker record id: the two are separate sequences, so a
+            // number accepted as either can name two different people. See
+            // LoanService::coMakerIdsForMembers(). The same rule as the
+            // principal borrower above, because a co-maker is jointly liable:
+            // a rejected registration must not become one.
+            'co_maker_ids.*' => ['integer', $this->nonRejectedBorrowerRule()],
             'loan_product_id' => ['required', 'exists:loan_products,id'],
             'principal_amount' => ['required', 'numeric', 'min:1'],
             'purpose' => ['nullable', 'string', 'max:500'],
@@ -56,6 +55,16 @@ class RestructureLoanRequest extends FormRequest
             'deductions.*.name' => ['required_with:deductions', 'string', 'max:255'],
             'deductions.*.amount' => ['required_with:deductions', 'numeric', 'min:0'],
             'deductions.*.type' => ['required_with:deductions', 'in:fixed,percentage'],
+        ];
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    public function messages(): array
+    {
+        return [
+            'co_maker_ids.*.exists' => 'Each co-maker must be an existing member who was not rejected.',
         ];
     }
 }
