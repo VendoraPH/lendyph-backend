@@ -31,7 +31,11 @@ class StoreLoanAdjustmentRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'adjustment_type' => ['required', 'in:restructure,penalty_waiver,balance_adjustment,term_extension,extension'],
+            // `extension` is deliberately absent. Those rows are written only by
+            // POST /loans/{loan}/extend, already applied, and never go through
+            // this create → approve → apply workflow — LoanAdjustmentService has
+            // no arm for them, so accepting the type here turned into a 500.
+            'adjustment_type' => ['required', 'in:restructure,penalty_waiver,balance_adjustment,term_extension'],
             'description' => ['nullable', 'string', 'max:1000'],
             'new_values' => ['required', 'array'],
 
