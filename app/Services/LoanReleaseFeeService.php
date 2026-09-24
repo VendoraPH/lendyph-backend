@@ -2,8 +2,11 @@
 
 namespace App\Services;
 
+use App\Http\Requests\Fee\Concerns\GuardsAgainstProductFeeOverlap;
+use App\Http\Requests\LoanProduct\Concerns\GuardsAgainstFeeCatalogOverlap;
 use App\Models\Fee;
 use App\Models\Loan;
+use App\Models\LoanProduct;
 use App\Services\Accounting\AutomaticPoster;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Http\Exceptions\HttpResponseException;
@@ -143,11 +146,18 @@ final class LoanReleaseFeeService
      * JSON column on the loan and come back as numbers from BOTH endpoints
      * already, so there is nothing to reconcile.
      *
+     * ## `overlap_warnings` is advisory only
+     *
+     * Purely additive, and preview-only — never surfaced from
+     * {@see self::applyOnRelease()}, so it changes nothing about what a
+     * release charges or how much; see {@see self::overlapWarnings()}.
+     *
      * @return array{
      *     deductions: list<array<string, mixed>>,
      *     total_deductions: string,
      *     net_proceeds: string,
      *     fee_fingerprint: string,
+     *     overlap_warnings: list<array{fee_id: int, fee_name: string, message: string}>,
      * }
      */
     public function preview(Loan $loan): array
@@ -166,7 +176,60 @@ final class LoanReleaseFeeService
             'total_deductions' => number_format($total, 2, '.', ''),
             'net_proceeds' => number_format($net, 2, '.', ''),
             'fee_fingerprint' => $this->fingerprint($fees),
+            'overlap_warnings' => $this->overlapWarnings($loan, $fees),
         ];
+    }
+
+    /**
+     * Advisory-only: which of `$fees` would double-charge the SAME
+     * conceptual fee this loan's `LoanProduct` columns already collect.
+     *
+     * ## Why this exists alongside the write-time guards
+     *
+     * {@see GuardsAgainstProductFeeOverlap}
+     * and {@see GuardsAgainstFeeCatalogOverlap}
+     * stop a NEW colliding configuration from being saved. Neither
+     * retroactively re-checks a `Fee` row that predates the guard, or a
+     * product column raised before the guard shipped. This is the backstop
+     * for that gap: surfaced on the preview a cashier already reads before
+     * releasing, so an already-saved collision is still visible at the one
+     * moment someone can still do something about it.
+     *
+     * Deliberately NOT called from {@see self::applyOnRelease()} — it
+     * reports on the configuration, not on the money, and
+     * {@see LoanReleaseFeeService} charges both mechanisms by design (see
+     * the class docblock). This only tells the cashier about it first.
+     *
+     * @param  EloquentCollection<int, Fee>  $fees  this loan's applicable fees, as returned by {@see self::applicableFees()}
+     * @return list<array{fee_id: int, fee_name: string, message: string}>
+     */
+    private function overlapWarnings(Loan $loan, EloquentCollection $fees): array
+    {
+        $product = LoanProduct::find($loan->loan_product_id);
+
+        if (! $product) {
+            return [];
+        }
+
+        $detector = app(FeeOverlapDetector::class);
+        $warnings = [];
+
+        foreach ($fees as $fee) {
+            $collides = $detector->collidingProducts($fee->name, $fee->applicable_product_ids)
+                ->contains('id', $product->id);
+
+            if (! $collides) {
+                continue;
+            }
+
+            $warnings[] = [
+                'fee_id' => $fee->id,
+                'fee_name' => $fee->name,
+                'message' => "'{$fee->name}' duplicates this product's own fee and will be charged in addition to it.",
+            ];
+        }
+
+        return $warnings;
     }
 
     /**

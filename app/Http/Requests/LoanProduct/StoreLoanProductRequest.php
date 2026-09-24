@@ -3,10 +3,14 @@
 namespace App\Http\Requests\LoanProduct;
 
 use App\Enums\LoanFrequency;
+use App\Http\Requests\LoanProduct\Concerns\GuardsAgainstFeeCatalogOverlap;
+use Illuminate\Contracts\Validation\Validator;
 use Illuminate\Foundation\Http\FormRequest;
 
 class StoreLoanProductRequest extends FormRequest
 {
+    use GuardsAgainstFeeCatalogOverlap;
+
     public function authorize(): bool
     {
         return $this->user()->can('loans:create');
@@ -70,5 +74,10 @@ class StoreLoanProductRequest extends FormRequest
         if ($this->has('is_active') && ! $this->has('status')) {
             $this->merge(['status' => $this->boolean('is_active') ? 'active' : 'inactive']);
         }
+    }
+
+    public function withValidator(Validator $validator): void
+    {
+        $this->guardAgainstFeeCatalogOverlap($validator);
     }
 }
