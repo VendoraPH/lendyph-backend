@@ -920,14 +920,14 @@ it('has no path writing an active loan status outside the ones that are accounte
         //
         // The moment this importer learns to attach collateral, that stops
         // being true and this line has to move to the guarded list.
-        'app/Services/CsvImport/CsvImportProcessor.php:944 — \'status\' => \'ongoing\',',
+        'app/Services/CsvImport/CsvImportProcessor.php:945 — \'status\' => \'ongoing\',',
         // release(): approved → released. Its lock is the first statement of the
         // transaction; the assertion runs at the end, after
         // closeRestructuredSource() has taken any restructure source out of the
         // active set. The automatic accounting posting sits immediately BEFORE
         // that assertion, so the assertion is still the transaction's last
         // statement — which is what this entry is really asserting.
-        'app/Services/LoanService.php:771 — \'status\' => \'released\',',
+        'app/Services/LoanService.php:774 — \'status\' => \'released\',',
         // processRepayment(): released → ongoing. Deliberately UNGUARDED — both
         // are already active, so it cannot add a holder.
         'app/Services/RepaymentService.php:189 — $loan->update([\'status\' => \'ongoing\']);',

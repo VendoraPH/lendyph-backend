@@ -9,6 +9,7 @@ use App\Models\CsvImportRun;
 use App\Models\Loan;
 use App\Models\LoanProduct;
 use App\Services\AuditLogService;
+use App\Services\LoanTermSchedule;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -904,10 +905,10 @@ class CsvImportProcessor
             'branch_id' => $borrower->branch_id ?? $run->branch_id,
             'interest_rate' => $normalized->value('interest_rate'),
             'interest_method' => $normalized->value('interest_type'),
-            // A PERIOD COUNT in units of `frequency`, derived from the dates by
-            // the reconstructor. NOT the CSV's "Term in Months", which would
-            // corrupt every loan that is not monthly.
-            'term' => $schedule->term,
+            // From the PERIOD COUNT the reconstructor derived from the dates —
+            // NOT the CSV's "Term in Months", which would corrupt every loan
+            // that is not monthly — as the exact term that reproduces it.
+            ...LoanTermSchedule::fromPeriodCount($schedule->term, $normalized->value('payment_frequency')),
             'frequency' => $normalized->value('payment_frequency'),
             'principal_amount' => $this->pesos($principal),
             'purpose' => $normalized->value('purpose'),

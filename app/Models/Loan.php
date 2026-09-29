@@ -2,6 +2,8 @@
 
 namespace App\Models;
 
+use App\Enums\InterestRateFrequency;
+use App\Enums\TermUnit;
 use App\Services\SequenceCode;
 use App\Traits\Auditable;
 use Illuminate\Database\Eloquent\Casts\Attribute;
@@ -15,6 +17,15 @@ use Illuminate\Database\Eloquent\Relations\MorphMany;
 class Loan extends Model
 {
     use Auditable, HasFactory;
+
+    /**
+     * The database defaults, so a loan built in memory — a preview stub, a
+     * replicate() — reads the same as one loaded back.
+     */
+    protected $attributes = [
+        'term_unit' => 'months',
+        'interest_rate_frequency' => 'monthly',
+    ];
 
     /**
      * Loans that have been money out the door — the portfolio a balance,
@@ -123,8 +134,10 @@ class Loan extends Model
         'source_loan_id',
         'branch_id',
         'interest_rate',
+        'interest_rate_frequency',
         'interest_method',
         'term',
+        'term_unit',
         'frequency',
         'principal_amount',
         'purpose',
@@ -196,6 +209,8 @@ class Loan extends Model
             'restructure_outstanding' => 'decimal:2',
             'restructure_principal' => 'decimal:2',
             'restructure_shortfall' => 'decimal:2',
+            'term_unit' => TermUnit::class,
+            'interest_rate_frequency' => InterestRateFrequency::class,
         ];
     }
 
@@ -341,15 +356,14 @@ class Loan extends Model
     /**
      * Whether this loan is eligible for the Extend Loan action.
      *
-     * Extension is limited to one-month-term loans whatever the product.
-     * `term` is a period count whose unit follows `frequency` and is only
-     * denominated in months for these two — see
-     * LoanService::computeMaturityDate — so a daily loan with term 30 is
-     * thirty daily periods, not a one-month loan.
+     * Extension is limited to one-month-term loans whatever the product: a
+     * term of 1 in months, paid monthly or at maturity. A 30-day term is not
+     * one, and neither is a one-month loan paid more often than monthly.
      */
     public function isOneMonthTerm(): bool
     {
         return in_array($this->frequency, ['monthly', 'upon_maturity'], true)
+            && $this->term_unit === TermUnit::Months
             && $this->term === 1;
     }
 

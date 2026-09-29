@@ -2,7 +2,9 @@
 
 namespace App\Http\Requests\LoanProduct;
 
+use App\Enums\InterestRateFrequency;
 use App\Enums\LoanFrequency;
+use App\Enums\TermUnit;
 use App\Http\Requests\LoanProduct\Concerns\GuardsAgainstFeeCatalogOverlap;
 use App\Models\LoanProduct;
 use Illuminate\Contracts\Validation\Validator;
@@ -28,6 +30,8 @@ class UpdateLoanProductRequest extends FormRequest
             'term' => ['sometimes', 'integer', 'min:1'],
             'min_term' => ['nullable', 'integer', 'min:1'],
             'max_term' => ['nullable', 'integer', 'min:1'],
+            'term_unit' => ['sometimes', TermUnit::rule()],
+            'interest_rate_frequency' => ['sometimes', InterestRateFrequency::rule()],
             'frequency' => ['sometimes', LoanFrequency::rule()],
             'frequencies' => ['nullable', 'array'],
             'frequencies.*' => [LoanFrequency::rule()],
