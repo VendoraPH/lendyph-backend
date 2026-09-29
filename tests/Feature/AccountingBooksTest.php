@@ -2,18 +2,22 @@
 
 namespace Tests\Feature;
 
+use App\Models\AccountingJournal;
 use App\Services\Accounting\JournalPoster;
 use Tests\TestCase;
 use Tests\Traits\PostsJournals;
 use Tests\Traits\SetupLendyPH;
 
 /**
- * The BIR books of account — the general journal and the general ledger.
+ * The BIR books of account — the general journal, the general ledger, and the
+ * cash receipts and cash disbursements books.
  *
- * The central claim these tests defend is that the two books are ONE set of
- * postings in two orders. If they ever disagree about what happened in a
- * period, one of them is lying to an auditor, and the failure would be
- * invisible on screen because each book is internally consistent.
+ * The central claim these tests defend is that the journal and the ledger are
+ * ONE set of postings in two orders. If they ever disagree about what happened
+ * in a period, one of them is lying to an auditor, and the failure would be
+ * invisible on screen because each book is internally consistent. The cash
+ * books are that same set narrowed by which way each entry moved money, and
+ * together they must net to the change in cash the cash flow statement reports.
  */
 class AccountingBooksTest extends TestCase
 {
@@ -225,5 +229,175 @@ class AccountingBooksTest extends TestCase
         $this->assertSame([], $book['rows']);
         $this->assertSame(0, $book['total_debit']);
         $this->assertSame(0, $book['total_credit']);
+    }
+
+    // ── The cash books ───────────────────────────────────────────────────
+
+    /** A loan collection as AutomaticPoster writes it: cash in, split across what it paid. */
+    private function postCollection(string $date, int $received = 235500): AccountingJournal
+    {
+        return $this->postJournal([
+            ['account_id' => $this->account('1010'), 'debit' => $received, 'credit' => 0],
+            ['account_id' => $this->account('1110'), 'debit' => 0, 'credit' => $received - 53682],
+            ['account_id' => $this->account('4010'), 'debit' => 0, 'credit' => 53682],
+        ], ['date' => $date, 'source' => 'loan_collection', 'description' => 'Loan collection']);
+    }
+
+    /** A loan release net of its processing fee: the gross goes out as receivable, the net as cash. */
+    private function postRelease(string $date, int $gross = 1000000, int $fee = 10000): AccountingJournal
+    {
+        return $this->postJournal([
+            ['account_id' => $this->account('1110'), 'debit' => $gross, 'credit' => 0],
+            ['account_id' => $this->account('1010'), 'debit' => 0, 'credit' => $gross - $fee],
+            ['account_id' => $this->account('4030'), 'debit' => 0, 'credit' => $fee],
+        ], ['date' => $date, 'source' => 'loan_release', 'description' => 'Loan release']);
+    }
+
+    public function test_both_cash_books_are_routed_and_answer_the_book_shape(): void
+    {
+        // These two paths 404'd — the books screen asked for them from its
+        // Cash Receipts and Cash Disbursements tabs before they existed.
+        $receipts = $this->book('cash-receipts');
+        $disbursements = $this->book('cash-disbursements');
+
+        $this->assertSame('cash_receipts', $receipts['kind']);
+        $this->assertSame('cash_disbursements', $disbursements['kind']);
+
+        foreach ([$receipts, $disbursements] as $book) {
+            $this->assertSame(['kind', 'from', 'to', 'rows', 'total_debit', 'total_credit'], array_keys($book));
+            $this->assertSame([], $book['rows']);
+        }
+    }
+
+    public function test_a_collection_is_a_receipt_and_a_release_is_a_disbursement(): void
+    {
+        $collection = $this->postCollection('2026-09-10');
+        $release = $this->postRelease('2026-09-12');
+
+        $receipts = $this->book('cash-receipts');
+        $disbursements = $this->book('cash-disbursements');
+
+        // Each entry is listed WHOLE — every line, not just the cash one — so
+        // the book says what the money was for and still balances.
+        $this->assertSame(array_fill(0, 3, $collection->journal_no), array_column($receipts['rows'], 'journal_no'));
+        $this->assertSame(['1010', '1110', '4010'], array_column($receipts['rows'], 'account_code'));
+        $this->assertSame(235500, $receipts['total_debit']);
+        $this->assertSame($receipts['total_debit'], $receipts['total_credit']);
+
+        $this->assertSame(array_fill(0, 3, $release->journal_no), array_column($disbursements['rows'], 'journal_no'));
+        $this->assertSame(1000000, $disbursements['total_debit']);
+        $this->assertSame($disbursements['total_debit'], $disbursements['total_credit']);
+    }
+
+    public function test_a_transfer_between_our_own_money_accounts_is_in_neither_cash_book(): void
+    {
+        // Cash on hand deposited to the bank. Money moved between two pockets;
+        // none was received and none was paid.
+        $this->postSimpleJournal('1040', '1010', 500000, ['date' => '2026-09-15', 'source' => 'transfer']);
+
+        $this->assertSame([], $this->book('cash-receipts')['rows']);
+        $this->assertSame([], $this->book('cash-disbursements')['rows']);
+
+        // It is still a posting, so the general journal keeps it.
+        $this->assertCount(2, $this->book('general-journal')['rows']);
+    }
+
+    public function test_a_transfer_that_carried_a_charge_is_a_disbursement(): void
+    {
+        // What FundTransferRecorder writes for a transfer with a fee: the fee
+        // really was paid out, so the entry nets to a credit on cash.
+        $this->postJournal([
+            ['account_id' => $this->account('1040'), 'debit' => 500000, 'credit' => 0],
+            ['account_id' => $this->account('5150'), 'debit' => 1500, 'credit' => 0],
+            ['account_id' => $this->account('1010'), 'debit' => 0, 'credit' => 501500],
+        ], ['date' => '2026-09-15', 'source' => 'transfer']);
+
+        $this->assertSame([], $this->book('cash-receipts')['rows']);
+        $this->assertCount(3, $this->book('cash-disbursements')['rows']);
+    }
+
+    public function test_a_reversed_collection_is_a_receipt_and_its_reversal_a_disbursement(): void
+    {
+        $collection = $this->postCollection('2026-09-10');
+        $reversal = app(JournalPoster::class)->reverse($collection, '2026-09-13', 'Voided payment', $this->admin->id);
+
+        $receipts = $this->book('cash-receipts');
+        $disbursements = $this->book('cash-disbursements');
+
+        // The original stays where it was — a reversed entry is a posted
+        // historical fact — and the reversal is money going back out, on the
+        // day it went.
+        $this->assertSame([$collection->journal_no], array_values(array_unique(array_column($receipts['rows'], 'journal_no'))));
+        $this->assertSame([$reversal->journal_no], array_values(array_unique(array_column($disbursements['rows'], 'journal_no'))));
+        $this->assertSame(['2026-09-13'], array_values(array_unique(array_column($disbursements['rows'], 'date'))));
+    }
+
+    public function test_drafts_are_not_in_the_cash_books(): void
+    {
+        $this->draftJournal([
+            ['account_id' => $this->account('1010'), 'debit' => 999900, 'credit' => 0],
+            ['account_id' => $this->account('3010'), 'debit' => 0, 'credit' => 999900],
+        ], ['date' => '2026-09-12']);
+
+        $this->assertSame([], $this->book('cash-receipts')['rows']);
+    }
+
+    public function test_the_cash_books_net_to_the_cash_flow_statements_change_in_cash(): void
+    {
+        $this->postCollection('2026-09-03');
+        $this->postRelease('2026-09-05');
+        $this->postSimpleJournal('1010', '3010', 300000, ['date' => '2026-09-06']);
+        $this->postSimpleJournal('5150', '1040', 45000, ['date' => '2026-09-08', 'source' => 'expense']);
+        $this->postSimpleJournal('1040', '1010', 200000, ['date' => '2026-09-09', 'source' => 'transfer']);
+        $voided = $this->postCollection('2026-09-10', 120000);
+        app(JournalPoster::class)->reverse($voided, '2026-09-11', 'Voided payment', $this->admin->id);
+
+        $cashCodes = ['1010', '1020', '1030', '1040'];
+        $netCash = 0;
+        foreach (['cash-receipts', 'cash-disbursements'] as $path) {
+            foreach ($this->book($path)['rows'] as $row) {
+                if (in_array($row['account_code'], $cashCodes, true)) {
+                    $netCash += $row['debit'] - $row['credit'];
+                }
+            }
+        }
+
+        $statement = $this->getJson('/api/accounting/statements/cash-flow?from=2026-09-01&to=2026-09-30')
+            ->assertOk()
+            ->json('data');
+
+        // Receipts less disbursements IS the period's change in cash. If the
+        // books and the statement ever disagree, one of them has miscounted
+        // what came in or went out.
+        $this->assertSame(235500 - 990000 + 300000 - 45000, $netCash);
+        $this->assertSame($statement['net_change'], $netCash);
+    }
+
+    public function test_the_cash_books_are_filtered_and_bounded_like_the_others(): void
+    {
+        $this->postCollection('2026-09-10');
+        $this->postJournal([
+            ['account_id' => $this->account('1010'), 'debit' => 70000, 'credit' => 0],
+            ['account_id' => $this->account('4010'), 'debit' => 0, 'credit' => 70000],
+        ], ['date' => '2026-09-11', 'branch_id' => null]);
+
+        $branch = $this->getJson('/api/accounting/books/cash-receipts?from=2026-09-01&to=2026-09-30&branch_id='.$this->branch->id)
+            ->assertOk()
+            ->json('data');
+        $this->assertSame(235500, $branch['total_debit']);
+
+        $this->getJson('/api/accounting/books/cash-disbursements?from=2026-01-01&to=2027-01-02')
+            ->assertStatus(422)
+            ->assertJsonValidationErrors('from');
+    }
+
+    public function test_the_cash_books_require_accounting_view(): void
+    {
+        $this->actingAs($this->userWithNoRole());
+
+        $this->getJson('/api/accounting/books/cash-receipts?from=2026-09-01&to=2026-09-30')
+            ->assertForbidden();
+        $this->getJson('/api/accounting/books/cash-disbursements?from=2026-09-01&to=2026-09-30')
+            ->assertForbidden();
     }
 }

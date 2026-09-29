@@ -543,12 +543,11 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
          * people's is not. Add to the bottom of this block, not into it.
          *
          * The BIR books of account. One path per book so the books screen can
-         * pick by tab without a switch statement per call site; both answer the
-         * same `{data: AccountingBook}` shape, because `book-report.tsx`
+         * pick by tab without a switch statement per call site; all four answer
+         * the same `{data: AccountingBook}` shape, because `book-report.tsx`
          * renders every book through ONE component keyed by `BookKind`. The
-         * cash receipts and cash disbursements books are the other half of the
-         * set and are not routed yet — they need the automatic posting engine
-         * to tell a receipt from a disbursement by source.
+         * cash books tell a receipt from a disbursement by which way each entry
+         * moved money (BookBuilder::movedMoney()).
          *
          * Note these are the FIRST accounting routes with a static segment
          * under a sub-prefix. They cannot collide with `/accounts/{account}`
@@ -558,6 +557,8 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
          */
         Route::get('/books/general-journal', [AccountingBookController::class, 'generalJournal']);
         Route::get('/books/general-ledger', [AccountingBookController::class, 'generalLedger']);
+        Route::get('/books/cash-receipts', [AccountingBookController::class, 'cashReceipts']);
+        Route::get('/books/cash-disbursements', [AccountingBookController::class, 'cashDisbursements']);
 
         /*
          * Aged receivables. Gated on `accounting:view` like the reports above,

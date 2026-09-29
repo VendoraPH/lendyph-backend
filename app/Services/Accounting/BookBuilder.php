@@ -3,13 +3,14 @@
 namespace App\Services\Accounting;
 
 use App\Models\AccountingJournal;
+use Illuminate\Database\Query\Builder;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 
 /**
  * The BIR books of account, as `AccountingBook` in `src/types/accounting.ts`.
  *
- * Two books, one set of rows. The general journal and the general ledger are
+ * Four books, one set of rows. The general journal and the general ledger are
  * not different data — they are the SAME postings in two orders, which is what
  * "book of original entry" and "book of final entry" mean:
  *
@@ -17,6 +18,17 @@ use Illuminate\Support\Facades\DB;
  *     entered, so the register reads as a diary of the period.
  *   - GENERAL LEDGER: by account. The same postings regrouped under the account
  *     they touched, so each account's activity is contiguous.
+ *
+ * The two cash books are the general journal narrowed to the entries that
+ * moved money, split by which way it went:
+ *
+ *   - CASH RECEIPTS: entries whose money-account lines net to a debit —
+ *     money came in (a collection, a fee received, capital paid in).
+ *   - CASH DISBURSEMENTS: entries whose money-account lines net to a credit —
+ *     money went out (a release, an expense, a payable settled).
+ *
+ * See {@see self::movedMoney()} for how an entry is assigned, including why a
+ * transfer between two of our own money accounts is in neither book.
  *
  * Because they are one query with two `ORDER BY`s, the two books cannot
  * disagree about what happened — `total_debit` and `total_credit` are
@@ -43,13 +55,13 @@ use Illuminate\Support\Facades\DB;
  */
 final class BookBuilder
 {
-    /** The books this builder can produce. The other two BIR books are not built yet. */
-    public const KINDS = ['general_journal', 'general_ledger'];
+    /** The books this builder can produce: all four BIR books of account. */
+    public const KINDS = ['general_journal', 'general_ledger', 'cash_receipts', 'cash_disbursements'];
 
     /**
      * One book over a date range.
      *
-     * @param  'general_journal'|'general_ledger'  $kind
+     * @param  'general_journal'|'general_ledger'|'cash_receipts'|'cash_disbursements'  $kind
      * @return array{kind: string, from: string, to: string, rows: list<array<string, mixed>>, total_debit: int, total_credit: int}
      */
     public function build(string $kind, string $from, string $to, ?int $branchId = null): array
@@ -113,7 +125,11 @@ final class BookBuilder
             ->where('j.date', '<=', $to)
             ->when($branchId !== null, fn ($q) => $q->where('j.branch_id', $branchId));
 
-        // The regrouping, and the only difference between the two books.
+        if ($kind === 'cash_receipts' || $kind === 'cash_disbursements') {
+            $query->whereIn('j.id', $this->movedMoney($kind === 'cash_receipts' ? 'in' : 'out', $from, $to));
+        }
+
+        // The regrouping, and the only difference between the journal and the ledger.
         if ($kind === 'general_ledger') {
             // Codes are fixed-width numeric strings, so lexical order is
             // statement order: 1010 -> 1110 -> 2010 -> 4010.
@@ -138,5 +154,52 @@ final class BookBuilder
                 'a.name as account_name',
             ])
             ->get();
+    }
+
+    /**
+     * The entries whose money moved in one direction, as a subquery of ids.
+     *
+     * An entry belongs to a cash book by the NET of its lines on money
+     * accounts: a net debit is a receipt, a net credit a disbursement. The
+     * entry is then listed whole — every line, not only the cash ones — so the
+     * book shows what the money was for and still balances, debits equal to
+     * credits, the same as the general journal it is drawn from.
+     *
+     * By the net rather than by the presence of a debit or credit line, and
+     * that is what decides the two cases a line-by-line rule would get wrong:
+     *
+     *   - A transfer between two of our own money accounts (Dr Bank, Cr Cash)
+     *     nets to zero and lands in NEITHER book. Money moved between pockets;
+     *     none was received or paid. It stays in the general journal, and it
+     *     contributes nothing to the cash flow statement for the same reason.
+     *     A transfer that carried a charge nets to the charge, so it IS a
+     *     disbursement — the charge really was paid out.
+     *   - A reversal is its own movement, so a voided collection's reversal
+     *     (Cr Cash) is a disbursement, dated the day it was reversed. The two
+     *     books then net to exactly the change in cash over the period, which
+     *     is what the cash flow statement reports as `net_change`.
+     *
+     * "Money account" is the definition CashFlowStatementBuilder, the Cash &
+     * Bank screen and the dashboard already share — `cash_kind` set, not a
+     * group — so no two screens disagree about what counted as cash.
+     *
+     * The outer query applies the status and branch filters. The date range is
+     * repeated here only so the grouping runs over the period's lines rather
+     * than the whole history of every money account.
+     *
+     * @param  'in'|'out'  $direction
+     */
+    private function movedMoney(string $direction, string $from, string $to): Builder
+    {
+        return DB::table('accounting_journal_lines as cl')
+            ->join('accounting_journals as cj', 'cj.id', '=', 'cl.accounting_journal_id')
+            ->join('accounting_accounts as ca', 'ca.id', '=', 'cl.accounting_account_id')
+            ->where('cj.date', '>=', $from)
+            ->where('cj.date', '<=', $to)
+            ->whereNotNull('ca.cash_kind')
+            ->where('ca.is_group', false)
+            ->groupBy('cl.accounting_journal_id')
+            ->havingRaw($direction === 'in' ? 'SUM(cl.debit) > SUM(cl.credit)' : 'SUM(cl.credit) > SUM(cl.debit)')
+            ->select('cl.accounting_journal_id');
     }
 }
