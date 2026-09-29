@@ -3,7 +3,9 @@
 namespace Tests\Feature;
 
 use App\Models\User;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
+use Laravel\Sanctum\PersonalAccessToken;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
@@ -106,6 +108,59 @@ class AuthTest extends TestCase
 
         $logoutResponse->assertOk()
             ->assertJson(['message' => 'Logged out successfully.']);
+    }
+
+    public function test_login_reports_how_long_the_token_lasts(): void
+    {
+        $this->travelTo(Carbon::parse('2026-09-30 09:00:00'));
+
+        $this->postJson('/api/auth/login', ['login' => 'super_admin', 'password' => 'password'])
+            ->assertOk()
+            ->assertJsonPath('expires_in', 30 * 60);
+
+        $this->assertSame('2026-09-30 09:30:00', PersonalAccessToken::latest('id')->first()->expires_at->toDateTimeString());
+    }
+
+    public function test_a_remembered_login_reports_thirty_days(): void
+    {
+        $this->postJson('/api/auth/login', ['login' => 'super_admin', 'password' => 'password', 'remember' => true])
+            ->assertOk()
+            ->assertJsonPath('expires_in', 30 * 24 * 60 * 60);
+    }
+
+    public function test_refresh_reports_how_long_the_new_token_lasts(): void
+    {
+        $this->app['auth']->forgetGuards();
+        $this->travelTo(Carbon::parse('2026-09-30 09:00:00'));
+
+        $token = $this->postJson('/api/auth/login', ['login' => 'super_admin', 'password' => 'password'])->json('token');
+
+        $this->travelTo(Carbon::parse('2026-09-30 09:20:00'));
+
+        $this->withToken($token)
+            ->postJson('/api/auth/refresh')
+            ->assertOk()
+            ->assertJsonPath('expires_in', 30 * 60);
+
+        $this->assertSame('2026-09-30 09:50:00', PersonalAccessToken::latest('id')->first()->expires_at->toDateTimeString());
+    }
+
+    /**
+     * Why the client has to renew BEFORE expiry. Refresh is authenticated by
+     * the token it replaces, so once that token has expired the refresh is
+     * refused like any other request. A client that waits for a 401 before
+     * refreshing can never succeed.
+     */
+    public function test_an_expired_token_cannot_be_refreshed(): void
+    {
+        $this->app['auth']->forgetGuards();
+        $this->travelTo(Carbon::parse('2026-09-30 09:00:00'));
+
+        $token = $this->postJson('/api/auth/login', ['login' => 'super_admin', 'password' => 'password'])->json('token');
+
+        $this->travelTo(Carbon::parse('2026-09-30 09:31:00'));
+
+        $this->withToken($token)->postJson('/api/auth/refresh')->assertUnauthorized();
     }
 
     public function test_me_returns_authenticated_user(): void
