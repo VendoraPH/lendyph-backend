@@ -9,6 +9,7 @@ use App\Http\Requests\Auth\UpdateMeRequest;
 use App\Http\Resources\UserResource;
 use App\Models\User;
 use App\Services\AuditLogService;
+use Carbon\CarbonInterface;
 use Illuminate\Contracts\Auth\StatefulGuard;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -43,6 +44,13 @@ class AuthController extends Controller
                 content: new OA\JsonContent(
                     properties: [
                         new OA\Property(property: 'token', type: 'string'),
+                        new OA\Property(
+                            property: 'expires_in',
+                            description: 'Seconds until the token expires. A token can only be refreshed while it is '
+                                .'still valid, so a client renews before this runs out rather than after a 401.',
+                            type: 'integer',
+                            example: 1800,
+                        ),
                         new OA\Property(
                             property: 'user',
                             description: 'The full user record. `user.must_change_password` is true when an '
@@ -96,6 +104,7 @@ class AuthController extends Controller
 
         return response()->json([
             'token' => $token->plainTextToken,
+            'expires_in' => $this->secondsUntil($expiry),
             'user' => new UserResource($user),
         ]);
     }
@@ -285,6 +294,7 @@ class AuthController extends Controller
                 content: new OA\JsonContent(
                     properties: [
                         new OA\Property(property: 'token', type: 'string'),
+                        new OA\Property(property: 'expires_in', description: 'Seconds until the new token expires.', type: 'integer', example: 1800),
                     ],
                 ),
             ),
@@ -322,12 +332,28 @@ class AuthController extends Controller
 
         $currentToken->delete();
 
-        $token = $user->createToken(
-            'auth-token',
-            ['*'],
-            now()->addMinutes(config('auth.token_timeout', 30)),
-        );
+        $expiry = now()->addMinutes(config('auth.token_timeout', 30));
 
-        return response()->json(['token' => $token->plainTextToken]);
+        $token = $user->createToken('auth-token', ['*'], $expiry);
+
+        return response()->json([
+            'token' => $token->plainTextToken,
+            'expires_in' => $this->secondsUntil($expiry),
+        ]);
+    }
+
+    /**
+     * How long a token just issued has left, for the client to renew by.
+     *
+     * The client needs this because refreshing is authenticated by the very
+     * token it replaces: once `expires_at` passes, `POST /auth/refresh` answers
+     * 401 like everything else, so a renewal has to happen before expiry, not
+     * in response to one. A duration rather than a timestamp, because the
+     * browser measures it against its own clock and a workstation whose clock
+     * is off would otherwise renew too late or not at all.
+     */
+    private function secondsUntil(CarbonInterface $expiresAt): int
+    {
+        return max(0, (int) round(now()->diffInSeconds($expiresAt)));
     }
 }
