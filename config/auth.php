@@ -122,8 +122,12 @@ return [
     | This value defines the number of minutes of inactivity before a
     | Sanctum token is considered expired. Set to 0 to disable.
     |
+    | Cast because env() hands back a string whenever the variable is set, and
+    | Carbon's addMinutes() refuses one: a box that set AUTH_TOKEN_TIMEOUT
+    | would fail every login with a 500 instead of changing the timeout.
+    |
     */
 
-    'token_timeout' => env('AUTH_TOKEN_TIMEOUT', 30),
+    'token_timeout' => (int) env('AUTH_TOKEN_TIMEOUT', 30),
 
 ];
