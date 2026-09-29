@@ -8,8 +8,9 @@ namespace App\Services\CsvImport;
 final class ReconstructedSchedule
 {
     /**
-     * @param  int  $term  The value for `loans.term` — a PERIOD COUNT in units of
-     *                     `frequency`, which is not the CSV's "Term in Months".
+     * @param  int  $term  A PERIOD COUNT in units of `frequency`, which is not
+     *                     the CSV's "Term in Months". Stored on the loan through
+     *                     LoanTermSchedule::fromPeriodCount().
      * @param  list<ReconstructedPeriod>  $periods
      * @param  list<RowNote>  $warnings
      * @param  list<RowNote>  $errors

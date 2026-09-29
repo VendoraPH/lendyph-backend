@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Enums\TermUnit;
 use App\Models\AmortizationSchedule;
 use App\Models\Borrower;
 use App\Models\Collateral;
@@ -34,6 +35,9 @@ class LoanService
         $interestRate = (float) ($validated['interest_rate'] ?? $product->interest_rate);
         $term = (int) ($validated['term'] ?? $product->term);
         $frequency = $validated['frequency'] ?? $product->frequency;
+        // Copied onto the loan, so editing the product later never reprices it.
+        $termUnit = $product->term_unit->value;
+        $rateFrequency = $product->interest_rate_frequency->value;
 
         // Validate principal against product min/max
         if ($enforceMinimumAmount && $product->min_amount > 0 && $principal < (float) $product->min_amount) {
@@ -61,7 +65,7 @@ class LoanService
         $maxTerm = (int) ($product->max_term ?? $product->term);
         if ($term < $minTerm || $term > $maxTerm) {
             throw ValidationException::withMessages([
-                'term' => ["Term must be between {$minTerm} and {$maxTerm} months for this product."],
+                'term' => ["Term must be between {$minTerm} and {$maxTerm} {$termUnit} for this product."],
             ]);
         }
 
@@ -86,17 +90,15 @@ class LoanService
             'loan_product_id' => $product->id,
             'branch_id' => $borrower->branch_id,
             'interest_rate' => $interestRate,
+            'interest_rate_frequency' => $rateFrequency,
             'interest_method' => $product->interest_method,
             'term' => $term,
+            'term_unit' => $termUnit,
             'frequency' => $frequency,
             'principal_amount' => $principal,
             'purpose' => $validated['purpose'] ?? null,
             'start_date' => $validated['start_date'],
-            'maturity_date' => $this->computeMaturityDate(
-                $validated['start_date'],
-                $term,
-                $frequency,
-            ),
+            'maturity_date' => $this->maturityDateFor($validated['start_date'], $term, $termUnit, $frequency),
             'deductions' => $deductionResult['items'],
             'total_deductions' => $deductionResult['total'],
             'net_proceeds' => $deductionResult['net_proceeds'],
@@ -492,9 +494,10 @@ class LoanService
         }
 
         if (isset($validated['start_date'])) {
-            $validated['maturity_date'] = $this->computeMaturityDate(
+            $validated['maturity_date'] = $this->maturityDateFor(
                 $validated['start_date'],
                 $loan->term,
+                $loan->term_unit->value,
                 $loan->frequency,
             );
         }
@@ -1171,19 +1174,35 @@ class LoanService
         ];
     }
 
-    public function computeMaturityDate(string $startDate, int $term, string $frequency): Carbon
+    /**
+     * Where `$periods` periods of `$frequency` from the start end.
+     *
+     * A PERIOD COUNT, not a loan's term: the CSV importer walks a loan's
+     * periods with it. A loan's own maturity date is maturityDateFor(), which
+     * reads the term as a length in its `term_unit`.
+     */
+    public function computeMaturityDate(string $startDate, int $periods, string $frequency): Carbon
     {
         $date = Carbon::parse($startDate);
 
         return match ($frequency) {
-            'daily' => $date->addDays($term),
-            'weekly' => $date->addWeeks($term),
-            'bi_weekly' => $date->addDays($term * 14),
-            'semi_monthly' => $date->addDays($term * 15),
+            'daily' => $date->addDays($periods),
+            'weekly' => $date->addWeeks($periods),
+            'bi_weekly' => $date->addDays($periods * 14),
+            'semi_monthly' => $date->addDays($periods * 15),
             // Upon-maturity bullet loans treat `term` as months-until-maturity
             // (single lump-sum payment on the maturity date).
-            'monthly', 'upon_maturity' => $date->addMonths($term),
+            'monthly', 'upon_maturity' => $date->addMonths($periods),
         };
+    }
+
+    /**
+     * A loan's maturity date: its term, a length in `$termUnit`, from the start.
+     * See LoanTermSchedule for how the term turns into instalments.
+     */
+    public function maturityDateFor(string $startDate, int $term, string $termUnit, string $frequency): Carbon
+    {
+        return LoanTermSchedule::maturityDate(Carbon::parse($startDate), $term, $termUnit, $frequency);
     }
 
     public function buildAmortizationPreview(Loan $loan): array
@@ -1204,9 +1223,13 @@ class LoanService
     private function buildSinglePaymentAtMaturity(Loan $loan): array
     {
         $principal = (float) $loan->principal_amount;
-        $rate = (float) $loan->interest_rate / 100; // PH convention: monthly rate
         $term = $loan->term;
-        $totalInterest = round($principal * $rate * $term, 2);
+
+        // A months term accrues a month's interest for each month; a days term
+        // accrues for exactly its days.
+        $totalInterest = $loan->term_unit === TermUnit::Months
+            ? round($principal * $this->rateFor($loan, LoanTermSchedule::DAYS_PER_MONTH) * $term, 2)
+            : round($principal * $this->rateFor($loan, $term), 2);
 
         return [
             [
@@ -1224,28 +1247,26 @@ class LoanService
     private function buildStraight(Loan $loan): array
     {
         $principal = (float) $loan->principal_amount;
-        $rate = (float) $loan->interest_rate / 100; // Monthly rate (PH convention)
-        $term = $loan->term;
+        $instalments = $this->instalmentsFor($loan);
+        $count = count($instalments);
 
-        // PH lending: interest = principal × monthly rate (flat on original principal each period)
-        $interestPerPeriod = round($principal * $rate, 2);
-        $totalInterest = round($interestPerPeriod * $term, 2);
-        $principalPerPeriod = round($principal / $term, 2);
+        $principalPerPeriod = round($principal / $count, 2);
 
         $schedule = [];
         $balance = $principal;
-        $date = Carbon::parse($loan->start_date);
 
-        for ($i = 1; $i <= $term; $i++) {
-            $date = $this->addPeriod($date, $loan->frequency);
+        foreach ($instalments as $index => $instalment) {
+            $i = $index + 1;
 
-            $pDue = ($i === $term) ? $balance : $principalPerPeriod;
-            $iDue = ($i === $term) ? $totalInterest - ($interestPerPeriod * ($term - 1)) : $interestPerPeriod;
+            // Flat: interest on the ORIGINAL principal, for the days this
+            // instalment covers — a short final instalment is charged less.
+            $pDue = ($i === $count) ? $balance : $principalPerPeriod;
+            $iDue = round($principal * $this->rateFor($loan, $instalment['days']), 2);
             $balance = round($balance - $pDue, 2);
 
             $schedule[] = [
                 'period_number' => $i,
-                'due_date' => $date->toDateString(),
+                'due_date' => $instalment['due_date']->toDateString(),
                 'principal_due' => round($pDue, 2),
                 'interest_due' => round($iDue, 2),
                 'total_due' => round($pDue + $iDue, 2),
@@ -1260,33 +1281,34 @@ class LoanService
     private function buildDiminishing(Loan $loan): array
     {
         $principal = (float) $loan->principal_amount;
-        $term = $loan->term;
-        // PH lending: interest_rate is monthly rate (e.g., 3 = 3% per month)
-        $ratePerPeriod = (float) $loan->interest_rate / 100;
+        $instalments = $this->instalmentsFor($loan);
+        $count = count($instalments);
 
-        // PMT formula
+        // PMT at the rate of one full instalment. Every instalment but a short
+        // final one is full length.
+        $ratePerPeriod = $this->rateFor($loan, $instalments[0]['days']);
+
         if ($ratePerPeriod > 0) {
-            $payment = round($principal * ($ratePerPeriod * pow(1 + $ratePerPeriod, $term))
-                / (pow(1 + $ratePerPeriod, $term) - 1), 2);
+            $payment = round($principal * ($ratePerPeriod * pow(1 + $ratePerPeriod, $count))
+                / (pow(1 + $ratePerPeriod, $count) - 1), 2);
         } else {
-            $payment = round($principal / $term, 2);
+            $payment = round($principal / $count, 2);
         }
 
         $schedule = [];
         $balance = $principal;
-        $date = Carbon::parse($loan->start_date);
 
-        for ($i = 1; $i <= $term; $i++) {
-            $date = $this->addPeriod($date, $loan->frequency);
+        foreach ($instalments as $index => $instalment) {
+            $i = $index + 1;
 
-            $interestDue = round($balance * $ratePerPeriod, 2);
-            $principalDue = ($i === $term) ? $balance : round($payment - $interestDue, 2);
+            $interestDue = round($balance * $this->rateFor($loan, $instalment['days']), 2);
+            $principalDue = ($i === $count) ? $balance : round($payment - $interestDue, 2);
             $totalDue = round($principalDue + $interestDue, 2);
             $balance = round($balance - $principalDue, 2);
 
             $schedule[] = [
                 'period_number' => $i,
-                'due_date' => $date->toDateString(),
+                'due_date' => $instalment['due_date']->toDateString(),
                 'principal_due' => $principalDue,
                 'interest_due' => $interestDue,
                 'total_due' => $totalDue,
@@ -1301,29 +1323,25 @@ class LoanService
     private function buildUponMaturity(Loan $loan): array
     {
         $principal = (float) $loan->principal_amount;
-        $rate = (float) $loan->interest_rate / 100; // Monthly rate (PH convention)
-        $term = $loan->term;
+        $instalments = $this->instalmentsFor($loan);
+        $count = count($instalments);
 
-        // PH lending: interest = principal × monthly rate per period
-        $interestPerPeriod = round($principal * $rate, 2);
-        $totalInterest = round($interestPerPeriod * $term, 2);
-
-        // If term > 1, generate interest-only periodic payments + principal at maturity
-        if ($term > 1) {
+        // More than one instalment: interest-only instalments, with the
+        // principal due in the last.
+        if ($count > 1) {
             $schedule = [];
-            $date = Carbon::parse($loan->start_date);
 
-            for ($i = 1; $i <= $term; $i++) {
-                $date = $this->addPeriod($date, $loan->frequency);
-                $isLast = ($i === $term);
+            foreach ($instalments as $index => $instalment) {
+                $i = $index + 1;
+                $isLast = ($i === $count);
 
                 $pDue = $isLast ? $principal : 0;
-                $iDue = ($isLast) ? $totalInterest - ($interestPerPeriod * ($term - 1)) : $interestPerPeriod;
+                $iDue = round($principal * $this->rateFor($loan, $instalment['days']), 2);
                 $balance = $isLast ? 0 : $principal;
 
                 $schedule[] = [
                     'period_number' => $i,
-                    'due_date' => $date->toDateString(),
+                    'due_date' => $instalment['due_date']->toDateString(),
                     'principal_due' => round($pDue, 2),
                     'interest_due' => round($iDue, 2),
                     'total_due' => round($pDue + $iDue, 2),
@@ -1336,16 +1354,12 @@ class LoanService
         }
 
         // Single-period: lump sum at maturity
-        $maturityDate = $this->computeMaturityDate(
-            $loan->start_date->toDateString(),
-            $term,
-            $loan->frequency,
-        );
+        $totalInterest = round($principal * $this->rateFor($loan, $instalments[0]['days']), 2);
 
         return [
             [
                 'period_number' => 1,
-                'due_date' => $maturityDate->toDateString(),
+                'due_date' => $instalments[0]['due_date']->toDateString(),
                 'principal_due' => $principal,
                 'interest_due' => $totalInterest,
                 'total_due' => round($principal + $totalInterest, 2),
@@ -1355,19 +1369,30 @@ class LoanService
         ];
     }
 
-    private function addPeriod(Carbon $date, string $frequency): Carbon
+    /**
+     * @return list<array{due_date: Carbon, days: int}>
+     */
+    private function instalmentsFor(Loan $loan): array
     {
-        return match ($frequency) {
-            'daily' => $date->copy()->addDay(),
-            'weekly' => $date->copy()->addWeek(),
-            'bi_weekly' => $date->copy()->addDays(14),
-            'semi_monthly' => $date->copy()->addDays(15),
-            // Upon-maturity loans schedule a single bullet payment, so the
-            // schedule generator never iterates past period 1 — but treat the
-            // "next period" as the maturity date itself (term months out) for
-            // any caller that does invoke addPeriod defensively.
-            'monthly', 'upon_maturity' => $date->copy()->addMonth(),
-        };
+        return LoanTermSchedule::instalments(
+            Carbon::parse($loan->start_date),
+            (int) $loan->term,
+            $loan->term_unit->value,
+            $loan->frequency,
+        );
+    }
+
+    /**
+     * The interest, as a fraction of principal, for an instalment covering
+     * `$days` days at the loan's quoted rate.
+     */
+    private function rateFor(Loan $loan, int $days): float
+    {
+        return LoanTermSchedule::rateForDays(
+            (float) $loan->interest_rate,
+            $loan->interest_rate_frequency->value,
+            $days,
+        );
     }
 
     private function guardStatus(Loan $loan, string $expected, string $action): void

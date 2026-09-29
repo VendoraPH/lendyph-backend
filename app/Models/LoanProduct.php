@@ -2,6 +2,8 @@
 
 namespace App\Models;
 
+use App\Enums\InterestRateFrequency;
+use App\Enums\TermUnit;
 use App\Traits\Auditable;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -11,13 +13,24 @@ class LoanProduct extends Model
 {
     use Auditable, HasFactory;
 
+    /**
+     * The database defaults, so a product built in memory reads the same as
+     * one loaded back.
+     */
+    protected $attributes = [
+        'term_unit' => 'months',
+        'interest_rate_frequency' => 'monthly',
+    ];
+
     protected $fillable = [
         'name',
         'description',
         'interest_rate',
+        'interest_rate_frequency',
         'min_interest_rate',
         'interest_method',
         'term',
+        'term_unit',
         'min_term',
         'max_term',
         'frequency',
@@ -60,6 +73,8 @@ class LoanProduct extends Model
             'max_amount' => 'decimal:2',
             'frequencies' => 'array',
             'custom_fees' => 'array',
+            'term_unit' => TermUnit::class,
+            'interest_rate_frequency' => InterestRateFrequency::class,
         ];
     }
 

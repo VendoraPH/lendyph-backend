@@ -89,7 +89,7 @@ These guards don't run in a filtered run of just your own tests, so run the full
 - `RepaymentService::processRepayment()` allocates penalty, then interest, then principal, across schedules in period order. Its preview runs the real method inside a rolled-back transaction.
 - Adjustments (`restructure`, `penalty_waiver`, `balance_adjustment`, `term_extension`) are created, then approved, then applied (`LoanAdjustmentService`). `balance_adjustment` and `term_extension` take deltas, not resulting values.
 - `POST /loans/{loan}/extend` only works for loans whose *original* term was one month (`Loan::isOneMonthTerm()`, exposed to the frontend as `is_one_month_term`).
-- **Loan maths.** `term` counts periods of the loan's `frequency` (`app/Enums/LoanFrequency.php`), not months. `interest_rate` is a percentage applied once per period; the code comments that call it a "monthly rate" only hold for monthly loans. The interest methods are `straight`, `diminishing` and `upon_maturity`.
+- **Loan maths.** `term` is a length in `term_unit` (months or days); `frequency` (`app/Enums/LoanFrequency.php`) splits it into instalments, and `interest_rate` is quoted per `interest_rate_frequency`. Both are copied from the product onto the loan at creation. `LoanTermSchedule` converts on a 30-day month and ends an uneven term with a shorter, prorated instalment; a months term paid monthly or at maturity steps by calendar months. The interest methods are `straight`, `diminishing` and `upon_maturity`.
 
 **Accounting.**
 - Lending tables hold decimal pesos; accounting tables hold integer centavos (`Services/Accounting/Money.php`).

@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Enums\TermUnit;
 use App\Models\AmortizationSchedule;
 use App\Models\Loan;
 use App\Models\LoanAdjustment;
@@ -25,6 +26,16 @@ class LoanAdjustmentService
         if (! in_array($loan->status, ['released', 'ongoing'])) {
             throw ValidationException::withMessages([
                 'loan' => 'Adjustments can only be made on released or ongoing loans.',
+            ]);
+        }
+
+        $reschedules = in_array($validated['adjustment_type'], ['restructure', 'term_extension'], true);
+        $newFrequency = $validated['new_values']['frequency'] ?? $loan->frequency;
+
+        if ($reschedules && $newFrequency === 'upon_maturity'
+            && ! LoanTermSchedule::stepsByCalendarMonth($loan->term_unit->value, $newFrequency)) {
+            throw ValidationException::withMessages([
+                'adjustment_type' => 'A single-payment loan with a days term has no instalments to reschedule. Restructure it into a new loan instead.',
             ]);
         }
 
@@ -167,9 +178,13 @@ class LoanAdjustmentService
             $latestOpenDueDate = Carbon::parse($openSchedules->max('due_date'));
             $maxPeriodNumber = (int) $loan->amortizationSchedules()->max('period_number');
 
-            // PH monthly-rate convention — same as LoanService::buildUponMaturity.
-            // One flat cycle regardless of how many days the cycle spans.
-            $freshInterest = round($carryPrincipal * ((float) $loan->interest_rate / 100), 2);
+            // One month's interest at the loan's rate, whatever period it is
+            // quoted per. One flat cycle regardless of how many days it spans.
+            $freshInterest = round($carryPrincipal * LoanTermSchedule::rateForDays(
+                (float) $loan->interest_rate,
+                $loan->interest_rate_frequency->value,
+                LoanTermSchedule::DAYS_PER_MONTH,
+            ), 2);
 
             $newDueDate = $this->stepNextPeriod($latestOpenDueDate, $loan->frequency);
 
@@ -309,6 +324,28 @@ class LoanAdjustmentService
         ), 2);
     }
 
+    /**
+     * The term that reschedules `$instalments` instalments of `$frequency`.
+     *
+     * Restructure and term-extension adjustments count instalments. A months
+     * term paid monthly or at maturity counts them already. Any other loan is
+     * rescheduled as a days term of that many whole instalments, which
+     * LoanTermSchedule splits back into exactly that many.
+     *
+     * @return array{term: int, term_unit: string}
+     */
+    private function termForInstalments(Loan $loan, int $instalments, string $frequency): array
+    {
+        if (LoanTermSchedule::stepsByCalendarMonth($loan->term_unit->value, $frequency)) {
+            return ['term' => $instalments, 'term_unit' => TermUnit::Months->value];
+        }
+
+        return [
+            'term' => $instalments * LoanTermSchedule::PERIOD_DAYS[$frequency],
+            'term_unit' => TermUnit::Days->value,
+        ];
+    }
+
     private function stepNextPeriod(Carbon $date, string $frequency): Carbon
     {
         return match ($frequency) {
@@ -366,14 +403,20 @@ class LoanAdjustmentService
 
         // Update loan with new terms
         $newRate = $newValues['interest_rate'] ?? $loan->interest_rate;
-        $newTerm = $newValues['term'] ?? $loan->term;
+        // `term` here counts instalments, like every restructure input.
+        $newTerm = $newValues['term'] ?? count(LoanTermSchedule::instalments(
+            Carbon::parse($loan->start_date),
+            $loan->term,
+            $loan->term_unit->value,
+            $loan->frequency,
+        ));
         $newFrequency = $newValues['frequency'] ?? $loan->frequency;
 
         // Build new schedule using a temporary loan state
         $tempLoan = $loan->replicate();
         $tempLoan->principal_amount = $outstanding;
         $tempLoan->interest_rate = $newRate;
-        $tempLoan->term = $newTerm;
+        $tempLoan->fill($this->termForInstalments($loan, (int) $newTerm, $newFrequency));
         $tempLoan->frequency = $newFrequency;
         $tempLoan->interest_method = $loan->interest_method;
 
@@ -414,7 +457,7 @@ class LoanAdjustmentService
         // moved to a NEW loan (see LoanService::closeRestructuredSource()).
         $loan->update([
             'interest_rate' => $newRate,
-            'term' => $lastPaidPeriod + $newTerm,
+            ...$this->termForInstalments($loan, $lastPaidPeriod + $newTerm, $newFrequency),
             'frequency' => $newFrequency,
             'maturity_date' => $newMaturity,
         ]);
@@ -536,7 +579,7 @@ class LoanAdjustmentService
         // Build new schedule
         $tempLoan = $loan->replicate();
         $tempLoan->principal_amount = $outstanding;
-        $tempLoan->term = $newTerm;
+        $tempLoan->fill($this->termForInstalments($loan, $newTerm, $loan->frequency));
         $tempLoan->start_date = $lastPaidSchedule ? $lastPaidSchedule->due_date : $loan->start_date;
 
         $newSchedule = $this->loanService->buildAmortizationPreview($tempLoan);
@@ -563,7 +606,7 @@ class LoanAdjustmentService
         );
 
         $loan->update([
-            'term' => $lastPaidPeriod + $newTerm,
+            ...$this->termForInstalments($loan, $lastPaidPeriod + $newTerm, $loan->frequency),
             'maturity_date' => $newMaturity,
         ]);
     }

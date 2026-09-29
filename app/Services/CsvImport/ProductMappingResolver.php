@@ -2,9 +2,11 @@
 
 namespace App\Services\CsvImport;
 
+use App\Enums\TermUnit;
 use App\Models\CsvImportFile;
 use App\Models\CsvImportRun;
 use App\Models\LoanProduct;
+use App\Services\LoanTermSchedule;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 
@@ -612,14 +614,18 @@ class ProductMappingResolver
 
         if ($term !== null && preg_match('/^-?\d+$/', (string) $term) === 1) {
             $months = (int) $term;
+            // The file's term is in months; a days product's bounds are in days.
+            $length = $product->term_unit === TermUnit::Days
+                ? $months * LoanTermSchedule::DAYS_PER_MONTH
+                : $months;
             $minTerm = (int) ($product->min_term ?? 1);
             $maxTerm = (int) ($product->max_term ?? $product->term);
 
-            if ($months < $minTerm) {
+            if ($length < $minTerm) {
                 $breaches[] = 'term_below_min';
             }
 
-            if ($maxTerm > 0 && $months > $maxTerm) {
+            if ($maxTerm > 0 && $length > $maxTerm) {
                 $breaches[] = 'term_above_max';
             }
         }

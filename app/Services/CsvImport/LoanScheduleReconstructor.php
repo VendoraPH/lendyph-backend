@@ -4,6 +4,7 @@ namespace App\Services\CsvImport;
 
 use App\Models\Loan;
 use App\Services\LoanService;
+use App\Services\LoanTermSchedule;
 use Carbon\Carbon;
 
 /**
@@ -118,15 +119,12 @@ class LoanScheduleReconstructor
     }
 
     /**
-     * Derive `loans.term` from the DATES, not from "Term in Months".
+     * Derive the loan's PERIOD COUNT from the DATES, not from "Term in Months".
      *
-     * "Term in Months" is not `loans.term` and writing it there corrupts every
-     * loan that is not monthly. `loans.term` is a PERIOD COUNT whose unit
-     * follows `frequency` — see Loan::isOneMonthTerm() and
-     * LoanService::computeMaturityDate(), which reads it as days for daily,
-     * weeks for weekly, and only as months for monthly and upon_maturity. A
-     * six-month WEEKLY loan is 26, and storing 6 would have the app believe the
-     * loan matures in six weeks.
+     * "Term in Months" counts months whatever the frequency, and a six-month
+     * WEEKLY loan is 26 periods, not 6. The count is stored through
+     * LoanTermSchedule::fromPeriodCount(), which turns it into the exact term
+     * (and term unit) that reproduces those periods.
      *
      * The walk is done with LoanService::computeMaturityDate() itself, once per
      * candidate k, rather than by repeatedly applying a one-period step. That
@@ -470,7 +468,7 @@ class LoanScheduleReconstructor
             'interest_rate' => $input->interestRate,
             'interest_method' => $input->interestMethod,
             'frequency' => $input->frequency,
-            'term' => $term,
+            ...LoanTermSchedule::fromPeriodCount($term, $input->frequency),
             'start_date' => $input->dateReleased,
             'maturity_date' => $input->maturityDate,
         ]);

@@ -206,8 +206,10 @@ class LoanRestructureTest extends TestCase
         $this->assertSame(3, $newLoan->term);
         $this->assertSame('weekly', $newLoan->frequency);
         $this->assertSame('2026-09-01', $newLoan->start_date->toDateString());
+        // `term` is a length in the product's unit: three months, paid weekly,
+        // with a month counted as 30 days.
         $this->assertSame(
-            Carbon::parse('2026-09-01')->addWeeks(3)->toDateString(),
+            Carbon::parse('2026-09-01')->addDays(90)->toDateString(),
             $newLoan->maturity_date->toDateString(),
         );
 

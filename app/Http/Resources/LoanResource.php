@@ -16,8 +16,10 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'external_loan_no', type: 'string', nullable: true, description: "The cooperative's own reference for a loan migrated in by the CSV importer. Kept separate from `loan_account_number`, which is a generated LN- sequence."),
         new OA\Property(property: 'is_imported', type: 'boolean', description: 'True when this loan was migrated in from an existing book rather than originated here, so its amortization schedule is reconstructed and its pre-import arrears are not penalised.'),
         new OA\Property(property: 'interest_rate', type: 'number'),
+        new OA\Property(property: 'interest_rate_frequency', type: 'string', enum: ['daily', 'weekly', 'bi_weekly', 'semi_monthly', 'monthly']),
         new OA\Property(property: 'interest_method', type: 'string'),
         new OA\Property(property: 'term', type: 'integer'),
+        new OA\Property(property: 'term_unit', type: 'string', enum: ['months', 'days']),
         new OA\Property(property: 'is_one_month_term', type: 'boolean', description: 'Eligible for POST /loans/{id}/extend'),
         new OA\Property(property: 'extension_count', type: 'integer', description: 'Number of times this loan has been rolled forward via POST /loans/{id}/extend'),
         new OA\Property(property: 'frequency', type: 'string'),
@@ -155,8 +157,10 @@ class LoanResource extends JsonResource
             // AmortizationSchedule::isPenalisable(), never this flag.
             'is_imported' => $this->isImported(),
             'interest_rate' => $this->interest_rate,
+            'interest_rate_frequency' => $this->interest_rate_frequency,
             'interest_method' => $this->interest_method,
             'term' => $this->term,
+            'term_unit' => $this->term_unit,
             // Eligibility for the Extend Loan action, computed here so the
             // frontend doesn't need to duplicate the frequency + term rule
             // from Loan::isOneMonthTerm().

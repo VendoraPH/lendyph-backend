@@ -300,10 +300,10 @@ class LoanReleaseFeesTest extends TestCase
     /**
      * Term days come from the AGREED DATES, never from `loans.term`.
      *
-     * `term` is a period count whose unit follows `frequency`
-     * ({@see LoanService::computeMaturityDate()}), so `term: 30` on a daily
-     * loan is thirty DAYS and `term: 6` on a monthly one is about a hundred and
-     * eighty. Any `term * k` conversion gets one of these two wrong.
+     * `term` is a length in the loan's `term_unit`, so `term: 30` on a days
+     * loan is thirty DAYS and `term: 6` on a months one is about a hundred and
+     * eighty. Any `term * k` conversion that ignores the unit gets one of these
+     * two wrong.
      *
      * Both loans below are ₱10,000 with the same fee rule, `term_days_gt: 90`.
      * Read off `term`, the daily loan (30) and the monthly loan (6) would sort
@@ -313,7 +313,7 @@ class LoanReleaseFeesTest extends TestCase
     public function test_term_day_conditions_read_the_date_pair_not_the_period_count(): void
     {
         $sixMonths = $this->freeProduct(['term' => 6, 'frequency' => 'monthly']);
-        $thirtyDays = $this->freeProduct(['term' => 30, 'frequency' => 'daily', 'max_term' => 30]);
+        $thirtyDays = $this->freeProduct(['term' => 30, 'term_unit' => 'days', 'frequency' => 'daily', 'max_term' => 30]);
 
         Fee::create([
             'name' => 'Long Term Fee',

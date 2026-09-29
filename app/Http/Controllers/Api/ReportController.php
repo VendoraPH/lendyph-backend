@@ -659,7 +659,7 @@ class ReportController extends Controller
             $l->loanProduct?->name ?? '',
             $l->principal_amount,
             $l->interest_rate.'%',
-            $l->term.' months',
+            $l->term.' '.$l->term_unit->value,
             $l->released_at?->toDateString() ?? '',
             $l->status,
         ]));
