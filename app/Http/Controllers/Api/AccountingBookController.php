@@ -12,13 +12,13 @@ use OpenApi\Attributes as OA;
 /**
  * The BIR books of account.
  *
- * Two books so far — the general journal and the general ledger. The cash
- * receipts and cash disbursements books are the other half of the set and are
- * not built here; they need the automatic posting engine to be able to tell a
- * receipt from a disbursement by source, and until that lands they would be
- * empty for a reason a reader could not see.
+ * All four: the general journal, the general ledger, and the cash receipts and
+ * cash disbursements books. The cash books read the journals the automatic
+ * posting engine now writes for releases, collections and expenses, and tell a
+ * receipt from a disbursement by which way the entry moved money — see
+ * BookBuilder::movedMoney().
  *
- * Both books answer `{data: AccountingBook}` — the same shape, deliberately,
+ * Every book answers `{data: AccountingBook}` — the same shape, deliberately,
  * because `book-report.tsx` renders all of them through ONE call site keyed by
  * `BookKind`. A book that returned its own shape would not merely need new
  * frontend code, it would need a branch in a component whose whole point is
@@ -90,8 +90,52 @@ class AccountingBookController extends Controller
         return $this->book('general_ledger');
     }
 
+    #[OA\Get(
+        path: '/api/accounting/books/cash-receipts',
+        summary: 'Cash receipts book — every entry that brought money in',
+        description: 'The general journal narrowed to the entries whose money-account lines net to a debit, listed whole (every line, so the book balances) in chronological order. Answers `{data: AccountingBook}`. A money account is one with a `cash_kind`, as on the Cash & Bank screen. A transfer between two money accounts nets to zero and appears in neither cash book. Same status filter, 366-day cap and no row cap as the general journal.',
+        tags: ['Accounting'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'from', in: 'query', required: true, schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'to', in: 'query', required: true, schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
+        ],
+        responses: [
+            new OA\Response(response: 200, description: 'The cash receipts book'),
+            new OA\Response(response: 403, description: 'Missing accounting:view'),
+            new OA\Response(response: 422, description: 'Missing dates, reversed range, or a range longer than 366 days'),
+        ],
+    )]
+    public function cashReceipts(): JsonResponse
+    {
+        return $this->book('cash_receipts');
+    }
+
+    #[OA\Get(
+        path: '/api/accounting/books/cash-disbursements',
+        summary: 'Cash disbursements book — every entry that paid money out',
+        description: "The general journal narrowed to the entries whose money-account lines net to a credit, listed whole in chronological order. Answers `{data: AccountingBook}`. A reversal is its own movement, so the reversal of a collection appears here on the day it was reversed. Receipts less disbursements over a period equals the cash flow statement's `net_change` for it.",
+        tags: ['Accounting'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'from', in: 'query', required: true, schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'to', in: 'query', required: true, schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
+        ],
+        responses: [
+            new OA\Response(response: 200, description: 'The cash disbursements book'),
+            new OA\Response(response: 403, description: 'Missing accounting:view'),
+            new OA\Response(response: 422, description: 'Missing dates, reversed range, or a range longer than 366 days'),
+        ],
+    )]
+    public function cashDisbursements(): JsonResponse
+    {
+        return $this->book('cash_disbursements');
+    }
+
     /**
-     * Both books, which differ only in how they are ordered.
+     * Every book, which differ only in which entries they read and in order.
      *
      * `from` and `to` are REQUIRED rather than defaulted to the current month.
      * A book of account is a book FOR A PERIOD, and a defaulted range would
