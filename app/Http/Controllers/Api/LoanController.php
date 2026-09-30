@@ -664,7 +664,7 @@ DESC,
         description: <<<'TXT'
         Read-only. Returns the itemised deductions this loan would carry after release, the resulting `total_deductions` and `net_proceeds`, and a `fee_fingerprint` over the fee rules the figures were computed from.
 
-        The list is the loan's EXISTING deductions (derived from the loan product's own fee columns when the application was created) plus one item per configured fee in Settings that matches this loan's product and conditions. Fee-sourced items carry an extra `fee_id`; every item keeps the `{name, amount, type, original_value}` shape the release dialog already reads.
+        The list is the loan's EXISTING deductions (the ones stated when the application was created, or the loan product's own fee columns when none were sent) plus one item per configured fee in Settings that matches this loan's product and conditions. Fee-sourced items carry an extra `fee_id`; every item keeps the `{name, amount, type, original_value}` shape the release dialog already reads.
 
         Runs the identical calculation the release itself runs, guard included — a fee schedule that would withhold more than the principal is refused here, in front of the cashier, rather than at the counter.
 
