@@ -17,8 +17,12 @@ use Tests\Traits\SetupLendyPH;
  *
  * The loan page's "Assign / Change" account officer control used to go through
  * PUT /loans/{loan}, which never worked. It refuses every released loan, and
- * UpdateLoanRequest has no `account_officer_id` rule, so on a draft the value
+ * UpdateLoanRequest had no `account_officer_id` rule, so on a draft the value
  * was silently dropped while the page reported success.
+ *
+ * The edit form still sends the officer through PUT, so that rule now exists,
+ * and every write that sets an officer — create, restructure, edit, reassign —
+ * refuses an inactive user with the same message.
  */
 class LoanAccountOfficerTest extends TestCase
 {
@@ -160,5 +164,70 @@ class LoanAccountOfficerTest extends TestCase
         $this->patchJson("/api/loans/{$loan->id}/account-officer", [])
             ->assertUnprocessable()
             ->assertJsonValidationErrors(['account_officer_id']);
+    }
+
+    public function test_the_edit_form_saves_a_drafts_officer(): void
+    {
+        $loan = $this->createDraftLoan();
+        $officer = $this->userWithRole('loan_officer');
+
+        $this->putJson("/api/loans/{$loan->id}", ['account_officer_id' => $officer->id])
+            ->assertOk()
+            ->assertJsonPath('data.account_officer_id', $officer->id);
+
+        $this->assertSame($officer->id, $loan->fresh()->account_officer_id);
+
+        $this->putJson("/api/loans/{$loan->id}", ['account_officer_id' => null])->assertOk();
+
+        $this->assertNull($loan->fresh()->account_officer_id);
+    }
+
+    public function test_the_edit_form_leaves_the_officer_alone_when_it_is_not_sent(): void
+    {
+        $loan = $this->createDraftLoan();
+        $officer = $this->userWithRole('loan_officer');
+        $loan->update(['account_officer_id' => $officer->id]);
+
+        $this->putJson("/api/loans/{$loan->id}", ['purpose' => 'Store expansion'])->assertOk();
+
+        $this->assertSame($officer->id, $loan->fresh()->account_officer_id);
+    }
+
+    public function test_every_write_that_sets_an_officer_refuses_an_inactive_user(): void
+    {
+        $gone = $this->userWithRole('loan_officer', ['status' => 'inactive']);
+        $message = 'Choose an active user as the account officer.';
+
+        $this->postJson('/api/loans', [
+            'borrower_id' => Borrower::factory()->create(['branch_id' => $this->branch->id])->id,
+            'loan_product_id' => LoanProduct::factory()->create()->id,
+            'principal_amount' => 20000,
+            'start_date' => now()->toDateString(),
+            'account_officer_id' => $gone->id,
+        ])->assertUnprocessable()->assertJsonValidationErrors(['account_officer_id' => $message]);
+
+        $draft = $this->createDraftLoan();
+        $this->putJson("/api/loans/{$draft->id}", ['account_officer_id' => $gone->id])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['account_officer_id' => $message]);
+        $this->assertNull($draft->fresh()->account_officer_id);
+
+        $released = $this->createReleasedLoan();
+        $this->postJson("/api/loans/{$released->id}/restructure", ['account_officer_id' => $gone->id])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['account_officer_id' => $message]);
+    }
+
+    public function test_creating_a_loan_still_accepts_an_active_officer(): void
+    {
+        $officer = $this->userWithRole('loan_officer');
+
+        $this->postJson('/api/loans', [
+            'borrower_id' => Borrower::factory()->create(['branch_id' => $this->branch->id])->id,
+            'loan_product_id' => LoanProduct::factory()->create()->id,
+            'principal_amount' => 20000,
+            'start_date' => now()->toDateString(),
+            'account_officer_id' => $officer->id,
+        ])->assertCreated()->assertJsonPath('data.account_officer_id', $officer->id);
     }
 }

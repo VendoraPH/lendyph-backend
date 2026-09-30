@@ -2,11 +2,13 @@
 
 namespace App\Http\Requests\Loan;
 
+use App\Http\Requests\Concerns\RequiresActiveAccountOfficer;
 use Illuminate\Foundation\Http\FormRequest;
-use Illuminate\Validation\Rule;
 
 class AssignAccountOfficerRequest extends FormRequest
 {
+    use RequiresActiveAccountOfficer;
+
     public function authorize(): bool
     {
         return $this->user()->can('loans:update');
@@ -15,20 +17,15 @@ class AssignAccountOfficerRequest extends FormRequest
     public function rules(): array
     {
         return [
-            // Only an active user can carry a loan. A deactivated account
-            // cannot sign in, so it would leave the loan with nobody following it up.
-            'account_officer_id' => [
-                'required',
-                'integer',
-                Rule::exists('users', 'id')->where('status', 'active'),
-            ],
+            // Only an active user can carry a loan — see RequiresActiveAccountOfficer.
+            'account_officer_id' => ['required', 'integer', $this->activeAccountOfficerRule()],
         ];
     }
 
     public function messages(): array
     {
         return [
-            'account_officer_id.exists' => 'Choose an active user as the account officer.',
+            'account_officer_id.exists' => $this->activeAccountOfficerMessage(),
         ];
     }
 }

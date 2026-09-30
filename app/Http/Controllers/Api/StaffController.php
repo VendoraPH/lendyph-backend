@@ -88,8 +88,8 @@ class StaffController extends Controller
             })
             ->orderBy('first_name')
             ->orderBy('last_name')
-            // Tiebreak on the key: two staff can share a name, and the picker
-            // drains every page. See DeterministicPaginationTest.
+            // Tiebreak on the key: two staff can share a name, and a page must
+            // never repeat or skip one. See DeterministicPaginationTest.
             ->orderBy('id')
             ->paginate($request->perPage());
 
