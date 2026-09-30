@@ -130,17 +130,19 @@ class LoanScheduleReconstructor
      * candidate k, rather than by repeatedly applying a one-period step. That
      * is deliberate and it is the subtle part:
      *
-     *  - computeMaturityDate() is the function the app will use AGAINST this
-     *    value later — LoanService::updateLoan() recomputes maturity_date from
-     *    (start_date, term, frequency) on every edit. Choosing k any other way
-     *    means the maturity date silently moves the first time an operator
-     *    opens the loan and saves it.
-     *  - Repeated one-month steps do not equal one addMonths(k) call, because
-     *    Carbon clamps to the shorter month and never recovers: a loan released
-     *    31 January steps to 28 February, then to 28 March, and by month six it
-     *    is three days adrift and the period count comes out one too high.
-     *    addMonths(k) from the start date goes 31 Jan -> 29 Feb -> 31 Mar and
-     *    lands on the real maturity date.
+     *  - computeMaturityDate() dates period k exactly where the app's own
+     *    schedule does (LoanTermSchedule, for the term fromPeriodCount()
+     *    stores), so the stored term and the maturity date describe the same
+     *    schedule. Choosing k any other way stores a term whose last
+     *    instalment does not fall on the loan's maturity date.
+     *  - Repeated one-month steps do not equal k months from the start date.
+     *    Carbon overflows a short month (31 Jan + 1 month = 3 Mar) and every
+     *    later step inherits the drift; clamping instead (31 Jan -> 28 Feb ->
+     *    28 Mar) never gets back to the 31st. Either way the walk ends up days
+     *    adrift and the period count can come out one too high.
+     *    computeMaturityDate() counts k calendar months from the start date on
+     *    its day, capped at a shorter month's end, so it goes 31 Jan -> 29 Feb
+     *    -> 31 Mar and lands on the real maturity date.
      *
      * For the four fixed-length frequencies the two approaches are identical
      * anyway, since every step is a constant number of days.
@@ -203,6 +205,10 @@ class LoanScheduleReconstructor
     }
 
     /**
+     * Periods 1 to n-1 fall where the walk above dated them, which for a
+     * monthly loan is the release date's day of the month, capped at a shorter
+     * month's end: the dates a released loan's schedule would have.
+     *
      * Period n's due date is the CSV's maturity date VERBATIM.
      *
      * That equality is not cosmetic. `loans.maturity_date` and the last

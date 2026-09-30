@@ -186,7 +186,7 @@ class LoanAdjustmentService
                 LoanTermSchedule::DAYS_PER_MONTH,
             ), 2);
 
-            $newDueDate = $this->stepNextPeriod($latestOpenDueDate, $loan->frequency);
+            $newDueDate = $this->nextCycleDueDate($loan, $latestOpenDueDate);
 
             // On 'defer' this is where the stacking happens: the unpaid interest
             // is still in $carryInterest and the fresh cycle is added on top.
@@ -346,15 +346,53 @@ class LoanAdjustmentService
         ];
     }
 
-    private function stepNextPeriod(Carbon $date, string $frequency): Carbon
+    /**
+     * The due date one cycle after `$latestDueDate`.
+     *
+     * A monthly or upon-maturity cycle lands on the next anchored date after
+     * the row it continues from: the loan's anchor day, capped at a shorter
+     * month's end. A loan started on the 31st rolls 28 Feb -> 31 Mar -> 30 Apr
+     * instead of staying on the 28th. An open row an overflowing month step
+     * pushed into the first days of the next month (3 Mar) rolls to that
+     * month's anchored date (31 Mar); every other row rolls into the following
+     * month. See LoanTermSchedule::nthAnchoredDateAfter().
+     */
+    private function nextCycleDueDate(Loan $loan, Carbon $latestDueDate): Carbon
     {
-        return match ($frequency) {
-            'daily' => $date->copy()->addDay(),
-            'weekly' => $date->copy()->addWeek(),
-            'bi_weekly' => $date->copy()->addDays(14),
-            'semi_monthly' => $date->copy()->addDays(15),
-            'monthly', 'upon_maturity' => $date->copy()->addMonth(),
+        return match ($loan->frequency) {
+            'daily' => $latestDueDate->copy()->addDay(),
+            'weekly' => $latestDueDate->copy()->addWeek(),
+            'bi_weekly' => $latestDueDate->copy()->addDays(14),
+            'semi_monthly' => $latestDueDate->copy()->addDays(15),
+            'monthly', 'upon_maturity' => LoanTermSchedule::nthAnchoredDateAfter($latestDueDate, 1, $this->anchorDay($loan)),
         };
+    }
+
+    /**
+     * The day of the month a loan's calendar-month due dates fall on: the day
+     * it started, whichever row a rebuild or a roll-forward starts from.
+     */
+    private function anchorDay(Loan $loan): int
+    {
+        return $loan->start_date->day;
+    }
+
+    /**
+     * Where a schedule rebuilt on `$tempLoan` ends: its last row's due date,
+     * on `$loan`'s anchor day when it steps by calendar month.
+     *
+     * Set on the temporary loan before its schedule is built, because a single
+     * payment at maturity takes its due date from `maturity_date`.
+     */
+    private function rescheduledMaturityDate(Loan $tempLoan, Loan $loan): Carbon
+    {
+        return LoanTermSchedule::maturityDate(
+            Carbon::parse($tempLoan->start_date),
+            (int) $tempLoan->term,
+            $tempLoan->term_unit->value,
+            $tempLoan->frequency,
+            $this->anchorDay($loan),
+        );
     }
 
     public function applyAdjustment(LoanAdjustment $adjustment): LoanAdjustment
@@ -420,11 +458,17 @@ class LoanAdjustmentService
         $tempLoan->frequency = $newFrequency;
         $tempLoan->interest_method = $loan->interest_method;
 
-        // Use the last due date of paid schedules as new start date
-        $lastPaidSchedule = $loan->amortizationSchedules()->where('status', 'paid')->orderByDesc('due_date')->first();
+        // Use the last due date of paid schedules as new start date. The rows
+        // still fall on the loan's own anchor day, not on that row's day,
+        // starting at the next anchored date after it (see
+        // LoanTermSchedule::nthAnchoredDateAfter()). reorder(), because the
+        // relation already sorts by period_number, which would otherwise win
+        // and hand back the FIRST paid row.
+        $lastPaidSchedule = $loan->amortizationSchedules()->where('status', 'paid')->reorder('due_date', 'desc')->first();
         $tempLoan->start_date = $lastPaidSchedule ? $lastPaidSchedule->due_date : $loan->start_date;
+        $tempLoan->maturity_date = $this->rescheduledMaturityDate($tempLoan, $loan);
 
-        $newSchedule = $this->loanService->buildAmortizationPreview($tempLoan);
+        $newSchedule = $this->loanService->buildAmortizationPreview($tempLoan, $this->anchorDay($loan));
 
         // Persist with continued period numbers
         foreach ($newSchedule as $row) {
@@ -440,15 +484,6 @@ class LoanAdjustmentService
             ]);
         }
 
-        // Update loan record
-        $newMaturity = $this->loanService->computeMaturityDate(
-            $tempLoan->start_date instanceof Carbon
-                ? $tempLoan->start_date->toDateString()
-                : $tempLoan->start_date,
-            $newTerm,
-            $newFrequency,
-        );
-
         // The loan keeps its released/ongoing status on purpose. This adjustment
         // reschedules a balance that is still owed, and
         // RepaymentService::processRepayment() only accepts released/ongoing —
@@ -459,7 +494,7 @@ class LoanAdjustmentService
             'interest_rate' => $newRate,
             ...$this->termForInstalments($loan, $lastPaidPeriod + $newTerm, $newFrequency),
             'frequency' => $newFrequency,
-            'maturity_date' => $newMaturity,
+            'maturity_date' => $tempLoan->maturity_date,
         ]);
     }
 
@@ -562,9 +597,10 @@ class LoanAdjustmentService
             ->where('status', 'paid')
             ->max('period_number') ?? 0;
 
+        // The latest paid row, as in applyRestructure().
         $lastPaidSchedule = $loan->amortizationSchedules()
             ->where('status', 'paid')
-            ->orderByDesc('due_date')
+            ->reorder('due_date', 'desc')
             ->first();
 
         // Delete unpaid schedules
@@ -581,8 +617,10 @@ class LoanAdjustmentService
         $tempLoan->principal_amount = $outstanding;
         $tempLoan->fill($this->termForInstalments($loan, $newTerm, $loan->frequency));
         $tempLoan->start_date = $lastPaidSchedule ? $lastPaidSchedule->due_date : $loan->start_date;
+        $tempLoan->maturity_date = $this->rescheduledMaturityDate($tempLoan, $loan);
 
-        $newSchedule = $this->loanService->buildAmortizationPreview($tempLoan);
+        // On the loan's own anchor day, as applyRestructure() rebuilds.
+        $newSchedule = $this->loanService->buildAmortizationPreview($tempLoan, $this->anchorDay($loan));
 
         foreach ($newSchedule as $row) {
             AmortizationSchedule::create([
@@ -597,17 +635,9 @@ class LoanAdjustmentService
             ]);
         }
 
-        $newMaturity = $this->loanService->computeMaturityDate(
-            $tempLoan->start_date instanceof Carbon
-                ? $tempLoan->start_date->toDateString()
-                : $tempLoan->start_date,
-            $newTerm,
-            $loan->frequency,
-        );
-
         $loan->update([
             ...$this->termForInstalments($loan, $lastPaidPeriod + $newTerm, $loan->frequency),
-            'maturity_date' => $newMaturity,
+            'maturity_date' => $tempLoan->maturity_date,
         ]);
     }
 
