@@ -229,6 +229,8 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::patch('/loans/{loan}/reject', [LoanController::class, 'reject']);
     Route::get('/loans/{loan}/release-preview', [LoanController::class, 'releasePreview']);
     Route::patch('/loans/{loan}/release', [LoanController::class, 'release']);
+    // The release dialog's "Add Co-Maker": approved loans only, `loans:release`.
+    Route::post('/loans/{loan}/co-makers', [LoanController::class, 'addCoMaker'])->whereNumber('loan');
     Route::patch('/loans/{loan}/void', [LoanController::class, 'void']);
     Route::post('/loans/{loan}/extend', [LoanController::class, 'extend']);
     Route::post('/loans/{loan}/restructure', [LoanController::class, 'restructure']);

@@ -24,6 +24,7 @@ class CoMakerController extends Controller
     #[OA\Get(
         path: '/api/borrowers/{borrowerId}/co-makers',
         summary: 'List co-makers for a borrower',
+        description: 'The borrower\'s Co-makers tab. Each co-maker carries `loans`: every loan they are linked to as a co-maker, as `{id, application_number, loan_account_number, status}` in loan id order, whatever the status — an empty list when they are on none. Eager-loaded, so the list costs the same number of queries however many co-makers or loans it returns. `loans` appears on this endpoint only.',
         tags: ['Co-makers'],
         security: [['sanctum' => []]],
         parameters: [
@@ -41,7 +42,17 @@ class CoMakerController extends Controller
         $this->authorize('borrowers:view');
 
         return CoMakerResource::collection(
-            $borrower->coMakers()->with('documents')->get()
+            $borrower->coMakers()
+                ->with([
+                    'documents',
+                    // Just what the tab's loan badge shows. The pivot columns
+                    // still come along — BelongsToMany adds them itself, and
+                    // needs them to match each loan to its co-maker.
+                    'loans' => fn ($query) => $query
+                        ->select('loans.id', 'loans.application_number', 'loans.loan_account_number', 'loans.status')
+                        ->orderBy('loans.id'),
+                ])
+                ->get()
         );
     }
 
