@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Http\Requests\AutoPay\ToggleAutoPayRequest;
+use App\Http\Requests\Loan\AddLoanCoMakerRequest;
 use App\Http\Requests\Loan\ApproveLoanRequest;
 use App\Http\Requests\Loan\AssignAccountOfficerRequest;
 use App\Http\Requests\Loan\ExtendLoanRequest;
@@ -13,6 +14,7 @@ use App\Http\Requests\Loan\RestructureLoanRequest;
 use App\Http\Requests\Loan\StoreLoanRequest;
 use App\Http\Requests\Loan\UpdateLoanRequest;
 use App\Http\Resources\AmortizationScheduleResource;
+use App\Http\Resources\CoMakerResource;
 use App\Http\Resources\LoanLedgerEntryResource;
 use App\Http\Resources\LoanResource;
 use App\Models\Loan;
@@ -143,6 +145,12 @@ which is the newest-first order the list has always had. Every sort carries a
 final tiebreak on `id`, so paging through equal values cannot repeat or skip a
 loan.
 
+Each row carries `co_makers`, in the same shape as `GET /api/loans/{id}`
+(including each link's `added_by` and `added_at`), so a borrower's loans can
+be shown with their co-makers without one request per loan. Eager-loaded: the
+list costs the same number of queries however many rows or co-makers it
+returns.
+
 `meta.stats` is always organisation-wide — narrowed by `branch_id` and
 `borrower_id` only, and never by `search`, `status`, `loan_product_id` or the
 date range. Those counts are the KPI cards and tab badges: scoping them to the
@@ -224,7 +232,7 @@ DESC,
             // then hydrate OVER the loan's, and LoanResource would publish the
             // borrower's id and status on every row of the list.
             ->select('loans.*')
-            ->with('borrower', 'loanProduct', 'branch', 'createdByUser', 'amortizationSchedules')
+            ->with('borrower', 'loanProduct', 'branch', 'createdByUser', 'amortizationSchedules', 'coMakers')
             // Aliased count so LoanResource's extension_count reads an
             // already-loaded value instead of firing a COUNT query per row.
             ->withCount(['adjustments as extension_count' => fn ($q) => $q->where('adjustment_type', 'extension')])
@@ -695,6 +703,82 @@ DESC,
         }
 
         return response()->json(['data' => $fees->preview($loan)]);
+    }
+
+    #[OA\Post(
+        path: '/api/loans/{id}/co-makers',
+        summary: 'Add a co-maker to a loan awaiting release',
+        description: <<<'DESC'
+The release dialog's "Add Co-Maker". Links a co-maker to the loan, and records who added them and when.
+
+Send **either** `co_maker_id` — one of this borrower's existing, **active** co-maker records, as listed by `GET /api/borrowers/{id}/co-makers` — **or** a new co-maker's details, which creates the co-maker on the loan's borrower (it then also appears in that list) and links it. Sending both is a 422.
+
+Only while the loan is awaiting release (`approved`). Any other status, a released loan included, is a 422 on `status`: once a loan is released its co-makers cannot be added to through the app.
+
+Requires `loans:release`, the permission that releases the loan; `borrowers:create` does not grant it.
+
+The response's co-maker carries `added_by` (user id) and `added_at`, the same two fields each entry of `GET /api/loans/{id}` `co_makers` now carries. Writes a `co_maker_added` audit entry against the loan.
+DESC,
+        tags: ['Loans'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
+        ],
+        requestBody: new OA\RequestBody(
+            required: true,
+            content: new OA\JsonContent(
+                properties: [
+                    new OA\Property(property: 'co_maker_id', type: 'integer', nullable: true, example: 12, description: 'An existing, active co-maker of this loan\'s borrower. When sent, none of the fields below may be.'),
+                    new OA\Property(property: 'first_name', type: 'string', example: 'Maria', description: 'Required without co_maker_id'),
+                    new OA\Property(property: 'middle_name', type: 'string', nullable: true),
+                    new OA\Property(property: 'last_name', type: 'string', example: 'Santos', description: 'Required without co_maker_id'),
+                    new OA\Property(property: 'suffix', type: 'string', nullable: true),
+                    new OA\Property(property: 'address', type: 'string', nullable: true),
+                    new OA\Property(property: 'contact_number', type: 'string', nullable: true, example: '09181234567'),
+                    new OA\Property(property: 'occupation', type: 'string', nullable: true),
+                    new OA\Property(property: 'employer', type: 'string', nullable: true),
+                    new OA\Property(property: 'monthly_income', type: 'number', nullable: true, example: 20000),
+                    new OA\Property(property: 'relationship_to_borrower', type: 'string', nullable: true, example: 'Spouse'),
+                ],
+            ),
+        ),
+        responses: [
+            new OA\Response(
+                response: 201,
+                description: 'Co-maker linked to the loan',
+                content: new OA\JsonContent(
+                    properties: [
+                        new OA\Property(property: 'message', type: 'string', example: 'Co-maker added to the loan.'),
+                        new OA\Property(
+                            property: 'data',
+                            type: 'object',
+                            description: 'The co-maker, as in GET /api/loans/{id} `co_makers`',
+                            properties: [
+                                new OA\Property(property: 'id', type: 'integer'),
+                                new OA\Property(property: 'co_maker_code', type: 'string', example: 'CMK-000012'),
+                                new OA\Property(property: 'borrower_id', type: 'integer'),
+                                new OA\Property(property: 'full_name', type: 'string', example: 'Maria Santos'),
+                                new OA\Property(property: 'added_by', type: 'integer', nullable: true, description: 'Id of the user who linked the co-maker to the loan'),
+                                new OA\Property(property: 'added_at', type: 'string', format: 'date-time'),
+                            ],
+                        ),
+                    ],
+                ),
+            ),
+            new OA\Response(response: 401, description: 'Unauthenticated'),
+            new OA\Response(response: 403, description: 'Missing loans:release'),
+            new OA\Response(response: 404, description: 'Loan not found'),
+            new OA\Response(response: 422, description: 'Loan is not awaiting release (`status`), co_maker_id is not this borrower\'s, is inactive or is already on the loan, both shapes sent, or a missing name'),
+        ],
+    )]
+    public function addCoMaker(AddLoanCoMakerRequest $request, Loan $loan): JsonResponse
+    {
+        $coMaker = $this->loanService->addCoMakerAwaitingRelease($loan, $request->validated(), $request->user());
+
+        return response()->json([
+            'message' => 'Co-maker added to the loan.',
+            'data' => new CoMakerResource($coMaker),
+        ], 201);
     }
 
     #[OA\Patch(

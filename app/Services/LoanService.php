@@ -117,7 +117,7 @@ class LoanService
             $coMakerIds = $this->coMakerIdsForMembers($validated['co_maker_ids']);
 
             if (! empty($coMakerIds)) {
-                $loan->coMakers()->sync($coMakerIds);
+                $this->syncCoMakers($loan, $coMakerIds, $user);
             }
         }
 
@@ -189,6 +189,30 @@ class LoanService
     }
 
     /**
+     * Make $coMakerIds exactly the loan's co-makers, recording $user as the
+     * one who added each link this call creates.
+     *
+     * createLoan(), restructure() and updateLoan() all link co-makers through
+     * here, so none of them can forget `added_by`; addCoMakerAwaitingRelease()
+     * attaches a single one and stamps it itself.
+     *
+     * Only NEW links are stamped: a co-maker who was already on the loan keeps
+     * the `added_by` (and `created_at`) of whoever linked them first, so an
+     * edit that re-sends the same set does not rewrite the record to say the
+     * editor added everyone.
+     *
+     * @param  list<int>  $coMakerIds
+     */
+    private function syncCoMakers(Loan $loan, array $coMakerIds, ?User $user): void
+    {
+        $changes = $loan->coMakers()->sync($coMakerIds);
+
+        if ($user && $changes['attached'] !== []) {
+            $loan->coMakers()->updateExistingPivot($changes['attached'], ['added_by' => $user->id]);
+        }
+    }
+
+    /**
      * Restructure a live loan by creating a NEW loan carrying its outstanding
      * balance.
      *
@@ -252,13 +276,13 @@ class LoanService
                 $inherited = $lockedSource->coMakers()->pluck('co_makers.id')->all();
 
                 if ($inherited !== []) {
-                    $newLoan->coMakers()->sync($inherited);
+                    $this->syncCoMakers($newLoan, $inherited, $user);
                 }
             } elseif (! empty($validated['co_maker_ids'])) {
                 $coMakerIds = $this->coMakerIdsForMembers($validated['co_maker_ids']);
 
                 if ($coMakerIds !== []) {
-                    $newLoan->coMakers()->sync($coMakerIds);
+                    $this->syncCoMakers($newLoan, $coMakerIds, $user);
                 }
             }
 
@@ -508,7 +532,7 @@ class LoanService
         // coMakerIdsForMembers(). UpdateLoanRequest previously left this
         // field unvalidated as bare co-maker record ids.
         if (isset($validated['co_maker_ids'])) {
-            $loan->coMakers()->sync($this->coMakerIdsForMembers($validated['co_maker_ids']));
+            $this->syncCoMakers($loan, $this->coMakerIdsForMembers($validated['co_maker_ids']), $user);
         }
 
         return $loan;
@@ -732,6 +756,100 @@ class LoanService
         return $loan;
     }
 
+    /**
+     * Link a co-maker to a loan that is approved and waiting to be released —
+     * the release dialog's "Add Co-Maker".
+     *
+     * Owner decision: whoever may release a loan may complete its co-makers at
+     * the counter, but only until the release itself. Once the money is out,
+     * who is jointly liable for it is settled, and the app offers no way to
+     * add to that list.
+     *
+     * `$validated` either names one of the borrower's existing, active co-maker
+     * records (`co_maker_id`) or describes a new one, which is created on the
+     * loan's borrower exactly as the Co-makers tab (CoMakerController::store)
+     * creates it, so it also shows up there.
+     *
+     * The status is re-read under a row lock on the loan, not taken from the
+     * route-bound model. release() flips the status with an UPDATE of this same
+     * row, so the two serialize: a release that commits first makes this a
+     * 422, and one that comes second releases the loan with the co-maker
+     * already on it. Without the lock, a co-maker could be linked to a loan
+     * that was released a moment earlier.
+     *
+     * @param  array<string, mixed>  $validated  AddLoanCoMakerRequest payload
+     */
+    public function addCoMakerAwaitingRelease(Loan $loan, array $validated, User $user): CoMaker
+    {
+        return DB::transaction(function () use ($loan, $validated, $user) {
+            $lockedLoan = Loan::whereKey($loan->id)->lockForUpdate()->firstOrFail();
+
+            if (! $lockedLoan->is_releasable) {
+                throw ValidationException::withMessages([
+                    'status' => ['Co-makers can only be added while the loan is awaiting release.'],
+                ]);
+            }
+
+            if (isset($validated['co_maker_id'])) {
+                // Locked so a concurrent delete or deactivation of the
+                // co-maker cannot land between these checks and the attach.
+                $coMaker = CoMaker::whereKey($validated['co_maker_id'])
+                    ->where('borrower_id', $lockedLoan->borrower_id)
+                    ->lockForUpdate()
+                    ->first();
+
+                if (! $coMaker) {
+                    throw ValidationException::withMessages([
+                        'co_maker_id' => ["The selected co-maker is not one of this borrower's co-makers."],
+                    ]);
+                }
+
+                if ($lockedLoan->coMakers()->whereKey($coMaker->id)->exists()) {
+                    throw ValidationException::withMessages([
+                        'co_maker_id' => ['This co-maker is already on the loan.'],
+                    ]);
+                }
+
+                // Linking makes this person jointly liable for the loan, so a
+                // co-maker someone has deactivated is refused rather than
+                // quietly brought back. Checked under the lock above, so a
+                // concurrent deactivation cannot slip in before the attach.
+                if ($coMaker->status !== 'active') {
+                    throw ValidationException::withMessages([
+                        'co_maker_id' => ["This co-maker is inactive. Reactivate them on the borrower's Co-makers tab before adding them to a loan."],
+                    ]);
+                }
+            } else {
+                $coMaker = CoMaker::create([
+                    ...Arr::except($validated, 'co_maker_id'),
+                    'borrower_id' => $lockedLoan->borrower_id,
+                ]);
+            }
+
+            $lockedLoan->coMakers()->attach($coMaker->id, ['added_by' => $user->id]);
+
+            AuditLogService::log(
+                action: 'co_maker_added',
+                auditable: $lockedLoan,
+                newValues: [
+                    'co_maker_id' => $coMaker->id,
+                    'co_maker_code' => $coMaker->co_maker_code,
+                    'full_name' => $coMaker->full_name,
+                    // Whether the record was created by this call, or an
+                    // existing co-maker of the borrower's was linked.
+                    'co_maker_created' => $coMaker->wasRecentlyCreated,
+                ],
+                description: "Co-maker {$coMaker->co_maker_code} ({$coMaker->full_name}) added to loan "
+                    ."{$lockedLoan->application_number} while awaiting release",
+                userId: $user->id,
+            );
+
+            // Read back through the relation so the pivot (`added_by`,
+            // `created_at`) rides along for CoMakerResource.
+            return $lockedLoan->coMakers()->whereKey($coMaker->id)->firstOrFail();
+        });
+    }
+
     public function release(Loan $loan, User $releaser, array $insurance = [], ?string $feeFingerprint = null): Loan
     {
         $this->guardStatus($loan, 'approved', 'release');
@@ -801,10 +919,10 @@ class LoanService
             //   exceeds the loan net proceeds" would send them to correct the
             //   one number that is innocent.
             //
-            // A sibling in this namespace, so no import is needed here —
-            // LoanService.php:716 above is pinned by line number in
-            // CollateralIntegrityGuardsTest's active-status census, and a `use`
-            // statement at the top of this file would move it.
+            // A sibling in this namespace, so no import is needed here — the
+            // write of `released` to the status above is pinned by line number
+            // in CollateralIntegrityGuardsTest's active-status census, and a
+            // `use` statement at the top of this file would move it.
             app(LoanReleaseFeeService::class)->applyOnRelease($loan, $feeFingerprint);
 
             $this->applyInsuranceOnRelease($loan, $insurance);
