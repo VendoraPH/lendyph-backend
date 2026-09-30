@@ -953,7 +953,7 @@ DESC,
         responses: [
             new OA\Response(response: 200, description: 'Amortization schedule with payment tracking'),
             new OA\Response(response: 404, description: 'Not found'),
-            new OA\Response(response: 422, description: 'Loan has no schedule yet'),
+            new OA\Response(response: 422, description: 'Loan was never released, so it has no schedule. A released loan with no periods left (a closed restructure source) gets 200 with an empty list.'),
         ],
     )]
     public function amortizationSchedule(Loan $loan): JsonResponse
@@ -962,7 +962,13 @@ DESC,
 
         $schedules = $loan->amortizationSchedules;
 
-        if ($schedules->isEmpty()) {
+        // Only a loan that was never released has no schedule to show. A
+        // released loan can legitimately have none left: closing a restructured
+        // source deletes every period nothing was paid on
+        // (LoanService::clearOpenSchedules), so its schedule IS empty — which
+        // is an answer, not an error. The 422 made every such loan page log a
+        // failed request.
+        if ($schedules->isEmpty() && $loan->released_at === null) {
             return response()->json([
                 'message' => 'No amortization schedule found. Loan may not have been released yet.',
             ], 422);
