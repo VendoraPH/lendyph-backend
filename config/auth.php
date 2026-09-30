@@ -119,8 +119,12 @@ return [
     | Token Timeout (Minutes)
     |--------------------------------------------------------------------------
     |
-    | This value defines the number of minutes of inactivity before a
-    | Sanctum token is considered expired. Set to 0 to disable.
+    | How long an API token lives, in minutes: a normal sign-in's token and a
+    | refreshed token expire this long after they are issued, and a remembered
+    | token is revoked after this long unused. It must be a whole number above
+    | 0. The app refuses to boot otherwise (App\Services\TokenTimeout), because
+    | 0 would mint tokens that are already expired and a token that never
+    | expires is not supported.
     |
     | Cast because env() hands back a string whenever the variable is set, and
     | Carbon's addMinutes() refuses one: a box that set AUTH_TOKEN_TIMEOUT

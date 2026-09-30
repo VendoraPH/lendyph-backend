@@ -74,6 +74,7 @@ These guards don't run in a filtered run of just your own tests, so run the full
 
 **Auth and permissions.**
 - Sanctum bearer tokens only, with no cookies and no stateful domains. There is an idle timeout (`CheckTokenExpiry` + `TokenIdleWindow`), and `POST /auth/refresh` rotates the token.
+- `AUTH_TOKEN_TIMEOUT` (minutes, default 30) is the token lifetime. A normal sign-in's token expires that long after it was issued, and refresh only works while it is still valid, so login and refresh return `expires_in` for the client to renew ahead of expiry. A value of 0 or below stops the app from booting (`App\Services\TokenTimeout`).
 - `must_change_password` makes every call return **423** (`code: password_change_required`), except `/auth/me`, `/auth/change-password` and `/auth/logout`.
 - Roles and permissions use spatie/laravel-permission (`web` guard) with `resource:action` names. `super_admin` passes every check through `Gate::before`.
 - **Authorize in the controller (`$this->authorize('loans:view')`) or in the FormRequest's `authorize()`, never with route middleware.** No route uses `permission:`.

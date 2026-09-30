@@ -3,6 +3,7 @@
 namespace App\Http\Middleware;
 
 use App\Services\TokenIdleWindow;
+use App\Services\TokenTimeout;
 use Closure;
 use Illuminate\Http\Request;
 use Laravel\Sanctum\PersonalAccessToken;
@@ -41,12 +42,12 @@ class CheckTokenExpiry
     public function handle(Request $request, Closure $next): Response
     {
         $token = $request->user()?->currentAccessToken();
-        $timeout = (int) config('auth.token_timeout', 30);
+        $timeout = TokenTimeout::minutes();
 
         // Only real database-backed tokens carry an idle window. Session-based
         // callers and `actingAs()` in tests get a TransientToken, which has no
         // key and no `last_used_at` to measure.
-        if ($timeout > 0 && $token instanceof PersonalAccessToken) {
+        if ($token instanceof PersonalAccessToken) {
             $idleSince = TokenIdleWindow::idleSince($request, $token);
 
             if ($idleSince && $idleSince->diffInMinutes(now()) > $timeout) {
