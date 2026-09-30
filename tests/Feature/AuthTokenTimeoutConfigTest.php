@@ -1,5 +1,7 @@
 <?php
 
+use App\Providers\AppServiceProvider;
+use App\Services\TokenTimeout;
 use Illuminate\Support\Carbon;
 use Laravel\Sanctum\PersonalAccessToken;
 use Tests\TestCase;
@@ -60,3 +62,20 @@ it('lets a login succeed when the timeout comes from the environment', function 
     expect(PersonalAccessToken::latest('id')->first()->expires_at->toDateTimeString())
         ->toBe('2026-09-30 09:45:00');
 });
+
+it('starts with a positive timeout', function () {
+    config(['auth.token_timeout' => tokenTimeoutFor('45')]);
+
+    app()->getProvider(AppServiceProvider::class)->boot();
+
+    expect(TokenTimeout::minutes())->toBe(45);
+});
+
+it('refuses to start with a timeout that is not above zero', function (string $env) {
+    // 0 used to be documented as "disable" and minted tokens that had already
+    // expired. A token that never expires is not supported either.
+    config(['auth.token_timeout' => tokenTimeoutFor($env)]);
+
+    expect(fn () => app()->getProvider(AppServiceProvider::class)->boot())
+        ->toThrow(InvalidArgumentException::class, 'AUTH_TOKEN_TIMEOUT must be a whole number of minutes greater than 0');
+})->with(['zero' => '0', 'negative' => '-5', 'not a number' => 'never']);

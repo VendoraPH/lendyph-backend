@@ -9,6 +9,7 @@ use App\Http\Requests\Auth\UpdateMeRequest;
 use App\Http\Resources\UserResource;
 use App\Models\User;
 use App\Services\AuditLogService;
+use App\Services\TokenTimeout;
 use Carbon\CarbonInterface;
 use Illuminate\Contracts\Auth\StatefulGuard;
 use Illuminate\Http\JsonResponse;
@@ -82,7 +83,7 @@ class AuthController extends Controller
 
         $expiry = $request->boolean('remember')
             ? now()->addDays(30)
-            : now()->addMinutes(config('auth.token_timeout', 30));
+            : now()->addMinutes(TokenTimeout::minutes());
 
         $token = $user->createToken('auth-token', ['*'], $expiry);
 
@@ -332,7 +333,7 @@ class AuthController extends Controller
 
         $currentToken->delete();
 
-        $expiry = now()->addMinutes(config('auth.token_timeout', 30));
+        $expiry = now()->addMinutes(TokenTimeout::minutes());
 
         $token = $user->createToken('auth-token', ['*'], $expiry);
 

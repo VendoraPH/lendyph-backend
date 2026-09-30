@@ -7,6 +7,7 @@ use App\Services\BorrowerSubmissionTokenService;
 use App\Services\CsvImport\CsvImportUploadService;
 use App\Services\CsvImport\ImportErrorDigest;
 use App\Services\TokenIdleWindow;
+use App\Services\TokenTimeout;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -159,6 +160,9 @@ class AppServiceProvider extends ServiceProvider
 
     public function boot(): void
     {
+        // Refuse to start with a token lifetime of 0 or below. See TokenTimeout.
+        TokenTimeout::minutes();
+
         // Super-admin bypass — developer-side super_admin role gets all
         // permissions automatically. Client-side "admin" no longer bypasses
         // here; instead, the RoleAndPermissionSeeder gives the admin role
