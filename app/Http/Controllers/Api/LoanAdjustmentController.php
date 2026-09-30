@@ -33,13 +33,20 @@ class LoanAdjustmentController extends Controller
     {
         $this->authorize('loan_adjustments:view');
 
+        // `min:1`: `?per_page=0` silently became the default page inside
+        // paginate(), and a negative value reached MySQL as `offset` with no
+        // `limit` — a 500. The same rule every other list validates.
+        $perPage = (int) (request()->validate([
+            'per_page' => ['nullable', 'integer', 'min:1'],
+        ])['per_page'] ?? 15);
+
         $adjustments = $loan->adjustments()
             ->with('adjustedByUser', 'approvedByUser')
             ->latest()
             // Tiebreak on the key so adjustments sharing a `created_at` keep
             // one order across pages. See DeterministicPaginationTest.
             ->orderByDesc('id')
-            ->paginate(min((int) request('per_page', 15), 100));
+            ->paginate(min($perPage, 100));
 
         return LoanAdjustmentResource::collection($adjustments);
     }
