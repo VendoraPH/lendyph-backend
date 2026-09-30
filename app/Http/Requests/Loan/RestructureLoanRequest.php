@@ -4,6 +4,7 @@ namespace App\Http\Requests\Loan;
 
 use App\Enums\LoanFrequency;
 use App\Http\Requests\Concerns\ExcludesRejectedBorrowers;
+use App\Http\Requests\Concerns\RequiresActiveAccountOfficer;
 use Illuminate\Foundation\Http\FormRequest;
 
 /**
@@ -20,7 +21,7 @@ use Illuminate\Foundation\Http\FormRequest;
  */
 class RestructureLoanRequest extends FormRequest
 {
-    use ExcludesRejectedBorrowers;
+    use ExcludesRejectedBorrowers, RequiresActiveAccountOfficer;
 
     public function authorize(): bool
     {
@@ -46,7 +47,7 @@ class RestructureLoanRequest extends FormRequest
             'term' => ['nullable', 'integer', 'min:1'],
             'frequency' => ['nullable', LoanFrequency::rule()],
             'start_date' => ['required', 'date'],
-            'account_officer_id' => ['nullable', 'exists:users,id'],
+            'account_officer_id' => ['nullable', 'integer', $this->activeAccountOfficerRule()],
             'scb_amount' => ['nullable', 'numeric', 'min:0'],
             'policy_exception' => ['nullable', 'boolean'],
             'policy_exception_details' => ['nullable', 'string', 'max:2000'],
@@ -65,6 +66,7 @@ class RestructureLoanRequest extends FormRequest
     {
         return [
             'co_maker_ids.*.exists' => 'Each co-maker must be an existing member who was not rejected.',
+            'account_officer_id.exists' => $this->activeAccountOfficerMessage(),
         ];
     }
 }

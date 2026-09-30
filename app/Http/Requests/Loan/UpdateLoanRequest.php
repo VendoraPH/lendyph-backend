@@ -3,11 +3,12 @@
 namespace App\Http\Requests\Loan;
 
 use App\Http\Requests\Concerns\ExcludesRejectedBorrowers;
+use App\Http\Requests\Concerns\RequiresActiveAccountOfficer;
 use Illuminate\Foundation\Http\FormRequest;
 
 class UpdateLoanRequest extends FormRequest
 {
-    use ExcludesRejectedBorrowers;
+    use ExcludesRejectedBorrowers, RequiresActiveAccountOfficer;
 
     public function authorize(): bool
     {
@@ -25,6 +26,10 @@ class UpdateLoanRequest extends FormRequest
             // principal borrower on StoreLoanRequest, because a co-maker is
             // jointly liable: a rejected registration must not become one.
             'co_maker_ids.*' => ['integer', $this->nonRejectedBorrowerRule()],
+            // Sent by the edit form's account-officer picker. Without a rule the
+            // value never reached validated(), so a draft's officer could be
+            // changed on screen and silently not saved.
+            'account_officer_id' => ['nullable', 'integer', $this->activeAccountOfficerRule()],
             'principal_amount' => ['sometimes', 'numeric', 'min:1'],
             'purpose' => ['nullable', 'string', 'max:500'],
             // Only consumed when the principal of a RESTRUCTURE is being changed:
@@ -51,6 +56,7 @@ class UpdateLoanRequest extends FormRequest
     {
         return [
             'co_maker_ids.*.exists' => 'Each co-maker must be an existing member who was not rejected.',
+            'account_officer_id.exists' => $this->activeAccountOfficerMessage(),
         ];
     }
 }

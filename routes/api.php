@@ -45,6 +45,7 @@ use App\Http\Controllers\Api\ReportController;
 use App\Http\Controllers\Api\RoleController;
 use App\Http\Controllers\Api\ShareCapitalLedgerController;
 use App\Http\Controllers\Api\ShareCapitalPledgeController;
+use App\Http\Controllers\Api\StaffController;
 use App\Http\Controllers\Api\UserController;
 use App\Http\Middleware\AllowAuthOrSubmissionToken;
 use App\Http\Middleware\CheckTokenExpiry;
@@ -153,6 +154,13 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::patch('/users/{user}/deactivate', [UserController::class, 'deactivate'])->name('users.deactivate')->whereNumber('user');
     Route::patch('/users/{user}/reactivate', [UserController::class, 'reactivate'])->name('users.reactivate')->whereNumber('user');
     Route::post('/users/{user}/reset-password', [UserController::class, 'resetPassword'])->name('users.reset-password')->whereNumber('user');
+
+    // Staff — the account-officer pickers' list: active users as {id, full_name},
+    // for anyone holding loans:create or loans:update. NOT user management, so
+    // its name must stay outside `users.*`: that predicate drives the denied-
+    // caller ceiling in AppServiceProvider's `api` limiter, and a loan officer
+    // (who holds no users:* permission) would be cut to 10/min on the picker.
+    Route::get('/staff', [StaffController::class, 'index'])->name('staff.index');
 
     // Branches
     Route::apiResource('branches', BranchController::class)->except(['destroy']);
