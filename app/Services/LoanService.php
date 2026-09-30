@@ -1327,7 +1327,8 @@ class LoanService
      *
      * A PERIOD COUNT, not a loan's term: the CSV importer walks a loan's
      * periods with it. A loan's own maturity date is maturityDateFor(), which
-     * reads the term as a length in its `term_unit`.
+     * reads the term as a length in its `term_unit`. For the term
+     * LoanTermSchedule::fromPeriodCount() stores, the two agree.
      */
     public function computeMaturityDate(string $startDate, int $periods, string $frequency): Carbon
     {
@@ -1339,8 +1340,9 @@ class LoanService
             'bi_weekly' => $date->addDays($periods * 14),
             'semi_monthly' => $date->addDays($periods * 15),
             // Upon-maturity bullet loans treat `term` as months-until-maturity
-            // (single lump-sum payment on the maturity date).
-            'monthly', 'upon_maturity' => $date->addMonths($periods),
+            // (single lump-sum payment on the maturity date). Calendar months
+            // on the start's day, capped at a shorter month's end.
+            'monthly', 'upon_maturity' => LoanTermSchedule::calendarMonthDueDate($date, $periods, $date->day),
         };
     }
 
@@ -1353,7 +1355,14 @@ class LoanService
         return LoanTermSchedule::maturityDate(Carbon::parse($startDate), $term, $termUnit, $frequency);
     }
 
-    public function buildAmortizationPreview(Loan $loan): array
+    /**
+     * The loan's schedule, computed and not saved.
+     *
+     * `$anchorDay` is the day of the month calendar-month instalments fall on,
+     * the loan's start day by default. A schedule rebuilt from a later date
+     * passes the loan's original day, see LoanTermSchedule::instalments().
+     */
+    public function buildAmortizationPreview(Loan $loan, ?int $anchorDay = null): array
     {
         // `frequency = upon_maturity` is a bullet loan: a single lump-sum
         // payment at maturity, regardless of which interest method is set.
@@ -1362,9 +1371,9 @@ class LoanService
         }
 
         return match ($loan->interest_method) {
-            'straight' => $this->buildStraight($loan),
-            'diminishing' => $this->buildDiminishing($loan),
-            'upon_maturity' => $this->buildUponMaturity($loan),
+            'straight' => $this->buildStraight($loan, $anchorDay),
+            'diminishing' => $this->buildDiminishing($loan, $anchorDay),
+            'upon_maturity' => $this->buildUponMaturity($loan, $anchorDay),
         };
     }
 
@@ -1392,10 +1401,10 @@ class LoanService
         ];
     }
 
-    private function buildStraight(Loan $loan): array
+    private function buildStraight(Loan $loan, ?int $anchorDay): array
     {
         $principal = (float) $loan->principal_amount;
-        $instalments = $this->instalmentsFor($loan);
+        $instalments = $this->instalmentsFor($loan, $anchorDay);
         $count = count($instalments);
 
         $principalPerPeriod = round($principal / $count, 2);
@@ -1426,10 +1435,10 @@ class LoanService
         return $schedule;
     }
 
-    private function buildDiminishing(Loan $loan): array
+    private function buildDiminishing(Loan $loan, ?int $anchorDay): array
     {
         $principal = (float) $loan->principal_amount;
-        $instalments = $this->instalmentsFor($loan);
+        $instalments = $this->instalmentsFor($loan, $anchorDay);
         $count = count($instalments);
 
         // PMT at the rate of one full instalment. Every instalment but a short
@@ -1468,10 +1477,10 @@ class LoanService
         return $schedule;
     }
 
-    private function buildUponMaturity(Loan $loan): array
+    private function buildUponMaturity(Loan $loan, ?int $anchorDay): array
     {
         $principal = (float) $loan->principal_amount;
-        $instalments = $this->instalmentsFor($loan);
+        $instalments = $this->instalmentsFor($loan, $anchorDay);
         $count = count($instalments);
 
         // More than one instalment: interest-only instalments, with the
@@ -1520,13 +1529,14 @@ class LoanService
     /**
      * @return list<array{due_date: Carbon, days: int}>
      */
-    private function instalmentsFor(Loan $loan): array
+    private function instalmentsFor(Loan $loan, ?int $anchorDay): array
     {
         return LoanTermSchedule::instalments(
             Carbon::parse($loan->start_date),
             (int) $loan->term,
             $loan->term_unit->value,
             $loan->frequency,
+            $anchorDay,
         );
     }
 

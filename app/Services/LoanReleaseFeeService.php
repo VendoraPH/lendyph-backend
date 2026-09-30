@@ -437,16 +437,13 @@ final class LoanReleaseFeeService
      *
      * ## Why not `loans.term`
      *
-     * Because `term` is not a number of days and is not a number of months
-     * either. It is a PERIOD COUNT whose unit follows `frequency`: see
-     * {@see LoanService::computeMaturityDate()}, where `term` is fed to
-     * `addDays()`, `addWeeks()`, `addMonths()` or a multiple of 14 or 15 days
-     * depending on the frequency, and {@see Loan::isOneMonthTerm()}, which
-     * spells the same warning out. `term: 30` on a daily loan is thirty days;
-     * on a monthly loan it is thirty months. Any `term * k` conversion is
-     * therefore wrong for four of the six frequencies, and the two it is right
-     * for are the ones where a calendar month is not a fixed number of days
-     * anyway.
+     * Because `term` is not always a number of days. It is a length in
+     * `term_unit`: `term: 30` is thirty days on a days term and thirty months
+     * on a months term. A months term paid monthly or at maturity runs in
+     * CALENDAR months, anchored to the start's day and capped at a shorter
+     * month's end ({@see LoanTermSchedule}), and a calendar month is not a
+     * fixed number of days. Any `term * k` conversion is therefore wrong for
+     * those loans.
      *
      * The date pair is the only unambiguous source, and it is the pair the
      * borrower actually signed. Both columns are `date` casts, so both are
