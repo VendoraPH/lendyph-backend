@@ -226,6 +226,7 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::post('/loans/{loan}/restructure', [LoanController::class, 'restructure']);
     Route::get('/loans/{loan}/ledger-entries', [LoanController::class, 'ledgerEntries']);
     Route::patch('/loans/{loan}/auto-pay', [LoanController::class, 'toggleAutoPay']);
+    Route::patch('/loans/{loan}/account-officer', [LoanController::class, 'assignAccountOfficer'])->whereNumber('loan');
     Route::get('/loans/{loan}/amortization-preview', [LoanController::class, 'amortizationPreview']);
     Route::get('/loans/{loan}/amortization-schedule', [LoanController::class, 'amortizationSchedule']);
 
