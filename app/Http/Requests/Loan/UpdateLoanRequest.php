@@ -4,11 +4,12 @@ namespace App\Http\Requests\Loan;
 
 use App\Http\Requests\Concerns\ExcludesRejectedBorrowers;
 use App\Http\Requests\Concerns\RequiresActiveAccountOfficer;
+use App\Http\Requests\Concerns\ValidatesDeductionAmounts;
 use Illuminate\Foundation\Http\FormRequest;
 
 class UpdateLoanRequest extends FormRequest
 {
-    use ExcludesRejectedBorrowers, RequiresActiveAccountOfficer;
+    use ExcludesRejectedBorrowers, RequiresActiveAccountOfficer, ValidatesDeductionAmounts;
 
     public function authorize(): bool
     {
@@ -37,14 +38,14 @@ class UpdateLoanRequest extends FormRequest
             // no `remarks` column on loans, so it never reaches the row itself —
             // LoanService maps it onto `restructure_remarks`.
             'remarks' => ['nullable', 'string', 'max:1000'],
-            'interest_rate' => ['nullable', 'numeric', 'min:0', 'max:100'],
+            'interest_rate' => ['sometimes', 'numeric', 'min:0', 'max:100', 'decimal:0,4'],
             'start_date' => ['sometimes', 'date'],
-            'scb_amount' => ['nullable', 'numeric', 'min:0'],
-            'policy_exception' => ['nullable', 'boolean'],
+            'scb_amount' => ['sometimes', 'numeric', 'min:0'],
+            'policy_exception' => ['sometimes', 'boolean'],
             'policy_exception_details' => ['nullable', 'string', 'max:2000'],
             'deductions' => ['nullable', 'array'],
             'deductions.*.name' => ['required_with:deductions', 'string', 'max:255'],
-            'deductions.*.amount' => ['required_with:deductions', 'numeric', 'min:0'],
+            'deductions.*.amount' => $this->deductionAmountRule(),
             'deductions.*.type' => ['required_with:deductions', 'in:fixed,percentage'],
         ];
     }

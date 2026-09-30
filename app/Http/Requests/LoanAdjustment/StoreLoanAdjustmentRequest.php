@@ -40,7 +40,7 @@ class StoreLoanAdjustmentRequest extends FormRequest
             'new_values' => ['required', 'array'],
 
             // Restructure — any one of the three is enough; enforced in after().
-            'new_values.interest_rate' => ['nullable', 'numeric', 'min:0'],
+            'new_values.interest_rate' => ['nullable', 'numeric', 'min:0', 'decimal:0,4'],
             'new_values.term' => ['nullable', 'integer', 'min:1'],
             'new_values.frequency' => ['nullable', 'in:daily,weekly,bi_weekly,semi_monthly,monthly'],
 

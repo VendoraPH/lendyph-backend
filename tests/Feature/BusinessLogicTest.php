@@ -128,6 +128,34 @@ class BusinessLogicTest extends TestCase
         $this->assertEquals(500, $response->json('data.total_deductions'));
     }
 
+    public function test_an_empty_deductions_list_charges_no_fees_and_null_charges_the_product_fees(): void
+    {
+        $product = LoanProduct::factory()->create([
+            'processing_fee' => 2.0,
+            'service_fee' => 1.0,
+        ]);
+        $payload = fn (): array => [
+            'borrower_id' => Borrower::factory()->create(['branch_id' => $this->branch->id])->id,
+            'loan_product_id' => $product->id,
+            'principal_amount' => 100000,
+            'start_date' => now()->toDateString(),
+        ];
+
+        // A sent `[]` is "no deductions", not "work them out for me".
+        $this->postJson('/api/loans', $payload() + ['deductions' => []])
+            ->assertCreated()
+            ->assertJsonPath('data.deductions', [])
+            ->assertJsonPath('data.total_deductions', '0.00')
+            ->assertJsonPath('data.net_proceeds', '100000.00');
+
+        // Null reads like an omitted key: the product's 2% + 1%.
+        $this->postJson('/api/loans', $payload() + ['deductions' => null])
+            ->assertCreated()
+            ->assertJsonCount(2, 'data.deductions')
+            ->assertJsonPath('data.total_deductions', '3000.00')
+            ->assertJsonPath('data.net_proceeds', '97000.00');
+    }
+
     public function test_auto_computed_notarial_fee_is_percentage_of_principal(): void
     {
         $product = LoanProduct::factory()->create([

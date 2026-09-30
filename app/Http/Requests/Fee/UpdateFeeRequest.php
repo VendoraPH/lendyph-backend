@@ -3,6 +3,7 @@
 namespace App\Http\Requests\Fee;
 
 use App\Http\Requests\Fee\Concerns\GuardsAgainstProductFeeOverlap;
+use App\Http\Requests\Fee\Concerns\LimitsFeeValuePlaces;
 use App\Models\Fee;
 use Illuminate\Contracts\Validation\Validator;
 use Illuminate\Foundation\Http\FormRequest;
@@ -10,7 +11,7 @@ use Illuminate\Validation\Rule;
 
 class UpdateFeeRequest extends FormRequest
 {
-    use GuardsAgainstProductFeeOverlap;
+    use GuardsAgainstProductFeeOverlap, LimitsFeeValuePlaces;
 
     public function authorize(): bool
     {
@@ -22,7 +23,7 @@ class UpdateFeeRequest extends FormRequest
         return [
             'name' => ['sometimes', 'string', 'max:255', Rule::unique('fees', 'name')->ignore($this->fee)],
             'type' => ['sometimes', 'in:fixed,percentage'],
-            'value' => ['sometimes', 'numeric', 'min:0'],
+            'value' => ['sometimes', 'numeric', 'min:0', $this->feeValuePlacesRule($this->input('type', $this->route('fee')?->type))],
             'applicable_product_ids' => ['nullable', 'array'],
             'applicable_product_ids.*' => ['integer', 'exists:loan_products,id'],
             'conditions' => ['nullable', 'array'],
@@ -45,5 +46,7 @@ class UpdateFeeRequest extends FormRequest
             existingName: $existing?->name,
             existingProductIds: $existing?->applicable_product_ids,
         );
+
+        $this->guardStoredValueOnSwitchToFixed($validator, $existing);
     }
 }

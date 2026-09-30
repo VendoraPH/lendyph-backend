@@ -27,6 +27,14 @@ class ReportService
     private const PAR_THRESHOLD_DAYS = 30;
 
     /**
+     * Decimal places an interest-rate figure is reported to: the scale of
+     * `loans.interest_rate`. An average over loans that share one rate IS that
+     * stored rate, so any fewer places would misreport a 2.1234% product as
+     * 2.12%.
+     */
+    private const RATE_SCALE = 4;
+
+    /**
      * Loan-loss provision rate per aging bucket, keyed exactly as
      * {@see self::agingReport()} keys its buckets.
      *
@@ -1247,7 +1255,7 @@ class ReportService
                 'total_released' => $released,
                 'outstanding' => round($outstandingPrincipal + (float) $row->insurance_remaining, 2),
                 'outstanding_principal' => $outstandingPrincipal,
-                'avg_interest_rate' => round((float) $row->avg_interest_rate, 2),
+                'avg_interest_rate' => round((float) $row->avg_interest_rate, self::RATE_SCALE),
                 'overdue_amount' => round((float) $row->overdue_amount, 2),
                 'at_risk_amount' => $atRisk,
                 // Whole percent, e.g. 12.5 means 12.5%.
@@ -1266,7 +1274,7 @@ class ReportService
                 'total_released' => round($grandReleased, 2),
                 'outstanding' => round($grandOutstandingPrincipal + $grandInsurance, 2),
                 'outstanding_principal' => round($grandOutstandingPrincipal, 2),
-                'avg_interest_rate' => $grandLoanCount > 0 ? round($weightedRate / $grandLoanCount, 2) : 0.0,
+                'avg_interest_rate' => $grandLoanCount > 0 ? round($weightedRate / $grandLoanCount, self::RATE_SCALE) : 0.0,
                 'overdue_amount' => round($grandOverdue, 2),
                 'at_risk_amount' => round($grandAtRisk, 2),
                 'par_ratio' => $grandOutstandingPrincipal > 0

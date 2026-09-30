@@ -1147,7 +1147,7 @@ class ReportFinancialTest extends TestCase
             'principal_amount' => $options['principal'] ?? 60000,
             'start_date' => $options['start_date'] ?? Carbon::today()->toDateString(),
             'account_officer_id' => isset($options['officer']) ? $options['officer']->id : null,
-            'deductions' => $options['deductions'] ?? [],
+            'deductions' => $options['deductions'] ?? null,
         ], $this->admin);
 
         $loanService->submitForReview($loan);
