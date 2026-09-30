@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\AutoPay\ToggleAutoPayRequest;
 use App\Http\Requests\Loan\ApproveLoanRequest;
+use App\Http\Requests\Loan\AssignAccountOfficerRequest;
 use App\Http\Requests\Loan\ExtendLoanRequest;
 use App\Http\Requests\Loan\RejectLoanRequest;
 use App\Http\Requests\Loan\ReleaseLoanRequest;
@@ -872,6 +873,49 @@ DESC,
                 'enabled_by_user_id' => $loan->auto_pay_enabled_by,
             ],
         ]);
+    }
+
+    /**
+     * Reassign a loan's account officer at any status.
+     *
+     * Kept apart from `update()` on purpose. That endpoint re-derives the loan's
+     * money, so it refuses everything outside draft/for_review. The account
+     * officer is a staffing field, and it changes most often once a loan is out
+     * and being collected. The change goes through the model, so `Auditable`
+     * records who moved the loan and from whom.
+     */
+    #[OA\Patch(
+        path: '/api/loans/{id}/account-officer',
+        summary: 'Assign or change the account officer of a loan',
+        description: 'Works at any loan status. The officer must be an active user. The change is recorded in the audit log.',
+        tags: ['Loans'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
+        ],
+        requestBody: new OA\RequestBody(
+            required: true,
+            content: new OA\JsonContent(
+                required: ['account_officer_id'],
+                properties: [
+                    new OA\Property(property: 'account_officer_id', type: 'integer', example: 4),
+                ],
+            ),
+        ),
+        responses: [
+            new OA\Response(response: 200, description: 'Loan with the new account officer'),
+            new OA\Response(response: 401, description: 'Unauthenticated'),
+            new OA\Response(response: 403, description: 'Missing loans:update permission'),
+            new OA\Response(response: 404, description: 'Loan not found'),
+            new OA\Response(response: 422, description: 'Missing, unknown or inactive user'),
+        ],
+    )]
+    public function assignAccountOfficer(AssignAccountOfficerRequest $request, Loan $loan): LoanResource
+    {
+        $loan->update(['account_officer_id' => $request->integer('account_officer_id')]);
+        $loan->load('borrower', 'loanProduct', 'branch', 'coMakers', 'accountOfficer');
+
+        return new LoanResource($loan);
     }
 
     #[OA\Get(
