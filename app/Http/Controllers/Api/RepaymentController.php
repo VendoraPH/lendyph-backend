@@ -194,6 +194,13 @@ class RepaymentController extends Controller
     {
         $this->authorize('payments:view');
 
+        // `min:1`: `?per_page=0` silently became the default page inside
+        // paginate(), and a negative value reached MySQL as `offset` with no
+        // `limit` — a 500. The same rule every other list validates.
+        $perPage = (int) (request()->validate([
+            'per_page' => ['nullable', 'integer', 'min:1'],
+        ])['per_page'] ?? 15);
+
         $repayments = $loan->repayments()
             ->with('receivedByUser', 'voidedByUser', 'loan.borrower', 'loan.loanProduct', 'loan.amortizationSchedules', 'shareCapitalLedgerEntries')
             ->latest('payment_date')
@@ -202,7 +209,7 @@ class RepaymentController extends Controller
             // this list is oldest-first and latest() changes nothing. The
             // tiebreaker follows the order the list actually has.
             ->orderBy('id')
-            ->paginate(min((int) request('per_page', 15), 100));
+            ->paginate(min($perPage, 100));
 
         return RepaymentResource::collection($repayments);
     }
