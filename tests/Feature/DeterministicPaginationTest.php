@@ -145,6 +145,23 @@ it('serves every row exactly once, in key order, when the whole list ties on its
         ];
     },
 
+    'GET /api/staff' => function () {
+        User::factory()->count(7)->create();
+        // Sorted by name, so the tie is on the name — two officers called
+        // Juan Dela Cruz is an ordinary coop, not a contrived one.
+        User::query()->update(['first_name' => 'Juan', 'last_name' => 'Dela Cruz']);
+        // Inactive users are not listed at all, so they cannot be in the
+        // expected set; one is here to prove the drain skips it.
+        User::factory()->inactive()->create(['first_name' => 'Juan', 'last_name' => 'Dela Cruz']);
+
+        return [
+            'url' => '/api/staff',
+            'model' => User::class,
+            'direction' => 'asc',
+            'expected' => User::query()->where('status', 'active')->orderBy('id')->pluck('id')->all(),
+        ];
+    },
+
     'GET /api/borrowers' => function () {
         Borrower::factory()->count(7)->create(['branch_id' => $this->branch->id]);
         Borrower::query()->update(['created_at' => '2026-01-15 09:00:00']);
