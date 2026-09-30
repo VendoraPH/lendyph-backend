@@ -645,5 +645,9 @@ it('has no write path into loan_collaterals outside the two that are accounted f
         // restructure IS guarded, at the end of its transaction, once
         // closeRestructuredSource() has taken the source out of the active set.
         'app/Services/LoanService.php',
+        // The ₱0 share capital snapshot correction. It only updates
+        // `snapshot_value` on rows that already exist, never `loan_id` or
+        // `collateral_id`, so it cannot create or move a pledge.
+        'database/migrations/2026_09_30_130000_correct_zero_share_capital_collateral_snapshots.php',
     ], 'a new write into loan_collaterals appeared; either route it through the same active-loan guard as CollateralController::attach(), or account for it here and say why it is exempt');
 });
