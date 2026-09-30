@@ -156,10 +156,11 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::post('/users/{user}/reset-password', [UserController::class, 'resetPassword'])->name('users.reset-password')->whereNumber('user');
 
     // Staff — the account-officer pickers' list: active users as {id, full_name},
-    // for anyone holding loans:create or loans:update. NOT user management, so
-    // its name must stay outside `users.*`: that predicate drives the denied-
-    // caller ceiling in AppServiceProvider's `api` limiter, and a loan officer
-    // (who holds no users:* permission) would be cut to 10/min on the picker.
+    // for anyone holding loans:create, loans:update or loans:restructure. NOT
+    // user management, so its name must stay outside `users.*`: that predicate
+    // drives the denied-caller ceiling in AppServiceProvider's `api` limiter, and
+    // a loan officer (who holds no users:* permission) would be cut to 10/min on
+    // the picker.
     Route::get('/staff', [StaffController::class, 'index'])->name('staff.index');
 
     // Branches
@@ -229,6 +230,8 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::patch('/loans/{loan}/reject', [LoanController::class, 'reject']);
     Route::get('/loans/{loan}/release-preview', [LoanController::class, 'releasePreview']);
     Route::patch('/loans/{loan}/release', [LoanController::class, 'release']);
+    // The release dialog's "Add Co-Maker": approved loans only, `loans:release`.
+    Route::post('/loans/{loan}/co-makers', [LoanController::class, 'addCoMaker'])->whereNumber('loan');
     Route::patch('/loans/{loan}/void', [LoanController::class, 'void']);
     Route::post('/loans/{loan}/extend', [LoanController::class, 'extend']);
     Route::post('/loans/{loan}/restructure', [LoanController::class, 'restructure']);
