@@ -21,7 +21,7 @@ class CollateralController extends Controller
     #[OA\Get(
         path: '/api/collaterals',
         summary: 'List collaterals',
-        description: 'Filterable by borrower_id and collateral_type_id (alias `type`). Each row carries `active_loans`: the loans in an active status currently holding it, so the client never has to fan out over the loan list to work out what is pledged.',
+        description: 'Filterable by borrower_id and collateral_type_id (alias `type`). Each row carries `active_loans`: the loans in an active status currently holding it, so the client never has to fan out over the loan list to work out what is pledged. Each row also carries `effective_value` and `value_unknown`, its value as security, so the client never has to read a share capital ledger per member to value the list.',
         tags: ['Collaterals'],
         security: [['sanctum' => []]],
         parameters: [
@@ -29,7 +29,13 @@ class CollateralController extends Controller
             new OA\Parameter(name: 'type', in: 'query', required: false, description: 'Collateral type id', schema: new OA\Schema(type: 'integer')),
         ],
         responses: [
-            new OA\Response(response: 200, description: 'Collateral list'),
+            new OA\Response(
+                response: 200,
+                description: 'Collateral list',
+                content: new OA\JsonContent(properties: [
+                    new OA\Property(property: 'data', type: 'array', items: new OA\Items(ref: '#/components/schemas/Collateral')),
+                ]),
+            ),
             new OA\Response(response: 401, description: 'Unauthenticated'),
             new OA\Response(response: 403, description: 'Forbidden'),
         ],
@@ -74,7 +80,7 @@ class CollateralController extends Controller
             ->latest()
             ->get();
 
-        return CollateralResource::collection($collaterals);
+        return CollateralResource::valuedCollection($collaterals, request()->user());
     }
 
     #[OA\Post(
@@ -95,7 +101,13 @@ class CollateralController extends Controller
             ),
         ),
         responses: [
-            new OA\Response(response: 201, description: 'Collateral created'),
+            new OA\Response(
+                response: 201,
+                description: 'Collateral created',
+                content: new OA\JsonContent(properties: [
+                    new OA\Property(property: 'data', ref: '#/components/schemas/Collateral'),
+                ]),
+            ),
             new OA\Response(response: 422, description: 'Validation error'),
         ],
     )]
@@ -104,7 +116,7 @@ class CollateralController extends Controller
         $collateral = Collateral::create($request->validated());
         $collateral->load(['collateralType', 'activeLoans']);
 
-        return (new CollateralResource($collateral))
+        return CollateralResource::valued($collateral, $request->user())
             ->response()
             ->setStatusCode(201);
     }
@@ -118,7 +130,13 @@ class CollateralController extends Controller
             new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
         ],
         responses: [
-            new OA\Response(response: 200, description: 'Collateral details'),
+            new OA\Response(
+                response: 200,
+                description: 'Collateral details',
+                content: new OA\JsonContent(properties: [
+                    new OA\Property(property: 'data', ref: '#/components/schemas/Collateral'),
+                ]),
+            ),
             new OA\Response(response: 404, description: 'Not found'),
         ],
     )]
@@ -128,7 +146,7 @@ class CollateralController extends Controller
 
         $collateral->load(['collateralType', 'activeLoans']);
 
-        return new CollateralResource($collateral);
+        return CollateralResource::valued($collateral, request()->user());
     }
 
     #[OA\Put(
@@ -141,7 +159,13 @@ class CollateralController extends Controller
         ],
         requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent),
         responses: [
-            new OA\Response(response: 200, description: 'Collateral updated'),
+            new OA\Response(
+                response: 200,
+                description: 'Collateral updated',
+                content: new OA\JsonContent(properties: [
+                    new OA\Property(property: 'data', ref: '#/components/schemas/Collateral'),
+                ]),
+            ),
             new OA\Response(response: 422, description: 'Validation error, or a `borrower_id` change on a collateral attached to a loan'),
         ],
     )]
@@ -186,7 +210,7 @@ class CollateralController extends Controller
 
         $collateral->load(['collateralType', 'activeLoans']);
 
-        return new CollateralResource($collateral);
+        return CollateralResource::valued($collateral, $request->user());
     }
 
     /**
@@ -284,7 +308,13 @@ class CollateralController extends Controller
             new OA\Parameter(name: 'loanId', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
         ],
         responses: [
-            new OA\Response(response: 200, description: 'Attached collaterals with snapshot pivot and `active_loans` (which includes this loan when it is itself active)'),
+            new OA\Response(
+                response: 200,
+                description: 'Attached collaterals with snapshot pivot and `active_loans` (which includes this loan when it is itself active)',
+                content: new OA\JsonContent(properties: [
+                    new OA\Property(property: 'data', type: 'array', items: new OA\Items(ref: '#/components/schemas/Collateral')),
+                ]),
+            ),
             new OA\Response(response: 404, description: 'Loan not found'),
         ],
     )]
@@ -294,7 +324,7 @@ class CollateralController extends Controller
 
         $collaterals = $loan->collaterals()->with(['collateralType', 'activeLoans'])->get();
 
-        return CollateralResource::collection($collaterals);
+        return CollateralResource::valuedCollection($collaterals, request()->user());
     }
 
     #[OA\Post(
@@ -317,7 +347,13 @@ class CollateralController extends Controller
             ),
         ),
         responses: [
-            new OA\Response(response: 201, description: 'Collateral attached'),
+            new OA\Response(
+                response: 201,
+                description: 'Collateral attached',
+                content: new OA\JsonContent(properties: [
+                    new OA\Property(property: 'data', ref: '#/components/schemas/Collateral'),
+                ]),
+            ),
             new OA\Response(response: 422, description: 'Validation error, collateral belongs to a different borrower, already attached, or already pledged to another active loan (the message names the conflicting loan(s))'),
         ],
     )]
@@ -397,7 +433,7 @@ class CollateralController extends Controller
                 ->firstOrFail();
         });
 
-        return (new CollateralResource($attached))
+        return CollateralResource::valued($attached, $request->user())
             ->response()
             ->setStatusCode(201);
     }

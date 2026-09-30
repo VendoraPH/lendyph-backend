@@ -47,6 +47,46 @@ class ShareCapitalLedger extends Model
         });
     }
 
+    /**
+     * Each member's share capital balance, for any number of members in one query.
+     *
+     * The balance is `SUM(credit) - SUM(debit)` across the member's whole
+     * ledger: no date filter and no clamp, so it can be negative. That is the
+     * figure RepaymentService::reverseShareCapitalCredit() judges a void against
+     * and the Share Capital report shows; this is the same expression, grouped,
+     * so a list can value every member it holds with one aggregate instead of
+     * one per row.
+     *
+     * Every id asked about is in the result. A member with no ledger rows has a
+     * balance of 0, not an unknown one.
+     *
+     * @param  array<int, int>  $borrowerIds
+     * @return array<int, float> balance rounded to centavos, keyed by borrower_id
+     */
+    public static function balancesFor(array $borrowerIds): array
+    {
+        $borrowerIds = array_values(array_unique($borrowerIds));
+
+        if ($borrowerIds === []) {
+            return [];
+        }
+
+        $balances = array_fill_keys($borrowerIds, 0.0);
+
+        $sums = static::query()
+            ->whereIn('borrower_id', $borrowerIds)
+            ->groupBy('borrower_id')
+            ->selectRaw('borrower_id, COALESCE(SUM(credit) - SUM(debit), 0) as balance')
+            ->toBase()
+            ->pluck('balance', 'borrower_id');
+
+        foreach ($sums as $borrowerId => $balance) {
+            $balances[(int) $borrowerId] = round((float) $balance, 2);
+        }
+
+        return $balances;
+    }
+
     public function borrower(): BelongsTo
     {
         return $this->belongsTo(Borrower::class);
