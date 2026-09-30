@@ -713,6 +713,122 @@ class LoanRestructureTest extends TestCase
     }
 
     // ---------------------------------------------------------------------
+    // Submitting: loans:restructure is enough for a restructure application
+    // ---------------------------------------------------------------------
+
+    /**
+     * A role that can raise a restructure and do nothing else to a loan.
+     */
+    private function restructureOnlyUser(): User
+    {
+        $role = Role::create([
+            'name' => 'restructure_only',
+            'guard_name' => 'web',
+            'is_active' => true,
+            'is_system' => false,
+        ]);
+        $role->syncPermissions(['loans:view', 'loans:restructure']);
+
+        return tap(User::factory()->create(), fn (User $user) => $user->assignRole($role));
+    }
+
+    private function ordinaryDraft(): Loan
+    {
+        return Loan::factory()->create([
+            'status' => 'draft',
+            'branch_id' => $this->branch->id,
+            'created_by' => $this->admin->id,
+        ]);
+    }
+
+    public function test_a_restructure_only_role_can_submit_its_restructure_application(): void
+    {
+        $source = $this->createReleasedLoan();
+        $clerk = $this->restructureOnlyUser();
+        $this->assertFalse($clerk->can('loans:update'));
+
+        $this->actingAs($clerk);
+        $newLoan = $this->restructure($source);
+
+        $this->patchJson("/api/loans/{$newLoan->id}/submit")
+            ->assertOk()
+            ->assertJsonPath('data.status', 'for_review');
+
+        $this->assertSame('for_review', $newLoan->fresh()->status);
+        $this->assertSame(
+            $clerk->id,
+            (int) $newLoan->approvalSteps()->where('step_order', 0)->value('acted_by'),
+            'The chain records the clerk as the one who submitted it.',
+        );
+    }
+
+    public function test_a_restructure_only_role_cannot_submit_any_other_application(): void
+    {
+        $draft = $this->ordinaryDraft();
+
+        $this->actingAs($this->restructureOnlyUser());
+
+        $this->patchJson("/api/loans/{$draft->id}/submit")->assertForbidden();
+        $this->assertSame('draft', $draft->fresh()->status);
+    }
+
+    public function test_a_restructure_only_role_still_cannot_edit_a_loan(): void
+    {
+        $source = $this->createReleasedLoan();
+        $ordinary = $this->ordinaryDraft();
+        $clerk = $this->restructureOnlyUser();
+
+        $this->actingAs($clerk);
+        $newLoan = $this->restructure($source);
+
+        // Not another application, and not its own restructure application either.
+        foreach ([$ordinary, $newLoan] as $loan) {
+            $this->patchJson("/api/loans/{$loan->id}", ['purpose' => 'Edited'])->assertForbidden();
+            $this->putJson("/api/loans/{$loan->id}", ['purpose' => 'Edited'])->assertForbidden();
+        }
+
+        $this->assertNotSame('Edited', $ordinary->fresh()->purpose);
+        $this->assertNotSame('Edited', $newLoan->fresh()->purpose);
+    }
+
+    public function test_a_role_with_neither_permission_cannot_submit_a_restructure_application(): void
+    {
+        $source = $this->createReleasedLoan();
+        $newLoan = $this->restructure($source);
+
+        $this->actingAs($this->userWithRole('viewer'));
+
+        $this->patchJson("/api/loans/{$newLoan->id}/submit")->assertForbidden();
+        $this->assertSame('draft', $newLoan->fresh()->status);
+    }
+
+    public function test_loans_update_still_submits_both_kinds_of_application(): void
+    {
+        $source = $this->createReleasedLoan();
+        $newLoan = $this->restructure($source);
+        $ordinary = $this->ordinaryDraft();
+
+        $role = Role::create([
+            'name' => 'update_only_editor',
+            'guard_name' => 'web',
+            'is_active' => true,
+            'is_system' => false,
+        ]);
+        $role->syncPermissions(['loans:view', 'loans:update']);
+        $editor = tap(User::factory()->create(), fn (User $user) => $user->assignRole($role));
+        $this->assertFalse($editor->can('loans:restructure'));
+
+        $this->actingAs($editor);
+
+        $this->patchJson("/api/loans/{$newLoan->id}/submit")
+            ->assertOk()
+            ->assertJsonPath('data.status', 'for_review');
+        $this->patchJson("/api/loans/{$ordinary->id}/submit")
+            ->assertOk()
+            ->assertJsonPath('data.status', 'for_review');
+    }
+
+    // ---------------------------------------------------------------------
     // Read surfaces
     // ---------------------------------------------------------------------
 

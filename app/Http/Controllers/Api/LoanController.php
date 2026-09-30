@@ -12,6 +12,7 @@ use App\Http\Requests\Loan\RejectLoanRequest;
 use App\Http\Requests\Loan\ReleaseLoanRequest;
 use App\Http\Requests\Loan\RestructureLoanRequest;
 use App\Http\Requests\Loan\StoreLoanRequest;
+use App\Http\Requests\Loan\SubmitLoanRequest;
 use App\Http\Requests\Loan\UpdateLoanRequest;
 use App\Http\Resources\AmortizationScheduleResource;
 use App\Http\Resources\CoMakerResource;
@@ -25,7 +26,6 @@ use App\Services\LoanService;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
-use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
@@ -538,6 +538,7 @@ DESC,
     #[OA\Patch(
         path: '/api/loans/{id}/submit',
         summary: 'Submit loan for review',
+        description: 'Needs `loans:update`. A restructure application (`is_restructure`) can also be submitted with `loans:restructure`.',
         tags: ['Loans'],
         security: [['sanctum' => []]],
         parameters: [
@@ -545,13 +546,12 @@ DESC,
         ],
         responses: [
             new OA\Response(response: 200, description: 'Loan submitted for review'),
+            new OA\Response(response: 403, description: 'Missing loans:update, or loans:restructure for a restructure application'),
             new OA\Response(response: 422, description: 'Invalid status transition'),
         ],
     )]
-    public function submit(Request $request, Loan $loan): JsonResponse
+    public function submit(SubmitLoanRequest $request, Loan $loan): JsonResponse
     {
-        $this->authorize('loans:update');
-
         $this->loanService->submitForReview($loan, $request->user());
 
         return response()->json(['message' => 'Loan submitted for review.', 'data' => new LoanResource($loan)]);
