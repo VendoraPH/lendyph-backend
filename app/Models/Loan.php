@@ -276,9 +276,15 @@ class Loan extends Model
         return $this->hasMany(self::class, 'source_loan_id');
     }
 
+    /**
+     * The pivot's `added_by` is who linked the co-maker to this loan, and its
+     * `created_at` when.
+     */
     public function coMakers(): BelongsToMany
     {
-        return $this->belongsToMany(CoMaker::class, 'co_maker_loan')->withTimestamps();
+        return $this->belongsToMany(CoMaker::class, 'co_maker_loan')
+            ->withPivot('added_by')
+            ->withTimestamps();
     }
 
     public function collaterals(): BelongsToMany

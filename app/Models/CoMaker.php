@@ -68,6 +68,8 @@ class CoMaker extends Model
 
     public function loans(): BelongsToMany
     {
-        return $this->belongsToMany(Loan::class, 'co_maker_loan')->withTimestamps();
+        return $this->belongsToMany(Loan::class, 'co_maker_loan')
+            ->withPivot('added_by')
+            ->withTimestamps();
     }
 }
