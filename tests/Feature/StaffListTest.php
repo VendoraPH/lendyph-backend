@@ -2,12 +2,14 @@
 
 namespace Tests\Feature;
 
+use App\Models\Loan;
 use App\Models\Role;
 use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\Facades\Route;
 use PHPUnit\Framework\Attributes\DataProvider;
+use Spatie\Permission\Models\Permission;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
@@ -18,7 +20,8 @@ use Tests\Traits\SetupLendyPH;
  * staff through GET /api/users, which only admin and super_admin may call, so
  * a loan officer opened every picker to an empty list. The owner's decision:
  * whoever can create or edit a loan gets a narrow staff list — active users,
- * names only — and the users list itself stays admin-only.
+ * names only — and the users list itself stays admin-only. Restructuring a
+ * loan picks an officer too, so `loans:restructure` opens the list as well.
  */
 class StaffListTest extends TestCase
 {
@@ -44,13 +47,13 @@ class StaffListTest extends TestCase
     }
 
     /**
-     * A caller holding exactly one permission, which is a role the roles
+     * A caller holding exactly these permissions, which is a role the roles
      * screen can build and the seeder does not ship.
      */
-    private function userWithOnlyPermission(string $permission): User
+    private function userWithOnlyPermissions(string ...$permissions): User
     {
-        $role = Role::create(['name' => 'spec:'.$permission, 'guard_name' => 'web']);
-        $role->syncPermissions([$permission]);
+        $role = Role::create(['name' => 'spec:'.implode(',', $permissions), 'guard_name' => 'web']);
+        $role->syncPermissions($permissions);
 
         return tap(
             User::factory()->create(['branch_id' => $this->branch->id]),
@@ -123,9 +126,67 @@ class StaffListTest extends TestCase
 
     public function test_a_role_holding_only_loans_create_can_list_staff(): void
     {
-        $this->actingAs($this->userWithOnlyPermission('loans:create'));
+        $this->actingAs($this->userWithOnlyPermissions('loans:create'));
 
         $this->getJson('/api/staff')->assertOk();
+    }
+
+    /**
+     * The restructure form has an officer picker of its own, and
+     * RestructureLoanRequest asks for `loans:restructure` alone — so a role
+     * built to restructure without creating or editing loans would otherwise
+     * open it to a 403.
+     */
+    public function test_a_role_holding_only_loans_restructure_lists_staff_as_id_and_full_name_only(): void
+    {
+        $restructurer = $this->userWithOnlyPermissions('loans:restructure');
+
+        $this->assertFalse($restructurer->canAny(['loans:create', 'loans:update']));
+        $this->assertFalse($restructurer->can('users:view'));
+        $this->actingAs($restructurer);
+
+        $rows = $this->getJson('/api/staff?per_page=100')->assertOk()->json('data');
+        $this->assertNotEmpty($rows);
+
+        foreach ($rows as $row) {
+            $this->assertSame(['id', 'full_name'], array_keys($row), 'A staff row must carry exactly id and full_name.');
+        }
+
+        $this->assertContains($restructurer->id, array_column($rows, 'id'));
+    }
+
+    /**
+     * The whole restructure picker, acted out by a role that can see and
+     * restructure loans but neither create nor edit them: the officer it
+     * picks from the staff list is the one the new loan carries.
+     */
+    public function test_a_restructure_only_role_picks_the_new_loans_account_officer_from_the_staff_list(): void
+    {
+        $source = $this->createReleasedLoan();
+        $colleague = $this->userWithRole('cashier', ['first_name' => 'Maricel', 'last_name' => 'Macaraeg']);
+        $restructurer = $this->userWithOnlyPermissions('loans:view', 'loans:restructure');
+
+        $this->assertFalse($restructurer->canAny(['loans:create', 'loans:update']));
+        $this->actingAs($restructurer);
+
+        $rows = $this->getJson('/api/staff?search=Macaraeg')->assertOk()->json('data');
+        $this->assertSame([['id' => $colleague->id, 'full_name' => 'Maricel Macaraeg']], $rows);
+
+        $pickedId = $rows[0]['id'];
+
+        // The source loan's whole balance (₱60,000 principal + ₱10,800
+        // interest), so no shortfall asks for `loans:write_off` as well.
+        $response = $this->postJson("/api/loans/{$source->id}/restructure", [
+            'borrower_id' => $source->borrower_id,
+            'loan_product_id' => $source->loan_product_id,
+            'principal_amount' => 70800.00,
+            'start_date' => now()->toDateString(),
+            'account_officer_id' => $pickedId,
+        ])->assertCreated()
+            ->assertJsonPath('data.source_loan_id', $source->id)
+            ->assertJsonPath('data.account_officer_id', $pickedId);
+
+        $this->assertSame($colleague->id, Loan::findOrFail($response->json('data.id'))->account_officer_id);
     }
 
     /**
@@ -148,12 +209,61 @@ class StaffListTest extends TestCase
      * has no existence to mask.
      */
     #[DataProvider('rolesWithoutLoanWrite')]
-    public function test_a_role_without_loans_create_or_update_is_refused(string $role): void
+    public function test_a_seeded_role_without_loans_create_update_or_restructure_is_refused(string $role): void
     {
         $caller = $this->userWithRole($role);
 
-        $this->assertFalse($caller->canAny(['loans:create', 'loans:update']), "The seeded [{$role}] now holds a loan write permission.");
+        $this->assertFalse($caller->canAny(['loans:create', 'loans:update', 'loans:restructure']), "The seeded [{$role}] now holds a permission that opens the staff list.");
         $this->actingAs($caller);
+
+        $this->getJson('/api/staff')
+            ->assertForbidden()
+            ->assertJsonMissingPath('data');
+    }
+
+    /**
+     * Roles the roles screen can build, where the seeded ones above all hold
+     * `loans:view`.
+     *
+     * @return array<string, array{list<string>}>
+     */
+    public static function permissionSetsWithoutLoanWrite(): array
+    {
+        return [
+            'only loans:view' => [['loans:view']],
+            'no loans:* permission at all' => [['dashboard:view', 'borrowers:view', 'payments:view']],
+        ];
+    }
+
+    /**
+     * @param  list<string>  $permissions
+     */
+    #[DataProvider('permissionSetsWithoutLoanWrite')]
+    public function test_a_custom_role_without_loans_create_update_or_restructure_is_refused(array $permissions): void
+    {
+        $this->actingAs($this->userWithOnlyPermissions(...$permissions));
+
+        $this->getJson('/api/staff')
+            ->assertForbidden()
+            ->assertJsonMissingPath('data');
+    }
+
+    /**
+     * The gate is those three and no wider. Read from the permissions table
+     * rather than listed, so a `loans:*` permission added later is covered
+     * without anyone remembering this test.
+     */
+    public function test_every_other_loans_permission_together_is_refused(): void
+    {
+        $others = Permission::where('guard_name', 'web')
+            ->where('name', 'like', 'loans:%')
+            ->whereNotIn('name', ['loans:create', 'loans:update', 'loans:restructure'])
+            ->pluck('name')
+            ->all();
+
+        $this->assertContains('loans:extend', $others);
+        $this->assertContains('loans:write_off', $others);
+        $this->actingAs($this->userWithOnlyPermissions(...$others));
 
         $this->getJson('/api/staff')
             ->assertForbidden()

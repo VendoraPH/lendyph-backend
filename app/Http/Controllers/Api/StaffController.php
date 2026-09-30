@@ -16,9 +16,10 @@ use OpenApi\Attributes as OA;
  *
  * Those pickers used to read `GET /api/users`, which only admin and
  * super_admin may call, so every loan officer saw an empty list. This is the
- * narrow alternative: names and ids of active staff, for anyone who can create
- * or edit a loan. It is NOT a second way into user management — see
- * ListStaffRequest for the gate and StaffResource for why the row is two keys.
+ * narrow alternative: names and ids of active staff, for anyone who can create,
+ * edit or restructure a loan. It is NOT a second way into user management —
+ * see ListStaffRequest for the gate and StaffResource for why the row is two
+ * keys.
  */
 class StaffController extends Controller
 {
@@ -26,8 +27,9 @@ class StaffController extends Controller
         path: '/api/staff',
         summary: 'List active staff for account-officer pickers',
         description: 'Active users only, as `{id, full_name}` — the same `full_name` a loan returns for '
-            .'`account_officer`. Allowed for any caller holding `loans:create` or `loans:update`; this is '
-            .'not user management and does not require `users:view`. `search` matches first name, last '
+            .'`account_officer`. Allowed for any caller holding `loans:create`, `loans:update` or '
+            .'`loans:restructure` (the new-loan, loan-detail and restructure pickers); this is not user '
+            .'management and does not require `users:view`. `search` matches first name, last '
             .'name or "first last", never username or email. Ordered by first name, last name, then id. '
             .'`per_page` is clamped to 1..100.',
         tags: ['Staff'],
@@ -61,7 +63,7 @@ class StaffController extends Controller
                 ]),
             ),
             new OA\Response(response: 401, description: 'Unauthenticated'),
-            new OA\Response(response: 403, description: 'Holds neither loans:create nor loans:update'),
+            new OA\Response(response: 403, description: 'Holds none of loans:create, loans:update or loans:restructure'),
             new OA\Response(response: 422, description: 'Validation error'),
         ],
     )]
