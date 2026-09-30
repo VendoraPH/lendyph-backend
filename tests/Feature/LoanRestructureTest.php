@@ -415,6 +415,32 @@ class LoanRestructureTest extends TestCase
             ->assertJsonCount(0, 'data.amortization_schedules');
     }
 
+    public function test_a_closed_source_with_no_periods_left_answers_an_empty_schedule(): void
+    {
+        $source = $this->createReleasedLoan(['start_date' => now()->subMonths(8)->toDateString()]);
+        $this->pushToReleased($this->restructure($source));
+
+        $this->assertSame(0, AmortizationSchedule::where('loan_id', $source->id)->count());
+
+        // Released, then closed with nothing paid: an empty schedule is the
+        // answer. It used to be a 422 ("may not have been released yet"),
+        // which every restructured loan page logged as a failed request.
+        $this->getJson("/api/loans/{$source->id}/amortization-schedule")
+            ->assertOk()
+            ->assertJsonCount(0, 'data')
+            ->assertJsonPath('summary.periods_total', 0);
+    }
+
+    public function test_a_loan_that_was_never_released_still_has_no_schedule(): void
+    {
+        $source = $this->createReleasedLoan();
+        $draft = $this->restructure($source);
+
+        $this->getJson("/api/loans/{$draft->id}/amortization-schedule")
+            ->assertUnprocessable()
+            ->assertJsonPath('message', 'No amortization schedule found. Loan may not have been released yet.');
+    }
+
     public function test_a_partially_paid_period_survives_closure_with_payments_reconciling(): void
     {
         $source = $this->createReleasedLoan();
