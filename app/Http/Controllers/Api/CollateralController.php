@@ -4,12 +4,15 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Collateral\AttachCollateralRequest;
+use App\Http\Requests\Collateral\CollateralRegisterRequest;
 use App\Http\Requests\Collateral\StoreCollateralRequest;
 use App\Http\Requests\Collateral\UpdateCollateralRequest;
+use App\Http\Resources\CollateralRegisterGroupResource;
 use App\Http\Resources\CollateralResource;
 use App\Models\Collateral;
 use App\Models\Loan;
 use App\Services\CollateralPledgeGuard;
+use App\Services\CollateralRegister;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Support\Facades\DB;
@@ -81,6 +84,88 @@ class CollateralController extends Controller
             ->get();
 
         return CollateralResource::valuedCollection($collaterals, request()->user());
+    }
+
+    #[OA\Get(
+        path: '/api/collaterals/register',
+        summary: 'Collateral register, grouped by member and paged',
+        description: 'The collateral book grouped by member, one page of GROUPS at a time. `search` and `collateral_type_id` filter collateral rows first; each group and its figures then cover only its filtered rows. '
+            .'`search` is a case-insensitive substring match over the member\'s name as displayed, the detail and the type name. '
+            .'Values are those of `effective_value`: a caller without `share_capital:view` sees share capital rows as `value_unknown`, which are counted in `unknown_count` and left out of every `total_value`. '
+            .'A caller without `borrowers:view` sees every member as "Member #{id}", and search and the `member` sort then work on that label, never the real name. '
+            .'Groups are ordered by `sort`/`direction`, then by member name ascending, then by member id ascending. `per_page` is clamped to 1..100.',
+        tags: ['Collaterals'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'search', in: 'query', required: false, description: 'Max 100 characters.', schema: new OA\Schema(type: 'string', maxLength: 100)),
+            new OA\Parameter(name: 'collateral_type_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer', minimum: 1)),
+            new OA\Parameter(name: 'sort', in: 'query', required: false, schema: new OA\Schema(type: 'string', default: 'member', enum: CollateralRegister::SORTS)),
+            new OA\Parameter(name: 'direction', in: 'query', required: false, schema: new OA\Schema(type: 'string', default: 'asc', enum: ['asc', 'desc'])),
+            new OA\Parameter(name: 'page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 1, minimum: 1)),
+            new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15, minimum: 1, maximum: 100)),
+        ],
+        responses: [
+            new OA\Response(
+                response: 200,
+                description: 'One page of member groups',
+                content: new OA\JsonContent(properties: [
+                    new OA\Property(property: 'data', type: 'array', items: new OA\Items(ref: '#/components/schemas/CollateralRegisterGroup')),
+                    new OA\Property(property: 'links', type: 'object', properties: [
+                        new OA\Property(property: 'first', type: 'string', nullable: true),
+                        new OA\Property(property: 'last', type: 'string', nullable: true),
+                        new OA\Property(property: 'prev', type: 'string', nullable: true),
+                        new OA\Property(property: 'next', type: 'string', nullable: true),
+                    ]),
+                    new OA\Property(property: 'meta', type: 'object', properties: [
+                        new OA\Property(property: 'current_page', type: 'integer'),
+                        new OA\Property(property: 'from', type: 'integer', nullable: true),
+                        new OA\Property(property: 'last_page', type: 'integer'),
+                        new OA\Property(property: 'path', type: 'string'),
+                        new OA\Property(property: 'per_page', type: 'integer'),
+                        new OA\Property(property: 'to', type: 'integer', nullable: true),
+                        new OA\Property(property: 'total', type: 'integer', description: 'Member groups after filtering.'),
+                        new OA\Property(property: 'names_hidden', type: 'boolean', description: 'True when the caller lacks `borrowers:view`, so every `borrower_name` is "Member #{id}".'),
+                        new OA\Property(property: 'totals', type: 'object', properties: [
+                            new OA\Property(property: 'total_collaterals', type: 'integer', description: 'The whole book; ignores search and type.'),
+                            new OA\Property(property: 'tagged_to_active_loans', type: 'integer', description: 'The whole book; ignores search and type.'),
+                            new OA\Property(property: 'total_value', type: 'number', description: 'Known values of the filtered rows.'),
+                            new OA\Property(property: 'unknown_count', type: 'integer', description: 'Filtered rows whose value is unknown.'),
+                            new OA\Property(property: 'members', type: 'integer', description: 'Member groups after filtering; equals `meta.total`.'),
+                        ]),
+                    ]),
+                ]),
+            ),
+            new OA\Response(response: 401, description: 'Unauthenticated'),
+            new OA\Response(response: 403, description: 'Forbidden'),
+            new OA\Response(response: 422, description: 'Validation error'),
+        ],
+    )]
+    public function register(CollateralRegisterRequest $request): AnonymousResourceCollection
+    {
+        $viewer = $request->user();
+        $register = new CollateralRegister($viewer, $request->search(), $request->collateralTypeId());
+
+        $groups = $register->groups($request->sort(), $request->direction(), $request->perPage());
+
+        // Valued in one pass for the whole page and then dealt out to their
+        // members, so the page's share capital balances cost one query however
+        // many members it holds. Valuing group by group would be one per member.
+        $rows = CollateralResource::valuedCollection(
+            $register->rowsOf($groups->getCollection()->map(fn (object $group): int => (int) $group->borrower_id)->all()),
+            $viewer,
+        )->collection->groupBy(fn (CollateralResource $row): int => (int) $row->resource->borrower_id);
+
+        $groups->through(function (object $group) use ($rows): object {
+            $group->collaterals = CollateralResource::collection($rows->get((int) $group->borrower_id, collect())->values());
+
+            return $group;
+        });
+
+        return CollateralRegisterGroupResource::collection($groups)
+            ->additional(['meta' => [
+                'names_hidden' => $register->namesHidden(),
+                'totals' => $register->totals(),
+            ]]);
     }
 
     #[OA\Post(
