@@ -5,11 +5,12 @@ namespace App\Http\Requests\Loan;
 use App\Enums\LoanFrequency;
 use App\Http\Requests\Concerns\ExcludesRejectedBorrowers;
 use App\Http\Requests\Concerns\RequiresActiveAccountOfficer;
+use App\Http\Requests\Concerns\ValidatesDeductionAmounts;
 use Illuminate\Foundation\Http\FormRequest;
 
 class StoreLoanRequest extends FormRequest
 {
-    use ExcludesRejectedBorrowers, RequiresActiveAccountOfficer;
+    use ExcludesRejectedBorrowers, RequiresActiveAccountOfficer, ValidatesDeductionAmounts;
 
     public function authorize(): bool
     {
@@ -31,7 +32,7 @@ class StoreLoanRequest extends FormRequest
             'loan_product_id' => ['required', 'exists:loan_products,id'],
             'principal_amount' => ['required', 'numeric', 'min:1'],
             'purpose' => ['nullable', 'string', 'max:500'],
-            'interest_rate' => ['nullable', 'numeric', 'min:0', 'max:100'],
+            'interest_rate' => ['nullable', 'numeric', 'min:0', 'max:100', 'decimal:0,4'],
             'term' => ['nullable', 'integer', 'min:1'],
             'frequency' => ['nullable', LoanFrequency::rule()],
             'start_date' => ['required', 'date'],
@@ -41,7 +42,7 @@ class StoreLoanRequest extends FormRequest
             'policy_exception_details' => ['nullable', 'string', 'max:2000'],
             'deductions' => ['nullable', 'array'],
             'deductions.*.name' => ['required_with:deductions', 'string', 'max:255'],
-            'deductions.*.amount' => ['required_with:deductions', 'numeric', 'min:0'],
+            'deductions.*.amount' => $this->deductionAmountRule(),
             'deductions.*.type' => ['required_with:deductions', 'in:fixed,percentage'],
         ];
     }

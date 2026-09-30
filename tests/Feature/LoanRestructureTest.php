@@ -221,6 +221,33 @@ class LoanRestructureTest extends TestCase
         $this->assertEqualsWithDelta(68884.00, (float) $newLoan->net_proceeds, 0.01);
     }
 
+    public function test_waiving_every_fee_on_a_restructure_charges_no_deductions(): void
+    {
+        // The restructure form sends `[]` when the operator waives every fee,
+        // and its preview shows ₱0. The product's 2% + 1% must not come back.
+        $source = $this->createReleasedLoan();
+
+        $newLoan = $this->restructure($source, ['deductions' => []]);
+
+        $this->assertSame([], $newLoan->deductions);
+        $this->assertEqualsWithDelta(0.00, (float) $newLoan->total_deductions, 0.01);
+        $this->assertEqualsWithDelta(self::SOURCE_OUTSTANDING, (float) $newLoan->net_proceeds, 0.01);
+    }
+
+    public function test_a_restructure_that_omits_deductions_still_charges_the_product_fees(): void
+    {
+        $source = $this->createReleasedLoan();
+
+        $newLoan = $this->restructure($source);
+
+        // The factory product's 2% processing + 1% service on 70,800.
+        $this->assertSame(['Processing Fee', 'Service Fee'], array_column($newLoan->deductions, 'name'));
+        $this->assertEqualsWithDelta(1416.00, (float) $newLoan->deductions[0]['amount'], 0.01);
+        $this->assertEqualsWithDelta(708.00, (float) $newLoan->deductions[1]['amount'], 0.01);
+        $this->assertEqualsWithDelta(2124.00, (float) $newLoan->total_deductions, 0.01);
+        $this->assertEqualsWithDelta(68676.00, (float) $newLoan->net_proceeds, 0.01);
+    }
+
     public function test_it_inherits_the_source_co_makers_when_none_are_sent(): void
     {
         $source = $this->createReleasedLoan();

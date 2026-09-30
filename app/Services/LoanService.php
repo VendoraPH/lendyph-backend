@@ -51,14 +51,7 @@ class LoanService
             ]);
         }
 
-        // Validate interest rate against product range
-        $minRate = (float) ($product->min_interest_rate ?? $product->interest_rate);
-        $maxRate = (float) $product->interest_rate;
-        if ($interestRate < $minRate || $interestRate > $maxRate) {
-            throw ValidationException::withMessages([
-                'interest_rate' => ["Interest rate must be between {$minRate}% and {$maxRate}% for this product."],
-            ]);
-        }
+        $this->assertInterestRateWithinProductRange($interestRate, $product);
 
         // Validate term against product range
         $minTerm = (int) ($product->min_term ?? 1);
@@ -69,9 +62,12 @@ class LoanService
             ]);
         }
 
-        // Auto-compute deductions from product fees when not sent by frontend
-        $deductions = $validated['deductions'] ?? [];
-        if (empty($deductions)) {
+        // The product's own fees apply only when no deductions were sent at all
+        // (key absent or null). A sent `[]` is a deliberate "none": the
+        // restructure form sends it when the operator waives every fee.
+        $deductions = $validated['deductions'] ?? null;
+        if ($deductions === null) {
+            $deductions = [];
             if ((float) $product->processing_fee > 0) {
                 $deductions[] = ['name' => 'Processing Fee', 'amount' => (float) $product->processing_fee, 'type' => 'percentage'];
             }
@@ -122,6 +118,24 @@ class LoanService
         }
 
         return $loan;
+    }
+
+    /**
+     * A loan's rate must sit inside its product's range: `min_interest_rate`
+     * (or the product rate when no minimum is set) up to `interest_rate`.
+     *
+     * Shared by createLoan() and updateLoan(), so an edit cannot move a rate
+     * somewhere creating the loan would have refused.
+     */
+    private function assertInterestRateWithinProductRange(float $interestRate, LoanProduct $product): void
+    {
+        $minRate = (float) ($product->min_interest_rate ?? $product->interest_rate);
+        $maxRate = (float) $product->interest_rate;
+        if ($interestRate < $minRate || $interestRate > $maxRate) {
+            throw ValidationException::withMessages([
+                'interest_rate' => ["Interest rate must be between {$minRate}% and {$maxRate}% for this product."],
+            ]);
+        }
     }
 
     /**
@@ -502,6 +516,22 @@ class LoanService
             throw ValidationException::withMessages([
                 'status' => ['Loan can only be edited in draft or for_review status.'],
             ]);
+        }
+
+        // Only when the edit moves the rate or the product: a draft whose rate
+        // is left alone stays editable even if its product's range has since
+        // narrowed. Checked before guardRestructurePrincipalEdit(), which
+        // writes an audit row, so a refused rate leaves nothing behind.
+        $rateChanges = isset($validated['interest_rate'])
+            && (float) $validated['interest_rate'] !== (float) $loan->interest_rate;
+        $productChanges = isset($validated['loan_product_id'])
+            && (int) $validated['loan_product_id'] !== (int) $loan->loan_product_id;
+
+        if ($rateChanges || $productChanges) {
+            $this->assertInterestRateWithinProductRange(
+                (float) ($validated['interest_rate'] ?? $loan->interest_rate),
+                $productChanges ? LoanProduct::findOrFail($validated['loan_product_id']) : $loan->loanProduct,
+            );
         }
 
         $validated = $this->guardRestructurePrincipalEdit($loan, $validated, $user);

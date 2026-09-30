@@ -3,12 +3,13 @@
 namespace App\Http\Requests\Fee;
 
 use App\Http\Requests\Fee\Concerns\GuardsAgainstProductFeeOverlap;
+use App\Http\Requests\Fee\Concerns\LimitsFeeValuePlaces;
 use Illuminate\Contracts\Validation\Validator;
 use Illuminate\Foundation\Http\FormRequest;
 
 class StoreFeeRequest extends FormRequest
 {
-    use GuardsAgainstProductFeeOverlap;
+    use GuardsAgainstProductFeeOverlap, LimitsFeeValuePlaces;
 
     public function authorize(): bool
     {
@@ -20,7 +21,7 @@ class StoreFeeRequest extends FormRequest
         return [
             'name' => ['required', 'string', 'max:255', 'unique:fees,name'],
             'type' => ['required', 'in:fixed,percentage'],
-            'value' => ['required', 'numeric', 'min:0'],
+            'value' => ['required', 'numeric', 'min:0', $this->feeValuePlacesRule($this->input('type'))],
             'applicable_product_ids' => ['nullable', 'array'],
             'applicable_product_ids.*' => ['integer', 'exists:loan_products,id'],
             'conditions' => ['nullable', 'array'],
