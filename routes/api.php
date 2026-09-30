@@ -326,6 +326,9 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     // Collaterals
     Route::get('/collaterals', [CollateralController::class, 'index']);
     Route::post('/collaterals', [CollateralController::class, 'store']);
+    // Must precede /{collateral}, which is not constrained to digits and would
+    // otherwise capture "register" as an id and answer 404.
+    Route::get('/collaterals/register', [CollateralController::class, 'register']);
     Route::get('/collaterals/{collateral}', [CollateralController::class, 'show']);
     Route::put('/collaterals/{collateral}', [CollateralController::class, 'update']);
     Route::delete('/collaterals/{collateral}', [CollateralController::class, 'destroy']);

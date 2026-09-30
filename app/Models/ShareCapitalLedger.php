@@ -6,6 +6,7 @@ use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Query\Builder as QueryBuilder;
 
 class ShareCapitalLedger extends Model
 {
@@ -73,11 +74,8 @@ class ShareCapitalLedger extends Model
 
         $balances = array_fill_keys($borrowerIds, 0.0);
 
-        $sums = static::query()
+        $sums = static::balancesQuery()
             ->whereIn('borrower_id', $borrowerIds)
-            ->groupBy('borrower_id')
-            ->selectRaw('borrower_id, COALESCE(SUM(credit) - SUM(debit), 0) as balance')
-            ->toBase()
             ->pluck('balance', 'borrower_id');
 
         foreach ($sums as $borrowerId => $balance) {
@@ -85,6 +83,24 @@ class ShareCapitalLedger extends Model
         }
 
         return $balances;
+    }
+
+    /**
+     * The balance definition balancesFor() reads, as a query: one row per
+     * member with ledger entries, `borrower_id` and `balance`.
+     *
+     * Exposed so a query that has to sort or total by the balance, like the
+     * Collateral Register, can join it as a derived table instead of writing
+     * a second definition of "balance" that could drift from this one. Narrow
+     * it with a `where` on `borrower_id`; a member with no rows is absent, and
+     * their balance is 0.
+     */
+    public static function balancesQuery(): QueryBuilder
+    {
+        return static::query()
+            ->toBase()
+            ->groupBy('borrower_id')
+            ->selectRaw('borrower_id, COALESCE(SUM(credit) - SUM(debit), 0) as balance');
     }
 
     public function borrower(): BelongsTo
