@@ -139,6 +139,129 @@ class PenaltyWaiverTest extends TestCase
         $this->assertSame(320.0, (float) $log->new_values['total_waived']);
     }
 
+    public function test_a_waiver_holds_through_the_nightly_penalty_run(): void
+    {
+        $this->artisan('loans:apply-penalties')->assertSuccessful();
+        $this->waiveAll();
+        $this->assertPenalty(1, charged: 0, paid: 0);
+
+        $this->travelTo(Carbon::parse('2026-03-02 06:05'));
+        $this->artisan('loans:apply-penalties')->assertSuccessful();
+        $this->assertPenalty(1, charged: 0, paid: 0);
+
+        // Period 2 falls late later and is charged as usual; period 1 stays waived.
+        $this->travelTo(Carbon::parse('2026-03-20 06:05'));
+        $this->artisan('loans:apply-penalties')->assertSuccessful();
+        $this->assertPenalty(1, charged: 0, paid: 0);
+        $this->assertPenalty(2, charged: 200, paid: 0);
+        $this->assertMoney(23800, $this->summary()['overdue_amount']);
+    }
+
+    public function test_a_waiver_holds_through_the_next_payment(): void
+    {
+        $this->artisan('loans:apply-penalties')->assertSuccessful();
+        $this->waiveAll();
+
+        $this->travelTo(Carbon::parse('2026-03-10 09:00'));
+        $payment = $this->pay(5000);
+
+        // Nothing is charged back, so the ₱5,000 goes to interest, then principal.
+        $this->assertMoney(0, $payment->penalty_applied);
+        $this->assertMoney(1800, $payment->interest_applied);
+        $this->assertMoney(3200, $payment->principal_applied);
+        $this->assertPenalty(1, charged: 0, paid: 0);
+
+        $this->travelTo(Carbon::parse('2026-03-11 06:05'));
+        $this->artisan('loans:apply-penalties')->assertSuccessful();
+        $this->assertPenalty(1, charged: 0, paid: 0);
+        $this->assertPaymentsReconcile();
+    }
+
+    public function test_a_waiver_keeps_a_partly_paid_penalty_at_what_was_paid(): void
+    {
+        $this->pay(80);
+        $this->waiveAll();
+
+        $this->travelTo(Carbon::parse('2026-03-02 06:05'));
+        $this->artisan('loans:apply-penalties')->assertSuccessful();
+        $this->travelTo(Carbon::parse('2026-03-05 09:00'));
+        $payment = $this->pay(1000);
+
+        $this->assertMoney(0, $payment->penalty_applied);
+        $this->assertPenalty(1, charged: 80, paid: 80);
+        $this->assertPaymentsReconcile();
+    }
+
+    public function test_the_waiver_links_each_period_it_forgave(): void
+    {
+        $this->artisan('loans:apply-penalties')->assertSuccessful();
+
+        $adjustment = $this->waiveAll();
+
+        // Period 2 is not late yet, so there was nothing on it to forgive.
+        $this->assertSame($adjustment->id, AmortizationSchedule::find($this->scheduleId(1))->penalty_waiver_id);
+        $this->assertNull(AmortizationSchedule::find($this->scheduleId(2))->penalty_waiver_id);
+    }
+
+    public function test_voiding_the_payment_a_waiver_kept_makes_that_penalty_owed_again(): void
+    {
+        $payment = $this->pay(80);
+        $this->waiveAll();
+
+        $this->patchJson("/api/repayments/{$payment->id}/void", ['void_reason' => 'Keyed twice'])->assertOk();
+        $this->assertPenalty(1, charged: 80, paid: 0);
+
+        // Owed again, but never charged afresh: the ₱120 waived stays waived.
+        $this->travelTo(Carbon::parse('2026-03-02 06:05'));
+        $this->artisan('loans:apply-penalties')->assertSuccessful();
+        $this->assertPenalty(1, charged: 80, paid: 0);
+        $this->assertMoney(80, $this->summary()['outstanding_penalty']);
+        $this->assertPaymentsReconcile();
+    }
+
+    public function test_a_request_for_selected_periods_records_only_those(): void
+    {
+        $this->travelTo(Carbon::parse('2026-04-01 09:00'));
+        $this->artisan('loans:apply-penalties')->assertSuccessful();
+
+        $oldValues = $this->postJson("/api/loans/{$this->loan->id}/adjustments", [
+            'adjustment_type' => 'penalty_waiver',
+            'new_values' => ['schedule_ids' => [$this->scheduleId(2)]],
+        ])->assertCreated()->json('data.old_values');
+
+        $this->assertEquals(['penalties' => [[
+            'schedule_id' => $this->scheduleId(2),
+            'period_number' => 2,
+            'penalty_amount' => 200.0,
+            'penalty_paid' => 0.0,
+            'penalty_owed' => 200.0,
+        ]]], $oldValues);
+    }
+
+    public function test_the_request_records_only_the_penalty_still_owed(): void
+    {
+        // On 2026-04-01 periods 1 and 2 are late, ₱200 penalty each. ₱12,000
+        // settles period 1 outright; ₱80 then goes to period 2's penalty.
+        $this->travelTo(Carbon::parse('2026-04-01 09:00'));
+        $this->pay(12000);
+        $this->pay(80);
+        $this->assertPenalty(1, charged: 200, paid: 200);
+        $this->assertPenalty(2, charged: 200, paid: 80);
+
+        $oldValues = $this->postJson("/api/loans/{$this->loan->id}/adjustments", [
+            'adjustment_type' => 'penalty_waiver',
+            'new_values' => ['waive_all' => true],
+        ])->assertCreated()->json('data.old_values');
+
+        $this->assertEquals(['penalties' => [[
+            'schedule_id' => $this->scheduleId(2),
+            'period_number' => 2,
+            'penalty_amount' => 200.0,
+            'penalty_paid' => 80.0,
+            'penalty_owed' => 120.0,
+        ]]], $oldValues);
+    }
+
     private function pay(float $amount): Repayment
     {
         $id = $this->postJson("/api/loans/{$this->loan->id}/repayments", [
