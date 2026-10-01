@@ -10,6 +10,7 @@ use App\Http\Resources\ShareCapitalLedgerResource;
 use App\Http\Resources\ShareCapitalPledgeResource;
 use App\Models\Borrower;
 use App\Models\ShareCapitalPledge;
+use App\Services\LikePattern;
 use App\Services\ShareCapitalService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
@@ -116,7 +117,11 @@ DESC,
             ->withMax('borrowerLedgerEntries as last_transaction_date', 'date')
             ->when(filled($schedule), fn ($q) => $q->where('schedule', $schedule))
             ->when(request()->has('auto_credit'), fn ($q) => $q->where('auto_credit', filter_var(request('auto_credit'), FILTER_VALIDATE_BOOLEAN)))
-            ->when(filled($search), fn ($q) => $q->whereHas('borrower', fn ($bq) => $bq->where('first_name', 'like', "%{$search}%")->orWhere('last_name', 'like', "%{$search}%")))
+            ->when(filled($search), function ($q) use ($search) {
+                $like = LikePattern::contains($search);
+
+                $q->whereHas('borrower', fn ($bq) => $bq->where('first_name', 'like', $like)->orWhere('last_name', 'like', $like));
+            })
             ->orderBy('id')
             ->paginate(min(max((int) ($filters['per_page'] ?? 15), 1), 100));
 
