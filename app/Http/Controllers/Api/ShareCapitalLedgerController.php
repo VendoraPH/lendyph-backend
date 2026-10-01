@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\ShareCapital\StoreShareCapitalLedgerRequest;
 use App\Http\Resources\ShareCapitalLedgerResource;
 use App\Models\ShareCapitalLedger;
+use App\Services\LikePattern;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use OpenApi\Attributes as OA;
@@ -64,11 +65,13 @@ class ShareCapitalLedgerController extends Controller
             ->when(filled($dateFrom), fn ($q) => $q->whereDate('date', '>=', $dateFrom))
             ->when(filled($dateTo), fn ($q) => $q->whereDate('date', '<=', $dateTo))
             ->when(filled($search), function ($q) use ($search) {
-                $q->where(function ($q) use ($search) {
-                    $q->where('reference', 'like', "%{$search}%")
-                        ->orWhere('description', 'like', "%{$search}%")
-                        ->orWhereHas('borrower', fn ($bq) => $bq->where('first_name', 'like', "%{$search}%")
-                            ->orWhere('last_name', 'like', "%{$search}%"));
+                $like = LikePattern::contains($search);
+
+                $q->where(function ($q) use ($like) {
+                    $q->where('reference', 'like', $like)
+                        ->orWhere('description', 'like', $like)
+                        ->orWhereHas('borrower', fn ($bq) => $bq->where('first_name', 'like', $like)
+                            ->orWhere('last_name', 'like', $like));
                 });
             })
             ->orderByDesc('date')

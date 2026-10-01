@@ -8,6 +8,7 @@ use App\Http\Requests\Repayment\VoidRepaymentRequest;
 use App\Http\Resources\RepaymentResource;
 use App\Models\Loan;
 use App\Models\Repayment;
+use App\Services\LikePattern;
 use App\Services\RepaymentService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
@@ -105,14 +106,16 @@ class RepaymentController extends Controller
 
         $query = Repayment::with('loan.borrower', 'loan.loanProduct', 'loan.amortizationSchedules', 'receivedByUser', 'voidedByUser', 'shareCapitalLedgerEntries')
             ->when(filled($search), function ($q) use ($search) {
-                $q->where(function ($q) use ($search) {
-                    $q->where('receipt_number', 'like', "%{$search}%")
-                        ->orWhereHas('loan', function ($lq) use ($search) {
-                            $lq->where('loan_account_number', 'like', "%{$search}%")
+                $like = LikePattern::contains($search);
+
+                $q->where(function ($q) use ($like) {
+                    $q->where('receipt_number', 'like', $like)
+                        ->orWhereHas('loan', function ($lq) use ($like) {
+                            $lq->where('loan_account_number', 'like', $like)
                                 ->orWhereHas('borrower', fn ($bq) => $bq->where(
                                     DB::raw("CONCAT(first_name, ' ', last_name)"),
                                     'like',
-                                    "%{$search}%"
+                                    $like
                                 ));
                         });
                 });

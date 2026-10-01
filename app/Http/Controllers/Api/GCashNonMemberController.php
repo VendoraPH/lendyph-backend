@@ -9,6 +9,7 @@ use App\Http\Resources\GCashNonMemberResource;
 use App\Models\GCashNonMember;
 use App\Rules\UniqueWalkInIdNumber;
 use App\Services\AuditLogService;
+use App\Services\LikePattern;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
@@ -44,23 +45,26 @@ class GCashNonMemberController extends Controller
             'search' => ['nullable', 'string'],
         ]);
         $perPage = (int) ($validated['per_page'] ?? 25);
+        // Gated on filled(), not truthiness: `when()` skips a falsy value, so
+        // `?search=0` was dropped and listed every walk-in.
+        $search = $validated['search'] ?? null;
 
         $nonMembers = GCashNonMember::query()
             ->withCount('transactions')
-            ->when($validated['search'] ?? null, function ($q, $term) {
-                $like = self::containsPattern($term);
+            ->when(filled($search), function ($q) use ($search) {
+                $like = LikePattern::contains($search);
                 // ID numbers also match normalised, the way the duplicate rule
                 // compares them, so `12345678` finds `1234-5678` and the reverse.
                 // Skipped when nothing is left (a search of `---`), which would
                 // otherwise match every walk-in.
-                $normalised = UniqueWalkInIdNumber::normalise($term);
+                $normalised = UniqueWalkInIdNumber::normalise($search);
                 $q->where(fn ($w) => $w
                     ->where('full_name', 'like', $like)
                     ->orWhere('mobile_number', 'like', $like)
                     ->orWhere('id_number', 'like', $like)
                     ->when($normalised !== '', fn ($w) => $w->orWhereRaw(
                         UniqueWalkInIdNumber::NORMALISED_COLUMN.' LIKE ?',
-                        [self::containsPattern($normalised)],
+                        [LikePattern::contains($normalised)],
                     )));
             })
             ->orderBy('full_name')
@@ -168,14 +172,5 @@ class GCashNonMemberController extends Controller
         );
 
         return response()->json(['message' => 'Walk-in customer removed.']);
-    }
-
-    /**
-     * A LIKE pattern matching `$term` anywhere, with `%`, `_` and `\` matched
-     * literally. Unescaped, a search of `%` or `_` listed every walk-in.
-     */
-    private static function containsPattern(string $term): string
-    {
-        return '%'.addcslashes($term, '%_\\').'%';
     }
 }

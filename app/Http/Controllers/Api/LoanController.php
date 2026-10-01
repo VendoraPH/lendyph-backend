@@ -20,6 +20,7 @@ use App\Http\Resources\LoanLedgerEntryResource;
 use App\Http\Resources\LoanResource;
 use App\Models\Loan;
 use App\Services\AutoPayService;
+use App\Services\LikePattern;
 use App\Services\LoanAdjustmentService;
 use App\Services\LoanReleaseFeeService;
 use App\Services\LoanService;
@@ -237,13 +238,15 @@ DESC,
             // already-loaded value instead of firing a COUNT query per row.
             ->withCount(['adjustments as extension_count' => fn ($q) => $q->where('adjustment_type', 'extension')])
             ->when(filled($search), function ($q) use ($search) {
-                $q->where(function ($query) use ($search) {
-                    $query->where('loans.application_number', 'like', "%{$search}%")
-                        ->orWhere('loans.loan_account_number', 'like', "%{$search}%")
-                        ->orWhereHas('borrower', function ($bq) use ($search) {
-                            $bq->where('first_name', 'like', "%{$search}%")
-                                ->orWhere('last_name', 'like', "%{$search}%")
-                                ->orWhere('borrower_code', 'like', "%{$search}%");
+                $like = LikePattern::contains($search);
+
+                $q->where(function ($query) use ($like) {
+                    $query->where('loans.application_number', 'like', $like)
+                        ->orWhere('loans.loan_account_number', 'like', $like)
+                        ->orWhereHas('borrower', function ($bq) use ($like) {
+                            $bq->where('first_name', 'like', $like)
+                                ->orWhere('last_name', 'like', $like)
+                                ->orWhere('borrower_code', 'like', $like);
                         });
                 });
             })

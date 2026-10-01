@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\Staff\ListStaffRequest;
 use App\Http\Resources\StaffResource;
 use App\Models\User;
+use App\Services\LikePattern;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use OpenApi\Attributes as OA;
@@ -81,7 +82,7 @@ class StaffController extends Controller
             // oracle for it: `?search=gmail` would reveal who has a gmail
             // address to a caller who is not allowed to see addresses.
             ->when(filled($search), function (Builder $query) use ($search) {
-                $like = '%'.$search.'%';
+                $like = LikePattern::contains($search);
 
                 $query->where(fn (Builder $q) => $q
                     ->where('first_name', 'like', $like)

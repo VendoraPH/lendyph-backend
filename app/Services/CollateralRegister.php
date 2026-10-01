@@ -171,7 +171,7 @@ final class CollateralRegister
             ->when(filled($this->collateralTypeId), fn (Builder $query) => $query
                 ->where('collaterals.collateral_type_id', $this->collateralTypeId))
             ->when(filled($this->search), function (Builder $query) {
-                $like = '%'.addcslashes((string) $this->search, '\\%_').'%';
+                $like = LikePattern::contains((string) $this->search);
 
                 $query->where(fn (Builder $matches) => $matches
                     ->whereRaw($this->nameSql().' LIKE ?', [$like])

@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Services\LikePattern;
 use App\Services\SequenceCode;
 use App\Services\SignedFileLink;
 use App\Traits\Auditable;
@@ -223,13 +224,15 @@ class Borrower extends Model
      */
     public function scopeSearch($query, string $term)
     {
-        return $query->where(function ($q) use ($term) {
-            $q->where('borrower_code', 'like', "%{$term}%")
-                ->orWhere('first_name', 'like', "%{$term}%")
-                ->orWhere('middle_name', 'like', "%{$term}%")
-                ->orWhere('last_name', 'like', "%{$term}%")
-                ->orWhere('contact_number', 'like', "%{$term}%")
-                ->orWhere('email', 'like', "%{$term}%");
+        $like = LikePattern::contains($term);
+
+        return $query->where(function ($q) use ($like) {
+            $q->where('borrower_code', 'like', $like)
+                ->orWhere('first_name', 'like', $like)
+                ->orWhere('middle_name', 'like', $like)
+                ->orWhere('last_name', 'like', $like)
+                ->orWhere('contact_number', 'like', $like)
+                ->orWhere('email', 'like', $like);
         });
     }
 }

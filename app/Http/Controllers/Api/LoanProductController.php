@@ -10,6 +10,7 @@ use App\Http\Requests\LoanProduct\StoreLoanProductRequest;
 use App\Http\Requests\LoanProduct\UpdateLoanProductRequest;
 use App\Http\Resources\LoanProductResource;
 use App\Models\LoanProduct;
+use App\Services\LikePattern;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use OpenApi\Attributes as OA;
@@ -54,7 +55,7 @@ class LoanProductController extends Controller
         $status = $filters['status'] ?? null;
 
         $products = LoanProduct::query()
-            ->when(filled($search), fn ($q) => $q->where('name', 'like', "%{$search}%"))
+            ->when(filled($search), fn ($q) => $q->where('name', 'like', LikePattern::contains($search)))
             ->when(filled($status), fn ($q) => $q->where('status', $status))
             ->orderBy('name')
             ->get();

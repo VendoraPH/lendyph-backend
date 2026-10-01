@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\AuditLogResource;
 use App\Models\AuditLog;
+use App\Services\LikePattern;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use OpenApi\Attributes as OA;
@@ -222,20 +223,22 @@ class AuditLogController extends Controller
 
         return AuditLog::with('user', 'auditable')
             ->when(filled($search), function ($q) use ($search) {
-                $q->where(function ($q) use ($search) {
-                    $q->where('action', 'like', "%{$search}%")
-                        ->orWhere('auditable_type', 'like', "%{$search}%")
-                        ->orWhere('description', 'like', "%{$search}%")
-                        ->orWhereHas('user', function ($uq) use ($search) {
-                            $uq->where('first_name', 'like', "%{$search}%")
-                                ->orWhere('last_name', 'like', "%{$search}%")
-                                ->orWhere('username', 'like', "%{$search}%");
+                $like = LikePattern::contains($search);
+
+                $q->where(function ($q) use ($like) {
+                    $q->where('action', 'like', $like)
+                        ->orWhere('auditable_type', 'like', $like)
+                        ->orWhere('description', 'like', $like)
+                        ->orWhereHas('user', function ($uq) use ($like) {
+                            $uq->where('first_name', 'like', $like)
+                                ->orWhere('last_name', 'like', $like)
+                                ->orWhere('username', 'like', $like);
                         });
                 });
             })
             ->when(filled($userId), fn ($q) => $q->where('user_id', $userId))
             ->when(filled($action), fn ($q) => $q->where('action', $action))
-            ->when(filled($auditableType), fn ($q) => $q->where('auditable_type', 'like', "%{$auditableType}%"))
+            ->when(filled($auditableType), fn ($q) => $q->where('auditable_type', 'like', LikePattern::contains($auditableType)))
             ->when(filled($dateFrom), fn ($q) => $q->where('created_at', '>=', $dateFrom))
             ->when(filled($dateTo), fn ($q) => $q->where('created_at', '<=', "{$dateTo} 23:59:59"));
     }
