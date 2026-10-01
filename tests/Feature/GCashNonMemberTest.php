@@ -158,6 +158,81 @@ class GCashNonMemberTest extends TestCase
         ])->assertOk()->assertJsonPath('data.full_name', 'Renamed');
     }
 
+    public function test_store_rejects_an_id_that_differs_only_by_dashes(): void
+    {
+        GCashNonMember::factory()->create(['id_type' => 'UMID', 'id_number' => '12345678']);
+
+        $this->postJson('/api/gcash/non-members', [
+            'full_name' => 'Carla Dizon',
+            'mobile_number' => '09171112222',
+            'id_type' => 'UMID',
+            'id_number' => '1234-5678',
+        ])->assertStatus(422)->assertJsonValidationErrors(['id_number']);
+
+        $this->assertDatabaseCount('gcash_non_members', 1);
+    }
+
+    public function test_store_rejects_an_id_that_differs_only_by_spaces_dashes_and_case(): void
+    {
+        GCashNonMember::factory()->create(['id_type' => 'Passport', 'id_number' => 'AB1234']);
+
+        $this->postJson('/api/gcash/non-members', [
+            'full_name' => 'Carla Dizon',
+            'mobile_number' => '09171112222',
+            'id_type' => 'Passport',
+            'id_number' => 'ab 12-34',
+        ])->assertStatus(422)->assertJsonValidationErrors(['id_number']);
+    }
+
+    public function test_store_allows_a_reformatted_number_under_a_different_id_type(): void
+    {
+        GCashNonMember::factory()->create(['id_type' => 'UMID', 'id_number' => '12345678']);
+
+        $this->postJson('/api/gcash/non-members', [
+            'full_name' => 'Carla Dizon',
+            'mobile_number' => '09171112222',
+            'id_type' => 'Passport',
+            'id_number' => '1234-5678',
+        ])->assertCreated();
+    }
+
+    public function test_store_keeps_the_id_number_as_entered(): void
+    {
+        $this->postJson('/api/gcash/non-members', [
+            'full_name' => 'Carla Dizon',
+            'mobile_number' => '09171112222',
+            'id_type' => 'UMID',
+            'id_number' => '1234-5678 ab',
+        ])->assertCreated()->assertJsonPath('data.id_number', '1234-5678 ab');
+
+        $this->assertDatabaseHas('gcash_non_members', ['id_number' => '1234-5678 ab']);
+    }
+
+    public function test_update_may_reformat_its_own_id_number(): void
+    {
+        $walkIn = GCashNonMember::factory()->create(['id_type' => 'UMID', 'id_number' => '12345678']);
+
+        $this->putJson("/api/gcash/non-members/{$walkIn->id}", [
+            'full_name' => $walkIn->full_name,
+            'mobile_number' => $walkIn->mobile_number,
+            'id_type' => 'UMID',
+            'id_number' => '1234-5678',
+        ])->assertOk()->assertJsonPath('data.id_number', '1234-5678');
+    }
+
+    public function test_update_rejects_another_walk_ins_id_that_differs_only_by_dashes(): void
+    {
+        GCashNonMember::factory()->create(['id_type' => 'UMID', 'id_number' => '12345678']);
+        $walkIn = GCashNonMember::factory()->create(['id_type' => 'UMID', 'id_number' => '87654321']);
+
+        $this->putJson("/api/gcash/non-members/{$walkIn->id}", [
+            'full_name' => $walkIn->full_name,
+            'mobile_number' => $walkIn->mobile_number,
+            'id_type' => 'UMID',
+            'id_number' => '1234-5678',
+        ])->assertStatus(422)->assertJsonValidationErrors(['id_number']);
+    }
+
     public function test_destroy_removes_a_non_member_from_the_list(): void
     {
         $walkIn = GCashNonMember::factory()->create();
