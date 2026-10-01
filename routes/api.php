@@ -240,6 +240,7 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::patch('/loans/{loan}/account-officer', [LoanController::class, 'assignAccountOfficer'])->whereNumber('loan');
     Route::get('/loans/{loan}/amortization-preview', [LoanController::class, 'amortizationPreview']);
     Route::get('/loans/{loan}/amortization-schedule', [LoanController::class, 'amortizationSchedule']);
+    Route::get('/loans/{loan}/amortization-balances', [LoanController::class, 'amortizationBalances'])->whereNumber('loan');
 
     // Multi-step BOD approval chain.
     //

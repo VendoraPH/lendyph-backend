@@ -19,6 +19,7 @@ use App\Http\Resources\CoMakerResource;
 use App\Http\Resources\LoanLedgerEntryResource;
 use App\Http\Resources\LoanResource;
 use App\Models\Loan;
+use App\Services\AmortizationBalanceService;
 use App\Services\AutoPayService;
 use App\Services\LikePattern;
 use App\Services\LoanAdjustmentService;
@@ -1081,6 +1082,39 @@ DESC,
             'data' => AmortizationScheduleResource::collection($schedules),
             'summary' => $summary,
         ]);
+    }
+
+    #[OA\Get(
+        path: '/api/loans/{id}/amortization-balances',
+        summary: 'What is still owed on each amortization period',
+        description: 'Per period, the principal, interest and penalty still owed (due minus what the payment allocation recorded against that period, floored at zero) and their total, plus whether the period is late past its grace period. The totals equal the outstanding, paid and overdue figures of GET /api/loans/{id}/summary. Read-only: nothing is allocated here.',
+        tags: ['Amortization Schedule'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
+        ],
+        responses: [
+            new OA\Response(response: 200, description: 'Per-period balances and their totals'),
+            new OA\Response(response: 403, description: 'Missing loans:view permission'),
+            new OA\Response(response: 404, description: 'Loan not found'),
+            new OA\Response(response: 422, description: 'Loan was never released, so it has no schedule. A released loan with no periods left (a closed restructure source) gets 200 with no periods.'),
+        ],
+    )]
+    public function amortizationBalances(Loan $loan, AmortizationBalanceService $balances): JsonResponse
+    {
+        $this->authorize('loans:view');
+
+        $data = $balances->forLoan($loan);
+
+        // Same rule as amortizationSchedule(): only a loan that was never
+        // released has no schedule to answer with.
+        if ($data['periods'] === [] && $loan->released_at === null) {
+            return response()->json([
+                'message' => 'No amortization schedule found. Loan may not have been released yet.',
+            ], 422);
+        }
+
+        return response()->json(['data' => $data]);
     }
 
     #[OA\Get(
