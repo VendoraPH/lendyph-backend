@@ -271,6 +271,47 @@ class GCashNonMemberTest extends TestCase
             ->assertJsonCount(0, 'data');
     }
 
+    public function test_index_rejects_a_search_that_is_not_a_string(): void
+    {
+        $this->getJson('/api/gcash/non-members?search[]=x')
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['search']);
+    }
+
+    public function test_index_search_matches_a_percent_sign_literally(): void
+    {
+        GCashNonMember::factory()->create(['full_name' => 'Promo 50% Off']);
+        GCashNonMember::factory()->create(['full_name' => 'Promo 500 Off']);
+        GCashNonMember::factory()->create(['full_name' => 'Ben Cruz']);
+
+        $this->getJson('/api/gcash/non-members?search='.urlencode('50%'))
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.full_name', 'Promo 50% Off');
+    }
+
+    public function test_index_search_matches_an_underscore_literally(): void
+    {
+        GCashNonMember::factory()->create(['full_name' => 'Ana_Reyes']);
+        GCashNonMember::factory()->create(['full_name' => 'Ben Cruz']);
+
+        $this->getJson('/api/gcash/non-members?search=_')
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.full_name', 'Ana_Reyes');
+    }
+
+    public function test_index_search_matches_a_backslash_literally(): void
+    {
+        GCashNonMember::factory()->create(['full_name' => 'Ana \\ Reyes']);
+        GCashNonMember::factory()->create(['full_name' => 'Ben Cruz']);
+
+        $this->getJson('/api/gcash/non-members?search='.urlencode('\\'))
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.full_name', 'Ana \\ Reyes');
+    }
+
     public function test_store_rejects_an_id_number_of_only_dashes_or_spaces(): void
     {
         foreach (['---', ' - - '] as $idNumber) {

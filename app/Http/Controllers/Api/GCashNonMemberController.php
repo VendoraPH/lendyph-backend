@@ -28,6 +28,7 @@ class GCashNonMemberController extends Controller
         responses: [
             new OA\Response(response: 200, description: 'Paginated walk-in customers'),
             new OA\Response(response: 403, description: 'Missing gcash:view permission'),
+            new OA\Response(response: 422, description: 'Validation error'),
         ],
     )]
     public function index(Request $request): AnonymousResourceCollection
@@ -37,14 +38,17 @@ class GCashNonMemberController extends Controller
         // `min:1`: `?per_page=0` silently became the default page inside
         // paginate(), and a negative value reached MySQL as `offset` with no
         // `limit` — a 500. The same rule every other list validates.
-        $perPage = (int) ($request->validate([
+        // `string`: `?search[]=x` arrived as an array and 500'd on concatenation.
+        $validated = $request->validate([
             'per_page' => ['nullable', 'integer', 'min:1'],
-        ])['per_page'] ?? 25);
+            'search' => ['nullable', 'string'],
+        ]);
+        $perPage = (int) ($validated['per_page'] ?? 25);
 
         $nonMembers = GCashNonMember::query()
             ->withCount('transactions')
-            ->when($request->query('search'), function ($q, $term) {
-                $like = '%'.$term.'%';
+            ->when($validated['search'] ?? null, function ($q, $term) {
+                $like = self::containsPattern($term);
                 // ID numbers also match normalised, the way the duplicate rule
                 // compares them, so `12345678` finds `1234-5678` and the reverse.
                 // Skipped when nothing is left (a search of `---`), which would
@@ -56,7 +60,7 @@ class GCashNonMemberController extends Controller
                     ->orWhere('id_number', 'like', $like)
                     ->when($normalised !== '', fn ($w) => $w->orWhereRaw(
                         UniqueWalkInIdNumber::NORMALISED_COLUMN.' LIKE ?',
-                        ['%'.$normalised.'%'],
+                        [self::containsPattern($normalised)],
                     )));
             })
             ->orderBy('full_name')
@@ -164,5 +168,14 @@ class GCashNonMemberController extends Controller
         );
 
         return response()->json(['message' => 'Walk-in customer removed.']);
+    }
+
+    /**
+     * A LIKE pattern matching `$term` anywhere, with `%`, `_` and `\` matched
+     * literally. Unescaped, a search of `%` or `_` listed every walk-in.
+     */
+    private static function containsPattern(string $term): string
+    {
+        return '%'.addcslashes($term, '%_\\').'%';
     }
 }
