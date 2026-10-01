@@ -6,6 +6,7 @@ use App\Models\AmortizationSchedule;
 use App\Models\Borrower;
 use App\Models\Loan;
 use App\Models\Repayment;
+use App\Models\RepaymentAllocation;
 use App\Models\ShareCapitalLedger;
 use App\Models\User;
 use App\Services\Accounting\AutomaticPoster;
@@ -71,6 +72,7 @@ class RepaymentService
             $nextInterestApplied = 0.0;
             $nextPrincipalApplied = 0.0;
             $touchedFutureSchedule = false;
+            $allocations = [];
 
             // Business rule (frontend PR #106): on SCB-bearing loans, overpayment must NOT pre-pay
             // future amortization — it becomes share capital instead. The frontend computes the SCB
@@ -107,6 +109,16 @@ class RepaymentService
                 $principalApplied += $pPaid;
                 $interestApplied += $iPaid;
                 $penaltyApplied += $penPaid;
+
+                if ($pPaid > 0 || $iPaid > 0 || $penPaid > 0) {
+                    $allocations[] = [
+                        'amortization_schedule_id' => $schedule->id,
+                        'period_number' => $schedule->period_number,
+                        'penalty' => round($penPaid, 2),
+                        'interest' => round($iPaid, 2),
+                        'principal' => round($pPaid, 2),
+                    ];
+                }
 
                 // Categorize into 6-tier breakdown for frontend display:
                 // - Schedules with due_date < paymentDate → "overdue" buckets (interest + principal both go here)
@@ -171,6 +183,9 @@ class RepaymentService
                 'received_by' => $user->id,
                 'remarks' => $remarks,
             ]);
+
+            // What went on each period, so a void can take back exactly that.
+            $repayment->allocations()->createMany($allocations);
 
             // Step 6: Loan status lifecycle
             // released → ongoing on first payment, → completed when all schedules paid
@@ -346,8 +361,11 @@ class RepaymentService
         // would fix the consistent snapshot BEFORE the collateral lock below,
         // which is the exact defect this ordering exists to avoid. The guard at
         // :261 has already loaded it; this makes that guarantee explicit rather
-        // than incidental.
-        $repayment->loadMissing('loan');
+        // than incidental. The allocations too, for the same reason: the guard
+        // below reads them, and reverseAllocation() reads them again inside.
+        $repayment->loadMissing(['loan', 'allocations']);
+
+        $this->assertAllocationIsKnown($repayment);
 
         return DB::transaction(function () use ($repayment, $reason, $user) {
             $loan = $repayment->loan;
@@ -376,9 +394,6 @@ class RepaymentService
             // reopens exactly this defect. Voids are rare; the lock is cheap.
             $lockedCollateralIds = CollateralPledgeGuard::lockCollateralsOf($loan);
 
-            // Reverse allocation from schedules — we need to know per-schedule amounts.
-            // We stored totals only, so we reverse using a proportional approach:
-            // Re-run the allocation simulation and reverse each schedule.
             $this->reverseAllocation($repayment);
 
             // Reverse whatever share capital this repayment credited — a no-op
@@ -628,6 +643,11 @@ class RepaymentService
      * report all read `due_date` directly rather than the stamp, so imported
      * arrears still show up everywhere the coop needs to chase them — they are
      * simply never charged for a second time.
+     *
+     * A period a penalty waiver forgave (`penalty_waiver_id`) is skipped too,
+     * and for good: this method overwrites the charge rather than adding to it,
+     * so passing over it once would only have moved the waiver's undoing to
+     * the next payment or the next night.
      */
     public function applyPenalties(Loan $loan, Carbon $asOfDate): void
     {
@@ -643,6 +663,7 @@ class RepaymentService
         $loan->amortizationSchedules()
             ->where('due_date', '<', $lateBefore)
             ->whereIn('status', ['pending', 'partial', 'overdue'])
+            ->whereNull('penalty_waiver_id')
             ->each(function (AmortizationSchedule $schedule) use ($penaltyRate, $arrearsBaseline) {
                 if (! AmortizationSchedule::isPenalisable($arrearsBaseline, $schedule->due_date)) {
                     return;
@@ -712,21 +733,51 @@ class RepaymentService
     }
 
     /**
-     * Reverse the payment allocation for a voided repayment by re-simulating allocation
-     * and subtracting from each schedule.
+     * Refuse a void that cannot say which periods the payment paid.
+     *
+     * A payment recorded before `repayment_allocations` existed has rows only
+     * where the backfill (2026_10_01_150200) could prove them, so one without
+     * rows that still put money on periods is a guess away from reversing the
+     * wrong ones. A row whose period is gone means a restructure, a term
+     * extension or an extension has since replaced the period it paid.
+     * Either way the void stops here, before its transaction opens.
+     *
+     * @throws ValidationException on `repayment`
+     */
+    private function assertAllocationIsKnown(Repayment $repayment): void
+    {
+        $applied = (float) $repayment->principal_applied
+            + (float) $repayment->interest_applied
+            + (float) $repayment->penalty_applied;
+
+        if ($repayment->allocations->isEmpty() && $applied > 0) {
+            throw ValidationException::withMessages([
+                'repayment' => 'This payment was recorded before Lendyph kept track of which periods each payment paid, '
+                    .'and they cannot be worked out from this loan\'s history, so it cannot be voided. '
+                    .'Use a balance adjustment to correct the loan instead.',
+            ]);
+        }
+
+        if ($repayment->allocations->contains(fn (RepaymentAllocation $allocation) => $allocation->amortization_schedule_id === null)) {
+            throw ValidationException::withMessages([
+                'repayment' => 'A period this payment paid has since been replaced by a restructure or an extension, '
+                    .'so it cannot be voided. Use a balance adjustment to correct the loan instead.',
+            ]);
+        }
+    }
+
+    /**
+     * Take back exactly what this payment put on each period, from its
+     * allocation rows. Periods it did not reach are not touched.
      */
     private function reverseAllocation(Repayment $repayment): void
     {
         $loan = $repayment->loan;
-        $amountPaid = (float) $repayment->amount_paid;
         $paymentDate = $repayment->payment_date;
 
-        // Replay allocation simulation to know what went where, then subtract
-        $schedules = $loan->amortizationSchedules()
-            ->orderBy('period_number')
-            ->get();
-
-        $remaining = $amountPaid;
+        $schedules = AmortizationSchedule::whereIn('id', $repayment->allocations->pluck('amortization_schedule_id'))
+            ->get()
+            ->keyBy('id');
 
         // Same definition of late as applyPenalties() a hundred lines up. The
         // status re-derivation below is the other place this service stamps
@@ -744,34 +795,12 @@ class RepaymentService
         $lateBefore = AmortizationSchedule::pastGraceCutoff($loan->grace_period_days, $paymentDate);
         $arrearsBaseline = $loan->imported_arrears_baseline;
 
-        foreach ($schedules as $schedule) {
-            if ($remaining <= 0) {
-                break;
-            }
+        foreach ($repayment->allocations as $allocation) {
+            $schedule = $schedules[$allocation->amortization_schedule_id];
 
-            // Simulate how much penalty/interest/principal was taken from this schedule
-            // We reverse by computing how much was paid (capped by what was actually allocated)
-
-            // Penalty reverse
-            $penaltyOwed = min((float) $schedule->penalty_paid, $remaining);
-            if ($penaltyOwed > 0) {
-                $schedule->penalty_paid = max(0, round((float) $schedule->penalty_paid - $penaltyOwed, 2));
-                $remaining -= $penaltyOwed;
-            }
-
-            // Interest reverse
-            $interestOwed = min((float) $schedule->interest_paid, $remaining);
-            if ($interestOwed > 0) {
-                $schedule->interest_paid = max(0, round((float) $schedule->interest_paid - $interestOwed, 2));
-                $remaining -= $interestOwed;
-            }
-
-            // Principal reverse
-            $principalOwed = min((float) $schedule->principal_paid, $remaining);
-            if ($principalOwed > 0) {
-                $schedule->principal_paid = max(0, round((float) $schedule->principal_paid - $principalOwed, 2));
-                $remaining -= $principalOwed;
-            }
+            $schedule->penalty_paid = max(0, round((float) $schedule->penalty_paid - (float) $allocation->penalty, 2));
+            $schedule->interest_paid = max(0, round((float) $schedule->interest_paid - (float) $allocation->interest, 2));
+            $schedule->principal_paid = max(0, round((float) $schedule->principal_paid - (float) $allocation->principal, 2));
 
             // Recalculate schedule status
             if ($schedule->principal_paid == 0 && $schedule->interest_paid == 0 && $schedule->penalty_paid == 0) {
@@ -779,7 +808,14 @@ class RepaymentService
                     && AmortizationSchedule::isPenalisable($arrearsBaseline, $schedule->due_date);
 
                 $schedule->status = $isLate ? 'overdue' : 'pending';
-                $schedule->penalty_amount = 0;
+
+                // applyPenalties() recharges the penalty from scratch, except on
+                // a waived period, which it never charges again. There the
+                // charge the waiver kept stands, owed again now that the
+                // payment that covered it is void.
+                if ($schedule->penalty_waiver_id === null) {
+                    $schedule->penalty_amount = 0;
+                }
             } else {
                 $schedule->status = 'partial';
             }

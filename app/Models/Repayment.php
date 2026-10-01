@@ -73,6 +73,11 @@ class Repayment extends Model
         return $this->belongsTo(Loan::class);
     }
 
+    public function allocations(): HasMany
+    {
+        return $this->hasMany(RepaymentAllocation::class);
+    }
+
     public function receivedByUser(): BelongsTo
     {
         return $this->belongsTo(User::class, 'received_by');

@@ -10,6 +10,7 @@ use App\Models\LoanLedgerEntry;
 use App\Models\Repayment;
 use App\Models\User;
 use Carbon\Carbon;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -39,7 +40,7 @@ class LoanAdjustmentService
             ]);
         }
 
-        $oldValues = $this->captureOldValues($loan, $validated['adjustment_type']);
+        $oldValues = $this->captureOldValues($loan, $validated['adjustment_type'], $validated['new_values']);
 
         return LoanAdjustment::create([
             'loan_id' => $loan->id,
@@ -513,13 +514,6 @@ class LoanAdjustmentService
             ]);
         }
 
-        $query = $loan->amortizationSchedules()
-            ->whereIn('status', ['pending', 'partial', 'overdue']);
-
-        if (! $waiveAll) {
-            $query->whereIn('id', $newValues['schedule_ids']);
-        }
-
         $before = [];
         $after = [];
 
@@ -528,13 +522,17 @@ class LoanAdjustmentService
         // touched: zeroing it, as this used to, erased penalty that a posted
         // receipt still carries, so Total Paid dropped and a later void took
         // the missing penalty out of interest or principal instead.
-        $query->each(function (AmortizationSchedule $schedule) use (&$before, &$after) {
+        //
+        // The period keeps a link to this waiver, which is what stops
+        // RepaymentService::applyPenalties() charging it again on the next
+        // payment or the next night.
+        $this->selectedOpenSchedules($loan, $newValues)->each(function (AmortizationSchedule $schedule) use ($adjustment, &$before, &$after) {
             $charged = (float) $schedule->penalty_amount;
             $paid = (float) $schedule->penalty_paid;
-            $owed = round(max(0, $charged - $paid), 2);
+            $owed = $this->penaltyOwed($schedule);
 
             if ($owed > 0) {
-                $schedule->update(['penalty_amount' => $paid]);
+                $schedule->update(['penalty_amount' => $paid, 'penalty_waiver_id' => $adjustment->id]);
 
                 $before[] = [
                     'schedule_id' => $schedule->id,
@@ -683,7 +681,38 @@ class LoanAdjustmentService
         ]);
     }
 
-    private function captureOldValues(Loan $loan, string $type): array
+    /**
+     * The open periods a penalty waiver covers: all of them on `waive_all`,
+     * otherwise the selected `schedule_ids`.
+     *
+     * @param  array<string, mixed>  $newValues
+     */
+    private function selectedOpenSchedules(Loan $loan, array $newValues): Builder
+    {
+        $query = AmortizationSchedule::where('loan_id', $loan->id)
+            ->whereIn('status', AmortizationSchedule::UNPAID_STATUSES)
+            ->orderBy('period_number');
+
+        if (! ($newValues['waive_all'] ?? false)) {
+            $query->whereIn('id', $newValues['schedule_ids'] ?? []);
+        }
+
+        return $query;
+    }
+
+    /**
+     * The penalty still owed on a period: the most a waiver can forgive there.
+     */
+    private function penaltyOwed(AmortizationSchedule $schedule): float
+    {
+        return round(max(0, (float) $schedule->penalty_amount - (float) $schedule->penalty_paid), 2);
+    }
+
+    /**
+     * @param  array<string, mixed>  $newValues
+     * @return array<string, mixed>
+     */
+    private function captureOldValues(Loan $loan, string $type, array $newValues): array
     {
         return match ($type) {
             'restructure' => [
@@ -696,14 +725,18 @@ class LoanAdjustmentService
                 'frequency' => $loan->frequency,
                 'maturity_date' => $loan->maturity_date->toDateString(),
             ],
+            // What the waiver would forgive, period by period, as of the
+            // request: only open periods it covers that still owe penalty.
             'penalty_waiver' => [
-                'penalties' => $loan->amortizationSchedules()
-                    ->where('penalty_amount', '>', 0)
+                'penalties' => $this->selectedOpenSchedules($loan, $newValues)
                     ->get()
-                    ->map(fn ($s) => [
+                    ->filter(fn (AmortizationSchedule $s) => $this->penaltyOwed($s) > 0)
+                    ->map(fn (AmortizationSchedule $s) => [
                         'schedule_id' => $s->id,
                         'period_number' => $s->period_number,
                         'penalty_amount' => (float) $s->penalty_amount,
+                        'penalty_paid' => (float) $s->penalty_paid,
+                        'penalty_owed' => $this->penaltyOwed($s),
                     ])->values()->toArray(),
             ],
             'balance_adjustment' => [
