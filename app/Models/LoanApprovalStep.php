@@ -6,6 +6,7 @@ use App\Traits\Auditable;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Support\Collection;
 use OpenApi\Attributes as OA;
 
 /**
@@ -95,5 +96,18 @@ class LoanApprovalStep extends Model
     public function actedByUser(): BelongsTo
     {
         return $this->belongsTo(User::class, 'acted_by');
+    }
+
+    /**
+     * The live revision round of one loan's chain: the `current_steps` of
+     * GET /loans/{id}/approval-steps, and the round Loan::currentApprover()
+     * reads. One definition so the two cannot drift apart.
+     *
+     * @param  Collection<int, self>  $steps  every step of one loan, in Loan::approvalSteps() order
+     * @return Collection<int, self>
+     */
+    public static function currentRound(Collection $steps): Collection
+    {
+        return $steps->where('round', $steps->max('round'))->values();
     }
 }

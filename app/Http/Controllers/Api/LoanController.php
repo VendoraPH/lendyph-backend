@@ -153,6 +153,15 @@ be shown with their co-makers without one request per loan. Eager-loaded: the
 list costs the same number of queries however many rows or co-makers it
 returns.
 
+Each row carries `current_approver`, the name of the approval step a
+`for_review` loan is waiting on, so the list can read "For Approval - Manager"
+without one `GET /api/loans/{id}/approval-steps` per row. It is the first
+`pending` step of that endpoint's `current_steps`, so the two always agree. It
+is null when the loan is not `for_review` (including an `approved` loan whose
+release step is pending), when no step is pending, or when the step's name is
+blank. Never an empty string. The chain is eager-loaded: one query per page,
+not one per row.
+
 `meta.stats` is always organisation-wide — narrowed by `branch_id` and
 `borrower_id` only, and never by `search`, `status`, `loan_product_id` or the
 date range. Those counts are the KPI cards and tab badges: scoping them to the
@@ -234,7 +243,7 @@ DESC,
             // then hydrate OVER the loan's, and LoanResource would publish the
             // borrower's id and status on every row of the list.
             ->select('loans.*')
-            ->with('borrower', 'loanProduct', 'branch', 'createdByUser', 'amortizationSchedules', 'coMakers')
+            ->with('borrower', 'loanProduct', 'branch', 'createdByUser', 'amortizationSchedules', 'coMakers', 'approvalSteps')
             // Aliased count so LoanResource's extension_count reads an
             // already-loaded value instead of firing a COUNT query per row.
             ->withCount(['adjustments as extension_count' => fn ($q) => $q->where('adjustment_type', 'extension')])
@@ -462,6 +471,7 @@ DESC,
     #[OA\Get(
         path: '/api/loans/{id}',
         summary: 'Show loan',
+        description: '`current_approver` names the approval step a `for_review` loan is waiting on: the first `pending` step of `current_steps` in `GET /api/loans/{id}/approval-steps`. Null when the loan is not `for_review`, no step is pending, or the step name is blank. Never an empty string. Same value as the loan\'s row on `GET /api/loans`.',
         tags: ['Loans'],
         security: [['sanctum' => []]],
         parameters: [
@@ -481,6 +491,8 @@ DESC,
             'approvedByUser', 'releasedByUser', 'rejectedByUser',
             'createdByUser', 'accountOfficer', 'amortizationSchedules',
             'documents',
+            // For current_approver.
+            'approvalSteps',
             // Restructure lineage — loaded here only. index() would pay for it
             // on every row of every page to render a link almost nothing uses.
             'sourceLoan', 'restructuredInto',
