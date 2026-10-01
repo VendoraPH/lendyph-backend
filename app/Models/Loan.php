@@ -351,6 +351,32 @@ class Loan extends Model
     }
 
     /**
+     * Name of the approval step this loan is waiting on, for the loans list's
+     * "For Approval - <approver>" label.
+     *
+     * The first pending step of the live round: the step the loan detail page
+     * picks out of GET /loans/{id}/approval-steps. Null outside `for_review`
+     * (an approved loan's pending release step is not an approver), when
+     * nothing is pending, and when the name is blank, so a client never has to
+     * tell "" apart from null.
+     *
+     * Reads the `approvalSteps` relation: eager-load it before calling this
+     * across a list.
+     */
+    public function currentApprover(): ?string
+    {
+        if ($this->status !== 'for_review') {
+            return null;
+        }
+
+        $name = LoanApprovalStep::currentRound($this->approvalSteps)
+            ->firstWhere('status', LoanApprovalStep::STATUS_PENDING)
+            ?->name;
+
+        return trim((string) $name) === '' ? null : $name;
+    }
+
+    /**
      * Debits and credits recorded against this loan, oldest first — a ledger
      * only makes sense read forwards.
      */

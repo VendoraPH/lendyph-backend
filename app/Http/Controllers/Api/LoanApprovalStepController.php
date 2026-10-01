@@ -206,8 +206,7 @@ class LoanApprovalStepController extends Controller
             ->all();
 
         return [
-            'current_steps' => $byRound
-                ->get($currentRound, collect())
+            'current_steps' => LoanApprovalStep::currentRound($steps)
                 ->map(fn (LoanApprovalStep $s) => $this->presentStep($s, $loan, $viewer))
                 ->values()
                 ->all(),

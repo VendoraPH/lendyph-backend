@@ -31,6 +31,7 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'policy_exception', type: 'boolean'),
         new OA\Property(property: 'policy_exception_details', type: 'string', nullable: true),
         new OA\Property(property: 'status', type: 'string'),
+        new OA\Property(property: 'current_approver', type: 'string', nullable: true, example: 'Manager', description: 'GET /loans and GET /loans/{id} only (requires `approvalSteps` eager-loaded). Name of the approval step a `for_review` loan is waiting on: the first `pending` step of `current_steps` in GET /loans/{id}/approval-steps. Null when the loan is not `for_review`, no step is pending, or the step name is blank. Never an empty string.'),
         new OA\Property(property: 'outstanding_balance', type: 'number'),
         new OA\Property(property: 'next_due_date', type: 'string', format: 'date', nullable: true),
         new OA\Property(property: 'current_due', type: 'number'),
@@ -188,6 +189,10 @@ class LoanResource extends JsonResource
                 return $doc?->url;
             }),
             'status' => $this->status,
+            // Only GET /loans and GET /loans/{id} load the chain, so every
+            // other endpoint leaves the key out rather than paying a query per
+            // loan. See Loan::currentApprover().
+            'current_approver' => $this->whenLoaded('approvalSteps', fn () => $this->currentApprover()),
             // Read from the model accessor rather than recomputed here: this is
             // the same figure the reports and exports use, it includes any
             // uncollected insurance premium, and it stays correct when the
