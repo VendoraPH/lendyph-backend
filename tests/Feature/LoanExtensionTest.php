@@ -93,8 +93,9 @@ class LoanExtensionTest extends TestCase
 
         $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'defer'])->assertOk();
 
+        // The partly paid period stays, closed at the ₱900 paid; the new one comes after it.
         $loan->refresh()->load('amortizationSchedules');
-        $newSchedule = $loan->amortizationSchedules->first();
+        $newSchedule = $loan->amortizationSchedules->last();
 
         // Carry interest 900 (1800 - 900) + fresh interest 1800 = 2700
         $this->assertEqualsWithDelta(2700.00, (float) $newSchedule->interest_due, 0.01);
@@ -167,7 +168,8 @@ class LoanExtensionTest extends TestCase
         $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'pay'])
             ->assertOk();
 
-        $newSchedule = $loan->fresh()->amortizationSchedules()->first();
+        // The period the interest was collected on stays, closed; the new one comes after it.
+        $newSchedule = $loan->fresh()->amortizationSchedules()->reorder('period_number', 'desc')->first();
 
         $this->assertNotNull(Repayment::where('loan_id', $loan->id)->first());
         $this->assertGreaterThan(
