@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\AmortizationSchedule;
 use App\Models\Borrower;
 use App\Models\Loan;
+use App\Models\LoanLedgerEntry;
 use App\Models\Repayment;
 use App\Models\RepaymentAllocation;
 use App\Models\ShareCapitalLedger;
@@ -16,6 +17,13 @@ use Illuminate\Validation\ValidationException;
 
 class RepaymentService
 {
+    /** The preview's payment badge labels, by type (see paymentBadge()). */
+    private const PAYMENT_BADGES = [
+        'partial' => 'Partial Payment',
+        'exact' => 'Exact Payment',
+        'advance' => 'Advance Payment',
+    ];
+
     /**
      * Record a repayment and allocate it across schedules.
      */
@@ -303,7 +311,9 @@ class RepaymentService
         DB::beginTransaction();
 
         try {
+            $owedIds = $this->owedScheduleIds($loan, Carbon::parse($paymentDate));
             $repayment = $this->processRepayment($loan, $amountPaid, $paymentDate, $user, postToBooks: false);
+            $allocations = $this->previewedAllocations($repayment);
 
             return [
                 'amount_paid' => (float) $repayment->amount_paid,
@@ -326,11 +336,91 @@ class RepaymentService
                 'balance_before' => (float) $repayment->balance_before,
                 'balance_after' => (float) $repayment->balance_after,
                 'payment_type' => $repayment->payment_type,
+                'payment_badge' => $this->paymentBadge($owedIds, $allocations, (float) $repayment->overpayment),
+                'allocations' => $allocations,
                 'is_preview' => true,
             ];
         } finally {
             DB::rollBack();
         }
+    }
+
+    /**
+     * What a payment is measured against for its badge: every open period due
+     * on or before the payment date, or the next instalment if none is due yet.
+     *
+     * @return list<int>
+     */
+    private function owedScheduleIds(Loan $loan, Carbon $paymentDate): array
+    {
+        $open = $loan->amortizationSchedules()
+            ->whereIn('status', AmortizationSchedule::UNPAID_STATUSES)
+            ->orderBy('period_number')
+            ->get();
+
+        $due = $open->filter(fn (AmortizationSchedule $s) => $s->due_date->lte($paymentDate));
+
+        return ($due->isNotEmpty() ? $due : $open->take(1))->pluck('id')->all();
+    }
+
+    /**
+     * Each period a previewed payment reaches, read from the allocation rows
+     * processRepayment() wrote, and what that period would still owe after it.
+     *
+     * @return list<array{schedule_id: int, period: int, due_date: string, penalty: float, interest: float, principal: float, amount_applied: float, remaining_balance: float}>
+     */
+    private function previewedAllocations(Repayment $repayment): array
+    {
+        $allocations = $repayment->allocations()->orderBy('period_number')->get();
+        $schedules = AmortizationSchedule::whereIn('id', $allocations->pluck('amortization_schedule_id'))->get()->keyBy('id');
+
+        return $allocations->map(function (RepaymentAllocation $allocation) use ($schedules): array {
+            $schedule = $schedules[$allocation->amortization_schedule_id];
+
+            return [
+                'schedule_id' => $schedule->id,
+                'period' => $allocation->period_number,
+                'due_date' => $schedule->due_date->toDateString(),
+                'penalty' => (float) $allocation->penalty,
+                'interest' => (float) $allocation->interest,
+                'principal' => (float) $allocation->principal,
+                'amount_applied' => round((float) $allocation->penalty + (float) $allocation->interest + (float) $allocation->principal, 2),
+                'remaining_balance' => round(
+                    max(0, (float) $schedule->principal_due - (float) $schedule->principal_paid)
+                    + max(0, (float) $schedule->interest_due - (float) $schedule->interest_paid)
+                    + max(0, (float) $schedule->penalty_amount - (float) $schedule->penalty_paid),
+                    2,
+                ),
+            ];
+        })->all();
+    }
+
+    /**
+     * The payments page's badge for a previewed payment.
+     *
+     * Partial when what is owed (owedScheduleIds()) is not fully paid, advance
+     * when it is and money went past it, to a later period or as an
+     * overpayment, and exact otherwise. Only the preview says this: the stored
+     * `payment_type` keeps its own meaning, under which anything paid before a
+     * period's due date is `advance`.
+     *
+     * @param  list<int>  $owedIds
+     * @param  list<array{schedule_id: int}>  $allocations
+     * @return array{type: string, label: string}
+     */
+    private function paymentBadge(array $owedIds, array $allocations, float $overpayment): array
+    {
+        $owedPaid = ! AmortizationSchedule::whereIn('id', $owedIds)->where('status', '!=', 'paid')->exists();
+        $wentPast = round($overpayment, 2) > 0
+            || collect($allocations)->contains(fn (array $a) => ! in_array($a['schedule_id'], $owedIds, true));
+
+        $type = match (true) {
+            ! $owedPaid => 'partial',
+            $wentPast => 'advance',
+            default => 'exact',
+        };
+
+        return ['type' => $type, 'label' => self::PAYMENT_BADGES[$type]];
     }
 
     /**
@@ -366,6 +456,7 @@ class RepaymentService
         $repayment->loadMissing(['loan', 'allocations']);
 
         $this->assertAllocationIsKnown($repayment);
+        $this->assertNotAnExtensionCollection($repayment);
 
         return DB::transaction(function () use ($repayment, $reason, $user) {
             $loan = $repayment->loan;
@@ -670,7 +761,12 @@ class RepaymentService
                 }
 
                 $remainingDue = (float) $schedule->principal_due - (float) $schedule->principal_paid;
-                $penalty = round($remainingDue * ($penaltyRate / 100), 2);
+
+                // Never below what was already paid toward it: principal paid
+                // since the last run lowers the recalculation, and a charge
+                // under its own payments would leave a receipt carrying
+                // penalty the period no longer says was owed.
+                $penalty = max(round($remainingDue * ($penaltyRate / 100), 2), (float) $schedule->penalty_paid);
 
                 $schedule->update([
                     'penalty_amount' => $penalty,
@@ -762,6 +858,33 @@ class RepaymentService
             throw ValidationException::withMessages([
                 'repayment' => 'A period this payment paid has since been replaced by a restructure or an extension, '
                     .'so it cannot be voided. Use a balance adjustment to correct the loan instead.',
+            ]);
+        }
+    }
+
+    /**
+     * Refuse a void of the payment an extension collected its interest with.
+     *
+     * The extension wrote a ledger credit for that payment, and a void takes
+     * nothing out of the loan ledger, so voiding it would leave the ledger
+     * recording a payment that no longer exists.
+     *
+     * @throws ValidationException on `repayment`
+     */
+    private function assertNotAnExtensionCollection(Repayment $repayment): void
+    {
+        $extension = LoanLedgerEntry::where('repayment_id', $repayment->id)
+            ->where('type', 'credit')
+            ->whereNotNull('loan_adjustment_id')
+            ->with('loanAdjustment:id,adjustment_number')
+            ->first()
+            ?->loanAdjustment;
+
+        if ($extension) {
+            throw ValidationException::withMessages([
+                'repayment' => "This payment collected the interest when the loan was extended ({$extension->adjustment_number}), "
+                    .'and that extension\'s ledger credit records it, so it cannot be voided. '
+                    .'Use a balance adjustment to correct the loan instead.',
             ]);
         }
     }

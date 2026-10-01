@@ -228,6 +228,7 @@ class AmortizationSchedule extends Model
         'penalty_amount',
         'penalty_paid',
         'penalty_waiver_id',
+        'closed_by_adjustment_id',
     ];
 
     protected function casts(): array

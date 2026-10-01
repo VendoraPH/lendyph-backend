@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests\LoanAdjustment;
 
+use App\Models\LoanAdjustment;
 use Illuminate\Contracts\Validation\Validator;
 use Illuminate\Foundation\Http\FormRequest;
 
@@ -81,6 +82,18 @@ class StoreLoanAdjustmentRequest extends FormRequest
                         'new_values.schedule_ids',
                         'Select the schedules to waive, or set waive_all to true.',
                     );
+                }
+
+                // Each type carries only its own fields. A penalty waiver that
+                // also carried `interest_rate` used to be accepted and stored,
+                // so an approver saw a figure the waiver would never apply.
+                if (isset(LoanAdjustment::NEW_VALUE_FIELDS[$type]) && is_array($newValues)) {
+                    foreach (LoanAdjustment::foreignFields($type, $newValues) as $field) {
+                        $validator->errors()->add(
+                            "new_values.{$field}",
+                            sprintf('A %s does not take %s.', str_replace('_', ' ', $type), $field),
+                        );
+                    }
                 }
 
                 // Restructure with no figures at all would apply nothing while
