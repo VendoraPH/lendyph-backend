@@ -233,6 +233,72 @@ class GCashNonMemberTest extends TestCase
         ])->assertStatus(422)->assertJsonValidationErrors(['id_number']);
     }
 
+    public function test_index_search_finds_a_dashed_id_number_typed_without_dashes(): void
+    {
+        GCashNonMember::factory()->create(['full_name' => 'Ana Reyes', 'id_number' => '1234-5678']);
+        GCashNonMember::factory()->create(['full_name' => 'Ben Cruz', 'id_number' => 'ZZ99999999']);
+
+        $this->getJson('/api/gcash/non-members?search=12345678')
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.full_name', 'Ana Reyes');
+    }
+
+    public function test_index_search_finds_an_undashed_id_number_typed_with_dashes(): void
+    {
+        GCashNonMember::factory()->create(['full_name' => 'Ana Reyes', 'id_number' => '12345678']);
+        GCashNonMember::factory()->create(['full_name' => 'Ben Cruz', 'id_number' => 'AB87654321']);
+        GCashNonMember::factory()->create(['full_name' => 'Carla Dizon', 'id_number' => 'ZZ99999999']);
+
+        $this->getJson('/api/gcash/non-members?search=1234-5678')
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.full_name', 'Ana Reyes');
+
+        $this->getJson('/api/gcash/non-members?search='.urlencode('ab-8765 4321'))
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.full_name', 'Ben Cruz');
+    }
+
+    public function test_index_search_of_only_dashes_does_not_list_every_walk_in(): void
+    {
+        GCashNonMember::factory()->create(['full_name' => 'Ana Reyes', 'id_number' => '12345678']);
+        GCashNonMember::factory()->create(['full_name' => 'Ben Cruz', 'id_number' => 'AB87654321']);
+
+        $this->getJson('/api/gcash/non-members?search=---')
+            ->assertOk()
+            ->assertJsonCount(0, 'data');
+    }
+
+    public function test_store_rejects_an_id_number_of_only_dashes_or_spaces(): void
+    {
+        foreach (['---', ' - - '] as $idNumber) {
+            $this->postJson('/api/gcash/non-members', [
+                'full_name' => 'Carla Dizon',
+                'mobile_number' => '09171112222',
+                'id_type' => 'UMID',
+                'id_number' => $idNumber,
+            ])->assertStatus(422)->assertJsonValidationErrors(['id_number']);
+        }
+
+        $this->assertDatabaseCount('gcash_non_members', 0);
+    }
+
+    public function test_update_rejects_an_id_number_of_only_dashes(): void
+    {
+        $walkIn = GCashNonMember::factory()->create(['id_type' => 'UMID', 'id_number' => '12345678']);
+
+        $this->putJson("/api/gcash/non-members/{$walkIn->id}", [
+            'full_name' => $walkIn->full_name,
+            'mobile_number' => $walkIn->mobile_number,
+            'id_type' => 'UMID',
+            'id_number' => '---',
+        ])->assertStatus(422)->assertJsonValidationErrors(['id_number']);
+
+        $this->assertDatabaseHas('gcash_non_members', ['id' => $walkIn->id, 'id_number' => '12345678']);
+    }
+
     public function test_destroy_removes_a_non_member_from_the_list(): void
     {
         $walkIn = GCashNonMember::factory()->create();
