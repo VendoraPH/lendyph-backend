@@ -5,6 +5,7 @@ namespace Database\Seeders;
 use App\Models\Borrower;
 use App\Models\Branch;
 use App\Models\Fee;
+use App\Models\GCashTier;
 use App\Models\LoanProduct;
 use App\Models\ShareCapitalLedger;
 use App\Models\User;
@@ -20,7 +21,7 @@ class DemoSeeder extends Seeder
      * Run with: php artisan db:seed --class=DemoSeeder
      *
      * Creates: 2 loan products, 8 borrowers, 5 loans (various statuses),
-     * repayments, co-makers, fees, share capital pledges + ledger entries,
+     * repayments, co-makers, fees, GCash fee tiers, share capital pledges + ledger entries,
      * and 3 users with different roles.
      */
     public function run(): void
@@ -155,6 +156,18 @@ class DemoSeeder extends Seeder
         // demonstrates the catalog's real purpose: a charge that has nothing
         // to do with a loan product at all.
         Fee::firstOrCreate(['name' => 'Credit Investigation Fee'], ['type' => 'fixed', 'value' => 300]);
+
+        // ── GCash fee tiers ──
+        // Cash In and Cash Out refuse any amount no tier covers, so without these
+        // a fresh local database cannot record a GCash transaction at all. Only
+        // seeded when none exist, so tiers edited in GCash Settings survive a re-seed.
+        if (! GCashTier::exists()) {
+            collect([
+                ['min_amount' => 1, 'max_amount' => 1000, 'cash_in_rate' => 10, 'cash_out_rate' => 10],
+                ['min_amount' => 1000.01, 'max_amount' => 5000, 'cash_in_rate' => 25, 'cash_out_rate' => 25],
+                ['min_amount' => 5000.01, 'max_amount' => 50000, 'cash_in_rate' => 50, 'cash_out_rate' => 50],
+            ])->each(fn (array $tier, int $i) => GCashTier::create([...$tier, 'display_order' => $i + 1]));
+        }
 
         // ── Borrowers ──
         $borrowers = collect([

@@ -2,28 +2,22 @@
 
 namespace App\Http\Requests\GCash;
 
-use Illuminate\Foundation\Http\FormRequest;
+use App\Models\GCashNonMember;
+use Illuminate\Validation\Rules\Unique;
 
-class UpdateGCashNonMemberRequest extends FormRequest
+/**
+ * The frontend's edit dialog posts the whole record back, so the rules are the
+ * store rules rather than `sometimes` — a partial update would silently blank
+ * the fields the dialog did not send.
+ */
+class UpdateGCashNonMemberRequest extends StoreGCashNonMemberRequest
 {
-    public function authorize(): bool
+    /** The walk-in being edited may keep its own ID. */
+    protected function uniqueIdRule(): Unique
     {
-        return $this->user()->can('gcash:transact');
-    }
+        /** @var GCashNonMember $nonMember */
+        $nonMember = $this->route('nonMember');
 
-    /**
-     * The frontend's edit dialog posts the whole record back, so these mirror
-     * the store rules rather than being `sometimes` — a partial update would
-     * silently blank the fields the dialog did not send.
-     */
-    public function rules(): array
-    {
-        return [
-            'full_name' => ['required', 'string', 'max:255'],
-            'mobile_number' => ['required', 'string', 'max:32'],
-            'id_type' => ['required', 'string', 'max:64'],
-            'id_number' => ['required', 'string', 'max:64'],
-            'remarks' => ['nullable', 'string', 'max:2000'],
-        ];
+        return parent::uniqueIdRule()->ignore($nonMember->id);
     }
 }
