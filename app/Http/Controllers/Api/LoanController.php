@@ -860,7 +860,7 @@ DESC,
             'borrower', 'loanProduct', 'branch', 'coMakers',
             'approvedByUser', 'releasedByUser', 'rejectedByUser',
             'createdByUser', 'accountOfficer', 'amortizationSchedules',
-            'documents', 'sourceLoan', 'restructuredInto',
+            'documents', 'approvalSteps', 'sourceLoan', 'restructuredInto',
         );
 
         return response()->json([
