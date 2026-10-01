@@ -520,11 +520,36 @@ class LoanAdjustmentService
             $query->whereIn('id', $newValues['schedule_ids']);
         }
 
-        $query->each(function (AmortizationSchedule $schedule) {
-            $schedule->update([
-                'penalty_amount' => 0,
-                'penalty_paid' => 0,
-            ]);
+        $before = [];
+        $after = [];
+
+        // A waiver forgives only the penalty still owed. The charge comes down
+        // to what the borrower has already paid, and `penalty_paid` is never
+        // touched: zeroing it, as this used to, erased penalty that a posted
+        // receipt still carries, so Total Paid dropped and a later void took
+        // the missing penalty out of interest or principal instead.
+        $query->each(function (AmortizationSchedule $schedule) use (&$before, &$after) {
+            $charged = (float) $schedule->penalty_amount;
+            $paid = (float) $schedule->penalty_paid;
+            $owed = round(max(0, $charged - $paid), 2);
+
+            if ($owed > 0) {
+                $schedule->update(['penalty_amount' => $paid]);
+
+                $before[] = [
+                    'schedule_id' => $schedule->id,
+                    'period_number' => $schedule->period_number,
+                    'penalty_amount' => $charged,
+                    'penalty_paid' => $paid,
+                ];
+                $after[] = [
+                    'schedule_id' => $schedule->id,
+                    'period_number' => $schedule->period_number,
+                    'penalty_amount' => $paid,
+                    'penalty_paid' => $paid,
+                    'waived' => $owed,
+                ];
+            }
 
             // Recalculate status if overdue was only due to penalty
             if ($schedule->status === 'overdue') {
@@ -536,6 +561,23 @@ class LoanAdjustmentService
                 }
             }
         });
+
+        // Periods are not audited models, so this row is the only record of
+        // what the waiver forgave on each one, who applied it, and when.
+        $totalWaived = round(array_sum(array_column($after, 'waived')), 2);
+
+        AuditLogService::log(
+            'penalty_waived',
+            $adjustment,
+            ['periods' => $before],
+            ['periods' => $after, 'total_waived' => $totalWaived],
+            sprintf(
+                'Penalty waiver %s forgave ₱%s of unpaid penalty on loan %s.',
+                $adjustment->adjustment_number,
+                number_format($totalWaived, 2),
+                $loan->loan_account_number ?? $loan->application_number,
+            ),
+        );
     }
 
     private function applyBalanceAdjustment(LoanAdjustment $adjustment, Loan $loan): void
