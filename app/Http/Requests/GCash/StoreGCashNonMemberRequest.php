@@ -2,9 +2,8 @@
 
 namespace App\Http\Requests\GCash;
 
+use App\Rules\UniqueWalkInIdNumber;
 use Illuminate\Foundation\Http\FormRequest;
-use Illuminate\Validation\Rule;
-use Illuminate\Validation\Rules\Unique;
 
 class StoreGCashNonMemberRequest extends FormRequest
 {
@@ -24,23 +23,17 @@ class StoreGCashNonMemberRequest extends FormRequest
         ];
     }
 
-    public function messages(): array
+    /** One live walk-in per ID document; see UniqueWalkInIdNumber. */
+    protected function uniqueIdRule(): UniqueWalkInIdNumber
     {
-        return [
-            'id_number.unique' => 'A walk-in with this ID type and ID number is already registered. Search for them instead of adding them again.',
-        ];
+        return new UniqueWalkInIdNumber($this->idType());
     }
 
-    /**
-     * One live walk-in per ID document. A validation rule, not a unique index:
-     * a removed walk-in is soft-deleted and keeps its ID, and it must not stop
-     * the same person being registered again. The comparison follows the
-     * column collation, so it ignores case.
-     */
-    protected function uniqueIdRule(): Unique
+    /** A non-string type already fails `string`; it must not 500 the rule first. */
+    protected function idType(): ?string
     {
-        return Rule::unique('gcash_non_members', 'id_number')
-            ->where('id_type', $this->input('id_type'))
-            ->withoutTrashed();
+        $idType = $this->input('id_type');
+
+        return is_string($idType) ? $idType : null;
     }
 }

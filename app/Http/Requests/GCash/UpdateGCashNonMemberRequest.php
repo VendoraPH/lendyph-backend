@@ -3,7 +3,7 @@
 namespace App\Http\Requests\GCash;
 
 use App\Models\GCashNonMember;
-use Illuminate\Validation\Rules\Unique;
+use App\Rules\UniqueWalkInIdNumber;
 
 /**
  * The frontend's edit dialog posts the whole record back, so the rules are the
@@ -13,11 +13,11 @@ use Illuminate\Validation\Rules\Unique;
 class UpdateGCashNonMemberRequest extends StoreGCashNonMemberRequest
 {
     /** The walk-in being edited may keep its own ID. */
-    protected function uniqueIdRule(): Unique
+    protected function uniqueIdRule(): UniqueWalkInIdNumber
     {
         /** @var GCashNonMember $nonMember */
         $nonMember = $this->route('nonMember');
 
-        return parent::uniqueIdRule()->ignore($nonMember->id);
+        return new UniqueWalkInIdNumber($this->idType(), $nonMember->id);
     }
 }
