@@ -7,6 +7,7 @@ use App\Http\Requests\GCash\StoreGCashNonMemberRequest;
 use App\Http\Requests\GCash\UpdateGCashNonMemberRequest;
 use App\Http\Resources\GCashNonMemberResource;
 use App\Models\GCashNonMember;
+use App\Rules\UniqueWalkInIdNumber;
 use App\Services\AuditLogService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -44,10 +45,19 @@ class GCashNonMemberController extends Controller
             ->withCount('transactions')
             ->when($request->query('search'), function ($q, $term) {
                 $like = '%'.$term.'%';
+                // ID numbers also match normalised, the way the duplicate rule
+                // compares them, so `12345678` finds `1234-5678` and the reverse.
+                // Skipped when nothing is left (a search of `---`), which would
+                // otherwise match every walk-in.
+                $normalised = UniqueWalkInIdNumber::normalise($term);
                 $q->where(fn ($w) => $w
                     ->where('full_name', 'like', $like)
                     ->orWhere('mobile_number', 'like', $like)
-                    ->orWhere('id_number', 'like', $like));
+                    ->orWhere('id_number', 'like', $like)
+                    ->when($normalised !== '', fn ($w) => $w->orWhereRaw(
+                        UniqueWalkInIdNumber::NORMALISED_COLUMN.' LIKE ?',
+                        ['%'.$normalised.'%'],
+                    )));
             })
             ->orderBy('full_name')
             // Tiebreak on the key: walk-ins share names, and the picker drains

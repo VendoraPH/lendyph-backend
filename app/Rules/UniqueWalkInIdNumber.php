@@ -17,11 +17,18 @@ use Illuminate\Contracts\Validation\ValidationRule;
  * only the comparison is normalised. The ID type is compared as-is (the column
  * collation already ignores its case), so the same number under a different
  * type is a different document.
+ *
+ * An ID number with nothing left once normalised (only spaces or dashes, such
+ * as `---`) is refused here too: it names no document, and it would otherwise
+ * match every other such ID as a duplicate.
  */
 class UniqueWalkInIdNumber implements ValidationRule
 {
-    /** SQL twin of normalise(); the two must strip the same characters. */
-    private const NORMALISED_COLUMN = "UPPER(REPLACE(REPLACE(id_number, ' ', ''), '-', ''))";
+    /**
+     * SQL twin of normalise(); the two must strip the same characters. Public
+     * so the walk-in search matches ID numbers the same way.
+     */
+    public const NORMALISED_COLUMN = "UPPER(REPLACE(REPLACE(id_number, ' ', ''), '-', ''))";
 
     public function __construct(
         private readonly ?string $idType,
@@ -39,9 +46,17 @@ class UniqueWalkInIdNumber implements ValidationRule
             return;
         }
 
+        $normalised = self::normalise($value);
+
+        if ($normalised === '') {
+            $fail('The ID number must contain letters or numbers, not only dashes or spaces.');
+
+            return;
+        }
+
         $taken = GCashNonMember::query()
             ->where('id_type', $this->idType)
-            ->whereRaw(self::NORMALISED_COLUMN.' = ?', [self::normalise($value)])
+            ->whereRaw(self::NORMALISED_COLUMN.' = ?', [$normalised])
             ->when($this->ignoreId, fn ($query, int $id) => $query->whereKeyNot($id))
             ->exists();
 
