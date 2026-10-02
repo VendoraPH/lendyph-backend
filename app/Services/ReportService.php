@@ -9,6 +9,7 @@ use App\Models\Repayment;
 use App\Models\ShareCapitalLedger;
 use Carbon\Carbon;
 use Closure;
+use DateTimeInterface;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Query\Builder as QueryBuilder;
@@ -206,8 +207,8 @@ class ReportService
     {
         return Loan::query()
             ->whereIn('status', Loan::EVER_RELEASED_STATUSES)
-            ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->whereDate('released_at', '>=', $d))
-            ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->whereDate('released_at', '<=', $d))
+            ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->where('released_at', '>=', self::dayStart($d)))
+            ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->where('released_at', '<', self::nextDayStart($d)))
             ->when($filters['branch_id'] ?? null, fn ($q, $b) => $q->where('branch_id', $b))
             ->when($filters['status'] ?? null, fn ($q, $s) => $q->where('status', $s))
             ->latest('released_at')
@@ -273,8 +274,8 @@ class ReportService
     {
         return Repayment::query()
             ->where('status', $filters['status'] ?? 'posted')
-            ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->whereDate('payment_date', '>=', $d))
-            ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->whereDate('payment_date', '<=', $d))
+            ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->where('payment_date', '>=', self::filterDay($d)))
+            ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->where('payment_date', '<=', self::filterDay($d)))
             ->when($filters['loan_id'] ?? null, fn ($q, $l) => $q->where('loan_id', $l))
             ->when($filters['branch_id'] ?? null, fn ($q, $b) => $q->whereHas('loan', fn ($lq) => $lq->where('branch_id', $b)))
             ->latest('payment_date')
@@ -440,8 +441,8 @@ class ReportService
         $query = Loan::query()
             ->whereIn('status', Loan::EVER_RELEASED_STATUSES)
             ->when($filters['branch_id'] ?? null, fn ($q, $b) => $q->where('branch_id', $b))
-            ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->whereDate('released_at', '>=', $d))
-            ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->whereDate('released_at', '<=', $d));
+            ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->where('released_at', '>=', self::dayStart($d)))
+            ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->where('released_at', '<', self::nextDayStart($d)));
 
         $loanIds = (clone $query)->select('loans.id');
 
@@ -558,8 +559,8 @@ class ReportService
             ->leftJoinSub($scheduleTotals, 'schedule_totals', 'schedule_totals.loan_id', '=', 'loans.id')
             ->whereIn('loans.status', Loan::EVER_RELEASED_STATUSES)
             ->when($filters['branch_id'] ?? null, fn ($q, $b) => $q->where('loans.branch_id', $b))
-            ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->whereDate('loans.released_at', '>=', $d))
-            ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->whereDate('loans.released_at', '<=', $d))
+            ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->where('loans.released_at', '>=', self::dayStart($d)))
+            ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->where('loans.released_at', '<', self::nextDayStart($d)))
             ->groupBy('branches.id', 'branches.name')
             ->selectRaw('
                 branches.id as branch_id,
@@ -637,8 +638,8 @@ class ReportService
             ->whereIn('loans.status', Loan::EVER_RELEASED_STATUSES)
             ->when($branchId, fn ($q, $b) => $q->where('loans.branch_id', $b))
             ->when($filters['loan_id'] ?? null, fn ($q, $l) => $q->where('loans.id', $l))
-            ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->whereDate('loans.released_at', '>=', $d))
-            ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->whereDate('loans.released_at', '<=', $d))
+            ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->where('loans.released_at', '>=', self::dayStart($d)))
+            ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->where('loans.released_at', '<', self::nextDayStart($d)))
             ->selectRaw('SUM(loan_products.processing_fee / 100 * loans.principal_amount) as total')
             ->value('total') ?? 0;
 
@@ -839,8 +840,8 @@ class ReportService
 
         $newBorrowers = Borrower::query()
             ->when($branchId, fn ($q, $b) => $q->where('branch_id', $b))
-            ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->whereDate('created_at', '>=', $d))
-            ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->whereDate('created_at', '<=', $d))
+            ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->where('created_at', '>=', self::dayStart($d)))
+            ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->where('created_at', '<', self::nextDayStart($d)))
             ->count();
 
         $avgLoanSize = (float) Loan::whereIn('status', Loan::EVER_RELEASED_STATUSES)
@@ -950,8 +951,8 @@ class ReportService
     public function disbursementReport(array $filters): array
     {
         $query = Loan::whereIn('status', Loan::EVER_RELEASED_STATUSES)
-            ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->whereDate('released_at', '>=', $d))
-            ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->whereDate('released_at', '<=', $d))
+            ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->where('released_at', '>=', self::dayStart($d)))
+            ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->where('released_at', '<', self::nextDayStart($d)))
             ->when($filters['branch_id'] ?? null, fn ($q, $b) => $q->where('branch_id', $b));
 
         $loansReleased = (clone $query)->count();
@@ -1026,8 +1027,8 @@ class ReportService
 
         $release = Loan::query()
             ->whereIn('status', Loan::EVER_RELEASED_STATUSES)
-            ->whereDate('released_at', '>=', $fromDate)
-            ->whereDate('released_at', '<=', $toDate)
+            ->where('released_at', '>=', self::dayStart($fromDate))
+            ->where('released_at', '<', self::nextDayStart($toDate))
             ->when($branchId, fn ($q, $b) => $q->where('branch_id', $b))
             ->selectRaw('
                 COUNT(*) as loan_count,
@@ -1151,8 +1152,8 @@ class ReportService
             ->join('branches', 'branches.id', '=', 'loans.branch_id')
             ->whereIn('loans.status', Loan::EVER_RELEASED_STATUSES)
             ->when($branchId, fn ($q, $b) => $q->where('loans.branch_id', $b))
-            ->whereDate('loans.released_at', '>=', $fromDate)
-            ->whereDate('loans.released_at', '<=', $toDate)
+            ->where('loans.released_at', '>=', self::dayStart($fromDate))
+            ->where('loans.released_at', '<', self::nextDayStart($toDate))
             ->groupBy('branches.id', 'branches.name')
             ->selectRaw('
                 branches.id as branch_id,
@@ -1397,8 +1398,8 @@ class ReportService
             )
             ->whereIn('loans.status', Loan::EVER_RELEASED_STATUSES)
             ->when($filters['branch_id'] ?? null, fn ($q, $b) => $q->where('loans.branch_id', $b))
-            ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->whereDate('loans.released_at', '>=', $d))
-            ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->whereDate('loans.released_at', '<=', $d))
+            ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->where('loans.released_at', '>=', self::dayStart($d)))
+            ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->where('loans.released_at', '<', self::nextDayStart($d)))
             ->groupBy('loan_products.id', 'loan_products.name')
             ->selectRaw('
                 loan_products.id as product_id,
@@ -1527,8 +1528,8 @@ class ReportService
 
         $collectedInPeriod = DB::table('repayments')
             ->where('status', 'posted')
-            ->when($dateFrom, fn ($q, $d) => $q->whereDate('payment_date', '>=', $d))
-            ->when($dateTo, fn ($q, $d) => $q->whereDate('payment_date', '<=', $d))
+            ->when($dateFrom, fn ($q, $d) => $q->where('payment_date', '>=', self::filterDay($d)))
+            ->when($dateTo, fn ($q, $d) => $q->where('payment_date', '<=', self::filterDay($d)))
             ->groupBy('loan_id')
             ->selectRaw('loan_id, COALESCE(SUM(amount_paid), 0) as collected, COUNT(*) as payment_count');
 
@@ -1711,13 +1712,13 @@ class ReportService
             ));
 
         $opening = $fromDate === null ? 0.0 : round((float) $ledger()
-            ->whereDate('date', '<', $fromDate)
+            ->where('date', '<', $fromDate)
             ->selectRaw('COALESCE(SUM(credit) - SUM(debit), 0) as balance')
             ->value('balance'), 2);
 
         $period = $ledger()
-            ->when($fromDate, fn ($q, $d) => $q->whereDate('date', '>=', $d))
-            ->whereDate('date', '<=', $toDate)
+            ->when($fromDate, fn ($q, $d) => $q->where('date', '>=', self::filterDay($d)))
+            ->where('date', '<=', $toDate)
             ->selectRaw('
                 COUNT(*) as entry_count,
                 COUNT(DISTINCT borrower_id) as members_with_activity,
@@ -1841,7 +1842,7 @@ class ReportService
         return DB::table('share_capital_ledger')
             ->join('borrowers', 'borrowers.id', '=', 'share_capital_ledger.borrower_id')
             ->when($branchId, fn ($q, $b) => $q->where('borrowers.branch_id', $b))
-            ->whereDate('share_capital_ledger.date', '<=', $toDate)
+            ->where('share_capital_ledger.date', '<=', $toDate)
             ->groupBy(
                 'borrowers.id',
                 'borrowers.borrower_code',
@@ -1897,8 +1898,8 @@ class ReportService
                 'share_capital_ledger.borrower_id',
                 DB::table('borrowers')->where('branch_id', $b)->select('id'),
             ))
-            ->when($fromDate, fn ($q, $d) => $q->whereDate('date', '>=', $d))
-            ->whereDate('date', '<=', $toDate)
+            ->when($fromDate, fn ($q, $d) => $q->where('date', '>=', self::filterDay($d)))
+            ->where('date', '<=', $toDate)
             ->groupByRaw("DATE_FORMAT(date, '%Y-%m')")
             ->selectRaw("
                 DATE_FORMAT(date, '%Y-%m') as period,
@@ -1951,15 +1952,15 @@ class ReportService
 
         $opening = $fromDate === null ? 0.0 : round((float) DB::table('share_capital_ledger')
             ->where('borrower_id', $borrower->getKey())
-            ->whereDate('date', '<', $fromDate)
+            ->where('date', '<', $fromDate)
             ->selectRaw('COALESCE(SUM(credit) - SUM(debit), 0) as balance')
             ->value('balance'), 2);
 
         $rows = ShareCapitalLedger::query()
             ->with('createdByUser')
             ->where('borrower_id', $borrower->getKey())
-            ->when($fromDate, fn ($q, $d) => $q->whereDate('date', '>=', $d))
-            ->whereDate('date', '<=', $toDate)
+            ->when($fromDate, fn ($q, $d) => $q->where('date', '>=', self::filterDay($d)))
+            ->where('date', '<=', $toDate)
             ->orderBy('date')
             ->orderBy('id')
             ->get();
@@ -2128,6 +2129,43 @@ class ReportService
     }
 
     // ── Filter resolution ────────────────────────────────────────────────
+
+    /**
+     * A report date filter's day as `Y-m-d`, the form whereDate() compares a
+     * date against. ReportController::reportFilters() has already validated
+     * it as a date.
+     *
+     * The date filters below compare columns to this directly instead of
+     * wrapping them in DATE(), which stops an index serving the range. On a
+     * DATE column (`payment_date`, `share_capital_ledger.date`) the plain
+     * comparison is the same comparison. On a DATETIME/TIMESTAMP column
+     * (`released_at`, `created_at`) dayStart() and nextDayStart() turn it into
+     * the same whole-day range.
+     */
+    private static function filterDay(string|DateTimeInterface $date): string
+    {
+        return Carbon::parse($date)->toDateString();
+    }
+
+    /**
+     * Midnight at the start of the day, for a DATETIME/TIMESTAMP column:
+     * `col >= dayStart(D)` selects what whereDate(col, '>=', D) did, and
+     * `col < dayStart(D)` what whereDate(col, '<', D) did.
+     */
+    private static function dayStart(string|DateTimeInterface $date): string
+    {
+        return self::filterDay($date).' 00:00:00';
+    }
+
+    /**
+     * Midnight at the start of the NEXT day, for a DATETIME/TIMESTAMP column:
+     * `col < nextDayStart(D)` selects what whereDate(col, '<=', D) did, every
+     * moment of D up to and including 23:59:59.
+     */
+    private static function nextDayStart(string|DateTimeInterface $date): string
+    {
+        return Carbon::parse(self::filterDay($date))->addDay()->toDateString().' 00:00:00';
+    }
 
     /**
      * The date a point-in-time report is run "as of".
