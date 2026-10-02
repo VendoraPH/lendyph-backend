@@ -79,7 +79,10 @@ return new class extends Migration
 
     public function down(): void
     {
-        $permIds = DB::table('permissions')->whereIn('name', self::PERMISSIONS)->pluck('id');
+        $permIds = DB::table('permissions')
+            ->where('guard_name', 'web')
+            ->whereIn('name', self::PERMISSIONS)
+            ->pluck('id');
 
         DB::table('role_has_permissions')->whereIn('permission_id', $permIds)->delete();
         DB::table('permissions')->whereIn('id', $permIds)->delete();

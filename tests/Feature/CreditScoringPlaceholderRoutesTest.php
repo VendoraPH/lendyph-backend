@@ -105,11 +105,11 @@ it('answers 403 to a caller whose role holds only the other credit scoring permi
         ->assertForbidden();
 })->with('credit scoring placeholder endpoints');
 
-it('answers 501 to the seeded admin role', function (string $method, string $uri) {
-    $this->actingAs(creditScoringCallerInRole('admin'))
+it('answers 501 to the seeded admin and super_admin roles', function (string $roleName, string $method, string $uri) {
+    $this->actingAs(creditScoringCallerInRole($roleName))
         ->json($method, $uri)
         ->assertStatus(501);
-})->with('credit scoring placeholder endpoints');
+})->with(['admin', 'super_admin'])->with('credit scoring placeholder endpoints');
 
 /**
  * One user per role, so each request is made by the role it names. Every
