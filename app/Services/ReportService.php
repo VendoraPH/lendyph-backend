@@ -406,6 +406,7 @@ class ReportService
             COALESCE(SUM(interest_due), 0) as total_interest_due,
             COALESCE(SUM(penalty_amount), 0) as total_penalty,
             COALESCE(SUM(total_due), 0) as total_due,
+            COALESCE(SUM(principal_paid + interest_paid), 0) as total_paid,
             COALESCE(SUM('.AmortizationSchedule::remainingTotalSql().'), 0) as total_balance
         ')->first();
 
@@ -427,6 +428,10 @@ class ReportService
             'total_interest_due' => round((float) ($agg->total_interest_due ?? 0), 2),
             'total_penalty' => round((float) ($agg->total_penalty ?? 0), 2),
             'total_due' => round((float) ($agg->total_due ?? 0), 2),
+            // The rows' Paid column: principal and interest paid, the two parts
+            // `total_due` is made of. Penalty paid is not in it, as it is not
+            // in any row's figure.
+            'total_paid' => round((float) ($agg->total_paid ?? 0), 2),
             'total_balance' => round((float) ($agg->total_balance ?? 0), 2),
         ];
     }
@@ -643,13 +648,18 @@ class ReportService
             ->selectRaw('SUM(loan_products.processing_fee / 100 * loans.principal_amount) as total')
             ->value('total') ?? 0;
 
-        $total = $interestIncome + $processingFees + $penaltyIncome;
+        $interestIncome = round($interestIncome, 2);
+        $processingFees = round($processingFees, 2);
+        $penaltyIncome = round($penaltyIncome, 2);
 
         return [
-            'interest_income' => round($interestIncome, 2),
-            'processing_fees' => round($processingFees, 2),
-            'penalty_income' => round($penaltyIncome, 2),
-            'total' => round($total, 2),
+            'interest_income' => $interestIncome,
+            'processing_fees' => $processingFees,
+            'penalty_income' => $penaltyIncome,
+            // The three figures above, already rounded, added up: Total Income
+            // is what a reader adds up from the report, never a centavo off it
+            // because the unrounded fees were rounded only once, at the end.
+            'total' => round($interestIncome + $processingFees + $penaltyIncome, 2),
             'generated_at' => now()->toDateTimeString(),
         ];
     }
