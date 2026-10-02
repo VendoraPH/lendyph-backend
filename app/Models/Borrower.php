@@ -216,7 +216,8 @@ class Borrower extends Model
     }
 
     /**
-     * Free-text borrower lookup: code, any name part, contact number or email.
+     * Free-text borrower lookup: code, any name part, the full name, contact
+     * number or email.
      *
      * `email` is included because the Members screen searches it. That screen
      * filtered client-side over one page of results; moving it server-side
@@ -225,14 +226,21 @@ class Borrower extends Model
     public function scopeSearch($query, string $term)
     {
         $like = LikePattern::contains($term);
+        // A whole name typed with spaces ("Maria Dela Cruz") lives in no single
+        // column, so it is also matched against the name as shown (suffix
+        // included) and against first + last name. Runs of spaces in the term
+        // collapse to one. NULLIF: CONCAT_WS skips a NULL but not an empty part.
+        $nameLike = LikePattern::contains(preg_replace('/\s+/', ' ', trim($term)));
 
-        return $query->where(function ($q) use ($like) {
+        return $query->where(function ($q) use ($like, $nameLike) {
             $q->where('borrower_code', 'like', $like)
                 ->orWhere('first_name', 'like', $like)
                 ->orWhere('middle_name', 'like', $like)
                 ->orWhere('last_name', 'like', $like)
                 ->orWhere('contact_number', 'like', $like)
-                ->orWhere('email', 'like', $like);
+                ->orWhere('email', 'like', $like)
+                ->orWhereRaw("CONCAT_WS(' ', first_name, NULLIF(middle_name, ''), last_name, NULLIF(suffix, '')) LIKE ?", [$nameLike])
+                ->orWhereRaw("CONCAT_WS(' ', first_name, last_name) LIKE ?", [$nameLike]);
         });
     }
 }
