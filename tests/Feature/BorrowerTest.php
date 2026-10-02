@@ -113,6 +113,24 @@ class BorrowerTest extends TestCase
             ->assertJsonCount(1, 'data')
             ->assertJsonPath('data.0.id', $noMiddle->id);
 
+        // The name as shown includes the suffix.
+        $suffixed = Borrower::factory()->create([
+            'branch_id' => $this->branch->id,
+            'first_name' => 'Andres',
+            'middle_name' => null,
+            'last_name' => 'Bonifacio',
+            'suffix' => 'Jr',
+        ]);
+        $this->getJson('/api/borrowers?search='.urlencode('Andres Bonifacio Jr'))
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.id', $suffixed->id);
+
+        // LIKE wildcards in a spaced term still match only themselves.
+        $this->getJson('/api/borrowers?search='.urlencode('Maria %'))
+            ->assertOk()
+            ->assertJsonCount(0, 'data');
+
         // Words that belong to two different borrowers match neither.
         $this->getJson('/api/borrowers?search='.urlencode('Maria Rizal'))
             ->assertOk()

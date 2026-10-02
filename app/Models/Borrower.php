@@ -227,9 +227,9 @@ class Borrower extends Model
     {
         $like = LikePattern::contains($term);
         // A whole name typed with spaces ("Maria Dela Cruz") lives in no single
-        // column, so it is also matched against the name as shown, with and
-        // without the middle name. Runs of spaces in the term collapse to one.
-        // NULLIF: CONCAT_WS skips a NULL but not an empty middle name.
+        // column, so it is also matched against the name as shown (suffix
+        // included) and against first + last name. Runs of spaces in the term
+        // collapse to one. NULLIF: CONCAT_WS skips a NULL but not an empty part.
         $nameLike = LikePattern::contains(preg_replace('/\s+/', ' ', trim($term)));
 
         return $query->where(function ($q) use ($like, $nameLike) {
@@ -239,7 +239,7 @@ class Borrower extends Model
                 ->orWhere('last_name', 'like', $like)
                 ->orWhere('contact_number', 'like', $like)
                 ->orWhere('email', 'like', $like)
-                ->orWhereRaw("CONCAT_WS(' ', first_name, NULLIF(middle_name, ''), last_name) LIKE ?", [$nameLike])
+                ->orWhereRaw("CONCAT_WS(' ', first_name, NULLIF(middle_name, ''), last_name, NULLIF(suffix, '')) LIKE ?", [$nameLike])
                 ->orWhereRaw("CONCAT_WS(' ', first_name, last_name) LIKE ?", [$nameLike]);
         });
     }
