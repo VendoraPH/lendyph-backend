@@ -74,6 +74,51 @@ class BorrowerTest extends TestCase
             ->assertJsonPath('data.0.id', $juan->id);
     }
 
+    public function test_search_matches_a_full_name_across_the_name_columns(): void
+    {
+        $maria = Borrower::factory()->create([
+            'branch_id' => $this->branch->id,
+            'first_name' => 'Maria',
+            'middle_name' => 'Santos',
+            'last_name' => 'Dela Cruz',
+            'suffix' => null,
+        ]);
+        $noMiddle = Borrower::factory()->create([
+            'branch_id' => $this->branch->id,
+            'first_name' => 'Jose',
+            'middle_name' => '',
+            'last_name' => 'Rizal',
+            'suffix' => null,
+        ]);
+        Borrower::factory()->create([
+            'branch_id' => $this->branch->id,
+            'first_name' => 'Maria',
+            'middle_name' => null,
+            'last_name' => 'Clara',
+            'suffix' => null,
+        ]);
+
+        // Typed the way the name is shown, with or without the middle name,
+        // in any case and with stray spaces.
+        foreach (['Maria Dela Cruz', 'maria santos dela cruz', '  Maria   Dela  Cruz ', 'ria Dela Cr'] as $term) {
+            $this->getJson('/api/borrowers?search='.urlencode($term))
+                ->assertOk()
+                ->assertJsonCount(1, 'data')
+                ->assertJsonPath('data.0.id', $maria->id);
+        }
+
+        // An empty middle name is not a NULL one; the name still matches.
+        $this->getJson('/api/borrowers?search='.urlencode('Jose Rizal'))
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.id', $noMiddle->id);
+
+        // Words that belong to two different borrowers match neither.
+        $this->getJson('/api/borrowers?search='.urlencode('Maria Rizal'))
+            ->assertOk()
+            ->assertJsonCount(0, 'data');
+    }
+
     public function test_update_borrower(): void
     {
         $borrower = Borrower::factory()->create(['branch_id' => $this->branch->id]);
