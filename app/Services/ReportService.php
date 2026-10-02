@@ -617,14 +617,17 @@ class ReportService
         ];
     }
 
+    /**
+     * Interest and penalty collected in the period, plus processing fees on
+     * the loans released in it. `branch_id` and `loan_id` narrow every figure:
+     * the repayments through incomeRepaymentsQuery(), the fees by the loan
+     * they were charged on.
+     */
     public function incomeReport(array $filters): array
     {
         $branchId = $filters['branch_id'] ?? null;
 
-        $query = Repayment::where('status', 'posted')
-            ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->whereDate('payment_date', '>=', $d))
-            ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->whereDate('payment_date', '<=', $d))
-            ->when($branchId, fn ($q, $b) => $q->whereHas('loan', fn ($lq) => $lq->where('branch_id', $b)));
+        $query = $this->incomeRepaymentsQuery($filters);
 
         $interestIncome = (float) (clone $query)->sum('interest_applied');
         $penaltyIncome = (float) (clone $query)->sum('penalty_applied');
@@ -633,6 +636,7 @@ class ReportService
             ->join('loan_products', 'loans.loan_product_id', '=', 'loan_products.id')
             ->whereIn('loans.status', Loan::EVER_RELEASED_STATUSES)
             ->when($branchId, fn ($q, $b) => $q->where('loans.branch_id', $b))
+            ->when($filters['loan_id'] ?? null, fn ($q, $l) => $q->where('loans.id', $l))
             ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->whereDate('loans.released_at', '>=', $d))
             ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->whereDate('loans.released_at', '<=', $d))
             ->selectRaw('SUM(loan_products.processing_fee / 100 * loans.principal_amount) as total')
@@ -653,16 +657,15 @@ class ReportService
 
     /**
      * The repayments incomeReport() sums: posted, paid inside the period, on a
-     * loan of the branch.
+     * loan of the branch, and on the one loan when `loan_id` is given.
      *
-     * Built on repaymentsQuery() so a loan's row can never be filtered
-     * differently from the List of Repayments totals. `status` is pinned to
-     * posted and `loan_id` dropped because the Income report has neither
-     * filter; with them gone the two queries select the same rows.
+     * Built on repaymentsQuery() so the Income report, Income by Loan and the
+     * List of Repayments totals can never filter the same request differently.
+     * `status` is pinned to posted because income is never a voided receipt.
      */
     private function incomeRepaymentsQuery(array $filters): Builder
     {
-        return $this->repaymentsQuery(array_merge($filters, ['status' => 'posted', 'loan_id' => null]))
+        return $this->repaymentsQuery(array_merge($filters, ['status' => 'posted']))
             ->reorder();
     }
 
