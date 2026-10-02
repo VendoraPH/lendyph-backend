@@ -4,6 +4,8 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Api\Traits\CsvExportTrait;
 use App\Http\Controllers\Controller;
+use App\Http\Resources\BorrowerReleasedResource;
+use App\Http\Resources\IncomeByLoanResource;
 use App\Http\Resources\LoanResource;
 use App\Http\Resources\RepaymentResource;
 use App\Models\AmortizationSchedule;
@@ -419,6 +421,48 @@ class ReportController extends Controller
     }
 
     #[OA\Get(
+        path: '/api/reports/income/by-loan',
+        summary: 'Income by loan account',
+        description: 'The posted repayments GET /api/reports/income sums, grouped by loan: one row per loan, ordered by '
+            .'`total_income` desc then `loan_id` asc, paginated over loans (`meta.total` counts loans). `totals` covers the '
+            .'whole filtered set: its `interest_income` / `penalty_income` equal the Income report\'s, and `payments` equals '
+            .'the List of Repayments `totals.count`, for the same filters. Processing fees are not included.',
+        tags: ['Reports'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer', minimum: 1)),
+            new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15, maximum: 1000, minimum: 1)),
+        ],
+        responses: [
+            new OA\Response(response: 200, description: 'Paginated per-loan income rows with totals', content: new OA\JsonContent(properties: [
+                new OA\Property(property: 'data', type: 'array', items: new OA\Items(ref: '#/components/schemas/IncomeByLoanRow')),
+                new OA\Property(property: 'links', type: 'object'),
+                new OA\Property(property: 'meta', type: 'object'),
+                new OA\Property(property: 'totals', type: 'object', properties: [
+                    new OA\Property(property: 'count', type: 'integer', description: 'Loans over the whole filtered set; equals `meta.total`.'),
+                    new OA\Property(property: 'payments', type: 'integer'),
+                    new OA\Property(property: 'interest_income', type: 'number'),
+                    new OA\Property(property: 'penalty_income', type: 'number'),
+                    new OA\Property(property: 'total_income', type: 'number'),
+                ]),
+            ])),
+            new OA\Response(response: 403, description: 'Missing reports:view'),
+            new OA\Response(response: 422, description: 'Validation error'),
+        ],
+    )]
+    public function incomeByLoan(): AnonymousResourceCollection
+    {
+        $this->authorize('reports:view');
+
+        $filters = $this->reportFilters();
+
+        return IncomeByLoanResource::collection($this->reportService->incomeByLoan($filters))
+            ->additional(['totals' => $this->reportService->incomeByLoanTotals($filters)]);
+    }
+
+    #[OA\Get(
         path: '/api/reports/aging',
         summary: 'Aging report',
         tags: ['Reports'],
@@ -454,6 +498,46 @@ class ReportController extends Controller
         $this->authorize('reports:view');
 
         return response()->json(['data' => $this->reportService->borrowerReport($this->reportFilters())]);
+    }
+
+    #[OA\Get(
+        path: '/api/reports/borrowers/released',
+        summary: 'Borrowers with loans released',
+        description: 'The loans GET /api/reports/releases lists, grouped by borrower: one row per borrower, ordered by the '
+            .'borrower\'s name as displayed then `borrower_id` asc, paginated over borrowers (`meta.total` counts '
+            .'borrowers). `totals` covers the whole filtered set: its `loan_count` and `total_principal` equal the List of '
+            .'Releases `totals.count` and `totals.total_principal` for the same filters.',
+        tags: ['Reports'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer', minimum: 1)),
+            new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15, maximum: 1000, minimum: 1)),
+        ],
+        responses: [
+            new OA\Response(response: 200, description: 'Paginated per-borrower release rows with totals', content: new OA\JsonContent(properties: [
+                new OA\Property(property: 'data', type: 'array', items: new OA\Items(ref: '#/components/schemas/BorrowerReleasedRow')),
+                new OA\Property(property: 'links', type: 'object'),
+                new OA\Property(property: 'meta', type: 'object'),
+                new OA\Property(property: 'totals', type: 'object', properties: [
+                    new OA\Property(property: 'count', type: 'integer', description: 'Borrowers over the whole filtered set; equals `meta.total`.'),
+                    new OA\Property(property: 'loan_count', type: 'integer'),
+                    new OA\Property(property: 'total_principal', type: 'number'),
+                ]),
+            ])),
+            new OA\Response(response: 403, description: 'Missing reports:view'),
+            new OA\Response(response: 422, description: 'Validation error'),
+        ],
+    )]
+    public function borrowersReleased(): AnonymousResourceCollection
+    {
+        $this->authorize('reports:view');
+
+        $filters = $this->reportFilters();
+
+        return BorrowerReleasedResource::collection($this->reportService->borrowersReleased($filters))
+            ->additional(['totals' => $this->reportService->borrowersReleasedTotals($filters)]);
     }
 
     #[OA\Get(
