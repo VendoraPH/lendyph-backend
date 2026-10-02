@@ -115,7 +115,7 @@ class StaffListTest extends TestCase
 
     public function test_a_role_holding_only_loans_update_can_list_staff(): void
     {
-        $processor = $this->userWithRole('loan_processor');
+        $processor = $this->userWithOnlyPermissions('loans:update');
 
         $this->assertTrue($processor->can('loans:update'));
         $this->assertFalse($processor->can('loans:create'));

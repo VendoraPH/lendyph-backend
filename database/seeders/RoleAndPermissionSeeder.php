@@ -331,6 +331,17 @@ class RoleAndPermissionSeeder extends Seeder
                 // not extended to the BOD roles: signing authority comes from
                 // holding the role named on the step, not from a permission.
                 $roleName === 'loan_processor' ? ['loans:update'] : [],
+                // loan_processor also prepares the application itself: it
+                // creates the loan and reads what the new-loan form shows.
+                // Mirrors 2026_10_03_100000_grant_loan_processor_loan_creation_permissions,
+                // which grants the same five on already-migrated deployments.
+                $roleName === 'loan_processor' ? [
+                    'loans:create',
+                    'borrowers:view',
+                    'fees:view',
+                    'collaterals:view',
+                    'share_capital:view',
+                ] : [],
                 $roleName === 'manager' ? $managerAccountingPermissions : [],
             ));
         }
