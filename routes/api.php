@@ -286,8 +286,10 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
         Route::get('/loan-balance-summary', [ReportController::class, 'loanBalanceSummary']);
         Route::get('/daily-collection', [ReportController::class, 'dailyCollection']);
         Route::get('/income', [ReportController::class, 'incomeReport']);
+        Route::get('/income/by-loan', [ReportController::class, 'incomeByLoan']);
         Route::get('/aging', [ReportController::class, 'agingReport']);
         Route::get('/borrowers', [ReportController::class, 'borrowerReport']);
+        Route::get('/borrowers/released', [ReportController::class, 'borrowersReleased']);
         Route::get('/disbursements', [ReportController::class, 'disbursementReport']);
 
         // Financial reports (Part B)

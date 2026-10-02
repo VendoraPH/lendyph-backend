@@ -35,6 +35,12 @@ class ReportService
     private const RATE_SCALE = 4;
 
     /**
+     * Borrower::full_name in SQL: first, middle, last and suffix, empty parts
+     * dropped (the same expression CollateralRegister orders its groups by).
+     */
+    private const BORROWER_NAME_SQL = "CONCAT_WS(' ', NULLIF(borrowers.first_name, ''), NULLIF(borrowers.middle_name, ''), NULLIF(borrowers.last_name, ''), NULLIF(borrowers.suffix, ''))";
+
+    /**
      * Loan-loss provision rate per aging bucket, keyed exactly as
      * {@see self::agingReport()} keys its buckets.
      *
@@ -643,6 +649,87 @@ class ReportService
         ];
     }
 
+    // ── Income by Loan Account ───────────────────────────────────────────
+
+    /**
+     * The repayments incomeReport() sums: posted, paid inside the period, on a
+     * loan of the branch.
+     *
+     * Built on repaymentsQuery() so a loan's row can never be filtered
+     * differently from the List of Repayments totals. `status` is pinned to
+     * posted and `loan_id` dropped because the Income report has neither
+     * filter; with them gone the two queries select the same rows.
+     */
+    private function incomeRepaymentsQuery(array $filters): Builder
+    {
+        return $this->repaymentsQuery(array_merge($filters, ['status' => 'posted', 'loan_id' => null]))
+            ->reorder();
+    }
+
+    /**
+     * One page of loans, each with the interest and penalty its posted
+     * repayments brought in during the period.
+     *
+     * The repayments are grouped in a derived table and joined to `loans`, so
+     * the outer query is ungrouped and the paginator counts LOANS, not
+     * repayments. Ordered by `total_income` desc, then loan id, a total order
+     * so walking the pages never repeats or skips a loan. Each Loan carries
+     * `payments`, `interest_income`, `penalty_income` and `total_income` as
+     * the database summed them, plus its borrower.
+     */
+    public function incomeByLoan(array $filters): LengthAwarePaginator
+    {
+        $perLoan = $this->incomeRepaymentsQuery($filters)
+            ->select('repayments.loan_id')
+            ->selectRaw('COUNT(*) as payments')
+            ->selectRaw('COALESCE(SUM(repayments.interest_applied), 0) as interest_income')
+            ->selectRaw('COALESCE(SUM(repayments.penalty_applied), 0) as penalty_income')
+            ->selectRaw('COALESCE(SUM(repayments.interest_applied), 0) + COALESCE(SUM(repayments.penalty_applied), 0) as total_income')
+            ->groupBy('repayments.loan_id');
+
+        return Loan::query()
+            ->joinSub($perLoan, 'per_loan', 'per_loan.loan_id', '=', 'loans.id')
+            ->select([
+                'loans.id',
+                'loans.loan_account_number',
+                'loans.borrower_id',
+                'per_loan.payments',
+                'per_loan.interest_income',
+                'per_loan.penalty_income',
+                'per_loan.total_income',
+            ])
+            ->with('borrower:id,first_name,middle_name,last_name,suffix')
+            ->orderByDesc('per_loan.total_income')
+            ->orderBy('loans.id')
+            ->paginate($filters['per_page'] ?? 15);
+    }
+
+    /**
+     * Totals over the WHOLE filtered set. `interest_income` and
+     * `penalty_income` are the same sums incomeReport() returns, and
+     * `payments` is the List of Repayments `count`, for the same filters.
+     *
+     * @return array{count: int, payments: int, interest_income: float, penalty_income: float, total_income: float}
+     */
+    public function incomeByLoanTotals(array $filters): array
+    {
+        $agg = $this->incomeRepaymentsQuery($filters)->toBase()->selectRaw('
+            COUNT(DISTINCT repayments.loan_id) as loan_count,
+            COUNT(*) as payment_count,
+            COALESCE(SUM(repayments.interest_applied), 0) as interest_income,
+            COALESCE(SUM(repayments.penalty_applied), 0) as penalty_income,
+            COALESCE(SUM(repayments.interest_applied), 0) + COALESCE(SUM(repayments.penalty_applied), 0) as total_income
+        ')->first();
+
+        return [
+            'count' => (int) ($agg->loan_count ?? 0),
+            'payments' => (int) ($agg->payment_count ?? 0),
+            'interest_income' => round((float) ($agg->interest_income ?? 0), 2),
+            'penalty_income' => round((float) ($agg->penalty_income ?? 0), 2),
+            'total_income' => round((float) ($agg->total_income ?? 0), 2),
+        ];
+    }
+
     // ── Aging ────────────────────────────────────────────────────────────
 
     public function agingReport(array $filters): array
@@ -766,6 +853,95 @@ class ReportService
             'repeat_borrowers' => $repeatBorrowers,
             'generated_at' => now()->toDateTimeString(),
         ];
+    }
+
+    // ── Borrowers with Loans Released ────────────────────────────────────
+
+    /**
+     * One page of borrowers, each with the loans released to them in the
+     * period.
+     *
+     * The loans releasesQuery() selects are grouped in a derived table and
+     * joined to `borrowers`, so the outer query is ungrouped and the paginator
+     * counts BORROWERS, not loans. Ordered by the borrower's name as
+     * displayed, then borrower id, a total order across pages. Each Borrower
+     * carries `loan_count`, `total_principal` and `last_released_at` as the
+     * database computed them, and `releasedLoans`: those same loans, oldest
+     * release first, loaded for the whole page in one query.
+     */
+    public function borrowersReleased(array $filters): LengthAwarePaginator
+    {
+        $perBorrower = $this->releasedLoansQuery($filters)
+            ->select('loans.borrower_id')
+            ->selectRaw('COUNT(*) as loan_count')
+            ->selectRaw('COALESCE(SUM(loans.principal_amount), 0) as total_principal')
+            ->selectRaw('MAX(loans.released_at) as last_released_at')
+            ->groupBy('loans.borrower_id');
+
+        $page = Borrower::query()
+            ->joinSub($perBorrower, 'per_borrower', 'per_borrower.borrower_id', '=', 'borrowers.id')
+            ->select([
+                'borrowers.id',
+                'borrowers.first_name',
+                'borrowers.middle_name',
+                'borrowers.last_name',
+                'borrowers.suffix',
+                'per_borrower.loan_count',
+                'per_borrower.total_principal',
+                'per_borrower.last_released_at',
+            ])
+            ->orderByRaw(self::BORROWER_NAME_SQL)
+            ->orderBy('borrowers.id')
+            ->paginate($filters['per_page'] ?? 15);
+
+        $borrowerIds = $page->getCollection()->modelKeys();
+
+        $loans = $borrowerIds === []
+            ? collect()
+            : $this->releasedLoansQuery($filters)
+                ->whereIn('loans.borrower_id', $borrowerIds)
+                ->select(['loans.id', 'loans.borrower_id', 'loans.loan_account_number', 'loans.released_at', 'loans.status'])
+                ->orderBy('loans.released_at')
+                ->orderBy('loans.id')
+                ->get()
+                ->groupBy('borrower_id');
+
+        $page->getCollection()->each(
+            fn (Borrower $borrower) => $borrower->setRelation('releasedLoans', $loans->get($borrower->id, collect())->values()),
+        );
+
+        return $page;
+    }
+
+    /**
+     * Totals over the WHOLE filtered set. `loan_count` and `total_principal`
+     * are the List of Releases `count` and `total_principal` for the same
+     * filters.
+     *
+     * @return array{count: int, loan_count: int, total_principal: float}
+     */
+    public function borrowersReleasedTotals(array $filters): array
+    {
+        $agg = $this->releasedLoansQuery($filters)->toBase()->selectRaw('
+            COUNT(DISTINCT loans.borrower_id) as borrower_count,
+            COUNT(*) as loan_count,
+            COALESCE(SUM(loans.principal_amount), 0) as total_principal
+        ')->first();
+
+        return [
+            'count' => (int) ($agg->borrower_count ?? 0),
+            'loan_count' => (int) ($agg->loan_count ?? 0),
+            'total_principal' => round((float) ($agg->total_principal ?? 0), 2),
+        ];
+    }
+
+    /**
+     * The loans the List of Releases selects for the same filters, unordered
+     * so it can be grouped or re-ordered.
+     */
+    private function releasedLoansQuery(array $filters): Builder
+    {
+        return $this->releasesQuery($filters)->reorder();
     }
 
     public function disbursementReport(array $filters): array
