@@ -473,6 +473,17 @@ class ReportGroupedTotalsTest extends TestCase
         }
     }
 
+    public function test_a_borrower_whose_loans_have_no_release_date_shows_no_last_release(): void
+    {
+        $borrower = $this->borrower();
+        $this->releasedLoan($borrower, null, 5000, $this->branch);
+
+        $response = $this->getJson('/api/reports/borrowers/released')->assertOk();
+
+        $this->assertSame(1, $response->json('data.0.loan_count'));
+        $this->assertNull($response->json('data.0.last_released_at'));
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────
 
     /**
@@ -490,7 +501,7 @@ class ReportGroupedTotalsTest extends TestCase
      */
     private function releasedLoan(
         Borrower $borrower,
-        string $releasedAt,
+        ?string $releasedAt,
         float $principal,
         Branch $branch,
         string $status = 'ongoing',
