@@ -410,6 +410,7 @@ class ReportController extends Controller
         parameters: [
             new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'loan_id', in: 'query', required: false, description: 'One loan only: its interest and penalty collected and its own processing fee.', schema: new OA\Schema(type: 'integer', minimum: 1)),
         ],
         responses: [new OA\Response(response: 200, description: 'Income breakdown')],
     )]
@@ -433,6 +434,7 @@ class ReportController extends Controller
             new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer', minimum: 1)),
+            new OA\Parameter(name: 'loan_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer', minimum: 1)),
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15, maximum: 1000, minimum: 1)),
         ],
         responses: [
