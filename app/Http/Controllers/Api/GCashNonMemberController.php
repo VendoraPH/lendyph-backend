@@ -95,7 +95,7 @@ class GCashNonMemberController extends Controller
             action: 'created',
             auditable: $nonMember,
             newValues: $nonMember->toArray(),
-            description: "GCash non-member {$nonMember->full_name} registered",
+            description: "GCash walk-in {$nonMember->full_name} registered",
         );
 
         return (new GCashNonMemberResource($nonMember->loadCount('transactions')))
@@ -127,7 +127,7 @@ class GCashNonMemberController extends Controller
             auditable: $nonMember,
             oldValues: $before,
             newValues: $nonMember->toArray(),
-            description: "GCash non-member {$nonMember->full_name} updated",
+            description: "GCash walk-in {$nonMember->full_name} updated",
         );
 
         return response()->json([
@@ -168,7 +168,7 @@ class GCashNonMemberController extends Controller
             action: 'deleted',
             auditable: $nonMember,
             oldValues: $before,
-            description: "GCash non-member {$name} removed",
+            description: "GCash walk-in {$name} removed",
         );
 
         return response()->json(['message' => 'Walk-in customer removed.']);
