@@ -58,7 +58,7 @@ These guards don't run in a filtered run of just your own tests, so run the full
   - A genuinely new status write must lock and assert through `CollateralPledgeGuard` first.
 - **Other guards:**
   - `BranchAssignmentIsDisplayOnlyTest`: a user's branch must never scope what they can see.
-  - `CreditScoringNotSeededTest`: no `credit_scoring:*` permissions until that backend exists.
+  - `CreditScoringRolePermissionsTest` and `CreditScoringPlaceholderRoutesTest`: the `credit_scoring:view`, `credit_scoring:override` and `credit_scoring:settings` permissions are seeded for `admin` and `super_admin` only, and every `/api/credit-scoring/*` route answers 501 to a caller holding its permission (403 without it) until the module is built.
   - The arch tests in `tests/Unit/*ArchTest.php`.
 
 ## Architecture
