@@ -1508,6 +1508,115 @@ class LoanService
     }
 
     /**
+     * Every figure the loan form shows while it is filled in, computed here so
+     * the browser only displays them (POST /loans/preview).
+     *
+     * - `collateral`: the total of the stated snapshot values, the security
+     *   status (`unsecured` with no principal or nothing pledged, `secured`
+     *   when the total reaches the principal, else `partially_secured`), and
+     *   how far it is short of the principal.
+     * - `amortization`: the schedule {@see self::buildAmortizationPreview()}
+     *   writes at release, built from an unsaved loan carrying what
+     *   createLoan() would store — the product's interest method, term unit and
+     *   rate frequency, the form's rate, term, frequency and start date — plus
+     *   the share capital build-up added to each period, and the column totals.
+     *   Null until the product, a principal, a rate, the term, the frequency
+     *   and the start date are all known.
+     *
+     * Money is added in whole centavos, never as peso floats. Writes nothing.
+     *
+     * @param  array{loan_product_id?: int|null, principal_amount?: float|int|string|null, interest_rate?: float|int|string|null, term?: int|null, frequency?: string|null, start_date?: string|null, scb_amount?: float|int|string|null, collaterals?: list<array{collateral_id?: int|null, snapshot_value: float|int|string}>|null}  $input
+     * @return array{collateral: array{total_value: float|int, security_status: string, short_by: float|int}, amortization: array<string, mixed>|null}
+     */
+    public function formPreview(array $input): array
+    {
+        $principal = $this->toCentavos((float) ($input['principal_amount'] ?? 0));
+        $pledged = 0;
+
+        foreach ($input['collaterals'] ?? [] as $collateral) {
+            $pledged += $this->toCentavos((float) $collateral['snapshot_value']);
+        }
+
+        $status = match (true) {
+            $principal <= 0, $pledged <= 0 => 'unsecured',
+            $pledged >= $principal => 'secured',
+            default => 'partially_secured',
+        };
+
+        return [
+            'collateral' => [
+                'total_value' => $pledged / 100,
+                'security_status' => $status,
+                'short_by' => $principal > 0 ? max(0, $principal - $pledged) / 100 : 0.0,
+            ],
+            'amortization' => $this->formSchedule($input, $principal),
+        ];
+    }
+
+    /**
+     * The amortization half of formPreview(), or null when an input is missing.
+     *
+     * @param  array<string, mixed>  $input
+     * @return array{maturity_date: string, interest_method: string, rows: list<array<string, mixed>>, totals: array<string, float|int>}|null
+     */
+    private function formSchedule(array $input, int $principal): ?array
+    {
+        $product = isset($input['loan_product_id']) ? LoanProduct::find($input['loan_product_id']) : null;
+        $rate = (float) ($input['interest_rate'] ?? 0);
+
+        if ($product === null || $principal <= 0 || $rate <= 0 || empty($input['term'])
+            || empty($input['frequency']) || empty($input['start_date'])) {
+            return null;
+        }
+
+        $term = (int) $input['term'];
+        $termUnit = $product->term_unit->value;
+
+        $loan = (new Loan)->forceFill([
+            'principal_amount' => $principal / 100,
+            'interest_rate' => $rate,
+            'interest_rate_frequency' => $product->interest_rate_frequency->value,
+            'interest_method' => $product->interest_method,
+            'term' => $term,
+            'term_unit' => $termUnit,
+            'frequency' => $input['frequency'],
+            'start_date' => $input['start_date'],
+            'maturity_date' => $this->maturityDateFor($input['start_date'], $term, $termUnit, $input['frequency']),
+        ]);
+
+        $scb = $this->toCentavos((float) ($input['scb_amount'] ?? 0));
+        $totals = ['principal_due' => 0, 'interest_due' => 0, 'share_capital_build_up' => 0, 'total_payment' => 0];
+        $rows = [];
+
+        foreach ($this->buildAmortizationPreview($loan) as $row) {
+            $payment = $this->toCentavos((float) $row['total_due']) + $scb;
+
+            $rows[] = [
+                'period_number' => $row['period_number'],
+                'due_date' => $row['due_date'],
+                'principal_due' => $row['principal_due'],
+                'interest_due' => $row['interest_due'],
+                'total_due' => $row['total_due'],
+                'share_capital_build_up' => $scb / 100,
+                'total_payment' => $payment / 100,
+                'remaining_balance' => $row['remaining_balance'],
+            ];
+
+            $totals['principal_due'] += $this->toCentavos((float) $row['principal_due']);
+            $totals['interest_due'] += $this->toCentavos((float) $row['interest_due']);
+            $totals['share_capital_build_up'] += $scb;
+            $totals['total_payment'] += $payment;
+        }
+
+        return [
+            'maturity_date' => $loan->maturity_date->toDateString(),
+            'interest_method' => $product->interest_method,
+            'rows' => $rows,
+            'totals' => array_map(fn (int $centavos): float|int => $centavos / 100, $totals),
+        ];
+    }
+
+    /**
      * The loan's schedule, computed and not saved.
      *
      * `$anchorDay` is the day of the month calendar-month instalments fall on,
