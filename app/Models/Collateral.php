@@ -44,7 +44,7 @@ class Collateral extends Model
     }
 
     /**
-     * The loans currently holding this collateral, narrowed to Loan::ACTIVE_STATUSES.
+     * The loans currently holding this collateral, narrowed to Loan::PLEDGING_STATUSES.
      *
      * This is the single source of the "is this collateral already pledged?"
      * answer: CollateralResource renders it as `active_loans` and
@@ -64,6 +64,6 @@ class Collateral extends Model
     {
         return $this->belongsToMany(Loan::class, 'loan_collaterals')
             ->select(['loans.id', 'loans.loan_account_number'])
-            ->whereIn('loans.status', Loan::ACTIVE_STATUSES);
+            ->whereIn('loans.status', Loan::PLEDGING_STATUSES);
     }
 }

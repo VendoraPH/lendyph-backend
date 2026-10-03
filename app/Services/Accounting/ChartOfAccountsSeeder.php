@@ -105,6 +105,11 @@ final class ChartOfAccountsSeeder
         ['code' => '2010', 'name' => 'Accounts Payable', 'type' => 'liability', 'parent' => '2000'],
         ['code' => '2020', 'name' => 'Accrued Expenses', 'type' => 'liability', 'parent' => '2000'],
 
+        // Deductions withheld at release on someone else's behalf, owed onward
+        // (accountant-confirmed 2026-10-03; see PostingRules::DEDUCTION_ROLES).
+        ['code' => '2030', 'name' => 'Notarial Fees Payable', 'type' => 'liability', 'parent' => '2000'],
+        ['code' => '2040', 'name' => 'Insurance Premium Payable', 'type' => 'liability', 'parent' => '2000'],
+
         // 2110 is a SIBLING of 2100, not a child of it. Money the organisation
         // borrowed from a bank and money it borrowed elsewhere are both
         // liabilities of its own; neither is a component of the other, and 2100
@@ -135,6 +140,10 @@ final class ChartOfAccountsSeeder
         // The named plug for opening balances. Also see the class docblock.
         ['code' => '3050', 'name' => 'Opening Balance Equity', 'type' => 'equity', 'parent' => '3000'],
 
+        // The members' share capital, credited with a Share Capital deduction
+        // withheld at release (accountant-confirmed 2026-10-03).
+        ['code' => '3060', 'name' => 'Share Capital', 'type' => 'equity', 'parent' => '3000'],
+
         // ── Income ──
         ['code' => '4000', 'name' => 'Income', 'type' => 'income', 'is_group' => true],
         ['code' => '4010', 'name' => 'Interest Income', 'type' => 'income', 'parent' => '4000'],
@@ -144,6 +153,9 @@ final class ChartOfAccountsSeeder
         ['code' => '4050', 'name' => 'Membership Fee Income', 'type' => 'income', 'parent' => '4000'],
         ['code' => '4060', 'name' => 'Other Lending Income', 'type' => 'income', 'parent' => '4000'],
         ['code' => '4070', 'name' => 'Other Income', 'type' => 'income', 'parent' => '4000'],
+        // Fees from the Settings fee catalog charged at release, such as a
+        // Credit Investigation Fee (accountant-confirmed 2026-10-03).
+        ['code' => '4080', 'name' => 'Other Fee Income', 'type' => 'income', 'parent' => '4000'],
 
         // ── Expenses ──
         ['code' => '5000', 'name' => 'Expenses', 'type' => 'expense', 'is_group' => true],
@@ -196,6 +208,14 @@ final class ChartOfAccountsSeeder
         // identical to the frontend's DEFAULT_CHART_OF_ACCOUNTS, which
         // AccountingChartOfAccountsTest asserts code for code and name for name.
         'borrower_advances' => '2300',
+        // Where each deduction withheld at release is credited, as the
+        // accountant confirmed on 2026-10-03. Charts seeded before these
+        // existed get them from the 2026_10_03_130000 migration.
+        'service_fee_income' => '4040',
+        'notarial_fees_payable' => '2030',
+        'insurance_premium_payable' => '2040',
+        'share_capital' => '3060',
+        'other_fee_income' => '4080',
     ];
 
     /** Whether this organisation already has a chart. */

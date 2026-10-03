@@ -285,10 +285,12 @@ class AccountingAutomaticPostingTest extends TestCase
         $this->assertSame('48265.44', (string) $loan->net_proceeds);
         $this->assertSame('1734.56', (string) $loan->total_deductions);
 
-        // And the books agree with it, to the centavo.
+        // And the books agree with it, to the centavo: the fee to income, the
+        // premium to the insurer's payable.
         $this->assertSame(5_000_000, $this->lineOn($journal, '1110', 'debit'));
         $this->assertSame(4_826_544, $this->lineOn($journal, '1010', 'credit'));
-        $this->assertSame(173_456, $this->lineOn($journal, '4030', 'credit'));
+        $this->assertSame(123_456, $this->lineOn($journal, '4030', 'credit'));
+        $this->assertSame(50_000, $this->lineOn($journal, '2040', 'credit'));
 
         // Posting BEFORE applyInsuranceOnRelease() would have credited cash
         // with 4_876_544 — the pre-insurance figure — and still balanced.
@@ -298,13 +300,11 @@ class AccountingAutomaticPostingTest extends TestCase
     // ── Each deduction booked by its type ──
 
     /**
-     * The release passes its deduction ITEMS, and each is booked by its type.
-     *
-     * Only "processing fee" has an account mapping today, so the service fee,
-     * the notarial fee and the insurance premium are booked exactly where they
-     * were before — processing fee income, in the same single line. 4040
-     * Service Fee Income is on the seeded chart and stays untouched: no role
-     * points at it, and choosing it by its name would be guessing.
+     * The release passes its deduction ITEMS, and each is booked by its type,
+     * to the account the accountant confirmed on 2026-10-03: the processing
+     * fee to 4030, the service fee to 4040 Service Fee Income, the notarial fee
+     * to 2030 Notarial Fees Payable and the insurance premium to 2040
+     * Insurance Premium Payable.
      *
      * ₱50,000 principal; the product's 2% processing (₱1,000), 1% service
      * (₱500) and 0.5% notarial (₱250) fees; a ₱300 premium withheld at
@@ -324,19 +324,23 @@ class AccountingAutomaticPostingTest extends TestCase
         $this->assertSame('2050.00', (string) $loan->total_deductions);
         $this->assertSame('47950.00', (string) $loan->net_proceeds);
 
-        $this->assertCount(3, $journal->lines);
+        $this->assertCount(6, $journal->lines);
         $this->assertSame(5_000_000, $this->lineOn($journal, '1110', 'debit'));
         $this->assertSame(4_795_000, $this->lineOn($journal, '1010', 'credit'));
-        $this->assertSame(205_000, $this->lineOn($journal, '4030', 'credit'));
-        $this->assertSame(0, $this->lineOn($journal, '4040', 'credit'));
+        $this->assertSame(100_000, $this->lineOn($journal, '4030', 'credit'));
+        $this->assertSame(50_000, $this->lineOn($journal, '4040', 'credit'));
+        $this->assertSame(25_000, $this->lineOn($journal, '2030', 'credit'));
+        $this->assertSame(30_000, $this->lineOn($journal, '2040', 'credit'));
 
         $deductions = app(AutomaticPoster::class)->releaseDeductions($loan);
 
-        $this->assertSame(['processing_fee_income' => 100_000], $deductions['mapped']);
-        $this->assertSame(
-            ['service fee' => 50_000, 'notarial fee' => 25_000, 'insurance premium' => 30_000],
-            $deductions['unmapped'],
-        );
+        $this->assertSame([
+            'processing_fee_income' => 100_000,
+            'service_fee_income' => 50_000,
+            'notarial_fees_payable' => 25_000,
+            'insurance_premium_payable' => 30_000,
+        ], $deductions['mapped']);
+        $this->assertSame([], $deductions['unmapped']);
         $this->assertSame(0, $deductions['remainder']);
     }
 
@@ -438,11 +442,11 @@ class AccountingAutomaticPostingTest extends TestCase
             'an empty list beside a non-zero total' => ['[]', '1234.56', 123_456, true],
             'string and float amounts' => [json_encode([
                 ['name' => 'Processing Fee', 'amount' => '0.10', 'type' => 'fixed'],
-                ['name' => 'Service Fee', 'amount' => 0.20, 'type' => 'fixed'],
+                ['name' => 'Documentary Stamp', 'amount' => 0.20, 'type' => 'fixed'],
             ]), '0.30', 30, true],
             'an unmapped item with no amount' => [json_encode([
                 ['name' => 'Processing Fee', 'amount' => 1000, 'type' => 'fixed'],
-                ['name' => 'Notarial Fee', 'type' => 'fixed'],
+                ['name' => 'Documentary Stamp', 'type' => 'fixed'],
             ]), '1234.56', 123_456, true],
         ];
     }

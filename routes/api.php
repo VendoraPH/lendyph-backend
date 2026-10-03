@@ -225,6 +225,9 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::apiResource('loan-products', LoanProductController::class);
 
     // Loans
+    // The loan form's figures (collateral total, security, schedule), before
+    // the resource routes so `preview` is never read as a loan id.
+    Route::post('/loans/preview', [LoanController::class, 'formPreview']);
     Route::apiResource('loans', LoanController::class);
     Route::patch('/loans/{loan}/submit', [LoanController::class, 'submit']);
     Route::patch('/loans/{loan}/approve', [LoanController::class, 'approve']);

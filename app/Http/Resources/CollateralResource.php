@@ -94,7 +94,7 @@ class CollateralResource extends JsonResource
 
     /**
      * `active_loans` is the server's answer to "is this collateral already
-     * pledged?" — every loan in Loan::ACTIVE_STATUSES holding it, as
+     * pledged?" — every loan in Loan::PLEDGING_STATUSES holding it, as
      * `{id, loan_account_number}`. Empty array means free. It is present on
      * every CollateralController response because the controller eager-loads
      * `activeLoans` on all of them; the key is omitted rather than faked when

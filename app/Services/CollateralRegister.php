@@ -28,7 +28,7 @@ use Illuminate\Support\Facades\DB;
  *    caller without `share_capital:view` gets no balance at all: those rows are
  *    unknown, left out of every total and counted instead, and the ledger is
  *    never read.
- *  - A row is tagged when a loan in Loan::ACTIVE_STATUSES holds it, which is
+ *  - A row is tagged when a loan in Loan::PLEDGING_STATUSES holds it, which is
  *    exactly `active_loans` being non-empty.
  *
  * A member's name is the one the caller may see. Without `borrowers:view` every
@@ -86,7 +86,7 @@ final class CollateralRegister
             ->selectRaw('borrowers.id as borrower_id')
             ->selectRaw($this->nameSql().' as borrower_name')
             ->selectRaw('COUNT(*) as collaterals_count')
-            ->selectRaw('SUM('.$this->taggedSql().') as tagged_count', Loan::ACTIVE_STATUSES)
+            ->selectRaw('SUM('.$this->taggedSql().') as tagged_count', Loan::PLEDGING_STATUSES)
             ->selectRaw('COALESCE(SUM('.$this->knownValueSql().'), 0) as total_value')
             ->selectRaw('SUM('.$this->unknownSql().') as unknown_count')
             ->groupBy('borrowers.id')
@@ -136,7 +136,7 @@ final class CollateralRegister
     {
         $book = DB::table('collaterals')
             ->selectRaw('COUNT(*) as total_collaterals')
-            ->selectRaw('COALESCE(SUM('.$this->taggedSql().'), 0) as tagged_to_active_loans', Loan::ACTIVE_STATUSES)
+            ->selectRaw('COALESCE(SUM('.$this->taggedSql().'), 0) as tagged_to_active_loans', Loan::PLEDGING_STATUSES)
             ->first();
 
         $filtered = $this->withBalances($this->filtered()->toBase())
@@ -239,12 +239,12 @@ final class CollateralRegister
     }
 
     /**
-     * 1 when a loan in Loan::ACTIVE_STATUSES holds the row, else 0. Takes the
+     * 1 when a loan in Loan::PLEDGING_STATUSES holds the row, else 0. Takes the
      * statuses as bindings.
      */
     private function taggedSql(): string
     {
-        $statuses = implode(', ', array_fill(0, count(Loan::ACTIVE_STATUSES), '?'));
+        $statuses = implode(', ', array_fill(0, count(Loan::PLEDGING_STATUSES), '?'));
 
         return 'CASE WHEN EXISTS (SELECT 1 FROM loan_collaterals'
             .' INNER JOIN loans ON loans.id = loan_collaterals.loan_id'

@@ -344,6 +344,9 @@ class ReportController extends Controller
                     'total_due' => (float) $s->total_due,
                     'principal_paid' => (float) $s->principal_paid,
                     'interest_paid' => (float) $s->interest_paid,
+                    // The row's Paid: principal and interest, the parts
+                    // `total_due` is made of, as `totals.total_paid` adds up.
+                    'amount_paid' => round((float) $s->principal_paid + (float) $s->interest_paid, 2),
                     'amount_remaining' => $amountRemaining,
                     'balance' => $amountRemaining,
                     'status' => $s->status,

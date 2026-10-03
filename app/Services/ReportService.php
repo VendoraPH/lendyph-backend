@@ -60,6 +60,49 @@ class ReportService
         'over_90' => 0.50,
     ];
 
+    /**
+     * Peso figures added in whole centavos, so a total of figures that are each
+     * exact to the centavo is exact too.
+     *
+     * @param  iterable<mixed>  $figures
+     */
+    private static function sumOfFigures(iterable $figures): float
+    {
+        $centavos = 0;
+
+        foreach ($figures as $figure) {
+            $centavos += (int) round((float) $figure * 100);
+        }
+
+        return round($centavos / 100, 2);
+    }
+
+    /**
+     * The footer of a report table: each named column of `$rows` added up, a
+     * `money` column in whole centavos and a `count` column as an integer. A
+     * row missing a figure adds nothing. In the order the columns are named.
+     *
+     * The server sends these so the screen never adds up a column itself.
+     *
+     * @param  list<array<string, mixed>>  $rows
+     * @param  array<string, 'money'|'count'>  $columns
+     * @return array<string, float|int>
+     */
+    private static function columnTotals(array $rows, array $columns): array
+    {
+        $totals = [];
+
+        foreach ($columns as $key => $kind) {
+            $values = array_map(fn (array $row): mixed => $row[$key] ?? 0, $rows);
+
+            $totals[$key] = $kind === 'count'
+                ? array_sum(array_map('intval', $values))
+                : self::sumOfFigures($values);
+        }
+
+        return $totals;
+    }
+
     public function statementOfAccount(Loan $loan): array
     {
         $loan->load('borrower', 'loanProduct', 'branch', 'amortizationSchedules');
@@ -91,12 +134,31 @@ class ReportService
                 'date' => $r->payment_date->toDateString(),
                 'receipt_number' => $r->receipt_number,
                 'amount_paid' => (float) $r->amount_paid,
+                // The statement's two-column form: a payment credits the loan.
+                'debit' => null,
+                'credit' => (float) $r->amount_paid,
                 'principal_applied' => (float) $r->principal_applied,
                 'interest_applied' => (float) $r->interest_applied,
                 'penalty_applied' => (float) $r->penalty_applied,
                 'running_balance' => round(max(0, $runningBalance), 2),
             ];
         })->values()->toArray();
+
+        $schedule = $schedules->map(fn ($s) => [
+            'period_number' => $s->period_number,
+            'due_date' => $s->due_date->toDateString(),
+            'principal_due' => (float) $s->principal_due,
+            'interest_due' => (float) $s->interest_due,
+            'total_due' => (float) $s->total_due,
+            'principal_paid' => (float) $s->principal_paid,
+            'interest_paid' => (float) $s->interest_paid,
+            // The row's Paid: principal and interest, the two parts
+            // `total_due` is made of, as on the Due/Past Due list.
+            'amount_paid' => round((float) $s->principal_paid + (float) $s->interest_paid, 2),
+            'penalty_amount' => (float) $s->penalty_amount,
+            'penalty_paid' => (float) $s->penalty_paid,
+            'status' => $s->status,
+        ])->values()->toArray();
 
         return [
             'loan' => [
@@ -119,18 +181,15 @@ class ReportService
                 'address' => $loan->borrower->address,
             ],
             'transactions' => $transactions,
-            'amortization_schedule' => $schedules->map(fn ($s) => [
-                'period_number' => $s->period_number,
-                'due_date' => $s->due_date->toDateString(),
-                'principal_due' => (float) $s->principal_due,
-                'interest_due' => (float) $s->interest_due,
-                'total_due' => (float) $s->total_due,
-                'principal_paid' => (float) $s->principal_paid,
-                'interest_paid' => (float) $s->interest_paid,
-                'penalty_amount' => (float) $s->penalty_amount,
-                'penalty_paid' => (float) $s->penalty_paid,
-                'status' => $s->status,
-            ])->values()->toArray(),
+            'transaction_totals' => self::columnTotals($transactions, ['debit' => 'money', 'credit' => 'money']),
+            'amortization_schedule' => $schedule,
+            'schedule_totals' => self::columnTotals($schedule, [
+                'principal_due' => 'money',
+                'interest_due' => 'money',
+                'penalty_amount' => 'money',
+                'total_due' => 'money',
+                'amount_paid' => 'money',
+            ]),
             'summary' => [
                 'total_paid' => round($totalPaid, 2),
                 'opening_balance' => $openingBalance,
@@ -191,6 +250,10 @@ class ReportService
             'totals' => [
                 'total_loans' => $loans->count(),
                 'total_portfolio' => round($totalPortfolio, 2),
+                // The same figure under the name the ledger's Total Released
+                // reads.
+                'total_principal' => round($totalPortfolio, 2),
+                'total_paid' => self::columnTotals($loanSummaries, ['total_paid' => 'money'])['total_paid'],
                 'total_outstanding' => round($totalOutstanding, 2),
             ],
             'generated_at' => now()->toDateTimeString(),
@@ -507,6 +570,17 @@ class ReportService
 
         $outstandingPrincipal = round((float) ($scheduleAgg->outstanding_principal ?? 0), 2);
         $outstandingBalance = round($outstandingPrincipal + (float) ($portfolio->insurance_remaining ?? 0), 2);
+        $outstanding = [
+            'principal' => $outstandingPrincipal,
+            'interest' => round((float) ($scheduleAgg->outstanding_interest ?? 0), 2),
+            'penalty' => round((float) ($scheduleAgg->outstanding_penalty ?? 0), 2),
+        ];
+        $overdue = [
+            'principal' => round((float) ($overdueAgg->overdue_principal ?? 0), 2),
+            'interest' => round((float) ($overdueAgg->overdue_interest ?? 0), 2),
+            'penalty' => round((float) ($overdueAgg->overdue_penalty ?? 0), 2),
+        ];
+        $byBranch = $this->balanceSummaryByBranch($filters);
 
         return [
             'portfolio' => [
@@ -524,20 +598,26 @@ class ReportService
                 ? round($atRiskAmount / $outstandingPrincipal * 100, 2)
                 : 0.0,
             'par_threshold_days' => self::PAR_THRESHOLD_DAYS,
+            // `total` is principal + interest + penalty, the composition the
+            // three lines above it make up; `balance` is the headline figure,
+            // principal + insurance.
             'outstanding' => [
-                'principal' => $outstandingPrincipal,
-                'interest' => round((float) ($scheduleAgg->outstanding_interest ?? 0), 2),
-                'penalty' => round((float) ($scheduleAgg->outstanding_penalty ?? 0), 2),
+                ...$outstanding,
                 'insurance' => round((float) ($portfolio->insurance_remaining ?? 0), 2),
                 'balance' => $outstandingBalance,
+                'total' => self::sumOfFigures($outstanding),
             ],
             'overdue' => [
-                'principal' => round((float) ($overdueAgg->overdue_principal ?? 0), 2),
-                'interest' => round((float) ($overdueAgg->overdue_interest ?? 0), 2),
-                'penalty' => round((float) ($overdueAgg->overdue_penalty ?? 0), 2),
+                ...$overdue,
                 'loan_count' => (int) ($overdueAgg->overdue_loan_count ?? 0),
+                'total' => self::sumOfFigures($overdue),
             ],
-            'by_branch' => $this->balanceSummaryByBranch($filters),
+            'by_branch' => $byBranch,
+            'by_branch_totals' => self::columnTotals($byBranch, [
+                'loan_count' => 'count',
+                'total_released' => 'money',
+                'outstanding_balance' => 'money',
+            ]),
             'generated_at' => now()->toDateTimeString(),
         ];
     }
@@ -1137,6 +1217,7 @@ class ReportService
 
         $totalIn = round($repaymentsIn + $shareCredit, 2);
         $totalOut = round($netProceedsOut + $shareDebit, 2);
+        $byBranch = $this->cashFlowByBranch($fromDate, $toDate, $branchId);
 
         return [
             'date_from' => $fromDate,
@@ -1182,7 +1263,14 @@ class ReportService
                     ? 'share_capital_ledger has no branch column, so branch_id is honoured through the member\'s branch, matching the Share Capital report. Excluded from by_branch.'
                     : 'No branch filter applied, so these figures are organisation-wide. Share capital is always excluded from by_branch.',
             ],
-            'by_branch' => $this->cashFlowByBranch($fromDate, $toDate, $branchId),
+            'by_branch' => $byBranch,
+            // Loan cash only, like the rows: the repayment and release totals
+            // above, never the share capital lines.
+            'by_branch_totals' => self::columnTotals($byBranch, [
+                'inflow_total' => 'money',
+                'outflow_total' => 'money',
+                'net_movement' => 'money',
+            ]),
             'generated_at' => now()->toDateTimeString(),
         ];
     }
@@ -1556,13 +1644,32 @@ class ReportService
      */
     public function performance(array $filters): array
     {
+        $byOfficer = $this->performanceRows($filters, 'officer');
+        $byBranch = $this->performanceRows($filters, 'branch');
+
+        // The money and release counts sum exactly: every loan is in one officer
+        // row ("Unassigned" included) and one branch row. PAR and
+        // active_borrowers have no total; a ratio and a distinct count do not
+        // add up.
+        $columns = [
+            'released_count' => 'count',
+            'released_amount' => 'money',
+            'collected' => 'money',
+            'outstanding' => 'money',
+            'overdue_amount' => 'money',
+        ];
+        $officerTotals = self::columnTotals($byOfficer, $columns);
+
         return [
             'date_from' => $filters['date_from'] ?? null,
             'date_to' => $filters['date_to'] ?? null,
             'as_of_date' => Carbon::today()->toDateString(),
             'par_threshold_days' => self::PAR_THRESHOLD_DAYS,
-            'by_officer' => $this->performanceRows($filters, 'officer'),
-            'by_branch' => $this->performanceRows($filters, 'branch'),
+            'totals' => $officerTotals,
+            'by_officer' => $byOfficer,
+            'by_officer_totals' => $officerTotals,
+            'by_branch' => $byBranch,
+            'by_branch_totals' => self::columnTotals($byBranch, $columns),
             'note' => 'released_* and collected cover date_from..date_to; outstanding, overdue, at_risk and active_borrowers are as_of_date figures over the whole book.',
             'generated_at' => now()->toDateTimeString(),
         ];
@@ -1802,6 +1909,7 @@ class ReportService
         $closing = round($opening + $credits - $debits, 2);
 
         $members = $this->shareCapitalByMember($fromDate, $toDate, $branchId);
+        $byMonth = $this->shareCapitalByMonth($fromDate, $toDate, $branchId, $opening);
 
         return [
             'date_from' => $fromDate,
@@ -1818,10 +1926,22 @@ class ReportService
             'member_count' => count(array_filter($members, fn ($m) => $m['closing_balance'] != 0.0)),
             'members_with_activity' => (int) ($period->members_with_activity ?? 0),
             'subscription' => $this->shareCapitalSubscription($branchId, $closing),
-            'by_month' => $this->shareCapitalByMonth($fromDate, $toDate, $branchId, $opening),
+            'by_month' => $byMonth,
+            'by_month_totals' => self::columnTotals($byMonth, [
+                'credits' => 'money',
+                'debits' => 'money',
+                'net_movement' => 'money',
+            ]),
             // Null, not [] — an empty array would assert there are no members,
             // which is a different and false statement.
             'by_member' => $includeMembers ? $members : null,
+            // Withheld with the rows it totals.
+            'by_member_totals' => $includeMembers ? self::columnTotals($members, [
+                'opening_balance' => 'money',
+                'credits' => 'money',
+                'debits' => 'money',
+                'closing_balance' => 'money',
+            ]) : null,
             'by_member_omitted' => $includeMembers ? null : [
                 'reason' => 'permission_required',
                 'required_permission' => 'reports:export',

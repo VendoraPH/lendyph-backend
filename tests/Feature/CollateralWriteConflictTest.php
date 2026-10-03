@@ -7,7 +7,9 @@ use App\Models\Borrower;
 use App\Models\Collateral;
 use App\Models\Loan;
 use App\Models\LoanProduct;
+use Closure;
 use Exception;
+use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 use PDOException;
@@ -154,6 +156,54 @@ class CollateralWriteConflictTest extends TestCase
         $this->assertSame($before, $this->state());
     }
 
+    public function test_a_restructure_whose_lock_wait_times_out_answers_409_and_writes_nothing(): void
+    {
+        $source = $this->createReleasedLoan();
+        $this->pledge($source, Collateral::factory()->create(['borrower_id' => $source->borrower_id]));
+        $before = $this->state();
+        $this->failOnAuditRow('restructure_created', self::LOCK_WAIT_TIMEOUT);
+
+        $this->postJson("/api/loans/{$source->id}/restructure", $this->restructurePayload($source))
+            ->assertStatus(409)
+            ->assertExactJson(['message' => self::CONFLICT]);
+
+        $this->assertSame($before, $this->state());
+    }
+
+    public function test_a_restructure_whose_source_gained_a_collateral_after_its_pledges_were_read_answers_409_and_writes_nothing(): void
+    {
+        // The source's pledges are read before the transaction so the read
+        // takes no lock. One pledged in between would be copied onto the new
+        // loan without its collateral row lock; the copy is refused instead.
+        $source = $this->createReleasedLoan();
+        $this->pledge($source, Collateral::factory()->create(['borrower_id' => $source->borrower_id]));
+        $slipsIn = Collateral::factory()->create(['borrower_id' => $source->borrower_id]);
+        $before = $this->state();
+        $slippedIn = $this->pledgeAtTheCollateralLock($source, $slipsIn);
+
+        $this->postJson("/api/loans/{$source->id}/restructure", $this->restructurePayload($source))
+            ->assertStatus(409)
+            ->assertExactJson(['message' => self::CONFLICT]);
+
+        $this->assertTrue($slippedIn(), 'the pledge never slipped in, so this test proved nothing');
+        $this->assertSame($before, $this->state());
+    }
+
+    public function test_a_loan_delete_whose_loan_gained_a_collateral_after_its_pledges_were_read_answers_409_and_writes_nothing(): void
+    {
+        $this->pledge($this->loan, $this->collateral);
+        $slipsIn = Collateral::factory()->create(['borrower_id' => $this->borrower->id]);
+        $before = $this->state();
+        $slippedIn = $this->pledgeAtTheCollateralLock($this->loan, $slipsIn);
+
+        $this->deleteJson("/api/loans/{$this->loan->id}")
+            ->assertStatus(409)
+            ->assertExactJson(['message' => self::CONFLICT]);
+
+        $this->assertTrue($slippedIn(), 'the pledge never slipped in, so this test proved nothing');
+        $this->assertSame($before, $this->state());
+    }
+
     public function test_a_loan_delete_that_deadlocks_answers_409_and_writes_nothing(): void
     {
         $this->pledge($this->loan, $this->collateral);
@@ -184,6 +234,47 @@ class CollateralWriteConflictTest extends TestCase
     private function pledge(Loan $loan, Collateral $collateral): void
     {
         $loan->collaterals()->attach($collateral->id, ['snapshot_value' => 100, 'attached_at' => now()]);
+    }
+
+    /**
+     * Pledge `$collateral` to `$loan` the moment the request takes its first
+     * collateral row lock: after it read what the loan holds, before it locks
+     * the loan. Returns whether that happened.
+     *
+     * @return Closure(): bool
+     */
+    private function pledgeAtTheCollateralLock(Loan $loan, Collateral $collateral): Closure
+    {
+        $slippedIn = false;
+
+        DB::listen(function (QueryExecuted $query) use (&$slippedIn, $loan, $collateral): void {
+            $sql = strtolower($query->sql);
+
+            if ($slippedIn || ! str_contains($sql, 'from `collaterals`') || ! str_contains($sql, 'for update')) {
+                return;
+            }
+
+            $slippedIn = true;
+            $this->pledge($loan, $collateral);
+        });
+
+        return function () use (&$slippedIn): bool {
+            return $slippedIn;
+        };
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function restructurePayload(Loan $source): array
+    {
+        return [
+            'borrower_id' => $source->borrower_id,
+            'loan_product_id' => $source->loan_product_id,
+            // What createReleasedLoan() leaves owed, so no shortfall.
+            'principal_amount' => 70800,
+            'start_date' => now()->toDateString(),
+        ];
     }
 
     /**

@@ -186,7 +186,7 @@ class AccountingLoanReleaseDiffCommandTest extends TestCase
     }
 
     /**
-     * A posted journal altered in the fixture — its ₱2,050.00 fee line moved
+     * A posted journal altered in the fixture — its ₱1,000.00 processing fee line moved
      * from 4030 to 4040 — is reported against both accounts, with the
      * difference each would need, and every other journal stays silent.
      */
@@ -207,21 +207,21 @@ class AccountingLoanReleaseDiffCommandTest extends TestCase
         $no = preg_quote($alteredJournal->journal_no, '/');
         $ln = preg_quote($altered->loan_account_number, '/');
 
-        // 4030: nothing posted, ₱2,050.00 credit due.
+        // 4030: nothing posted, ₱1,000.00 credit due.
         $this->assertMatchesRegularExpression(
-            "/{$no}\s*\|\s*{$ln}\s*\|\s*4030 [^|]+\|\s*—\s*\|\s*Cr ₱2,050\.00\s*\|\s*Cr ₱2,050\.00\s*\|/u",
+            "/{$no}\s*\|\s*{$ln}\s*\|\s*4030 [^|]+\|\s*—\s*\|\s*Cr ₱1,000\.00\s*\|\s*Cr ₱1,000\.00\s*\|/u",
             $output,
         );
-        // 4040: ₱2,050.00 credit posted, nothing due.
+        // 4040: ₱1,500.00 credit posted (its own ₱500 and the moved ₱1,000), ₱500.00 due.
         $this->assertMatchesRegularExpression(
-            "/{$no}\s*\|\s*{$ln}\s*\|\s*4040 [^|]+\|\s*Cr ₱2,050\.00\s*\|\s*—\s*\|\s*Dr ₱2,050\.00\s*\|/u",
+            "/{$no}\s*\|\s*{$ln}\s*\|\s*4040 [^|]+\|\s*Cr ₱1,500\.00\s*\|\s*Cr ₱500\.00\s*\|\s*Dr ₱1,000\.00\s*\|/u",
             $output,
         );
 
         $this->assertStringNotContainsString($this->releaseJournalOf($untouched)->journal_no, $output);
         $this->assertMatchesRegularExpression('/Journals scanned:\s+2\b/', $output);
         $this->assertMatchesRegularExpression('/Would differ:\s+1\b/', $output);
-        $this->assertMatchesRegularExpression('/Total absolute difference:\s+₱4,100\.00/', $output);
+        $this->assertMatchesRegularExpression('/Total absolute difference:\s+₱2,000\.00/', $output);
     }
 
     public function test_it_lists_the_deduction_types_and_which_have_an_account(): void
@@ -234,11 +234,12 @@ class AccountingLoanReleaseDiffCommandTest extends TestCase
 
         $this->assertMatchesRegularExpression('/processing fee\s*\|\s*2\s*\|\s*₱2,000\.00\s*\|\s*processing_fee_income → 4030/u', $output);
 
-        foreach (['service fee' => '₱1,000\.00', 'notarial fee' => '₱500\.00', 'insurance premium' => '₱600\.00'] as $type => $total) {
-            $this->assertMatchesRegularExpression(
-                "/{$type}\s*\|\s*2\s*\|\s*{$total}\s*\|\s*none — booked to processing_fee_income as before/u",
-                $output,
-            );
+        foreach ([
+            'service fee' => ['₱1,000\.00', 'service_fee_income → 4040'],
+            'notarial fee' => ['₱500\.00', 'notarial_fees_payable → 2030'],
+            'insurance premium' => ['₱600\.00', 'insurance_premium_payable → 2040'],
+        ] as $type => [$total, $mapping]) {
+            $this->assertMatchesRegularExpression("/{$type}\s*\|\s*2\s*\|\s*{$total}\s*\|\s*{$mapping}/u", $output);
         }
     }
 
@@ -269,7 +270,7 @@ class AccountingLoanReleaseDiffCommandTest extends TestCase
         $this->assertMatchesRegularExpression('/processing fee\s*\|\s*1\s*\|\s*₱1,000\.00\s*\|/u', $output);
     }
 
-    public function test_the_header_says_todays_mappings_book_the_same_lines_as_before(): void
+    public function test_the_header_says_journals_posted_before_a_type_had_its_own_account_may_differ(): void
     {
         $this->seedChartOfAccounts();
         $this->releaseLoan();
@@ -277,8 +278,7 @@ class AccountingLoanReleaseDiffCommandTest extends TestCase
         $output = $this->runCommand();
 
         $this->assertStringContainsString(
-            "With today's mappings the rule books the same lines as before, so any difference comes from "
-            .'loan figures edited after posting or a mapping changed since.',
+            'Deduction types with an account of their own are booked to it, so journals posted before that may differ by design.',
             $output,
         );
     }
@@ -304,7 +304,7 @@ class AccountingLoanReleaseDiffCommandTest extends TestCase
         DB::table('loans')->where('id', $over->id)->update(['deductions' => json_encode([
             ...$over->deductions,
             ['name' => 'Documentary Stamp', 'amount' => 700, 'type' => 'fixed'],
-            ['name' => 'Notarial Fee', 'type' => 'fixed'],
+            ['name' => 'Legal Fee', 'type' => 'fixed'],
         ])]);
 
         $output = $this->runCommand();
@@ -312,10 +312,13 @@ class AccountingLoanReleaseDiffCommandTest extends TestCase
         $this->assertMatchesRegularExpression('/Total deductions above their usable items[^:]*:\s+1 loan\(s\), ₱500\.00/u', $output);
         $this->assertMatchesRegularExpression('/Usable items above total deductions:\s+1 loan\(s\), ₱700\.00/u', $output);
         $this->assertMatchesRegularExpression(
-            '/notarial fee \(unusable item: no usable amount\)\s*\|\s*1\s*\|\s*—\s*\|/u',
+            '/legal fee \(unusable item: no usable amount\)\s*\|\s*1\s*\|\s*—\s*\|/u',
             $output,
         );
-        $this->assertMatchesRegularExpression('/Would differ:\s+0\b/', $output);
+        // The short loan's missing Service Fee item leaves its ₱500 in the
+        // remainder, which the rule books to 4030 rather than the 4040 its
+        // journal carries.
+        $this->assertMatchesRegularExpression('/Would differ:\s+1\b/', $output);
         $this->assertMatchesRegularExpression('/Skipped:\s+0\b/', $output);
     }
 

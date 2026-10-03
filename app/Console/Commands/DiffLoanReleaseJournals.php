@@ -121,14 +121,7 @@ class DiffLoanReleaseJournals extends Command
 
         $this->line("Rebuilt from each loan's current figures with today's release rule and today's account mappings.");
 
-        if (array_diff(PostingRules::DEDUCTION_ROLES, [PostingRules::UNMAPPED_DEDUCTION_ROLE]) === []) {
-            $this->line(
-                "With today's mappings the rule books the same lines as before, so any difference comes from "
-                .'loan figures edited after posting or a mapping changed since.'
-            );
-        } else {
-            $this->line('Deduction types with an account of their own are booked to it, so journals posted before that may differ by design.');
-        }
+        $this->line('Deduction types with an account of their own are booked to it, so journals posted before that may differ by design.');
 
         $this->newLine();
 

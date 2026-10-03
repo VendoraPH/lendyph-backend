@@ -8,6 +8,7 @@ use App\Http\Requests\Loan\AddLoanCoMakerRequest;
 use App\Http\Requests\Loan\ApproveLoanRequest;
 use App\Http\Requests\Loan\AssignAccountOfficerRequest;
 use App\Http\Requests\Loan\ExtendLoanRequest;
+use App\Http\Requests\Loan\PreviewLoanRequest;
 use App\Http\Requests\Loan\RejectLoanRequest;
 use App\Http\Requests\Loan\ReleaseLoanRequest;
 use App\Http\Requests\Loan\RestructureLoanRequest;
@@ -1078,6 +1079,50 @@ DESC,
         $loan->load('borrower', 'loanProduct', 'branch', 'coMakers', 'accountOfficer');
 
         return new LoanResource($loan);
+    }
+
+    #[OA\Post(
+        path: '/api/loans/preview',
+        summary: 'The loan form\'s figures, computed by the server',
+        description: <<<'TXT'
+        Read-only. Every field is optional; each section is computed from what was sent.
+
+        `collateral` is always present: `total_value` (the stated snapshot values added up), `security_status` (`unsecured` with no principal or nothing pledged, `secured` when the total reaches the principal, else `partially_secured`) and `short_by` (the principal less the total, never below 0; 0 without a principal).
+
+        `amortization` is null until `loan_product_id`, a `principal_amount` above 0, an `interest_rate` above 0, `term`, `frequency` and `start_date` are all sent. Its `rows` are the schedule a release of the same loan writes, built with the product's interest method, term unit and rate frequency (`interest_method` says which), each with the `share_capital_build_up` (`scb_amount`) and `total_payment` (`total_due` plus it); `totals` adds up principal, interest, build-up and payment.
+
+        The product's amount, rate and term ranges are not checked here; saving the loan enforces them.
+        TXT,
+        tags: ['Loans'],
+        security: [['sanctum' => []]],
+        requestBody: new OA\RequestBody(
+            content: new OA\JsonContent(
+                properties: [
+                    new OA\Property(property: 'loan_product_id', type: 'integer', nullable: true),
+                    new OA\Property(property: 'principal_amount', type: 'number', nullable: true),
+                    new OA\Property(property: 'interest_rate', type: 'number', nullable: true),
+                    new OA\Property(property: 'term', type: 'integer', nullable: true),
+                    new OA\Property(property: 'frequency', type: 'string', nullable: true),
+                    new OA\Property(property: 'start_date', type: 'string', format: 'date', nullable: true),
+                    new OA\Property(property: 'scb_amount', type: 'number', nullable: true),
+                    new OA\Property(property: 'collaterals', type: 'array', nullable: true, items: new OA\Items(
+                        properties: [
+                            new OA\Property(property: 'collateral_id', type: 'integer', nullable: true),
+                            new OA\Property(property: 'snapshot_value', type: 'number'),
+                        ],
+                    )),
+                ],
+            ),
+        ),
+        responses: [
+            new OA\Response(response: 200, description: '`{data: {collateral, amortization}}`'),
+            new OA\Response(response: 403, description: 'Missing both loans:create and loans:update'),
+            new OA\Response(response: 422, description: 'Malformed input'),
+        ],
+    )]
+    public function formPreview(PreviewLoanRequest $request): JsonResponse
+    {
+        return response()->json(['data' => $this->loanService->formPreview($request->validated())]);
     }
 
     #[OA\Get(

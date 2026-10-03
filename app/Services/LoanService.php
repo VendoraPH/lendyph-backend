@@ -355,7 +355,7 @@ class LoanService
      * `collateral_ids` input on RestructureLoanRequest to opt out with, and
      * leaving the collateral behind is not a neutral choice. On release,
      * closeRestructuredSource() flips the source to `restructured`, which is
-     * outside Loan::ACTIVE_STATUSES — so a source whose collateral did not come
+     * outside Loan::PLEDGING_STATUSES — so a source whose collateral did not come
      * with it makes CollateralResource's `active_loans` report a land title as
      * FREE while it is still securing a live balance, and makes
      * CollateralController::attach() let a second loan take it. That is the
@@ -986,7 +986,15 @@ class LoanService
     {
         $this->guardStatus($loan, 'approved', 'release');
 
-        return DB::transaction(function () use ($loan, $releaser, $insurance, $feeFingerprint) {
+        // What the loan holds, read before the transaction so that the read
+        // takes no lock and fixes no snapshot; it is read again, exactly, under
+        // the loan's lock below.
+        $heldBefore = CollateralAttacher::heldBy($loan);
+
+        // A deadlock or lock wait timeout is a 409, not a 500. This is the
+        // outermost transaction: LoanController::release() and the test
+        // helpers are the only callers.
+        return LoanWriteTransaction::run(function () use ($loan, $releaser, $insurance, $feeFingerprint, $heldBefore) {
             // THE FIRST STATEMENT IN THIS TRANSACTION, and it has to stay that
             // way. Under REPEATABLE READ the consistent snapshot is fixed by the
             // first plain SELECT, and neither a locking read nor DML moves it —
@@ -999,16 +1007,20 @@ class LoanService
             // conflicting pledge CAN be committed from here on, so every later
             // snapshot already contains everything the guard needs.
             //
-            // It is also the better lock order: collaterals before `loans`, the
-            // same order CollateralController::attach() takes.
-            $lockedCollateralIds = CollateralPledgeGuard::lockCollateralsOf($loan);
+            // The order every collateral write takes (CollateralAttacher): the
+            // collateral rows in ONE id-ordered statement, never the pledges
+            // themselves, then the loan rows.
+            $lockedCollateralIds = CollateralAttacher::lock($heldBefore)->keys()->all();
 
-            // Lock and validate the source up front, before anything is written.
-            // Two approved restructures of the same source releasing at once
-            // would otherwise both succeed and the borrower would owe both, for
-            // the same balance. Whichever transaction gets the lock second finds
-            // the source already closed and is rolled back by the throw.
-            $lockedSource = $this->lockAndGuardRestructureSource($loan);
+            // Lock the loan and the loan it restructures, then validate both,
+            // before anything is written. Two releases of one loan would
+            // otherwise both write a schedule and a journal; two approved
+            // restructures of the same source releasing at once would both
+            // succeed and the borrower would owe both, for the same balance.
+            // Whichever transaction gets the lock second finds the loan already
+            // released, or the source already closed, and is rolled back by the
+            // throw.
+            $lockedSource = $this->lockAndGuardReleaseRows($loan, $lockedCollateralIds);
 
             // Generate loan account number with row-level lock to prevent race conditions.
             // Order by loan_account_number (not id) so the next number is taken from the
@@ -1082,7 +1094,7 @@ class LoanService
             // statement in the transaction, as its comment requires.
             app(LoanApprovalChainService::class)->markReleased($loan, $releaser);
 
-            // `approved` → `released` is a transition INTO Loan::ACTIVE_STATUSES,
+            // `approved` → `released` is a transition INTO Loan::PLEDGING_STATUSES,
             // and it writes no `loan_collaterals` row, so the guard on
             // CollateralController::attach() never sees it. Without this, a loan
             // attached while its collateral's only other holder was inactive
@@ -1095,7 +1107,7 @@ class LoanService
             // release BOTH loans hold it — asserting before
             // closeRestructuredSource() would reject every restructure release
             // that inherited anything. Here the source is already `restructured`
-            // and out of ACTIVE_STATUSES, so what is asserted is the state this
+            // and out of PLEDGING_STATUSES, so what is asserted is the state this
             // transaction is actually about to commit. A throw still rolls the
             // whole release back, status write and loan account number included.
             /*
@@ -1133,23 +1145,61 @@ class LoanService
     }
 
     /**
-     * Lock the source loan and refuse to release unless it is still open and
-     * the application still matches what was approved.
+     * Lock the loan being released and the loan it restructures, then refuse
+     * to release unless the loan is still approved, holds only collateral that
+     * was locked, and (for a restructure) its source is still open and the
+     * application still matches what was approved.
      *
-     * Catches a source already closed by a different restructure, one paid off
-     * while this application sat in review, and a principal edited after
-     * sign-off. Fails CLOSED: anything unexpected throws and rolls the release
-     * back rather than quietly releasing a second loan for the same debt.
+     * Both loan rows are locked in ONE statement in id order, after the
+     * collateral rows: the order every collateral write takes (see
+     * CollateralAttacher). `$loan` is then refreshed from its locked row, so
+     * every write below starts from what is committed rather than from what
+     * the request read before the lock.
      *
+     * A loan no longer approved under the lock was released, voided or sent
+     * back by another request after this one read it, and a collateral it
+     * holds that was not locked was pledged in between: both are the 409 of a
+     * write another one got to first.
+     *
+     * For a restructure, catches a source already closed by a different
+     * restructure, one paid off while this application sat in review, and a
+     * principal edited after sign-off. Fails CLOSED: anything unexpected throws
+     * and rolls the release back rather than quietly releasing a second loan
+     * for the same debt.
+     *
+     * @param  array<int, int>  $lockedCollateralIds  the collateral rows release() locked
      * @return Loan|null the locked source, or null when this is an ordinary loan
+     *
+     * @throws HttpResponseException 409 when the loan changed since it was read
      */
-    private function lockAndGuardRestructureSource(Loan $loan): ?Loan
+    private function lockAndGuardReleaseRows(Loan $loan, array $lockedCollateralIds): ?Loan
     {
+        $ids = array_map('intval', array_filter([$loan->getKey(), $loan->source_loan_id]));
+        sort($ids);
+
+        $locked = Loan::whereKey($ids)
+            ->orderBy('id')
+            ->lockForUpdate()
+            ->get()
+            ->keyBy('id');
+
+        $current = $locked->get($loan->getKey());
+
+        if ($current === null || $current->status !== 'approved') {
+            throw LoanWriteTransaction::conflict();
+        }
+
+        $loan->setRawAttributes($current->getAttributes(), true);
+
+        if (array_diff(CollateralAttacher::heldBy($loan), $lockedCollateralIds) !== []) {
+            throw LoanWriteTransaction::conflict();
+        }
+
         if ($loan->source_loan_id === null) {
             return null;
         }
 
-        $source = Loan::whereKey($loan->source_loan_id)->lockForUpdate()->first();
+        $source = $locked->get($loan->source_loan_id);
 
         if (! $source || ! in_array($source->status, ['released', 'ongoing'], true)) {
             throw ValidationException::withMessages([
@@ -1186,7 +1236,7 @@ class LoanService
      * that status mean exactly one thing: closed because its balance moved to a
      * new loan.
      *
-     * `$source` is already locked by lockAndGuardRestructureSource().
+     * `$source` is already locked by lockAndGuardReleaseRows().
      */
     private function closeRestructuredSource(Loan $newLoan, Loan $source, User $releaser): void
     {
@@ -1194,7 +1244,7 @@ class LoanService
         // below restores it. An audit has flagged it as a third double-pledge
         // path; it is not one. The only status write here moves the source from
         // `released`/`ongoing` INTO `restructured`, which is outside
-        // Loan::ACTIVE_STATUSES, so it FREES a collateral rather than taking
+        // Loan::PLEDGING_STATUSES, so it FREES a collateral rather than taking
         // one. CollateralPledgeGuard is deliberately not called from here.
         $previousStatus = $source->status;
         $closingBalance = $this->totalOutstanding($source);
@@ -1361,9 +1411,9 @@ class LoanService
 
     public function voidLoan(Loan $loan): Loan
     {
-        if (in_array($loan->status, ['released', 'ongoing', 'completed'])) {
+        if (in_array($loan->status, ['released', 'ongoing', 'completed', 'defaulted'])) {
             throw ValidationException::withMessages([
-                'status' => ['Released, ongoing, or completed loans cannot be voided.'],
+                'status' => ['Released, ongoing, completed, or defaulted loans cannot be voided.'],
             ]);
         }
 
@@ -1455,6 +1505,125 @@ class LoanService
     public function maturityDateFor(string $startDate, int $term, string $termUnit, string $frequency): Carbon
     {
         return LoanTermSchedule::maturityDate(Carbon::parse($startDate), $term, $termUnit, $frequency);
+    }
+
+    /**
+     * Every figure the loan form shows while it is filled in, computed here so
+     * the browser only displays them (POST /loans/preview).
+     *
+     * - `collateral`: the total of the stated snapshot values, the security
+     *   status (`unsecured` with no principal or nothing pledged, `secured`
+     *   when the total reaches the principal, else `partially_secured`), and
+     *   how far it is short of the principal.
+     * - `amortization`: the schedule {@see self::buildAmortizationPreview()}
+     *   writes at release, built from an unsaved loan carrying what
+     *   createLoan() would store — the product's interest method, term unit and
+     *   rate frequency, the form's rate, term, frequency and start date — plus
+     *   the share capital build-up added to each period, and the column totals.
+     *   Null until the product, a principal, a rate, the term, the frequency
+     *   and the start date are all known, and for a term outside the product's
+     *   range.
+     *
+     * Money is added in whole centavos, never as peso floats. Writes nothing.
+     *
+     * @param  array{loan_product_id?: int|null, principal_amount?: float|int|string|null, interest_rate?: float|int|string|null, term?: int|null, frequency?: string|null, start_date?: string|null, scb_amount?: float|int|string|null, collaterals?: list<array{collateral_id?: int|null, snapshot_value: float|int|string}>|null}  $input
+     * @return array{collateral: array{total_value: float|int, security_status: string, short_by: float|int}, amortization: array<string, mixed>|null}
+     */
+    public function formPreview(array $input): array
+    {
+        $principal = $this->toCentavos((float) ($input['principal_amount'] ?? 0));
+        $pledged = 0;
+
+        foreach ($input['collaterals'] ?? [] as $collateral) {
+            $pledged += $this->toCentavos((float) $collateral['snapshot_value']);
+        }
+
+        $status = match (true) {
+            $principal <= 0, $pledged <= 0 => 'unsecured',
+            $pledged >= $principal => 'secured',
+            default => 'partially_secured',
+        };
+
+        return [
+            'collateral' => [
+                'total_value' => $pledged / 100,
+                'security_status' => $status,
+                'short_by' => $principal > 0 ? max(0, $principal - $pledged) / 100 : 0.0,
+            ],
+            'amortization' => $this->formSchedule($input, $principal),
+        ];
+    }
+
+    /**
+     * The amortization half of formPreview(), or null when an input is missing.
+     *
+     * @param  array<string, mixed>  $input
+     * @return array{maturity_date: string, interest_method: string, rows: list<array<string, mixed>>, totals: array<string, float|int>}|null
+     */
+    private function formSchedule(array $input, int $principal): ?array
+    {
+        $product = isset($input['loan_product_id']) ? LoanProduct::find($input['loan_product_id']) : null;
+        $rate = (float) ($input['interest_rate'] ?? 0);
+
+        if ($product === null || $principal <= 0 || $rate <= 0 || empty($input['term'])
+            || empty($input['frequency']) || empty($input['start_date'])) {
+            return null;
+        }
+
+        // A term outside the product's range is one createLoan() refuses, so it
+        // has no schedule. This also bounds the work a single preview can ask for.
+        $term = (int) $input['term'];
+        $minTerm = (int) ($product->min_term ?? 1);
+        $maxTerm = (int) ($product->max_term ?? $product->term);
+
+        if ($term < $minTerm || $term > $maxTerm) {
+            return null;
+        }
+
+        $termUnit = $product->term_unit->value;
+
+        $loan = (new Loan)->forceFill([
+            'principal_amount' => $principal / 100,
+            'interest_rate' => $rate,
+            'interest_rate_frequency' => $product->interest_rate_frequency->value,
+            'interest_method' => $product->interest_method,
+            'term' => $term,
+            'term_unit' => $termUnit,
+            'frequency' => $input['frequency'],
+            'start_date' => $input['start_date'],
+            'maturity_date' => $this->maturityDateFor($input['start_date'], $term, $termUnit, $input['frequency']),
+        ]);
+
+        $scb = $this->toCentavos((float) ($input['scb_amount'] ?? 0));
+        $totals = ['principal_due' => 0, 'interest_due' => 0, 'share_capital_build_up' => 0, 'total_payment' => 0];
+        $rows = [];
+
+        foreach ($this->buildAmortizationPreview($loan) as $row) {
+            $payment = $this->toCentavos((float) $row['total_due']) + $scb;
+
+            $rows[] = [
+                'period_number' => $row['period_number'],
+                'due_date' => $row['due_date'],
+                'principal_due' => $row['principal_due'],
+                'interest_due' => $row['interest_due'],
+                'total_due' => $row['total_due'],
+                'share_capital_build_up' => $scb / 100,
+                'total_payment' => $payment / 100,
+                'remaining_balance' => $row['remaining_balance'],
+            ];
+
+            $totals['principal_due'] += $this->toCentavos((float) $row['principal_due']);
+            $totals['interest_due'] += $this->toCentavos((float) $row['interest_due']);
+            $totals['share_capital_build_up'] += $scb;
+            $totals['total_payment'] += $payment;
+        }
+
+        return [
+            'maturity_date' => $loan->maturity_date->toDateString(),
+            'interest_method' => $product->interest_method,
+            'rows' => $rows,
+            'totals' => array_map(fn (int $centavos): float|int => $centavos / 100, $totals),
+        ];
     }
 
     /**
