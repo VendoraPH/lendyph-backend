@@ -986,7 +986,15 @@ class LoanService
     {
         $this->guardStatus($loan, 'approved', 'release');
 
-        return DB::transaction(function () use ($loan, $releaser, $insurance, $feeFingerprint) {
+        // What the loan holds, read before the transaction so that the read
+        // takes no lock and fixes no snapshot; it is read again, exactly, under
+        // the loan's lock below.
+        $heldBefore = CollateralAttacher::heldBy($loan);
+
+        // A deadlock or lock wait timeout is a 409, not a 500. This is the
+        // outermost transaction: LoanController::release() and the test
+        // helpers are the only callers.
+        return LoanWriteTransaction::run(function () use ($loan, $releaser, $insurance, $feeFingerprint, $heldBefore) {
             // THE FIRST STATEMENT IN THIS TRANSACTION, and it has to stay that
             // way. Under REPEATABLE READ the consistent snapshot is fixed by the
             // first plain SELECT, and neither a locking read nor DML moves it —
@@ -999,16 +1007,20 @@ class LoanService
             // conflicting pledge CAN be committed from here on, so every later
             // snapshot already contains everything the guard needs.
             //
-            // It is also the better lock order: collaterals before `loans`, the
-            // same order CollateralController::attach() takes.
-            $lockedCollateralIds = CollateralPledgeGuard::lockCollateralsOf($loan);
+            // The order every collateral write takes (CollateralAttacher): the
+            // collateral rows in ONE id-ordered statement, never the pledges
+            // themselves, then the loan rows.
+            $lockedCollateralIds = CollateralAttacher::lock($heldBefore)->keys()->all();
 
-            // Lock and validate the source up front, before anything is written.
-            // Two approved restructures of the same source releasing at once
-            // would otherwise both succeed and the borrower would owe both, for
-            // the same balance. Whichever transaction gets the lock second finds
-            // the source already closed and is rolled back by the throw.
-            $lockedSource = $this->lockAndGuardRestructureSource($loan);
+            // Lock the loan and the loan it restructures, then validate both,
+            // before anything is written. Two releases of one loan would
+            // otherwise both write a schedule and a journal; two approved
+            // restructures of the same source releasing at once would both
+            // succeed and the borrower would owe both, for the same balance.
+            // Whichever transaction gets the lock second finds the loan already
+            // released, or the source already closed, and is rolled back by the
+            // throw.
+            $lockedSource = $this->lockAndGuardReleaseRows($loan, $lockedCollateralIds);
 
             // Generate loan account number with row-level lock to prevent race conditions.
             // Order by loan_account_number (not id) so the next number is taken from the
@@ -1133,23 +1145,61 @@ class LoanService
     }
 
     /**
-     * Lock the source loan and refuse to release unless it is still open and
-     * the application still matches what was approved.
+     * Lock the loan being released and the loan it restructures, then refuse
+     * to release unless the loan is still approved, holds only collateral that
+     * was locked, and (for a restructure) its source is still open and the
+     * application still matches what was approved.
      *
-     * Catches a source already closed by a different restructure, one paid off
-     * while this application sat in review, and a principal edited after
-     * sign-off. Fails CLOSED: anything unexpected throws and rolls the release
-     * back rather than quietly releasing a second loan for the same debt.
+     * Both loan rows are locked in ONE statement in id order, after the
+     * collateral rows: the order every collateral write takes (see
+     * CollateralAttacher). `$loan` is then refreshed from its locked row, so
+     * every write below starts from what is committed rather than from what
+     * the request read before the lock.
      *
+     * A loan no longer approved under the lock was released, voided or sent
+     * back by another request after this one read it, and a collateral it
+     * holds that was not locked was pledged in between: both are the 409 of a
+     * write another one got to first.
+     *
+     * For a restructure, catches a source already closed by a different
+     * restructure, one paid off while this application sat in review, and a
+     * principal edited after sign-off. Fails CLOSED: anything unexpected throws
+     * and rolls the release back rather than quietly releasing a second loan
+     * for the same debt.
+     *
+     * @param  array<int, int>  $lockedCollateralIds  the collateral rows release() locked
      * @return Loan|null the locked source, or null when this is an ordinary loan
+     *
+     * @throws HttpResponseException 409 when the loan changed since it was read
      */
-    private function lockAndGuardRestructureSource(Loan $loan): ?Loan
+    private function lockAndGuardReleaseRows(Loan $loan, array $lockedCollateralIds): ?Loan
     {
+        $ids = array_map('intval', array_filter([$loan->getKey(), $loan->source_loan_id]));
+        sort($ids);
+
+        $locked = Loan::whereKey($ids)
+            ->orderBy('id')
+            ->lockForUpdate()
+            ->get()
+            ->keyBy('id');
+
+        $current = $locked->get($loan->getKey());
+
+        if ($current === null || $current->status !== 'approved') {
+            throw LoanWriteTransaction::conflict();
+        }
+
+        $loan->setRawAttributes($current->getAttributes(), true);
+
+        if (array_diff(CollateralAttacher::heldBy($loan), $lockedCollateralIds) !== []) {
+            throw LoanWriteTransaction::conflict();
+        }
+
         if ($loan->source_loan_id === null) {
             return null;
         }
 
-        $source = Loan::whereKey($loan->source_loan_id)->lockForUpdate()->first();
+        $source = $locked->get($loan->source_loan_id);
 
         if (! $source || ! in_array($source->status, ['released', 'ongoing'], true)) {
             throw ValidationException::withMessages([
@@ -1186,7 +1236,7 @@ class LoanService
      * that status mean exactly one thing: closed because its balance moved to a
      * new loan.
      *
-     * `$source` is already locked by lockAndGuardRestructureSource().
+     * `$source` is already locked by lockAndGuardReleaseRows().
      */
     private function closeRestructuredSource(Loan $newLoan, Loan $source, User $releaser): void
     {

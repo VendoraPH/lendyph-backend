@@ -109,10 +109,13 @@ class CollateralPledgeGuard
      * on a write into `loan_collaterals`; a loan changing status writes only to
      * `loans`, so no pivot guard will ever see it. Every path that moves a loan
      * from an inactive status into an active one must call this, INSIDE its own
-     * transaction, having opened that transaction with lockCollateralsOf():
+     * transaction, having opened that transaction by locking the loan's
+     * collateral rows:
      *
      *   - LoanService::release()             approved  → released
+     *     (CollateralAttacher::lock(), the collateral rows only)
      *   - RepaymentService::voidRepayment()  completed → ongoing/released
+     *     (lockCollateralsOf())
      *
      * That is the complete list for this codebase: they are the only two writes
      * of an active status from an inactive one anywhere in app/.
@@ -121,12 +124,12 @@ class CollateralPledgeGuard
      * not call this. CheckDefaultedLoans writes `defaulted` only over `released`
      * or `ongoing`, which already pledge, so it cannot add one either.
      *
-     * `$collateralIds` is threaded in from lockCollateralsOf() rather than
-     * re-derived here, deliberately: the assertion is only meaningful while
-     * those rows are locked, so it takes the lock's own output as its argument
-     * and cannot be called without one.
+     * `$collateralIds` is threaded in from the lock rather than re-derived
+     * here, deliberately: the assertion is only meaningful while those rows are
+     * locked, so it takes the lock's own output as its argument and cannot be
+     * called without one.
      *
-     * @param  array<int, int>  $collateralIds  as returned by lockCollateralsOf()
+     * @param  array<int, int>  $collateralIds  the ids the caller's collateral lock returned
      *
      * @throws ValidationException naming the conflicting loan(s), on `collateral`
      */
