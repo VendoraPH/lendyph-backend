@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace App\Services\Accounting;
 
 use App\Exceptions\CannotPostToTheBooksException;
-use App\Models\AccountingAccountMapping;
 use App\Services\FeeOverlapDetector;
 
 /**
@@ -85,34 +84,49 @@ final class PostingRules
      * Income report already use, so "PROCESSING-FEE." is a processing fee here
      * exactly as it is there, and "Processing Fee Waiver" is not.
      *
-     * ## One entry, on purpose
+     * ## Confirmed by the cooperative's accountant on 2026-10-03
      *
-     * A row belongs here only when a role in
-     * {@see AccountingAccountMapping::ROLES} already means that type. Today that
-     * is processing fees and nothing else. The other types the release path
-     * writes — "service fee", "notarial fee", "insurance premium", and whatever
-     * a fee catalog row is called — have no role: the seeded chart carries 4040
-     * Service Fee Income, but no role points at it, and there is no
-     * share-capital or insurance-payable account at all. Mapping a type by an
-     * account's code or name would be guessing which account an administrator
-     * meant, and a wrong guess balances, posts, and is never reported. So an
-     * unmapped type is booked as before — see {@see self::UNMAPPED_DEDUCTION_ROLE}
-     * — until a role for it exists and is added here.
+     * Each type the release path writes has a role of its own, and the role is
+     * resolved through Settings → Default Accounts like every other, never by
+     * an account's code or name:
+     *
+     * - processing fee    → processing_fee_income     (4030 by default)
+     * - service fee       → service_fee_income        (4040 Service Fee Income)
+     * - notarial fee      → notarial_fees_payable     (2030, a liability: owed to the notary)
+     * - insurance premium → insurance_premium_payable (2040, a liability: owed to the insurer)
+     * - share capital     → share_capital             (3060, the members' equity)
+     *
+     * A fee from the Settings fee catalog whose name is none of these goes to
+     * {@see self::CATALOG_FEE_ROLE}. Anything else is booked as before — see
+     * {@see self::UNMAPPED_DEDUCTION_ROLE}. Only journals posted from then on
+     * use these roles; a posted journal is never rewritten.
      *
      * @var array<string, string>
      */
     public const DEDUCTION_ROLES = [
         'processing fee' => 'processing_fee_income',
+        'service fee' => 'service_fee_income',
+        'notarial fee' => 'notarial_fees_payable',
+        'insurance premium' => 'insurance_premium_payable',
+        'share capital' => 'share_capital',
     ];
+
+    /**
+     * Where a fee from the Settings fee catalog (LoanReleaseFeeService, an item
+     * carrying `fee_id`) is credited when its name is no type in
+     * {@see self::DEDUCTION_ROLES} — a Credit Investigation Fee, say. 4080
+     * Other Fee Income by default (accountant-confirmed 2026-10-03).
+     */
+    public const CATALOG_FEE_ROLE = 'other_fee_income';
 
     /**
      * Where a deduction with no entry in {@see self::DEDUCTION_ROLES} is
      * credited, together with any part of `total_deductions` no item explains.
      *
      * The role ALL withheld deductions were credited to before items were
-     * booked by type. Keeping it for everything unmapped is what makes every
-     * release journal posted under today's mappings identical, line for line,
-     * to the one the rule posted before.
+     * booked by type, kept for whatever still has no type: a hand-typed
+     * deduction such as "Documentary Stamp", and an imported loan's total
+     * with no item list.
      */
     public const UNMAPPED_DEDUCTION_ROLE = 'processing_fee_income';
 
@@ -147,16 +161,15 @@ final class PostingRules
      * withholding: the product's processing, service and notarial fees from
      * `LoanService::createLoan()`, catalog fees from `LoanReleaseFeeService`,
      * the "Insurance Premium" from `applyInsuranceOnRelease()`. Each is
-     * credited to the role its type maps to in {@see self::DEDUCTION_ROLES};
-     * everything else — an unmapped type, and whatever part of `$deductions`
-     * no item explains (an imported loan carries a total and no list) — is
-     * credited to {@see self::UNMAPPED_DEDUCTION_ROLE}, exactly as the whole
-     * total was before. See {@see self::classifyDeductions()}.
+     * credited to the role its type maps to in {@see self::DEDUCTION_ROLES},
+     * or a catalog fee of no such type to {@see self::CATALOG_FEE_ROLE};
+     * everything else — an untyped deduction, and whatever part of
+     * `$deductions` no item explains (an imported loan carries a total and no
+     * list) — is credited to {@see self::UNMAPPED_DEDUCTION_ROLE}, exactly as
+     * the whole total was before. See {@see self::classifyDeductions()}.
      *
      * One credit line per ROLE, not per item: items that resolve to the same
-     * role are summed. With today's mappings every deduction resolves to
-     * processing fee income, so the journal is the same three lines it always
-     * was — debit the gross, credit the net, credit the total withheld.
+     * role are summed.
      *
      * ## No new refusals for what the old rule posted
      *
@@ -174,7 +187,7 @@ final class PostingRules
      * @param  int  $net  `loans.net_proceeds` — what was handed over
      * @param  int  $deductions  `loans.total_deductions` — what was withheld
      * @param  array<array-key, mixed>  $items  `loans.deductions` as a list, each usable amount in centavos:
-     *                                          list<array{name: string, amount: int|null}|mixed>
+     *                                          list<array{name: string, amount: int|null, catalog_fee?: bool}|mixed>
      * @param  string  $loan  what to call the loan in a refusal ("LA-000154")
      *
      * @throws CannotPostToTheBooksException when the three figures do not reconcile, or a mapped item cannot be booked
@@ -238,11 +251,16 @@ final class PostingRules
      * - `remainder` — `$deductions` minus every usable item, signed: the part
      *   of the total no item explains (negative when the items add up to more);
      * - `credits` — role => what the release credits it, in line order: the
-     *   mapped items, then `$deductions` minus them on
+     *   mapped items in {@see self::DEDUCTION_ROLES} order, then catalog fees
+     *   on {@see self::CATALOG_FEE_ROLE}, then `$deductions` minus them on
      *   {@see self::UNMAPPED_DEDUCTION_ROLE}. Zero shares are left out.
      *
+     * An item with `catalog_fee` true came from the Settings fee catalog; its
+     * name still decides first, so a catalog fee called "Service Fee" is a
+     * service fee.
+     *
      * @param  int  $deductions  `loans.total_deductions`, in centavos
-     * @param  array<array-key, mixed>  $items  list<array{name: string, amount: int|null}|mixed>, amounts in centavos
+     * @param  array<array-key, mixed>  $items  list<array{name: string, amount: int|null, catalog_fee?: bool}|mixed>, amounts in centavos
      * @param  string  $loan  what to call the loan in a refusal
      * @return array{
      *     types: array<string, array{amount: int, role: string|null}>,
@@ -275,7 +293,7 @@ final class PostingRules
 
             $name = is_string($item['name'] ?? null) ? $item['name'] : '';
             $type = self::deductionType($name);
-            $role = self::DEDUCTION_ROLES[$type] ?? null;
+            $role = self::DEDUCTION_ROLES[$type] ?? (($item['catalog_fee'] ?? false) === true ? self::CATALOG_FEE_ROLE : null);
             $amount = $item['amount'] ?? null;
             $problem = self::unusableAmount($amount);
 
@@ -312,7 +330,7 @@ final class PostingRules
 
         $credits = [];
 
-        foreach (array_unique(self::DEDUCTION_ROLES) as $role) {
+        foreach ([...array_unique(self::DEDUCTION_ROLES), self::CATALOG_FEE_ROLE] as $role) {
             if (($mapped[$role] ?? 0) > 0) {
                 $credits[$role] = $mapped[$role];
             }

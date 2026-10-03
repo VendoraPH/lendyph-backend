@@ -131,7 +131,7 @@ class AccountingEquityChangesTest extends TestCase
     public function test_a_contra_equity_account_reduces_equity(): void
     {
         $drawings = $this->postJson('/api/accounting/accounts', [
-            'code' => '3060', 'name' => 'Owner Drawings', 'type' => 'equity',
+            'code' => '3070', 'name' => 'Owner Drawings', 'type' => 'equity',
             'is_contra' => true, 'parent_id' => $this->account('3000'),
         ])->assertCreated()->json('data');
 
@@ -148,7 +148,7 @@ class AccountingEquityChangesTest extends TestCase
         ], ['date' => '2026-09-20']);
 
         $report = $this->report();
-        $row = $this->rowsByCode($report)['3060'];
+        $row = $this->rowsByCode($report)['3070'];
 
         $this->assertSame(0, $row['beginning']);
         $this->assertSame(0, $row['additions']);

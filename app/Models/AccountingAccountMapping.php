@@ -73,6 +73,11 @@ class AccountingAccountMapping extends Model
         'allowance_credit_losses',
         'accounts_payable',
         'borrower_advances',
+        'service_fee_income',
+        'notarial_fees_payable',
+        'insurance_premium_payable',
+        'share_capital',
+        'other_fee_income',
     ];
 
     /**
@@ -154,6 +159,21 @@ class AccountingAccountMapping extends Model
          * streams' postings in the same balance.
          */
         'borrower_advances' => ['type' => 'liability'],
+
+        /*
+         * Where each deduction withheld at release is credited, as the
+         * cooperative's accountant confirmed on 2026-10-03 (see
+         * PostingRules::DEDUCTION_ROLES). The notarial fee and the insurance
+         * premium are collected for someone else — the notary, the insurer —
+         * so they are owed onward, not earned: liabilities. Share capital is
+         * the member's own contribution: equity. The service fee and catalog
+         * fees are earned: income.
+         */
+        'service_fee_income' => ['type' => 'income'],
+        'notarial_fees_payable' => ['type' => 'liability'],
+        'insurance_premium_payable' => ['type' => 'liability'],
+        'share_capital' => ['type' => 'equity'],
+        'other_fee_income' => ['type' => 'income'],
     ];
 
     protected $fillable = [

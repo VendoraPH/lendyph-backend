@@ -9,6 +9,7 @@ use App\Models\AccountingAccount;
 use App\Models\AccountingJournal;
 use App\Models\Loan;
 use App\Models\Repayment;
+use App\Services\LoanReleaseFeeService;
 use DateTimeInterface;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Carbon;
@@ -174,8 +175,9 @@ final class AutomaticPoster
     }
 
     /**
-     * `loans.deductions` as the release rule takes it: each item's name, and
-     * its peso `amount` in centavos — or null when that amount is unusable.
+     * `loans.deductions` as the release rule takes it: each item's name, its
+     * peso `amount` in centavos — or null when that amount is unusable — and
+     * whether it came from the Settings fee catalog (it carries a `fee_id`).
      *
      * Only a LIST is a list of items. `null`, a JSON scalar or string, and a
      * JSON object (`{"processing_fee": 500}`) all mean "no items": the whole
@@ -188,7 +190,7 @@ final class AutomaticPoster
      * sign rather than becoming null: the rule refuses it on a mapped type and
      * names the figure, which it cannot do with a null.
      *
-     * @return list<array{name: string, amount: int|null}|mixed>
+     * @return list<array{name: string, amount: int|null, catalog_fee: bool}|mixed>
      */
     private function deductionItems(Loan $loan): array
     {
@@ -202,6 +204,7 @@ final class AutomaticPoster
             ? [
                 'name' => is_string($item['name'] ?? null) ? $item['name'] : '',
                 'amount' => $this->itemCentavos($item['amount'] ?? null),
+                'catalog_fee' => isset($item[LoanReleaseFeeService::ITEM_FEE_KEY]),
             ]
             : $item, $deductions);
     }

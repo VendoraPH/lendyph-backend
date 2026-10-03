@@ -665,12 +665,13 @@ class LoanReleaseFeesTest extends TestCase
             return $line === null ? 0 : (int) $line->{$side};
         };
 
+        // Catalog fees are credited to 4080 Other Fee Income.
         $this->assertSame(5_000_000, $lineOn('1110', 'debit'));
-        $this->assertSame(148_456, $lineOn('4030', 'credit'));
+        $this->assertSame(148_456, $lineOn('4080', 'credit'));
         $this->assertSame(4_851_544, $lineOn('1010', 'credit'));
 
         // Not the peso figures wearing a centavo label.
-        $this->assertNotSame(1_484, $lineOn('4030', 'credit'));
+        $this->assertNotSame(1_484, $lineOn('4080', 'credit'));
         $this->assertNotSame(48_515, $lineOn('1010', 'credit'));
     }
 
