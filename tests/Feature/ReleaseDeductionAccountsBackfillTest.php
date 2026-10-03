@@ -237,7 +237,9 @@ class ReleaseDeductionAccountsBackfillTest extends TestCase
     public function test_the_migration_writes_exactly_what_the_service_writes(): void
     {
         $this->chartSeededBeforeTheseAccounts();
+        // One role skipped (its code taken), one reused by name, one created.
         $this->account3('2040', 'Customer Deposits', 'liability');
+        $this->account3('2050', 'Notarial Fees Payable', 'liability');
         $before = $this->snapshot();
 
         // The service's outcome, taken inside a savepoint and then undone.
@@ -248,6 +250,8 @@ class ReleaseDeductionAccountsBackfillTest extends TestCase
 
         $this->assertSame($before, $this->snapshot());
         $this->assertCount(1, $result['skipped']);
+        $this->assertContains(['role' => 'notarial_fees_payable', 'code' => '2050', 'name' => 'Notarial Fees Payable'], $result['mapped']);
+        $this->assertNotContains('notarial_fees_payable', array_column($result['created'], 'role'));
 
         Log::spy();
         $this->migration()->up();
