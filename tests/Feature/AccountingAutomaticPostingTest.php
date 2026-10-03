@@ -14,6 +14,7 @@ use App\Services\LoanService;
 use App\Services\RepaymentService;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 use Tests\Traits\PostsJournals;
 use Tests\Traits\SetupLendyPH;
@@ -84,6 +85,44 @@ class AccountingAutomaticPostingTest extends TestCase
         $loans->submitForReview($loan);
         $loans->approve($loan, $this->admin, 'Approved for testing');
         $loans->release($loan, $this->admin);
+
+        return $loan->fresh();
+    }
+
+    /**
+     * A release carrying every kind of deduction the release path writes: the
+     * product's own processing, service and notarial fees, then an insurance
+     * premium withheld at release.
+     */
+    private function releaseLoanWithProductFeesAndInsurance(): Loan
+    {
+        $product = LoanProduct::factory()->create([
+            'interest_rate' => 3.0,
+            'interest_method' => 'straight',
+            'term' => 6,
+            'frequency' => 'monthly',
+            'processing_fee' => 2,
+            'service_fee' => 1,
+            'notarial_fee' => 0.5,
+        ]);
+
+        $borrower = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+        $loans = app(LoanService::class);
+
+        $loan = $loans->createLoan([
+            'borrower_id' => $borrower->id,
+            'loan_product_id' => $product->id,
+            'principal_amount' => 50000.00,
+            'start_date' => now()->toDateString(),
+        ], $this->admin);
+
+        $loans->submitForReview($loan);
+        $loans->approve($loan, $this->admin, 'Approved for testing');
+        $loans->release($loan, $this->admin, [
+            'insurance_premium_percentage' => 0.6,
+            'insurance_premium_amount' => 300.00,
+            'insurance_payment_type' => 'full',
+        ]);
 
         return $loan->fresh();
     }
@@ -254,6 +293,212 @@ class AccountingAutomaticPostingTest extends TestCase
         // Posting BEFORE applyInsuranceOnRelease() would have credited cash
         // with 4_876_544 — the pre-insurance figure — and still balanced.
         $this->assertNotSame(4_876_544, $this->lineOn($journal, '1010', 'credit'));
+    }
+
+    // ── Each deduction booked by its type ──
+
+    /**
+     * The release passes its deduction ITEMS, and each is booked by its type.
+     *
+     * Only "processing fee" has an account mapping today, so the service fee,
+     * the notarial fee and the insurance premium are booked exactly where they
+     * were before — processing fee income, in the same single line. 4040
+     * Service Fee Income is on the seeded chart and stays untouched: no role
+     * points at it, and choosing it by its name would be guessing.
+     *
+     * ₱50,000 principal; the product's 2% processing (₱1,000), 1% service
+     * (₱500) and 0.5% notarial (₱250) fees; a ₱300 premium withheld at
+     * release. ₱2,050 kept, ₱47,950 handed over.
+     */
+    public function test_a_release_books_each_deduction_by_its_type(): void
+    {
+        $this->seedChartOfAccounts();
+
+        $loan = $this->releaseLoanWithProductFeesAndInsurance();
+        $journal = $this->journalFor($loan, 'loan_release');
+
+        $this->assertSame(
+            ['Processing Fee', 'Service Fee', 'Notarial Fee', 'Insurance Premium'],
+            array_column($loan->deductions, 'name'),
+        );
+        $this->assertSame('2050.00', (string) $loan->total_deductions);
+        $this->assertSame('47950.00', (string) $loan->net_proceeds);
+
+        $this->assertCount(3, $journal->lines);
+        $this->assertSame(5_000_000, $this->lineOn($journal, '1110', 'debit'));
+        $this->assertSame(4_795_000, $this->lineOn($journal, '1010', 'credit'));
+        $this->assertSame(205_000, $this->lineOn($journal, '4030', 'credit'));
+        $this->assertSame(0, $this->lineOn($journal, '4040', 'credit'));
+
+        $deductions = app(AutomaticPoster::class)->releaseDeductions($loan);
+
+        $this->assertSame(['processing_fee_income' => 100_000], $deductions['mapped']);
+        $this->assertSame(
+            ['service fee' => 50_000, 'notarial fee' => 25_000, 'insurance premium' => 30_000],
+            $deductions['unmapped'],
+        );
+        $this->assertSame(0, $deductions['remainder']);
+    }
+
+    /**
+     * The items reach the rule: a processing fee item larger than everything
+     * the loan says it withheld — a hand-edited row — refuses the release
+     * instead of booking a fee the deductions do not contain.
+     */
+    public function test_a_release_whose_processing_fee_item_exceeds_its_deductions_is_refused(): void
+    {
+        $this->seedChartOfAccounts();
+
+        $product = LoanProduct::factory()->create([
+            'interest_rate' => 3.0, 'interest_method' => 'straight', 'term' => 6,
+            'frequency' => 'monthly', 'processing_fee' => 0, 'service_fee' => 0, 'notarial_fee' => 0,
+        ]);
+        $borrower = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+        $loans = app(LoanService::class);
+
+        $loan = $loans->createLoan([
+            'borrower_id' => $borrower->id,
+            'loan_product_id' => $product->id,
+            'principal_amount' => 50000.00,
+            'start_date' => now()->toDateString(),
+            'deductions' => [['name' => 'Processing Fee', 'amount' => 1000.00, 'type' => 'fixed']],
+        ], $this->admin);
+        $loans->submitForReview($loan);
+        $loans->approve($loan, $this->admin, 'Approved for testing');
+
+        DB::table('loans')->where('id', $loan->id)->update([
+            'deductions' => json_encode([
+                ['name' => 'Processing Fee', 'amount' => 1500.00, 'type' => 'fixed', 'original_value' => 1500.00],
+            ]),
+        ]);
+
+        try {
+            $loans->release($loan->fresh(), $this->admin);
+            $this->fail('A processing fee item above the loan\'s total deductions was posted.');
+        } catch (CannotPostToTheBooksException $e) {
+            $this->assertStringContainsString('₱1,500.00', $e->getMessage());
+            $this->assertStringContainsString('₱1,000.00', $e->getMessage());
+        }
+
+        $this->assertSame('approved', $loan->fresh()->status);
+        $this->assertNull($this->journalFor($loan, 'loan_release'));
+    }
+
+    /**
+     * An approved ₱50,000 loan whose STORED `deductions` and totals are then
+     * overwritten with a raw shape — what an import, an old release path or a
+     * hand edit can leave behind — ready to release.
+     */
+    private function approvedLoanStoring(?string $deductionsJson, string $totalDeductions): Loan
+    {
+        $product = LoanProduct::factory()->create([
+            'interest_rate' => 3.0, 'interest_method' => 'straight', 'term' => 6,
+            'frequency' => 'monthly', 'processing_fee' => 0, 'service_fee' => 0, 'notarial_fee' => 0,
+        ]);
+        $borrower = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+        $loans = app(LoanService::class);
+
+        $loan = $loans->createLoan([
+            'borrower_id' => $borrower->id,
+            'loan_product_id' => $product->id,
+            'principal_amount' => 50000.00,
+            'start_date' => now()->toDateString(),
+            'deductions' => [],
+        ], $this->admin);
+        $loans->submitForReview($loan);
+        $loans->approve($loan, $this->admin, 'Approved for testing');
+
+        DB::table('loans')->where('id', $loan->id)->update([
+            'deductions' => $deductionsJson,
+            'total_deductions' => $totalDeductions,
+            'net_proceeds' => number_format(50000.00 - (float) $totalDeductions, 2, '.', ''),
+        ]);
+
+        return $loan->fresh();
+    }
+
+    /**
+     * Stored shapes the old rule posted, which must still post, unchanged: the
+     * whole total on one 4030 line.
+     *
+     * Each goes through the real release, except the JSON string: release
+     * never reaches the books with one, because LoanReleaseFeeService reads
+     * `deductions` as a list before posting and fails on a string. That shape
+     * is posted through AutomaticPoster directly, which is the rule's half of
+     * the question.
+     *
+     * @return array<string, array{string|null, string, int, bool}>
+     */
+    public static function storedDeductionShapes(): array
+    {
+        return [
+            'deductions NULL' => [null, '1234.56', 123_456, true],
+            'a JSON string' => [json_encode('Processing Fee 1,234.56'), '1234.56', 123_456, false],
+            'a JSON object' => [json_encode(['processing_fee' => 1234.56]), '1234.56', 123_456, true],
+            'an empty list beside a non-zero total' => ['[]', '1234.56', 123_456, true],
+            'string and float amounts' => [json_encode([
+                ['name' => 'Processing Fee', 'amount' => '0.10', 'type' => 'fixed'],
+                ['name' => 'Service Fee', 'amount' => 0.20, 'type' => 'fixed'],
+            ]), '0.30', 30, true],
+            'an unmapped item with no amount' => [json_encode([
+                ['name' => 'Processing Fee', 'amount' => 1000, 'type' => 'fixed'],
+                ['name' => 'Notarial Fee', 'type' => 'fixed'],
+            ]), '1234.56', 123_456, true],
+        ];
+    }
+
+    #[DataProvider('storedDeductionShapes')]
+    public function test_a_stored_deduction_shape_the_old_rule_posted_still_posts_as_before(
+        ?string $deductionsJson,
+        string $totalDeductions,
+        int $expectedFeeCredit,
+        bool $throughRelease,
+    ): void {
+        $this->seedChartOfAccounts();
+
+        $loan = $this->approvedLoanStoring($deductionsJson, $totalDeductions);
+
+        if ($throughRelease) {
+            app(LoanService::class)->release($loan, $this->admin);
+        } else {
+            app(AutomaticPoster::class)->loanRelease($loan, $this->admin->id);
+        }
+
+        $journal = $this->journalFor($loan, 'loan_release');
+
+        $this->assertNotNull($journal, 'The release posted no journal.');
+        $this->assertCount(3, $journal->lines);
+        $this->assertSame(5_000_000, $this->lineOn($journal, '1110', 'debit'));
+        $this->assertSame(5_000_000 - $expectedFeeCredit, $this->lineOn($journal, '1010', 'credit'));
+        $this->assertSame($expectedFeeCredit, $this->lineOn($journal, '4030', 'credit'));
+    }
+
+    /**
+     * The one item that may still refuse a release: one with an account of
+     * its own whose amount cannot be read. The refusal names the loan, and the
+     * release rolls back whole.
+     */
+    public function test_a_release_whose_mapped_item_has_no_usable_amount_is_refused_and_rolled_back(): void
+    {
+        $this->seedChartOfAccounts();
+
+        $loan = $this->approvedLoanStoring(json_encode([
+            ['name' => 'Processing Fee', 'amount' => 'see attached', 'type' => 'fixed'],
+        ]), '1234.56');
+
+        try {
+            app(LoanService::class)->release($loan, $this->admin);
+            $this->fail('A processing fee with no usable amount was posted.');
+        } catch (CannotPostToTheBooksException $e) {
+            $this->assertMatchesRegularExpression('/"Processing Fee".*no usable amount/s', $e->getMessage());
+            $this->assertStringContainsString((string) $loan->application_number, $e->getMessage());
+        }
+
+        $fresh = $loan->fresh();
+
+        $this->assertSame('approved', $fresh->status);
+        $this->assertNull($fresh->loan_account_number);
+        $this->assertNull($this->journalFor($loan, 'loan_release'));
     }
 
     // ── Idempotency: a retry must not double-post ──
