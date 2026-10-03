@@ -5,6 +5,7 @@ namespace Tests\Unit;
 use App\Exceptions\CannotPostToTheBooksException;
 use App\Services\Accounting\AccountMap;
 use App\Services\Accounting\PostingRules;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -143,6 +144,228 @@ class AccountingPostingRulesTest extends TestCase
 
         $this->assertSame(100_000, $this->amountOn($posting, 1040, 'credit'));
         $this->assertSame(0, $this->amountOn($posting, 1010, 'credit'));
+    }
+
+    // ── loan_release: each deduction booked by its type ──
+
+    /**
+     * A processing fee item goes to the account mapped for processing fees.
+     *
+     * The type is the item's NAME, normalised the way FeeOverlapDetector and
+     * the Income report normalise it, so "PROCESSING-FEE." is the same type and
+     * "Processing Fee Waiver" is not.
+     */
+    public function test_a_processing_fee_item_is_credited_to_processing_fee_income(): void
+    {
+        $posting = PostingRules::loanRelease(
+            5_000_000, 4_876_544, 123_456, 'cash', $this->map(),
+            items: [['name' => 'PROCESSING-FEE.', 'amount' => 123_456]],
+        );
+
+        $this->assertBalancedAndNonEmpty($posting);
+        $this->assertCount(3, $posting['lines']);
+        $this->assertSame(123_456, $this->amountOn($posting, 4030, 'credit'));
+
+        $deductions = PostingRules::classifyDeductions(123_456, [['name' => 'PROCESSING-FEE.', 'amount' => 123_456]]);
+
+        $this->assertSame(['processing_fee_income' => 123_456], $deductions['mapped']);
+        $this->assertSame([], $deductions['unmapped']);
+        $this->assertSame(0, $deductions['remainder']);
+        $this->assertSame('processing_fee_income', PostingRules::deductionRoleFor('Processing Fee'));
+        $this->assertNull(PostingRules::deductionRoleFor('Processing Fee Waiver'));
+    }
+
+    /**
+     * A type with no account mapping is booked exactly where it is booked
+     * today: processing fee income. No account is guessed for it — not 4040
+     * Service Fee Income by its name, not anything by its code.
+     */
+    public function test_a_type_without_an_account_is_booked_exactly_as_before(): void
+    {
+        $items = [
+            ['name' => 'Processing Fee', 'amount' => 100_000],
+            ['name' => 'Service Fee', 'amount' => 50_000],
+            ['name' => 'Notarial Fee', 'amount' => 20_000],
+            ['name' => 'Insurance Premium', 'amount' => 30_000],
+            ['name' => 'service fee', 'amount' => 5_000],
+        ];
+
+        $posting = PostingRules::loanRelease(5_000_000, 4_795_000, 205_000, 'cash', $this->map(), items: $items);
+
+        $this->assertBalancedAndNonEmpty($posting);
+        $this->assertCount(3, $posting['lines']);
+        $this->assertSame(205_000, $this->amountOn($posting, 4030, 'credit'));
+
+        $deductions = PostingRules::classifyDeductions(205_000, $items);
+
+        $this->assertSame(['processing_fee_income' => 100_000], $deductions['mapped']);
+        $this->assertSame(
+            ['service fee' => 55_000, 'notarial fee' => 20_000, 'insurance premium' => 30_000],
+            $deductions['unmapped'],
+        );
+        $this->assertSame(['amount' => 55_000, 'role' => null], $deductions['types']['service fee']);
+        $this->assertSame(['amount' => 100_000, 'role' => 'processing_fee_income'], $deductions['types']['processing fee']);
+        $this->assertSame(['processing_fee_income' => 205_000], $deductions['credits']);
+    }
+
+    /**
+     * Whatever part of the total no item explains is booked as today, too —
+     * an imported loan with a total and no item list included.
+     */
+    public function test_the_unitemised_remainder_is_booked_exactly_as_before(): void
+    {
+        $partly = PostingRules::loanRelease(
+            5_000_000, 4_850_000, 150_000, 'cash', $this->map(),
+            items: [['name' => 'Processing Fee', 'amount' => 100_000]],
+        );
+        $none = PostingRules::loanRelease(5_000_000, 4_850_000, 150_000, 'cash', $this->map(), items: []);
+
+        foreach ([$partly, $none] as $posting) {
+            $this->assertBalancedAndNonEmpty($posting);
+            $this->assertCount(3, $posting['lines']);
+            $this->assertSame(150_000, $this->amountOn($posting, 4030, 'credit'));
+        }
+
+        $this->assertSame(50_000, PostingRules::classifyDeductions(150_000, [['name' => 'Processing Fee', 'amount' => 100_000]])['remainder']);
+        $this->assertSame(150_000, PostingRules::classifyDeductions(150_000, [])['remainder']);
+    }
+
+    /**
+     * Items with an account of their own that add up to MORE than was
+     * withheld cannot all be booked where they belong without crediting more
+     * than the loan's deductions — so the release is refused, naming the
+     * figures, rather than one of them being quietly trimmed.
+     */
+    public function test_mapped_items_that_exceed_the_total_deductions_are_refused(): void
+    {
+        $this->expectException(CannotPostToTheBooksException::class);
+        $this->expectExceptionMessageMatches('/₱2,000\.00.*₱1,500\.00/s');
+
+        PostingRules::loanRelease(
+            5_000_000, 4_850_000, 150_000, 'cash', $this->map(),
+            items: [
+                ['name' => 'Processing Fee', 'amount' => 120_000],
+                ['name' => 'processing fee', 'amount' => 80_000],
+            ],
+        );
+    }
+
+    /**
+     * Unmapped items above the total are not refused: they and the remainder
+     * are booked as today, which credits the whole total to processing fee
+     * income — the figure the loan records as withheld.
+     */
+    public function test_unmapped_items_above_the_total_are_booked_as_before(): void
+    {
+        $posting = PostingRules::loanRelease(
+            5_000_000, 4_850_000, 150_000, 'cash', $this->map(),
+            items: [
+                ['name' => 'Processing Fee', 'amount' => 100_000],
+                ['name' => 'Service Fee', 'amount' => 90_000],
+            ],
+        );
+
+        $this->assertBalancedAndNonEmpty($posting);
+        $this->assertSame(150_000, $this->amountOn($posting, 4030, 'credit'));
+        $this->assertSame(-40_000, PostingRules::classifyDeductions(150_000, [
+            ['name' => 'Processing Fee', 'amount' => 100_000],
+            ['name' => 'Service Fee', 'amount' => 90_000],
+        ])['remainder']);
+    }
+
+    /** Direction belongs to the column, not the sign — for an item as for a component. */
+    public function test_a_negative_deduction_item_is_refused(): void
+    {
+        $this->expectException(CannotPostToTheBooksException::class);
+        $this->expectExceptionMessageMatches('/"Service Fee".*-₱100\.00/s');
+
+        PostingRules::loanRelease(
+            5_000_000, 4_860_000, 140_000, 'cash', $this->map(),
+            items: [
+                ['name' => 'Processing Fee', 'amount' => 150_000],
+                ['name' => 'Service Fee', 'amount' => -10_000],
+            ],
+        );
+    }
+
+    /**
+     * An item amount that is not whole centavos — a peso float, a string, or
+     * nothing at all — is refused rather than read as zero.
+     *
+     * @return array<string, array{mixed}>
+     */
+    public static function unusableItemAmounts(): array
+    {
+        return [
+            'pesos as a float' => [1500.00],
+            'a decimal string' => ['1500.00'],
+            'missing' => [null],
+        ];
+    }
+
+    #[DataProvider('unusableItemAmounts')]
+    public function test_a_deduction_item_without_a_usable_amount_is_refused(mixed $amount): void
+    {
+        $this->expectException(CannotPostToTheBooksException::class);
+        $this->expectExceptionMessageMatches('/"Notarial Fee" has no usable amount/');
+
+        PostingRules::classifyDeductions(150_000, [['name' => 'Notarial Fee', 'amount' => $amount]]);
+    }
+
+    /**
+     * With today's mappings every release journal is identical, line for
+     * line, to the one the old rule posted — debit the gross, credit the net,
+     * credit the whole deduction total to processing fee income — whatever the
+     * item list holds.
+     *
+     * @return array<string, array{int, int, int, list<array{name: string, amount: int}>}>
+     */
+    public static function typicalItemLists(): array
+    {
+        return [
+            'product fees' => [5_000_000, 4_850_000, 150_000, [
+                ['name' => 'Processing Fee', 'amount' => 100_000],
+                ['name' => 'Service Fee', 'amount' => 25_000],
+                ['name' => 'Notarial Fee', 'amount' => 25_000],
+            ]],
+            'product fees, catalog fee and insurance' => [5_000_000, 4_795_000, 205_000, [
+                ['name' => 'Processing Fee', 'amount' => 100_000],
+                ['name' => 'Service Fee', 'amount' => 25_000],
+                ['name' => 'Notarial Fee', 'amount' => 25_000],
+                ['name' => 'Documentary Stamp', 'amount' => 5_000],
+                ['name' => 'Insurance Premium', 'amount' => 50_000],
+            ]],
+            'processing fee only' => [5_000_000, 4_876_544, 123_456, [
+                ['name' => 'Processing Fee', 'amount' => 123_456],
+            ]],
+            'no processing fee' => [1_000_000, 990_000, 10_000, [
+                ['name' => 'Notarial Fee', 'amount' => 10_000],
+            ]],
+            'a zero processing fee' => [1_000_000, 990_000, 10_000, [
+                ['name' => 'Processing Fee', 'amount' => 0],
+                ['name' => 'Service Fee', 'amount' => 10_000],
+            ]],
+            'no item list' => [1_000_000, 980_000, 20_000, []],
+            'nothing withheld' => [1_000_000, 1_000_000, 0, []],
+        ];
+    }
+
+    /** @param  list<array{name: string, amount: int}>  $items */
+    #[DataProvider('typicalItemLists')]
+    public function test_release_lines_are_identical_to_the_old_rule(int $gross, int $net, int $deductions, array $items): void
+    {
+        $posting = PostingRules::loanRelease($gross, $net, $deductions, 'cash', $this->map(), items: $items);
+
+        $old = [
+            ['account_id' => 1110, 'debit' => $gross, 'credit' => 0],
+            ['account_id' => 1010, 'debit' => 0, 'credit' => $net],
+        ];
+
+        if ($deductions > 0) {
+            $old[] = ['account_id' => 4030, 'debit' => 0, 'credit' => $deductions];
+        }
+
+        $this->assertSame($old, $posting['lines']);
     }
 
     // ── loan_collection ──
