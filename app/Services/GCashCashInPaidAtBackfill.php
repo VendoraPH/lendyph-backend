@@ -23,7 +23,9 @@ use Illuminate\Support\Facades\DB;
  * paid, which only markPaid() does and which means it was paid later. A fixed
  * row no longer matches, so running it again changes nothing.
  *
- * The 2026_10_03_120000 migration runs this on deploy;
+ * The 2026_10_03_120000 migration does the same on deploy, written out with
+ * the query builder so that it depends on no application class; keep the two
+ * in step (BackfillGCashCashInPaidAtTest compares them).
  * `php artisan gcash:backfill-cash-in-paid-at --dry-run` shows what it will
  * change on a database first.
  */

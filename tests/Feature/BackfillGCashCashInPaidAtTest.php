@@ -6,6 +6,7 @@ use App\Models\AuditLog;
 use App\Models\GCashTransaction;
 use App\Services\GCashCashInPaidAtBackfill;
 use Illuminate\Database\Migrations\Migration;
+use Illuminate\Support\Arr;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -133,6 +134,54 @@ class BackfillGCashCashInPaidAtTest extends TestCase
         $this->assertSame($after, $this->snapshot());
     }
 
+    public function test_the_migration_writes_exactly_what_the_service_writes(): void
+    {
+        $before = $this->snapshot();
+
+        // The service's outcome, taken inside a savepoint and then undone.
+        DB::beginTransaction();
+        $result = app(GCashCashInPaidAtBackfill::class)->run(dryRun: false);
+        $byService = $this->outcome();
+        DB::rollBack();
+
+        $this->assertSame($before, $this->snapshot());
+        $this->assertCount(2, $byService['audit']);
+
+        Log::spy();
+        $this->migration()->up();
+        $byMigration = $this->outcome();
+
+        // The same rows, the same audit rows column for column, the same skips.
+        $this->assertSame($byService, $byMigration);
+        Log::shouldHaveReceived('info')->withArgs(
+            fn (string $message, array $context): bool => $message === GCashCashInPaidAtBackfill::summary($result) && $context === $result,
+        )->once();
+        Log::shouldHaveReceived('warning')->withArgs(
+            fn (string $message, array $context): bool => $context['rows'] === $result['skipped'],
+        )->once();
+
+        // A second run changes nothing and records nothing, and says so.
+        $this->migration()->up();
+        $this->assertSame($byMigration, $this->outcome());
+        Log::shouldHaveReceived('info')->withArgs(
+            fn (string $message, array $context): bool => $message === 'gcash cash_in paid_at backfill: 0 updated, 2 skipped'
+                && $context === ['updated' => [], 'skipped' => $result['skipped']],
+        )->once();
+        Log::shouldHaveReceived('warning')->withArgs(
+            fn (string $message, array $context): bool => $context['rows'] === $result['skipped'],
+        )->twice();
+    }
+
+    public function test_the_migration_calls_no_application_class(): void
+    {
+        // A migration has to do on its last deployment what it did on its first,
+        // so it must not reach into app code that can change after it ships.
+        $source = file_get_contents(database_path(self::MIGRATION));
+
+        $this->assertDoesNotMatchRegularExpression('/^use App\\\\/m', $source);
+        $this->assertStringNotContainsString('App\\Services', $source);
+    }
+
     public function test_the_migration_s_down_changes_nothing(): void
     {
         $this->migration()->up();
@@ -165,6 +214,25 @@ class BackfillGCashCashInPaidAtTest extends TestCase
     private function paidAt(string $key): ?string
     {
         return DB::table('gcash_transactions')->where('id', $this->tx[$key]->id)->value('paid_at');
+    }
+
+    /**
+     * The transactions and their backfill audit rows, every column but the
+     * audit row's own id.
+     *
+     * @return array{rows: list<array<string, mixed>>, audit: list<array<string, mixed>>}
+     */
+    private function outcome(): array
+    {
+        return [
+            'rows' => DB::table('gcash_transactions')->orderBy('id')->get()->map(fn (object $row): array => (array) $row)->all(),
+            'audit' => DB::table('audit_logs')
+                ->where('action', GCashCashInPaidAtBackfill::AUDIT_ACTION)
+                ->orderBy('auditable_id')
+                ->get()
+                ->map(fn (object $row): array => Arr::except((array) $row, 'id'))
+                ->all(),
+        ];
     }
 
     /**
