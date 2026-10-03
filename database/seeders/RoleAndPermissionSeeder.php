@@ -29,6 +29,14 @@ class RoleAndPermissionSeeder extends Seeder
             'loans:approve', 'loans:reject', 'loans:release', 'loans:void',
             'loans:extend', 'loans:restructure', 'loans:write_off',
 
+            // Loan Products. Creating, editing and deleting a product sets the
+            // terms of every later application, so it has its own permission
+            // instead of riding on `loans:create` / `loans:update`. admin and
+            // super_admin only, through Permission::all() below; see
+            // 2026_10_03_110000_add_loan_products_manage_permission, which is
+            // what grants it on the already-migrated deployments.
+            'loan_products:manage',
+
             // Payments (renamed from repayments)
             'payments:view', 'payments:create', 'payments:update', 'payments:void',
 
@@ -331,6 +339,19 @@ class RoleAndPermissionSeeder extends Seeder
                 // not extended to the BOD roles: signing authority comes from
                 // holding the role named on the step, not from a permission.
                 $roleName === 'loan_processor' ? ['loans:update'] : [],
+                // loan_processor also prepares the application itself: it
+                // creates the loan, reads what the new-loan form shows and attaches
+                // the member's collateral to it.
+                // Mirrors 2026_10_03_100000_grant_loan_processor_loan_creation_permissions,
+                // which grants the same six on already-migrated deployments.
+                $roleName === 'loan_processor' ? [
+                    'loans:create',
+                    'borrowers:view',
+                    'fees:view',
+                    'collaterals:view',
+                    'collaterals:update',
+                    'share_capital:view',
+                ] : [],
                 $roleName === 'manager' ? $managerAccountingPermissions : [],
             ));
         }

@@ -16,7 +16,7 @@ class UpdateLoanProductRequest extends FormRequest
 
     public function authorize(): bool
     {
-        return $this->user()->can('loans:update');
+        return $this->user()->can('loan_products:manage');
     }
 
     public function rules(): array

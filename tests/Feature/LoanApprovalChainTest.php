@@ -30,6 +30,13 @@ class LoanApprovalChainTest extends TestCase
 {
     use SetupLendyPH;
 
+    /** Everything loan_processor holds: the chain's first step plus preparing the application. */
+    private const LOAN_PROCESSOR_PERMISSIONS = [
+        'loans:view', 'loans:update', 'loans:create',
+        'borrowers:view', 'fees:view', 'collaterals:view', 'collaterals:update',
+        'share_capital:view',
+    ];
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -125,11 +132,13 @@ class LoanApprovalChainTest extends TestCase
 
         // loan_processor is the FIRST step of both default chains, and
         // LoanController@submit checks `loans:update` — with view alone it
-        // could not start the chain it exists to start.
+        // could not start the chain it exists to start. It also prepares the
+        // application, so it creates the loan, reads what the new-loan form
+        // shows and attaches the member's collateral (2026_10_03_100000).
         $this->assertEqualsCanonicalizing(
-            ['loans:view', 'loans:update'],
+            self::LOAN_PROCESSOR_PERMISSIONS,
             Role::where('name', 'loan_processor')->firstOrFail()->permissions->pluck('name')->all(),
-            'loan_processor needs exactly view + update: never loans:approve, which would hand it the single-shot endpoint.',
+            'loan_processor needs exactly its preparer set: never loans:approve, which would hand it the single-shot endpoint.',
         );
     }
 
@@ -167,7 +176,7 @@ class LoanApprovalChainTest extends TestCase
         }
 
         $this->assertEqualsCanonicalizing(
-            ['loans:view', 'loans:update'],
+            self::LOAN_PROCESSOR_PERMISSIONS,
             Role::where('name', 'loan_processor')->firstOrFail()->fresh('permissions')->permissions->pluck('name')->all(),
             'loan_processor was granted accounting access it must not have.',
         );
