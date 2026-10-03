@@ -519,7 +519,7 @@ DESC,
     #[OA\Put(
         path: '/api/loans/{id}',
         summary: 'Update loan',
-        description: 'Update loan application (only if draft or for_review). `collaterals` is optional and is the loan\'s complete collateral list. Absent: collateral is not touched. A list (`[]` included): collateral the loan holds and the list leaves out is detached, listed collateral it does not hold yet is attached with its `snapshot_value` (same rules and guards as POST /api/loans/{loanId}/collaterals), and collateral it already holds keeps its original snapshot. `null` is a 422. Sending the key requires `collaterals:update` as well as `loans:update`. The loan fields and the collateral change are saved together or not at all.',
+        description: 'Update loan application (only if draft or for_review). `collaterals` is optional and is the loan\'s complete collateral list. Absent: collateral is not touched. A list (`[]` included): collateral the loan holds and the list leaves out is detached, listed collateral it does not hold yet is attached with its `snapshot_value` (same rules and guards as POST /api/loans/{loanId}/collaterals), and collateral it already holds keeps its original snapshot. Each collateral attached or detached is recorded in the audit log against the loan (`collateral_attached`, `collateral_detached`). `null` is a 422. Sending the key requires `collaterals:update` as well as `loans:update`. The loan fields and the collateral change are saved together or not at all.',
         tags: ['Loans'],
         security: [['sanctum' => []]],
         parameters: [
@@ -544,7 +544,8 @@ DESC,
         responses: [
             new OA\Response(response: 200, description: 'Loan updated'),
             new OA\Response(response: 403, description: 'Missing loans:update, or sent `collaterals` without collaterals:update'),
-            new OA\Response(response: 422, description: 'Validation error or not editable. Collateral errors are on `collaterals.{index}.collateral_id`: not registered to this loan\'s borrower, listed twice, no longer exists, or already pledged to another active loan (the message names it)'),
+            new OA\Response(response: 409, description: 'Sent `collaterals`, and another change to this collateral was saved at the same time; nothing was written. Reload and try again'),
+            new OA\Response(response: 422, description: 'Validation error or not editable (on `status`; with `collaterals`, checked again on the locked loan row, so a loan approved while the request was in flight is refused). Collateral errors are on `collaterals.{index}.collateral_id`: not registered to this loan\'s borrower, listed twice, no longer exists, or already pledged to another active loan (the message names it)'),
         ],
     )]
     public function update(UpdateLoanRequest $request, Loan $loan): LoanResource

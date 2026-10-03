@@ -255,6 +255,11 @@ class LoanService
         // followed by an insert, so without serializing on the source two
         // simultaneous requests would both see "none open" and both create one.
         return DB::transaction(function () use ($sourceLoan, $validated, $user, $principal, $remarks) {
+            // The source's collateral first, then the source: the order every
+            // collateral write takes (CollateralAttacher), so this cannot hold
+            // the loan while waiting on a collateral that a detach or a
+            // revaluation holds while waiting on the loan.
+            CollateralPledgeGuard::lockCollateralsOf($sourceLoan);
             $lockedSource = $this->lockSourceLoan($sourceLoan->id);
 
             $hasOpenRestructure = $lockedSource->restructuredInto()
@@ -301,7 +306,7 @@ class LoanService
                 }
             }
 
-            $inheritedCollaterals = $this->inheritCollaterals($lockedSource, $newLoan);
+            $inheritedCollaterals = $this->inheritCollaterals($lockedSource, $newLoan, $user);
 
             AuditLogService::log(
                 action: 'restructure_created',
@@ -354,9 +359,12 @@ class LoanService
      *
      * @return array<int, int> ids of the collaterals carried over
      */
-    private function inheritCollaterals(Loan $source, Loan $newLoan): array
+    private function inheritCollaterals(Loan $source, Loan $newLoan, User $user): array
     {
-        // Read under a row lock. These are the same `collaterals` rows
+        // Read under a row lock. restructure() has already locked these rows,
+        // ahead of the source loan, so this re-asks for locks it holds; it
+        // stays a locking read so the copy never depends on where the plain
+        // reads above it happen to fall. These are the same `collaterals` rows
         // CollateralController::attach() locks before it decides, so a
         // concurrent attach of one of them serializes behind this copy instead
         // of racing it; the lock also covers the `loan_collaterals` rows, so a
@@ -364,10 +372,10 @@ class LoanService
         // loan holding collateral the source no longer has.
         //
         // No lock-order cycle with attach(): attach waits on a `loans` row only
-        // for the foreign-key check when it INSERTS a pivot row, and it only
-        // ever inserts for a collateral the target loan does not already hold —
-        // disjoint, by construction, from the set copied here.
-        $rows = $source->collaterals()
+        // after its collateral lock, and it only ever inserts for a collateral
+        // the target loan does not already hold — disjoint, by construction,
+        // from the set copied here.
+        $snapshotValues = $source->collaterals()
             // Same stated lock order as CollateralPledgeGuard::lockCollateralsOf().
             // A convention rather than a guarantee — see the note there — but the
             // two paths lock the same rows and should ask in the same order.
@@ -375,32 +383,32 @@ class LoanService
             ->lockForUpdate()
             ->get()
             ->mapWithKeys(fn (Collateral $collateral) => [
-                $collateral->id => [
-                    // Carried forward, not re-appraised.
-                    //
-                    // POST /loans/{loan}/collaterals takes `snapshot_value` from
-                    // the operator; this path has no such input, so deriving a
-                    // fresh figure from the live `collaterals.amount` would have
-                    // the server assert an appraisal nobody signed off on — the
-                    // same class of error closeRestructuredSource() avoids by
-                    // computing the write-off from the approved snapshot rather
-                    // than the live balance. The source's row is left untouched,
-                    // so what was pledged against the original loan, and when it
-                    // was struck, both stay on the record. An operator who wants
-                    // the collateral re-valued for the new loan detaches and
-                    // re-attaches it with a stated value.
-                    'snapshot_value' => $collateral->pivot->snapshot_value,
-                    'attached_at' => now(),
-                ],
-            ]);
+                // Carried forward, not re-appraised.
+                //
+                // POST /loans/{loan}/collaterals takes `snapshot_value` from
+                // the operator; this path has no such input, so deriving a
+                // fresh figure from the live `collaterals.amount` would have
+                // the server assert an appraisal nobody signed off on — the
+                // same class of error closeRestructuredSource() avoids by
+                // computing the write-off from the approved snapshot rather
+                // than the live balance. The source's row is left untouched,
+                // so what was pledged against the original loan, and when it
+                // was struck, both stay on the record. An operator who wants
+                // the collateral re-valued for the new loan detaches and
+                // re-attaches it with a stated value.
+                $collateral->id => $collateral->pivot->snapshot_value,
+            ])
+            ->all();
 
-        if ($rows->isEmpty()) {
+        if ($snapshotValues === []) {
             return [];
         }
 
-        $newLoan->collaterals()->attach($rows->all());
+        // Recorded per collateral, as `collateral_attached` on the new loan,
+        // like every other pledge.
+        CollateralAttacher::inheritLocked($newLoan, $snapshotValues, $user);
 
-        return $rows->keys()->map(fn ($id) => (int) $id)->all();
+        return array_map('intval', array_keys($snapshotValues));
     }
 
     /**
@@ -542,9 +550,21 @@ class LoanService
 
         // One transaction, so a refused collateral leaves the loan's own fields
         // unsaved too. It must be the OUTERMOST one, and its collateral locks
-        // its first statements: CollateralPledgeGuard's snapshot rule.
-        return DB::transaction(function () use ($loan, $validated, $user, $collaterals): Loan {
-            $lockedCollaterals = $collaterals === null ? null : $this->lockCollateralsForList($loan, $collaterals);
+        // its first statements: CollateralPledgeGuard's snapshot rule. Then the
+        // loan row, the order every collateral write takes (CollateralAttacher),
+        // and the editable check made again on that locked row: the one above
+        // ran before the transaction, so a loan approved since would otherwise
+        // have its collateral changed after sign-off.
+        $edit = function () use ($loan, $validated, $user, $collaterals): Loan {
+            $lockedCollaterals = null;
+
+            if ($collaterals !== null) {
+                $lockedCollaterals = CollateralAttacher::lockForList(
+                    $loan,
+                    array_map(static fn (array $row): int => (int) $row['collateral_id'], $collaterals),
+                );
+                CollateralAttacher::lockEditableLoan($loan);
+            }
 
             $validated = $this->guardRestructurePrincipalEdit($loan, $validated, $user);
 
@@ -582,32 +602,11 @@ class LoanService
             }
 
             return $loan;
-        });
-    }
+        };
 
-    /**
-     * Lock every collateral a `collaterals` list can touch: the ones the loan
-     * holds now (they may be detached) and the listed ones it does not hold
-     * yet (they will be attached).
-     *
-     * Both reads are locking reads, so neither fixes the transaction's
-     * snapshot; every plain read after them, the attach guards included, sees
-     * the world as it is once the rows are pinned. The lock on what the loan
-     * holds also covers its `loan_collaterals` rows, so the set cannot change
-     * underneath the reconcile.
-     *
-     * @param  list<array{collateral_id: int|string, snapshot_value: int|float|string}>  $collaterals
-     * @return array{held: array<int, int>, new: EloquentCollection<int, Collateral>}
-     */
-    private function lockCollateralsForList(Loan $loan, array $collaterals): array
-    {
-        $held = CollateralPledgeGuard::lockCollateralsOf($loan);
-        $newIds = array_values(array_diff(
-            array_map(static fn (array $row): int => (int) $row['collateral_id'], $collaterals),
-            $held,
-        ));
-
-        return ['held' => $held, 'new' => CollateralAttacher::lock($newIds)];
+        // With a list this is a collateral write, so a deadlock on its locks is
+        // a 409 like the attach endpoint's rather than a 500.
+        return $collaterals === null ? DB::transaction($edit) : CollateralWriteTransaction::run($edit);
     }
 
     /**
@@ -621,35 +620,23 @@ class LoanService
      * re-sends the list must not re-appraise it. An operator who wants a new
      * value detaches and re-attaches it.
      *
-     * One audit row records the change, beside the `updated` row the Loan
-     * model writes for the loan's own fields. Nothing is written when the
-     * list matches what the loan already holds.
+     * Each attach and detach is recorded by CollateralAttacher, one audit row
+     * per collateral, exactly as the endpoints record theirs, beside the
+     * `updated` row the Loan model writes for the loan's own fields. Nothing
+     * is written for collateral the list leaves as it was.
      *
      * @param  list<array{collateral_id: int|string, snapshot_value: int|float|string}>  $collaterals
-     * @param  array{held: array<int, int>, new: EloquentCollection<int, Collateral>}  $locked
+     * @param  array{held: list<int>, collaterals: EloquentCollection<int, Collateral>}  $locked  as CollateralAttacher::lockForList() returns it
      *
      * @throws ValidationException on `collaterals.{index}.collateral_id`
      */
     private function reconcileCollaterals(Loan $loan, array $collaterals, array $locked, ?User $user): void
     {
         $listedIds = array_map(static fn (array $row): int => (int) $row['collateral_id'], $collaterals);
-        $detachIds = array_values(array_diff($locked['held'], $listedIds));
 
-        $detached = $detachIds === [] ? [] : $loan->collaterals()
-            ->whereIn('collaterals.id', $detachIds)
-            ->orderBy('collaterals.id')
-            ->get()
-            ->map(fn (Collateral $collateral): array => [
-                'collateral_id' => $collateral->id,
-                'snapshot_value' => (float) $collateral->pivot->snapshot_value,
-            ])
-            ->all();
-
-        if ($detachIds !== []) {
-            $loan->collaterals()->detach($detachIds);
+        foreach (array_diff($locked['held'], $listedIds) as $collateralId) {
+            CollateralAttacher::detachLocked($loan, $collateralId, $user);
         }
-
-        $attached = [];
 
         foreach ($collaterals as $index => $row) {
             $collateralId = (int) $row['collateral_id'];
@@ -659,42 +646,13 @@ class LoanService
             }
 
             try {
-                CollateralAttacher::attachLocked($loan, $locked['new']->get($collateralId), $row['snapshot_value']);
+                CollateralAttacher::attachLocked($loan, $locked['collaterals']->get($collateralId), $row['snapshot_value'], $user);
             } catch (ValidationException $e) {
                 throw ValidationException::withMessages([
                     "collaterals.{$index}.collateral_id" => Arr::flatten($e->errors()),
                 ]);
             }
-
-            $attached[] = ['collateral_id' => $collateralId, 'snapshot_value' => (float) $row['snapshot_value']];
         }
-
-        if ($attached === [] && $detached === []) {
-            return;
-        }
-
-        $held = $locked['held'];
-        $after = [...array_diff($held, $detachIds), ...array_column($attached, 'collateral_id')];
-        sort($held);
-        sort($after);
-
-        AuditLogService::log(
-            action: 'collaterals_updated',
-            auditable: $loan,
-            oldValues: ['collateral_ids' => $held],
-            newValues: [
-                'collateral_ids' => $after,
-                'attached' => $attached,
-                'detached' => $detached,
-            ],
-            description: sprintf(
-                'Collateral on loan %s updated with the loan edit: %d attached, %d detached',
-                $loan->loan_account_number ?? $loan->application_number,
-                count($attached),
-                count($detached),
-            ),
-            userId: $user?->id,
-        );
     }
 
     /**
