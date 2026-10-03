@@ -21,12 +21,15 @@ use App\Http\Resources\LoanResource;
 use App\Models\Loan;
 use App\Services\AmortizationBalanceService;
 use App\Services\AutoPayService;
+use App\Services\CollateralAttacher;
+use App\Services\CollateralWriteTransaction;
 use App\Services\LikePattern;
 use App\Services\LoanAdjustmentService;
 use App\Services\LoanReleaseFeeService;
 use App\Services\LoanService;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Validation\Rule;
@@ -559,7 +562,7 @@ DESC,
     #[OA\Delete(
         path: '/api/loans/{id}',
         summary: 'Delete loan',
-        description: 'Delete loan application (only if draft)',
+        description: 'Delete loan application (only if draft). Its collateral is detached first, each recorded as `collateral_detached` in the audit log against the loan, as DELETE /api/loans/{loanId}/collaterals/{id} records it.',
         tags: ['Loans'],
         security: [['sanctum' => []]],
         parameters: [
@@ -567,7 +570,9 @@ DESC,
         ],
         responses: [
             new OA\Response(response: 200, description: 'Loan deleted'),
-            new OA\Response(response: 422, description: 'Cannot delete'),
+            new OA\Response(response: 404, description: 'Loan not found'),
+            new OA\Response(response: 409, description: 'Another change to this loan\'s collateral was saved at the same time; nothing was deleted. Reload and try again'),
+            new OA\Response(response: 422, description: 'Cannot delete: only draft loans can be deleted'),
         ],
     )]
     public function destroy(Loan $loan): JsonResponse
@@ -575,12 +580,36 @@ DESC,
         $this->authorize('loans:void');
 
         if ($loan->status !== 'draft') {
-            return response()->json(['message' => 'Only draft loans can be deleted.'], 422);
+            return $this->onlyDraftsCanBeDeleted();
         }
 
-        $loan->delete();
+        // Deleting the row would take its pledges with it through the
+        // `loan_collaterals` cascade, unrecorded, so they are detached first,
+        // each recorded as any detach is. A pledge write, so it takes the
+        // pledge writes' lock order (CollateralAttacher): what the loan holds,
+        // read before the transaction, locked in one id-ordered statement,
+        // then the loan row, whose status is checked again under that lock.
+        $heldBefore = CollateralAttacher::heldBy($loan);
+
+        CollateralWriteTransaction::run(function () use ($loan, $heldBefore): void {
+            $collaterals = CollateralAttacher::lock($heldBefore);
+            $locked = Loan::whereKey($loan->getKey())->lockForUpdate()->firstOrFail();
+
+            if ($locked->status !== 'draft') {
+                throw new HttpResponseException($this->onlyDraftsCanBeDeleted());
+            }
+
+            CollateralAttacher::detachAllLocked($locked, $collaterals->keys()->all(), request()->user());
+
+            $locked->delete();
+        });
 
         return response()->json(['message' => 'Loan deleted successfully.']);
+    }
+
+    private function onlyDraftsCanBeDeleted(): JsonResponse
+    {
+        return response()->json(['message' => 'Only draft loans can be deleted.'], 422);
     }
 
     #[OA\Patch(
@@ -947,6 +976,7 @@ DESC,
             new OA\Response(response: 201, description: 'New draft loan created, with source_loan_id set'),
             new OA\Response(response: 403, description: 'Missing loans:restructure permission'),
             new OA\Response(response: 404, description: 'Loan not found'),
+            new OA\Response(response: 409, description: 'Another change to the source loan\'s collateral, or to the newest loan, was saved at the same time; nothing was created. Reload and try again'),
             new OA\Response(response: 422, description: 'Source loan is not released/ongoing, borrower mismatch, a restructure is already in progress, nothing outstanding, principal exceeds the outstanding balance, or a shortfall was sent without remarks'),
         ],
     )]

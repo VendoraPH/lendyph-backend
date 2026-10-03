@@ -607,6 +607,62 @@ it('still edits the other fields of a collateral a live loan holds', function ()
         ->and($this->collateral->fresh()->detail_value)->toBe('TCT-55555');
 });
 
+// ── deleting a draft takes its collateral off through the same path ─────
+
+it('records each collateral a deleted draft held as detached, by whoever deleted it', function () {
+    $loan = lockdownLoan($this->loanDefaults, 'draft');
+    $second = Collateral::factory()->create(['borrower_id' => $this->borrower->id]);
+    lockdownPledge($loan, $this->collateral, 150000);
+    lockdownPledge($loan, $second, 80000.25);
+
+    $this->deleteJson("/api/loans/{$loan->id}")
+        ->assertOk()
+        ->assertExactJson(['message' => 'Loan deleted successfully.']);
+
+    $detached = ($this->auditRows)('collateral_detached');
+
+    expect(Loan::find($loan->id))->toBeNull()
+        ->and(DB::table('loan_collaterals')->where('loan_id', $loan->id)->count())->toBe(0)
+        ->and($detached)->toHaveCount(2)
+        ->and($detached->pluck('auditable_type')->unique()->all())->toBe([Loan::class])
+        ->and($detached->pluck('auditable_id')->unique()->all())->toBe([$loan->id])
+        ->and($detached->pluck('user_id')->unique()->all())->toBe([$this->admin->id])
+        ->and($detached->map(fn (AuditLog $entry): array => [$entry->old_values, $entry->new_values])->all())->toEqual([
+            [['collateral_id' => $this->collateral->id, 'snapshot_value' => 150000], ['collateral_id' => $this->collateral->id, 'snapshot_value' => null]],
+            [['collateral_id' => $second->id, 'snapshot_value' => 80000.25], ['collateral_id' => $second->id, 'snapshot_value' => null]],
+        ])
+        // The loan's own row, as before.
+        ->and(AuditLog::where('action', 'deleted')
+            ->where('auditable_type', Loan::class)
+            ->where('auditable_id', $loan->id)
+            ->exists())->toBeTrue();
+});
+
+it('still refuses to delete a loan that is not a draft, and writes nothing', function (string $status) {
+    $loan = lockdownLoan($this->loanDefaults, $status);
+    lockdownPledge($loan, $this->collateral, 150000);
+    $before = ($this->state)();
+
+    $this->deleteJson("/api/loans/{$loan->id}")
+        ->assertUnprocessable()
+        ->assertExactJson(['message' => 'Only draft loans can be deleted.']);
+
+    expect(($this->state)())->toBe($before);
+})->with(['for_review', 'approved', 'rejected', 'released', 'ongoing', 'completed', 'defaulted', 'restructured', 'void']);
+
+it('reads the loan status again under its lock, so a delete cannot slip past a status change', function () {
+    $loan = lockdownLoan($this->loanDefaults, 'draft');
+    lockdownPledge($loan, $this->collateral, 150000);
+    $before = ($this->state)();
+    lockdownChangeStatusAtTheCollateralLock($loan, 'for_review');
+
+    $this->deleteJson("/api/loans/{$loan->id}")
+        ->assertUnprocessable()
+        ->assertExactJson(['message' => 'Only draft loans can be deleted.']);
+
+    expect(($this->state)())->toBe($before);
+});
+
 // ── 4. the lock order ────────────────────────────────────────────────────
 
 it('locks the collateral, then the loan, on an attach', function () {
@@ -708,4 +764,15 @@ it('locks the collateral, then its loans in id order, on a value change', functi
 
     expect($loanLock['sql'])->toContain('order by `id` asc')
         ->and(lockdownLockedIds($loanLock))->toBe([$first->id, $second->id]);
+});
+
+it('locks the collateral, then the loan, on a loan delete', function () {
+    $loan = lockdownLoan($this->loanDefaults, 'draft');
+    $second = Collateral::factory()->create(['borrower_id' => $this->borrower->id]);
+    lockdownPledge($loan, $second);
+    lockdownPledge($loan, $this->collateral);
+
+    $reads = lockdownLockingReads(fn () => $this->deleteJson("/api/loans/{$loan->id}")->assertOk());
+
+    lockdownAssertLockOrder($reads, [$this->collateral->id, $second->id]);
 });

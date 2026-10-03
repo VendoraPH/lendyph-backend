@@ -13,8 +13,9 @@ use Illuminate\Validation\ValidationException;
  * Pledging a collateral to a loan and taking it off again: the one
  * implementation behind POST and DELETE /loans/{loan}/collaterals
  * (CollateralController), the `collaterals` list on PUT /loans/{loan}
- * (LoanService::updateLoan()) and the restructure copy
- * (LoanService::inheritCollaterals()). Every pledge it writes or removes is
+ * (LoanService::updateLoan()), the restructure copy
+ * (LoanService::inheritCollaterals()) and a draft's deletion
+ * (LoanController::destroy()). Every pledge it writes or removes is
  * recorded in the audit log against the loan, `collateral_attached` or
  * `collateral_detached`, with the value it was pledged at, so no path can
  * change what secures a loan without leaving that on the record.
@@ -48,7 +49,8 @@ use Illuminate\Validation\ValidationException;
  *
  * A loan's pledges need no lock of their own, because every write that adds
  * or removes one holds the loan's row lock: attach, detach and the list here,
- * the restructure copy on its own new loan, and a loan's deletion. Under that
+ * the restructure copy on its own new loan, and a draft's deletion, which
+ * detaches through detachAllLocked() before the row goes. Under that
  * lock the set cannot change, so a PLAIN read of it made after it is exact
  * (heldBy()). The list
  * on PUT /loans/{loan} has to know what the loan holds before it can lock it,
@@ -288,6 +290,32 @@ class CollateralAttacher
             ),
             userId: $user?->id,
         );
+    }
+
+    /**
+     * Take every collateral off a loan, recording each, as a loan's deletion
+     * must before the `loan_collaterals` cascade would remove them unrecorded.
+     *
+     * The caller has locked the collateral rows it read the loan holding,
+     * before the transaction, then the loan row. Under that lock what the loan
+     * holds is read again, exactly; a collateral attached in between would be
+     * detached without its row lock, so that is refused as the conflict it is.
+     *
+     * @param  array<int, int>  $lockedCollateralIds  the collateral rows the caller locked
+     *
+     * @throws HttpResponseException 409 when the loan holds a collateral that was not locked
+     */
+    public static function detachAllLocked(Loan $loan, array $lockedCollateralIds, ?User $user): void
+    {
+        $held = self::heldBy($loan);
+
+        if (array_diff($held, $lockedCollateralIds) !== []) {
+            throw CollateralWriteTransaction::conflict();
+        }
+
+        foreach ($held as $collateralId) {
+            self::detachLocked($loan, $collateralId, $user);
+        }
     }
 
     private static function pledge(Loan $loan, int $collateralId, float|int|string $snapshotValue, ?User $user): void

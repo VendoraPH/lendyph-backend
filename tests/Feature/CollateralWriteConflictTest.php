@@ -154,6 +154,20 @@ class CollateralWriteConflictTest extends TestCase
         $this->assertSame($before, $this->state());
     }
 
+    public function test_a_loan_delete_that_deadlocks_answers_409_and_writes_nothing(): void
+    {
+        $this->pledge($this->loan, $this->collateral);
+        $this->pledge($this->loan, Collateral::factory()->create(['borrower_id' => $this->borrower->id]));
+        $before = $this->state();
+        $this->failOnAuditRow('deleted', self::DEADLOCK);
+
+        $this->deleteJson("/api/loans/{$this->loan->id}")
+            ->assertStatus(409)
+            ->assertExactJson(['message' => self::CONFLICT]);
+
+        $this->assertSame($before, $this->state());
+    }
+
     public function test_any_other_database_error_is_not_turned_into_a_409(): void
     {
         $before = $this->state();
