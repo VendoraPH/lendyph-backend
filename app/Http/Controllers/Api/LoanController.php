@@ -162,18 +162,9 @@ release step is pending), when no step is pending, or when the step's name is
 blank. Never an empty string. The chain is eager-loaded: one query per page,
 not one per row.
 
-`awaiting_me=1` keeps only the loans waiting on the signed-in user's role:
-`for_review` loans whose current approval step (the step `current_approver`
-names, the first `pending` step of the latest round) has a `role` equal to one
-of the user's role names, compared exactly. A `pending` row left in an earlier
-round does not count. There is no admin/super_admin bypass: those roles see
-only steps that name `admin` or `super_admin`. For the "awaiting me" badge, read
-`meta.total` of `?awaiting_me=1&per_page=1`. `awaiting_me=0` or absent changes
-nothing.
-
 `meta.stats` is always organisation-wide — narrowed by `branch_id` and
-`borrower_id` only, and never by `search`, `status`, `loan_product_id`,
-`awaiting_me` or the date range. Those counts are the KPI cards and tab badges: scoping them to the
+`borrower_id` only, and never by `search`, `status`, `loan_product_id` or the
+date range. Those counts are the KPI cards and tab badges: scoping them to the
 current filter would make every tab read the number of rows already on screen.
 It carries one entry per status in the enum, plus `active` (the sum of the
 statuses `status=active` selects) and `past_due` (the row count `status=past_due`
@@ -189,7 +180,6 @@ DESC,
             new OA\Parameter(name: 'loan_product_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
             new OA\Parameter(name: 'date_from', in: 'query', required: false, description: 'Inclusive lower bound on created_at (YYYY-MM-DD).', schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'date_to', in: 'query', required: false, description: 'Inclusive upper bound on created_at, whole day (YYYY-MM-DD).', schema: new OA\Schema(type: 'string', format: 'date')),
-            new OA\Parameter(name: 'awaiting_me', in: 'query', required: false, description: 'When 1, only `for_review` loans whose current approval step (the one `current_approver` names) belongs to one of the signed-in user\'s roles, by exact role name. No admin/super_admin bypass. `meta.total` is the badge count.', schema: new OA\Schema(type: 'boolean', default: false)),
             new OA\Parameter(name: 'sort', in: 'query', required: false, schema: new OA\Schema(type: 'string', default: 'created_at', enum: self::SORT_KEYS)),
             new OA\Parameter(name: 'dir', in: 'query', required: false, schema: new OA\Schema(type: 'string', default: 'desc', enum: ['asc', 'desc'])),
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15, maximum: 100)),
@@ -219,7 +209,6 @@ DESC,
             'sort' => ['nullable', Rule::in(self::SORT_KEYS)],
             'dir' => ['nullable', Rule::in(['asc', 'desc'])],
             'per_page' => ['nullable', 'integer', 'min:1'],
-            'awaiting_me' => ['nullable', 'boolean'],
         ]);
 
         /**
@@ -242,7 +231,6 @@ DESC,
         $loanProductId = $filters['loan_product_id'] ?? null;
         $dateFrom = $filters['date_from'] ?? null;
         $dateTo = $filters['date_to'] ?? null;
-        $awaitingMe = filter_var($filters['awaiting_me'] ?? false, FILTER_VALIDATE_BOOLEAN);
 
         $query = Loan::query()
             // Do NOT reorder these two lines, and do not delete the select.
@@ -282,10 +270,7 @@ DESC,
             // `date_to` cover the loans captured during that day rather than
             // only one created exactly at midnight.
             ->when(filled($dateFrom), fn ($q) => $q->where('loans.created_at', '>=', Carbon::parse($dateFrom)->startOfDay()))
-            ->when(filled($dateTo), fn ($q) => $q->where('loans.created_at', '<=', Carbon::parse($dateTo)->endOfDay()))
-            ->when($awaitingMe, fn ($q) => $q->awaitingApprovalFromRoles(
-                request()->user()->roles->pluck('name')->all(),
-            ));
+            ->when(filled($dateTo), fn ($q) => $q->where('loans.created_at', '<=', Carbon::parse($dateTo)->endOfDay()));
 
         $this->applySort($query, $filters['sort'] ?? 'created_at', $filters['dir'] ?? 'desc');
 

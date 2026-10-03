@@ -13,7 +13,6 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\MorphMany;
-use Illuminate\Support\Facades\DB;
 
 class Loan extends Model
 {
@@ -375,42 +374,6 @@ class Loan extends Model
             ?->name;
 
         return trim((string) $name) === '' ? null : $name;
-    }
-
-    /**
-     * Loans under review whose current approval step belongs to one of these
-     * roles: the step currentApprover() names, i.e. the first `pending` step
-     * (by step_order) of the loan's latest round. A `pending` row left behind
-     * in an earlier round does not count, and neither does any status other
-     * than `for_review`.
-     *
-     * Role names are compared byte for byte, the way
-     * LoanApprovalChainService::canAct() compares them in PHP. The column's
-     * case-insensitive collation would otherwise let a step role `Manager` or
-     * `manager ` match the role `manager`. There is no admin/super_admin
-     * bypass: this asks whether it is the role's turn, not who may act.
-     *
-     * @param  list<string>  $roleNames
-     */
-    public function scopeAwaitingApprovalFromRoles($query, array $roleNames)
-    {
-        return $query->where('loans.status', 'for_review')
-            ->whereExists(function ($steps) use ($roleNames) {
-                $steps->selectRaw('1')
-                    ->from('loan_approval_steps as current_step')
-                    ->whereColumn('current_step.loan_id', 'loans.id')
-                    ->where('current_step.status', LoanApprovalStep::STATUS_PENDING)
-                    ->whereRaw('current_step.round = (select max(latest.round) from loan_approval_steps as latest where latest.loan_id = current_step.loan_id)')
-                    ->whereNotExists(function ($earlier) {
-                        $earlier->selectRaw('1')
-                            ->from('loan_approval_steps as earlier_step')
-                            ->whereColumn('earlier_step.loan_id', 'current_step.loan_id')
-                            ->whereColumn('earlier_step.round', 'current_step.round')
-                            ->where('earlier_step.status', LoanApprovalStep::STATUS_PENDING)
-                            ->whereColumn('earlier_step.step_order', '<', 'current_step.step_order');
-                    })
-                    ->whereIn(DB::raw('CAST(current_step.role AS BINARY)'), $roleNames);
-            });
     }
 
     /**
