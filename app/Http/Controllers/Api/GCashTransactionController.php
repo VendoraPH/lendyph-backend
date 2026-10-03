@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\GCash\PreviewGCashTransactionRequest;
 use App\Http\Requests\GCash\StoreGCashTransactionRequest;
 use App\Http\Resources\GCashTransactionResource;
 use App\Models\GCashTransaction;
@@ -59,6 +60,43 @@ class GCashTransactionController extends Controller
             ->paginate(min($perPage, 100));
 
         return GCashTransactionResource::collection($transactions);
+    }
+
+    #[OA\Get(
+        path: '/api/gcash/transactions/preview',
+        summary: 'Quote the charge and total for a GCash transaction',
+        description: 'Uses the same fee tiers and rounding as recording the transaction, so the dialog never computes money in the browser. Cash In: total = amount + charge. Cash Out: total = amount - charge. Writes nothing.',
+        tags: ['GCash'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'type', in: 'query', required: true, schema: new OA\Schema(type: 'string', enum: ['cash_in', 'cash_out'])),
+            new OA\Parameter(name: 'amount', in: 'query', required: true, schema: new OA\Schema(type: 'number'), description: 'Greater than 0, up to 2 decimal places.', example: 1500),
+        ],
+        responses: [
+            new OA\Response(
+                response: 200,
+                description: 'Charge and total for this type and amount',
+                content: new OA\JsonContent(
+                    properties: [
+                        new OA\Property(property: 'data', type: 'object', properties: [
+                            new OA\Property(property: 'type', type: 'string', enum: ['cash_in', 'cash_out'], example: 'cash_in'),
+                            new OA\Property(property: 'amount', type: 'number', example: 1500.0),
+                            new OA\Property(property: 'charge_amount', type: 'number', example: 15.0),
+                            new OA\Property(property: 'total_amount', type: 'number', example: 1515.0),
+                        ]),
+                    ],
+                ),
+            ),
+            new OA\Response(response: 401, description: 'Unauthenticated'),
+            new OA\Response(response: 403, description: 'Missing gcash:transact permission'),
+            new OA\Response(response: 422, description: 'Validation error or no matching tier'),
+        ],
+    )]
+    public function preview(PreviewGCashTransactionRequest $request): JsonResponse
+    {
+        return response()->json([
+            'data' => $this->gcash->quote($request->validated('type'), $request->validated('amount')),
+        ]);
     }
 
     #[OA\Post(

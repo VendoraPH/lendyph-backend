@@ -15,12 +15,15 @@ class GCashService
 {
     public function createTransaction(array $payload, User $actor): GCashTransaction
     {
-        $type = $payload['type'];
-        $amount = round((float) $payload['amount'], 2);
         $isPending = (bool) ($payload['is_pending'] ?? false);
 
-        return DB::transaction(function () use ($type, $amount, $payload, $actor, $isPending) {
-            $tier = $this->resolveTier($amount);
+        return DB::transaction(function () use ($payload, $actor, $isPending) {
+            [
+                'type' => $type,
+                'amount' => $amount,
+                'charge_amount' => $charge,
+                'total_amount' => $total,
+            ] = $this->quote($payload['type'], $payload['amount']);
 
             if ($duplicate = $this->detectDuplicate($payload, $type, $amount)) {
                 throw new HttpResponseException(response()->json([
@@ -28,11 +31,6 @@ class GCashService
                     'data' => ['existing_id' => $duplicate->id],
                 ], 409));
             }
-
-            $charge = (float) ($type === 'cash_in' ? $tier->cash_in_rate : $tier->cash_out_rate);
-            $total = $type === 'cash_in'
-                ? round($amount + $charge, 2)
-                : round($amount - $charge, 2);
 
             $status = match (true) {
                 $type === 'cash_out' => 'completed',
@@ -65,6 +63,37 @@ class GCashService
 
             return $tx;
         });
+    }
+
+    /**
+     * The charge and total for a transaction of this type and amount, from
+     * the fee tier the amount falls in. createTransaction() records exactly
+     * this, and the preview endpoint returns it, so the two never disagree.
+     * Cash In adds the charge to the amount; Cash Out deducts it.
+     *
+     * Writes nothing. Throws the same 422 on `amount` as recording would
+     * when no tier covers the amount.
+     *
+     * @return array{type: string, amount: float, charge_amount: float, total_amount: float}
+     *
+     * @throws ValidationException
+     */
+    public function quote(string $type, float|int|string $amount): array
+    {
+        $amount = round((float) $amount, 2);
+        $tier = $this->resolveTier($amount);
+
+        $charge = (float) ($type === 'cash_in' ? $tier->cash_in_rate : $tier->cash_out_rate);
+        $total = $type === 'cash_in'
+            ? round($amount + $charge, 2)
+            : round($amount - $charge, 2);
+
+        return [
+            'type' => $type,
+            'amount' => $amount,
+            'charge_amount' => $charge,
+            'total_amount' => $total,
+        ];
     }
 
     public function markPaid(GCashTransaction $tx, User $actor): GCashTransaction
