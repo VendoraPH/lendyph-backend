@@ -49,9 +49,16 @@ use Illuminate\Support\Facades\DB;
  * their deductions name may already be in the member's imported ledger
  * balance, so they are listed to be checked, never counted as missing.
  *
- * Loans are read in chunks by id, with the ledger rows of each chunk fetched
- * in one query, so the cost is two queries per chunk however many loans
- * there are.
+ * A loan whose share capital the release did not credit because, without
+ * books, its items came to more than it withheld in total
+ * (ShareCapitalReleaseCredit::unprovableReason()) is listed there too, with
+ * both figures, and is in no total: it is missing a credit, but not one this
+ * report can state.
+ *
+ * Whether the organisation keeps books is asked once per run. Loans are then
+ * read in chunks by id, with their members and the ledger rows of each chunk
+ * fetched in one query each, so the cost is one query plus at most three per
+ * chunk, however many loans there are.
  */
 #[Signature('share-capital:release-deductions-report')]
 #[Description('List released loans that withheld share capital with no share capital ledger credit for it. Read only')]
@@ -82,11 +89,13 @@ class ReportShareCapitalReleaseDeductions extends Command
         $this->info('Read only. Nothing is written.');
         $this->newLine();
 
+        $booksKept = $credits->keepsBooks();
+
         Loan::query()
             ->whereIn('status', Loan::EVER_RELEASED_STATUSES)
             ->with('borrower:id,borrower_code')
             ->select(['id', 'borrower_id', 'status', 'loan_account_number', 'application_number', 'external_loan_no', 'imported_arrears_baseline', 'total_deductions', 'deductions'])
-            ->chunkById(self::CHUNK, function (EloquentCollection $loans) use ($credits): void {
+            ->chunkById(self::CHUNK, function (EloquentCollection $loans) use ($credits, $booksKept): void {
                 $candidates = $loans->filter(fn (Loan $loan): bool => $credits->withholdsShareCapital($loan));
 
                 if ($candidates->isEmpty()) {
@@ -101,7 +110,7 @@ class ReportShareCapitalReleaseDeductions extends Command
 
                 foreach ($candidates as $loan) {
                     if (! $credited->has($loan->getKey())) {
-                        $this->count($loan, $credits);
+                        $this->count($loan, $credits, $booksKept);
                     }
                 }
             });
@@ -111,15 +120,24 @@ class ReportShareCapitalReleaseDeductions extends Command
         return self::SUCCESS;
     }
 
-    private function count(Loan $loan, ShareCapitalReleaseCredit $credits): void
+    private function count(Loan $loan, ShareCapitalReleaseCredit $credits, bool $booksKept): void
     {
         $reference = (string) ($loan->loan_account_number ?? $loan->application_number);
         $section = $loan->isImported() ? self::IMPORTED : self::RELEASED_HERE;
+        $released = $section === self::IMPORTED ? 'imported' : 'released here';
 
         try {
-            $amount = $credits->amountFor($loan);
+            $amount = $credits->amountFor($loan, $booksKept);
         } catch (CannotPostToTheBooksException $unreadable) {
-            $this->unreadable[] = [$reference, $loan->status, $section === self::IMPORTED ? 'imported' : 'released here', $unreadable->getMessage()];
+            $this->unreadable[] = [$reference, $loan->status, $released, $unreadable->getMessage()];
+
+            return;
+        }
+
+        $unprovable = $credits->unprovableReason($loan, $amount, $booksKept);
+
+        if ($unprovable !== null) {
+            $this->unreadable[] = [$reference, $loan->status, $released, 'Not credited at release: '.$unprovable];
 
             return;
         }

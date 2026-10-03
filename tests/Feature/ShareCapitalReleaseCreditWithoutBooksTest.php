@@ -9,6 +9,7 @@ use App\Models\LoanProduct;
 use App\Models\ShareCapitalLedger;
 use App\Services\LoanService;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
@@ -42,19 +43,41 @@ class ShareCapitalReleaseCreditWithoutBooksTest extends TestCase
         $this->assertSame(0, AccountingJournal::query()->count());
     }
 
-    public function test_a_release_whose_items_the_journal_guard_would_refuse_still_releases_without_books(): void
+    public function test_share_capital_above_what_the_loan_withheld_is_not_credited_and_the_release_still_goes_ahead(): void
     {
         $loan = $this->approvedLoan([
             ['name' => 'Share Capital', 'amount' => 500, 'type' => 'fixed'],
         ]);
-        // Items above the stated total: the release journal refuses this, but
-        // there is no journal here, and the release succeeded before the
-        // share capital credit existed.
+        // Items above the stated total: only ₱400 was withheld, so ₱500 of
+        // share capital is not a figure the loan proves. The release journal
+        // would refuse this, but there is no journal here, and the release
+        // succeeded before the share capital credit existed.
         DB::table('loans')->where('id', $loan->id)->update(['total_deductions' => 400, 'net_proceeds' => 59600]);
+        Log::spy();
 
         $this->patchJson("/api/loans/{$loan->id}/release")->assertOk();
 
-        $this->assertSame('released', $loan->fresh()->status);
+        $loan->refresh();
+        $this->assertSame('released', $loan->status);
+        $this->assertSame(0, ShareCapitalLedger::query()->count());
+
+        Log::shouldHaveReceived('warning')->once()->withArgs(fn (string $message, array $context): bool => str_contains($message, 'Share capital not credited at release')
+            && $context === [
+                'loan_id' => $loan->id,
+                'loan_account_number' => $loan->loan_account_number,
+                'share_capital_centavos' => 50000,
+                'total_deductions_centavos' => 40000,
+            ]);
+    }
+
+    public function test_share_capital_equal_to_everything_withheld_is_still_credited(): void
+    {
+        $loan = $this->approvedLoan([
+            ['name' => 'Share Capital', 'amount' => 500, 'type' => 'fixed'],
+        ]);
+
+        $this->patchJson("/api/loans/{$loan->id}/release")->assertOk();
+
         $this->assertSame('500.00', ShareCapitalLedger::query()->where('loan_id', $loan->id)->sole()->credit);
     }
 

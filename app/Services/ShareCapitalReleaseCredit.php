@@ -10,6 +10,7 @@ use App\Models\User;
 use App\Services\Accounting\AutomaticPoster;
 use App\Services\Accounting\Money;
 use App\Services\Accounting\PostingRules;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
 use LogicException;
 
@@ -27,17 +28,26 @@ use LogicException;
  * statement and the Share Capital report said it had not. This writes the
  * missing row, in the release transaction, so the two can only move together.
  *
- * ## The amount is the journal's, by construction
+ * ## The amount is the journal's, by construction, where there are books
  *
- * Which items are share capital, and what each is worth in centavos, is
- * answered by {@see AutomaticPoster::releaseDeductions()}: the same
- * normalisation, role lookup and per-item conversion the release journal is
- * built from. There is no second list of names here, so a "SHARE-CAPITAL."
- * item is share capital in the ledger exactly when it is in the books, and the
- * credit equals the journal's Share Capital line to the centavo. Every share
- * capital item of the FINAL deductions is summed into ONE row: the configured
- * fees and the insurance premium have been added by then, and neither is
- * share capital, so neither reaches the figure.
+ * In an organisation that keeps books, which items are share capital, and
+ * what each is worth in centavos, is answered by
+ * {@see AutomaticPoster::releaseDeductions()}: the same normalisation, role
+ * lookup and per-item conversion the release journal is built from. There is
+ * no second list of names here, so a "SHARE-CAPITAL." item is share capital in
+ * the ledger exactly when it is in the books, and the credit equals the
+ * journal's Share Capital line to the centavo. Every share capital item of the
+ * FINAL deductions is summed into ONE row: the configured fees and the
+ * insurance premium have been added by then, and neither is share capital, so
+ * neither reaches the figure.
+ *
+ * An organisation with no chart of accounts posts no journal, so there is no
+ * journal line to equal. There the items are summed by the same conversion and
+ * the same role lookup, without the journal's consistency guard, which would
+ * add a refusal the release never had (see amountFor()). What that guard
+ * protects is checked instead by unprovableReason(): a sum the loan's own
+ * total does not show was withheld is credited to no one, and the release
+ * goes ahead (see record()).
  *
  * ## One row per release, and only for new releases
  *
@@ -59,7 +69,9 @@ final class ShareCapitalReleaseCredit
 
     /**
      * Credit the member with the share capital `$loan`'s release withheld, or
-     * write nothing when it withheld none.
+     * write nothing when it withheld none, or when, without books, the loan's
+     * own total does not prove it was withheld (unprovableReason(); logged as
+     * a warning, and the release goes ahead).
      *
      * Must run inside the release transaction, after the deductions are final
      * and the loan account number and `released_at` are set, so a failure
@@ -70,7 +82,8 @@ final class ShareCapitalReleaseCredit
      */
     public function record(Loan $loan, User $releaser): ?ShareCapitalLedger
     {
-        $centavos = $this->amountFor($loan);
+        $booksKept = $this->keepsBooks();
+        $centavos = $this->amountFor($loan, $booksKept);
 
         if ($centavos === 0) {
             return null;
@@ -86,6 +99,25 @@ final class ShareCapitalReleaseCredit
                     .'approve the membership before releasing.',
                 ],
             ]);
+        }
+
+        // Write only what the loan's own figures prove was withheld. Without
+        // books nothing else checks the items against the total, and a credit
+        // larger than what was kept out of the loan would be equity no one
+        // paid. Credit nothing, say so in the log, and release:
+        // `share-capital:release-deductions-report` lists the loan for the
+        // owner to settle.
+        $unprovable = $this->unprovableReason($loan, $centavos, $booksKept);
+
+        if ($unprovable !== null) {
+            Log::warning('Share capital not credited at release: '.$unprovable, [
+                'loan_id' => $loan->getKey(),
+                'loan_account_number' => $loan->loan_account_number,
+                'share_capital_centavos' => $centavos,
+                'total_deductions_centavos' => Money::toCentavos($loan->total_deductions),
+            ]);
+
+            return null;
         }
 
         $number = $loan->loan_account_number ?? $loan->application_number;
@@ -125,17 +157,21 @@ final class ShareCapitalReleaseCredit
      * the loan's total, has no journal to protect there, and a release that
      * succeeded without it must still succeed. Its share capital items are
      * summed by the same per-item conversion and the same role lookup; an
-     * item with no usable, positive amount credits nothing.
+     * item with no usable, positive amount credits nothing. Whether that sum
+     * is one the loan's total proves was withheld is unprovableReason()'s to
+     * say.
+     *
+     * @param  bool|null  $booksKept  keepsBooks(), when the caller already knows it (one query, not one per loan)
      *
      * @throws CannotPostToTheBooksException when this organisation keeps books and a share capital item has no bookable amount, exactly as the journal would refuse it
      */
-    public function amountFor(Loan $loan): int
+    public function amountFor(Loan $loan, ?bool $booksKept = null): int
     {
         if (! $this->withholdsShareCapital($loan)) {
             return 0;
         }
 
-        if ($this->poster->enabled()) {
+        if ($booksKept ?? $this->keepsBooks()) {
             return $this->poster->releaseDeductions($loan)['mapped'][self::role()] ?? 0;
         }
 
@@ -149,6 +185,48 @@ final class ShareCapitalReleaseCredit
         }
 
         return $centavos;
+    }
+
+    /**
+     * Why `$centavos` of share capital, as amountFor() summed it, is not a
+     * figure the loan's own total proves was withheld, or null when it is.
+     *
+     * Only without books. With books, amountFor() is the journal's own
+     * classification, whose guard already refuses items that add up to more
+     * than `total_deductions`, so it never answers such a sum. Without books
+     * nothing refused it, and a share capital sum above the total, or a total
+     * that is no usable amount at all, cannot be shown to have been kept out
+     * of the loan.
+     */
+    public function unprovableReason(Loan $loan, int $centavos, bool $booksKept): ?string
+    {
+        if ($booksKept || $centavos === 0) {
+            return null;
+        }
+
+        $withheld = Money::toCentavos($loan->total_deductions);
+
+        if ($withheld === null) {
+            return 'its total deductions are not a usable amount, so the '.Money::format($centavos)
+                .' of share capital its items name cannot be shown to have been withheld.';
+        }
+
+        if ($centavos > $withheld) {
+            return 'its share capital items come to '.Money::format($centavos).', more than the '
+                .Money::format($withheld).' it withheld in total.';
+        }
+
+        return null;
+    }
+
+    /**
+     * Whether this organisation keeps books (has a chart of accounts), as
+     * AutomaticPoster decides it. One query; a caller valuing many loans asks
+     * once and passes the answer to amountFor().
+     */
+    public function keepsBooks(): bool
+    {
+        return $this->poster->enabled();
     }
 
     /**

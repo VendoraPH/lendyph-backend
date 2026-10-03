@@ -71,6 +71,44 @@ class ShareCapitalReleaseDeductionsReportCommandTest extends TestCase
         $this->assertStringContainsString($imported->loan_account_number, explode('Could not be read', $importedSection)[0]);
     }
 
+    public function test_a_loan_whose_share_capital_was_not_provable_is_listed_with_both_figures_and_in_no_total(): void
+    {
+        $loan = $this->approvedLoan([['name' => 'Share Capital', 'amount' => 500, 'type' => 'fixed']]);
+        // Without books, ₱500 of share capital against ₱400 withheld is not
+        // credited at release.
+        DB::table('loans')->where('id', $loan->id)->update(['total_deductions' => 400, 'net_proceeds' => 59600]);
+        $released = app(LoanService::class)->release($loan, $this->admin)->fresh();
+        $this->assertSame(0, ShareCapitalLedger::query()->count());
+
+        $output = $this->runCommand();
+
+        $unreadable = explode('Could not be read', $output, 2)[1];
+        $this->assertStringContainsString($released->loan_account_number, $unreadable);
+        $this->assertStringContainsString('Not credited at release', $unreadable);
+        $this->assertStringContainsString('₱500.00', $unreadable);
+        $this->assertStringContainsString('₱400.00', $unreadable);
+        $this->assertMatchesRegularExpression('/Missing release credits:\s+0 loans, ₱0\.00/', $output);
+    }
+
+    public function test_it_asks_whether_the_organisation_keeps_books_once_per_run(): void
+    {
+        foreach (range(1, 3) as $i) {
+            $this->releasedLoanReleasedBeforeTheFix([['name' => 'Share Capital', 'amount' => 100 * $i, 'type' => 'fixed']]);
+        }
+
+        $chartReads = 0;
+        DB::listen(function ($query) use (&$chartReads): void {
+            if (str_contains($query->sql, 'from `accounting_accounts`')) {
+                $chartReads++;
+            }
+        });
+
+        $output = $this->runCommand();
+
+        $this->assertSame(1, $chartReads);
+        $this->assertMatchesRegularExpression('/Missing release credits:\s+3 loans, ₱600\.00/', $output);
+    }
+
     public function test_it_reports_nothing_missing_when_every_release_was_credited(): void
     {
         $this->releasedLoan([['name' => 'Share Capital', 'amount' => 300, 'type' => 'fixed']]);
