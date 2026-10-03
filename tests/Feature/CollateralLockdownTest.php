@@ -139,7 +139,14 @@ function lockdownLockingReads(callable $act): array
 
 /**
  * Assert the one lock order: a single id-ordered statement on `collaterals`,
- * holding `$collateralIds`, before the first lock on `loans`.
+ * holding `$collateralIds`, before the first lock on `loans`, and no locking
+ * read of `loan_collaterals` at all.
+ *
+ * That last part is what lets these paths queue. A locking read of a loan's
+ * pledges takes gap locks, which do not conflict with each other, so two
+ * writers both get them and then deadlock on their own inserts into the gap.
+ * A loan's pledges need no lock of their own: every writer of them holds the
+ * loan's row lock.
  *
  * @param  list<array{sql: string, bindings: array<int, mixed>}>  $reads
  * @param  list<int>  $collateralIds
@@ -149,7 +156,10 @@ function lockdownAssertLockOrder(array $reads, array $collateralIds): void
     $collateralLocks = array_keys(array_filter($reads, fn (array $read): bool => str_contains($read['sql'], 'from `collaterals`')));
     $loanLocks = array_keys(array_filter($reads, fn (array $read): bool => str_contains($read['sql'], 'from `loans`')));
 
-    expect($collateralLocks)->toHaveCount(1, 'the collateral rows were locked in more than one statement')
+    $pledgeLocks = array_filter($reads, fn (array $read): bool => str_contains($read['sql'], '`loan_collaterals`'));
+
+    expect($pledgeLocks)->toBeEmpty('loan_collaterals was read with a lock, which takes gap locks that deadlock concurrent pledge writes')
+        ->and($collateralLocks)->toHaveCount(1, 'the collateral rows were locked in more than one statement')
         ->and($loanLocks)->not->toBeEmpty('the loan row was never locked')
         ->and($collateralLocks[0])->toBeLessThan($loanLocks[0], 'the loan was locked before its collateral');
 
@@ -552,6 +562,37 @@ it('lets the edit form re-send an unchanged amount for a collateral a live loan 
         ->and(($this->auditRows)('collateral_value_changed'))->toBeEmpty();
 })->with([250000, '250000', '250000.00', 250000.001]);
 
+it('judges an amount change the way the column will store it, to the centavo', function () {
+    // 300000.035 is stored as 300000.04 by the decimal(14, 2) column, so it is
+    // a change, though float arithmetic (300000.035 * 100 = 30000003.4999…)
+    // rounds it back to the 300000.03 already held.
+    $this->collateral->update(['amount' => '300000.03']);
+    $loan = lockdownLoan($this->loanDefaults, 'released');
+    lockdownPledge($loan, $this->collateral, 300000.03);
+
+    $this->putJson("/api/collaterals/{$this->collateral->id}", ['amount' => 300000.035])
+        ->assertUnprocessable()
+        ->assertJsonValidationErrors(['amount']);
+
+    expect(DB::table('collaterals')->where('id', $this->collateral->id)->value('amount'))->toBe('300000.03')
+        ->and(($this->auditRows)('collateral_value_changed'))->toBeEmpty();
+});
+
+it('records a half-centavo change as the centavo the column stores', function () {
+    $this->collateral->update(['amount' => '300000.03']);
+    $loan = lockdownLoan($this->loanDefaults, 'draft');
+    lockdownPledge($loan, $this->collateral, 300000.03);
+
+    $this->putJson("/api/collaterals/{$this->collateral->id}", ['amount' => 300000.035])->assertOk();
+
+    $entry = ($this->auditRows)('collateral_value_changed')->sole();
+
+    expect(DB::table('collaterals')->where('id', $this->collateral->id)->value('amount'))->toBe('300000.04')
+        ->and($entry->auditable_id)->toBe($loan->id)
+        ->and($entry->old_values)->toEqual(['collateral_id' => $this->collateral->id, 'amount' => 300000.03])
+        ->and($entry->new_values)->toEqual(['collateral_id' => $this->collateral->id, 'amount' => 300000.04]);
+});
+
 it('still edits the other fields of a collateral a live loan holds', function () {
     $loan = lockdownLoan($this->loanDefaults, 'ongoing');
     lockdownPledge($loan, $this->collateral, 250000);
@@ -607,6 +648,50 @@ it('locks what a loan edit holds and what it lists in one id-ordered statement, 
     ])->assertOk());
 
     lockdownAssertLockOrder($reads, [$low->id, $middle->id, $high->id]);
+});
+
+it('refuses a loan edit whose loan gained an unlisted collateral after the list was read', function () {
+    // The list's pledges are read before its transaction, so that the read
+    // takes no lock. One attached in between would be detached without its
+    // collateral row lock; the edit is refused as a conflict instead.
+    $loan = lockdownLoan($this->loanDefaults, 'draft');
+    $listed = Collateral::factory()->create(['borrower_id' => $this->borrower->id]);
+    $before = ($this->state)();
+
+    $slippedIn = false;
+    DB::listen(function (QueryExecuted $query) use (&$slippedIn, $loan) {
+        $sql = strtolower($query->sql);
+
+        if ($slippedIn || ! str_contains($sql, 'from `collaterals`') || ! str_contains($sql, 'for update')) {
+            return;
+        }
+
+        $slippedIn = true;
+        lockdownPledge($loan, $this->collateral, 250000);
+    });
+
+    $this->putJson("/api/loans/{$loan->id}", [
+        'purpose' => 'Changed',
+        'collaterals' => [['collateral_id' => $listed->id, 'snapshot_value' => 1000]],
+    ])->assertStatus(409)
+        ->assertExactJson(['message' => 'Another change to this collateral was saved at the same time. Reload and try again.']);
+
+    expect($slippedIn)->toBeTrue('the pledge never slipped in, so this test proved nothing')
+        ->and(($this->state)())->toBe($before);
+});
+
+it('locks the source loan\'s collateral, then the source loan, on a restructure', function () {
+    [$source, $collateral] = lockdownOngoingLoanHoldingCollateral($this, $this->borrower, $this->admin, 275000.75);
+    $second = Collateral::factory()->create(['borrower_id' => $this->borrower->id]);
+    lockdownPledge($source, $second, 50000);
+
+    $reads = lockdownLockingReads(fn () => lockdownRestructure($this, $source));
+
+    lockdownAssertLockOrder($reads, [$collateral->id, $second->id]);
+
+    $sourceLock = collect($reads)->first(fn (array $read): bool => str_contains($read['sql'], 'from `loans`'));
+
+    expect(lockdownLockedIds($sourceLock))->toBe([$source->id]);
 });
 
 it('locks the collateral, then its loans in id order, on a value change', function () {

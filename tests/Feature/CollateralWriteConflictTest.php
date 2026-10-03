@@ -133,6 +133,27 @@ class CollateralWriteConflictTest extends TestCase
         $this->assertSame($before, $this->state());
     }
 
+    public function test_a_restructure_that_deadlocks_answers_409_and_writes_nothing(): void
+    {
+        // Restructure creation writes pledges onto the new loan, and the lock
+        // it takes for the application number (the newest loan's row) is one a
+        // pledge write on that newest loan holds too.
+        $source = $this->createReleasedLoan();
+        $this->pledge($source, Collateral::factory()->create(['borrower_id' => $source->borrower_id]));
+        $before = $this->state();
+        $this->failOnAuditRow('restructure_created', self::DEADLOCK);
+
+        $this->postJson("/api/loans/{$source->id}/restructure", [
+            'borrower_id' => $source->borrower_id,
+            'loan_product_id' => $source->loan_product_id,
+            // What createReleasedLoan() leaves owed, so no shortfall.
+            'principal_amount' => 70800,
+            'start_date' => now()->toDateString(),
+        ])->assertStatus(409)->assertExactJson(['message' => self::CONFLICT]);
+
+        $this->assertSame($before, $this->state());
+    }
+
     public function test_any_other_database_error_is_not_turned_into_a_409(): void
     {
         $before = $this->state();

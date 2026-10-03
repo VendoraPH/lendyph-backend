@@ -10,13 +10,15 @@ use PDOException;
 
 /**
  * The transaction every collateral write runs in: attach and detach
- * (CollateralController), PUT /collaterals/{id}, and PUT /loans/{loan} when it
- * carries `collaterals`.
+ * (CollateralController), PUT /collaterals/{id}, PUT /loans/{loan} when it
+ * carries `collaterals`, and restructure creation, which copies pledges onto
+ * the new loan (LoanService::restructure()).
  *
  * Those paths all lock in one order (see CollateralAttacher), which keeps two
  * of them from deadlocking in the ordinary case but cannot rule it out: InnoDB
- * does not promise that ORDER BY is the order it takes row locks in, and the
- * gap locks on `loan_collaterals` can still cross. When MySQL breaks a deadlock
+ * does not promise that ORDER BY is the order it takes row locks in, and paths
+ * outside this set (release, void) still take gap locks on `loan_collaterals`.
+ * When MySQL breaks a deadlock
  * or a lock wait times out, nothing the client sent was wrong; another change
  * got there first. The transaction is rolled back, so nothing of this one is
  * left, and the answer is a 409 the client can reload and retry from, never a
@@ -52,9 +54,18 @@ final class CollateralWriteTransaction
                 throw $e;
             }
 
-            throw new HttpResponseException(response()->json([
-                'message' => 'Another change to this collateral was saved at the same time. Reload and try again.',
-            ], 409));
+            throw self::conflict();
         }
+    }
+
+    /**
+     * The 409 for a write that another one got to first, for a caller that
+     * detects that itself rather than through a database error.
+     */
+    public static function conflict(): HttpResponseException
+    {
+        return new HttpResponseException(response()->json([
+            'message' => 'Another change to this collateral was saved at the same time. Reload and try again.',
+        ], 409));
     }
 }

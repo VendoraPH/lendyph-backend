@@ -305,17 +305,25 @@ class CollateralController extends Controller
                 ]);
             }
 
-            $holders = $this->changesAmount($locked, $validated) ? $this->lockLoansHolding($locked) : null;
-
             $this->assertBorrowerIsNotBeingReassignedWhilePledged($locked, $validated);
+
+            $previousAmount = (float) $locked->amount;
+            $locked->fill($validated);
+
+            // Only a CHANGE to the amount counts, as for `borrower_id`: the edit
+            // form PUTs every field on every save, `amount` included, as 250000
+            // or "250000.00". And a change as the column will store it. The
+            // decimal:2 cast rounds half-up to the centavo exactly as MySQL's
+            // decimal(14, 2) does, so 300000.035 is the change to 300000.04
+            // that it will be, where float arithmetic (300000.035 * 100 =
+            // 30000003.4999…) would call it the 300000.03 already held.
+            $holders = $locked->isDirty('amount') ? $this->lockLoansHolding($locked) : null;
 
             if ($holders !== null) {
                 $this->assertAmountIsNotFixedByAHolder($holders);
             }
 
-            $previousAmount = (float) $locked->amount;
-
-            $locked->update($validated);
+            $locked->save();
 
             if ($holders !== null) {
                 $this->recordValueChange($locked, $holders, $previousAmount, $request->user());
@@ -327,25 +335,6 @@ class CollateralController extends Controller
         $collateral->load(['collateralType', 'activeLoans']);
 
         return CollateralResource::valued($collateral, $request->user());
-    }
-
-    /**
-     * Whether the request moves `amount` to a different figure, to the
-     * centavo the column stores.
-     *
-     * The collateral edit form PUTs every field on every save, `amount`
-     * included and usually unchanged, and as whatever the field held: 250000,
-     * "250000.00". Only a CHANGE counts, as for `borrower_id` below.
-     *
-     * @param  array<string, mixed>  $validated
-     */
-    private function changesAmount(Collateral $collateral, array $validated): bool
-    {
-        if (! array_key_exists('amount', $validated)) {
-            return false;
-        }
-
-        return (int) round((float) $validated['amount'] * 100) !== (int) round((float) $collateral->amount * 100);
     }
 
     /**
@@ -411,6 +400,7 @@ class CollateralController extends Controller
      */
     private function recordValueChange(Collateral $collateral, EloquentCollection $holders, float $previousAmount, ?User $user): void
     {
+        // Through the decimal:2 cast, so the row shows the stored centavo.
         $amount = (float) $collateral->amount;
 
         foreach ($holders as $loan) {

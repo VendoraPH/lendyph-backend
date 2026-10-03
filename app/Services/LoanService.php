@@ -15,6 +15,7 @@ use App\Services\Accounting\AutomaticPoster;
 use Carbon\Carbon;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
+use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -250,16 +251,30 @@ class LoanService
         $principal = round((float) $validated['principal_amount'], 2);
         $remarks = $validated['remarks'] ?? null;
 
+        // What the source holds, read before the transaction so that the read
+        // takes no lock and fixes no snapshot; inheritCollaterals() reads it
+        // again, exactly, under the source's lock.
+        $heldBefore = CollateralAttacher::heldBy($sourceLoan);
+
         // The guards run INSIDE the transaction, opening with a row lock on the
         // source. The one-open-application-at-a-time rule is an exists() check
         // followed by an insert, so without serializing on the source two
         // simultaneous requests would both see "none open" and both create one.
-        return DB::transaction(function () use ($sourceLoan, $validated, $user, $principal, $remarks) {
+        //
+        // A collateral write, since it copies pledges onto the new loan, so a
+        // deadlock in it is a 409 like the other pledge writes', not a 500.
+        // This is the outermost transaction: LoanController::restructure() is
+        // the only caller.
+        return CollateralWriteTransaction::run(function () use ($sourceLoan, $validated, $user, $principal, $remarks, $heldBefore) {
             // The source's collateral first, then the source: the order every
             // collateral write takes (CollateralAttacher), so this cannot hold
             // the loan while waiting on a collateral that a detach or a
-            // revaluation holds while waiting on the loan.
-            CollateralPledgeGuard::lockCollateralsOf($sourceLoan);
+            // revaluation holds while waiting on the loan. The collateral rows
+            // only, never `loan_collaterals`: a locking read of the source's
+            // pledges would gap-lock the index range after them, where a pledge
+            // written on the newest loan lands, while createLoan() below waits
+            // on that newest loan's row for the next application number.
+            $lockedCollaterals = CollateralAttacher::lock($heldBefore);
             $lockedSource = $this->lockSourceLoan($sourceLoan->id);
 
             $hasOpenRestructure = $lockedSource->restructuredInto()
@@ -306,7 +321,7 @@ class LoanService
                 }
             }
 
-            $inheritedCollaterals = $this->inheritCollaterals($lockedSource, $newLoan, $user);
+            $inheritedCollaterals = $this->inheritCollaterals($lockedSource, $newLoan, $user, $lockedCollaterals->keys()->all());
 
             AuditLogService::log(
                 action: 'restructure_created',
@@ -357,30 +372,26 @@ class LoanService
      * the source, and release closes the source in the same transaction, so
      * there is never a moment when both are active.
      *
+     * @param  array<int, int>  $lockedCollateralIds  the collateral rows restructure() locked
      * @return array<int, int> ids of the collaterals carried over
+     *
+     * @throws HttpResponseException 409 when the source holds a collateral that was not locked
      */
-    private function inheritCollaterals(Loan $source, Loan $newLoan, User $user): array
+    private function inheritCollaterals(Loan $source, Loan $newLoan, User $user, array $lockedCollateralIds): array
     {
-        // Read under a row lock. restructure() has already locked these rows,
-        // ahead of the source loan, so this re-asks for locks it holds; it
-        // stays a locking read so the copy never depends on where the plain
-        // reads above it happen to fall. These are the same `collaterals` rows
-        // CollateralController::attach() locks before it decides, so a
-        // concurrent attach of one of them serializes behind this copy instead
-        // of racing it; the lock also covers the `loan_collaterals` rows, so a
-        // detach cannot delete a row out from under the read and leave the new
-        // loan holding collateral the source no longer has.
+        // A plain read, and exact. restructure() holds the source's row lock,
+        // and every write that adds or removes a pledge holds that loan's row
+        // lock (see CollateralAttacher), so the source's pledges cannot change under
+        // this read or before the copy commits; on a released or ongoing loan
+        // none is allowed at all. The collateral rows were locked before the
+        // source, as restructure() describes, which is what a concurrent attach
+        // of one of them serializes on.
         //
-        // No lock-order cycle with attach(): attach waits on a `loans` row only
-        // after its collateral lock, and it only ever inserts for a collateral
-        // the target loan does not already hold — disjoint, by construction,
-        // from the set copied here.
+        // One the source gained after restructure() read what it held would be
+        // copied without its row lock, so that is refused as the conflict it
+        // is.
         $snapshotValues = $source->collaterals()
-            // Same stated lock order as CollateralPledgeGuard::lockCollateralsOf().
-            // A convention rather than a guarantee — see the note there — but the
-            // two paths lock the same rows and should ask in the same order.
             ->orderBy('collaterals.id')
-            ->lockForUpdate()
             ->get()
             ->mapWithKeys(fn (Collateral $collateral) => [
                 // Carried forward, not re-appraised.
@@ -399,6 +410,10 @@ class LoanService
                 $collateral->id => $collateral->pivot->snapshot_value,
             ])
             ->all();
+
+        if (array_diff(array_keys($snapshotValues), $lockedCollateralIds) !== []) {
+            throw CollateralWriteTransaction::conflict();
+        }
 
         if ($snapshotValues === []) {
             return [];
@@ -548,6 +563,10 @@ class LoanService
         $collaterals = $validated['collaterals'] ?? null;
         unset($validated['collaterals']);
 
+        // What the loan holds, read before the transaction for lockForList()
+        // to lock, and checked again there under the loan's lock.
+        $heldBefore = $collaterals === null ? [] : CollateralAttacher::heldBy($loan);
+
         // One transaction, so a refused collateral leaves the loan's own fields
         // unsaved too. It must be the OUTERMOST one, and its collateral locks
         // its first statements: CollateralPledgeGuard's snapshot rule. Then the
@@ -555,16 +574,12 @@ class LoanService
         // and the editable check made again on that locked row: the one above
         // ran before the transaction, so a loan approved since would otherwise
         // have its collateral changed after sign-off.
-        $edit = function () use ($loan, $validated, $user, $collaterals): Loan {
-            $lockedCollaterals = null;
-
-            if ($collaterals !== null) {
-                $lockedCollaterals = CollateralAttacher::lockForList(
-                    $loan,
-                    array_map(static fn (array $row): int => (int) $row['collateral_id'], $collaterals),
-                );
-                CollateralAttacher::lockEditableLoan($loan);
-            }
+        $edit = function () use ($loan, $validated, $user, $collaterals, $heldBefore): Loan {
+            $lockedCollaterals = $collaterals === null ? null : CollateralAttacher::lockForList(
+                $loan,
+                array_map(static fn (array $row): int => (int) $row['collateral_id'], $collaterals),
+                $heldBefore,
+            );
 
             $validated = $this->guardRestructurePrincipalEdit($loan, $validated, $user);
 
