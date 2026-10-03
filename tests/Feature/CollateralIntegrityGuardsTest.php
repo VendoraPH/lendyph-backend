@@ -323,7 +323,7 @@ it('still releases when the collateral\'s only other holder is not active', func
     $this->patchJson("/api/loans/{$loan->id}/release")->assertOk();
 
     expect($loan->fresh()->status)->toBe('released');
-})->with(['draft', 'for_review', 'approved', 'rejected', 'completed', 'defaulted', 'restructured', 'void']);
+})->with(['draft', 'for_review', 'approved', 'rejected', 'completed', 'restructured', 'void']);
 
 it('releases a loan holding no collateral at all without asking the question', function () {
     $loan = guardApprovedLoan($this->borrower, $this->admin);

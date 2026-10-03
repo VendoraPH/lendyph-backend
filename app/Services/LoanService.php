@@ -1361,9 +1361,9 @@ class LoanService
 
     public function voidLoan(Loan $loan): Loan
     {
-        if (in_array($loan->status, ['released', 'ongoing', 'completed'])) {
+        if (in_array($loan->status, ['released', 'ongoing', 'completed', 'defaulted'])) {
             throw ValidationException::withMessages([
-                'status' => ['Released, ongoing, or completed loans cannot be voided.'],
+                'status' => ['Released, ongoing, completed, or defaulted loans cannot be voided.'],
             ]);
         }
 

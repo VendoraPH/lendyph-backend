@@ -19,7 +19,7 @@ use Illuminate\Validation\ValidationException;
  *      in, for both CollateralController::attach() and the `collaterals` list
  *      on LoanService::updateLoan(). Guarded by assertCollateralIsFree().
  *   2. A STATUS TRANSITION — no pivot write at all. A loan that already holds
- *      collateral moves INTO Loan::ACTIVE_STATUSES while another active loan
+ *      collateral moves INTO Loan::PLEDGING_STATUSES while another active loan
  *      holds the same collateral. Guarded by lockCollateralsOf() +
  *      assertNoDoublePledge().
  *
@@ -101,7 +101,7 @@ class CollateralPledgeGuard
     }
 
     /**
-     * Refuse a transition INTO Loan::ACTIVE_STATUSES that would make `$loan` a
+     * Refuse a transition INTO Loan::PLEDGING_STATUSES that would make `$loan` a
      * SECOND active holder of collateral another active loan is already
      * standing on.
      *
@@ -118,7 +118,8 @@ class CollateralPledgeGuard
      * of an active status from an inactive one anywhere in app/.
      * RepaymentService::processRepayment() also writes `ongoing`, but only over
      * `released`, which is already active — it cannot add a holder, so it does
-     * not call this.
+     * not call this. CheckDefaultedLoans writes `defaulted` only over `released`
+     * or `ongoing`, which already pledge, so it cannot add one either.
      *
      * `$collateralIds` is threaded in from lockCollateralsOf() rather than
      * re-derived here, deliberately: the assertion is only meaningful while
@@ -149,7 +150,7 @@ class CollateralPledgeGuard
     }
 
     /**
-     * Refuse a collateral that some other loan in Loan::ACTIVE_STATUSES already holds.
+     * Refuse a collateral that some other loan in Loan::PLEDGING_STATUSES already holds.
      *
      * Note which side the status test is on: it is the CURRENT holders that must
      * not be active, not the loan being attached to. Pledging to a draft loan a
@@ -181,7 +182,7 @@ class CollateralPledgeGuard
     }
 
     /**
-     * The loans in Loan::ACTIVE_STATUSES holding any of `$collateralIds`, other
+     * The loans in Loan::PLEDGING_STATUSES holding any of `$collateralIds`, other
      * than `$loan` itself.
      *
      * The one query both guards above are built out of — the shared part is the
@@ -206,7 +207,7 @@ class CollateralPledgeGuard
     {
         return Loan::query()
             ->select(['loans.id', 'loans.loan_account_number'])
-            ->whereIn('loans.status', Loan::ACTIVE_STATUSES)
+            ->whereIn('loans.status', Loan::PLEDGING_STATUSES)
             ->whereKeyNot($loan->getKey())
             ->whereHas('collaterals', fn ($query) => $query->whereIn('collaterals.id', $collateralIds))
             ->orderBy('loans.id')

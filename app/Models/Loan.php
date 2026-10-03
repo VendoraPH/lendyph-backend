@@ -100,6 +100,19 @@ class Loan extends Model
     public const ACTIVE_STATUSES = ['released', 'ongoing'];
 
     /**
+     * Loans whose collateral is still pledged: the holders every pledge check
+     * refuses a second loan against (CollateralPledgeGuard,
+     * Collateral::activeLoans(), CollateralRegister).
+     *
+     * self::ACTIVE_STATUSES plus `defaulted`. A defaulted loan still owes its
+     * balance, and the collateral securing it is what the cooperative may have
+     * to call on, so it must not be free to secure another loan. It stays out of
+     * ACTIVE_STATUSES itself, which is what the loans screen, auto-pay and the
+     * penalty run mean by an active loan.
+     */
+    public const PLEDGING_STATUSES = ['released', 'ongoing', 'defaulted'];
+
+    /**
      * Virtual `status` value standing for the whole of self::ACTIVE_STATUSES.
      *
      * Not a stored status and never written to a row — it exists only as a

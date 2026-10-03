@@ -127,13 +127,13 @@ it('reports the active loan holding a collateral on the index', function (string
         ->and($row['active_loans'])->toBe([
             ['id' => $loan->id, 'loan_account_number' => $loan->loan_account_number],
         ]);
-})->with(Loan::ACTIVE_STATUSES);
+})->with(Loan::PLEDGING_STATUSES);
 
 it('reports no active loans for a collateral held only by a loan that is not active', function (string $status) {
     pledgeDirectly(loanInStatus($this->loanDefaults, $status), $this->collateral);
 
     expect($this->getJson('/api/collaterals')->assertOk()->json('data.0.active_loans'))->toBe([]);
-})->with(['draft', 'for_review', 'approved', 'rejected', 'completed', 'defaulted', 'restructured', 'void']);
+})->with(['draft', 'for_review', 'approved', 'rejected', 'completed', 'restructured', 'void']);
 
 it('reports an empty array for a collateral attached to nothing', function () {
     expect($this->getJson('/api/collaterals')->assertOk()->json('data.0.active_loans'))->toBe([]);
@@ -280,7 +280,7 @@ it('refuses to attach a collateral that another active loan already holds', func
         'collateral_id' => $this->collateral->id,
     ]);
     $this->assertDatabaseCount('loan_collaterals', 1);
-})->with(Loan::ACTIVE_STATUSES);
+})->with(Loan::PLEDGING_STATUSES);
 
 it('refuses the attach even when the loan being attached to is not itself active', function () {
     // The status test is on the CURRENT holders, not on the target: a draft
@@ -329,7 +329,7 @@ it('attaches a collateral whose only other loan is not active', function (string
         'loan_id' => $target->id,
         'collateral_id' => $this->collateral->id,
     ]);
-})->with(['draft', 'for_review', 'approved', 'rejected', 'completed', 'defaulted', 'restructured', 'void']);
+})->with(['draft', 'for_review', 'approved', 'rejected', 'completed', 'restructured', 'void']);
 
 it('still refuses to re-attach the same collateral to the same loan', function () {
     // A draft: an active loan refuses any attach on its status first.
