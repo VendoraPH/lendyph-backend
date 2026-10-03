@@ -40,6 +40,14 @@ use Illuminate\Validation\ValidationException;
  *   2. the loan row (lockEditableLoan(), or the source loan's lock on a
  *      restructure).
  *
+ * The loan writes that change no pledge take the same order, with their own
+ * row third (see LoanWriteTransaction): a release (its collateral, then the
+ * loan and the loan it restructures), a payment void (its loan's collateral,
+ * then the loan, then the payment), a loan create (the newest loan's row, for
+ * the application number), an adjustment apply (the loan, then the
+ * adjustment) and an extension (the loan). The last three touch no collateral,
+ * so they start at step 2.
+ *
  * Nothing locks `loan_collaterals` itself, and that is deliberate. A locking
  * read of a loan's pledges takes gap locks, and gap locks do not conflict with
  * each other: two requests both get them, then each blocks the other's INSERT

@@ -307,6 +307,7 @@ class RepaymentController extends Controller
         ),
         responses: [
             new OA\Response(response: 200, description: 'Repayment voided'),
+            new OA\Response(response: 409, description: 'Another request voided this payment, or closed its loan, at the same time, or the write deadlocked; nothing was reversed. Reload and try again'),
             new OA\Response(response: 422, description: 'Already voided or validation error'),
         ],
     )]

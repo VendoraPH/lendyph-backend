@@ -17,10 +17,13 @@ use PDOException;
  *
  * Those paths all lock in one order (see CollateralAttacher), which keeps two
  * of them from deadlocking in the ordinary case but cannot rule it out: InnoDB
- * does not promise that ORDER BY is the order it takes row locks in, and paths
- * outside this set (a payment void) still take gap locks on `loan_collaterals`.
- * A release locks in the same order and answers its own clashes with a 409
- * through LoanWriteTransaction. When MySQL breaks a deadlock
+ * does not promise that ORDER BY is the order it takes row locks in, and a
+ * payment void, which locks its loan's collateral through
+ * CollateralPledgeGuard::lockCollateralsOf(), still takes gap locks on
+ * `loan_collaterals`. The loan writes outside this set (a release, a payment
+ * void, a loan create, an adjustment apply and an extension) lock in the same
+ * order, collateral rows, then loan rows, then their own row, and answer their
+ * own clashes with a 409 through LoanWriteTransaction. When MySQL breaks a deadlock
  * or a lock wait times out, nothing the client sent was wrong; another change
  * got there first. The transaction is rolled back, so nothing of this one is
  * left, and the answer is a 409 the client can reload and retry from, never a

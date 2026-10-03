@@ -15,7 +15,7 @@ class DisclosureController extends Controller
     #[OA\Get(
         path: '/api/loans/{loan}/disclosure',
         summary: 'Generate disclosure statement',
-        description: 'Returns all financial terms, deductions, and amortization schedule for printing/display',
+        description: 'Returns all financial terms, deductions, and amortization schedule for printing/display. `totals` carries `total_principal`, `total_interest`, `total_obligation`, `total_amortization` (the schedule\'s total amortization column), `total_deductions`, `net_proceeds`, `total_finance_charges` (total deductions plus total interest) and `unitemised_deductions` (total deductions less the itemised `deductions.items`, signed: negative when the items add up to more than the total, 0 when they agree), schedule totals in whole centavos.',
         tags: ['Loan Documents'],
         security: [['sanctum' => []]],
         parameters: [

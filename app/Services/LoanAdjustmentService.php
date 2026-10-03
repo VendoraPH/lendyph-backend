@@ -11,8 +11,8 @@ use App\Models\Repayment;
 use App\Models\User;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Support\Collection;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
 class LoanAdjustmentService
@@ -139,7 +139,15 @@ class LoanAdjustmentService
             ]);
         }
 
-        return DB::transaction(function () use ($loan, $user, $remarks, $interestOption) {
+        // A deadlock or lock wait timeout is a 409, not a 500. This is the
+        // outermost transaction: LoanController::extend() and the test helpers
+        // are the only callers. processRepayment() below nests inside it.
+        return LoanWriteTransaction::run(function () use ($loan, $user, $remarks, $interestOption) {
+            // The loan row first, the order every loan write takes
+            // (LoanWriteTransaction). No collateral lock: an extension writes
+            // `ongoing` at most, over `released`, and both already pledge.
+            $this->lockLoanForExtension($loan);
+
             $oldMaturityDate = $loan->maturity_date->toDateString();
             $oldTerm = $loan->term;
 
@@ -258,6 +266,39 @@ class LoanAdjustmentService
 
             return $adjustment;
         });
+    }
+
+    /**
+     * Lock the loan being extended and refuse with a 409 if it changed since
+     * the request read it.
+     *
+     * An extension always moves `maturity_date`, and so does every other
+     * rescheduling write, so a maturity date that no longer matches the one
+     * this request read means another extension (or an adjustment) got there
+     * first; extending again would roll the loan forward twice and collect the
+     * interest twice. A loan no longer released or ongoing, or left with no
+     * open period, has likewise moved under the request. `$loan` is then
+     * refreshed from its locked row.
+     *
+     * @throws HttpResponseException 409 when the loan changed since it was read
+     */
+    private function lockLoanForExtension(Loan $loan): void
+    {
+        $locked = Loan::whereKey($loan->getKey())->lockForUpdate()->first();
+
+        $changed = $locked === null
+            || ! in_array($locked->status, ['released', 'ongoing'], true)
+            || $locked->maturity_date?->toDateString() !== $loan->maturity_date?->toDateString();
+
+        if ($changed) {
+            throw LoanWriteTransaction::conflict();
+        }
+
+        $loan->setRawAttributes($locked->getAttributes(), true);
+
+        if (! $loan->amortizationSchedules()->whereIn('status', ['pending', 'partial', 'overdue'])->exists()) {
+            throw LoanWriteTransaction::conflict();
+        }
     }
 
     /**
@@ -516,13 +557,32 @@ class LoanAdjustmentService
         );
     }
 
+    /**
+     * Apply an approved adjustment to its loan's schedule.
+     *
+     * The checks before the transaction refuse, with a 422, an apply that was
+     * wrong from the start. The transaction then locks in the order every loan
+     * write takes (LoanWriteTransaction): the loan, then this adjustment
+     * (lockAdjustmentRows()), and re-reads the adjustment under its lock,
+     * because two applies that both passed the status check would otherwise
+     * both rewrite the schedule. The second finds it already applied and is
+     * answered with a 409, as is a deadlock or a lock wait timeout, with
+     * nothing of it left.
+     *
+     * No collateral lock: no adjustment type changes what the loan pledges or
+     * moves it into or out of Loan::PLEDGING_STATUSES (a restructure
+     * adjustment keeps the loan's status on purpose; see applyRestructure()).
+     *
+     * This is the outermost transaction: LoanAdjustmentController::apply() and
+     * the test helpers are the only callers.
+     */
     public function applyAdjustment(LoanAdjustment $adjustment): LoanAdjustment
     {
         $this->guardStatus($adjustment, 'approved', 'apply');
         $this->assertPayloadFitsType($adjustment);
 
-        return DB::transaction(function () use ($adjustment) {
-            $loan = $adjustment->loan;
+        return LoanWriteTransaction::run(function () use ($adjustment) {
+            $loan = $this->lockAdjustmentRows($adjustment);
 
             match ($adjustment->adjustment_type) {
                 'restructure' => $this->applyRestructure($adjustment, $loan),
@@ -538,6 +598,32 @@ class LoanAdjustmentService
 
             return $adjustment;
         });
+    }
+
+    /**
+     * Lock the adjustment's loan row, then the adjustment's own, and refuse
+     * with a 409 unless the adjustment is still approved.
+     *
+     * Two locking reads, in the order every loan write takes
+     * (LoanWriteTransaction). The adjustment is refreshed from its locked row
+     * and handed the locked loan, so the apply works from what is committed
+     * rather than from what the request read before the lock.
+     *
+     * @throws HttpResponseException 409 when the adjustment was applied, or otherwise moved, since it was read
+     */
+    private function lockAdjustmentRows(LoanAdjustment $adjustment): Loan
+    {
+        $loan = Loan::whereKey($adjustment->loan_id)->lockForUpdate()->first();
+        $locked = LoanAdjustment::whereKey($adjustment->getKey())->lockForUpdate()->first();
+
+        if ($loan === null || $locked === null || $locked->status !== 'approved') {
+            throw LoanWriteTransaction::conflict();
+        }
+
+        $adjustment->setRawAttributes($locked->getAttributes(), true);
+        $adjustment->setRelation('loan', $loan);
+
+        return $loan;
     }
 
     private function applyRestructure(LoanAdjustment $adjustment, Loan $loan): void

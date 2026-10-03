@@ -11,6 +11,7 @@ use App\Http\Requests\Loan\ExtendLoanRequest;
 use App\Http\Requests\Loan\PreviewLoanRequest;
 use App\Http\Requests\Loan\RejectLoanRequest;
 use App\Http\Requests\Loan\ReleaseLoanRequest;
+use App\Http\Requests\Loan\ReleasePreviewRequest;
 use App\Http\Requests\Loan\RestructureLoanRequest;
 use App\Http\Requests\Loan\StoreLoanRequest;
 use App\Http\Requests\Loan\SubmitLoanRequest;
@@ -474,6 +475,7 @@ DESC,
         ),
         responses: [
             new OA\Response(response: 201, description: 'Loan application created'),
+            new OA\Response(response: 409, description: 'Another loan application was created at the same moment (it took this one\'s application number, or the write deadlocked); nothing was created. Message: "Another loan application was created at the same moment. Submit again."'),
             new OA\Response(response: 422, description: 'Validation error'),
         ],
     )]
@@ -515,6 +517,9 @@ DESC,
             // Restructure lineage — loaded here only. index() would pay for it
             // on every row of every page to render a link almost nothing uses.
             'sourceLoan', 'restructuredInto',
+            // For `collateral_summary`, the collaterals card. Here only, for
+            // the same reason.
+            'collaterals',
         );
 
         return new LoanResource($loan);
@@ -697,7 +702,7 @@ DESC,
     #[OA\Patch(
         path: '/api/loans/{id}/release',
         summary: 'Release loan',
-        description: 'Release an approved loan — generates loan account number and amortization schedule. Applies the fee rules configured in Settings that match this loan\'s product and conditions, ADDING them to any deductions already itemised on the loan. Optionally records insurance premium fields collected at release.',
+        description: 'Release an approved loan — generates loan account number and amortization schedule. Applies the fee rules configured in Settings that match this loan\'s product and conditions, ADDING them to any deductions already itemised on the loan. Optionally withholds an insurance premium: the server computes it from `insurance_premium_percentage` (principal × percentage / 100, to the centavo, half up), the figure GET /api/loans/{id}/release-preview quotes. If the share capital the final deductions withhold is above 0, the member\'s share capital ledger is credited with it in the same transaction (one row carrying the loan), and a borrower who is not a member yet is refused (422 on `deductions`). Collisions with another write answer 409 and write nothing.',
         tags: ['Loans'],
         security: [['sanctum' => []]],
         parameters: [
@@ -708,18 +713,18 @@ DESC,
             content: new OA\JsonContent(
                 properties: [
                     new OA\Property(property: 'insurance_premium_percentage', type: 'number', nullable: true, minimum: 0, maximum: 100, description: 'When 0 or omitted, insurance block is ignored.'),
-                    new OA\Property(property: 'insurance_premium_amount', type: 'number', nullable: true, description: 'principal_amount × percentage / 100, rounded 2dp.'),
+                    new OA\Property(property: 'insurance_premium_amount', type: 'number', nullable: true, description: 'Optional, from older clients. Computed by the server; a sent value that differs from the server\'s by any centavo is a 422 on this field ("The premium for X% is ₱Y. Reload the release preview.").'),
                     new OA\Property(property: 'insurance_payment_type', type: 'string', nullable: true, enum: ['full', 'partial']),
-                    new OA\Property(property: 'insurance_partial_amount', type: 'number', nullable: true, description: 'Required (>0) when payment_type=partial. Must be null or 0 when payment_type=full.'),
-                    new OA\Property(property: 'insurance_remaining_balance', type: 'number', nullable: true, description: '0 when full; premium_amount − partial_amount when partial.'),
+                    new OA\Property(property: 'insurance_partial_amount', type: 'number', nullable: true, description: 'Required when payment_type=partial (0 allowed: nothing collected now), and no more than the server\'s premium (else 422 on this field). Must be absent, null or 0 when payment_type=full.'),
+                    new OA\Property(property: 'insurance_remaining_balance', type: 'number', nullable: true, description: 'Accepted and ignored: the server computes it (0 when full; premium − partial amount when partial).'),
                     new OA\Property(property: 'fee_fingerprint', type: 'string', nullable: true, description: 'The `fee_fingerprint` returned by GET /api/loans/{id}/release-preview. Optional. When sent and the fee configuration has changed since that preview, the release is refused with 409 and nothing is written.'),
                 ],
             ),
         ),
         responses: [
             new OA\Response(response: 200, description: 'Loan released'),
-            new OA\Response(response: 409, description: 'The fee configuration changed since the preview this release quoted'),
-            new OA\Response(response: 422, description: 'Invalid status transition, fees exceeding principal, or insurance validation error'),
+            new OA\Response(response: 409, description: 'The fee configuration changed since the preview this release quoted, or another change to this loan was saved at the same time; nothing was written. Reload and try again'),
+            new OA\Response(response: 422, description: 'Invalid status transition, fees exceeding principal, a sent premium that is not the server\'s, a partial amount above the premium, insurance above the net proceeds, or share capital withheld for a borrower who is not a member'),
         ],
     )]
     public function release(ReleaseLoanRequest $request, Loan $loan): JsonResponse
@@ -746,7 +751,7 @@ DESC,
 
         Runs the identical calculation the release itself runs, guard included — a fee schedule that would withhold more than the principal is refused here, in front of the cashier, rather than at the counter.
 
-        Insurance is deliberately not included: it is typed into the release dialog at release time, not configured, so there is nothing to preview.
+        Insurance: send the release dialog's `insurance_premium_percentage` (0–100, up to 2 places), `insurance_payment_type` (`full`, the default, or `partial`) and, for a partial payment, `insurance_partial_amount` (0 allowed), validated as the release validates them. `insurance` then quotes `premium_amount` (the principal × the percentage / 100, to the centavo, half up: the figure the release withholds), `collected` (the premium, or the partial amount), `partial_amount` (null on a full payment) and `remaining_balance`; it is null with no percentage or 0. `total_deductions_after_insurance` (`total_deductions` + collected), `net_proceeds_after_insurance` (`net_proceeds` − collected, negative when it overruns) and `exceeds_net_proceeds` (collected above `net_proceeds`, which the release refuses) are always present, equal to the totals without insurance. All figures are 2dp strings.
 
         Pass the returned `fee_fingerprint` back to `PATCH /api/loans/{id}/release` to be refused with a 409 if the fee configuration changed in between.
         TXT,
@@ -754,14 +759,17 @@ DESC,
         security: [['sanctum' => []]],
         parameters: [
             new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
+            new OA\Parameter(name: 'insurance_premium_percentage', in: 'query', required: false, schema: new OA\Schema(type: 'number', minimum: 0, maximum: 100)),
+            new OA\Parameter(name: 'insurance_payment_type', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['full', 'partial'])),
+            new OA\Parameter(name: 'insurance_partial_amount', in: 'query', required: false, schema: new OA\Schema(type: 'number', minimum: 0)),
         ],
         responses: [
-            new OA\Response(response: 200, description: 'Projected deductions, totals and fee fingerprint'),
+            new OA\Response(response: 200, description: 'Projected deductions, totals, fee fingerprint and insurance figures'),
             new OA\Response(response: 403, description: 'Missing loans:release'),
-            new OA\Response(response: 422, description: 'Loan is not awaiting release, or the fees would exceed the principal'),
+            new OA\Response(response: 422, description: 'Loan is not awaiting release, the fees would exceed the principal, malformed insurance parameters, or a partial amount above the premium (on `insurance_partial_amount`)'),
         ],
     )]
-    public function releasePreview(Loan $loan, LoanReleaseFeeService $fees): JsonResponse
+    public function releasePreview(ReleasePreviewRequest $request, Loan $loan, LoanReleaseFeeService $fees): JsonResponse
     {
         // `loans:release` rather than `loans:view`. The handoff asks for this to
         // be "authorized for the releasing role", and it is the right call: this
@@ -780,7 +788,19 @@ DESC,
             ]);
         }
 
-        return response()->json(['data' => $fees->preview($loan)]);
+        $preview = $fees->preview($loan);
+
+        // What the insurance the dialog is filling in would collect, and what
+        // that leaves, by the code the release withholds it with.
+        return response()->json(['data' => [
+            ...$preview,
+            ...$this->loanService->insurancePreview(
+                $loan,
+                $request->insurancePayload(),
+                $preview['total_deductions'],
+                $preview['net_proceeds'],
+            ),
+        ]]);
     }
 
     #[OA\Post(
@@ -903,6 +923,7 @@ DESC,
             new OA\Response(response: 200, description: 'Loan extended; returns updated loan in GET /api/loans/{id} shape'),
             new OA\Response(response: 403, description: 'Missing loans:extend permission'),
             new OA\Response(response: 404, description: 'Loan not found'),
+            new OA\Response(response: 409, description: 'Another change to this loan (another extension, an adjustment) was saved at the same time; nothing was written. Reload and try again'),
             new OA\Response(response: 422, description: 'Loan is not upon-maturity (neither frequency nor interest_method is upon_maturity), not in released/ongoing status, or has no open period'),
         ],
     )]
@@ -923,6 +944,7 @@ DESC,
             'approvedByUser', 'releasedByUser', 'rejectedByUser',
             'createdByUser', 'accountOfficer', 'amortizationSchedules',
             'documents', 'approvalSteps', 'sourceLoan', 'restructuredInto',
+            'collaterals',
         );
 
         return response()->json([
@@ -1087,7 +1109,11 @@ DESC,
         description: <<<'TXT'
         Read-only. Every field is optional; each section is computed from what was sent.
 
-        `collateral` is always present: `total_value` (the stated snapshot values added up), `security_status` (`unsecured` with no principal or nothing pledged, `secured` when the total reaches the principal, else `partially_secured`) and `short_by` (the principal less the total, never below 0; 0 without a principal).
+        `collateral` is always present: `total_value` (the stated snapshot values added up), `security_status` (`unsecured` with no principal or nothing pledged, `secured` when the total reaches the principal, else `partially_secured`) and `short_by` (the principal less the total, never below 0; 0 without a principal). GET /api/loans/{id} `collateral_summary` uses the same rule for a saved loan's pledges.
+
+        `maturity_date` is where the loan would mature, as creating it would store it: null until `loan_product_id`, a `term` inside the product's term range, `frequency` and `start_date` are sent (the principal and the rate are not needed).
+
+        `deductions` is null until `loan_product_id` and a `principal_amount` above 0 are sent. Send `deductions` as the create, edit and restructure payloads do (`{name, amount, type}`; a percentage's `amount` is the rate); absent or null means the product's own processing, service and notarial fee rates, as creating the loan falls back to, and `[]` means none. `items` are those deductions as the loan would store them (`{name, amount, type, original_value}`), `stated_total` their total; `configured_fees` are the Settings fees a release of this loan would add, matched to its product and its conditions (loan amount, term in days once `maturity_date` is known) by the release's own code, each with its `fee_id`, and `configured_total` their total; `total_deductions` is both totals, and `net_proceeds` the principal less it. When the deductions are more than the principal, `net_proceeds` is null and `error` carries the refusal saving or releasing would give (else `error` is null), in this 200 body so the rest of the preview still shows. Pesos as JSON numbers, totals added in whole centavos.
 
         `amortization` is null until `loan_product_id`, a `principal_amount` above 0, an `interest_rate` above 0, `term`, `frequency` and `start_date` are all sent. Its `rows` are the schedule a release of the same loan writes, built with the product's interest method, term unit and rate frequency (`interest_method` says which), each with the `share_capital_build_up` (`scb_amount`) and `total_payment` (`total_due` plus it); `totals` adds up principal, interest, build-up and payment.
 
@@ -1111,11 +1137,18 @@ DESC,
                             new OA\Property(property: 'snapshot_value', type: 'number'),
                         ],
                     )),
+                    new OA\Property(property: 'deductions', type: 'array', nullable: true, items: new OA\Items(
+                        properties: [
+                            new OA\Property(property: 'name', type: 'string'),
+                            new OA\Property(property: 'amount', type: 'number', description: 'The rate for a percentage, pesos for a fixed deduction'),
+                            new OA\Property(property: 'type', type: 'string', enum: ['percentage', 'fixed']),
+                        ],
+                    )),
                 ],
             ),
         ),
         responses: [
-            new OA\Response(response: 200, description: '`{data: {collateral, amortization}}`'),
+            new OA\Response(response: 200, description: '`{data: {collateral, maturity_date, deductions, amortization}}`'),
             new OA\Response(response: 403, description: 'Missing both loans:create and loans:update'),
             new OA\Response(response: 422, description: 'Malformed input'),
         ],

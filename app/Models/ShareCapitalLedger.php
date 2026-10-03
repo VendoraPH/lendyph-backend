@@ -17,6 +17,7 @@ class ShareCapitalLedger extends Model
     protected $fillable = [
         'borrower_id',
         'repayment_id',
+        'loan_id',
         'date',
         'description',
         'reference',
@@ -111,6 +112,15 @@ class ShareCapitalLedger extends Model
     public function repayment(): BelongsTo
     {
         return $this->belongsTo(Repayment::class);
+    }
+
+    /**
+     * The loan whose release withheld this share capital, for a row written
+     * by ShareCapitalReleaseCredit. Null on every other row.
+     */
+    public function loan(): BelongsTo
+    {
+        return $this->belongsTo(Loan::class);
     }
 
     public function createdByUser(): BelongsTo

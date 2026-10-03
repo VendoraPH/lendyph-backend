@@ -187,6 +187,7 @@ class LoanAdjustmentController extends Controller
         ],
         responses: [
             new OA\Response(response: 200, description: 'Adjustment applied'),
+            new OA\Response(response: 409, description: 'The adjustment was applied by another request at the same time, or the write deadlocked; nothing was written. Reload and try again'),
             new OA\Response(response: 422, description: 'Invalid status'),
         ],
     )]

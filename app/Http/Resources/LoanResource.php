@@ -3,6 +3,7 @@
 namespace App\Http\Resources;
 
 use App\Models\AmortizationSchedule;
+use App\Services\CollateralSecurity;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 use OpenApi\Attributes as OA;
@@ -38,6 +39,19 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'overdue_amount', type: 'number'),
         new OA\Property(property: 'penalty_amount', type: 'number'),
         new OA\Property(property: 'total_payable', type: 'number'),
+        new OA\Property(property: 'unitemised_deductions', type: 'number', description: '`total_deductions` less the itemised `deductions`, in whole centavos, signed: positive when the total is more than the items, negative when the items add up to more, 0 when they agree. The release voucher prints it as its own line.'),
+        new OA\Property(property: 'amortization_schedule_totals', type: 'object', description: 'Only with `amortization_schedules`. Each column of the schedule added up in whole centavos.', properties: [
+            new OA\Property(property: 'principal', type: 'number'),
+            new OA\Property(property: 'interest', type: 'number'),
+            new OA\Property(property: 'penalty', type: 'number'),
+            new OA\Property(property: 'total_due', type: 'number'),
+            new OA\Property(property: 'amount_paid', type: 'number'),
+        ]),
+        new OA\Property(property: 'collateral_summary', type: 'object', nullable: true, description: 'GET /loans/{id} only; null where the loan\'s collaterals are not loaded (lists). The pledged `snapshot_value`s added up against the principal, by the rule POST /loans/preview\'s `collateral` uses.', properties: [
+            new OA\Property(property: 'total_value', type: 'number'),
+            new OA\Property(property: 'security_status', type: 'string', enum: ['secured', 'partially_secured', 'unsecured']),
+            new OA\Property(property: 'short_by', type: 'number'),
+        ]),
         new OA\Property(property: 'borrower_name', type: 'string', nullable: true),
         new OA\Property(property: 'loan_product_name', type: 'string', nullable: true),
         new OA\Property(property: 'account_officer_id', type: 'integer', nullable: true),
@@ -176,6 +190,10 @@ class LoanResource extends JsonResource
             'maturity_date' => $this->maturity_date?->toDateString(),
             'deductions' => $this->deductions,
             'total_deductions' => $this->total_deductions,
+            // The total less the items, signed, for the release voucher's
+            // "Other deductions" or "Adjustment" line. See
+            // Loan::unitemisedDeductions().
+            'unitemised_deductions' => $this->resource->unitemisedDeductions(),
             'net_proceeds' => $this->net_proceeds,
             'scb_amount' => (float) $this->scb_amount,
             'penalty_rate' => $this->penalty_rate,
@@ -242,6 +260,16 @@ class LoanResource extends JsonResource
             'amortization_schedules' => AmortizationScheduleResource::collection(
                 $this->whenLoaded('amortizationSchedules')
             ),
+            // The schedule's column totals, in whole centavos, under the
+            // column names AmortizationScheduleResource gives each row, so the
+            // printed schedule never adds a column up itself. Only where the
+            // schedule is loaded.
+            'amortization_schedule_totals' => $this->whenLoaded('amortizationSchedules', fn () => $this->scheduleTotals()),
+            // The collaterals card's total, security status and shortfall
+            // (CollateralSecurity, the rule the loan form's preview uses). Only
+            // where `collaterals` is loaded (GET /loans/{id}); null elsewhere,
+            // so a list pays nothing for it.
+            'collateral_summary' => $this->relationLoaded('collaterals') ? CollateralSecurity::ofLoan($this->resource) : null,
             'source_loan_id' => $this->source_loan_id,
             'is_restructure' => $this->isRestructure(),
             'restructured_at' => $this->restructured_at,
@@ -280,5 +308,24 @@ class LoanResource extends JsonResource
             'created_at' => $this->created_at,
             'updated_at' => $this->updated_at,
         ];
+    }
+
+    /**
+     * @return array{principal: float|int, interest: float|int, penalty: float|int, total_due: float|int, amount_paid: float|int}
+     */
+    private function scheduleTotals(): array
+    {
+        $totals = ['principal' => 0, 'interest' => 0, 'penalty' => 0, 'total_due' => 0, 'amount_paid' => 0];
+        $centavos = fn (mixed $pesos): int => (int) round((float) ($pesos ?? 0) * 100);
+
+        foreach ($this->amortizationSchedules as $row) {
+            $totals['principal'] += $centavos($row->principal_due);
+            $totals['interest'] += $centavos($row->interest_due);
+            $totals['penalty'] += $centavos($row->penalty_amount);
+            $totals['total_due'] += $centavos($row->total_due);
+            $totals['amount_paid'] += $centavos($row->principal_paid) + $centavos($row->interest_paid) + $centavos($row->penalty_paid);
+        }
+
+        return array_map(fn (int $sum): float|int => $sum / 100, $totals);
     }
 }

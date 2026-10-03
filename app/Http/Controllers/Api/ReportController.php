@@ -160,7 +160,7 @@ class ReportController extends Controller
     #[OA\Get(
         path: '/api/reports/statement-of-account/{loan}',
         summary: 'Statement of Account',
-        description: 'All transactions, schedule, and balance for a specific loan',
+        description: 'All transactions, schedule, and balance for a specific loan. Each `amortization_schedule` row also carries the demand letter\'s arrears: `remaining` (`principal`, `interest`, `penalty` still owed, never below 0), `amount_due` (their sum), `days_overdue` (whole days past the due date, today in Asia/Manila; 0 when not yet due) and `is_overdue` (due before today with something still owed). `total_demanded` is every `is_overdue` row\'s `amount_due`, and `demand_totals` (`principal`, `interest`, `penalty`, `amount_due`) the columns over those rows. Totals in whole centavos.',
         tags: ['Reports'],
         security: [['sanctum' => []]],
         parameters: [
@@ -183,7 +183,7 @@ class ReportController extends Controller
     #[OA\Get(
         path: '/api/reports/subsidiary-ledger/{borrower}',
         summary: 'Subsidiary Ledger',
-        description: 'All loans with balances and payment history for a borrower',
+        description: 'All loans with balances and payment history for a borrower. `loans_totals` adds up the `loans` table\'s columns (`principal_amount`, `total_paid`, `outstanding_balance` in whole centavos, `payments_count` as a count).',
         tags: ['Reports'],
         security: [['sanctum' => []]],
         parameters: [
@@ -478,7 +478,7 @@ class ReportController extends Controller
             new OA\Parameter(name: 'as_of_date', in: 'query', required: false, description: 'Legacy as-of parameter; superseded by date_to.', schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
         ],
-        responses: [new OA\Response(response: 200, description: 'Aging buckets')],
+        responses: [new OA\Response(response: 200, description: 'Aging buckets. Each bucket carries `share_percent`: its amount as a percentage of `total.amount`, from whole centavos, rounded half up to 2 places; null when the total is 0. `total.share_percent` is 100, or null when the total is 0.')],
     )]
     public function agingReport(): JsonResponse
     {
@@ -699,7 +699,7 @@ class ReportController extends Controller
     #[OA\Get(
         path: '/api/reports/share-capital-statement/{borrower}',
         summary: 'Share Capital Statement',
-        description: 'One member\'s complete share capital ledger with a running balance, opening and closing balances and period totals. Unpaginated: this feeds a printable certificate.',
+        description: 'One member\'s complete share capital ledger with a running balance (`entries[].running_balance`), opening and closing balances and period totals (`totals.credits`, `totals.debits`, also as `total_credit` and `total_debit` beside `closing_balance`). Unpaginated: this feeds a printable certificate.',
         tags: ['Reports'],
         security: [['sanctum' => []]],
         parameters: [

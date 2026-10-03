@@ -12,6 +12,7 @@ use App\Models\ShareCapitalLedger;
 use App\Models\User;
 use App\Services\Accounting\AutomaticPoster;
 use Carbon\Carbon;
+use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
@@ -425,6 +426,15 @@ class RepaymentService
 
     /**
      * Void a posted repayment and reverse its effects.
+     *
+     * The checks before the transaction refuse, with a 422, a void that was
+     * wrong from the start. The transaction then locks in the order every loan
+     * write takes (LoanWriteTransaction): the loan's collateral rows, the loan,
+     * then this payment, and re-reads both under those locks
+     * (lockVoidRows()), because two voids of one payment that both passed the
+     * checks would otherwise both reverse its allocation. The second finds the
+     * payment already voided and is answered with a 409, as is a deadlock or a
+     * lock wait timeout, with nothing of it left.
      */
     public function voidRepayment(Repayment $repayment, string $reason, User $user): Repayment
     {
@@ -458,7 +468,10 @@ class RepaymentService
         $this->assertAllocationIsKnown($repayment);
         $this->assertNotAnExtensionCollection($repayment);
 
-        return DB::transaction(function () use ($repayment, $reason, $user) {
+        // A deadlock or lock wait timeout is a 409, not a 500. This is the
+        // outermost transaction: RepaymentController::void() and the test
+        // helpers are the only callers.
+        return LoanWriteTransaction::run(function () use ($repayment, $reason, $user) {
             $loan = $repayment->loan;
 
             // THE FIRST STATEMENT THAT TOUCHES THE DATABASE IN THIS TRANSACTION,
@@ -484,6 +497,9 @@ class RepaymentService
             // must be kept in agreement forever — and getting them out of step
             // reopens exactly this defect. Voids are rare; the lock is cheap.
             $lockedCollateralIds = CollateralPledgeGuard::lockCollateralsOf($loan);
+
+            // Then the loan, then this payment, each re-read under its lock.
+            $this->lockVoidRows($repayment, $loan);
 
             $this->reverseAllocation($repayment);
 
@@ -553,6 +569,45 @@ class RepaymentService
 
             return $repayment;
         });
+    }
+
+    /**
+     * Lock the loan row, then the payment's, after the collateral rows
+     * voidRepayment() locked first, and refuse with a 409 if either changed
+     * since the request read them.
+     *
+     * Two locking reads, so neither fixes the transaction's snapshot, and the
+     * order every loan write takes (LoanWriteTransaction). `$loan` and
+     * `$repayment` are then refreshed from their locked rows, so everything
+     * below starts from what is committed rather than from what the request
+     * read before the lock: a payment no longer posted was voided by another
+     * request, and a loan now `restructured` was closed by a restructure's
+     * release, in between.
+     *
+     * The allocations are read again too, as the transaction's first plain
+     * read, now that every lock is held. A period this payment paid that a
+     * restructure or an extension replaced in between has lost its schedule,
+     * and reversing onto it is the same conflict.
+     *
+     * @throws HttpResponseException 409 when the payment or its loan changed since it was read
+     */
+    private function lockVoidRows(Repayment $repayment, Loan $loan): void
+    {
+        $lockedLoan = Loan::whereKey($loan->getKey())->lockForUpdate()->first();
+        $lockedRepayment = Repayment::whereKey($repayment->getKey())->lockForUpdate()->first();
+
+        if ($lockedLoan === null || $lockedLoan->status === 'restructured'
+            || $lockedRepayment === null || $lockedRepayment->status !== 'posted') {
+            throw LoanWriteTransaction::conflict();
+        }
+
+        $loan->setRawAttributes($lockedLoan->getAttributes(), true);
+        $repayment->setRawAttributes($lockedRepayment->getAttributes(), true);
+        $repayment->load('allocations');
+
+        if ($repayment->allocations->contains(fn (RepaymentAllocation $allocation) => $allocation->amortization_schedule_id === null)) {
+            throw LoanWriteTransaction::conflict();
+        }
     }
 
     /**
@@ -760,19 +815,32 @@ class RepaymentService
                     return;
                 }
 
-                $remainingDue = (float) $schedule->principal_due - (float) $schedule->principal_paid;
-
-                // Never below what was already paid toward it: principal paid
-                // since the last run lowers the recalculation, and a charge
-                // under its own payments would leave a receipt carrying
-                // penalty the period no longer says was owed.
-                $penalty = max(round($remainingDue * ($penaltyRate / 100), 2), (float) $schedule->penalty_paid);
-
                 $schedule->update([
-                    'penalty_amount' => $penalty,
+                    'penalty_amount' => $this->penaltyFor($schedule, $penaltyRate),
                     'status' => 'overdue',
                 ]);
             });
+    }
+
+    /**
+     * The penalty a late period owes: `$penaltyRate` percent of the principal
+     * still unpaid on it, to the centavo.
+     *
+     * The one definition of the charge. applyPenalties() writes it on every
+     * late period, and reverseAllocation() puts it back on a late period a
+     * void leaves fully unpaid, so the two cannot disagree about what a period
+     * owes.
+     *
+     * Never below what was already paid toward it: principal paid since the
+     * last run lowers the recalculation, and a charge under its own payments
+     * would leave a receipt carrying penalty the period no longer says was
+     * owed.
+     */
+    private function penaltyFor(AmortizationSchedule $schedule, float $penaltyRate): float
+    {
+        $remainingDue = (float) $schedule->principal_due - (float) $schedule->principal_paid;
+
+        return max(round($remainingDue * ($penaltyRate / 100), 2), (float) $schedule->penalty_paid);
     }
 
     /**
@@ -917,6 +985,7 @@ class RepaymentService
         // delinquent because someone voided a mistyped receipt.
         $lateBefore = AmortizationSchedule::pastGraceCutoff($loan->grace_period_days, $paymentDate);
         $arrearsBaseline = $loan->imported_arrears_baseline;
+        $penaltyRate = (float) $loan->penalty_rate;
 
         foreach ($repayment->allocations as $allocation) {
             $schedule = $schedules[$allocation->amortization_schedule_id];
@@ -932,12 +1001,21 @@ class RepaymentService
 
                 $schedule->status = $isLate ? 'overdue' : 'pending';
 
-                // applyPenalties() recharges the penalty from scratch, except on
-                // a waived period, which it never charges again. There the
-                // charge the waiver kept stands, owed again now that the
-                // payment that covered it is void.
+                // A late period owes the penalty applyPenalties() charges it,
+                // from the same method, so the loan owes again exactly what it
+                // owed before the payment. Setting 0 and waiting for the next
+                // payment or the nightly run to recharge it left the period
+                // overdue with no penalty, and the loan's total payable short
+                // by that charge, in between. A period that is not late owes
+                // none, and nor does any period of a loan with no penalty rate.
+                //
+                // Except on a waived period, which applyPenalties() never
+                // charges again. There the charge the waiver kept stands, owed
+                // again now that the payment that covered it is void.
                 if ($schedule->penalty_waiver_id === null) {
-                    $schedule->penalty_amount = 0;
+                    $schedule->penalty_amount = $isLate && $penaltyRate > 0
+                        ? $this->penaltyFor($schedule, $penaltyRate)
+                        : 0;
                 }
             } else {
                 $schedule->status = 'partial';

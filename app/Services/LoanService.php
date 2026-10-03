@@ -12,6 +12,7 @@ use App\Models\LoanApprovalStep;
 use App\Models\LoanProduct;
 use App\Models\User;
 use App\Services\Accounting\AutomaticPoster;
+use App\Services\Accounting\Money;
 use Carbon\Carbon;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
@@ -23,12 +24,52 @@ use Illuminate\Validation\ValidationException;
 class LoanService
 {
     /**
+     * What a loan refuses deductions with when they are more than its
+     * principal: computeDeductions()'s guard, and the form preview's `error`.
+     */
+    private const DEDUCTIONS_EXCEED_PRINCIPAL = 'Total deductions exceed the principal amount.';
+
+    /**
+     * Create a draft loan application (POST /loans).
+     *
+     * In its own transaction, so the lock Loan::booted() takes on the newest
+     * loan row for the next application number is held until the loan and its
+     * co-makers are committed, and a failure anywhere leaves no half-made
+     * application behind. Without it that lock was released the moment it was
+     * taken (autocommit), and two creates at once could both take the same
+     * LA- number: the second one's insert then failed on the unique index as a
+     * 500. A create pledges no collateral (StoreLoanRequest carries none), so
+     * its first lock is that loan row; see LoanWriteTransaction for the order.
+     *
+     * Even holding the lock, a create that queued behind another's can read the
+     * number that one is inserting (InnoDB resumes the waiting read where it
+     * stood), so the duplicate-key error on `loans_application_number_unique`
+     * is answered with the same 409 as a deadlock, scoped to that index alone.
+     * Both say so in a create's words: there is no loan yet to "reload", so
+     * the client is told to submit again. Nothing retries on its own.
+     *
+     * This is the outermost transaction: LoanController::store() and the test
+     * helpers are the only callers. A restructure creates its loan inside its
+     * own transaction, through createLoanRecord().
+     */
+    public function createLoan(array $validated, User $user): Loan
+    {
+        return LoanWriteTransaction::run(
+            fn (): Loan => $this->createLoanRecord($validated, $user),
+            racedUniqueIndex: 'loans_application_number_unique',
+            conflictMessage: 'Another loan application was created at the same moment. Submit again.',
+        );
+    }
+
+    /**
+     * The loan createLoan() creates, written inside the caller's transaction.
+     *
      * @param  bool  $enforceMinimumAmount  Set false for a restructure: the new
      *                                      loan's principal is a part-paid balance, which is routinely below the
      *                                      product's `min_amount` and must not be rejected for it. Every other
      *                                      product rule (max_amount, interest-rate range, term range) still applies.
      */
-    public function createLoan(array $validated, User $user, bool $enforceMinimumAmount = true): Loan
+    private function createLoanRecord(array $validated, User $user, bool $enforceMinimumAmount = true): Loan
     {
         $product = LoanProduct::findOrFail($validated['loan_product_id']);
         $borrower = Borrower::findOrFail($validated['borrower_id']);
@@ -38,8 +79,7 @@ class LoanService
         $term = (int) ($validated['term'] ?? $product->term);
         $frequency = $validated['frequency'] ?? $product->frequency;
         // Copied onto the loan, so editing the product later never reprices it.
-        $termUnit = $product->term_unit->value;
-        $rateFrequency = $product->interest_rate_frequency->value;
+        $snapshot = $this->productSnapshot($product);
 
         // Validate principal against product min/max
         if ($enforceMinimumAmount && $product->min_amount > 0 && $principal < (float) $product->min_amount) {
@@ -54,55 +94,29 @@ class LoanService
         }
 
         $this->assertInterestRateWithinProductRange($interestRate, $product);
-
-        // Validate term against product range
-        $minTerm = (int) ($product->min_term ?? 1);
-        $maxTerm = (int) ($product->max_term ?? $product->term);
-        if ($term < $minTerm || $term > $maxTerm) {
-            throw ValidationException::withMessages([
-                'term' => ["Term must be between {$minTerm} and {$maxTerm} {$termUnit} for this product."],
-            ]);
-        }
+        $this->assertTermWithinProductRange($term, $product);
 
         // The product's own fees apply only when no deductions were sent at all
         // (key absent or null). A sent `[]` is a deliberate "none": the
         // restructure form sends it when the operator waives every fee.
-        $deductions = $validated['deductions'] ?? null;
-        if ($deductions === null) {
-            $deductions = [];
-            if ((float) $product->processing_fee > 0) {
-                $deductions[] = ['name' => 'Processing Fee', 'amount' => (float) $product->processing_fee, 'type' => 'percentage'];
-            }
-            if ((float) $product->service_fee > 0) {
-                $deductions[] = ['name' => 'Service Fee', 'amount' => (float) $product->service_fee, 'type' => 'percentage'];
-            }
-            if ((float) ($product->notarial_fee ?? 0) > 0) {
-                $deductions[] = ['name' => 'Notarial Fee', 'amount' => (float) $product->notarial_fee, 'type' => 'percentage'];
-            }
-        }
-
-        $deductionResult = $this->computeDeductions($principal, $deductions);
+        $deductionResult = $this->computeDeductions($principal, $validated['deductions'] ?? $this->productFeeDeductions($product));
 
         $loan = Loan::create([
+            ...$snapshot,
             'borrower_id' => $borrower->id,
             'loan_product_id' => $product->id,
             'branch_id' => $borrower->branch_id,
             'interest_rate' => $interestRate,
-            'interest_rate_frequency' => $rateFrequency,
-            'interest_method' => $product->interest_method,
             'term' => $term,
-            'term_unit' => $termUnit,
             'frequency' => $frequency,
             'principal_amount' => $principal,
             'purpose' => $validated['purpose'] ?? null,
             'start_date' => $validated['start_date'],
-            'maturity_date' => $this->maturityDateFor($validated['start_date'], $term, $termUnit, $frequency),
+            'maturity_date' => $this->maturityDateFor($validated['start_date'], $term, $snapshot['term_unit'], $frequency),
             'deductions' => $deductionResult['items'],
             'total_deductions' => $deductionResult['total'],
             'net_proceeds' => $deductionResult['net_proceeds'],
             'scb_amount' => $validated['scb_amount'] ?? 0,
-            'penalty_rate' => $product->penalty_rate,
-            'grace_period_days' => $product->grace_period_days,
             'policy_exception' => $validated['policy_exception'] ?? false,
             'policy_exception_details' => $validated['policy_exception_details'] ?? null,
             'status' => 'draft',
@@ -120,6 +134,79 @@ class LoanService
         }
 
         return $loan;
+    }
+
+    /**
+     * What a loan copies from its product and keeps, whatever happens to the
+     * product afterwards: how interest is computed (`interest_method`), what
+     * the term counts (`term_unit`), what period the rate is quoted per
+     * (`interest_rate_frequency`), and the late-payment terms (`penalty_rate`,
+     * `grace_period_days`).
+     *
+     * The one list. createLoanRecord() copies it onto a new loan, and the
+     * form preview builds its unsaved loan from it, so the preview's schedule
+     * follows the same product terms the saved loan will. The loan keeps them
+     * even if the product changes afterwards.
+     *
+     * @return array{interest_method: string, term_unit: string, interest_rate_frequency: string, penalty_rate: mixed, grace_period_days: mixed}
+     */
+    private function productSnapshot(LoanProduct $product): array
+    {
+        return [
+            'interest_method' => $product->interest_method,
+            'term_unit' => $product->term_unit->value,
+            'interest_rate_frequency' => $product->interest_rate_frequency->value,
+            'penalty_rate' => $product->penalty_rate,
+            'grace_period_days' => $product->grace_period_days,
+        ];
+    }
+
+    /**
+     * The deductions a loan carries when its application states none: the
+     * product's own processing, service and notarial fee rates, each a
+     * percentage of the principal, in that order, leaving out a rate of 0.
+     *
+     * Inputs for computeDeductions(), shared by the paths that fall back on
+     * the product's fees (a create, and the form preview of one), so the
+     * preview cannot list a different set than the create charges.
+     *
+     * @return list<array{name: string, amount: float, type: string}>
+     */
+    private function productFeeDeductions(LoanProduct $product): array
+    {
+        $deductions = [];
+
+        if ((float) $product->processing_fee > 0) {
+            $deductions[] = ['name' => 'Processing Fee', 'amount' => (float) $product->processing_fee, 'type' => 'percentage'];
+        }
+        if ((float) $product->service_fee > 0) {
+            $deductions[] = ['name' => 'Service Fee', 'amount' => (float) $product->service_fee, 'type' => 'percentage'];
+        }
+        if ((float) ($product->notarial_fee ?? 0) > 0) {
+            $deductions[] = ['name' => 'Notarial Fee', 'amount' => (float) $product->notarial_fee, 'type' => 'percentage'];
+        }
+
+        return $deductions;
+    }
+
+    /**
+     * A loan's term must sit inside its product's range, counted in the
+     * product's term unit: `min_term` (1 when unset) up to `max_term` (the
+     * product's own term when unset).
+     *
+     * createLoanRecord()'s check, and the same range formMaturity() reads, so
+     * the preview gives no maturity date for a term a create would refuse.
+     */
+    private function assertTermWithinProductRange(int $term, LoanProduct $product): void
+    {
+        $minTerm = (int) ($product->min_term ?? 1);
+        $maxTerm = (int) ($product->max_term ?? $product->term);
+
+        if ($term < $minTerm || $term > $maxTerm) {
+            throw ValidationException::withMessages([
+                'term' => ["Term must be between {$minTerm} and {$maxTerm} {$product->term_unit->value} for this product."],
+            ]);
+        }
     }
 
     /**
@@ -290,9 +377,10 @@ class LoanService
             ['outstanding' => $outstanding, 'shortfall' => $shortfall] =
                 $this->assertRestructureInvariants($lockedSource, $principal, $remarks, $user);
 
-            // Without `co_maker_ids`: createLoan() reads those as member ids,
-            // and this form's are not only member ids. Linked below instead.
-            $newLoan = $this->createLoan(Arr::except($validated, 'co_maker_ids'), $user, enforceMinimumAmount: false);
+            // Without `co_maker_ids`: createLoanRecord() reads those as member
+            // ids, and this form's are not only member ids. Linked below instead.
+            // Not createLoan(), whose own transaction would be a savepoint here.
+            $newLoan = $this->createLoanRecord(Arr::except($validated, 'co_maker_ids'), $user, enforceMinimumAmount: false);
 
             // Terms as approved, frozen here. The write-off at release is
             // computed from these and not from the live columns — see the
@@ -529,7 +617,12 @@ class LoanService
         return round((float) $unpaid + (float) $loan->insurance_remaining_balance, 2);
     }
 
-    private function toCentavos(float $amount): int
+    /**
+     * A peso figure as whole centavos, rounded half away from zero. Public so
+     * CollateralSecurity converts a saved pledge the way formPreview()
+     * converts a stated one.
+     */
+    public static function toCentavos(float $amount): int
     {
         return (int) round($amount * 100);
     }
@@ -1071,6 +1164,16 @@ class LoanService
 
             $this->applyInsuranceOnRelease($loan, $insurance);
 
+            // The share capital the deductions withhold, credited to the
+            // member's share capital ledger: ONE row, the sum of every Share
+            // Capital item, carrying this loan. After applyOnRelease() and
+            // applyInsuranceOnRelease(), so it reads the FINAL deductions; and
+            // before AutomaticPoster::loanRelease() below, which credits the
+            // same amount to the Share Capital equity account, so the books and
+            // the member's ledger commit together or not at all. A borrower who
+            // is not a member is refused here, with nothing written.
+            app(ShareCapitalReleaseCredit::class)->record($loan, $releaser);
+
             // Persist amortization schedule
             $schedule = $this->buildAmortizationPreview($loan);
             foreach ($schedule as $row) {
@@ -1341,27 +1444,119 @@ class LoanService
         }
     }
 
-    private function applyInsuranceOnRelease(Loan $loan, array $insurance): void
+    /**
+     * The insurance a release takes, from the dialog's fields: the premium for
+     * the percentage, what is collected now, and what is left owing, in
+     * centavos. Null when there is no percentage or it is 0.
+     *
+     * THE premium, for the release preview and for the release alike, so the
+     * two cannot quote different figures and the browser computes none:
+     * `round(principal × percentage / 100)` to the centavo, half up, in whole
+     * centavos (the percentage carries at most two places, so this is exact).
+     * A full payment collects the premium; a partial one collects the partial
+     * amount, which cannot be more than the premium, and leaves the rest
+     * owing.
+     *
+     * `insurance_premium_amount` is no longer an input. A client that still
+     * sends one must send the server's figure: any other is refused, so a
+     * premium worked out in the browser can never be the one withheld.
+     *
+     * @param  array<string, mixed>  $insurance  the release dialog's insurance fields
+     * @return array{percentage: float, payment_type: string, premium: int, collected: int, partial: int|null, remaining: int}|null
+     *
+     * @throws ValidationException on `insurance_premium_amount` or `insurance_partial_amount`
+     */
+    public function insuranceTerms(Loan $loan, array $insurance): ?array
     {
         $pct = $insurance['insurance_premium_percentage'] ?? null;
-        if ($pct === null || (float) $pct === 0.0) {
-            return;
+
+        if ($pct === null || $pct === '' || (float) $pct === 0.0) {
+            return null;
+        }
+
+        $hundredths = (int) round((float) $pct * 100);
+        $premium = intdiv($this->toCentavos((float) $loan->principal_amount) * $hundredths + 5000, 10000);
+        $label = rtrim(rtrim(number_format($hundredths / 100, 2, '.', ''), '0'), '.');
+
+        $sent = $insurance['insurance_premium_amount'] ?? null;
+
+        if ($sent !== null && $sent !== '' && $this->toCentavos((float) $sent) !== $premium) {
+            throw ValidationException::withMessages([
+                'insurance_premium_amount' => ["The premium for {$label}% is ".Money::format($premium).'. Reload the release preview.'],
+            ]);
         }
 
         $paymentType = $insurance['insurance_payment_type'] ?? 'full';
-        $premiumAmount = round((float) ($insurance['insurance_premium_amount'] ?? 0), 2);
-        $partialAmount = isset($insurance['insurance_partial_amount'])
-            ? round((float) $insurance['insurance_partial_amount'], 2)
-            : null;
 
-        if ($paymentType === 'full') {
-            $partialAmount = null;
-            $remainingBalance = 0.0;
-            $collected = $premiumAmount;
-        } else {
-            $remainingBalance = round($premiumAmount - (float) $partialAmount, 2);
-            $collected = (float) $partialAmount;
+        if ($paymentType !== 'partial') {
+            return ['percentage' => $hundredths / 100, 'payment_type' => 'full', 'premium' => $premium, 'collected' => $premium, 'partial' => null, 'remaining' => 0];
         }
+
+        $partial = $this->toCentavos((float) ($insurance['insurance_partial_amount'] ?? 0));
+
+        if ($partial > $premium) {
+            throw ValidationException::withMessages([
+                'insurance_partial_amount' => ['The partial amount cannot be more than the '.Money::format($premium)." premium for {$label}%."],
+            ]);
+        }
+
+        return ['percentage' => $hundredths / 100, 'payment_type' => 'partial', 'premium' => $premium, 'collected' => $partial, 'partial' => $partial, 'remaining' => $premium - $partial];
+    }
+
+    /**
+     * The release preview's insurance figures (GET /loans/{id}/release-preview):
+     * insuranceTerms() for the dialog's fields, and what the premium collected
+     * leaves of the previewed totals. 2dp strings, like that endpoint's own
+     * totals. With no insurance, `insurance` is null and the totals are the
+     * previewed ones.
+     *
+     * @param  array<string, mixed>  $insurance
+     * @param  string  $totalDeductions  the preview's `total_deductions`
+     * @param  string  $netProceeds  the preview's `net_proceeds`
+     * @return array{insurance: array{premium_amount: string, collected: string, partial_amount: string|null, remaining_balance: string}|null, total_deductions_after_insurance: string, net_proceeds_after_insurance: string, exceeds_net_proceeds: bool}
+     *
+     * @throws ValidationException as insuranceTerms() does
+     */
+    public function insurancePreview(Loan $loan, array $insurance, string $totalDeductions, string $netProceeds): array
+    {
+        $terms = $this->insuranceTerms($loan, $insurance);
+        $collected = $terms['collected'] ?? 0;
+        $net = $this->toCentavos((float) $netProceeds);
+        $pesos = fn (int $centavos): string => number_format($centavos / 100, 2, '.', '');
+
+        return [
+            'insurance' => $terms === null ? null : [
+                'premium_amount' => $pesos($terms['premium']),
+                'collected' => $pesos($terms['collected']),
+                'partial_amount' => $terms['partial'] === null ? null : $pesos($terms['partial']),
+                'remaining_balance' => $pesos($terms['remaining']),
+            ],
+            'total_deductions_after_insurance' => $pesos($this->toCentavos((float) $totalDeductions) + $collected),
+            'net_proceeds_after_insurance' => $pesos($net - $collected),
+            'exceeds_net_proceeds' => $collected > $net,
+        ];
+    }
+
+    /**
+     * Withhold the insurance premium at release, as insuranceTerms() computes
+     * it.
+     *
+     * @param  array<string, mixed>  $insurance
+     */
+    private function applyInsuranceOnRelease(Loan $loan, array $insurance): void
+    {
+        $terms = $this->insuranceTerms($loan, $insurance);
+
+        if ($terms === null) {
+            return;
+        }
+
+        $pct = $terms['percentage'];
+        $paymentType = $terms['payment_type'];
+        $premiumAmount = $terms['premium'] / 100;
+        $partialAmount = $terms['partial'] === null ? null : $terms['partial'] / 100;
+        $remainingBalance = $terms['remaining'] / 100;
+        $collected = $terms['collected'] / 100;
 
         $newNetProceeds = round((float) $loan->net_proceeds - $collected, 2);
 
@@ -1442,28 +1637,17 @@ class LoanService
     public function computeDeductions(float $principalAmount, array $deductions): array
     {
         $total = 0;
-        $items = [];
+        $items = $this->deductionItems($principalAmount, $deductions);
 
-        foreach ($deductions as $deduction) {
-            $amount = $deduction['type'] === 'percentage'
-                ? round($principalAmount * $deduction['amount'] / 100, 2)
-                : round((float) $deduction['amount'], 2);
-
-            $items[] = [
-                'name' => $deduction['name'],
-                'amount' => $amount,
-                'type' => $deduction['type'],
-                'original_value' => $deduction['amount'],
-            ];
-
-            $total += $amount;
+        foreach ($items as $item) {
+            $total += $item['amount'];
         }
 
         $netProceeds = round($principalAmount - $total, 2);
 
         if ($netProceeds < 0) {
             throw ValidationException::withMessages([
-                'deductions' => ['Total deductions exceed the principal amount.'],
+                'deductions' => [self::DEDUCTIONS_EXCEED_PRINCIPAL],
             ]);
         }
 
@@ -1472,6 +1656,35 @@ class LoanService
             'total' => $total,
             'net_proceeds' => $netProceeds,
         ];
+    }
+
+    /**
+     * Each stated deduction as the loan stores it: a percentage of the
+     * principal, or a fixed peso figure, each rounded to the centavo, keeping
+     * the stated value as `original_value`.
+     *
+     * computeDeductions() and the form preview both build their items here,
+     * so the preview lists exactly what saving the loan would store.
+     *
+     * @param  list<array{name: string, amount: float|int|string, type: string}>  $deductions
+     * @return list<array{name: string, amount: float, type: string, original_value: mixed}>
+     */
+    private function deductionItems(float $principalAmount, array $deductions): array
+    {
+        $items = [];
+
+        foreach ($deductions as $deduction) {
+            $items[] = [
+                'name' => $deduction['name'],
+                'amount' => $deduction['type'] === 'percentage'
+                    ? round($principalAmount * $deduction['amount'] / 100, 2)
+                    : round((float) $deduction['amount'], 2),
+                'type' => $deduction['type'],
+                'original_value' => $deduction['amount'],
+            ];
+        }
+
+        return $items;
     }
 
     /**
@@ -1508,26 +1721,31 @@ class LoanService
     }
 
     /**
-     * Every figure the loan form shows while it is filled in, computed here so
-     * the browser only displays them (POST /loans/preview).
+     * Every figure the loan form and the restructure page show while they are
+     * filled in, computed here so the browser only displays them
+     * (POST /loans/preview).
      *
-     * - `collateral`: the total of the stated snapshot values, the security
-     *   status (`unsecured` with no principal or nothing pledged, `secured`
-     *   when the total reaches the principal, else `partially_secured`), and
-     *   how far it is short of the principal.
+     * - `collateral`: CollateralSecurity::summary() of the stated snapshot
+     *   values against the principal, the rule the loan page's collaterals
+     *   card uses too.
+     * - `maturity_date`: where the loan would mature, by the code a create
+     *   stores it with. Null until the product, a term inside its range, the
+     *   frequency and the start date are known; the principal and the rate
+     *   play no part.
+     * - `deductions`: what the loan would withhold (formDeductions()). Null
+     *   until the product and a principal above 0 are known.
      * - `amortization`: the schedule {@see self::buildAmortizationPreview()}
      *   writes at release, built from an unsaved loan carrying what
      *   createLoan() would store — the product's interest method, term unit and
      *   rate frequency, the form's rate, term, frequency and start date — plus
      *   the share capital build-up added to each period, and the column totals.
-     *   Null until the product, a principal, a rate, the term, the frequency
-     *   and the start date are all known, and for a term outside the product's
-     *   range.
+     *   Null until the maturity date is known and a principal and a rate above
+     *   0 are too.
      *
      * Money is added in whole centavos, never as peso floats. Writes nothing.
      *
-     * @param  array{loan_product_id?: int|null, principal_amount?: float|int|string|null, interest_rate?: float|int|string|null, term?: int|null, frequency?: string|null, start_date?: string|null, scb_amount?: float|int|string|null, collaterals?: list<array{collateral_id?: int|null, snapshot_value: float|int|string}>|null}  $input
-     * @return array{collateral: array{total_value: float|int, security_status: string, short_by: float|int}, amortization: array<string, mixed>|null}
+     * @param  array{loan_product_id?: int|null, principal_amount?: float|int|string|null, interest_rate?: float|int|string|null, term?: int|null, frequency?: string|null, start_date?: string|null, scb_amount?: float|int|string|null, collaterals?: list<array{collateral_id?: int|null, snapshot_value: float|int|string}>|null, deductions?: list<array{name: string, amount: float|int|string, type: string}>|null}  $input
+     * @return array{collateral: array{total_value: float|int, security_status: string, short_by: float|int}, maturity_date: string|null, deductions: array<string, mixed>|null, amortization: array<string, mixed>|null}
      */
     public function formPreview(array $input): array
     {
@@ -1538,60 +1756,129 @@ class LoanService
             $pledged += $this->toCentavos((float) $collateral['snapshot_value']);
         }
 
-        $status = match (true) {
-            $principal <= 0, $pledged <= 0 => 'unsecured',
-            $pledged >= $principal => 'secured',
-            default => 'partially_secured',
-        };
+        $product = isset($input['loan_product_id']) ? LoanProduct::find($input['loan_product_id']) : null;
+        $maturity = $this->formMaturity($product, $input);
 
         return [
-            'collateral' => [
-                'total_value' => $pledged / 100,
-                'security_status' => $status,
-                'short_by' => $principal > 0 ? max(0, $principal - $pledged) / 100 : 0.0,
-            ],
-            'amortization' => $this->formSchedule($input, $principal),
+            'collateral' => CollateralSecurity::summary($principal, $pledged),
+            'maturity_date' => $maturity?->toDateString(),
+            'deductions' => $product === null || $principal <= 0 ? null : $this->formDeductions($product, $input, $principal, $maturity),
+            'amortization' => $product === null || $maturity === null ? null : $this->formSchedule($product, $input, $principal, $maturity),
         ];
     }
 
     /**
-     * The amortization half of formPreview(), or null when an input is missing.
+     * Where the form's loan would mature, or null while the product, a term
+     * inside the product's range, the frequency or the start date is missing.
+     *
+     * A term outside the range is one createLoan() refuses, so it has no
+     * maturity and no schedule. This also bounds the work a single preview can
+     * ask for.
+     *
+     * @param  array<string, mixed>  $input
+     */
+    private function formMaturity(?LoanProduct $product, array $input): ?Carbon
+    {
+        if ($product === null || empty($input['term']) || empty($input['frequency']) || empty($input['start_date'])) {
+            return null;
+        }
+
+        $term = (int) $input['term'];
+
+        try {
+            $this->assertTermWithinProductRange($term, $product);
+        } catch (ValidationException) {
+            return null;
+        }
+
+        return $this->maturityDateFor($input['start_date'], $term, $product->term_unit->value, $input['frequency']);
+    }
+
+    /**
+     * The `deductions` half of formPreview(): what the form's loan would
+     * withhold, by the code a create and a release run.
+     *
+     * - `items`: deductionItems() of the stated deductions, or, when none are
+     *   stated (absent or null), of the product's own fees
+     *   (productFeeDeductions()), exactly as createLoan() falls back. A sent
+     *   `[]` is none, as there.
+     * - `configured_fees`: what LoanReleaseFeeService adds at release for this
+     *   loan, from its product, principal and term
+     *   (LoanReleaseFeeService::itemsFor() on an unsaved loan). A fee with a
+     *   term condition applies only once the maturity date is known.
+     * - the totals, in whole centavos; `net_proceeds` is null and `error`
+     *   carries the refusal when the deductions are more than the principal:
+     *   the create's message when the stated ones alone are, the release's
+     *   when the configured fees take them over. In the body rather than as a
+     *   422, so the rest of the preview still shows.
+     *
+     * @param  array<string, mixed>  $input
+     * @return array{items: list<array<string, mixed>>, stated_total: float|int, configured_fees: list<array<string, mixed>>, configured_total: float|int, total_deductions: float|int, net_proceeds: float|int|null, error: string|null}
+     */
+    private function formDeductions(LoanProduct $product, array $input, int $principal, ?Carbon $maturity): array
+    {
+        $items = $this->deductionItems($principal / 100, $input['deductions'] ?? $this->productFeeDeductions($product));
+        $stated = 0;
+
+        foreach ($items as $item) {
+            $stated += $this->toCentavos((float) $item['amount']);
+        }
+
+        $configuredFees = app(LoanReleaseFeeService::class)->itemsFor((new Loan)->forceFill([
+            'loan_product_id' => $product->id,
+            'principal_amount' => $principal / 100,
+            'start_date' => $input['start_date'] ?? null,
+            'maturity_date' => $maturity?->toDateString(),
+            'deductions' => $items,
+        ]));
+        $configured = 0;
+
+        foreach ($configuredFees as $fee) {
+            $configured += $this->toCentavos((float) $fee['amount']);
+        }
+
+        $total = $stated + $configured;
+
+        $error = match (true) {
+            $stated > $principal => self::DEDUCTIONS_EXCEED_PRINCIPAL,
+            $total > $principal => LoanReleaseFeeService::overrunMessage($configured / 100, $total / 100, $principal / 100),
+            default => null,
+        };
+
+        return [
+            'items' => $items,
+            'stated_total' => $stated / 100,
+            'configured_fees' => $configuredFees,
+            'configured_total' => $configured / 100,
+            'total_deductions' => $total / 100,
+            'net_proceeds' => $error === null ? ($principal - $total) / 100 : null,
+            'error' => $error,
+        ];
+    }
+
+    /**
+     * The amortization half of formPreview(), or null while the principal or
+     * the rate is missing.
      *
      * @param  array<string, mixed>  $input
      * @return array{maturity_date: string, interest_method: string, rows: list<array<string, mixed>>, totals: array<string, float|int>}|null
      */
-    private function formSchedule(array $input, int $principal): ?array
+    private function formSchedule(LoanProduct $product, array $input, int $principal, Carbon $maturity): ?array
     {
-        $product = isset($input['loan_product_id']) ? LoanProduct::find($input['loan_product_id']) : null;
         $rate = (float) ($input['interest_rate'] ?? 0);
 
-        if ($product === null || $principal <= 0 || $rate <= 0 || empty($input['term'])
-            || empty($input['frequency']) || empty($input['start_date'])) {
+        if ($principal <= 0 || $rate <= 0) {
             return null;
         }
-
-        // A term outside the product's range is one createLoan() refuses, so it
-        // has no schedule. This also bounds the work a single preview can ask for.
-        $term = (int) $input['term'];
-        $minTerm = (int) ($product->min_term ?? 1);
-        $maxTerm = (int) ($product->max_term ?? $product->term);
-
-        if ($term < $minTerm || $term > $maxTerm) {
-            return null;
-        }
-
-        $termUnit = $product->term_unit->value;
 
         $loan = (new Loan)->forceFill([
+            ...$this->productSnapshot($product),
             'principal_amount' => $principal / 100,
             'interest_rate' => $rate,
-            'interest_rate_frequency' => $product->interest_rate_frequency->value,
-            'interest_method' => $product->interest_method,
-            'term' => $term,
-            'term_unit' => $termUnit,
+            'term' => (int) $input['term'],
             'frequency' => $input['frequency'],
             'start_date' => $input['start_date'],
-            'maturity_date' => $this->maturityDateFor($input['start_date'], $term, $termUnit, $input['frequency']),
+            'maturity_date' => $maturity,
         ]);
 
         $scb = $this->toCentavos((float) ($input['scb_amount'] ?? 0));

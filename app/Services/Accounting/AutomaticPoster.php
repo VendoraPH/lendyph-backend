@@ -118,7 +118,7 @@ final class AutomaticPoster
         $posting = $this->releasePosting($loan, AccountMap::resolve(), $method);
 
         return $this->write($posting, $loan, [
-            'date' => $this->dateOf($loan->released_at),
+            'date' => $this->releaseDate($loan),
             'reference' => $loan->loan_account_number ?? $loan->application_number,
             'description' => $this->describe('Loan release', $loan->loan_account_number ?? $loan->application_number),
             'branch_id' => $loan->branch_id,
@@ -153,6 +153,21 @@ final class AutomaticPoster
     }
 
     /**
+     * The accounting date of a loan's release: the day its release journal is
+     * filed under, read from `released_at` as {@see self::dateOf()} reads any
+     * moment.
+     *
+     * Public so that the other record a release writes about the same money,
+     * the member's share capital credit (ShareCapitalReleaseCredit), is dated
+     * by this same code rather than by a second reading of the clock that
+     * could put the two on different days.
+     */
+    public function releaseDate(Loan $loan): string
+    {
+        return $this->dateOf($loan->released_at);
+    }
+
+    /**
      * The loan's deductions sorted by type, as the release rule books them.
      * Read only. See {@see PostingRules::classifyDeductions()}.
      *
@@ -172,6 +187,21 @@ final class AutomaticPoster
             $this->deductionItems($loan),
             $this->releaseLabel($loan),
         );
+    }
+
+    /**
+     * The loan's deduction items exactly as the release rule reads them, each
+     * amount converted to centavos by {@see self::deductionItems()}. Read only.
+     *
+     * For ShareCapitalReleaseCredit in an organisation that keeps no books,
+     * which sums its share capital items with this same conversion but has no
+     * journal for {@see PostingRules::classifyDeductions()}' guard to protect.
+     *
+     * @return list<array{name: string, amount: int|null, catalog_fee: bool}|mixed>
+     */
+    public function releaseDeductionItems(Loan $loan): array
+    {
+        return $this->deductionItems($loan);
     }
 
     /**

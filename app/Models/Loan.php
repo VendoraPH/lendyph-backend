@@ -245,6 +245,32 @@ class Loan extends Model
         });
     }
 
+    /**
+     * `total_deductions` less the itemised `deductions`, in pesos to the
+     * centavo, SIGNED: positive when the total is more than the items explain,
+     * negative when the items add up to more than the total, 0 when they
+     * agree. Added up in whole centavos.
+     *
+     * The total governs what was withheld (it is what the release journal and
+     * `net_proceeds` follow); the printed documents itemise the deductions and
+     * show this as a line of its own ("Other deductions" when positive, an
+     * "Adjustment" when negative), so the lines add up to the total without
+     * the browser subtracting anything. An imported loan carries a total and
+     * no items, so all of it is unitemised.
+     */
+    public function unitemisedDeductions(): float
+    {
+        $itemised = 0;
+
+        foreach (is_array($this->deductions) ? $this->deductions : [] as $item) {
+            if (is_array($item) && is_numeric($item['amount'] ?? null)) {
+                $itemised += (int) round((float) $item['amount'] * 100);
+            }
+        }
+
+        return ((int) round((float) $this->total_deductions * 100) - $itemised) / 100;
+    }
+
     protected function isEditable(): Attribute
     {
         return Attribute::get(fn () => in_array($this->status, ['draft', 'for_review']));
