@@ -3,6 +3,7 @@
 use App\Models\Borrower;
 use App\Models\Collateral;
 use App\Models\CollateralType;
+use App\Models\Loan;
 use App\Models\Role;
 use App\Models\User;
 use Spatie\Permission\Models\Permission;
@@ -13,6 +14,15 @@ uses(TestCase::class, SetupLendyPH::class);
 
 beforeEach(function () {
     $this->seedAndLogin();
+
+    // Collateral is attached and detached only while a loan is a draft or an
+    // application (CollateralLockdownTest), so the attach and detach specs
+    // below run against one.
+    $this->draftLoan = fn (): Loan => Loan::factory()->create([
+        'branch_id' => $this->branch->id,
+        'created_by' => $this->admin->id,
+        'status' => 'draft',
+    ]);
 });
 
 it('lists collaterals for a borrower', function () {
@@ -94,7 +104,7 @@ it('rejects deletion when collateral is attached to a loan', function () {
 });
 
 it('attaches a collateral to a loan with snapshot value', function () {
-    $loan = $this->createReleasedLoan();
+    $loan = ($this->draftLoan)();
     $collateral = Collateral::factory()->create(['borrower_id' => $loan->borrower_id]);
 
     $response = $this->postJson("/api/loans/{$loan->id}/collaterals", [
@@ -112,7 +122,7 @@ it('attaches a collateral to a loan with snapshot value', function () {
 });
 
 it('rejects re-attaching the same collateral to the same loan', function () {
-    $loan = $this->createReleasedLoan();
+    $loan = ($this->draftLoan)();
     $collateral = Collateral::factory()->create(['borrower_id' => $loan->borrower_id]);
 
     $loan->collaterals()->attach($collateral->id, [
@@ -123,7 +133,8 @@ it('rejects re-attaching the same collateral to the same loan', function () {
     $this->postJson("/api/loans/{$loan->id}/collaterals", [
         'collateral_id' => $collateral->id,
         'snapshot_value' => 200,
-    ])->assertStatus(422);
+    ])->assertStatus(422)
+        ->assertJsonValidationErrors(['collateral_id' => 'This collateral is already attached to the loan.']);
 });
 
 it('lists collaterals attached to a loan', function () {
@@ -141,7 +152,7 @@ it('lists collaterals attached to a loan', function () {
 });
 
 it('detaches a collateral from a loan', function () {
-    $loan = $this->createReleasedLoan();
+    $loan = ($this->draftLoan)();
     $collateral = Collateral::factory()->create(['borrower_id' => $loan->borrower_id]);
 
     $loan->collaterals()->attach($collateral->id, [

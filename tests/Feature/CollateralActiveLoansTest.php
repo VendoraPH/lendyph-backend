@@ -198,13 +198,21 @@ it('carries active_loans on create, update and attach responses', function () {
     expect($this->putJson("/api/collaterals/{$id}", ['amount' => 2000])->assertOk()->json('data.active_loans'))
         ->toBe([]);
 
-    $loan = loanInStatus($this->loanDefaults, 'released');
-    $attached = $this->postJson("/api/loans/{$loan->id}/collaterals", [
+    // Attached to a draft, the only kind of loan an attach is allowed on, which
+    // is not active yet.
+    $draft = loanInStatus($this->loanDefaults, 'draft');
+    $attached = $this->postJson("/api/loans/{$draft->id}/collaterals", [
         'collateral_id' => $id,
         'snapshot_value' => 2000,
     ])->assertCreated();
 
-    expect($attached->json('data.active_loans'))
+    expect($attached->json('data.active_loans'))->toBe([]);
+
+    // Once a live loan holds it, the update response names that loan.
+    $loan = loanInStatus($this->loanDefaults, 'released');
+    pledgeDirectly($loan, Collateral::findOrFail($id));
+
+    expect($this->putJson("/api/collaterals/{$id}", ['detail_value' => 'TCT-1'])->assertOk()->json('data.active_loans'))
         ->toBe([['id' => $loan->id, 'loan_account_number' => $loan->loan_account_number]]);
 });
 
@@ -258,7 +266,7 @@ it('refuses to attach a collateral that another active loan already holds', func
     $holder = loanInStatus($this->loanDefaults, $holderStatus);
     pledgeDirectly($holder, $this->collateral);
 
-    $target = loanInStatus($this->loanDefaults, 'released');
+    $target = loanInStatus($this->loanDefaults, 'draft');
 
     $this->postJson("/api/loans/{$target->id}/collaterals", [
         'collateral_id' => $this->collateral->id,
@@ -297,7 +305,7 @@ it('names every conflicting loan when the collateral is on more than one active 
     pledgeDirectly($first, $this->collateral);
     pledgeDirectly($second, $this->collateral);
 
-    $message = $this->postJson('/api/loans/'.loanInStatus($this->loanDefaults, 'released')->id.'/collaterals', [
+    $message = $this->postJson('/api/loans/'.loanInStatus($this->loanDefaults, 'draft')->id.'/collaterals', [
         'collateral_id' => $this->collateral->id,
         'snapshot_value' => 500,
     ])->assertStatus(422)->json('errors.collateral_id.0');
@@ -310,7 +318,7 @@ it('names every conflicting loan when the collateral is on more than one active 
 it('attaches a collateral whose only other loan is not active', function (string $holderStatus) {
     pledgeDirectly(loanInStatus($this->loanDefaults, $holderStatus), $this->collateral);
 
-    $target = loanInStatus($this->loanDefaults, 'released');
+    $target = loanInStatus($this->loanDefaults, 'draft');
 
     $this->postJson("/api/loans/{$target->id}/collaterals", [
         'collateral_id' => $this->collateral->id,
@@ -323,8 +331,9 @@ it('attaches a collateral whose only other loan is not active', function (string
     ]);
 })->with(['draft', 'for_review', 'approved', 'rejected', 'completed', 'defaulted', 'restructured', 'void']);
 
-it('still refuses to re-attach the same collateral to the same active loan', function () {
-    $loan = loanInStatus($this->loanDefaults, 'released');
+it('still refuses to re-attach the same collateral to the same loan', function () {
+    // A draft: an active loan refuses any attach on its status first.
+    $loan = loanInStatus($this->loanDefaults, 'draft');
     pledgeDirectly($loan, $this->collateral);
 
     $this->postJson("/api/loans/{$loan->id}/collaterals", [
@@ -339,7 +348,7 @@ it('takes a row lock on the collateral inside a transaction before it decides', 
     // requests pledging the same collateral to two DIFFERENT loans both pass it
     // and both insert, and the unique index on (loan_id, collateral_id) cannot
     // stop them because the loan ids differ.
-    $loan = loanInStatus($this->loanDefaults, 'released');
+    $loan = loanInStatus($this->loanDefaults, 'draft');
 
     $transactionsOpened = 0;
     Event::listen(TransactionBeginning::class, function () use (&$transactionsOpened) {
@@ -370,24 +379,31 @@ it('frees the collateral for another loan once it is detached', function () {
     $holder = loanInStatus($this->loanDefaults, 'released');
     pledgeDirectly($holder, $this->collateral);
 
-    $target = loanInStatus($this->loanDefaults, 'released');
+    $target = loanInStatus($this->loanDefaults, 'draft');
     $payload = ['collateral_id' => $this->collateral->id, 'snapshot_value' => 500];
 
     $this->postJson("/api/loans/{$target->id}/collaterals", $payload)->assertStatus(422);
 
-    $this->deleteJson("/api/loans/{$holder->id}/collaterals/{$this->collateral->id}")->assertOk();
+    // Removed directly: the endpoint no longer detaches from a released loan
+    // (CollateralLockdownTest). What this pins is that the guard and
+    // active_loans read the pledge live, so the removal frees the collateral.
+    DB::table('loan_collaterals')
+        ->where('loan_id', $holder->id)
+        ->where('collateral_id', $this->collateral->id)
+        ->delete();
 
     $this->postJson("/api/loans/{$target->id}/collaterals", $payload)->assertCreated();
 
+    // The target is a draft, not active, and the old holder is gone.
     expect($this->getJson("/api/collaterals/{$this->collateral->id}")->assertOk()->json('data.active_loans'))
-        ->toBe([['id' => $target->id, 'loan_account_number' => $target->loan_account_number]]);
+        ->toBe([]);
 });
 
 it('frees the collateral for another loan once the holding loan leaves an active status', function () {
     $holder = loanInStatus($this->loanDefaults, 'ongoing');
     pledgeDirectly($holder, $this->collateral);
 
-    $target = loanInStatus($this->loanDefaults, 'released');
+    $target = loanInStatus($this->loanDefaults, 'draft');
     $payload = ['collateral_id' => $this->collateral->id, 'snapshot_value' => 500];
 
     $this->postJson("/api/loans/{$target->id}/collaterals", $payload)->assertStatus(422);
@@ -403,8 +419,9 @@ it('frees the collateral for another loan once the holding loan leaves an active
         'loan_id' => $holder->id,
         'collateral_id' => $this->collateral->id,
     ]);
+    // Neither the completed holder nor the draft target is active.
     expect($this->getJson("/api/collaterals/{$this->collateral->id}")->assertOk()->json('data.active_loans'))
-        ->toBe([['id' => $target->id, 'loan_account_number' => $target->loan_account_number]]);
+        ->toBe([]);
 });
 
 // ── restructure: the collateral follows the debt ─────────────────────────
@@ -413,10 +430,7 @@ it('carries the source loan collateral onto the restructured loan', function () 
     $source = $this->createReleasedLoan();
     $collateral = Collateral::factory()->create(['borrower_id' => $source->borrower_id]);
 
-    $this->postJson("/api/loans/{$source->id}/collaterals", [
-        'collateral_id' => $collateral->id,
-        'snapshot_value' => 250000,
-    ])->assertCreated();
+    pledgeDirectly($source, $collateral, 250000);
 
     $newLoan = restructureOf($this, $source);
 
@@ -443,13 +457,12 @@ it('carries the original snapshot value forward instead of re-appraising it', fu
     $source = $this->createReleasedLoan();
     $collateral = Collateral::factory()->create(['borrower_id' => $source->borrower_id, 'amount' => 250000]);
 
-    $this->postJson("/api/loans/{$source->id}/collaterals", [
-        'collateral_id' => $collateral->id,
-        'snapshot_value' => 250000,
-    ])->assertCreated();
-
-    // The collateral is re-valued on the register between pledge and restructure.
+    // The register's figure moves away from the pledged one. Revalued before
+    // the pledge, because a released loan's collateral cannot be revalued
+    // (CollateralLockdownTest).
     $this->putJson("/api/collaterals/{$collateral->id}", ['amount' => 400000])->assertOk();
+
+    pledgeDirectly($source, $collateral, 250000);
 
     $newLoan = restructureOf($this, $source);
 
@@ -463,10 +476,7 @@ it('reports the restructured loan and not the source once the new loan is releas
     $source = $this->createReleasedLoan();
     $collateral = Collateral::factory()->create(['borrower_id' => $source->borrower_id]);
 
-    $this->postJson("/api/loans/{$source->id}/collaterals", [
-        'collateral_id' => $collateral->id,
-        'snapshot_value' => 250000,
-    ])->assertCreated();
+    pledgeDirectly($source, $collateral, 250000);
 
     $newLoan = restructureOf($this, $source);
     releaseViaApi($this, $newLoan, $this->admin);
@@ -489,17 +499,17 @@ it('never lets the collateral be taken by another loan at any point in the restr
     $source = $this->createReleasedLoan();
     $collateral = Collateral::factory()->create(['borrower_id' => $source->borrower_id]);
 
-    $this->postJson("/api/loans/{$source->id}/collaterals", [
-        'collateral_id' => $collateral->id,
-        'snapshot_value' => 250000,
-    ])->assertCreated();
+    pledgeDirectly($source, $collateral, 250000);
 
     // The rival must be the SAME borrower's loan. createReleasedLoan() makes its
     // own borrower, and AttachCollateralRequest now scopes `collateral_id` to
     // the loan's borrower — a rival belonging to $this->borrower would be
     // refused on ownership and this test would stop exercising the pledge guard
     // it exists for.
-    $rival = loanInStatus($this->loanDefaults, 'released', $source->borrower_id);
+    //
+    // It must also be a draft. An attach to a loan in any later status is
+    // refused on its status before the pledge guard is asked anything.
+    $rival = loanInStatus($this->loanDefaults, 'draft', $source->borrower_id);
     $grab = fn () => $this->postJson("/api/loans/{$rival->id}/collaterals", [
         'collateral_id' => $collateral->id,
         'snapshot_value' => 250000,
@@ -510,13 +520,13 @@ it('never lets the collateral be taken by another loan at any point in the restr
     // where a rival loan can take this collateral. Before the restructure the
     // source holds it; between application and release BOTH hold it; after
     // release the new loan holds it.
-    $grab()->assertStatus(422);
+    $grab()->assertStatus(422)->assertJsonValidationErrors('collateral_id');
 
     $newLoan = restructureOf($this, $source);
-    $grab()->assertStatus(422);
+    $grab()->assertStatus(422)->assertJsonValidationErrors('collateral_id');
 
     releaseViaApi($this, $newLoan, $this->admin);
-    $grab()->assertStatus(422);
+    $grab()->assertStatus(422)->assertJsonValidationErrors('collateral_id');
 
     $this->assertDatabaseMissing('loan_collaterals', [
         'loan_id' => $rival->id,
@@ -528,10 +538,7 @@ it('reads the source collateral under a row lock inside the restructure transact
     $source = $this->createReleasedLoan();
     $collateral = Collateral::factory()->create(['borrower_id' => $source->borrower_id]);
 
-    $this->postJson("/api/loans/{$source->id}/collaterals", [
-        'collateral_id' => $collateral->id,
-        'snapshot_value' => 250000,
-    ])->assertCreated();
+    pledgeDirectly($source, $collateral, 250000);
 
     $transactionsOpened = 0;
     Event::listen(TransactionBeginning::class, function () use (&$transactionsOpened) {
@@ -568,10 +575,7 @@ it('records the inherited collateral ids on the restructure audit entry', functi
     $source = $this->createReleasedLoan();
     $collateral = Collateral::factory()->create(['borrower_id' => $source->borrower_id]);
 
-    $this->postJson("/api/loans/{$source->id}/collaterals", [
-        'collateral_id' => $collateral->id,
-        'snapshot_value' => 250000,
-    ])->assertCreated();
+    pledgeDirectly($source, $collateral, 250000);
 
     $newLoan = restructureOf($this, $source);
 
@@ -636,17 +640,17 @@ it('has no write path into loan_collaterals outside the two that are accounted f
     sort($writes);
 
     expect($writes)->toBe([
-        // The attach, for both POST /loans/{loan}/collaterals and the
-        // `collaterals` list on PUT /loans/{loan}. Guarded by
-        // CollateralPledgeGuard::assertCollateralIsFree(), with ownership
-        // enforced ahead of it by ValidatesLoanCollaterals on both requests.
+        // Every pledge write, in two methods. attachLocked() is the attach, for
+        // both POST /loans/{loan}/collaterals and the `collaterals` list on PUT
+        // /loans/{loan}: guarded by CollateralPledgeGuard::assertCollateralIsFree(),
+        // with ownership enforced ahead of it by ValidatesLoanCollaterals on
+        // both requests. inheritLocked() is restructure inheritance, called only
+        // by LoanService::inheritCollaterals(): deliberately unguarded, since it
+        // moves collateral from a live loan to the loan replacing it, which the
+        // guard would reject. The release of that restructure IS guarded, at the
+        // end of its transaction, once closeRestructuredSource() has taken the
+        // source out of the active set.
         'app/Services/CollateralAttacher.php',
-        // Restructure inheritance. Deliberately unguarded — it moves collateral
-        // from a live loan to the loan replacing it, which the guard would
-        // reject; see LoanService::inheritCollaterals(). The release of that
-        // restructure IS guarded, at the end of its transaction, once
-        // closeRestructuredSource() has taken the source out of the active set.
-        'app/Services/LoanService.php',
         // The ₱0 share capital snapshot correction. It only updates
         // `snapshot_value` on rows that already exist, never `loan_id` or
         // `collateral_id`, so it cannot create or move a pledge.

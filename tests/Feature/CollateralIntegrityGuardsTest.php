@@ -86,8 +86,12 @@ function guardPledgeDirectly(Loan $loan, Collateral $collateral, float $snapshot
  *
  * Built through LoanService rather than the factory because release() persists
  * an amortization schedule and needs a product with real terms behind it.
+ *
+ * `$whileDraft` runs before the loan is submitted: collateral is attached
+ * only while a loan is a draft or an application, so that is where a spec
+ * that attaches through the endpoint does it.
  */
-function guardApprovedLoan(Borrower $borrower, User $admin, float $principal = 60000): Loan
+function guardApprovedLoan(Borrower $borrower, User $admin, float $principal = 60000, ?Closure $whileDraft = null): Loan
 {
     $product = LoanProduct::factory()->create([
         'interest_rate' => 3.0,
@@ -106,6 +110,10 @@ function guardApprovedLoan(Borrower $borrower, User $admin, float $principal = 6
         'principal_amount' => $principal,
         'start_date' => now()->toDateString(),
     ], $admin);
+
+    if ($whileDraft !== null) {
+        $whileDraft($loan);
+    }
 
     $service->submitForReview($loan);
     $service->approve($loan, $admin, 'Approved for testing');
@@ -286,12 +294,10 @@ it('refuses to release a loan whose collateral another active loan already holds
 
 it('still releases a loan holding collateral no other active loan wants', function () {
     $collateral = Collateral::factory()->create(['borrower_id' => $this->borrower->id]);
-    $loan = guardApprovedLoan($this->borrower, $this->admin);
-
-    $this->postJson("/api/loans/{$loan->id}/collaterals", [
+    $loan = guardApprovedLoan($this->borrower, $this->admin, whileDraft: fn (Loan $draft) => $this->postJson("/api/loans/{$draft->id}/collaterals", [
         'collateral_id' => $collateral->id,
         'snapshot_value' => 250000,
-    ])->assertCreated();
+    ])->assertCreated());
 
     $this->patchJson("/api/loans/{$loan->id}/release")->assertOk();
 
@@ -309,11 +315,10 @@ it('still releases when the collateral\'s only other holder is not active', func
     $collateral = Collateral::factory()->create(['borrower_id' => $this->borrower->id]);
     guardPledgeDirectly(guardLoanInStatus($this->loanDefaults, $holderStatus), $collateral);
 
-    $loan = guardApprovedLoan($this->borrower, $this->admin);
-    $this->postJson("/api/loans/{$loan->id}/collaterals", [
+    $loan = guardApprovedLoan($this->borrower, $this->admin, whileDraft: fn (Loan $draft) => $this->postJson("/api/loans/{$draft->id}/collaterals", [
         'collateral_id' => $collateral->id,
         'snapshot_value' => 250000,
-    ])->assertCreated();
+    ])->assertCreated());
 
     $this->patchJson("/api/loans/{$loan->id}/release")->assertOk();
 
@@ -334,12 +339,10 @@ it('takes a row lock on the loan\'s collateral inside the release transaction', 
     // half. A read-then-write check without the lock is not a guard: an attach
     // racing a release both pass their own read and both commit.
     $collateral = Collateral::factory()->create(['borrower_id' => $this->borrower->id]);
-    $loan = guardApprovedLoan($this->borrower, $this->admin);
-
-    $this->postJson("/api/loans/{$loan->id}/collaterals", [
+    $loan = guardApprovedLoan($this->borrower, $this->admin, whileDraft: fn (Loan $draft) => $this->postJson("/api/loans/{$draft->id}/collaterals", [
         'collateral_id' => $collateral->id,
         'snapshot_value' => 250000,
-    ])->assertCreated();
+    ])->assertCreated());
 
     $transactionsOpened = 0;
     Event::listen(TransactionBeginning::class, function () use (&$transactionsOpened) {
@@ -370,18 +373,18 @@ it('refuses to void a payment that would re-activate a loan onto collateral anot
     //
     //  1. Loan A is released holding the collateral and then settled in full,
     //     which takes it to `completed`.
-    //  2. Loan B attaches the same collateral. PERMITTED, deliberately: A is no
-    //     longer active, so the collateral is genuinely free.
+    //  2. Loan B attaches the same collateral while still a draft, and is then
+    //     approved and released. PERMITTED, deliberately: A is no longer
+    //     active, so the collateral is genuinely free.
     //  3. Voiding A's payment un-completes A. Before this guard, that left one
     //     collateral securing two live balances, with nothing anywhere in the
     //     system having been refused.
     $collateral = Collateral::factory()->create(['borrower_id' => $this->borrower->id]);
 
-    $loanA = guardApprovedLoan($this->borrower, $this->admin);
-    $this->postJson("/api/loans/{$loanA->id}/collaterals", [
+    $loanA = guardApprovedLoan($this->borrower, $this->admin, whileDraft: fn (Loan $draft) => $this->postJson("/api/loans/{$draft->id}/collaterals", [
         'collateral_id' => $collateral->id,
         'snapshot_value' => 250000,
-    ])->assertCreated();
+    ])->assertCreated());
     $this->patchJson("/api/loans/{$loanA->id}/release")->assertOk();
 
     $repayment = app(RepaymentService::class)->processRepayment(
@@ -389,11 +392,12 @@ it('refuses to void a payment that would re-activate a loan onto collateral anot
     );
     expect($loanA->fresh()->status)->toBe('completed');
 
-    $loanB = guardLoanInStatus($this->loanDefaults, 'released');
-    $this->postJson("/api/loans/{$loanB->id}/collaterals", [
+    $loanB = guardApprovedLoan($this->borrower, $this->admin, whileDraft: fn (Loan $draft) => $this->postJson("/api/loans/{$draft->id}/collaterals", [
         'collateral_id' => $collateral->id,
         'snapshot_value' => 250000,
-    ])->assertCreated();
+    ])->assertCreated());
+    $this->patchJson("/api/loans/{$loanB->id}/release")->assertOk();
+    $loanB->refresh();
 
     $this->patchJson("/api/repayments/{$repayment->id}/void", ['void_reason' => 'Duplicate entry'])
         ->assertStatus(422)
@@ -414,11 +418,10 @@ it('refuses to void a payment that would re-activate a loan onto collateral anot
 it('still voids a payment when nothing else has taken the collateral', function () {
     $collateral = Collateral::factory()->create(['borrower_id' => $this->borrower->id]);
 
-    $loan = guardApprovedLoan($this->borrower, $this->admin);
-    $this->postJson("/api/loans/{$loan->id}/collaterals", [
+    $loan = guardApprovedLoan($this->borrower, $this->admin, whileDraft: fn (Loan $draft) => $this->postJson("/api/loans/{$draft->id}/collaterals", [
         'collateral_id' => $collateral->id,
         'snapshot_value' => 250000,
-    ])->assertCreated();
+    ])->assertCreated());
     $this->patchJson("/api/loans/{$loan->id}/release")->assertOk();
 
     $repayment = app(RepaymentService::class)->processRepayment(
@@ -458,11 +461,10 @@ it('still voids a partial payment, which leaves an already-active loan active', 
     // guard has nothing to say about it and must not invent something.
     $collateral = Collateral::factory()->create(['borrower_id' => $this->borrower->id]);
 
-    $loan = guardApprovedLoan($this->borrower, $this->admin);
-    $this->postJson("/api/loans/{$loan->id}/collaterals", [
+    $loan = guardApprovedLoan($this->borrower, $this->admin, whileDraft: fn (Loan $draft) => $this->postJson("/api/loans/{$draft->id}/collaterals", [
         'collateral_id' => $collateral->id,
         'snapshot_value' => 250000,
-    ])->assertCreated();
+    ])->assertCreated());
     $this->patchJson("/api/loans/{$loan->id}/release")->assertOk();
 
     $repayment = app(RepaymentService::class)->processRepayment(
@@ -493,11 +495,7 @@ it('still releases a restructure that inherited its source loan\'s collateral', 
     // it there.
     $source = $this->createReleasedLoan();
     $collateral = Collateral::factory()->create(['borrower_id' => $source->borrower_id]);
-
-    $this->postJson("/api/loans/{$source->id}/collaterals", [
-        'collateral_id' => $collateral->id,
-        'snapshot_value' => 250000,
-    ])->assertCreated();
+    guardPledgeDirectly($source, $collateral, 250000);
 
     $restructure = Loan::findOrFail(
         $this->postJson("/api/loans/{$source->id}/restructure", [
@@ -629,8 +627,10 @@ it('still moves an unattached collateral to another borrower', function () {
 });
 
 it('still moves a collateral whose only loan link has been detached', function () {
+    // A draft, because collateral comes off a loan only while it is a draft or
+    // an application (CollateralLockdownTest).
     $collateral = Collateral::factory()->create(['borrower_id' => $this->borrower->id]);
-    $loan = guardLoanInStatus($this->loanDefaults, 'ongoing');
+    $loan = guardLoanInStatus($this->loanDefaults, 'draft');
     guardPledgeDirectly($loan, $collateral);
 
     $this->putJson("/api/collaterals/{$collateral->id}", ['borrower_id' => $this->stranger->id])
@@ -648,6 +648,9 @@ it('still edits every other field of a pledged collateral', function () {
     // Non-negotiable: the collateral edit form PUTs the whole payload on every
     // save, `borrower_id` included and unchanged. Treating presence rather than
     // CHANGE as the trigger would make an attached collateral uneditable.
+    // `amount` is re-sent unchanged too: a change to it is refused while a live
+    // loan holds the collateral (CollateralLockdownTest), by the same
+    // change-not-presence rule.
     $collateral = Collateral::factory()->create([
         'borrower_id' => $this->borrower->id,
         'detail_value' => 'TCT-11111',
@@ -659,12 +662,12 @@ it('still edits every other field of a pledged collateral', function () {
         'borrower_id' => $this->borrower->id,
         'collateral_type_id' => $collateral->collateral_type_id,
         'detail_value' => 'TCT-22222',
-        'amount' => 400000,
+        'amount' => '250000.00',
     ])->assertOk();
 
     $collateral->refresh();
     expect($collateral->detail_value)->toBe('TCT-22222')
-        ->and((float) $collateral->amount)->toBe(400000.0)
+        ->and((float) $collateral->amount)->toBe(250000.0)
         ->and($collateral->borrower_id)->toBe($this->borrower->id);
 });
 
@@ -691,11 +694,10 @@ it('locks the collateral before the void transaction reads anything', function (
     // property; the race is just its consequence.
     $collateral = Collateral::factory()->create(['borrower_id' => $this->borrower->id]);
 
-    $loan = guardApprovedLoan($this->borrower, $this->admin);
-    $this->postJson("/api/loans/{$loan->id}/collaterals", [
+    $loan = guardApprovedLoan($this->borrower, $this->admin, whileDraft: fn (Loan $draft) => $this->postJson("/api/loans/{$draft->id}/collaterals", [
         'collateral_id' => $collateral->id,
         'snapshot_value' => 250000,
-    ])->assertCreated();
+    ])->assertCreated());
     $this->patchJson("/api/loans/{$loan->id}/release")->assertOk();
 
     $repayment = app(RepaymentService::class)->processRepayment(
@@ -727,12 +729,10 @@ it('locks the collateral before the release transaction reads anything', functio
     // 12, first plain read at query 2) and the update lock test below (no
     // transaction at all).
     $collateral = Collateral::factory()->create(['borrower_id' => $this->borrower->id]);
-    $loan = guardApprovedLoan($this->borrower, $this->admin);
-
-    $this->postJson("/api/loans/{$loan->id}/collaterals", [
+    $loan = guardApprovedLoan($this->borrower, $this->admin, whileDraft: fn (Loan $draft) => $this->postJson("/api/loans/{$draft->id}/collaterals", [
         'collateral_id' => $collateral->id,
         'snapshot_value' => 250000,
-    ])->assertCreated();
+    ])->assertCreated());
 
     $order = guardLockOrdering(fn () => $this->patchJson("/api/loans/{$loan->id}/release")->assertOk());
 
@@ -927,7 +927,7 @@ it('has no path writing an active loan status outside the ones that are accounte
         // active set. The automatic accounting posting sits immediately BEFORE
         // that assertion, so the assertion is still the transaction's last
         // statement — which is what this entry is really asserting.
-        'app/Services/LoanService.php:1051 — \'status\' => \'released\',',
+        'app/Services/LoanService.php:1024 — \'status\' => \'released\',',
         // processRepayment(): released → ongoing. Deliberately UNGUARDED — both
         // are already active, so it cannot add a holder.
         'app/Services/RepaymentService.php:212 — $loan->update([\'status\' => \'ongoing\']);',

@@ -46,6 +46,9 @@ beforeEach(function () {
         return $collateral;
     };
 
+    // The per-collateral audit rows a list writes, CollateralAttacher's.
+    $this->pledgeAuditRows = fn (): int => AuditLog::whereIn('action', ['collateral_attached', 'collateral_detached'])->count();
+
     $this->pivotRows = fn (Loan $loan): array => DB::table('loan_collaterals')
         ->where('loan_id', $loan->id)
         ->orderBy('collateral_id')
@@ -65,7 +68,7 @@ it('leaves collateral exactly as it was when the request has no collaterals key'
 
     expect($this->loan->fresh()->purpose)->toBe('Store expansion')
         ->and(($this->pivotRows)($this->loan))->toBe($before)
-        ->and(AuditLog::where('action', 'collaterals_updated')->count())->toBe(0);
+        ->and(($this->pledgeAuditRows)())->toBe(0);
 });
 
 it('detaches the unlisted, attaches the new and keeps an existing snapshot', function () {
@@ -94,17 +97,19 @@ it('detaches the unlisted, attaches the new and keeps an existing snapshot', fun
         ->and($rows[$added->id]->attached_at)->toBe('2026-09-02 10:00:00')
         ->and($this->loan->fresh()->purpose)->toBe('Store expansion');
 
-    $entry = AuditLog::where('action', 'collaterals_updated')->sole();
+    // One row per collateral attached or detached, none for the one kept.
+    $attached = AuditLog::where('action', 'collateral_attached')->sole();
+    $detached = AuditLog::where('action', 'collateral_detached')->sole();
 
-    expect($entry->auditable_id)->toBe($this->loan->id)
-        ->and($entry->user_id)->toBe($this->admin->id)
-        ->and($entry->old_values)->toBe(['collateral_ids' => [$kept->id, $dropped->id]])
+    expect($attached->auditable_id)->toBe($this->loan->id)
+        ->and($attached->user_id)->toBe($this->admin->id)
         // toEqual: the JSON column reorders keys and stores 80000.0 as 80000.
-        ->and($entry->new_values)->toEqual([
-            'collateral_ids' => [$kept->id, $added->id],
-            'attached' => [['collateral_id' => $added->id, 'snapshot_value' => 45000.5]],
-            'detached' => [['collateral_id' => $dropped->id, 'snapshot_value' => 80000]],
-        ]);
+        ->and($attached->old_values)->toEqual(['collateral_id' => $added->id, 'snapshot_value' => null])
+        ->and($attached->new_values)->toEqual(['collateral_id' => $added->id, 'snapshot_value' => 45000.5])
+        ->and($detached->auditable_id)->toBe($this->loan->id)
+        ->and($detached->user_id)->toBe($this->admin->id)
+        ->and($detached->old_values)->toEqual(['collateral_id' => $dropped->id, 'snapshot_value' => 80000])
+        ->and($detached->new_values)->toEqual(['collateral_id' => $dropped->id, 'snapshot_value' => null]);
 });
 
 it('writes no collateral audit row when the list matches what the loan holds', function () {
@@ -114,18 +119,21 @@ it('writes no collateral audit row when the list matches what the loan holds', f
         'collaterals' => [['collateral_id' => $held->id, 'snapshot_value' => 150000]],
     ])->assertOk();
 
-    expect(AuditLog::where('action', 'collaterals_updated')->count())->toBe(0)
+    expect(($this->pledgeAuditRows)())->toBe(0)
         ->and($this->loan->collaterals()->pluck('collaterals.id')->all())->toBe([$held->id]);
 });
 
 it('detaches every collateral for an empty list', function () {
-    ($this->pledge)($this->loan, 150000);
-    ($this->pledge)($this->loan, 80000);
+    $first = ($this->pledge)($this->loan, 150000);
+    $second = ($this->pledge)($this->loan, 80000);
 
     $this->putJson("/api/loans/{$this->loan->id}", ['collaterals' => []])->assertOk();
 
     expect($this->loan->collaterals()->count())->toBe(0)
-        ->and(AuditLog::where('action', 'collaterals_updated')->sole()->new_values['collateral_ids'])->toBe([]);
+        ->and(AuditLog::where('action', 'collateral_detached')->orderBy('id')->pluck('old_values')->all())->toEqual([
+            ['collateral_id' => $first->id, 'snapshot_value' => 150000],
+            ['collateral_id' => $second->id, 'snapshot_value' => 80000],
+        ]);
 });
 
 it('refuses null, which is not a list', function () {
@@ -219,7 +227,7 @@ it('refuses a collateral another active loan holds, and saves nothing from the r
     expect(($this->pivotRows)($this->loan))->toBe($before)
         ->and($this->loan->fresh()->purpose)->not->toBe('Changed')
         ->and($holder->collaterals()->pluck('collaterals.id')->all())->toBe([$pledged->id])
-        ->and(AuditLog::where('action', 'collaterals_updated')->count())->toBe(0);
+        ->and(($this->pledgeAuditRows)())->toBe(0);
 });
 
 it('needs collaterals:update to send the key, whatever its value', function () {

@@ -56,7 +56,7 @@ class CollateralPledgeGuard
      * CALL THIS AS THE FIRST STATEMENT INSIDE THE TRANSACTION. Not "early" —
      * first. Every other writer that could add an active holder for one of
      * these collaterals (CollateralController::attach(),
-     * LoanService::inheritCollaterals(), and the other status transitions
+     * LoanService::restructure(), and the other status transitions
      * through this class) opens by locking the same rows, so once this returns,
      * no conflicting pledge can be committed until the caller's transaction
      * ends. Any snapshot the transaction establishes afterwards is therefore
@@ -92,8 +92,8 @@ class CollateralPledgeGuard
             // detector rolling one transaction back. What it does buy is that
             // every path that locks these rows asks for them in one stated
             // order, which makes a cycle less likely and, more usefully, makes
-            // the intent reviewable. LoanService::inheritCollaterals() carries
-            // the same clause for the same reason; keep them in step.
+            // the intent reviewable. CollateralAttacher::lock() asks in the
+            // same order for the same reason; keep them in step.
             ->orderBy('collaterals.id')
             ->lockForUpdate()
             ->pluck('collaterals.id')
