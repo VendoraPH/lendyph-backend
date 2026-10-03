@@ -373,6 +373,7 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     // GCash Transactions
     Route::prefix('gcash')->group(function () {
         Route::get('/transactions', [GCashTransactionController::class, 'index']);
+        Route::get('/transactions/preview', [GCashTransactionController::class, 'preview']);
         Route::post('/transactions', [GCashTransactionController::class, 'store']);
         Route::patch('/transactions/{transaction}/paid', [GCashTransactionController::class, 'markPaid']);
         Route::get('/non-members', [GCashNonMemberController::class, 'index']);

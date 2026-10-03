@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Models\AuditLog;
 use App\Models\Borrower;
 use App\Models\GCashNonMember;
 use App\Models\GCashTier;
@@ -468,5 +469,71 @@ class GCashNonMemberTest extends TestCase
 
         $this->postJson('/api/gcash/transactions', $payload)->assertCreated();
         $this->postJson('/api/gcash/transactions', $payload)->assertStatus(409);
+    }
+
+    /**
+     * Staff call these customers walk-ins, so no message they can read (a
+     * validation error on the transaction form) says "non member".
+     */
+    public function test_transaction_validation_messages_call_the_party_a_walk_in(): void
+    {
+        $missing = $this->postJson('/api/gcash/transactions', [
+            'type' => 'cash_in',
+            'amount' => 1000,
+        ])->assertStatus(422);
+
+        $this->assertSame(
+            ['The borrower id field is required when walk-in is not present.'],
+            $missing->json('errors.borrower_id'),
+        );
+        $this->assertSame(
+            ['The walk-in field is required when borrower id is not present.'],
+            $missing->json('errors.gcash_non_member_id'),
+        );
+
+        $unknown = $this->postJson('/api/gcash/transactions', [
+            'gcash_non_member_id' => 999999,
+            'type' => 'cash_in',
+            'amount' => 1000,
+        ])->assertStatus(422);
+
+        $this->assertSame(['The selected walk-in is invalid.'], $unknown->json('errors.gcash_non_member_id'));
+        $this->assertStringNotContainsStringIgnoringCase('non member', $missing->getContent().$unknown->getContent());
+    }
+
+    /**
+     * The audit trail shows each entry's description to staff, so new entries
+     * for a walk-in say "walk-in" rather than "non-member".
+     */
+    public function test_audit_descriptions_call_the_customer_a_walk_in(): void
+    {
+        $id = $this->postJson('/api/gcash/non-members', [
+            'full_name' => 'Gina Lopez',
+            'mobile_number' => '09171112222',
+            'id_type' => 'UMID',
+            'id_number' => 'GL12345678',
+        ])->assertCreated()->json('data.id');
+
+        $this->putJson("/api/gcash/non-members/{$id}", [
+            'full_name' => 'Gina Lopez-Santos',
+            'mobile_number' => '09171112222',
+            'id_type' => 'UMID',
+            'id_number' => 'GL12345678',
+        ])->assertOk();
+
+        $this->deleteJson("/api/gcash/non-members/{$id}")->assertOk();
+
+        $descriptions = AuditLog::query()
+            ->where('auditable_type', GCashNonMember::class)
+            ->where('auditable_id', $id)
+            ->orderBy('id')
+            ->pluck('description')
+            ->all();
+
+        $this->assertSame([
+            'GCash walk-in Gina Lopez registered',
+            'GCash walk-in Gina Lopez-Santos updated',
+            'GCash walk-in Gina Lopez-Santos removed',
+        ], $descriptions);
     }
 }
