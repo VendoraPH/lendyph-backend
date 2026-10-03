@@ -78,6 +78,27 @@ class ReportService
     }
 
     /**
+     * `$part` as a percentage of `$whole`, from whole centavos, rounded half up
+     * to two places; null when the whole is 0, which has no parts.
+     *
+     * Not forced to add up to 100 across a set: three equal thirds are 33.33
+     * each, which is what each of them is.
+     */
+    private static function sharePercent(float $part, float $whole): ?float
+    {
+        $wholeCentavos = (int) round($whole * 100);
+
+        if ($wholeCentavos <= 0) {
+            return null;
+        }
+
+        $partCentavos = (int) round($part * 100);
+
+        // Hundredths of a percent, rounded half up in integers.
+        return intdiv($partCentavos * 10000 * 2 + $wholeCentavos, $wholeCentavos * 2) / 100;
+    }
+
+    /**
      * The footer of a report table: each named column of `$rows` added up, a
      * `money` column in whole centavos and a `count` column as an integer. A
      * row missing a figure adds nothing. In the order the columns are named.
@@ -144,21 +165,53 @@ class ReportService
             ];
         })->values()->toArray();
 
-        $schedule = $schedules->map(fn ($s) => [
-            'period_number' => $s->period_number,
-            'due_date' => $s->due_date->toDateString(),
-            'principal_due' => (float) $s->principal_due,
-            'interest_due' => (float) $s->interest_due,
-            'total_due' => (float) $s->total_due,
-            'principal_paid' => (float) $s->principal_paid,
-            'interest_paid' => (float) $s->interest_paid,
-            // The row's Paid: principal and interest, the two parts
-            // `total_due` is made of, as on the Due/Past Due list.
-            'amount_paid' => round((float) $s->principal_paid + (float) $s->interest_paid, 2),
-            'penalty_amount' => (float) $s->penalty_amount,
-            'penalty_paid' => (float) $s->penalty_paid,
-            'status' => $s->status,
-        ])->values()->toArray();
+        // The demand letter's arrears, worked out here so the letter computes
+        // nothing: what each period still owes on each part, never below 0,
+        // in whole centavos; how many days late it is today; and whether it
+        // is in arrears (due before today with something still owed). A
+        // period's `status` is not trusted for that, because it only turns
+        // `overdue` when the nightly run reaches it.
+        $today = Carbon::today();
+        $centavos = fn (mixed $pesos): int => (int) round((float) $pesos * 100);
+        $owed = fn (mixed $due, mixed $paid): int => max(0, $centavos($due) - $centavos($paid));
+
+        $schedule = $schedules->map(function ($s) use ($today, $owed) {
+            $remaining = [
+                'principal' => $owed($s->principal_due, $s->principal_paid),
+                'interest' => $owed($s->interest_due, $s->interest_paid),
+                'penalty' => $owed($s->penalty_amount, $s->penalty_paid),
+            ];
+            $amountDue = array_sum($remaining);
+            $daysOverdue = $s->due_date->lt($today) ? (int) $s->due_date->diffInDays($today) : 0;
+
+            return [
+                'period_number' => $s->period_number,
+                'due_date' => $s->due_date->toDateString(),
+                'principal_due' => (float) $s->principal_due,
+                'interest_due' => (float) $s->interest_due,
+                'total_due' => (float) $s->total_due,
+                'principal_paid' => (float) $s->principal_paid,
+                'interest_paid' => (float) $s->interest_paid,
+                // The row's Paid: principal and interest, the two parts
+                // `total_due` is made of, as on the Due/Past Due list.
+                'amount_paid' => round((float) $s->principal_paid + (float) $s->interest_paid, 2),
+                'penalty_amount' => (float) $s->penalty_amount,
+                'penalty_paid' => (float) $s->penalty_paid,
+                'status' => $s->status,
+                'remaining' => array_map(fn (int $part): float|int => $part / 100, $remaining),
+                'amount_due' => $amountDue / 100,
+                'days_overdue' => $daysOverdue,
+                'is_overdue' => $daysOverdue > 0 && $amountDue > 0,
+            ];
+        })->values()->toArray();
+
+        $arrears = array_values(array_filter($schedule, fn (array $row): bool => $row['is_overdue']));
+        $demandTotals = [
+            'principal' => self::sumOfFigures(array_column(array_column($arrears, 'remaining'), 'principal')),
+            'interest' => self::sumOfFigures(array_column(array_column($arrears, 'remaining'), 'interest')),
+            'penalty' => self::sumOfFigures(array_column(array_column($arrears, 'remaining'), 'penalty')),
+            'amount_due' => self::sumOfFigures(array_column($arrears, 'amount_due')),
+        ];
 
         return [
             'loan' => [
@@ -190,6 +243,10 @@ class ReportService
                 'total_due' => 'money',
                 'amount_paid' => 'money',
             ]),
+            // Everything in arrears today, the demand letter's total, and its
+            // table's column totals over the rows with `is_overdue`.
+            'total_demanded' => $demandTotals['amount_due'],
+            'demand_totals' => $demandTotals,
             'summary' => [
                 'total_paid' => round($totalPaid, 2),
                 'opening_balance' => $openingBalance,
@@ -247,6 +304,14 @@ class ReportService
                 'contact_number' => $borrower->contact_number,
             ],
             'loans' => $loanSummaries,
+            // The member ledger card's loans table, each column added up in
+            // whole centavos, under the row keys of `loans`.
+            'loans_totals' => self::columnTotals($loanSummaries, [
+                'principal_amount' => 'money',
+                'total_paid' => 'money',
+                'payments_count' => 'count',
+                'outstanding_balance' => 'money',
+            ]),
             'totals' => [
                 'total_loans' => $loans->count(),
                 'total_portfolio' => round($totalPortfolio, 2),
@@ -935,12 +1000,21 @@ class ReportService
         $overall = $this->overdueScheduleQuery($filters, $asOf)
             ->where('due_date', '<=', $asOf->copy()->subDay()->toDateString());
 
+        $total = round((float) (clone $overall)->sum(DB::raw(AmortizationSchedule::remainingTotalSql())), 2);
+
+        // Each bucket's part of the total, so the screen never divides one
+        // figure by another.
+        foreach ($result as $key => $bucket) {
+            $result[$key]['share_percent'] = self::sharePercent($bucket['amount'], $total);
+        }
+
         return [
             'as_of_date' => $asOf->toDateString(),
             'buckets' => $result,
             'total' => [
-                'amount' => round((float) (clone $overall)->sum(DB::raw(AmortizationSchedule::remainingTotalSql())), 2),
+                'amount' => $total,
                 'count' => (clone $overall)->distinct()->count('loan_id'),
+                'share_percent' => $total > 0 ? 100 : null,
             ],
             'generated_at' => now()->toDateTimeString(),
         ];
@@ -1130,7 +1204,16 @@ class ReportService
      * Cash IN is what actually crossed the counter: posted repayments — scoped
      * through releasedLoanScope() so the figure reconciles exactly with
      * dailyCollection()'s `total_collected` for the same period — plus share
-     * capital credits.
+     * capital credits that were paid in.
+     *
+     * Share capital withheld from a loan at release (a ledger row carrying a
+     * `loan_id`, written by ShareCapitalReleaseCredit) is NOT cash in: the
+     * money was kept out of the loan, never received. Those rows are left out
+     * of `inflows`, `outflows` and the `share_capital` block, and reported
+     * under `non_cash.share_capital_at_release` instead. The Share Capital
+     * report counts them, because the member's equity did grow: add
+     * `non_cash.share_capital_at_release` to `share_capital.credit` to reach
+     * that report's credits for the same period and branch.
      *
      * Cash OUT is `net_proceeds`, NOT `principal_amount`. Deductions are
      * withheld at release and never leave the till, so booking the gross
@@ -1141,8 +1224,8 @@ class ReportService
      * `share_capital_ledger` carries no branch column, so `branch_id` is
      * honoured through the MEMBER's branch (`borrowers.branch_id`) — the exact
      * scoping shareCapital() applies, under the same `borrower_branch` name,
-     * so a branch-filtered Cash Flow and the Share Capital report can never
-     * disagree about the same period and branch. `share_capital.branch_scope`
+     * so a branch-filtered Cash Flow and the Share Capital report select the
+     * same ledger rows for the same period and branch. `share_capital.branch_scope`
      * reports which of the two applied: `borrower_branch` when `branch_id` is
      * set, `organisation` when it is not.
      *
@@ -1189,6 +1272,8 @@ class ReportService
             ->first();
 
         // Scoped through the member's branch, identically to shareCapital().
+        // A row with a `loan_id` was withheld at release, not paid in, so it
+        // is summed apart and kept out of every cash figure.
         $share = DB::table('share_capital_ledger')
             ->when($branchId, fn ($q, $b) => $q->whereIn(
                 'share_capital_ledger.borrower_id',
@@ -1196,9 +1281,10 @@ class ReportService
             ))
             ->whereBetween('date', [$fromDate, $toDate])
             ->selectRaw('
-                COUNT(*) as entry_count,
-                COALESCE(SUM(credit), 0) as credit,
-                COALESCE(SUM(debit), 0) as debit
+                COALESCE(SUM(CASE WHEN loan_id IS NULL THEN 1 ELSE 0 END), 0) as entry_count,
+                COALESCE(SUM(CASE WHEN loan_id IS NULL THEN credit ELSE 0 END), 0) as credit,
+                COALESCE(SUM(CASE WHEN loan_id IS NULL THEN debit ELSE 0 END), 0) as debit,
+                COALESCE(SUM(CASE WHEN loan_id IS NOT NULL THEN credit - debit ELSE 0 END), 0) as at_release
             ')
             ->first();
 
@@ -1213,6 +1299,7 @@ class ReportService
         $shareScope = $branchId ? 'borrower_branch' : 'organisation';
         $shareCredit = round((float) ($share->credit ?? 0), 2);
         $shareDebit = round((float) ($share->debit ?? 0), 2);
+        $shareAtRelease = round((float) ($share->at_release ?? 0), 2);
         $netProceedsOut = round((float) ($release->net_proceeds ?? 0), 2);
 
         $totalIn = round($repaymentsIn + $shareCredit, 2);
@@ -1249,19 +1336,24 @@ class ReportService
             'non_cash' => [
                 'principal_released' => round((float) ($release->principal_amount ?? 0), 2),
                 'total_deductions' => round((float) ($release->total_deductions ?? 0), 2),
-                'note' => 'Deductions are withheld at release and never leave the till; principal_released = net_proceeds + total_deductions.',
+                // Part of the deductions withheld at release, credited to the
+                // members' share capital ledgers: their equity, never cash in.
+                'share_capital_at_release' => $shareAtRelease,
+                'note' => 'Deductions are withheld at release and never leave the till; principal_released = net_proceeds + total_deductions. share_capital_at_release is the share capital withheld from loans at release and credited to the members\' share capital: it is in their Share Capital balance but was never received as cash, so it is excluded from inflows and from share_capital.',
             ],
-            // Same scope vocabulary as the Share Capital report, so the two
-            // agree figure-for-figure for the same period and branch.
+            // Same scope vocabulary as the Share Capital report. Cash only:
+            // with non_cash.share_capital_at_release added back, the credits
+            // equal that report's for the same period and branch.
             'share_capital' => [
                 'branch_scope' => $shareScope,
                 'credit' => $shareCredit,
                 'debit' => $shareDebit,
                 'net_movement' => round($shareCredit - $shareDebit, 2),
                 'count' => (int) ($share->entry_count ?? 0),
-                'note' => $branchId
+                'note' => ($branchId
                     ? 'share_capital_ledger has no branch column, so branch_id is honoured through the member\'s branch, matching the Share Capital report. Excluded from by_branch.'
-                    : 'No branch filter applied, so these figures are organisation-wide. Share capital is always excluded from by_branch.',
+                    : 'No branch filter applied, so these figures are organisation-wide. Share capital is always excluded from by_branch.')
+                    .' Cash paid in and out only: share capital withheld at release is under non_cash.share_capital_at_release.',
             ],
             'by_branch' => $byBranch,
             // Loan cash only, like the rows: the repayment and release totals
@@ -2201,6 +2293,10 @@ class ReportService
                 'net_movement' => round($credits - $debits, 2),
             ],
             'closing_balance' => round($opening + $credits - $debits, 2),
+            // `totals.credits` and `totals.debits` under the names the
+            // certificate reads beside `closing_balance`.
+            'total_credit' => $credits,
+            'total_debit' => $debits,
             'pledge' => $pledge === null ? null : [
                 'amount' => round((float) $pledge->amount, 2),
                 'schedule' => $pledge->schedule,

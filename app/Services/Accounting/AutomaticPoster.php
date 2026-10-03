@@ -118,7 +118,7 @@ final class AutomaticPoster
         $posting = $this->releasePosting($loan, AccountMap::resolve(), $method);
 
         return $this->write($posting, $loan, [
-            'date' => $this->dateOf($loan->released_at),
+            'date' => $this->releaseDate($loan),
             'reference' => $loan->loan_account_number ?? $loan->application_number,
             'description' => $this->describe('Loan release', $loan->loan_account_number ?? $loan->application_number),
             'branch_id' => $loan->branch_id,
@@ -150,6 +150,21 @@ final class AutomaticPoster
             items: $this->deductionItems($loan),
             loan: $this->releaseLabel($loan),
         );
+    }
+
+    /**
+     * The accounting date of a loan's release: the day its release journal is
+     * filed under, read from `released_at` as {@see self::dateOf()} reads any
+     * moment.
+     *
+     * Public so that the other record a release writes about the same money,
+     * the member's share capital credit (ShareCapitalReleaseCredit), is dated
+     * by this same code rather than by a second reading of the clock that
+     * could put the two on different days.
+     */
+    public function releaseDate(Loan $loan): string
+    {
+        return $this->dateOf($loan->released_at);
     }
 
     /**

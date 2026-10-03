@@ -121,6 +121,37 @@ final class LoanReleaseFeeService
     }
 
     /**
+     * The fee items applyOnRelease() would add to `$loan`, saved or not.
+     *
+     * The same two steps the release takes (applicableFees(), then
+     * unchargedItems()), so the loan form's preview (LoanService::formPreview())
+     * can quote what a release of the loan it is filling in would charge
+     * without a second copy of the product match or the conditions. An unsaved
+     * loan carries what the form states: its product, principal, start and
+     * maturity dates, and its deduction items, none of which came from a fee
+     * rule, so every applicable fee is uncharged.
+     *
+     * @return list<array<string, mixed>>
+     */
+    public function itemsFor(Loan $loan): array
+    {
+        return $this->unchargedItems($loan, $this->applicableFees($loan));
+    }
+
+    /**
+     * What a release refuses fees with when they overrun the principal:
+     * assertWithinPrincipal()'s message, for the form's preview to show in
+     * place of a 422.
+     */
+    public static function overrunMessage(float $charged, float $total, float $principal): string
+    {
+        return 'Configured fees of ₱'.number_format($charged, 2).' bring total deductions to ₱'
+            .number_format($total, 2).', which exceeds the ₱'
+            .number_format($principal, 2)
+            .' principal. Review the fee rules in Settings before releasing this loan.';
+    }
+
+    /**
      * What release WOULD do to this loan's deductions, without doing it.
      *
      * Runs the identical calculation the release takes, including the guard
@@ -592,12 +623,7 @@ final class LoanReleaseFeeService
         }
 
         throw ValidationException::withMessages([
-            'fees' => [
-                'Configured fees of ₱'.number_format($charged, 2).' bring total deductions to ₱'
-                .number_format($total, 2).', which exceeds the ₱'
-                .number_format((float) $loan->principal_amount, 2)
-                .' principal. Review the fee rules in Settings before releasing this loan.',
-            ],
+            'fees' => [self::overrunMessage($charged, $total, (float) $loan->principal_amount)],
         ]);
     }
 

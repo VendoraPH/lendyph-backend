@@ -39,6 +39,8 @@ class LoanFormPreviewTest extends TestCase
             ],
         ])->assertOk()->assertExactJson(['data' => [
             'collateral' => ['total_value' => 35000.75, 'security_status' => 'partially_secured', 'short_by' => 14999.25],
+            'maturity_date' => null,
+            'deductions' => null,
             'amortization' => null,
         ]]);
     }

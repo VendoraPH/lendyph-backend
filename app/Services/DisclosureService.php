@@ -23,8 +23,14 @@ class DisclosureService
             ])->values()->toArray()
             : $this->loanService->buildAmortizationPreview($loan);
 
-        $totalPrincipal = array_sum(array_column($schedule, 'principal_due'));
-        $totalInterest = array_sum(array_column($schedule, 'interest_due'));
+        // Every total in whole centavos, so the printed statement's figures
+        // add up exactly and the browser adds nothing.
+        $centavos = fn (mixed $pesos): int => (int) round((float) $pesos * 100);
+        $sumOf = fn (string $column): int => array_sum(array_map($centavos, array_column($schedule, $column)));
+
+        $totalPrincipal = $sumOf('principal_due');
+        $totalInterest = $sumOf('interest_due');
+        $totalDeductions = $centavos($loan->total_deductions);
 
         return [
             'document_title' => 'DISCLOSURE STATEMENT',
@@ -65,11 +71,20 @@ class DisclosureService
             ],
 
             'totals' => [
-                'total_principal' => round($totalPrincipal, 2),
-                'total_interest' => round($totalInterest, 2),
-                'total_obligation' => round($totalPrincipal + $totalInterest, 2),
+                'total_principal' => $totalPrincipal / 100,
+                'total_interest' => $totalInterest / 100,
+                'total_obligation' => ($totalPrincipal + $totalInterest) / 100,
+                // The schedule's Total Amortization column added up.
+                'total_amortization' => $sumOf('total_due') / 100,
                 'total_deductions' => (float) $loan->total_deductions,
                 'net_proceeds' => (float) $loan->net_proceeds,
+                // Section 2 of the statement: what was withheld plus the
+                // interest, the finance charges R.A. 3765 has disclosed.
+                'total_finance_charges' => ($totalDeductions + $totalInterest) / 100,
+                // The total less the itemised deductions, signed, printed as a
+                // charge (or an adjustment) of its own so the lettered lines
+                // add up to the total.
+                'unitemised_deductions' => $loan->unitemisedDeductions(),
             ],
 
             'amortization_schedule' => $schedule,

@@ -182,8 +182,10 @@ class AccountingReleaseDeductionAccountsTest extends TestCase
 
         $loan = $this->draftLoan($items);
 
+        // The server computes the premium (2.47% of ₱50,000 is ₱1,235.00), so
+        // ₱1,234.56 of it is collected as a partial payment.
         $insurance = in_array('insurance', $kinds, true)
-            ? ['insurance_premium_percentage' => 2.47, 'insurance_premium_amount' => 1234.56, 'insurance_payment_type' => 'full']
+            ? ['insurance_premium_percentage' => 2.47, 'insurance_payment_type' => 'partial', 'insurance_partial_amount' => 1234.56]
             : [];
 
         $this->approveAndRelease($loan, $insurance);

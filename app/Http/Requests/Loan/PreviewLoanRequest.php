@@ -3,6 +3,7 @@
 namespace App\Http\Requests\Loan;
 
 use App\Enums\LoanFrequency;
+use App\Http\Requests\Concerns\ValidatesDeductionAmounts;
 use Illuminate\Foundation\Http\FormRequest;
 
 /**
@@ -17,6 +18,8 @@ use Illuminate\Foundation\Http\FormRequest;
  */
 class PreviewLoanRequest extends FormRequest
 {
+    use ValidatesDeductionAmounts;
+
     public function authorize(): bool
     {
         return $this->user()->canAny(['loans:create', 'loans:update']);
@@ -37,6 +40,14 @@ class PreviewLoanRequest extends FormRequest
             'collaterals' => ['nullable', 'array'],
             'collaterals.*.collateral_id' => ['nullable', 'integer'],
             'collaterals.*.snapshot_value' => ['required', 'numeric', 'min:0'],
+            // The deduction inputs exactly as a create, an edit or a restructure
+            // sends them, under the same rules, so the preview never lists a
+            // deduction saving would refuse. Absent or null: the product's own
+            // fees, as createLoan() falls back; `[]`: none.
+            'deductions' => ['nullable', 'array'],
+            'deductions.*.name' => ['required_with:deductions', 'string', 'max:255'],
+            'deductions.*.amount' => $this->deductionAmountRule(),
+            'deductions.*.type' => ['required_with:deductions', 'in:fixed,percentage'],
         ];
     }
 }
