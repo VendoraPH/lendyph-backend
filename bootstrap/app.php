@@ -175,9 +175,13 @@ return Application::configure(basePath: dirname(__DIR__))
         // JSON 401 an `Accept: application/json` request always got, whatever
         // Accept header it sent. Anything else falls through to the default
         // rendering, so web routes are unchanged.
+        //
+        // The message is fixed rather than read off the exception, so a future
+        // throw with its own wording cannot tell a caller which way its token
+        // failed.
         $exceptions->render(function (AuthenticationException $exception, Request $request) {
             if ($request->is('api/*')) {
-                return response()->json(['message' => $exception->getMessage()], 401);
+                return response()->json(['message' => 'Unauthenticated.'], 401);
             }
         });
     })->create();
