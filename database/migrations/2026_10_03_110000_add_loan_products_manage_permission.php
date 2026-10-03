@@ -22,8 +22,8 @@ use Spatie\Permission\PermissionRegistrar;
  *
  * ADDITIVE ONLY. Nothing is revoked here: the other roles stop managing
  * products because the routes now check this permission instead, and they
- * keep every loan permission they hold. An admin can grant it to any role
- * through the roles screen.
+ * keep every loan permission they hold. PUT /roles/{id} accepts it like any
+ * other permission name.
  */
 return new class extends Migration
 {
