@@ -6,6 +6,7 @@ use App\Http\Middleware\EnsureUserIsActive;
 use App\Http\Middleware\OptionalSanctumAuth;
 use App\Http\Middleware\RequirePasswordChange;
 use App\Http\Middleware\SecurityHeaders;
+use Illuminate\Auth\AuthenticationException;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
@@ -144,6 +145,17 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->prependToPriorityList(SubstituteBindings::class, EnsureUserIsActive::class);
         $middleware->prependToPriorityList(SubstituteBindings::class, RequirePasswordChange::class);
 
+        // An API guest is answered, never redirected. The framework default
+        // sends every guest to route('login'), which this API-only app does
+        // not have, so an unauthenticated api/* call without
+        // `Accept: application/json` threw RouteNotFoundException and came
+        // back 500. Returning null here lets the AuthenticationException
+        // through to the renderer below, which answers the JSON 401. Web
+        // routes keep the default redirect.
+        $middleware->redirectGuestsTo(
+            fn (Request $request) => $request->is('api/*') ? null : route('login'),
+        );
+
         $middleware->alias([
             'role' => RoleMiddleware::class,
             'permission' => PermissionMiddleware::class,
@@ -159,5 +171,13 @@ return Application::configure(basePath: dirname(__DIR__))
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
-        //
+        // Every api/* route answers an unauthenticated caller with the same
+        // JSON 401 an `Accept: application/json` request always got, whatever
+        // Accept header it sent. Anything else falls through to the default
+        // rendering, so web routes are unchanged.
+        $exceptions->render(function (AuthenticationException $exception, Request $request) {
+            if ($request->is('api/*')) {
+                return response()->json(['message' => $exception->getMessage()], 401);
+            }
+        });
     })->create();
