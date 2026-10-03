@@ -33,7 +33,8 @@ class LoanApprovalChainTest extends TestCase
     /** Everything loan_processor holds: the chain's first step plus preparing the application. */
     private const LOAN_PROCESSOR_PERMISSIONS = [
         'loans:view', 'loans:update', 'loans:create',
-        'borrowers:view', 'fees:view', 'collaterals:view', 'share_capital:view',
+        'borrowers:view', 'fees:view', 'collaterals:view', 'collaterals:update',
+        'share_capital:view',
     ];
 
     protected function setUp(): void
@@ -132,8 +133,8 @@ class LoanApprovalChainTest extends TestCase
         // loan_processor is the FIRST step of both default chains, and
         // LoanController@submit checks `loans:update` — with view alone it
         // could not start the chain it exists to start. It also prepares the
-        // application, so it creates the loan and reads what the new-loan form
-        // shows (2026_10_03_100000).
+        // application, so it creates the loan, reads what the new-loan form
+        // shows and attaches the member's collateral (2026_10_03_100000).
         $this->assertEqualsCanonicalizing(
             self::LOAN_PROCESSOR_PERMISSIONS,
             Role::where('name', 'loan_processor')->firstOrFail()->permissions->pluck('name')->all(),

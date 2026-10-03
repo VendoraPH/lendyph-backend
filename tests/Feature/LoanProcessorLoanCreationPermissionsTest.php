@@ -10,7 +10,8 @@ use Tests\TestCase;
 /**
  * `loan_processor` prepares loan applications, so it needs to create a loan and
  * read what the new-loan form shows: the borrower, the fees, the collaterals
- * and the borrower's share capital.
+ * and the borrower's share capital. It also attaches the member's collateral to
+ * the loan, which needs `collaterals:update`.
  *
  * Granted by 2026_10_03_100000_grant_loan_processor_loan_creation_permissions
  * on already-migrated deployments, and by RoleAndPermissionSeeder on a fresh
@@ -28,7 +29,7 @@ function loanProcessorCreationMigration(): object
  */
 function loanProcessorCreationGrants(): array
 {
-    return ['borrowers:view', 'collaterals:view', 'fees:view', 'loans:create', 'share_capital:view'];
+    return ['borrowers:view', 'collaterals:update', 'collaterals:view', 'fees:view', 'loans:create', 'share_capital:view'];
 }
 
 /**
@@ -61,7 +62,7 @@ function loanProcessorBeforeTheGrant(): void
     app(PermissionRegistrar::class)->forgetCachedPermissions();
 }
 
-it('grants exactly the five permissions under their existing names', function () {
+it('grants exactly the six permissions under their existing names', function () {
     $existing = Permission::where('guard_name', 'web')
         ->whereIn('name', loanProcessorCreationGrants())
         ->orderBy('name')
@@ -74,6 +75,7 @@ it('grants exactly the five permissions under their existing names', function ()
 it('seeds loan_processor with its chain permissions plus the creation set on a fresh database', function () {
     expect(loanProcessorPermissionNames())->toBe([
         'borrowers:view',
+        'collaterals:update',
         'collaterals:view',
         'fees:view',
         'loans:create',
@@ -83,7 +85,7 @@ it('seeds loan_processor with its chain permissions plus the creation set on a f
     ]);
 });
 
-it('adds the five permissions to an already-migrated loan_processor and nothing else', function () {
+it('adds the six permissions to an already-migrated loan_processor and nothing else', function () {
     loanProcessorBeforeTheGrant();
     $before = loanProcessorPermissionNames();
 

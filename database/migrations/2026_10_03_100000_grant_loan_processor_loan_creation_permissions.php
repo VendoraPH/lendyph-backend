@@ -11,7 +11,9 @@ use Spatie\Permission\PermissionRegistrar;
  * but until now it held only `loans:view` and `loans:update`
  * (2026_09_16_110001_add_approval_chain_roles), so it could not create the
  * loan it was meant to prepare, nor read the borrower, fees, collaterals and
- * share capital the new-loan form shows. Granted by the owner's decision on
+ * share capital the new-loan form shows. `collaterals:update` lets it attach the
+ * member's collateral to that loan (POST /loans/{loan}/collaterals also checks
+ * `loans:update`, which it already holds). Granted by the owner's decisions on
  * 2026-10-03.
  *
  * Listed here AND in RoleAndPermissionSeeder, per the convention stated there:
@@ -32,6 +34,7 @@ return new class extends Migration
         'borrowers:view',
         'fees:view',
         'collaterals:view',
+        'collaterals:update',
         'share_capital:view',
     ];
 
@@ -52,9 +55,9 @@ return new class extends Migration
     }
 
     /**
-     * Takes the five back from loan_processor only, leaving its chain
+     * Takes the six back from loan_processor only, leaving its chain
      * permissions. There is no record of which grants up() added, so a rollback
-     * also removes any of the five an admin had given the role by hand.
+     * also removes any of the six an admin had given the role by hand.
      */
     public function down(): void
     {

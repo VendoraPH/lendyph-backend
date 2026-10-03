@@ -160,7 +160,7 @@ class LoanProductController extends Controller
     )]
     public function destroy(LoanProduct $loanProduct): JsonResponse
     {
-        $this->authorize('loans:create');
+        $this->authorize('loan_products:manage');
 
         if ($loanProduct->loans()->exists()) {
             return response()->json(['message' => 'Cannot delete a loan product with existing loans.'], 409);
