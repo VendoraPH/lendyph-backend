@@ -636,9 +636,11 @@ it('has no write path into loan_collaterals outside the two that are accounted f
     sort($writes);
 
     expect($writes)->toBe([
-        // The endpoint. Guarded by CollateralPledgeGuard::assertCollateralIsFree(),
-        // with ownership enforced ahead of it by AttachCollateralRequest.
-        'app/Http/Controllers/Api/CollateralController.php',
+        // The attach, for both POST /loans/{loan}/collaterals and the
+        // `collaterals` list on PUT /loans/{loan}. Guarded by
+        // CollateralPledgeGuard::assertCollateralIsFree(), with ownership
+        // enforced ahead of it by ValidatesLoanCollaterals on both requests.
+        'app/Services/CollateralAttacher.php',
         // Restructure inheritance. Deliberately unguarded — it moves collateral
         // from a live loan to the loan replacing it, which the guard would
         // reject; see LoanService::inheritCollaterals(). The release of that

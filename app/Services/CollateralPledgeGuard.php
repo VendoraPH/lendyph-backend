@@ -15,8 +15,9 @@ use Illuminate\Validation\ValidationException;
  * checks, which is why the original guard only covered one of them:
  *
  *   1. A PIVOT WRITE — `loan_collaterals` gains a row for a collateral some
- *      other active loan already holds. CollateralController::attach() is the
- *      only route in. Guarded by assertCollateralIsFree().
+ *      other active loan already holds. CollateralAttacher is the only route
+ *      in, for both CollateralController::attach() and the `collaterals` list
+ *      on LoanService::updateLoan(). Guarded by assertCollateralIsFree().
  *   2. A STATUS TRANSITION — no pivot write at all. A loan that already holds
  *      collateral moves INTO Loan::ACTIVE_STATUSES while another active loan
  *      holds the same collateral. Guarded by lockCollateralsOf() +
@@ -160,7 +161,7 @@ class CollateralPledgeGuard
      *
      * The caller is expected to be holding the row lock on `$collateral`
      * already, and to have taken it before reading anything else in its
-     * transaction; CollateralController::attach() opens with that lock.
+     * transaction; CollateralAttacher::lock() is that lock.
      *
      * @throws ValidationException naming the conflicting loan(s), on `collateral_id`
      */
