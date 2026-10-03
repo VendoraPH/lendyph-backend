@@ -104,8 +104,8 @@ final class AutomaticPoster
      * ## The deduction items go with it
      *
      * The rule books each withholding by its type, so it is handed the loan's
-     * `deductions` list as well as the total — every item converted on its own
-     * through {@see self::centavos()}, never summed in pesos first. See
+     * `deductions` list as well as the total — every item converted on its own,
+     * never summed in pesos first. See {@see self::deductionItems()} and
      * {@see PostingRules::loanRelease()}.
      */
     public function loanRelease(Loan $loan, int $userId, string $method = 'cash'): ?AccountingJournal
@@ -147,6 +147,7 @@ final class AutomaticPoster
             method: $method,
             map: $map,
             items: $this->deductionItems($loan),
+            loan: $this->releaseLabel($loan),
         );
     }
 
@@ -158,6 +159,7 @@ final class AutomaticPoster
      *     types: array<string, array{amount: int, role: string|null}>,
      *     mapped: array<string, int>,
      *     unmapped: array<string, int>,
+     *     unusable: list<array{type: string, reason: string}>,
      *     remainder: int,
      *     credits: array<string, int>,
      * }
@@ -167,42 +169,73 @@ final class AutomaticPoster
         return PostingRules::classifyDeductions(
             $this->centavos($loan->total_deductions, 'total deductions', $loan),
             $this->deductionItems($loan),
+            $this->releaseLabel($loan),
         );
     }
 
     /**
      * `loans.deductions` as the release rule takes it: each item's name, and
-     * its peso `amount` in centavos.
+     * its peso `amount` in centavos — or null when that amount is unusable.
      *
-     * Item by item through {@see self::centavos()}, so a blank, text or
-     * negative amount is refused and named rather than read as zero, and no
-     * float sum of pesos ever reaches the books. A loan with no list (`null`,
-     * or anything that is not one) has no items; its whole total is then the
-     * unitemised remainder, booked as it always was.
+     * Only a LIST is a list of items. `null`, a JSON scalar or string, and a
+     * JSON object (`{"processing_fee": 500}`) all mean "no items": the whole
+     * total is then the unitemised remainder, booked as it always was. An entry
+     * of the list that is not an array is passed through as it is, for the
+     * rule to set aside.
      *
-     * @return list<array{name: string, amount: int}>
+     * Each amount is converted on its own by {@see Money::toCentavos()}, so no
+     * float sum of pesos ever reaches the books. A NEGATIVE amount keeps its
+     * sign rather than becoming null: the rule refuses it on a mapped type and
+     * names the figure, which it cannot do with a null.
+     *
+     * @return list<array{name: string, amount: int|null}|mixed>
      */
     private function deductionItems(Loan $loan): array
     {
-        $items = [];
-        $position = 0;
+        $deductions = $loan->deductions;
 
-        foreach (is_array($loan->deductions) ? $loan->deductions : [] as $item) {
-            $position++;
-            $name = is_array($item) && is_string($item['name'] ?? null) ? $item['name'] : '';
-            $amount = is_array($item) ? ($item['amount'] ?? null) : null;
-
-            $items[] = [
-                'name' => $name,
-                'amount' => $this->centavos(
-                    is_int($amount) || is_float($amount) || is_string($amount) ? $amount : null,
-                    $name === '' ? "amount for deduction {$position}" : "amount for the deduction \"{$name}\"",
-                    $loan,
-                ),
-            ];
+        if (! is_array($deductions) || ! array_is_list($deductions)) {
+            return [];
         }
 
-        return $items;
+        return array_map(fn (mixed $item): mixed => is_array($item)
+            ? [
+                'name' => is_string($item['name'] ?? null) ? $item['name'] : '',
+                'amount' => $this->itemCentavos($item['amount'] ?? null),
+            ]
+            : $item, $deductions);
+    }
+
+    /**
+     * One item's peso amount in centavos, signed; null when it is not an
+     * amount at all — missing, text, a list, or past what this module records.
+     */
+    private function itemCentavos(mixed $pesos): ?int
+    {
+        if (! is_int($pesos) && ! is_float($pesos) && ! is_string($pesos)) {
+            return null;
+        }
+
+        $centavos = Money::toCentavos($pesos);
+
+        if ($centavos !== null || ! is_numeric($pesos) || (float) $pesos >= 0) {
+            return $centavos;
+        }
+
+        $magnitude = Money::toCentavos(is_string($pesos) ? ltrim(trim($pesos), '-') : -$pesos);
+
+        return $magnitude === null ? null : -$magnitude;
+    }
+
+    /**
+     * What a release refusal calls the loan. The application number, because
+     * a refused release rolls back the loan account number it was issued.
+     */
+    private function releaseLabel(Loan $loan): string
+    {
+        $application = $loan->application_number;
+
+        return is_string($application) && $application !== '' ? $application : $this->businessIdentifier($loan);
     }
 
     /**

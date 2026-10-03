@@ -158,18 +158,26 @@ final class PostingRules
      * processing fee income, so the journal is the same three lines it always
      * was — debit the gross, credit the net, credit the total withheld.
      *
-     * The total stays the authority on what was withheld. Items with an
-     * account of their own that add up to more than it are refused, as is a
-     * negative item: booking either would credit income the loan's own figures
-     * say was never kept.
+     * ## No new refusals for what the old rule posted
+     *
+     * The total stays the authority on what was withheld, and the item list is
+     * only trusted where it has to be: for a type with an account of its own.
+     * So the only new refusals are a MAPPED item whose amount cannot be booked
+     * (missing, not whole centavos, negative, or past the ceiling) and mapped
+     * items that add up to more than the total — booking either would credit
+     * that account with money the loan's own figures do not show was kept.
+     * Anything unusable on an UNMAPPED type, or an entry that is not an item at
+     * all, is set aside: its money is already in the remainder, which is
+     * booked exactly as before.
      *
      * @param  int  $gross  `loans.principal_amount`, in centavos
      * @param  int  $net  `loans.net_proceeds` — what was handed over
      * @param  int  $deductions  `loans.total_deductions` — what was withheld
-     * @param  array<array-key, mixed>  $items  `loans.deductions`, each amount in centavos:
-     *                                          list<array{name: string, amount: int}>
+     * @param  array<array-key, mixed>  $items  `loans.deductions` as a list, each usable amount in centavos:
+     *                                          list<array{name: string, amount: int|null}|mixed>
+     * @param  string  $loan  what to call the loan in a refusal ("LA-000154")
      *
-     * @throws CannotPostToTheBooksException when the three figures do not reconcile, or the items cannot be booked
+     * @throws CannotPostToTheBooksException when the three figures do not reconcile, or a mapped item cannot be booked
      */
     public static function loanRelease(
         int $gross,
@@ -178,6 +186,7 @@ final class PostingRules
         string $method,
         AccountMap $map,
         array $items = [],
+        string $loan = 'This loan',
     ): array {
         self::requireAmount($gross, 'A loan release');
         self::requireComponent($net, 'The net proceeds');
@@ -201,7 +210,7 @@ final class PostingRules
         // role. A role whose share is zero emits no line and is not resolved
         // at all, so a product with no fees still releases on a chart that has
         // never mapped processing fee income.
-        foreach (self::classifyDeductions($deductions, $items)['credits'] as $role => $amount) {
+        foreach (self::classifyDeductions($deductions, $items, $loan)['credits'] as $role => $amount) {
             $lines[] = self::creditIfAny($map, $role, $amount);
         }
 
@@ -218,59 +227,67 @@ final class PostingRules
      * Pure, like every rule here, so the release rule, the
      * `accounting:loan-release-diff` preview and the tests all read one answer:
      *
-     * - `types` — every type on the list (normalised name), its summed amount,
-     *   and the role it maps to, or null when it has none;
+     * - `types` — every type with a usable item (normalised name), its summed
+     *   amount, and the role it maps to, or null when it has none;
      * - `mapped` — role => the summed items whose type maps to it;
-     * - `unmapped` — type => the summed items whose type maps to nothing;
-     * - `remainder` — `$deductions` minus every item, signed: the part of the
-     *   total no item explains (negative when the items add up to more);
+     * - `unmapped` — type => the summed usable items whose type maps to nothing;
+     * - `unusable` — the entries set aside, each with its type ('' when it has
+     *   no name, or is not an item at all) and why: `not an item`,
+     *   `no usable amount`, `negative amount`, or `amount past the ceiling`.
+     *   Only unmapped types ever land here; a mapped one is refused instead;
+     * - `remainder` — `$deductions` minus every usable item, signed: the part
+     *   of the total no item explains (negative when the items add up to more);
      * - `credits` — role => what the release credits it, in line order: the
      *   mapped items, then `$deductions` minus them on
      *   {@see self::UNMAPPED_DEDUCTION_ROLE}. Zero shares are left out.
      *
      * @param  int  $deductions  `loans.total_deductions`, in centavos
-     * @param  array<array-key, mixed>  $items  list<array{name: string, amount: int}>, amounts in centavos
+     * @param  array<array-key, mixed>  $items  list<array{name: string, amount: int|null}|mixed>, amounts in centavos
+     * @param  string  $loan  what to call the loan in a refusal
      * @return array{
      *     types: array<string, array{amount: int, role: string|null}>,
      *     mapped: array<string, int>,
      *     unmapped: array<string, int>,
+     *     unusable: list<array{type: string, reason: string}>,
      *     remainder: int,
      *     credits: array<string, int>,
      * }
      *
-     * @throws CannotPostToTheBooksException for an item amount that is not whole, non-negative centavos,
+     * @throws CannotPostToTheBooksException for a mapped item whose amount cannot be booked,
      *                                       or mapped items that exceed `$deductions`
      */
-    public static function classifyDeductions(int $deductions, array $items): array
+    public static function classifyDeductions(int $deductions, array $items, string $loan = 'This loan'): array
     {
         self::requireComponent($deductions, 'The total deductions');
 
         $types = [];
         $mapped = [];
         $unmapped = [];
+        $unusable = [];
         $itemised = 0;
 
         foreach ($items as $item) {
-            $name = is_array($item) && is_string($item['name'] ?? null) ? $item['name'] : '';
-            $amount = is_array($item) ? ($item['amount'] ?? null) : null;
-            $label = $name === '' ? 'An unnamed deduction' : "The deduction \"{$name}\"";
+            if (! is_array($item)) {
+                $unusable[] = ['type' => '', 'reason' => 'not an item'];
 
-            if (! is_int($amount)) {
-                throw CannotPostToTheBooksException::because(
-                    "{$label} has no usable amount, so the release cannot be booked by type. The release has "
-                    .'not been posted — an item read as zero would book its share where it does not belong.');
+                continue;
             }
 
-            if ($amount < 0) {
-                throw CannotPostToTheBooksException::because(
-                    "{$label} is ".Money::format($amount).'. A deduction cannot be negative — it is money '
-                    .'withheld, and direction belongs to the column, not the sign. The release has not been posted.');
-            }
-
-            self::requireWithinBounds($amount, $label);
-
+            $name = is_string($item['name'] ?? null) ? $item['name'] : '';
             $type = self::deductionType($name);
             $role = self::DEDUCTION_ROLES[$type] ?? null;
+            $amount = $item['amount'] ?? null;
+            $problem = self::unusableAmount($amount);
+
+            if ($problem !== null) {
+                if ($role !== null) {
+                    throw self::unbookableMappedItem($loan, $name, $amount, $problem);
+                }
+
+                $unusable[] = ['type' => $type, 'reason' => $problem];
+
+                continue;
+            }
 
             $types[$type] = ['amount' => ($types[$type]['amount'] ?? 0) + $amount, 'role' => $role];
 
@@ -287,8 +304,8 @@ final class PostingRules
 
         if ($mappedTotal > $deductions) {
             throw CannotPostToTheBooksException::because(
-                'This loan does not reconcile: its deductions with an account of their own come to '
-                .Money::format($mappedTotal).', but the loan withheld '.Money::format($deductions)
+                "{$loan} does not reconcile: its deductions with an account of their own come to "
+                .Money::format($mappedTotal).', but it withheld '.Money::format($deductions)
                 .' in total. The release has not been posted — booking those items where they belong would '
                 .'credit more than was withheld, and trimming one to fit would be choosing which figure is wrong.');
         }
@@ -311,9 +328,39 @@ final class PostingRules
             'types' => $types,
             'mapped' => $mapped,
             'unmapped' => $unmapped,
+            'unusable' => $unusable,
             'remainder' => $deductions - $itemised,
             'credits' => $credits,
         ];
+    }
+
+    /**
+     * Why an item amount cannot be booked, or null when it is whole,
+     * non-negative centavos within the module's ceiling.
+     */
+    private static function unusableAmount(mixed $amount): ?string
+    {
+        return match (true) {
+            ! is_int($amount) => 'no usable amount',
+            $amount < 0 => 'negative amount',
+            $amount > Money::maxCentavos() => 'amount past the ceiling',
+            default => null,
+        };
+    }
+
+    /** The refusal for an item with an account of its own that cannot be booked to it. */
+    private static function unbookableMappedItem(string $loan, string $name, mixed $amount, string $problem): CannotPostToTheBooksException
+    {
+        $what = match ($problem) {
+            'negative amount' => 'is '.Money::format($amount).'. A deduction is money withheld and cannot be '
+                .'negative — direction belongs to the column, not the sign.',
+            'amount past the ceiling' => 'is '.Money::format($amount).', which is beyond any amount this system '
+                .'records exactly.',
+            default => 'has no usable amount, and reading it as zero would book that fee as something else.',
+        };
+
+        return CannotPostToTheBooksException::because(
+            "{$loan} cannot be posted: its deduction \"{$name}\" {$what} The release has not been posted.");
     }
 
     /** A deduction's type: its name, normalised as {@see FeeOverlapDetector::normalize()} does. */

@@ -43,13 +43,16 @@ use Illuminate\Database\Eloquent\Collection as EloquentCollection;
  *   what would be posted, with both figures and the difference;
  * - every journal it could not rebuild, and why — a loan whose figures no
  *   longer reconcile, a role with no account, a loan that no longer exists;
- * - the deduction types found on those loans, how many loans carry each and
- *   for how much, and whether each has an account mapping;
+ * - the deduction types found on the loans it compared (skipped ones are
+ *   left out), how many loans carry each and for how much, and whether each
+ *   has an account mapping — plus any item set aside as unusable;
+ * - the not-itemised remainders, totals above their items and items above
+ *   their totals reported apart, so one cannot offset the other;
  * - the counts, and the total absolute difference in pesos.
  *
  * Journals are read in chunks by id with their lines eager-loaded and their
  * loans fetched in one query per chunk, so the cost is three queries per
- * {@see self::CHUNK} journals however large the book.
+ * chunk of {@see self::CHUNK} journals however large the book.
  */
 #[Signature('accounting:loan-release-diff {--dry-run : Required. Preview the comparison; this command never changes a journal}')]
 #[Description('Compare every posted loan release journal with what the release rule would post today. Read only')]
@@ -58,6 +61,16 @@ class DiffLoanReleaseJournals extends Command
     private const CHUNK = 500;
 
     private const NOTHING = '—';
+
+    /**
+     * `$chunkSize` is a constructor argument so a test can lower it through
+     * the container (`when(...)->needs('$chunkSize')`) and cross chunk
+     * boundaries with a handful of journals instead of hundreds.
+     */
+    public function __construct(private readonly int $chunkSize = self::CHUNK)
+    {
+        parent::__construct();
+    }
 
     private int $scanned = 0;
 
@@ -74,9 +87,14 @@ class DiffLoanReleaseJournals extends Command
     /** @var array<string, array{loans: int, amount: int, role: string|null}> */
     private array $types = [];
 
-    private int $unitemisedLoans = 0;
+    /** @var array<string, int> "type|reason" => loans carrying such an item */
+    private array $unusable = [];
 
-    private int $unitemisedAmount = 0;
+    /** @var array{loans: int, amount: int} totals above their usable items */
+    private array $totalsAboveItems = ['loans' => 0, 'amount' => 0];
+
+    /** @var array{loans: int, amount: int} usable items above their totals */
+    private array $itemsAboveTotals = ['loans' => 0, 'amount' => 0];
 
     /** @var array<int, string> */
     private array $accountLabels = [];
@@ -102,6 +120,16 @@ class DiffLoanReleaseJournals extends Command
         }
 
         $this->line("Rebuilt from each loan's current figures with today's release rule and today's account mappings.");
+
+        if (array_diff(PostingRules::DEDUCTION_ROLES, [PostingRules::UNMAPPED_DEDUCTION_ROLE]) === []) {
+            $this->line(
+                "With today's mappings the rule books the same lines as before, so any difference comes from "
+                .'loan figures edited after posting or a mapping changed since.'
+            );
+        } else {
+            $this->line('Deduction types with an account of their own are booked to it, so journals posted before that may differ by design.');
+        }
+
         $this->newLine();
 
         $map = AccountMap::resolve();
@@ -116,7 +144,7 @@ class DiffLoanReleaseJournals extends Command
             ->where('status', 'posted')
             ->select(['id', 'journal_no', 'postable_type', 'postable_id'])
             ->with('lines:id,accounting_journal_id,accounting_account_id,debit,credit')
-            ->chunkById(self::CHUNK, function (EloquentCollection $journals) use ($poster, $map): void {
+            ->chunkById($this->chunkSize, function (EloquentCollection $journals) use ($poster, $map): void {
                 $loans = Loan::query()
                     ->whereIn('id', $journals->where('postable_type', Loan::class)->pluck('postable_id')->all())
                     ->get(['id', 'loan_account_number', 'application_number', 'principal_amount', 'net_proceeds', 'total_deductions', 'deductions'])
@@ -148,13 +176,15 @@ class DiffLoanReleaseJournals extends Command
         $reference = (string) ($loan->loan_account_number ?? $loan->application_number ?? self::NOTHING);
 
         try {
-            $this->countTypes($poster->releaseDeductions($loan));
+            $deductions = $poster->releaseDeductions($loan);
             $posting = $poster->releasePosting($loan, $map);
         } catch (CannotPostToTheBooksException $refused) {
             $this->skipped[] = [(string) $journal->journal_no, $reference, $refused->getMessage()];
 
             return;
         }
+
+        $this->countTypes($deductions);
 
         $posted = $this->totalsByAccount($journal->lines->map(static fn ($line): array => [
             'account_id' => (int) $line->accounting_account_id,
@@ -192,7 +222,11 @@ class DiffLoanReleaseJournals extends Command
     }
 
     /**
-     * @param  array{types: array<string, array{amount: int, role: string|null}>, remainder: int}  $deductions
+     * @param  array{
+     *     types: array<string, array{amount: int, role: string|null}>,
+     *     unusable: list<array{type: string, reason: string}>,
+     *     remainder: int,
+     * }  $deductions
      */
     private function countTypes(array $deductions): void
     {
@@ -204,9 +238,21 @@ class DiffLoanReleaseJournals extends Command
             ];
         }
 
-        if ($deductions['remainder'] !== 0) {
-            $this->unitemisedLoans++;
-            $this->unitemisedAmount += $deductions['remainder'];
+        $kinds = array_unique(array_map(
+            static fn (array $item): string => "{$item['type']}|{$item['reason']}",
+            $deductions['unusable'],
+        ));
+
+        foreach ($kinds as $kind) {
+            $this->unusable[$kind] = ($this->unusable[$kind] ?? 0) + 1;
+        }
+
+        if ($deductions['remainder'] > 0) {
+            $this->totalsAboveItems['loans']++;
+            $this->totalsAboveItems['amount'] += $deductions['remainder'];
+        } elseif ($deductions['remainder'] < 0) {
+            $this->itemsAboveTotals['loans']++;
+            $this->itemsAboveTotals['amount'] -= $deductions['remainder'];
         }
     }
 
@@ -251,29 +297,53 @@ class DiffLoanReleaseJournals extends Command
         $this->newLine();
         $this->line('Deduction types on these loans');
 
-        if ($this->types === []) {
+        if ($this->types === [] && $this->unusable === []) {
             $this->line('  None.');
         } else {
             $types = $this->types;
             uksort($types, static fn (string $a, string $b): int => [$types[$b]['loans'], $a] <=> [$types[$a]['loans'], $b]);
 
-            $this->table(['Deduction type', 'Loans', 'Total', 'Account mapping'], array_map(
-                fn (string $type, array $found): array => [
-                    $type === '' ? '(no name)' : $type,
-                    number_format($found['loans']),
-                    Money::format($found['amount']),
-                    $this->mappingOf($found['role'], $map),
-                ],
-                array_keys($types),
-                $types,
-            ));
+            $unusable = $this->unusable;
+            ksort($unusable);
+
+            $this->table(['Deduction type', 'Loans', 'Total', 'Account mapping'], [
+                ...array_map(
+                    fn (string $type, array $found): array => [
+                        $type === '' ? '(no name)' : $type,
+                        number_format($found['loans']),
+                        Money::format($found['amount']),
+                        $this->mappingOf($found['role'], $map),
+                    ],
+                    array_keys($types),
+                    $types,
+                ),
+                ...array_map(
+                    static function (string $kind, int $loans): array {
+                        [$type, $reason] = explode('|', $kind, 2);
+
+                        return [
+                            ($type === '' ? '' : "{$type} ")."(unusable item: {$reason})",
+                            number_format($loans),
+                            self::NOTHING,
+                            'none — set aside; its money is in the not-itemised remainder',
+                        ];
+                    },
+                    array_keys($unusable),
+                    $unusable,
+                ),
+            ]);
         }
 
         $this->line(sprintf(
-            '  Not itemised (total deductions minus the items): %s loan(s), %s — booked to %s as before.',
-            number_format($this->unitemisedLoans),
-            Money::format($this->unitemisedAmount),
+            '  Total deductions above their usable items (not itemised): %s loan(s), %s — booked to %s as before.',
+            number_format($this->totalsAboveItems['loans']),
+            Money::format($this->totalsAboveItems['amount']),
             PostingRules::UNMAPPED_DEDUCTION_ROLE,
+        ));
+        $this->line(sprintf(
+            '  Usable items above total deductions: %s loan(s), %s — only the total is booked, as before.',
+            number_format($this->itemsAboveTotals['loans']),
+            Money::format($this->itemsAboveTotals['amount']),
         ));
 
         $this->newLine();

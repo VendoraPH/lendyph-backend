@@ -2,10 +2,12 @@
 
 namespace Tests\Feature;
 
+use App\Console\Commands\DiffLoanReleaseJournals;
 use App\Models\AccountingJournal;
 use App\Models\Borrower;
 use App\Models\Loan;
 use App\Models\LoanProduct;
+use App\Services\Accounting\JournalPoster;
 use App\Services\LoanService;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Artisan;
@@ -262,6 +264,124 @@ class AccountingLoanReleaseDiffCommandTest extends TestCase
         $this->assertMatchesRegularExpression('/Journals scanned:\s+2\b/', $output);
         $this->assertMatchesRegularExpression('/Skipped:\s+1\b/', $output);
         $this->assertMatchesRegularExpression('/Would differ:\s+0\b/', $output);
+
+        // Only the loan that was compared counts towards the deduction types.
+        $this->assertMatchesRegularExpression('/processing fee\s*\|\s*1\s*\|\s*₱1,000\.00\s*\|/u', $output);
+    }
+
+    public function test_the_header_says_todays_mappings_book_the_same_lines_as_before(): void
+    {
+        $this->seedChartOfAccounts();
+        $this->releaseLoan();
+
+        $output = $this->runCommand();
+
+        $this->assertStringContainsString(
+            "With today's mappings the rule books the same lines as before, so any difference comes from "
+            .'loan figures edited after posting or a mapping changed since.',
+            $output,
+        );
+    }
+
+    /**
+     * A total above its items and items above their total are reported apart,
+     * so one cannot hide the other; an item with no usable amount is listed
+     * rather than silently dropped.
+     */
+    public function test_remainders_either_way_and_unusable_items_are_reported_separately(): void
+    {
+        $this->seedChartOfAccounts();
+        $short = $this->releaseLoan();
+        $over = $this->releaseLoan();
+
+        // ₱2,050 withheld; the Service Fee item (₱500) is gone from the list.
+        DB::table('loans')->where('id', $short->id)->update(['deductions' => json_encode(array_values(array_filter(
+            $short->deductions,
+            static fn (array $item): bool => $item['name'] !== 'Service Fee',
+        )))]);
+
+        // ₱2,050 withheld; a ₱700 item it never charged, and one with no amount.
+        DB::table('loans')->where('id', $over->id)->update(['deductions' => json_encode([
+            ...$over->deductions,
+            ['name' => 'Documentary Stamp', 'amount' => 700, 'type' => 'fixed'],
+            ['name' => 'Notarial Fee', 'type' => 'fixed'],
+        ])]);
+
+        $output = $this->runCommand();
+
+        $this->assertMatchesRegularExpression('/Total deductions above their usable items[^:]*:\s+1 loan\(s\), ₱500\.00/u', $output);
+        $this->assertMatchesRegularExpression('/Usable items above total deductions:\s+1 loan\(s\), ₱700\.00/u', $output);
+        $this->assertMatchesRegularExpression(
+            '/notarial fee \(unusable item: no usable amount\)\s*\|\s*1\s*\|\s*—\s*\|/u',
+            $output,
+        );
+        $this->assertMatchesRegularExpression('/Would differ:\s+0\b/', $output);
+        $this->assertMatchesRegularExpression('/Skipped:\s+0\b/', $output);
+    }
+
+    /**
+     * Only POSTED release journals are compared. A reversed one is history
+     * with its own reversal beside it, and is left out even when its lines
+     * would differ.
+     */
+    public function test_a_reversed_release_journal_is_not_scanned(): void
+    {
+        $this->seedChartOfAccounts();
+        $this->releaseLoan();
+        $reversed = $this->releaseJournalOf($this->releaseLoan());
+
+        DB::table('accounting_journal_lines')
+            ->where('accounting_journal_id', $reversed->id)
+            ->where('accounting_account_id', $this->account('4030'))
+            ->update(['accounting_account_id' => $this->account('4040')]);
+        app(JournalPoster::class)->reverse($reversed->fresh(), now()->toDateString(), 'Test reversal', $this->admin->id);
+
+        $output = $this->runCommand();
+
+        $this->assertSame('reversed', $reversed->fresh()->status);
+        $this->assertMatchesRegularExpression('/Journals scanned:\s+1\b/', $output);
+        $this->assertMatchesRegularExpression('/Would differ:\s+0\b/', $output);
+        $this->assertStringNotContainsString($reversed->journal_no, $output);
+    }
+
+    /**
+     * Journals are read a chunk at a time. With the chunk lowered to two, five
+     * journals take three chunks, and the one altered in the last chunk is
+     * still found — nothing past the first chunk is dropped or read twice.
+     */
+    public function test_every_chunk_is_compared(): void
+    {
+        $this->seedChartOfAccounts();
+
+        $loans = [];
+        foreach (range(1, 5) as $ignored) {
+            $loans[] = $this->releaseLoan();
+        }
+
+        $last = $this->releaseJournalOf($loans[4]);
+        DB::table('accounting_journal_lines')
+            ->where('accounting_journal_id', $last->id)
+            ->where('accounting_account_id', $this->account('4030'))
+            ->update(['accounting_account_id' => $this->account('4040')]);
+
+        $this->app->when(DiffLoanReleaseJournals::class)->needs('$chunkSize')->give(2);
+
+        $loanReads = 0;
+        DB::listen(function ($query) use (&$loanReads): void {
+            if (preg_match('/^select `id`, `loan_account_number`.* from `loans` where `id` in/', $query->sql) === 1) {
+                $loanReads++;
+            }
+        });
+
+        $output = $this->runCommand();
+
+        // One read of loans per chunk: 2 + 2 + 1.
+        $this->assertSame(3, $loanReads);
+        $this->assertMatchesRegularExpression('/Journals scanned:\s+5\b/', $output);
+        $this->assertMatchesRegularExpression('/Would differ:\s+1\b/', $output);
+        $this->assertMatchesRegularExpression('/Matching:\s+4\b/', $output);
+        $this->assertStringContainsString($last->journal_no, $output);
+        $this->assertMatchesRegularExpression('/processing fee\s*\|\s*5\s*\|\s*₱5,000\.00\s*\|/u', $output);
     }
 
     public function test_an_organisation_with_no_books_has_nothing_to_compare(): void

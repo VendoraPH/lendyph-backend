@@ -3,6 +3,7 @@
 namespace Tests\Unit;
 
 use App\Exceptions\CannotPostToTheBooksException;
+use App\Models\AccountingAccountMapping;
 use App\Services\Accounting\AccountMap;
 use App\Services\Accounting\PostingRules;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -239,7 +240,7 @@ class AccountingPostingRulesTest extends TestCase
     public function test_mapped_items_that_exceed_the_total_deductions_are_refused(): void
     {
         $this->expectException(CannotPostToTheBooksException::class);
-        $this->expectExceptionMessageMatches('/₱2,000\.00.*₱1,500\.00/s');
+        $this->expectExceptionMessageMatches('/LN-000042.*₱2,000\.00.*₱1,500\.00/s');
 
         PostingRules::loanRelease(
             5_000_000, 4_850_000, 150_000, 'cash', $this->map(),
@@ -247,6 +248,7 @@ class AccountingPostingRulesTest extends TestCase
                 ['name' => 'Processing Fee', 'amount' => 120_000],
                 ['name' => 'processing fee', 'amount' => 80_000],
             ],
+            loan: 'LN-000042',
         );
     }
 
@@ -273,24 +275,28 @@ class AccountingPostingRulesTest extends TestCase
         ])['remainder']);
     }
 
-    /** Direction belongs to the column, not the sign — for an item as for a component. */
-    public function test_a_negative_deduction_item_is_refused(): void
+    /**
+     * A negative item with an account of its own is refused, naming the loan
+     * and the figure: direction belongs to the column, not the sign.
+     */
+    public function test_a_negative_mapped_item_is_refused_naming_the_loan(): void
     {
         $this->expectException(CannotPostToTheBooksException::class);
-        $this->expectExceptionMessageMatches('/"Service Fee".*-₱100\.00/s');
+        $this->expectExceptionMessageMatches('/LN-000042.*"Processing Fee".*-₱100\.00/s');
 
         PostingRules::loanRelease(
-            5_000_000, 4_860_000, 140_000, 'cash', $this->map(),
+            5_000_000, 4_960_000, 40_000, 'cash', $this->map(),
             items: [
-                ['name' => 'Processing Fee', 'amount' => 150_000],
-                ['name' => 'Service Fee', 'amount' => -10_000],
+                ['name' => 'Processing Fee', 'amount' => -10_000],
+                ['name' => 'Service Fee', 'amount' => 50_000],
             ],
+            loan: 'LN-000042',
         );
     }
 
     /**
-     * An item amount that is not whole centavos — a peso float, a string, or
-     * nothing at all — is refused rather than read as zero.
+     * An item amount that is not whole, non-negative centavos — a peso float,
+     * a string, nothing at all, a negative, or past the module's ceiling.
      *
      * @return array<string, array{mixed}>
      */
@@ -300,16 +306,83 @@ class AccountingPostingRulesTest extends TestCase
             'pesos as a float' => [1500.00],
             'a decimal string' => ['1500.00'],
             'missing' => [null],
+            'negative' => [-10_000],
+            'past the ceiling' => [9_007_199_254_740_993],
         ];
     }
 
+    /**
+     * On an item with an account of its own, an unusable amount refuses the
+     * release and names the loan: reading it as zero would book its share as
+     * something else.
+     */
     #[DataProvider('unusableItemAmounts')]
-    public function test_a_deduction_item_without_a_usable_amount_is_refused(mixed $amount): void
+    public function test_a_mapped_item_without_a_usable_amount_is_refused(mixed $amount): void
     {
         $this->expectException(CannotPostToTheBooksException::class);
-        $this->expectExceptionMessageMatches('/"Notarial Fee" has no usable amount/');
+        $this->expectExceptionMessageMatches('/LN-000042.*"Processing Fee"/s');
 
-        PostingRules::classifyDeductions(150_000, [['name' => 'Notarial Fee', 'amount' => $amount]]);
+        PostingRules::classifyDeductions(150_000, [['name' => 'Processing Fee', 'amount' => $amount]], 'LN-000042');
+    }
+
+    /**
+     * On an item with NO account of its own, the same amounts are not a
+     * refusal: the old rule posted these loans, and so does this one. The item
+     * is set aside — listed, so it stays visible — and its money is part of the
+     * remainder, booked exactly as before.
+     */
+    #[DataProvider('unusableItemAmounts')]
+    public function test_an_unmapped_item_without_a_usable_amount_is_set_aside_and_booked_as_before(mixed $amount): void
+    {
+        $items = [
+            ['name' => 'Processing Fee', 'amount' => 100_000],
+            ['name' => 'Notarial Fee', 'amount' => $amount],
+        ];
+
+        $posting = PostingRules::loanRelease(5_000_000, 4_850_000, 150_000, 'cash', $this->map(), items: $items);
+
+        $this->assertBalancedAndNonEmpty($posting);
+        $this->assertCount(3, $posting['lines']);
+        $this->assertSame(150_000, $this->amountOn($posting, 4030, 'credit'));
+
+        $deductions = PostingRules::classifyDeductions(150_000, $items);
+
+        $this->assertSame([], $deductions['unmapped']);
+        $this->assertArrayNotHasKey('notarial fee', $deductions['types']);
+        $this->assertCount(1, $deductions['unusable']);
+        $this->assertSame('notarial fee', $deductions['unusable'][0]['type']);
+        $this->assertSame(50_000, $deductions['remainder']);
+    }
+
+    /** Something in the list that is not an item at all is set aside the same way. */
+    public function test_an_entry_that_is_not_an_item_is_set_aside_and_booked_as_before(): void
+    {
+        $items = [['name' => 'Processing Fee', 'amount' => 100_000], 'Service Fee 500', 500, null];
+
+        $posting = PostingRules::loanRelease(5_000_000, 4_850_000, 150_000, 'cash', $this->map(), items: $items);
+
+        $this->assertSame(150_000, $this->amountOn($posting, 4030, 'credit'));
+
+        $deductions = PostingRules::classifyDeductions(150_000, $items);
+
+        $this->assertCount(3, $deductions['unusable']);
+        $this->assertSame(['type' => '', 'reason' => 'not an item'], $deductions['unusable'][0]);
+        $this->assertSame(50_000, $deductions['remainder']);
+    }
+
+    /**
+     * Every deduction type maps to a role the mapping screen actually offers,
+     * so a typo here cannot send a fee to a role nobody can ever set — and the
+     * table's keys are already in normal form, or they would never match.
+     */
+    public function test_every_deduction_role_is_a_real_posting_role(): void
+    {
+        foreach (PostingRules::DEDUCTION_ROLES as $type => $role) {
+            $this->assertContains($role, AccountingAccountMapping::ROLES, "\"{$type}\" maps to an unknown role.");
+            $this->assertSame($type, PostingRules::deductionType($type), "\"{$type}\" is not normalised.");
+        }
+
+        $this->assertContains(PostingRules::UNMAPPED_DEDUCTION_ROLE, AccountingAccountMapping::ROLES);
     }
 
     /**
