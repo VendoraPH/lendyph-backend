@@ -208,6 +208,9 @@ class ReportServerTotalsTest extends TestCase
             'created_by' => $this->admin->id,
             'principal_amount' => $principal,
             'net_proceeds' => $netProceeds,
+            // No recorded deductions, so the Income report charges the
+            // product's rate on the principal, unrounded per loan.
+            'deductions' => null,
             'insurance_remaining_balance' => 0,
             'status' => 'ongoing',
             'released_at' => $releasedAt,
