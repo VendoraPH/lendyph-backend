@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\GCashTier;
 use App\Models\GCashTransaction;
 use App\Models\User;
+use App\Services\Accounting\Money;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Http\Exceptions\HttpResponseException;
@@ -48,6 +49,9 @@ class GCashService
                 'charge_amount' => $charge,
                 'total_amount' => $total,
                 'status' => $status,
+                // A Cash In recorded as paid was paid at the counter, now.
+                // markPaid() stamps the same column when a pending one settles.
+                'paid_at' => $status === 'paid' ? $now : null,
                 'borrower_id' => $payload['borrower_id'] ?? null,
                 'gcash_non_member_id' => $payload['gcash_non_member_id'] ?? null,
                 'transactor_user_id' => $actor->id,
@@ -72,7 +76,8 @@ class GCashService
      * Cash In adds the charge to the amount; Cash Out deducts it.
      *
      * Writes nothing. Throws the same 422 on `amount` as recording would
-     * when no tier covers the amount.
+     * when no tier covers the amount, and when a Cash Out's charge would take
+     * all of it: the customer would receive nothing, or owe the difference.
      *
      * @return array{type: string, amount: float, charge_amount: float, total_amount: float}
      *
@@ -87,6 +92,12 @@ class GCashService
         $total = $type === 'cash_in'
             ? round($amount + $charge, 2)
             : round($amount - $charge, 2);
+
+        if ($type === 'cash_out' && $total <= 0) {
+            throw ValidationException::withMessages([
+                'amount' => ['Amount must be more than the '.Money::format((int) round($charge * 100)).' charge.'],
+            ]);
+        }
 
         return [
             'type' => $type,
