@@ -18,12 +18,16 @@ use Illuminate\Support\Facades\DB;
  *
  * For each role, in this order:
  *
- * - `service_fee_income` → the existing 4040 Service Fee Income.
+ * - `service_fee_income` → the existing 4040 Service Fee Income (code and name).
  * - `notarial_fees_payable` → 2030 Notarial Fees Payable, a new liability.
  * - `insurance_premium_payable` → 2040 Insurance Premium Payable, a new liability.
  * - `share_capital` → the chart's own equity account named "Share Capital",
  *   whatever its code, or a new 3060 Share Capital when it has none.
  * - `other_fee_income` → 4080 Other Fee Income, a new income account.
+ *
+ * A new account is looked for by its name anywhere in the chart first, so a
+ * chart already carrying one under another code is mapped to it rather than
+ * given a second.
  *
  * Every account must be active, postable (not a heading), not a contra
  * account, not a cash account, and of the role's type. A new account goes
@@ -33,9 +37,9 @@ use Illuminate\Support\Facades\DB;
  *
  * - a role already mapped, so an administrator's choice is never changed and
  *   a second run changes nothing;
- * - a code already taken by an account that is not the one described (another
- *   name, another type, inactive, a heading);
- * - 4040 missing or unusable;
+ * - a name carried by more than one account, or by one that cannot be posted
+ *   to, and a code already taken by an account with another name;
+ * - 4040 missing, unusable, or renamed;
  * - share capital when two equity accounts carry the name, or when equity
  *   accounts mention share capital but none is named exactly that, so it never
  *   adds a second share capital account next to the cooperative's own.
@@ -152,7 +156,7 @@ class ReleaseDeductionAccountsBackfill
         }
 
         [$account, $reason] = match ($role) {
-            'service_fee_income' => $this->existing(self::SERVICE_FEE_CODE, 'income'),
+            'service_fee_income' => $this->existing(self::SERVICE_FEE_CODE, 'Service Fee Income', 'income'),
             'share_capital' => $this->shareCapital(),
             default => $this->byCode(self::NEW_ACCOUNTS[$role]),
         };
@@ -177,11 +181,13 @@ class ReleaseDeductionAccountsBackfill
     }
 
     /**
-     * An existing account by code that must already be right.
+     * An existing account by code that must already be right: active,
+     * postable, of the role's type, and still carrying its name. A 4040 an
+     * administrator renamed for something else is not taken on its code alone.
      *
      * @return array{0: object|null, 1: string|null}
      */
-    private function existing(string $code, string $type): array
+    private function existing(string $code, string $name, string $type): array
     {
         $account = DB::table('accounting_accounts')->where('code', $code)->first();
 
@@ -189,33 +195,52 @@ class ReleaseDeductionAccountsBackfill
             return [null, "{$code} does not exist in this chart"];
         }
 
-        if (! $this->postable($account, $type)) {
-            return [null, "{$code} {$account->name} is not an active, postable {$type} account"];
+        if (! $this->postable($account, $type) || $this->normalize($account->name) !== $this->normalize($name)) {
+            return [null, "{$code} is {$account->name}, not an active, postable {$type} account named {$name}"];
         }
 
         return [$account, null];
     }
 
     /**
-     * The account a new-account role points at: the one already carrying its
-     * code and name, or none yet (to be created), or a reason it cannot be.
+     * The account a new-account role points at, found by its NAME anywhere in
+     * the chart before its code is looked at, so a chart that already keeps
+     * "Notarial Fees Payable" under another code never gets a second one:
+     *
+     * - one account with that name, active, postable and of the role's type:
+     *   that account, whatever its code;
+     * - more than one, or one that cannot be posted to: not certain, skipped;
+     * - none, and the code free: none yet, to be created;
+     * - none, and the code used by another account: skipped.
      *
      * @param  array{code: string, name: string, type: string}  $spec
      * @return array{0: object|null, 1: string|null}
      */
     private function byCode(array $spec): array
     {
-        $account = DB::table('accounting_accounts')->where('code', $spec['code'])->first();
+        $namesakes = DB::table('accounting_accounts')->orderBy('code')->get()
+            ->filter(fn (object $account): bool => $this->normalize($account->name) === $this->normalize($spec['name']))
+            ->values();
 
-        if ($account === null) {
-            return [null, null];
+        if ($namesakes->count() > 1) {
+            return [null, "more than one account is named {$spec['name']} (".$namesakes->pluck('code')->implode(', ').')'];
         }
 
-        if ($this->postable($account, $spec['type']) && $this->normalize($account->name) === $this->normalize($spec['name'])) {
-            return [$account, null];
+        if ($namesakes->count() === 1) {
+            $account = $namesakes->first();
+
+            return $this->postable($account, $spec['type'])
+                ? [$account, null]
+                : [null, "{$account->code} {$account->name} is not an active, postable {$spec['type']} account"];
         }
 
-        return [null, "{$spec['code']} is already used by {$account->name}, which is not an active, postable {$spec['type']} account named {$spec['name']}"];
+        $taken = DB::table('accounting_accounts')->where('code', $spec['code'])->first();
+
+        if ($taken !== null) {
+            return [null, "{$spec['code']} is already used by {$taken->name}"];
+        }
+
+        return [null, null];
     }
 
     /**

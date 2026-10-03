@@ -220,6 +220,28 @@ class LoanFormPreviewTest extends TestCase
         $this->postJson('/api/loans/preview', $terms)->assertOk()->assertJsonPath('data.amortization', null);
     }
 
+    /**
+     * A term outside the product's range is one saving would refuse, so there
+     * is no schedule to preview, however long the term.
+     */
+    public function test_there_is_no_schedule_for_a_term_outside_the_product_s_range(): void
+    {
+        $product = LoanProduct::factory()->create(['interest_rate' => 3, 'interest_method' => 'straight', 'frequency' => 'monthly', 'term' => 3, 'min_term' => 2, 'max_term' => 5]);
+        $terms = [
+            'loan_product_id' => $product->id,
+            'principal_amount' => 10000,
+            'interest_rate' => 3,
+            'frequency' => 'monthly',
+            'start_date' => '2026-10-03',
+        ];
+
+        foreach ([1, 6, 1_000_000] as $term) {
+            $this->postJson('/api/loans/preview', [...$terms, 'term' => $term])->assertOk()->assertJsonPath('data.amortization', null);
+        }
+
+        $this->assertCount(5, $this->postJson('/api/loans/preview', [...$terms, 'term' => 5])->assertOk()->json('data.amortization.rows'));
+    }
+
     public function test_it_writes_nothing(): void
     {
         $product = LoanProduct::factory()->create(['interest_rate' => 3, 'interest_method' => 'straight', 'frequency' => 'monthly', 'term' => 3, 'max_term' => 3]);
@@ -250,6 +272,7 @@ class LoanFormPreviewTest extends TestCase
             'a negative collateral value' => [['collaterals' => [['snapshot_value' => -1]]], 'collaterals.0.snapshot_value'],
             'a collateral with no value' => [['collaterals' => [['collateral_id' => 3]]], 'collaterals.0.snapshot_value'],
             'an unknown product' => [['loan_product_id' => 999999], 'loan_product_id'],
+            'a rate with more places than saving accepts' => [['interest_rate' => 2.12345], 'interest_rate'],
         ];
     }
 

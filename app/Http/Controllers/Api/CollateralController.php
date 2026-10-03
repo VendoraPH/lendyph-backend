@@ -634,7 +634,7 @@ class CollateralController extends Controller
      *     it is NOT one. `$previousStatus` at that line is an audit-log
      *     `oldValues` field, not a status write; the write beside it moves the
      *     source loan from `released`/`ongoing` INTO `restructured`, which is
-     *     outside Loan::ACTIVE_STATUSES. That transition FREES a collateral, it
+     *     outside Loan::PLEDGING_STATUSES. That transition FREES a collateral, it
      *     cannot create a second holder. Deliberately left unguarded.
      *
      * `active_loans` remains an ARRAY, and should stay one. It is what keeps the

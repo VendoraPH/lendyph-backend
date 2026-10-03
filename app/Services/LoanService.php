@@ -355,7 +355,7 @@ class LoanService
      * `collateral_ids` input on RestructureLoanRequest to opt out with, and
      * leaving the collateral behind is not a neutral choice. On release,
      * closeRestructuredSource() flips the source to `restructured`, which is
-     * outside Loan::ACTIVE_STATUSES — so a source whose collateral did not come
+     * outside Loan::PLEDGING_STATUSES — so a source whose collateral did not come
      * with it makes CollateralResource's `active_loans` report a land title as
      * FREE while it is still securing a live balance, and makes
      * CollateralController::attach() let a second loan take it. That is the
@@ -1094,7 +1094,7 @@ class LoanService
             // statement in the transaction, as its comment requires.
             app(LoanApprovalChainService::class)->markReleased($loan, $releaser);
 
-            // `approved` → `released` is a transition INTO Loan::ACTIVE_STATUSES,
+            // `approved` → `released` is a transition INTO Loan::PLEDGING_STATUSES,
             // and it writes no `loan_collaterals` row, so the guard on
             // CollateralController::attach() never sees it. Without this, a loan
             // attached while its collateral's only other holder was inactive
@@ -1107,7 +1107,7 @@ class LoanService
             // release BOTH loans hold it — asserting before
             // closeRestructuredSource() would reject every restructure release
             // that inherited anything. Here the source is already `restructured`
-            // and out of ACTIVE_STATUSES, so what is asserted is the state this
+            // and out of PLEDGING_STATUSES, so what is asserted is the state this
             // transaction is actually about to commit. A throw still rolls the
             // whole release back, status write and loan account number included.
             /*
@@ -1244,7 +1244,7 @@ class LoanService
         // below restores it. An audit has flagged it as a third double-pledge
         // path; it is not one. The only status write here moves the source from
         // `released`/`ongoing` INTO `restructured`, which is outside
-        // Loan::ACTIVE_STATUSES, so it FREES a collateral rather than taking
+        // Loan::PLEDGING_STATUSES, so it FREES a collateral rather than taking
         // one. CollateralPledgeGuard is deliberately not called from here.
         $previousStatus = $source->status;
         $closingBalance = $this->totalOutstanding($source);
@@ -1521,7 +1521,8 @@ class LoanService
      *   rate frequency, the form's rate, term, frequency and start date — plus
      *   the share capital build-up added to each period, and the column totals.
      *   Null until the product, a principal, a rate, the term, the frequency
-     *   and the start date are all known.
+     *   and the start date are all known, and for a term outside the product's
+     *   range.
      *
      * Money is added in whole centavos, never as peso floats. Writes nothing.
      *
@@ -1569,7 +1570,16 @@ class LoanService
             return null;
         }
 
+        // A term outside the product's range is one createLoan() refuses, so it
+        // has no schedule. This also bounds the work a single preview can ask for.
         $term = (int) $input['term'];
+        $minTerm = (int) ($product->min_term ?? 1);
+        $maxTerm = (int) ($product->max_term ?? $product->term);
+
+        if ($term < $minTerm || $term > $maxTerm) {
+            return null;
+        }
+
         $termUnit = $product->term_unit->value;
 
         $loan = (new Loan)->forceFill([

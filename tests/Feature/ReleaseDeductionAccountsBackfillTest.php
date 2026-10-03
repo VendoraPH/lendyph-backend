@@ -163,6 +163,43 @@ class ReleaseDeductionAccountsBackfillTest extends TestCase
         $this->assertSame('Rental Income', AccountingAccount::where('code', '4080')->value('name'));
     }
 
+    public function test_it_maps_to_an_account_already_carrying_the_name_under_another_code_instead_of_adding_a_second(): void
+    {
+        $this->chartSeededBeforeTheseAccounts();
+        $own = $this->account3('2050', 'NOTARIAL FEES PAYABLE', 'liability');
+
+        $this->migration()->up();
+
+        $this->assertSame((int) $own->id, AccountingAccountMapping::resolved()['notarial_fees_payable']);
+        $this->assertFalse(AccountingAccount::where('code', '2030')->exists());
+        $this->assertSame(1, AccountingAccount::where('name', 'like', 'Notarial Fees Payable')->count());
+    }
+
+    public function test_it_skips_a_role_whose_name_is_on_an_account_it_cannot_post_to(): void
+    {
+        $this->chartSeededBeforeTheseAccounts();
+        $this->account3('4090', 'Other Fee Income', 'income')->update(['is_active' => false]);
+
+        $this->migration()->up();
+
+        $this->assertArrayNotHasKey('other_fee_income', AccountingAccountMapping::resolved());
+        $this->assertFalse(AccountingAccount::where('code', '4080')->exists());
+    }
+
+    public function test_it_skips_service_fee_income_when_4040_was_renamed_for_something_else(): void
+    {
+        $this->chartSeededBeforeTheseAccounts();
+        AccountingAccount::where('code', '4040')->update(['name' => 'Late Fee Income']);
+
+        $this->artisan('accounting:backfill-release-deduction-accounts', ['--dry-run' => true])
+            ->expectsOutputToContain('service_fee_income skipped: 4040 is Late Fee Income, not an active, postable income account named Service Fee Income')
+            ->assertSuccessful();
+
+        $this->migration()->up();
+
+        $this->assertArrayNotHasKey('service_fee_income', AccountingAccountMapping::resolved());
+    }
+
     public function test_it_skips_service_fee_income_when_4040_is_not_a_postable_income_account(): void
     {
         $this->chartSeededBeforeTheseAccounts();

@@ -205,7 +205,7 @@ class RepaymentService
                 $loan->update(['status' => 'completed']);
             } elseif ($loan->status === 'released') {
                 // No CollateralPledgeGuard call here on purpose. `released` and
-                // `ongoing` are BOTH in Loan::ACTIVE_STATUSES, so this loan is
+                // `ongoing` are BOTH in Loan::PLEDGING_STATUSES, so this loan is
                 // already an active holder of whatever it holds and this write
                 // cannot add one. The guard is for transitions INTO the active
                 // set from outside it; see voidRepayment() below.
@@ -531,7 +531,7 @@ class RepaymentService
                     ->count();
 
                 // `completed` → `ongoing`/`released` is a transition INTO
-                // Loan::ACTIVE_STATUSES, and it writes no `loan_collaterals`
+                // Loan::PLEDGING_STATUSES, and it writes no `loan_collaterals`
                 // row, so the guard on CollateralController::attach() cannot
                 // see it. This is the REACHABLE double pledge, reachable
                 // without anybody doing anything unusual: that guard
