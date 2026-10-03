@@ -84,7 +84,7 @@ class ShareCapitalReleaseDeductionsReportCommandTest extends TestCase
 
         $unreadable = explode('Could not be read', $output, 2)[1];
         $this->assertStringContainsString($released->loan_account_number, $unreadable);
-        $this->assertStringContainsString('Not credited at release', $unreadable);
+        $this->assertStringContainsString('No credit can be proven', $unreadable);
         $this->assertStringContainsString('₱500.00', $unreadable);
         $this->assertStringContainsString('₱400.00', $unreadable);
         $this->assertMatchesRegularExpression('/Missing release credits:\s+0 loans, ₱0\.00/', $output);

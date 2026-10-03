@@ -137,7 +137,7 @@ class ReportShareCapitalReleaseDeductions extends Command
         $unprovable = $credits->unprovableReason($loan, $amount, $booksKept);
 
         if ($unprovable !== null) {
-            $this->unreadable[] = [$reference, $loan->status, $released, 'Not credited at release: '.$unprovable];
+            $this->unreadable[] = [$reference, $loan->status, $released, 'No credit can be proven: '.$unprovable];
 
             return;
         }
