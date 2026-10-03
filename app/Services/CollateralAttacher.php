@@ -254,8 +254,9 @@ class CollateralAttacher
      * Take a collateral off a loan, and record the value it had been pledged
      * at.
      *
-     * The caller holds the collateral's row lock and has passed
-     * lockEditableLoan(). Every write of this pledge holds one of those two
+     * The caller holds the collateral's row lock and the loan's row lock
+     * (lockEditableLoan(), or the draft check LoanController::destroy() makes
+     * on the locked row). Every write of this pledge holds one of those two
      * locks, so the pledge read here cannot change before it is removed.
      *
      * @throws ValidationException on `collateral` when the loan does not hold it

@@ -11,8 +11,9 @@ use PDOException;
 /**
  * The transaction every collateral write runs in: attach and detach
  * (CollateralController), PUT /collaterals/{id}, PUT /loans/{loan} when it
- * carries `collaterals`, and restructure creation, which copies pledges onto
- * the new loan (LoanService::restructure()).
+ * carries `collaterals`, restructure creation, which copies pledges onto
+ * the new loan (LoanService::restructure()), and DELETE /loans/{loan}, which
+ * detaches a draft's pledges before deleting it.
  *
  * Those paths all lock in one order (see CollateralAttacher), which keeps two
  * of them from deadlocking in the ordinary case but cannot rule it out: InnoDB
