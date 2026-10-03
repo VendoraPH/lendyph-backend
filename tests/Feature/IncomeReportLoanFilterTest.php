@@ -89,15 +89,28 @@ class IncomeReportLoanFilterTest extends TestCase
             ->assertJsonPath('data.total', 6370.58);
     }
 
+    /**
+     * The product's processing fee recorded as deducted, the way
+     * LoanService::createLoan() writes it; the Income report reads it there.
+     */
     private function releasedLoan(LoanProduct $product, string $releasedAt, float $principal): Loan
     {
+        $fee = round($principal * (float) $product->processing_fee / 100, 2);
+
         return Loan::factory()->create([
             'borrower_id' => Borrower::factory()->create(['branch_id' => $this->branch->id])->id,
             'loan_product_id' => $product->id,
             'branch_id' => $this->branch->id,
             'created_by' => $this->admin->id,
             'principal_amount' => $principal,
-            'net_proceeds' => $principal,
+            'deductions' => [[
+                'name' => 'Processing Fee',
+                'amount' => $fee,
+                'type' => 'percentage',
+                'original_value' => (float) $product->processing_fee,
+            ]],
+            'total_deductions' => $fee,
+            'net_proceeds' => $principal - $fee,
             'status' => 'ongoing',
             'released_at' => $releasedAt,
         ]);

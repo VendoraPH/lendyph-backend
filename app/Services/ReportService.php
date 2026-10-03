@@ -627,26 +627,17 @@ class ReportService
      * Interest and penalty collected in the period, plus processing fees on
      * the loans released in it. `branch_id` and `loan_id` narrow every figure:
      * the repayments through incomeRepaymentsQuery(), the fees by the loan
-     * they were charged on.
+     * they were charged on. See processingFeesOfReleasedLoans() for which fee
+     * figure each loan contributes.
      */
     public function incomeReport(array $filters): array
     {
-        $branchId = $filters['branch_id'] ?? null;
-
         $query = $this->incomeRepaymentsQuery($filters);
 
         $interestIncome = (float) (clone $query)->sum('interest_applied');
         $penaltyIncome = (float) (clone $query)->sum('penalty_applied');
 
-        $processingFees = (float) DB::table('loans')
-            ->join('loan_products', 'loans.loan_product_id', '=', 'loan_products.id')
-            ->whereIn('loans.status', Loan::EVER_RELEASED_STATUSES)
-            ->when($branchId, fn ($q, $b) => $q->where('loans.branch_id', $b))
-            ->when($filters['loan_id'] ?? null, fn ($q, $l) => $q->where('loans.id', $l))
-            ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->where('loans.released_at', '>=', self::dayStart($d)))
-            ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->where('loans.released_at', '<', self::nextDayStart($d)))
-            ->selectRaw('SUM(loan_products.processing_fee / 100 * loans.principal_amount) as total')
-            ->value('total') ?? 0;
+        $processingFees = $this->processingFeesOfReleasedLoans($filters);
 
         $interestIncome = round($interestIncome, 2);
         $processingFees = round($processingFees, 2);
@@ -662,6 +653,75 @@ class ReportService
             'total' => round($interestIncome + $processingFees + $penaltyIncome, 2),
             'generated_at' => now()->toDateTimeString(),
         ];
+    }
+
+    /**
+     * The processing fees withheld on the loans released in the period, as
+     * they were actually deducted, unrounded.
+     *
+     * A loan's `deductions` is the record of what was withheld at release, so
+     * its fee is the peso `amount` of every item whose name normalises to
+     * "processing fee" (FeeOverlapDetector's rule, so "PROCESSING-FEE." counts
+     * and "Processing Fee Waiver" does not). That covers the item
+     * LoanService::createLoan() writes from the product, a catalog fee
+     * LoanReleaseFeeService appends at release under that name, and a CSV
+     * import's. `amount` is pesos in all three; `original_value` is the rate
+     * for a percentage item and is never read here. A loan that recorded its
+     * deductions without such an item, `[]` included, withheld no processing
+     * fee and contributes nothing.
+     *
+     * A loan with no record falls back to the product's rate × principal, as
+     * this report always computed it: `deductions` NULL (SQL or JSON), or not
+     * a list of items, or an empty list beside a non-zero `total_deductions`,
+     * which contradicts itself. The rate is not rounded; the caller rounds the
+     * total once, as before.
+     *
+     * Two reads with the same filters. The fallback stays one SQL SUM, so its
+     * decimal arithmetic is exactly what the report produced before. The
+     * recorded items are streamed in pages and matched in PHP, so the name test
+     * is FeeOverlapDetector's own and not a second copy of it in SQL; their
+     * amounts are already whole centavos and are summed as integers.
+     */
+    private function processingFeesOfReleasedLoans(array $filters): float
+    {
+        $releasedLoans = DB::table('loans')
+            ->whereIn('loans.status', Loan::EVER_RELEASED_STATUSES)
+            ->when($filters['branch_id'] ?? null, fn ($q, $b) => $q->where('loans.branch_id', $b))
+            ->when($filters['loan_id'] ?? null, fn ($q, $l) => $q->where('loans.id', $l))
+            ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->where('loans.released_at', '>=', self::dayStart($d)))
+            ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->where('loans.released_at', '<', self::nextDayStart($d)));
+
+        $hasItems = "JSON_TYPE(loans.deductions) IN ('ARRAY', 'OBJECT')";
+
+        $unrecorded = (float) ((clone $releasedLoans)
+            ->join('loan_products', 'loans.loan_product_id', '=', 'loan_products.id')
+            ->where(fn ($q) => $q
+                ->whereNull('loans.deductions')
+                ->orWhereRaw("NOT ({$hasItems})")
+                ->orWhereRaw('(JSON_LENGTH(loans.deductions) = 0 AND loans.total_deductions > 0)'))
+            ->selectRaw('SUM(loan_products.processing_fee / 100 * loans.principal_amount) as total')
+            ->value('total') ?? 0);
+
+        $detector = app(FeeOverlapDetector::class);
+        $recordedCentavos = 0;
+
+        (clone $releasedLoans)
+            ->whereRaw($hasItems)
+            ->whereRaw('JSON_LENGTH(loans.deductions) > 0')
+            ->select(['loans.id', 'loans.deductions'])
+            ->lazyById(1000, 'loans.id', 'id')
+            ->each(function (object $loan) use ($detector, &$recordedCentavos): void {
+                foreach (json_decode($loan->deductions, true) as $item) {
+                    if (is_array($item)
+                        && is_string($item['name'] ?? null)
+                        && $detector->fieldFor($item['name']) === 'processing_fee'
+                    ) {
+                        $recordedCentavos += (int) round((float) ($item['amount'] ?? 0) * 100);
+                    }
+                }
+            });
+
+        return $unrecorded + $recordedCentavos / 100;
     }
 
     // ── Income by Loan Account ───────────────────────────────────────────

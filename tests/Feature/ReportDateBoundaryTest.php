@@ -270,6 +270,9 @@ class ReportDateBoundaryTest extends TestCase
             'principal_amount' => $principal,
             'net_proceeds' => $principal,
             'total_deductions' => 0,
+            // No recorded deductions, so the Income report charges the
+            // product's rate on the principal.
+            'deductions' => null,
             'status' => 'ongoing',
             'released_at' => $releasedAt,
         ]);

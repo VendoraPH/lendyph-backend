@@ -38,9 +38,13 @@ class GCashChargePreviewTest extends TestCase
     public static function quotedAmounts(): array
     {
         $cases = [];
+        $amounts = [1, 750.5, 1500, '1500.01', 2750.55, 5000, 5500, '5500.00', 49999.99, 50000];
 
         foreach (['cash_in', 'cash_out'] as $type) {
-            foreach ([1, 750.5, 1500, '1500.01', 2750.55, 5000, 5500, '5500.00', 49999.99, 50000] as $amount) {
+            // A Cash Out must be more than its charge, ₱10 in the first tier,
+            // so its smallest case is a centavo above it. The refusal at and
+            // below the charge is test_a_cash_out_at_or_below_its_charge_is_refused.
+            foreach ($type === 'cash_out' ? ['10.01', ...array_slice($amounts, 1)] : $amounts as $amount) {
                 $cases["{$type} {$amount}"] = [$type, $amount];
             }
         }
@@ -171,6 +175,77 @@ class GCashChargePreviewTest extends TestCase
 
         $this->getJson('/api/gcash/transactions/preview?type=cash_in&amount=1000')
             ->assertForbidden();
+    }
+
+    /**
+     * @return array<string, array{int|float|string}>
+     */
+    public static function cashOutsAtOrBelowTheCharge(): array
+    {
+        return [
+            'total exactly zero' => ['10'],
+            'total exactly zero, with decimals' => ['10.00'],
+            'total below zero' => [5],
+            'a centavo above the tier minimum' => ['1.01'],
+        ];
+    }
+
+    #[DataProvider('cashOutsAtOrBelowTheCharge')]
+    public function test_a_cash_out_at_or_below_its_charge_is_refused(int|float|string $amount): void
+    {
+        $preview = $this->getJson('/api/gcash/transactions/preview?'.http_build_query([
+            'type' => 'cash_out',
+            'amount' => $amount,
+        ]))
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['amount' => 'Amount must be more than the ₱10.00 charge.']);
+
+        $borrower = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+        $transactions = GCashTransaction::count();
+        $audits = AuditLog::count();
+
+        $store = $this->postJson('/api/gcash/transactions', [
+            'borrower_id' => $borrower->id,
+            'type' => 'cash_out',
+            'amount' => $amount,
+        ])->assertUnprocessable();
+
+        $this->assertSame($store->json('errors'), $preview->json('errors'));
+        $this->assertSame($transactions, GCashTransaction::count());
+        $this->assertSame($audits, AuditLog::count());
+    }
+
+    public function test_the_refusal_formats_the_charge_as_pesos_and_leaves_cash_in_alone(): void
+    {
+        GCashTier::query()->delete();
+        GCashTier::create(['min_amount' => 1, 'max_amount' => 2000, 'cash_in_rate' => 1250.5, 'cash_out_rate' => 1250.5, 'display_order' => 1]);
+
+        $this->getJson('/api/gcash/transactions/preview?type=cash_out&amount=1250.50')
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['amount' => 'Amount must be more than the ₱1,250.50 charge.']);
+
+        // A centavo over the charge goes through, on both endpoints.
+        $this->getJson('/api/gcash/transactions/preview?type=cash_out&amount=1250.51')
+            ->assertOk()
+            ->assertJsonPath('data.total_amount', 0.01);
+
+        $borrower = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+        $this->postJson('/api/gcash/transactions', [
+            'borrower_id' => $borrower->id,
+            'type' => 'cash_out',
+            'amount' => '1250.51',
+        ])->assertCreated()->assertJsonPath('data.total_amount', 0.01);
+
+        // Cash In adds its charge, so the same amounts stay valid.
+        $this->getJson('/api/gcash/transactions/preview?type=cash_in&amount=1000')
+            ->assertOk()
+            ->assertJsonPath('data.total_amount', 2250.5);
+
+        $this->postJson('/api/gcash/transactions', [
+            'borrower_id' => $borrower->id,
+            'type' => 'cash_in',
+            'amount' => 1000,
+        ])->assertCreated()->assertJsonPath('data.total_amount', 2250.5);
     }
 
     public function test_preview_writes_nothing(): void

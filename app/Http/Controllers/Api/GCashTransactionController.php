@@ -89,7 +89,7 @@ class GCashTransactionController extends Controller
             ),
             new OA\Response(response: 401, description: 'Unauthenticated'),
             new OA\Response(response: 403, description: 'Missing gcash:transact permission'),
-            new OA\Response(response: 422, description: 'Validation error or no matching tier'),
+            new OA\Response(response: 422, description: 'Validation error, no matching tier, or a Cash Out whose charge is the whole amount or more'),
         ],
     )]
     public function preview(PreviewGCashTransactionRequest $request): JsonResponse
@@ -121,7 +121,7 @@ class GCashTransactionController extends Controller
             new OA\Response(response: 201, description: 'Transaction recorded'),
             new OA\Response(response: 403, description: 'Missing gcash:transact permission'),
             new OA\Response(response: 409, description: 'Possible duplicate within 60s'),
-            new OA\Response(response: 422, description: 'Validation error or no matching tier'),
+            new OA\Response(response: 422, description: 'Validation error, no matching tier, or a Cash Out whose charge is the whole amount or more'),
         ],
     )]
     public function store(StoreGCashTransactionRequest $request): JsonResponse

@@ -14,6 +14,7 @@ use App\Models\User;
 use App\Services\Accounting\AutomaticPoster;
 use Carbon\Carbon;
 use Illuminate\Auth\Access\AuthorizationException;
+use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -534,38 +535,166 @@ class LoanService
             );
         }
 
-        $validated = $this->guardRestructurePrincipalEdit($loan, $validated, $user);
+        // `collaterals` is never a loan column. Absent, collateral is not
+        // touched at all; present, it is the loan's complete list.
+        $collaterals = $validated['collaterals'] ?? null;
+        unset($validated['collaterals']);
 
-        $needsRecompute = isset($validated['principal_amount']) || isset($validated['deductions']);
+        // One transaction, so a refused collateral leaves the loan's own fields
+        // unsaved too. It must be the OUTERMOST one, and its collateral locks
+        // its first statements: CollateralPledgeGuard's snapshot rule.
+        return DB::transaction(function () use ($loan, $validated, $user, $collaterals): Loan {
+            $lockedCollaterals = $collaterals === null ? null : $this->lockCollateralsForList($loan, $collaterals);
 
-        if ($needsRecompute) {
-            $principal = (float) ($validated['principal_amount'] ?? $loan->principal_amount);
-            $deductions = $validated['deductions'] ?? $this->deductionInputsFrom($loan->deductions ?? []);
-            $result = $this->computeDeductions($principal, $deductions);
-            $validated['deductions'] = $result['items'];
-            $validated['total_deductions'] = $result['total'];
-            $validated['net_proceeds'] = $result['net_proceeds'];
+            $validated = $this->guardRestructurePrincipalEdit($loan, $validated, $user);
+
+            $needsRecompute = isset($validated['principal_amount']) || isset($validated['deductions']);
+
+            if ($needsRecompute) {
+                $principal = (float) ($validated['principal_amount'] ?? $loan->principal_amount);
+                $deductions = $validated['deductions'] ?? $this->deductionInputsFrom($loan->deductions ?? []);
+                $result = $this->computeDeductions($principal, $deductions);
+                $validated['deductions'] = $result['items'];
+                $validated['total_deductions'] = $result['total'];
+                $validated['net_proceeds'] = $result['net_proceeds'];
+            }
+
+            if (isset($validated['start_date'])) {
+                $validated['maturity_date'] = $this->maturityDateFor(
+                    $validated['start_date'],
+                    $loan->term,
+                    $loan->term_unit->value,
+                    $loan->frequency,
+                );
+            }
+
+            $loan->update($validated);
+
+            // MEMBER ids only, exactly as createLoan() reads them — see
+            // coMakerIdsForMembers(). UpdateLoanRequest previously left this
+            // field unvalidated as bare co-maker record ids.
+            if (isset($validated['co_maker_ids'])) {
+                $this->syncCoMakers($loan, $this->coMakerIdsForMembers($validated['co_maker_ids']), $user);
+            }
+
+            if ($lockedCollaterals !== null) {
+                $this->reconcileCollaterals($loan, $collaterals, $lockedCollaterals, $user);
+            }
+
+            return $loan;
+        });
+    }
+
+    /**
+     * Lock every collateral a `collaterals` list can touch: the ones the loan
+     * holds now (they may be detached) and the listed ones it does not hold
+     * yet (they will be attached).
+     *
+     * Both reads are locking reads, so neither fixes the transaction's
+     * snapshot; every plain read after them, the attach guards included, sees
+     * the world as it is once the rows are pinned. The lock on what the loan
+     * holds also covers its `loan_collaterals` rows, so the set cannot change
+     * underneath the reconcile.
+     *
+     * @param  list<array{collateral_id: int|string, snapshot_value: int|float|string}>  $collaterals
+     * @return array{held: array<int, int>, new: EloquentCollection<int, Collateral>}
+     */
+    private function lockCollateralsForList(Loan $loan, array $collaterals): array
+    {
+        $held = CollateralPledgeGuard::lockCollateralsOf($loan);
+        $newIds = array_values(array_diff(
+            array_map(static fn (array $row): int => (int) $row['collateral_id'], $collaterals),
+            $held,
+        ));
+
+        return ['held' => $held, 'new' => CollateralAttacher::lock($newIds)];
+    }
+
+    /**
+     * Make the loan's collateral exactly the listed set.
+     *
+     * Collateral the loan holds and the list leaves out is detached. Listed
+     * collateral the loan does not hold yet is attached through the same
+     * guards as POST /loans/{loan}/collaterals. Collateral that is both held
+     * and listed is left exactly as it is: its `snapshot_value` and
+     * `attached_at` record the appraisal it was pledged at, and an edit that
+     * re-sends the list must not re-appraise it. An operator who wants a new
+     * value detaches and re-attaches it.
+     *
+     * One audit row records the change, beside the `updated` row the Loan
+     * model writes for the loan's own fields. Nothing is written when the
+     * list matches what the loan already holds.
+     *
+     * @param  list<array{collateral_id: int|string, snapshot_value: int|float|string}>  $collaterals
+     * @param  array{held: array<int, int>, new: EloquentCollection<int, Collateral>}  $locked
+     *
+     * @throws ValidationException on `collaterals.{index}.collateral_id`
+     */
+    private function reconcileCollaterals(Loan $loan, array $collaterals, array $locked, ?User $user): void
+    {
+        $listedIds = array_map(static fn (array $row): int => (int) $row['collateral_id'], $collaterals);
+        $detachIds = array_values(array_diff($locked['held'], $listedIds));
+
+        $detached = $detachIds === [] ? [] : $loan->collaterals()
+            ->whereIn('collaterals.id', $detachIds)
+            ->orderBy('collaterals.id')
+            ->get()
+            ->map(fn (Collateral $collateral): array => [
+                'collateral_id' => $collateral->id,
+                'snapshot_value' => (float) $collateral->pivot->snapshot_value,
+            ])
+            ->all();
+
+        if ($detachIds !== []) {
+            $loan->collaterals()->detach($detachIds);
         }
 
-        if (isset($validated['start_date'])) {
-            $validated['maturity_date'] = $this->maturityDateFor(
-                $validated['start_date'],
-                $loan->term,
-                $loan->term_unit->value,
-                $loan->frequency,
-            );
+        $attached = [];
+
+        foreach ($collaterals as $index => $row) {
+            $collateralId = (int) $row['collateral_id'];
+
+            if (in_array($collateralId, $locked['held'], true)) {
+                continue;
+            }
+
+            try {
+                CollateralAttacher::attachLocked($loan, $locked['new']->get($collateralId), $row['snapshot_value']);
+            } catch (ValidationException $e) {
+                throw ValidationException::withMessages([
+                    "collaterals.{$index}.collateral_id" => Arr::flatten($e->errors()),
+                ]);
+            }
+
+            $attached[] = ['collateral_id' => $collateralId, 'snapshot_value' => (float) $row['snapshot_value']];
         }
 
-        $loan->update($validated);
-
-        // MEMBER ids only, exactly as createLoan() reads them — see
-        // coMakerIdsForMembers(). UpdateLoanRequest previously left this
-        // field unvalidated as bare co-maker record ids.
-        if (isset($validated['co_maker_ids'])) {
-            $this->syncCoMakers($loan, $this->coMakerIdsForMembers($validated['co_maker_ids']), $user);
+        if ($attached === [] && $detached === []) {
+            return;
         }
 
-        return $loan;
+        $held = $locked['held'];
+        $after = [...array_diff($held, $detachIds), ...array_column($attached, 'collateral_id')];
+        sort($held);
+        sort($after);
+
+        AuditLogService::log(
+            action: 'collaterals_updated',
+            auditable: $loan,
+            oldValues: ['collateral_ids' => $held],
+            newValues: [
+                'collateral_ids' => $after,
+                'attached' => $attached,
+                'detached' => $detached,
+            ],
+            description: sprintf(
+                'Collateral on loan %s updated with the loan edit: %d attached, %d detached',
+                $loan->loan_account_number ?? $loan->application_number,
+                count($attached),
+                count($detached),
+            ),
+            userId: $user?->id,
+        );
     }
 
     /**

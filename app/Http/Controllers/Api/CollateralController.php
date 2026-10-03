@@ -11,7 +11,7 @@ use App\Http\Resources\CollateralRegisterGroupResource;
 use App\Http\Resources\CollateralResource;
 use App\Models\Collateral;
 use App\Models\Loan;
-use App\Services\CollateralPledgeGuard;
+use App\Services\CollateralAttacher;
 use App\Services\CollateralRegister;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
@@ -448,73 +448,26 @@ class CollateralController extends Controller
 
         // Ownership has already been rejected once by AttachCollateralRequest,
         // which scopes `collateral_id` to this loan's borrower, so a request
-        // naming somebody else's asset never gets far enough to lock a row. It
-        // is re-asserted below all the same, because that check ran before this
-        // transaction and the owner can move underneath it.
+        // naming somebody else's asset never gets far enough to lock a row.
+        // CollateralAttacher re-asserts it under the row lock, because that
+        // check ran before this transaction and the owner can move underneath it.
         //
-        // The guards run INSIDE the transaction, opening with a row lock on the
-        // collateral — the same shape LoanService::restructure() uses on its
-        // source loan. Each is a read-then-insert, and the unique index on
-        // (loan_id, collateral_id) cannot cover the important one: two requests
-        // pledging one collateral to two DIFFERENT loans write two distinct
-        // rows, so nothing at the schema level stops them. Every contender for a
-        // given collateral serializes on that collateral's row.
-        //
-        // The lock is also the transaction's first statement, so every plain
-        // read below is answered from a post-lock snapshot rather than one taken
-        // before the row was pinned — the property CollateralPledgeGuard's
-        // docblock spells out.
+        // The lock is the transaction's first statement, so every plain read
+        // after it is answered from a post-lock snapshot — the property
+        // CollateralPledgeGuard's docblock spells out. CollateralAttacher holds
+        // the guards; PUT /loans/{loan} runs the same ones for its list.
         $attached = DB::transaction(function () use ($loan, $validated): Collateral {
-            $collateral = Collateral::whereKey($validated['collateral_id'])->lockForUpdate()->first();
+            $collateralId = (int) $validated['collateral_id'];
+            $locked = CollateralAttacher::lock([$collateralId]);
 
-            if (! $collateral) {
-                throw ValidationException::withMessages([
-                    'collateral_id' => 'This collateral no longer exists.',
-                ]);
-            }
-
-            // Ownership, re-asserted under the lock.
-            //
-            // AttachCollateralRequest already scoped `collateral_id` to this
-            // loan's borrower, but that ran BEFORE this transaction opened, and
-            // PUT /api/collaterals/{id} can move a collateral between members.
-            // Validated at T0, reassigned at T1, attached at T2 pledges to this
-            // loan a collateral now registered to somebody else. The row above
-            // was read FOR UPDATE, which always returns the latest committed
-            // version rather than the snapshot, so this comparison sees the
-            // reassignment; update() takes the same lock, so the two serialize
-            // whichever way they interleave.
-            //
-            // `$loan->borrower_id` needs no such care: UpdateLoanRequest exposes
-            // no `borrower_id`, so a loan's member is fixed at creation.
-            //
-            // Same message as the form request's, deliberately — see its
-            // messages() for why the two failure modes are not told apart.
-            if ((int) $collateral->borrower_id !== (int) $loan->borrower_id) {
-                throw ValidationException::withMessages([
-                    'collateral_id' => 'This collateral is not registered to this loan\'s borrower.',
-                ]);
-            }
-
-            if ($loan->collaterals()->where('collaterals.id', $collateral->id)->exists()) {
-                throw ValidationException::withMessages([
-                    'collateral_id' => 'This collateral is already attached to the loan.',
-                ]);
-            }
-
-            CollateralPledgeGuard::assertCollateralIsFree($collateral, $loan);
-
-            $loan->collaterals()->attach($collateral->id, [
-                'snapshot_value' => $validated['snapshot_value'],
-                'attached_at' => now(),
-            ]);
+            CollateralAttacher::attachLocked($loan, $locked->get($collateralId), $validated['snapshot_value']);
 
             // Read back while still holding the lock, so the body describes
             // exactly the state that is about to commit — and so a concurrent
             // detach cannot make this return null between write and render.
             return $loan->collaterals()
                 ->with(['collateralType', 'activeLoans'])
-                ->where('collaterals.id', $collateral->id)
+                ->where('collaterals.id', $collateralId)
                 ->firstOrFail();
         });
 
@@ -530,8 +483,9 @@ class CollateralController extends Controller
      * no longer exists; it is kept in this shape because the shape of the bug is
      * worth remembering, not because it is still open.
      *
-     * CollateralPledgeGuard::assertCollateralIsFree(), which attach() calls,
-     * guards WRITES into `loan_collaterals`. It cannot see a loan TRANSITIONING
+     * CollateralPledgeGuard::assertCollateralIsFree(), which attach() runs
+     * through CollateralAttacher, guards WRITES into `loan_collaterals`. It
+     * cannot see a loan TRANSITIONING
      * into an active status while holding collateral another active loan also
      * holds, because that writes only to `loans` and touches no pivot row at
      * all. Every such transition now calls
