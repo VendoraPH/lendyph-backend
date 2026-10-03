@@ -214,6 +214,31 @@ class ShareCapitalReleaseCreditTest extends TestCase
         ]);
     }
 
+    public function test_a_release_credit_carries_its_own_reference_so_a_same_day_ledger_row_cannot_collide_with_it(): void
+    {
+        // The dated sequence out of id order, so ShareCapitalLedger::booted()
+        // would number the next row SC-<today>-000002, which is taken.
+        $today = now()->format('Ymd');
+        foreach (['000002', '000001'] as $number) {
+            ShareCapitalLedger::factory()->create([
+                'borrower_id' => $this->borrower->id,
+                'date' => now()->toDateString(),
+                'reference' => "SC-{$today}-{$number}",
+            ]);
+        }
+
+        $loan = $this->approvedLoan([
+            ['name' => 'Share Capital', 'amount' => 500, 'type' => 'fixed'],
+        ]);
+
+        $this->patchJson("/api/loans/{$loan->id}/release")->assertOk();
+
+        $loan->refresh();
+        $row = ShareCapitalLedger::query()->where('loan_id', $loan->id)->sole();
+        $this->assertSame("SC-{$loan->loan_account_number}", $row->reference);
+        $this->assertSame('500.00', $row->credit);
+    }
+
     public function test_the_share_capital_report_and_the_member_balance_include_the_release_credit(): void
     {
         ShareCapitalLedger::factory()->create([

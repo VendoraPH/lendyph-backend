@@ -54,6 +54,23 @@ class ShareCapitalReleaseDeductionsReportCommandTest extends TestCase
         $this->assertStringNotContainsString($credited->loan_account_number, $output);
     }
 
+    public function test_imported_loans_are_reported_apart_and_never_counted_as_missing(): void
+    {
+        $releasedHere = $this->releasedLoanReleasedBeforeTheFix([['name' => 'Share Capital', 'amount' => 500, 'type' => 'fixed']]);
+        $imported = $this->releasedLoanReleasedBeforeTheFix([['name' => 'Share Capital', 'amount' => 321.09, 'type' => 'fixed']]);
+        DB::table('loans')->where('id', $imported->id)->update(['external_loan_no' => 'OLD-0001']);
+
+        $output = $this->runCommand();
+
+        $this->assertMatchesRegularExpression('/Missing release credits:\s+1 loan, ₱500\.00/', $output);
+        $this->assertMatchesRegularExpression('/Imported loans to check:\s+1 loan, ₱321\.09/', $output);
+
+        [$releasedSection, $importedSection] = explode('Imported (CSV) loans', $output, 2);
+        $this->assertStringContainsString($releasedHere->loan_account_number, $releasedSection);
+        $this->assertStringNotContainsString($imported->loan_account_number, $releasedSection);
+        $this->assertStringContainsString($imported->loan_account_number, explode('Could not be read', $importedSection)[0]);
+    }
+
     public function test_it_reports_nothing_missing_when_every_release_was_credited(): void
     {
         $this->releasedLoan([['name' => 'Share Capital', 'amount' => 300, 'type' => 'fixed']]);

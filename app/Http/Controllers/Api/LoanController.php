@@ -475,7 +475,7 @@ DESC,
         ),
         responses: [
             new OA\Response(response: 201, description: 'Loan application created'),
-            new OA\Response(response: 409, description: 'Another loan application was created at the same time and took this one\'s application number, or the write deadlocked; nothing was created. Retry'),
+            new OA\Response(response: 409, description: 'Another loan application was created at the same moment (it took this one\'s application number, or the write deadlocked); nothing was created. Message: "Another loan application was created at the same moment. Submit again."'),
             new OA\Response(response: 422, description: 'Validation error'),
         ],
     )]

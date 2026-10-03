@@ -66,7 +66,7 @@ final class ShareCapitalReleaseCredit
      * anywhere in the release takes this row with it.
      *
      * @throws ValidationException on `deductions`, when the borrower is not a member
-     * @throws CannotPostToTheBooksException when a share capital item has no bookable amount
+     * @throws CannotPostToTheBooksException when this organisation keeps books and a share capital item has no bookable amount
      */
     public function record(Loan $loan, User $releaser): ?ShareCapitalLedger
     {
@@ -88,13 +88,23 @@ final class ShareCapitalReleaseCredit
             ]);
         }
 
-        $reference = $loan->loan_account_number ?? $loan->application_number;
+        $number = $loan->loan_account_number ?? $loan->application_number;
 
         return ShareCapitalLedger::create([
             'borrower_id' => $loan->borrower_id,
             'loan_id' => $loan->getKey(),
+            // Its own reference, not one ShareCapitalLedger::booted() numbers.
+            // That hook builds the next `SC-YYYYMMDD-n` from a plain read, and
+            // a release's snapshot is fixed before it waits on the loan account
+            // number's lock, so two releases on one day, or a release and any
+            // other ledger writer, could build the same reference and the
+            // release would fail on its unique index. The loan account number
+            // is unique, and so is this row per loan (`loan_id`), so
+            // "SC-LN-000123" (23 characters at most, in a 30-character column)
+            // cannot collide, and it cannot match the hook's dated pattern.
+            'reference' => "SC-{$number}",
             'date' => $this->poster->releaseDate($loan),
-            'description' => "Share capital deducted at release of {$reference}",
+            'description' => "Share capital deducted at release of {$number}",
             'debit' => 0,
             'credit' => sprintf('%d.%02d', intdiv($centavos, 100), $centavos % 100),
             'created_by' => $releaser->getKey(),
@@ -109,7 +119,15 @@ final class ShareCapitalReleaseCredit
      * deductions at all, so a release that withholds none meets no refusal
      * it did not meet before.
      *
-     * @throws CannotPostToTheBooksException when a share capital item has no bookable amount, exactly as the journal would refuse it
+     * An organisation that keeps no books (no chart of accounts, so
+     * AutomaticPoster posts nothing) gets no refusal from here either: the
+     * journal's consistency guard, which keeps the books' lines agreeing with
+     * the loan's total, has no journal to protect there, and a release that
+     * succeeded without it must still succeed. Its share capital items are
+     * summed by the same per-item conversion and the same role lookup; an
+     * item with no usable, positive amount credits nothing.
+     *
+     * @throws CannotPostToTheBooksException when this organisation keeps books and a share capital item has no bookable amount, exactly as the journal would refuse it
      */
     public function amountFor(Loan $loan): int
     {
@@ -117,7 +135,20 @@ final class ShareCapitalReleaseCredit
             return 0;
         }
 
-        return $this->poster->releaseDeductions($loan)['mapped'][self::role()] ?? 0;
+        if ($this->poster->enabled()) {
+            return $this->poster->releaseDeductions($loan)['mapped'][self::role()] ?? 0;
+        }
+
+        $centavos = 0;
+
+        foreach ($this->poster->releaseDeductionItems($loan) as $item) {
+            if (is_array($item) && PostingRules::deductionRoleFor($item['name']) === self::role()
+                && is_int($item['amount']) && $item['amount'] > 0) {
+                $centavos += $item['amount'];
+            }
+        }
+
+        return $centavos;
     }
 
     /**

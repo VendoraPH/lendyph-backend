@@ -45,6 +45,8 @@ class LoanService
      * number that one is inserting (InnoDB resumes the waiting read where it
      * stood), so the duplicate-key error on `loans_application_number_unique`
      * is answered with the same 409 as a deadlock, scoped to that index alone.
+     * Both say so in a create's words: there is no loan yet to "reload", so
+     * the client is told to submit again. Nothing retries on its own.
      *
      * This is the outermost transaction: LoanController::store() and the test
      * helpers are the only callers. A restructure creates its loan inside its
@@ -55,6 +57,7 @@ class LoanService
         return LoanWriteTransaction::run(
             fn (): Loan => $this->createLoanRecord($validated, $user),
             racedUniqueIndex: 'loans_application_number_unique',
+            conflictMessage: 'Another loan application was created at the same moment. Submit again.',
         );
     }
 
@@ -614,7 +617,12 @@ class LoanService
         return round((float) $unpaid + (float) $loan->insurance_remaining_balance, 2);
     }
 
-    private function toCentavos(float $amount): int
+    /**
+     * A peso figure as whole centavos, rounded half away from zero. Public so
+     * CollateralSecurity converts a saved pledge the way formPreview()
+     * converts a stated one.
+     */
+    public static function toCentavos(float $amount): int
     {
         return (int) round($amount * 100);
     }
@@ -1776,10 +1784,10 @@ class LoanService
         }
 
         $term = (int) $input['term'];
-        $minTerm = (int) ($product->min_term ?? 1);
-        $maxTerm = (int) ($product->max_term ?? $product->term);
 
-        if ($term < $minTerm || $term > $maxTerm) {
+        try {
+            $this->assertTermWithinProductRange($term, $product);
+        } catch (ValidationException) {
             return null;
         }
 

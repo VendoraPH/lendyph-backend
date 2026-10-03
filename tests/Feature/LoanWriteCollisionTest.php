@@ -54,6 +54,8 @@ class LoanWriteCollisionTest extends TestCase
 
     private const CONFLICT = 'Another change to this loan was saved at the same time. Reload and try again.';
 
+    private const CREATE_CONFLICT = 'Another loan application was created at the same moment. Submit again.';
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -177,7 +179,7 @@ class LoanWriteCollisionTest extends TestCase
         $before = $this->state();
         $this->failOn(fn (string $sql): bool => str_starts_with($sql, 'insert into `co_maker_loan`'), self::DEADLOCK);
 
-        $this->postJson('/api/loans', $payload)->assertStatus(409)->assertExactJson(['message' => self::CONFLICT]);
+        $this->postJson('/api/loans', $payload)->assertStatus(409)->assertExactJson(['message' => self::CREATE_CONFLICT]);
 
         $this->assertSame($before, $this->state());
     }
@@ -188,7 +190,7 @@ class LoanWriteCollisionTest extends TestCase
         $before = $this->state();
         $this->failOn(fn (string $sql): bool => str_starts_with($sql, 'insert into `co_maker_loan`'), self::LOCK_WAIT_TIMEOUT);
 
-        $this->postJson('/api/loans', $payload)->assertStatus(409)->assertExactJson(['message' => self::CONFLICT]);
+        $this->postJson('/api/loans', $payload)->assertStatus(409)->assertExactJson(['message' => self::CREATE_CONFLICT]);
 
         $this->assertSame($before, $this->state());
     }
@@ -217,7 +219,7 @@ class LoanWriteCollisionTest extends TestCase
             DB::table('loans')->insert($row);
         });
 
-        $this->postJson('/api/loans', $payload)->assertStatus(409)->assertExactJson(['message' => self::CONFLICT]);
+        $this->postJson('/api/loans', $payload)->assertStatus(409)->assertExactJson(['message' => self::CREATE_CONFLICT]);
 
         $this->assertTrue($slippedIn, 'the other create never landed, so this test proved nothing');
         $this->assertSame($before, $this->state());

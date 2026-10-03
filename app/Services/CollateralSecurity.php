@@ -59,15 +59,9 @@ final class CollateralSecurity
 
         foreach ($loan->collaterals as $collateral) {
             /** @var Collateral $collateral */
-            $pledged += self::centavos($collateral->pivot->snapshot_value ?? 0);
+            $pledged += LoanService::toCentavos((float) ($collateral->pivot->snapshot_value ?? 0));
         }
 
-        return self::summary(self::centavos($loan->principal_amount ?? 0), $pledged);
-    }
-
-    /** A peso figure as whole centavos, rounded half away from zero. */
-    public static function centavos(float|int|string $pesos): int
-    {
-        return (int) round((float) $pesos * 100);
+        return self::summary(LoanService::toCentavos((float) ($loan->principal_amount ?? 0)), $pledged);
     }
 }

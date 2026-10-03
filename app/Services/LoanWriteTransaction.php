@@ -80,15 +80,19 @@ final class LoanWriteTransaction
      * A duplicate-key error on `$racedUniqueIndex`, when given, is a 409 too.
      * Any other database error is rethrown untouched.
      *
+     * `$conflictMessage` replaces the 409's wording for a path where "this
+     * loan" is the wrong thing to say: a create has no loan yet.
+     *
      * @template TReturn
      *
      * @param  Closure(): TReturn  $callback
      * @param  string|null  $racedUniqueIndex  the unique index ("loans_application_number_unique") whose collision means another write got there first
+     * @param  string|null  $conflictMessage  the 409's message, when not conflict()'s own
      * @return TReturn
      *
      * @throws HttpResponseException 409 on a deadlock, a lock wait timeout or a collision on `$racedUniqueIndex`
      */
-    public static function run(Closure $callback, ?string $racedUniqueIndex = null): mixed
+    public static function run(Closure $callback, ?string $racedUniqueIndex = null, ?string $conflictMessage = null): mixed
     {
         try {
             return DB::transaction($callback);
@@ -97,13 +101,13 @@ final class LoanWriteTransaction
                 throw $e;
             }
 
-            throw self::conflict();
+            throw self::conflict($conflictMessage);
         } catch (PDOException $e) {
             if (! (new self)->causedByConcurrencyError($e)) {
                 throw $e;
             }
 
-            throw self::conflict();
+            throw self::conflict($conflictMessage);
         }
     }
 
@@ -111,10 +115,10 @@ final class LoanWriteTransaction
      * The 409 for a write that another one got to first, for a caller that
      * detects that itself rather than through a database error.
      */
-    public static function conflict(): HttpResponseException
+    public static function conflict(?string $message = null): HttpResponseException
     {
         return new HttpResponseException(response()->json([
-            'message' => 'Another change to this loan was saved at the same time. Reload and try again.',
+            'message' => $message ?? 'Another change to this loan was saved at the same time. Reload and try again.',
         ], 409));
     }
 }

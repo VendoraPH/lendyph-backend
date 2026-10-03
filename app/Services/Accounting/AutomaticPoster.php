@@ -190,6 +190,21 @@ final class AutomaticPoster
     }
 
     /**
+     * The loan's deduction items exactly as the release rule reads them, each
+     * amount converted to centavos by {@see self::deductionItems()}. Read only.
+     *
+     * For ShareCapitalReleaseCredit in an organisation that keeps no books,
+     * which sums its share capital items with this same conversion but has no
+     * journal for {@see PostingRules::classifyDeductions()}' guard to protect.
+     *
+     * @return list<array{name: string, amount: int|null, catalog_fee: bool}|mixed>
+     */
+    public function releaseDeductionItems(Loan $loan): array
+    {
+        return $this->deductionItems($loan);
+    }
+
+    /**
      * `loans.deductions` as the release rule takes it: each item's name, its
      * peso `amount` in centavos — or null when that amount is unusable — and
      * whether it came from the Settings fee catalog (it carries a `fee_id`).

@@ -42,6 +42,13 @@ use Illuminate\Support\Facades\DB;
  * and overall. A loan whose deductions cannot be read the way the release
  * journal reads them is listed apart, with the reason, and is in no total.
  *
+ * Loans migrated in by the CSV importer (Loan::isImported()) are reported in
+ * a section of their own, with their own counts and totals, and are in none
+ * of the released-here figures. They were released under the cooperative's
+ * old books, not through this application's release, and the share capital
+ * their deductions name may already be in the member's imported ledger
+ * balance, so they are listed to be checked, never counted as missing.
+ *
  * Loans are read in chunks by id, with the ledger rows of each chunk fetched
  * in one query, so the cost is two queries per chunk however many loans
  * there are.
@@ -52,18 +59,23 @@ class ReportShareCapitalReleaseDeductions extends Command
 {
     private const CHUNK = 500;
 
-    /** @var list<list<string>> */
-    private array $missing = [];
+    private const RELEASED_HERE = 'released';
 
-    /** @var array<string, array{loans: int, amount: int}> */
-    private array $byStatus = [];
+    private const IMPORTED = 'imported';
+
+    /**
+     * Per section (RELEASED_HERE, IMPORTED): the loans, by status, the count
+     * and the total.
+     *
+     * @var array<string, array{rows: list<list<string>>, by_status: array<string, array{loans: int, amount: int}>, count: int, total: int}>
+     */
+    private array $sections = [
+        self::RELEASED_HERE => ['rows' => [], 'by_status' => [], 'count' => 0, 'total' => 0],
+        self::IMPORTED => ['rows' => [], 'by_status' => [], 'count' => 0, 'total' => 0],
+    ];
 
     /** @var list<list<string>> */
     private array $unreadable = [];
-
-    private int $missingCount = 0;
-
-    private int $missingTotal = 0;
 
     public function handle(ShareCapitalReleaseCredit $credits): int
     {
@@ -73,7 +85,7 @@ class ReportShareCapitalReleaseDeductions extends Command
         Loan::query()
             ->whereIn('status', Loan::EVER_RELEASED_STATUSES)
             ->with('borrower:id,borrower_code')
-            ->select(['id', 'borrower_id', 'status', 'loan_account_number', 'application_number', 'total_deductions', 'deductions'])
+            ->select(['id', 'borrower_id', 'status', 'loan_account_number', 'application_number', 'external_loan_no', 'imported_arrears_baseline', 'total_deductions', 'deductions'])
             ->chunkById(self::CHUNK, function (EloquentCollection $loans) use ($credits): void {
                 $candidates = $loans->filter(fn (Loan $loan): bool => $credits->withholdsShareCapital($loan));
 
@@ -102,11 +114,12 @@ class ReportShareCapitalReleaseDeductions extends Command
     private function count(Loan $loan, ShareCapitalReleaseCredit $credits): void
     {
         $reference = (string) ($loan->loan_account_number ?? $loan->application_number);
+        $section = $loan->isImported() ? self::IMPORTED : self::RELEASED_HERE;
 
         try {
             $amount = $credits->amountFor($loan);
         } catch (CannotPostToTheBooksException $unreadable) {
-            $this->unreadable[] = [$reference, $loan->status, $unreadable->getMessage()];
+            $this->unreadable[] = [$reference, $loan->status, $section === self::IMPORTED ? 'imported' : 'released here', $unreadable->getMessage()];
 
             return;
         }
@@ -115,39 +128,24 @@ class ReportShareCapitalReleaseDeductions extends Command
             return;
         }
 
-        $this->missingCount++;
-        $this->missingTotal += $amount;
-        $this->byStatus[$loan->status] = [
-            'loans' => ($this->byStatus[$loan->status]['loans'] ?? 0) + 1,
-            'amount' => ($this->byStatus[$loan->status]['amount'] ?? 0) + $amount,
+        $this->sections[$section]['count']++;
+        $this->sections[$section]['total'] += $amount;
+        $this->sections[$section]['by_status'][$loan->status] = [
+            'loans' => ($this->sections[$section]['by_status'][$loan->status]['loans'] ?? 0) + 1,
+            'amount' => ($this->sections[$section]['by_status'][$loan->status]['amount'] ?? 0) + $amount,
         ];
-        $this->missing[] = [$reference, $loan->status, (string) ($loan->borrower?->borrower_code ?? '—'), Money::format($amount)];
+        $this->sections[$section]['rows'][] = [$reference, $loan->status, (string) ($loan->borrower?->borrower_code ?? '—'), Money::format($amount)];
     }
 
     private function report(): void
     {
-        $this->line('Released loans whose withheld share capital has no ledger credit');
-
-        if ($this->missing === []) {
-            $this->line('  None.');
-        } else {
-            $this->table(['Loan', 'Status', 'Member', 'Share capital withheld'], $this->missing);
-        }
+        $this->line('Loans released in this application whose withheld share capital has no ledger credit');
+        $this->section(self::RELEASED_HERE);
 
         $this->newLine();
-        $this->line('By status');
-
-        if ($this->byStatus === []) {
-            $this->line('  None.');
-        } else {
-            $statuses = array_values(array_filter(Loan::EVER_RELEASED_STATUSES, fn (string $status): bool => isset($this->byStatus[$status])));
-
-            $this->table(['Status', 'Loans', 'Total'], array_map(fn (string $status): array => [
-                $status,
-                number_format($this->byStatus[$status]['loans']),
-                Money::format($this->byStatus[$status]['amount']),
-            ], $statuses));
-        }
+        $this->line('Imported (CSV) loans with share capital deductions and no release credit');
+        $this->line('  Released under the old books: their share capital may already be in the member\'s imported ledger balance. Check each one; none is counted as missing.');
+        $this->section(self::IMPORTED);
 
         $this->newLine();
         $this->line('Could not be read');
@@ -155,15 +153,46 @@ class ReportShareCapitalReleaseDeductions extends Command
         if ($this->unreadable === []) {
             $this->line('  None.');
         } else {
-            $this->table(['Loan', 'Status', 'Why'], $this->unreadable);
+            $this->table(['Loan', 'Status', 'Released', 'Why'], $this->unreadable);
         }
 
         $this->newLine();
-        $this->line(sprintf(
-            'Missing release credits: %s %s, %s',
-            number_format($this->missingCount),
-            $this->missingCount === 1 ? 'loan' : 'loans',
-            Money::format($this->missingTotal),
-        ));
+        $this->line($this->summary('Missing release credits', self::RELEASED_HERE));
+        $this->line($this->summary('Imported loans to check', self::IMPORTED));
+    }
+
+    /** One section's loans, then its totals by status. */
+    private function section(string $section): void
+    {
+        $found = $this->sections[$section];
+
+        if ($found['rows'] === []) {
+            $this->line('  None.');
+
+            return;
+        }
+
+        $this->table(['Loan', 'Status', 'Member', 'Share capital withheld'], $found['rows']);
+
+        $statuses = array_values(array_filter(Loan::EVER_RELEASED_STATUSES, fn (string $status): bool => isset($found['by_status'][$status])));
+
+        $this->table(['Status', 'Loans', 'Total'], array_map(fn (string $status): array => [
+            $status,
+            number_format($found['by_status'][$status]['loans']),
+            Money::format($found['by_status'][$status]['amount']),
+        ], $statuses));
+    }
+
+    private function summary(string $label, string $section): string
+    {
+        $count = $this->sections[$section]['count'];
+
+        return sprintf(
+            '%s: %s %s, %s',
+            $label,
+            number_format($count),
+            $count === 1 ? 'loan' : 'loans',
+            Money::format($this->sections[$section]['total']),
+        );
     }
 }
