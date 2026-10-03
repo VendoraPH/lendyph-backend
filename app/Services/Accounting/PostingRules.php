@@ -163,7 +163,7 @@ final class PostingRules
      * The total stays the authority on what was withheld, and the item list is
      * only trusted where it has to be: for a type with an account of its own.
      * So the only new refusals are a MAPPED item whose amount cannot be booked
-     * (missing, not whole centavos, negative, or past the ceiling) and mapped
+     * (missing, non-numeric, negative, or past the ceiling) and mapped
      * items that add up to more than the total — booking either would credit
      * that account with money the loan's own figures do not show was kept.
      * Anything unusable on an UNMAPPED type, or an entry that is not an item at
