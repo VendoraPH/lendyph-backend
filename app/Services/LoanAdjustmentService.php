@@ -54,33 +54,63 @@ class LoanAdjustmentService
         ]);
     }
 
+    /**
+     * Approve a pending adjustment.
+     *
+     * The checks before the transaction refuse, with a 422, an approval that
+     * was wrong from the start. The transaction then takes the lock an apply
+     * takes, the loan and then this adjustment (lockAdjustmentRows()), and
+     * re-reads the adjustment under it: one rejected, approved or applied by
+     * another request since this one read it is a 409 and is left exactly as
+     * that request left it, as is a deadlock or a lock wait timeout.
+     *
+     * This is the outermost transaction: LoanAdjustmentController::approve()
+     * and the test helpers are the only callers.
+     */
     public function approveAdjustment(LoanAdjustment $adjustment, User $approver, ?string $remarks): LoanAdjustment
     {
         $this->guardStatus($adjustment, 'pending', 'approve');
         $this->assertPayloadFitsType($adjustment);
 
-        $adjustment->update([
-            'status' => 'approved',
-            'approved_by' => $approver->id,
-            'approved_at' => now(),
-            'remarks' => $remarks ?? $adjustment->remarks,
-        ]);
+        return LoanWriteTransaction::run(function () use ($adjustment, $approver, $remarks): LoanAdjustment {
+            $this->lockAdjustmentRows($adjustment, 'pending');
 
-        return $adjustment;
+            $adjustment->update([
+                'status' => 'approved',
+                'approved_by' => $approver->id,
+                'approved_at' => now(),
+                'remarks' => $remarks ?? $adjustment->remarks,
+            ]);
+
+            return $adjustment;
+        });
     }
 
+    /**
+     * Reject a pending adjustment, under the same lock and re-read as
+     * approveAdjustment(): a reject that read the adjustment as pending, when
+     * it has since been approved (and perhaps applied), is a 409 and never
+     * turns an applied adjustment into a rejected one.
+     *
+     * This is the outermost transaction: LoanAdjustmentController::reject()
+     * and the test helpers are the only callers.
+     */
     public function rejectAdjustment(LoanAdjustment $adjustment, User $approver, ?string $remarks): LoanAdjustment
     {
         $this->guardStatus($adjustment, 'pending', 'reject');
 
-        $adjustment->update([
-            'status' => 'rejected',
-            'approved_by' => $approver->id,
-            'approved_at' => now(),
-            'remarks' => $remarks ?? $adjustment->remarks,
-        ]);
+        return LoanWriteTransaction::run(function () use ($adjustment, $approver, $remarks): LoanAdjustment {
+            $this->lockAdjustmentRows($adjustment, 'pending');
 
-        return $adjustment;
+            $adjustment->update([
+                'status' => 'rejected',
+                'approved_by' => $approver->id,
+                'approved_at' => now(),
+                'remarks' => $remarks ?? $adjustment->remarks,
+            ]);
+
+            return $adjustment;
+        });
     }
 
     /**
@@ -141,7 +171,9 @@ class LoanAdjustmentService
 
         // A deadlock or lock wait timeout is a 409, not a 500. This is the
         // outermost transaction: LoanController::extend() and the test helpers
-        // are the only callers. processRepayment() below nests inside it.
+        // are the only callers. The interest is collected inside it, under its
+        // loan lock, through recordRepaymentOnLockedLoan(): processRepayment()
+        // opens a LoanWriteTransaction of its own, which must be the outermost.
         return LoanWriteTransaction::run(function () use ($loan, $user, $remarks, $interestOption) {
             // The loan row first, the order every loan write takes
             // (LoanWriteTransaction). No collateral lock: an extension writes
@@ -155,17 +187,16 @@ class LoanAdjustmentService
             $interestBefore = $this->outstandingInterest($openBefore);
 
             // Settle the accrued interest first so the new period starts clean.
-            // Allocation inside processRepayment runs penalty → interest →
-            // principal, so where a penalty is outstanding this amount is
-            // consumed by that first and some interest still carries. That
-            // matches what the UI did before this moved server-side, and the
-            // carry figures below are re-read afterwards, so the arithmetic
-            // stays correct either way.
+            // The allocation runs penalty → interest → principal, so where a
+            // penalty is outstanding this amount is consumed by that first and
+            // some interest still carries. That matches what the UI did before
+            // this moved server-side, and the carry figures below are re-read
+            // afterwards, so the arithmetic stays correct either way.
             $interestPaid = 0.0;
             $interestRepayment = null;
 
             if ($interestOption === 'pay' && $interestBefore > 0) {
-                $interestRepayment = $this->repaymentService->processRepayment(
+                $interestRepayment = $this->repaymentService->recordRepaymentOnLockedLoan(
                     $loan,
                     $interestBefore,
                     now()->toDateString(),
@@ -573,6 +604,11 @@ class LoanAdjustmentService
      * moves it into or out of Loan::PLEDGING_STATUSES (a restructure
      * adjustment keeps the loan's status on purpose; see applyRestructure()).
      *
+     * The loan must still be released or ongoing, as it had to be for the
+     * adjustment to be requested (createAdjustment()): one completed, closed
+     * by a restructure, defaulted or voided since is a 422 when the request
+     * reads it so, and a 409 when it moved between that read and the lock.
+     *
      * This is the outermost transaction: LoanAdjustmentController::apply() and
      * the test helpers are the only callers.
      */
@@ -581,8 +617,18 @@ class LoanAdjustmentService
         $this->guardStatus($adjustment, 'approved', 'apply');
         $this->assertPayloadFitsType($adjustment);
 
+        if (! in_array($adjustment->loan?->status, Loan::ACTIVE_STATUSES, true)) {
+            throw ValidationException::withMessages([
+                'loan' => 'Adjustments can only be applied to released or ongoing loans.',
+            ]);
+        }
+
         return LoanWriteTransaction::run(function () use ($adjustment) {
-            $loan = $this->lockAdjustmentRows($adjustment);
+            $loan = $this->lockAdjustmentRows($adjustment, 'approved');
+
+            if (! in_array($loan->status, Loan::ACTIVE_STATUSES, true)) {
+                throw LoanWriteTransaction::conflict();
+            }
 
             match ($adjustment->adjustment_type) {
                 'restructure' => $this->applyRestructure($adjustment, $loan),
@@ -602,21 +648,23 @@ class LoanAdjustmentService
 
     /**
      * Lock the adjustment's loan row, then the adjustment's own, and refuse
-     * with a 409 unless the adjustment is still approved.
+     * with a 409 unless the adjustment is still in `$expectedStatus`: pending
+     * for an approve or a reject, approved for an apply.
      *
      * Two locking reads, in the order every loan write takes
-     * (LoanWriteTransaction). The adjustment is refreshed from its locked row
-     * and handed the locked loan, so the apply works from what is committed
-     * rather than from what the request read before the lock.
+     * (LoanWriteTransaction), and the first statements of the transaction. The
+     * adjustment is refreshed from its locked row and handed the locked loan,
+     * so the write works from what is committed rather than from what the
+     * request read before the lock.
      *
-     * @throws HttpResponseException 409 when the adjustment was applied, or otherwise moved, since it was read
+     * @throws HttpResponseException 409 when the adjustment was decided, applied, or otherwise moved, since it was read
      */
-    private function lockAdjustmentRows(LoanAdjustment $adjustment): Loan
+    private function lockAdjustmentRows(LoanAdjustment $adjustment, string $expectedStatus): Loan
     {
         $loan = Loan::whereKey($adjustment->loan_id)->lockForUpdate()->first();
         $locked = LoanAdjustment::whereKey($adjustment->getKey())->lockForUpdate()->first();
 
-        if ($loan === null || $locked === null || $locked->status !== 'approved') {
+        if ($loan === null || $locked === null || $locked->status !== $expectedStatus) {
             throw LoanWriteTransaction::conflict();
         }
 

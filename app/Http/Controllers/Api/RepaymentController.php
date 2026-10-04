@@ -270,7 +270,8 @@ class RepaymentController extends Controller
         ),
         responses: [
             new OA\Response(response: 201, description: 'Repayment recorded'),
-            new OA\Response(response: 422, description: 'Validation error'),
+            new OA\Response(response: 409, description: 'The loan was closed (completed, restructured, voided or defaulted) since it was read, or the write deadlocked; nothing was recorded. Reload and try again'),
+            new OA\Response(response: 422, description: 'Validation error, or the loan is not released or ongoing (on `loan`)'),
         ],
     )]
     public function store(StoreRepaymentRequest $request, Loan $loan): JsonResponse
@@ -403,6 +404,7 @@ class RepaymentController extends Controller
         ),
         responses: [
             new OA\Response(response: 200, description: 'Allocation preview'),
+            new OA\Response(response: 409, description: 'The loan was closed (completed, restructured, voided or defaulted) since it was read. Reload and try again'),
             new OA\Response(response: 422, description: 'Validation error'),
             new OA\Response(response: 404, description: 'Loan not found'),
         ],

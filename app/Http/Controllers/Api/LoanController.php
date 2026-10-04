@@ -999,7 +999,7 @@ DESC,
             new OA\Response(response: 201, description: 'New draft loan created, with source_loan_id set'),
             new OA\Response(response: 403, description: 'Missing loans:restructure permission'),
             new OA\Response(response: 404, description: 'Loan not found'),
-            new OA\Response(response: 409, description: 'Another change to the source loan\'s collateral, or to the newest loan, was saved at the same time; nothing was created. Reload and try again'),
+            new OA\Response(response: 409, description: 'Another change to the source loan\'s collateral, or to the newest loan, was saved at the same time; nothing was created. Reload and try again. Losing the application number to a create made at the same moment answers "Another loan application was created at the same moment. Submit again." instead'),
             new OA\Response(response: 422, description: 'Source loan is not released/ongoing, borrower mismatch, a restructure is already in progress, nothing outstanding, principal exceeds the outstanding balance, or a shortfall was sent without remarks'),
         ],
     )]

@@ -11,6 +11,7 @@ use Closure;
 use Exception;
 use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Database\QueryException;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\DB;
 use PDOException;
 use ReflectionProperty;
@@ -166,6 +167,64 @@ class CollateralWriteConflictTest extends TestCase
         $this->postJson("/api/loans/{$source->id}/restructure", $this->restructurePayload($source))
             ->assertStatus(409)
             ->assertExactJson(['message' => self::CONFLICT]);
+
+        $this->assertSame($before, $this->state());
+    }
+
+    public function test_a_restructure_that_lost_its_application_number_to_another_create_answers_409_and_writes_nothing(): void
+    {
+        $source = $this->createReleasedLoan();
+        $this->pledge($source, Collateral::factory()->create(['borrower_id' => $source->borrower_id]));
+        $newest = Loan::query()->orderByDesc('id')->firstOrFail();
+        $before = $this->state();
+
+        // Another create takes the next application number between this
+        // restructure reading the newest loan and inserting its own.
+        $slippedIn = false;
+        DB::listen(function (QueryExecuted $query) use (&$slippedIn, $newest): void {
+            $sql = strtolower($query->sql);
+
+            if ($slippedIn || ! str_contains($sql, 'from `loans`') || ! str_contains($sql, 'order by `id` desc') || ! str_contains($sql, 'for update')) {
+                return;
+            }
+
+            $slippedIn = true;
+            $row = (array) DB::table('loans')->where('id', $newest->id)->first();
+            unset($row['id']);
+            $row['application_number'] = 'LA-'.str_pad((string) ((int) substr($newest->application_number, 3) + 1), 6, '0', STR_PAD_LEFT);
+            $row['loan_account_number'] = null;
+            DB::table('loans')->insert($row);
+        });
+
+        $this->postJson("/api/loans/{$source->id}/restructure", $this->restructurePayload($source))
+            ->assertStatus(409)
+            ->assertExactJson(['message' => 'Another loan application was created at the same moment. Submit again.']);
+
+        $this->assertTrue($slippedIn, 'the other create never landed, so this test proved nothing');
+        $this->assertSame($before, $this->state());
+    }
+
+    public function test_a_restructure_rethrows_a_unique_violation_on_any_other_index(): void
+    {
+        $source = $this->createReleasedLoan();
+        $this->pledge($source, Collateral::factory()->create(['borrower_id' => $source->borrower_id]));
+        $before = $this->state();
+
+        DB::connection()->beforeExecuting(function (string $query, array $bindings): void {
+            if (! str_starts_with($query, 'insert into `loan_collaterals`')) {
+                return;
+            }
+
+            $message = "SQLSTATE[23000]: Integrity constraint violation: 1062 Duplicate entry '1-1' for key 'loan_collaterals.loan_collaterals_loan_id_collateral_id_unique'";
+            $pdo = new PDOException($message);
+            $pdo->errorInfo = ['23000', 1062, "Duplicate entry '1-1' for key 'loan_collaterals.loan_collaterals_loan_id_collateral_id_unique'"];
+            (new ReflectionProperty(Exception::class, 'code'))->setValue($pdo, '23000');
+
+            throw (new UniqueConstraintViolationException(DB::connection()->getName(), $query, $bindings, $pdo))
+                ->setIndex('loan_collaterals_loan_id_collateral_id_unique');
+        });
+
+        $this->postJson("/api/loans/{$source->id}/restructure", $this->restructurePayload($source))->assertStatus(500);
 
         $this->assertSame($before, $this->state());
     }

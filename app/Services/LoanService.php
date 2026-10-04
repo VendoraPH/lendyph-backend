@@ -30,6 +30,15 @@ class LoanService
     private const DEDUCTIONS_EXCEED_PRINCIPAL = 'Total deductions exceed the principal amount.';
 
     /**
+     * The unique index a create collides on when another create took the
+     * same application number first, and the 409 both paths that create a
+     * loan answer it with: createLoan() and restructure().
+     */
+    private const APPLICATION_NUMBER_INDEX = 'loans_application_number_unique';
+
+    private const APPLICATION_NUMBER_TAKEN = 'Another loan application was created at the same moment. Submit again.';
+
+    /**
      * Create a draft loan application (POST /loans).
      *
      * In its own transaction, so the lock Loan::booted() takes on the newest
@@ -56,8 +65,8 @@ class LoanService
     {
         return LoanWriteTransaction::run(
             fn (): Loan => $this->createLoanRecord($validated, $user),
-            racedUniqueIndex: 'loans_application_number_unique',
-            conflictMessage: 'Another loan application was created at the same moment. Submit again.',
+            racedUniqueIndex: self::APPLICATION_NUMBER_INDEX,
+            conflictMessage: self::APPLICATION_NUMBER_TAKEN,
         );
     }
 
@@ -350,6 +359,8 @@ class LoanService
         //
         // A collateral write, since it copies pledges onto the new loan, so a
         // deadlock in it is a 409 like the other pledge writes', not a 500.
+        // It creates a loan too, so losing the application number to another
+        // create is the same 409 a create answers (see createLoan()).
         // This is the outermost transaction: LoanController::restructure() is
         // the only caller.
         return CollateralWriteTransaction::run(function () use ($sourceLoan, $validated, $user, $principal, $remarks, $heldBefore) {
@@ -433,7 +444,7 @@ class LoanService
             );
 
             return $newLoan->refresh();
-        });
+        }, racedUniqueIndex: self::APPLICATION_NUMBER_INDEX, racedUniqueMessage: self::APPLICATION_NUMBER_TAKEN);
     }
 
     /**
