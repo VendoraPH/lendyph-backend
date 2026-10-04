@@ -567,7 +567,7 @@ class ReportController extends Controller
     #[OA\Get(
         path: '/api/reports/cash-flow',
         summary: 'Cash Flow / Cash Position',
-        description: 'Cash in (posted repayments split by allocation, plus share capital credits) versus cash out (net proceeds released, plus share capital debits) for a period, with a per-branch breakdown. Deductions are reported separately as non-cash.',
+        description: 'Cash in (posted repayments split by allocation, plus share capital paid in on its own) versus cash out (net proceeds released, plus share capital paid out on its own) for a period, with a per-branch breakdown. Deductions are reported separately as non-cash, share capital withheld at release under `non_cash.share_capital_at_release`. A payment\'s share capital build-up is already inside the repayment line (its overpayment), so its ledger credits and any void reversals are in no cash total: they are reported under `share_capital.build_up_from_payments` (net), `build_up_credit` and `build_up_debit`. The Share Capital report\'s credits for the same period and branch = `share_capital.credit` + `share_capital.build_up_credit` + `non_cash.share_capital_at_release`; its debits = `share_capital.debit` + `share_capital.build_up_debit`.',
         tags: ['Reports'],
         security: [['sanctum' => []]],
         parameters: [
