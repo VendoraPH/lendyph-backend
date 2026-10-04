@@ -63,6 +63,10 @@ class RepaymentController extends Controller
                             new OA\Property(property: 'posted', type: 'integer'),
                             new OA\Property(property: 'voided', type: 'integer'),
                         ]),
+                        new OA\Property(property: 'totals', type: 'object', description: 'SUM(amount_paid) per status in pesos, summed in SQL and rounded once to 2 dp, over the `search`, `loan_id`, `borrower_id`, `date_from` and `date_to` filters. The `status` filter is ignored: the two figures are split by status already. `amount_paid` already includes any penalty, so nothing is added to it.', properties: [
+                            new OA\Property(property: 'collected', type: 'number', format: 'float', description: 'Posted payments'),
+                            new OA\Property(property: 'voided', type: 'number', format: 'float', description: 'Voided payments'),
+                        ]),
                     ]),
                 ]),
             ),
@@ -104,7 +108,13 @@ class RepaymentController extends Controller
         $dateFrom = $filters['date_from'] ?? null;
         $dateTo = $filters['date_to'] ?? null;
 
-        $query = Repayment::with('loan.borrower', 'loan.loanProduct', 'loan.amortizationSchedules', 'receivedByUser', 'voidedByUser', 'shareCapitalLedgerEntries')
+        /**
+         * Every filter but `status`, built fresh on each call: the page's rows
+         * add `status` and their relations on top, and `meta.totals` sums the
+         * same payments split by status. One copy of the filters, so the totals
+         * can never describe a different set of payments than the list does.
+         */
+        $filtered = fn () => Repayment::query()
             ->when(filled($search), function ($q) use ($search) {
                 $like = LikePattern::contains($search);
 
@@ -120,13 +130,15 @@ class RepaymentController extends Controller
                         });
                 });
             })
-            ->when(filled($status), fn ($q) => $q->where('status', $status))
             ->when(filled($loanId), fn ($q) => $q->where('loan_id', $loanId))
             ->when(filled($borrowerId), fn ($q) => $q->whereHas('loan', fn ($lq) => $lq->where('borrower_id', $borrowerId)))
             ->when(filled($dateFrom), fn ($q) => $q->whereDate('payment_date', '>=', $dateFrom))
             ->when(filled($dateTo), fn ($q) => $q->whereDate('payment_date', '<=', $dateTo));
 
-        $repayments = $query->latest('payment_date')
+        $repayments = $filtered()
+            ->with('loan.borrower', 'loan.loanProduct', 'loan.amortizationSchedules', 'receivedByUser', 'voidedByUser', 'shareCapitalLedgerEntries')
+            ->when(filled($status), fn ($q) => $q->where('status', $status))
+            ->latest('payment_date')
             // `payment_date` is a DATE, so every receipt taken on one day ties.
             // The key makes the order total, so the drained payment history
             // cannot serve a receipt twice or skip one. See
@@ -144,11 +156,31 @@ class RepaymentController extends Controller
             ->pluck('count', 'status')
             ->toArray();
 
+        /**
+         * The Payment History page's "Total Collected", from the server.
+         *
+         * It used to be added up in the browser from the rows it held, adding
+         * each row's penalty to an `amount_paid` that already contains it, so
+         * every peso of penalty was counted twice. Summed in SQL over exactly
+         * the list's filters, ignoring `status` (the two figures are split by
+         * it), and rounded once.
+         */
+        $sums = $filtered()
+            ->selectRaw('status, COALESCE(SUM(amount_paid), 0) as total')
+            ->groupBy('status')
+            ->pluck('total', 'status');
+
         return RepaymentResource::collection($repayments)
-            ->additional(['meta' => ['stats' => [
-                'posted' => (int) ($stats['posted'] ?? 0),
-                'voided' => (int) ($stats['voided'] ?? 0),
-            ]]]);
+            ->additional(['meta' => [
+                'stats' => [
+                    'posted' => (int) ($stats['posted'] ?? 0),
+                    'voided' => (int) ($stats['voided'] ?? 0),
+                ],
+                'totals' => [
+                    'collected' => round((float) ($sums['posted'] ?? 0), 2),
+                    'voided' => round((float) ($sums['voided'] ?? 0), 2),
+                ],
+            ]]);
     }
 
     #[OA\Get(
