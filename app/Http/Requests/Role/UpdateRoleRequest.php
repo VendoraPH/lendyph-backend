@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests\Role;
 
+use App\Http\Requests\Concerns\GuardsRolePermissionGrants;
 use App\Models\Role;
 use App\Rules\UniqueRoleDisplayName;
 use App\Rules\ValidUtf8;
@@ -11,6 +12,8 @@ use Illuminate\Validation\Validator;
 
 class UpdateRoleRequest extends FormRequest
 {
+    use GuardsRolePermissionGrants;
+
     public function authorize(): bool
     {
         return $this->user()->can('settings:update');
@@ -90,17 +93,28 @@ class UpdateRoleRequest extends FormRequest
                 // Only a super_admin may relabel super_admin. Otherwise a
                 // client admin could label it "Admin" (and admin something
                 // else), and a platform super_admin picking "Admin" for a user
-                // would hand out the Gate::before bypass.
+                // would hand out the Gate::before bypass. Clearing the label is
+                // a change too; sending the stored one back is not.
                 if ($role->name === 'super_admin'
-                    && $this->filled('display_name')
-                    && $this->input('display_name') !== $role->display_name
+                    && $this->has('display_name')
+                    && self::blankToNull($this->input('display_name')) !== self::blankToNull($role->display_name)
                     && ! $this->user()->hasRole('super_admin')) {
                     $validator->errors()->add(
                         'display_name',
                         'Only a super admin can change the super_admin role\'s display name.'
                     );
                 }
+
+                $this->refuseUngrantablePermissions($validator, $role);
             },
         ];
+    }
+
+    /**
+     * A blank label and no label are the same stored value.
+     */
+    private static function blankToNull(mixed $value): mixed
+    {
+        return is_string($value) && trim($value) === '' ? null : $value;
     }
 }

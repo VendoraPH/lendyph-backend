@@ -118,3 +118,47 @@ it('counts periods as collected, partial or pending and leaves out periods with 
     expect((float) $report->json('data.total_collected'))->toBe(17700.0);
     expect((float) $report->json('data.collection_rate'))->toBe(50.0);
 });
+
+it('agrees with the dashboard daily dues for the same day', function () {
+    $paidInFull = $this->createReleasedLoan();
+    flaggedMovePeriod($paidInFull, 1, 0);
+    flaggedPostPayment($this, $paidInFull, 11800);
+
+    $partlyPaid = $this->createReleasedLoan();
+    flaggedMovePeriod($partlyPaid, 1, 0);
+    flaggedPostPayment($this, $partlyPaid, 3000.55);
+
+    $unpaid = $this->createReleasedLoan();
+    flaggedMovePeriod($unpaid, 1, 0);
+
+    $today = Carbon::today()->toDateString();
+    $report = $this->getJson("/api/reports/daily-collection?date_from={$today}&date_to={$today}")->assertOk()->json('data');
+    $dashboard = $this->getJson("/api/dashboard/daily-dues?date={$today}")->assertOk()->json('summary');
+
+    foreach (['total_due', 'total_collected', 'collected_in_full', 'partially_collected', 'uncollected'] as $figure) {
+        expect((float) $report[$figure])->toBe((float) $dashboard[$figure], $figure);
+    }
+    expect($report['counts'])->toBe($dashboard['counts']);
+    // The dashboard rounds the rate to one decimal, the report to two.
+    expect(round($report['collection_rate'], 1))->toBe(round((float) $dashboard['collection_rate'], 1));
+});
+
+it('gives Collection Efficiency the same overall figures, and caps every branch and month row', function () {
+    $loan = $this->createReleasedLoan();
+    flaggedMovePeriod($loan, 1, 0);
+    flaggedPostPayment($this, $loan, 23600);
+
+    $today = Carbon::today()->toDateString();
+    $daily = $this->getJson("/api/reports/daily-collection?date_from={$today}&date_to={$today}")->assertOk()->json('data');
+    $efficiency = $this->getJson("/api/reports/collection-efficiency?date_from={$today}&date_to={$today}")->assertOk()->json('data');
+
+    foreach (['total_due', 'total_collected', 'collection_rate', 'uncollected', 'collected_in_full', 'partially_collected', 'counts', 'penalty_collected', 'total_received'] as $figure) {
+        expect($efficiency[$figure])->toBe($daily[$figure], $figure);
+    }
+    expect((float) $efficiency['total_received'])->toBe(23600.0);
+
+    foreach ([...$efficiency['by_branch'], ...$efficiency['by_period']] as $row) {
+        expect((float) $row['collection_rate'])->toBeLessThanOrEqual(100.0);
+    }
+    expect((float) $efficiency['by_branch'][0]['total_collected'])->toBe(11800.0);
+});

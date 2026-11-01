@@ -92,3 +92,42 @@ it('refuses a non-super_admin granting a permission they do not hold, on another
     expect($clerkRole->fresh()->permissions->pluck('name')->contains('loans:approve'))->toBeFalse();
     expect(Role::where('name', 'approver_clone')->exists())->toBeFalse();
 });
+
+it('lets a super_admin change super_admin\'s permissions', function () {
+    $superAdmin = Role::where('name', 'super_admin')->firstOrFail();
+    $kept = $superAdmin->permissions->pluck('name')->reject(fn ($name) => $name === 'reports:export')->values()->all();
+
+    $this->actingAs(User::where('username', 'super_admin')->firstOrFail())
+        ->putJson("/api/roles/{$superAdmin->id}", ['permissions' => $kept])
+        ->assertSuccessful();
+
+    expect($superAdmin->fresh()->permissions->pluck('name')->contains('reports:export'))->toBeFalse();
+});
+
+it('lets a non-super_admin remove a permission they do not hold', function () {
+    $clerkRole = Role::create(['name' => 'settings_clerk', 'guard_name' => 'web', 'is_system' => false]);
+    $clerkRole->syncPermissions(['settings:view', 'settings:update', 'dashboard:view']);
+    $clerk = User::factory()->create();
+    $clerk->assignRole($clerkRole);
+
+    $target = Role::create(['name' => 'approver_desk', 'guard_name' => 'web', 'is_system' => false]);
+    $target->syncPermissions(['dashboard:view', 'loans:approve']);
+    app(PermissionRegistrar::class)->forgetCachedPermissions();
+
+    $this->actingAs($clerk)
+        ->putJson("/api/roles/{$target->id}", ['permissions' => ['dashboard:view']])
+        ->assertSuccessful();
+
+    expect($target->fresh()->permissions->pluck('name')->all())->toBe(['dashboard:view']);
+});
+
+it('lets a client admin edit the admin role\'s own permissions', function () {
+    $adminRole = Role::where('name', 'admin')->firstOrFail();
+    $kept = $adminRole->permissions->pluck('name')->reject(fn ($name) => $name === 'reports:export')->values()->all();
+
+    $this->actingAs(flaggedClientAdmin())
+        ->putJson("/api/roles/{$adminRole->id}", ['permissions' => $kept])
+        ->assertSuccessful();
+
+    expect($adminRole->fresh()->permissions->pluck('name')->contains('reports:export'))->toBeFalse();
+});

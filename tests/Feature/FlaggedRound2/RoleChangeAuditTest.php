@@ -3,6 +3,11 @@
 use App\Models\AuditLog;
 use App\Models\Role;
 use App\Models\User;
+use App\Services\RolePermissionAudit;
+use Database\Seeders\RoleAndPermissionSeeder;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
+use Spatie\Permission\Models\Role as SpatieRole;
 use Tests\TestCase;
 
 uses(TestCase::class);
@@ -119,4 +124,35 @@ it('writes a deleted row when a custom role is deleted', function () {
     expect($deleted)->toHaveCount(1);
     expect($deleted->first()->user_id)->toBe($this->actor->id);
     expect($deleted->first()->old_values['name'])->toBe('temp_reviewer');
+});
+
+it('writes no audit rows when the role seeder runs', function () {
+    // Drift the seeded baseline so the seeder has something to write back.
+    DB::table('roles')->where('name', 'cashier')->update(['description' => 'Drifted']);
+    $before = AuditLog::where('auditable_type', (new Role)->getMorphClass())->count();
+
+    $this->seed(RoleAndPermissionSeeder::class);
+
+    expect(Role::where('name', 'cashier')->value('description'))->not->toBe('Drifted');
+    expect(AuditLog::where('auditable_type', (new Role)->getMorphClass())->count())->toBe($before);
+});
+
+it('writes one system row, with no user, when a migration changes a role\'s permissions', function () {
+    Auth::forgetGuards();
+
+    // A migration holds Spatie's own Role class, as the permission migrations do.
+    $viewer = SpatieRole::findByName('viewer', 'web');
+    $before = RolePermissionAudit::names($viewer);
+    $viewer->givePermissionTo('settings:delete');
+    RolePermissionAudit::record($viewer, $before, RolePermissionAudit::names($viewer), 'System change: test migration grants settings:delete to viewer');
+
+    // Unchanged: no second row.
+    RolePermissionAudit::record($viewer, RolePermissionAudit::names($viewer), RolePermissionAudit::names($viewer));
+
+    $rows = flaggedRoleAuditRows(Role::findOrFail($viewer->id), 'role_permissions_changed');
+    expect($rows)->toHaveCount(1);
+    expect($rows->first()->user_id)->toBeNull();
+    expect($rows->first()->description)->toBe('System change: test migration grants settings:delete to viewer');
+    expect($rows->first()->old_values['permissions'])->not->toContain('settings:delete');
+    expect($rows->first()->new_values['permissions'])->toContain('settings:delete');
 });

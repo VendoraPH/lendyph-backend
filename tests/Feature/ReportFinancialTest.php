@@ -249,30 +249,24 @@ class ReportFinancialTest extends TestCase
         $this->assertSame($this->branch->id, $filtered['by_branch'][0]['branch_id']);
         $this->assertEqualsWithDelta(50.0, $filtered['by_branch'][0]['collection_rate'], 0.01);
 
-        // Unfiltered, the ORG-level rate legitimately exceeds 100% — one branch
-        // paid down arrears billed outside the window. The per-branch rows stay
-        // correctly scoped even then, which is the actual guard.
+        // Unfiltered, the org-wide figures count Main's period only: the
+        // satellite had nothing due today, so its 30,000 is cash received, not
+        // collection against today's dues, and it has no branch row.
         $orgWide = $this->getJson("/api/reports/collection-efficiency?{$window}")->assertOk()->json('data');
         $this->assertEqualsWithDelta(11800, $orgWide['total_due'], 0.01);
-        $this->assertEqualsWithDelta(35900, $orgWide['total_collected'], 0.01);
-        $this->assertEqualsWithDelta(304.24, $orgWide['collection_rate'], 0.01);
+        $this->assertEqualsWithDelta(5900, $orgWide['total_collected'], 0.01);
+        $this->assertEqualsWithDelta(50.0, $orgWide['collection_rate'], 0.01);
+        $this->assertEqualsWithDelta(35900, $orgWide['total_received'], 0.01);
 
         $rows = collect($orgWide['by_branch'])->keyBy('branch_id');
-        $this->assertCount(2, $rows);
+        $this->assertCount(1, $rows);
         $this->assertEqualsWithDelta(11800, $rows[$this->branch->id]['total_due'], 0.01);
         $this->assertEqualsWithDelta(5900, $rows[$this->branch->id]['total_collected'], 0.01);
         $this->assertEqualsWithDelta(50.0, $rows[$this->branch->id]['collection_rate'], 0.01);
-        $this->assertEqualsWithDelta(0, $rows[$satellite->id]['total_due'], 0.01);
-        $this->assertEqualsWithDelta(30000, $rows[$satellite->id]['total_collected'], 0.01);
-        $this->assertEqualsWithDelta(
-            0.0,
-            $rows[$satellite->id]['collection_rate'],
-            0.01,
-            'Nothing billed means no rate to report, not a division by zero.',
-        );
+        $this->assertFalse($rows->has($satellite->id), 'A branch with nothing due in the range has no row.');
     }
 
-    public function test_collection_efficiency_by_period_bucket_may_legitimately_exceed_100_percent(): void
+    public function test_collection_efficiency_by_period_counts_each_months_own_periods_and_never_exceeds_100_percent(): void
     {
         $loan = $this->releaseLoan();
 
@@ -282,7 +276,8 @@ class ReportFinancialTest extends TestCase
         // 11,800 billed in each of the two months...
         $this->setScheduleDueDate($loan, periodNumber: 1, dueDate: $monthOne->copy()->addDays(14));
         $this->setScheduleDueDate($loan, periodNumber: 2, dueDate: $monthTwo->copy()->addDays(14));
-        // ...and 20,000 paid in the SECOND month, settling both.
+        // ...and 20,000 paid in the SECOND month: the late first period's
+        // penalty, then its 11,800, then 7,800 towards the second.
         $this->postRepayment($loan, 20000, $monthTwo->copy()->addDays(19)->toDateString());
 
         $from = $monthOne->toDateString();
@@ -291,37 +286,30 @@ class ReportFinancialTest extends TestCase
         $data = $this->getJson("/api/reports/collection-efficiency?date_from={$from}&date_to={$to}")
             ->assertOk()->json('data');
 
-        // Over the whole window nothing is odd: 20,000 against 23,600 billed.
+        $this->assertEqualsWithDelta(400, $data['penalty_collected'], 0.01);
+        $this->assertEqualsWithDelta(20000, $data['total_received'], 0.01);
+
+        // Penalty never counts as collected: 19,600 of 23,600 billed.
         $this->assertEqualsWithDelta(23600, $data['total_due'], 0.01);
-        $this->assertEqualsWithDelta(20000, $data['total_collected'], 0.01);
-        $this->assertEqualsWithDelta(84.75, $data['collection_rate'], 0.01);
+        $this->assertEqualsWithDelta(19600, $data['total_collected'], 0.01);
+        $this->assertEqualsWithDelta(83.05, $data['collection_rate'], 0.01);
 
         $periods = collect($data['by_period'])->keyBy('period');
         $this->assertCount(2, $periods);
 
+        // Each month holds the periods that fell due in it: the arrears paid in
+        // month two count towards month one's period, so neither passes 100%.
         $first = $periods[$monthOne->format('Y-m')];
         $this->assertEqualsWithDelta(11800, $first['total_due'], 0.01);
-        $this->assertEqualsWithDelta(0, $first['total_collected'], 0.01);
-        $this->assertEqualsWithDelta(0.0, $first['collection_rate'], 0.01);
-        $this->assertEqualsWithDelta(11800, $first['uncollected'], 0.01);
+        $this->assertEqualsWithDelta(11800, $first['total_collected'], 0.01);
+        $this->assertEqualsWithDelta(100.0, $first['collection_rate'], 0.01);
+        $this->assertEqualsWithDelta(0, $first['uncollected'], 0.01);
 
         $second = $periods[$monthTwo->format('Y-m')];
         $this->assertEqualsWithDelta(11800, $second['total_due'], 0.01);
-        $this->assertEqualsWithDelta(20000, $second['total_collected'], 0.01);
-        $this->assertEqualsWithDelta(
-            169.49,
-            $second['collection_rate'],
-            0.01,
-            'A monthly bucket ABOVE 100% is correct here: the month collected its own 11,800 plus the previous '
-            ."month's arrears. This is a timing effect and must not be \"fixed\" by clamping the rate.",
-        );
-        $this->assertGreaterThan(100.0, $second['collection_rate']);
-        $this->assertEqualsWithDelta(
-            0,
-            $second['uncollected'],
-            0.01,
-            'uncollected floors at zero rather than going negative when a bucket over-collects.',
-        );
+        $this->assertEqualsWithDelta(7800, $second['total_collected'], 0.01);
+        $this->assertEqualsWithDelta(66.10, $second['collection_rate'], 0.01);
+        $this->assertEqualsWithDelta(4000, $second['uncollected'], 0.01);
     }
 
     // ── Loan Portfolio by Product ────────────────────────────────────────

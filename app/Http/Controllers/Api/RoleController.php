@@ -8,6 +8,7 @@ use App\Http\Requests\Role\UpdateRoleRequest;
 use App\Http\Resources\RoleResource;
 use App\Models\Role;
 use App\Rules\UniqueRoleDisplayName;
+use App\Services\RolePermissionAudit;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Support\Facades\DB;
@@ -91,7 +92,7 @@ class RoleController extends Controller
         ),
         responses: [
             new OA\Response(response: 201, description: 'Role created'),
-            new OA\Response(response: 422, description: 'Validation error'),
+            new OA\Response(response: 422, description: 'Validation error, or a permission the actor does not hold (`errors.permissions`)'),
         ],
     )]
     public function store(StoreRoleRequest $request): JsonResponse
@@ -112,6 +113,7 @@ class RoleController extends Controller
 
             if (! empty($validated['permissions'])) {
                 $role->syncPermissions($validated['permissions']);
+                RolePermissionAudit::record($role, [], RolePermissionAudit::names($role));
             }
 
             return $role;
@@ -146,7 +148,7 @@ class RoleController extends Controller
         ),
         responses: [
             new OA\Response(response: 200, description: 'Role updated'),
-            new OA\Response(response: 422, description: 'Validation error or system-role rename attempted'),
+            new OA\Response(response: 422, description: 'Validation error; system-role rename attempted; a non-super_admin changing super_admin\'s display_name (clearing included) or permissions; or adding a permission the actor does not hold (`errors.display_name` / `errors.permissions`)'),
         ],
     )]
     public function update(UpdateRoleRequest $request, Role $role): RoleResource
@@ -162,7 +164,9 @@ class RoleController extends Controller
             }
 
             if (array_key_exists('permissions', $validated)) {
+                $before = RolePermissionAudit::names($role);
                 $role->syncPermissions($validated['permissions'] ?? []);
+                RolePermissionAudit::record($role, $before, RolePermissionAudit::names($role));
             }
         });
 

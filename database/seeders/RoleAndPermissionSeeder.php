@@ -3,13 +3,23 @@
 namespace Database\Seeders;
 
 use App\Models\Role;
+use App\Services\AuditLogService;
 use Illuminate\Database\Seeder;
 use Spatie\Permission\Models\Permission;
 use Spatie\Permission\PermissionRegistrar;
 
 class RoleAndPermissionSeeder extends Seeder
 {
+    /**
+     * Seeding writes no audit rows: a fresh database's roles are the baseline,
+     * not a change anyone made (Role is Auditable).
+     */
     public function run(): void
+    {
+        AuditLogService::withoutModelAuditing(fn () => $this->seedRolesAndPermissions());
+    }
+
+    private function seedRolesAndPermissions(): void
     {
         app()[PermissionRegistrar::class]->forgetCachedPermissions();
 

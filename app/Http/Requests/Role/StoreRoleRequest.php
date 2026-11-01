@@ -2,13 +2,17 @@
 
 namespace App\Http\Requests\Role;
 
+use App\Http\Requests\Concerns\GuardsRolePermissionGrants;
 use App\Rules\UniqueRoleDisplayName;
 use App\Rules\ValidUtf8;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\Validator;
 
 class StoreRoleRequest extends FormRequest
 {
+    use GuardsRolePermissionGrants;
+
     public function authorize(): bool
     {
         return $this->user()->can('settings:update');
@@ -61,6 +65,17 @@ class StoreRoleRequest extends FormRequest
     {
         return [
             'name.regex' => 'The role name must be lowercase letters, numbers, and underscores (e.g., branch_manager).',
+        ];
+    }
+
+    /**
+     * A new role may not carry a permission the creator doesn't hold
+     * (GuardsRolePermissionGrants).
+     */
+    public function after(): array
+    {
+        return [
+            fn (Validator $validator) => $this->refuseUngrantablePermissions($validator, null),
         ];
     }
 }

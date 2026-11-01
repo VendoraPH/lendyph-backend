@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Traits\Auditable;
 use Illuminate\Database\Eloquent\Relations\MorphToMany;
 use Spatie\Permission\Models\Role as SpatieRole;
 
@@ -9,11 +10,16 @@ use Spatie\Permission\Models\Role as SpatieRole;
  * Custom Role model that extends Spatie's Role with:
  * - description / is_active / is_system metadata
  * - Helper to distinguish seeded system roles from admin-created custom roles
+ * - Audit rows for create, edit (display name, description, active flag) and
+ *   delete. Permission changes are a pivot write the trait can't see; see
+ *   RolePermissionAudit.
  *
  * Registered as the `role` model in config/permission.php.
  */
 class Role extends SpatieRole
 {
+    use Auditable;
+
     protected $fillable = [
         'name',
         'display_name',
