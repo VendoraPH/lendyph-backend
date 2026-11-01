@@ -127,6 +127,7 @@ class ApprovalWorkflowController extends Controller
             'steps.*.name' => ['required', 'string', 'max:255'],
             'steps.*.role' => ['required', 'string', 'max:100'],
             'steps.*.kind' => ['required', Rule::in(['submit', 'approve', 'release'])],
+            'steps.*.status' => ['nullable', 'string', 'max:100'],
         ]);
 
         $this->validateChain($validated['steps']);

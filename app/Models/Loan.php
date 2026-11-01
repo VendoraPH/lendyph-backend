@@ -409,11 +409,36 @@ class Loan extends Model
             return null;
         }
 
-        $name = LoanApprovalStep::currentRound($this->approvalSteps)
-            ->firstWhere('status', LoanApprovalStep::STATUS_PENDING)
-            ?->name;
+        $name = $this->currentPendingStep()?->name;
 
         return trim((string) $name) === '' ? null : $name;
+    }
+
+    /**
+     * The label the loans list shows while a `for_review` loan waits at its
+     * current step ("For Approval - <label>"): the `status_label` snapshotted
+     * onto the step currentApprover() names. Null under the same conditions as
+     * currentApprover(), and when the step has no label or a blank one, so the
+     * client falls back to the approver name.
+     *
+     * Reads the `approvalSteps` relation: eager-load it before calling this
+     * across a list.
+     */
+    public function currentStatusLabel(): ?string
+    {
+        if ($this->status !== 'for_review') {
+            return null;
+        }
+
+        $label = $this->currentPendingStep()?->status_label;
+
+        return trim((string) $label) === '' ? null : $label;
+    }
+
+    private function currentPendingStep(): ?LoanApprovalStep
+    {
+        return LoanApprovalStep::currentRound($this->approvalSteps)
+            ->firstWhere('status', LoanApprovalStep::STATUS_PENDING);
     }
 
     /**
