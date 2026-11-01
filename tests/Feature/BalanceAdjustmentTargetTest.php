@@ -144,7 +144,7 @@ class BalanceAdjustmentTargetTest extends TestCase
 
         $this->patchJson("/api/loan-adjustments/{$id}/approve")
             ->assertStatus(409)
-            ->assertExactJson(['message' => "The loan's principal changed since this adjustment was requested; request it again."]);
+            ->assertExactJson(['message' => "The loan's principal changed since this adjustment was requested. Reject this request and create a new one for the same target."]);
 
         $this->assertSame('pending', LoanAdjustment::findOrFail($id)->status);
     }
@@ -160,7 +160,7 @@ class BalanceAdjustmentTargetTest extends TestCase
 
         $this->patchJson("/api/loan-adjustments/{$id}/apply")
             ->assertStatus(409)
-            ->assertExactJson(['message' => "The loan's principal changed since this adjustment was requested; request it again."]);
+            ->assertExactJson(['message' => "The loan's principal changed since this adjustment was requested. Reject this request and create a new one for the same target."]);
 
         $this->assertSame('approved', LoanAdjustment::findOrFail($id)->status);
         $this->assertSame($before, $this->unpaidPrincipal($loan));

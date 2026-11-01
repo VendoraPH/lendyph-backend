@@ -120,8 +120,9 @@ class LoanAdjustmentService
      * A balance adjustment requested as a target principal balance stores the
      * amount worked out at request time, so it lands on the target only while
      * the loan's unpaid principal is still what it was then. Checked under the
-     * loan's lock at approval and at apply; a moved principal is a 409 and the
-     * request has to be made again. One requested by amount is not checked.
+     * loan's lock at approval and at apply; a moved principal is a 409 telling
+     * staff to reject it and request the target again (it is not rejected for
+     * them). One requested by amount is not checked.
      *
      * @throws HttpResponseException 409 when the principal moved since the request
      */
@@ -137,7 +138,7 @@ class LoanAdjustmentService
         $atRequest = (int) round((float) ($own['outstanding_principal_at_request'] ?? -1) * 100);
 
         if ($this->outstandingPrincipalCentavos($loan) !== $atRequest) {
-            throw LoanWriteTransaction::conflict("The loan's principal changed since this adjustment was requested; request it again.");
+            throw LoanWriteTransaction::conflict("The loan's principal changed since this adjustment was requested. Reject this request and create a new one for the same target.");
         }
     }
 
