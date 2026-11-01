@@ -197,6 +197,38 @@ class LoanWriteCollisionTest extends TestCase
         $this->assertSame($before, $this->state());
     }
 
+    public function test_a_payment_preview_that_deadlocks_answers_409_and_writes_nothing(): void
+    {
+        $loan = $this->createReleasedLoan();
+        $before = $this->state();
+        $this->failOn(fn (string $sql): bool => str_starts_with($sql, 'insert into `repayment_allocations`'), self::DEADLOCK);
+
+        $this->previewRequest($loan)->assertStatus(409)->assertExactJson(['message' => self::CONFLICT]);
+
+        $this->assertSame($before, $this->state());
+    }
+
+    public function test_a_payment_preview_whose_lock_wait_times_out_answers_409_and_writes_nothing(): void
+    {
+        $loan = $this->createReleasedLoan();
+        $before = $this->state();
+        $this->failOn(fn (string $sql): bool => str_contains($sql, 'from `loans`') && str_contains($sql, 'for update'), self::LOCK_WAIT_TIMEOUT);
+
+        $this->previewRequest($loan)->assertStatus(409)->assertExactJson(['message' => self::CONFLICT]);
+
+        $this->assertSame($before, $this->state());
+    }
+
+    public function test_a_payment_preview_still_writes_nothing(): void
+    {
+        $loan = $this->createReleasedLoan();
+        $before = $this->state();
+
+        $this->previewRequest($loan)->assertOk()->assertJsonPath('data.is_preview', true);
+
+        $this->assertSame($before, $this->state());
+    }
+
     public function test_a_payment_opens_its_transaction_with_the_loan_lock(): void
     {
         $loan = $this->createReleasedLoan();
@@ -690,6 +722,14 @@ class LoanWriteCollisionTest extends TestCase
             'amount_paid' => 11800,
             'payment_date' => now()->toDateString(),
             'method' => 'cash',
+        ]);
+    }
+
+    private function previewRequest(Loan $loan): TestResponse
+    {
+        return $this->postJson("/api/loans/{$loan->id}/repayments/preview", [
+            'amount_paid' => 11800,
+            'payment_date' => now()->toDateString(),
         ]);
     }
 

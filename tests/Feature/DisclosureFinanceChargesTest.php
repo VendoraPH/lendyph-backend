@@ -176,6 +176,17 @@ class DisclosureFinanceChargesTest extends TestCase
         ], $data['rates']);
     }
 
+    public function test_the_nominal_annual_rate_is_the_contractual_rate_times_its_periods_never_rounded(): void
+    {
+        // 1.1234% a month is 13.4808% a year, and 1.6667% is 20.0004%: exact,
+        // to the rate's own four places, not cut to fewer.
+        foreach ([[1.1234, 13.4808], [1.6667, 20.0004]] as [$monthly, $annual]) {
+            $loan = $this->release($this->draftLoan(['interest_rate' => $monthly], 12000, []));
+
+            $this->assertSame($annual, $this->disclosure($loan)['rates']['nominal_annual_rate']);
+        }
+    }
+
     public function test_the_effective_rate_of_a_textbook_add_on_loan(): void
     {
         // ₱12,000 at 1% a month add-on (flat) for 12 months, nothing withheld:

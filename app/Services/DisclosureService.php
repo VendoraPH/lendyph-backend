@@ -356,7 +356,7 @@ class DisclosureService
         return [
             'contractual_rate' => $rate,
             'rate_frequency' => $rateFrequency,
-            'nominal_annual_rate' => $ratePeriods === null ? null : self::percent($rate * $ratePeriods),
+            'nominal_annual_rate' => $ratePeriods === null ? null : self::nominalAnnualRate($rate, $ratePeriods),
             'effective_rate_monthly' => $annual === null ? null : self::percent($annual / 12),
             'effective_rate_annual' => $annual === null ? null : self::percent($annual),
         ];
@@ -450,6 +450,17 @@ class DisclosureService
         }
 
         return ($low + $high) / 2;
+    }
+
+    /**
+     * The contractual rate times its periods a year, never rounded. The rate
+     * is stored to four places (decimal 8,4), so the product of a whole number
+     * of periods is exact in ten-thousandths of a percent: worked in those, so
+     * no float noise is sent and nothing is cut.
+     */
+    private static function nominalAnnualRate(float $rate, int $periods): float
+    {
+        return ((int) round($rate * 10000)) * $periods / 10000 + 0.0;
     }
 
     /** A percentage to four places, never a negative zero. */

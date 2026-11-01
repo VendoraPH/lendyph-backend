@@ -129,6 +129,88 @@ class BalanceAdjustmentSpreadTest extends TestCase
         $this->assertSame('approved', $adjustment->fresh()->status);
     }
 
+    public function test_a_reduction_equal_to_the_last_open_period_s_unpaid_principal_settles_it_and_completes_the_loan(): void
+    {
+        $loan = $this->loanOwingOnItsLastPeriod();
+
+        $this->applyBalanceAdjustment($loan, -600);
+
+        $last = $loan->amortizationSchedules()->reorder('period_number', 'desc')->first();
+        $this->assertSame(40000, $this->centavos($last->principal_due));
+        $this->assertSame('paid', $last->status);
+        $this->assertSame('completed', $loan->fresh()->status);
+    }
+
+    public function test_a_smaller_reduction_leaves_the_period_and_the_loan_as_they_were(): void
+    {
+        $loan = $this->loanOwingOnItsLastPeriod();
+        $statusBefore = $loan->fresh()->status;
+
+        $this->applyBalanceAdjustment($loan, -300);
+
+        $last = $loan->amortizationSchedules()->reorder('period_number', 'desc')->first();
+        $this->assertSame(70000, $this->centavos($last->principal_due));
+        $this->assertSame('partial', $last->status);
+        $this->assertSame($statusBefore, $loan->fresh()->status);
+    }
+
+    public function test_a_reduction_settles_only_the_periods_it_touches_and_never_rewrites_paid_ones(): void
+    {
+        // Their amounts and status. Their remaining_balance is still rewritten
+        // by the older chain recalculation after the spread (flagged, not
+        // changed here).
+        $loan = $this->loanOwingOnItsLastPeriod();
+        $paidBefore = AmortizationSchedule::where('loan_id', $loan->id)->where('status', 'paid')
+            ->orderBy('period_number')->get(['id', 'principal_due', 'interest_due', 'total_due', 'principal_paid', 'interest_paid', 'status'])->toArray();
+
+        $this->applyBalanceAdjustment($loan, -600);
+
+        $this->assertSame($paidBefore, AmortizationSchedule::where('loan_id', $loan->id)->whereIn('id', array_column($paidBefore, 'id'))
+            ->orderBy('period_number')->get(['id', 'principal_due', 'interest_due', 'total_due', 'principal_paid', 'interest_paid', 'status'])->toArray());
+    }
+
+    public function test_an_adjustment_amount_with_more_than_two_decimals_is_refused_not_rounded(): void
+    {
+        $loan = $this->createReleasedLoan();
+
+        $this->postJson("/api/loans/{$loan->id}/adjustments", [
+            'adjustment_type' => 'balance_adjustment',
+            'new_values' => ['adjustment_amount' => -100.005],
+        ])->assertUnprocessable()->assertJsonValidationErrors('new_values.adjustment_amount');
+
+        $this->postJson("/api/loans/{$loan->id}/adjustments", [
+            'adjustment_type' => 'balance_adjustment',
+            'new_values' => ['adjustment_amount' => -100.01],
+        ])->assertCreated();
+
+        $this->assertSame(1, LoanAdjustment::where('loan_id', $loan->id)->count());
+    }
+
+    /**
+     * Periods 1 to 5 paid in full; period 6 owes ₱1,000 principal with ₱400
+     * of it and all its interest paid, so ₱600 of principal is all that is
+     * still owed on the loan.
+     */
+    private function loanOwingOnItsLastPeriod(): Loan
+    {
+        $loan = $this->createReleasedLoan();
+
+        DB::table('amortization_schedules')->where('loan_id', $loan->id)->where('period_number', '<', 6)->update([
+            'principal_paid' => DB::raw('principal_due'),
+            'interest_paid' => DB::raw('interest_due'),
+            'status' => 'paid',
+        ]);
+        DB::table('amortization_schedules')->where('loan_id', $loan->id)->where('period_number', 6)->update([
+            'principal_due' => 1000,
+            'principal_paid' => 400,
+            'interest_paid' => DB::raw('interest_due'),
+            'total_due' => DB::raw('1000 + interest_due'),
+            'status' => 'partial',
+        ]);
+
+        return $loan;
+    }
+
     private function applyBalanceAdjustment(Loan $loan, float $amount): void
     {
         $adjustment = $this->approvedBalanceAdjustment($loan, $amount);

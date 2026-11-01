@@ -77,6 +77,32 @@ class ShareCapitalPledgeCentavosTest extends TestCase
         $this->assertDatabaseMissing('share_capital_ledger', ['borrower_id' => $this->pledge->borrower_id]);
     }
 
+    public function test_a_ledger_entry_with_more_than_two_decimals_is_refused_not_rounded(): void
+    {
+        $this->postJson('/api/share-capital/ledger', [
+            'borrower_id' => $this->pledge->borrower_id,
+            'date' => now()->toDateString(),
+            'description' => 'Manual contribution',
+            'type' => 'credit',
+            'amount' => 1500.555,
+        ])->assertUnprocessable()->assertJsonValidationErrors(['amount']);
+
+        $this->assertDatabaseMissing('share_capital_ledger', ['borrower_id' => $this->pledge->borrower_id]);
+    }
+
+    public function test_a_ledger_entry_with_centavos_is_saved_exactly(): void
+    {
+        $this->postJson('/api/share-capital/ledger', [
+            'borrower_id' => $this->pledge->borrower_id,
+            'date' => now()->toDateString(),
+            'description' => 'Manual contribution',
+            'type' => 'credit',
+            'amount' => 1500.55,
+        ])->assertCreated();
+
+        $this->assertDatabaseHas('share_capital_ledger', ['borrower_id' => $this->pledge->borrower_id, 'credit' => '1500.55']);
+    }
+
     public function test_bulk_entries_with_centavos_are_saved_exactly(): void
     {
         $this->postJson('/api/pledges/bulk-entries', ['entries' => [[

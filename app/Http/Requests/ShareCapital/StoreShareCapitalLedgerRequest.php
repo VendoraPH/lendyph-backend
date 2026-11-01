@@ -21,7 +21,7 @@ class StoreShareCapitalLedgerRequest extends FormRequest
             'date' => ['required', 'date'],
             'description' => ['required', 'string', 'max:255'],
             'type' => ['required', 'in:credit,debit'],
-            'amount' => ['required', 'numeric', 'min:0.01'],
+            'amount' => ['required', 'numeric', 'min:0.01', 'decimal:0,2'],
         ];
     }
 

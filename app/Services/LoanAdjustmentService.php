@@ -836,7 +836,9 @@ class LoanAdjustmentService
      * Worked in whole centavos (balanceAdjustmentShares()). Paid periods are
      * never touched. A reduction larger than the unpaid principal is refused
      * (422 on `new_values.adjustment_amount`) rather than capped, so what is
-     * applied is always what was approved.
+     * applied is always what was approved. A reduction that leaves a period
+     * owing nothing marks it `paid`, and one that leaves no open period
+     * completes the loan.
      */
     private function applyBalanceAdjustment(LoanAdjustment $adjustment, Loan $loan): void
     {
@@ -876,11 +878,31 @@ class LoanAdjustmentService
 
             $schedule = $unpaidSchedules[$i];
             $newPrincipalDue = $centavos($schedule->principal_due) + $share;
-
-            $schedule->update([
+            $changes = [
                 'principal_due' => $newPrincipalDue / 100,
                 'total_due' => ($newPrincipalDue + $centavos($schedule->interest_due)) / 100,
-            ]);
+            ];
+
+            // A reduction that leaves the period owing nothing settles it, by
+            // the rule a payment uses (RepaymentService::allocateToSchedule()).
+            $penaltySettled = $centavos($schedule->penalty_amount) === 0
+                || $centavos($schedule->penalty_paid) >= $centavos($schedule->penalty_amount);
+
+            if ($share < 0
+                && $centavos($schedule->principal_paid) >= $newPrincipalDue
+                && $centavos($schedule->interest_paid) >= $centavos($schedule->interest_due)
+                && $penaltySettled) {
+                $changes['status'] = 'paid';
+            }
+
+            $schedule->update($changes);
+        }
+
+        // As a payment does (RepaymentService, step 6): a loan with no open
+        // period left is completed. `completed` leaves the pledging statuses,
+        // so no collateral guard applies.
+        if ($amount < 0 && ! $loan->amortizationSchedules()->whereIn('status', ['pending', 'partial', 'overdue'])->exists()) {
+            $loan->update(['status' => 'completed']);
         }
 
         // Recalculate remaining_balance chain

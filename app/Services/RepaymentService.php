@@ -385,9 +385,9 @@ class RepaymentService
             ]);
         }
 
-        DB::beginTransaction();
-
-        try {
+        // Rolled back whatever happens; a deadlock or lock wait timeout on the
+        // loan lock answers 409, as recording the payment does.
+        return LoanWriteTransaction::rolledBack(function () use ($loan, $amountPaid, $paymentDate, $user): array {
             $this->lockLoanForPayment($loan);
 
             $owedIds = $this->owedScheduleIds($loan, Carbon::parse($paymentDate));
@@ -419,9 +419,7 @@ class RepaymentService
                 'allocations' => $allocations,
                 'is_preview' => true,
             ];
-        } finally {
-            DB::rollBack();
-        }
+        });
     }
 
     /**

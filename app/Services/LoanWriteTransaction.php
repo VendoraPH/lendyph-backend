@@ -118,6 +118,31 @@ final class LoanWriteTransaction
     }
 
     /**
+     * Run `$callback` inside a transaction that is always rolled back, for a
+     * preview that runs a real write to read its result and keeps none of it
+     * (RepaymentService::previewAllocation()). A deadlock or lock wait timeout
+     * on its locks answers 409, as run() does; any other error is rethrown.
+     *
+     * @throws HttpResponseException 409 on a concurrency error
+     */
+    public static function rolledBack(Closure $callback, ?string $conflictMessage = null): mixed
+    {
+        DB::beginTransaction();
+
+        try {
+            return $callback();
+        } catch (PDOException $e) {
+            if (! (new self)->causedByConcurrencyError($e)) {
+                throw $e;
+            }
+
+            throw self::conflict($conflictMessage);
+        } finally {
+            DB::rollBack();
+        }
+    }
+
+    /**
      * The 409 for a write that another one got to first, for a caller that
      * detects that itself rather than through a database error.
      */
