@@ -80,8 +80,10 @@ class RepaymentService
      *
      * `$amountUnderLock` gets the locked loan and returns what to pay, read
      * from what is committed once the lock is held, so a payment that landed
-     * after the caller first read the periods is seen. When it returns 0 or
-     * less nothing is recorded and null is returned. For AutoPayService.
+     * after the caller first read the periods is seen. Late penalties are
+     * applied first (applyPenalties()), so the amount covers the penalty the
+     * payment charges. When it returns 0 or less nothing is recorded and null
+     * is returned. For AutoPayService.
      *
      * @param  Closure(Loan): float  $amountUnderLock
      */
@@ -102,6 +104,12 @@ class RepaymentService
 
         return LoanWriteTransaction::run(function () use ($loan, $amountUnderLock, $paymentDate, $user, $remarks, $method, $referenceNumber): ?Repayment {
             $this->lockLoanForPayment($loan);
+
+            // The payment's own first step, run before the amount is worked out
+            // so it includes the late penalty the payment will charge (waived
+            // periods excluded, never below what was paid). Running it again in
+            // recordRepaymentOnLockedLoan() writes the same figures.
+            $this->applyPenalties($loan, Carbon::parse($paymentDate));
 
             $amount = round((float) $amountUnderLock($loan), 2);
 

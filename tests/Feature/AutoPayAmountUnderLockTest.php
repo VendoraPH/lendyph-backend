@@ -5,6 +5,8 @@ namespace Tests\Feature;
 use App\Models\AmortizationSchedule;
 use App\Models\Loan;
 use App\Models\Repayment;
+use App\Services\LoanAdjustmentService;
+use App\Services\RepaymentService;
 use Closure;
 use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Support\Facades\DB;
@@ -91,9 +93,50 @@ class AutoPayAmountUnderLockTest extends TestCase
         $this->assertEquals(11800, $response->json('data.repayments.0.amount_paid'));
     }
 
-    private function autoPayLoan(): Loan
+    public function test_an_overdue_period_is_charged_its_late_penalty_too_and_ends_paid(): void
     {
-        $loan = $this->createReleasedLoan();
+        // Period 1 fell due a month ago, past its 3-day grace: 2% of its
+        // ₱10,000 unpaid principal is a ₱200 penalty, charged by the payment.
+        $loan = $this->autoPayLoan(now()->subMonths(2)->toDateString());
+        $period = $loan->amortizationSchedules()->reorder('period_number')->firstOrFail();
+
+        $response = $this->processFor($period)->assertCreated();
+
+        $this->assertSame(1, $response->json('data.processed'));
+        $this->assertEquals(12000, $response->json('data.repayments.0.amount_paid'));
+
+        $period->refresh();
+        $this->assertSame('paid', $period->status);
+        $this->assertEquals(200, $period->penalty_paid);
+        $this->assertEquals(0, AmortizationSchedule::where('loan_id', $loan->id)->where('period_number', '>', 1)->sum('principal_paid'), 'nothing may spill into a later period');
+    }
+
+    public function test_a_waived_period_is_charged_no_penalty(): void
+    {
+        $loan = $this->autoPayLoan(now()->subMonths(2)->toDateString());
+        $period = $loan->amortizationSchedules()->reorder('period_number')->firstOrFail();
+
+        app(RepaymentService::class)->applyPenalties($loan->fresh(), now());
+        $service = app(LoanAdjustmentService::class);
+        $waiver = $service->createAdjustment($loan->fresh(), [
+            'adjustment_type' => 'penalty_waiver',
+            'new_values' => ['schedule_ids' => [$period->id]],
+        ], $this->admin);
+        $service->approveAdjustment($waiver, $this->admin, 'ok');
+        $service->applyAdjustment($waiver->fresh());
+        $this->assertNotNull($period->fresh()->penalty_waiver_id, 'the waiver did not land, so this test proves nothing');
+
+        $response = $this->processFor($period)->assertCreated();
+
+        $this->assertEquals(11800, $response->json('data.repayments.0.amount_paid'));
+        $period->refresh();
+        $this->assertSame('paid', $period->status);
+        $this->assertEquals(0, $period->penalty_paid);
+    }
+
+    private function autoPayLoan(?string $startDate = null): Loan
+    {
+        $loan = $this->createReleasedLoan(['start_date' => $startDate ?? now()->toDateString()]);
         $loan->update([
             'auto_pay' => true,
             'cbs_reference' => 'CBS-2026-00001',
