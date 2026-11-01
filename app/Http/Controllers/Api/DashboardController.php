@@ -62,7 +62,7 @@ class DashboardController extends Controller
             new OA\Parameter(name: 'date', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
         ],
         responses: [
-            new OA\Response(response: 200, description: 'Daily dues list with summary'),
+            new OA\Response(response: 200, description: 'Daily dues list with summary. A row is `collected` only once the principal and interest paid cover its `total_due` (penalty paid never counts towards it); `amount_collected` is that principal and interest, capped at the amount due. `summary` carries the dashboard pie: `collected_in_full`, `partially_collected`, `uncollected`, `total_collected`, `collection_rate` (never above 100) and `counts` per status.'),
         ],
     )]
     public function dailyDues(): JsonResponse

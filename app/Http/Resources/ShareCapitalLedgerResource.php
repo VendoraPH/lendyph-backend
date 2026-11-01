@@ -19,6 +19,11 @@ class ShareCapitalLedgerResource extends JsonResource
             'reference' => $this->reference,
             'debit' => (float) $this->debit,
             'credit' => (float) $this->credit,
+            // Only where the query selected it (ShareCapitalMemberService::withRunningBalance()).
+            'running_balance' => $this->when(
+                array_key_exists('running_balance', $this->resource->getAttributes()),
+                fn () => round((float) $this->resource->getAttribute('running_balance'), 2),
+            ),
             'created_by_user' => $this->whenLoaded('createdByUser', fn () => [
                 'id' => $this->createdByUser->id,
                 'name' => $this->createdByUser->full_name,

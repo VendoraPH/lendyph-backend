@@ -10,6 +10,7 @@ use App\Http\Controllers\Api\AccountingReconciliationController;
 use App\Http\Controllers\Api\AccountingReportController;
 use App\Http\Controllers\Api\AccountingSettingsController;
 use App\Http\Controllers\Api\AccountingStatementController;
+use App\Http\Controllers\Api\AmortizationCalculatorController;
 use App\Http\Controllers\Api\ApprovalWorkflowController;
 use App\Http\Controllers\Api\AuditLogController;
 use App\Http\Controllers\Api\AuthController;
@@ -182,6 +183,7 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::get('/borrowers/{borrower}/valid-ids', [BorrowerController::class, 'listValidIds']);
     Route::delete('/borrowers/{borrower}/valid-ids/{validIdId}', [BorrowerController::class, 'deleteValidId']);
     Route::get('/borrowers/{borrower}/ledger', [BorrowerController::class, 'ledger']);
+    Route::get('/borrowers/{borrower}/loan-summary', [BorrowerController::class, 'loanSummary']);
 
     // Co-makers
     Route::get('/borrowers/{borrower}/co-makers', [CoMakerController::class, 'index']);
@@ -228,6 +230,8 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     // The loan form's figures (collateral total, security, schedule), before
     // the resource routes so `preview` is never read as a loan id.
     Route::post('/loans/preview', [LoanController::class, 'formPreview']);
+    // The Amortization Calculator: a what-if schedule with no product or loan.
+    Route::post('/loans/amortization-calculator', AmortizationCalculatorController::class);
     Route::apiResource('loans', LoanController::class);
     Route::patch('/loans/{loan}/submit', [LoanController::class, 'submit']);
     Route::patch('/loans/{loan}/approve', [LoanController::class, 'approve']);
@@ -357,6 +361,7 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     // Share Capital Ledger
     Route::get('/share-capital/ledger', [ShareCapitalLedgerController::class, 'index']);
     Route::post('/share-capital/ledger', [ShareCapitalLedgerController::class, 'store']);
+    Route::get('/share-capital/members', [ShareCapitalLedgerController::class, 'members']);
 
     // Share Capital Pledges
     Route::get('/pledges', [ShareCapitalPledgeController::class, 'index']);

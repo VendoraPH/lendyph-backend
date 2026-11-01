@@ -9,6 +9,7 @@ use App\Http\Requests\Borrower\StoreBorrowerRequest;
 use App\Http\Requests\Borrower\UpdateBorrowerRequest;
 use App\Http\Resources\BorrowerResource;
 use App\Models\Borrower;
+use App\Services\BorrowerLoanSummaryService;
 use App\Services\BorrowerPurgeService;
 use App\Services\BorrowerSubmissionTokenService;
 use App\Services\Diagnostics\ErrorDigest;
@@ -997,6 +998,28 @@ DESC,
         $this->authorize('borrowers:delete');
 
         return $this->validIdDeleteResponse($borrower, $validIdId);
+    }
+
+    #[OA\Get(
+        path: '/api/borrowers/{id}/loan-summary',
+        summary: 'Member loan totals',
+        description: 'The Member Overview totals, computed by the server. `total_borrowed` is the principal of every released loan (released, ongoing, completed, defaulted) except restructured ones, whose rolled-over balance the successor loan already carries. `total_outstanding` is the outstanding balance over released, ongoing and defaulted loans. `total_paid` adds up posted payments. `counts` has every loan status; `current_loans` is released plus ongoing. Applications that never released count in `counts` only.',
+        tags: ['Borrowers'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
+        ],
+        responses: [
+            new OA\Response(response: 200, description: 'The member loan totals'),
+            new OA\Response(response: 403, description: 'Missing borrowers:view'),
+            new OA\Response(response: 404, description: 'Borrower not found'),
+        ],
+    )]
+    public function loanSummary(Borrower $borrower, BorrowerLoanSummaryService $summaries): JsonResponse
+    {
+        $this->authorize('borrowers:view');
+
+        return response()->json(['data' => $summaries->summarize($borrower)]);
     }
 
     #[OA\Get(
