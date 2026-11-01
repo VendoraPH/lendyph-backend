@@ -151,9 +151,10 @@ class RepaymentService
      *
      * For a caller that holds the loan's lock in an outermost transaction of
      * its own and must not open another: LoanAdjustmentService::extendLoan(),
-     * which collects the interest under its extension's lock, and
-     * previewAllocation(), whose transaction is rolled back. Everyone else
-     * calls processRepayment().
+     * which collects the interest under its extension's lock, and the
+     * previews that run in rolledBackUnderPaymentLock(): previewAllocation()
+     * and LoanAdjustmentService::extensionPreview(). Everyone else calls
+     * processRepayment().
      */
     public function recordRepaymentOnLockedLoan(
         Loan $loan,
@@ -421,20 +422,12 @@ class RepaymentService
      * loan's periods (rolled back afterwards, but locked while it runs), so taking the
      * loan row in the same order as a payment keeps a preview and a payment on the same
      * loan from waiting on each other's rows the other way round.
-     *
-     * `$readAfterAllocation` runs inside the same rolled-back transaction, after the
-     * allocation, and its result is returned as `read_after_allocation`: for a caller
-     * that needs the loan as the payment would leave it, such as
-     * LoanAdjustmentService::extensionPreview().
-     *
-     * @param  (Closure(Loan): mixed)|null  $readAfterAllocation
      */
     public function previewAllocation(
         Loan $loan,
         float $amountPaid,
         string $paymentDate,
         User $user,
-        ?Closure $readAfterAllocation = null,
     ): array {
         if (! in_array($loan->status, Loan::ACTIVE_STATUSES, true)) {
             throw ValidationException::withMessages([
@@ -442,17 +435,12 @@ class RepaymentService
             ]);
         }
 
-        // Rolled back whatever happens; a deadlock or lock wait timeout on the
-        // loan lock answers 409, as recording the payment does.
-        return LoanWriteTransaction::rolledBack(function () use ($loan, $amountPaid, $paymentDate, $user, $readAfterAllocation): array {
-            $this->lockLoanForPayment($loan);
-
+        return $this->rolledBackUnderPaymentLock($loan, function (Loan $loan) use ($amountPaid, $paymentDate, $user): array {
             $owedIds = $this->owedScheduleIds($loan, Carbon::parse($paymentDate));
             $repayment = $this->recordRepaymentOnLockedLoan($loan, $amountPaid, $paymentDate, $user, postToBooks: false);
             $allocations = $this->previewedAllocations($repayment);
-            $readAfter = $readAfterAllocation === null ? [] : ['read_after_allocation' => $readAfterAllocation($loan)];
 
-            return $readAfter + [
+            return [
                 'amount_paid' => (float) $repayment->amount_paid,
                 // Frontend-canonical scalar totals (consumed by /payments entry page)
                 'total_paid' => (float) $repayment->amount_paid,
@@ -477,6 +465,31 @@ class RepaymentService
                 'allocations' => $allocations,
                 'is_preview' => true,
             ];
+        });
+    }
+
+    /**
+     * Run `$read` on the loan locked as a payment locks it, inside a transaction
+     * that is rolled back whatever happens, so a preview can record and allocate
+     * a payment with recordRepaymentOnLockedLoan() and read the result without
+     * leaving a trace or a lock behind. A deadlock or lock wait timeout on the
+     * loan lock answers 409, as recording the payment does.
+     *
+     * For previewAllocation() and LoanAdjustmentService::extensionPreview(),
+     * which reads what the extension would collect under this lock, as
+     * extendLoan() does under its own.
+     *
+     * @template TResult
+     *
+     * @param  Closure(Loan): TResult  $read
+     * @return TResult
+     */
+    public function rolledBackUnderPaymentLock(Loan $loan, Closure $read): mixed
+    {
+        return LoanWriteTransaction::rolledBack(function () use ($loan, $read): mixed {
+            $this->lockLoanForPayment($loan);
+
+            return $read($loan);
         });
     }
 

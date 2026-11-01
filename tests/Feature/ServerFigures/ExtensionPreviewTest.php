@@ -2,13 +2,20 @@
 
 namespace Tests\Feature\ServerFigures;
 
+use App\Models\AccountingJournal;
 use App\Models\AmortizationSchedule;
+use App\Models\AuditLog;
+use App\Models\Borrower;
 use App\Models\Loan;
 use App\Models\LoanAdjustment;
 use App\Models\LoanLedgerEntry;
+use App\Models\LoanProduct;
 use App\Models\Repayment;
 use App\Models\Role;
+use App\Models\ShareCapitalLedger;
 use App\Models\User;
+use App\Services\LoanService;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
@@ -48,16 +55,50 @@ class ExtensionPreviewTest extends TestCase
     }
 
     /**
-     * @return array<string, int>
+     * The loan's own rows, its periods' paid columns and statuses, its status,
+     * and the audit log, journal and share capital ledger row counts across
+     * every loan (a preview writes to none of them).
+     *
+     * @return array<string, mixed>
      */
-    private function writeCounts(Loan $loan): array
+    private function writeSnapshot(Loan $loan): array
     {
         return [
             'adjustments' => LoanAdjustment::where('loan_id', $loan->id)->count(),
             'repayments' => Repayment::where('loan_id', $loan->id)->count(),
             'schedules' => AmortizationSchedule::where('loan_id', $loan->id)->count(),
             'ledger' => LoanLedgerEntry::where('loan_id', $loan->id)->count(),
+            'periods' => AmortizationSchedule::where('loan_id', $loan->id)
+                ->orderBy('id')
+                ->get(['id', 'principal_paid', 'interest_paid', 'penalty_paid', 'penalty_amount', 'status'])
+                ->toArray(),
+            'loan_status' => Loan::whereKey($loan->id)->value('status'),
+            'audit_logs' => AuditLog::count(),
+            'journals' => AccountingJournal::count(),
+            'share_capital_ledger' => ShareCapitalLedger::count(),
         ];
+    }
+
+    /**
+     * A one-month upon-maturity loan, approved but not released.
+     */
+    private function approvedOneMonthLoan(): Loan
+    {
+        $service = app(LoanService::class);
+
+        $loan = $service->createLoan([
+            'borrower_id' => Borrower::factory()->create(['branch_id' => $this->branch->id])->id,
+            'loan_product_id' => LoanProduct::factory()->create([
+                'interest_method' => 'upon_maturity', 'term' => 1, 'frequency' => 'monthly', 'interest_rate' => 3.0,
+            ])->id,
+            'principal_amount' => 60000,
+            'start_date' => '2026-04-27',
+        ], $this->admin);
+
+        $service->submitForReview($loan);
+        $service->approve($loan, $this->admin, 'Approved for testing');
+
+        return $loan->fresh();
     }
 
     public function test_it_quotes_a_month_at_the_converted_rate_not_the_raw_rate(): void
@@ -131,16 +172,52 @@ class ExtensionPreviewTest extends TestCase
     public function test_the_preview_writes_nothing(): void
     {
         $loan = $this->uponMaturityLoan();
-        $before = $this->writeCounts($loan);
+        $before = $this->writeSnapshot($loan);
         $penaltyBefore = AmortizationSchedule::where('loan_id', $loan->id)->sum('penalty_amount');
 
         foreach (['pay', 'defer'] as $option) {
             $this->getJson("/api/loans/{$loan->id}/extension-preview?interest_option={$option}")->assertOk();
         }
 
-        $this->assertSame($before, $this->writeCounts($loan));
+        $this->assertSame($before, $this->writeSnapshot($loan));
         $this->assertEquals($penaltyBefore, AmortizationSchedule::where('loan_id', $loan->id)->sum('penalty_amount'));
         $this->assertSame('2026-05-27', $loan->fresh()->maturity_date->toDateString());
+    }
+
+    /**
+     * @return array<string, array{string, string}>
+     */
+    public static function refusedLoans(): array
+    {
+        return [
+            'not a one-month term' => ['three_month_term', 'term'],
+            'not released or ongoing' => ['approved', 'status'],
+            'no open period' => ['no_open_period', 'loan'],
+        ];
+    }
+
+    #[DataProvider('refusedLoans')]
+    public function test_the_preview_refuses_with_the_same_422_as_the_extension(string $case, string $errorKey): void
+    {
+        $loan = match ($case) {
+            'three_month_term' => $this->uponMaturityLoan(['term' => 3, 'max_term' => 3]),
+            'approved' => $this->approvedOneMonthLoan(),
+            'no_open_period' => $this->uponMaturityLoan(),
+        };
+
+        if ($case === 'no_open_period') {
+            AmortizationSchedule::where('loan_id', $loan->id)->update(['status' => 'paid']);
+        }
+
+        foreach (['pay', 'defer'] as $option) {
+            $this->getJson("/api/loans/{$loan->id}/extension-preview?interest_option={$option}")
+                ->assertUnprocessable()
+                ->assertJsonValidationErrors($errorKey);
+
+            $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => $option])
+                ->assertUnprocessable()
+                ->assertJsonValidationErrors($errorKey);
+        }
     }
 
     public function test_the_preview_states_the_interest_option(): void

@@ -368,12 +368,14 @@ class LoanAdjustmentService
      * What POST /loans/{loan}/extend with `$interestOption` would collect and
      * record, for GET /loans/{loan}/extension-preview. Writes nothing.
      *
-     * Refuses, with the same 422s, a loan the extension would refuse. On
-     * 'pay' the collection runs through RepaymentService::previewAllocation(),
-     * the real allocation (penalty first) inside a transaction it rolls back,
-     * and the carry figures are read inside that same transaction, after the
-     * allocation, exactly where extendLoan() reads them. Both go through
-     * extensionFigures(), so the preview and the extension cannot drift.
+     * Refuses, with the same 422s, a loan the extension would refuse. The rest
+     * runs as extendLoan() does, under the loan's lock
+     * (RepaymentService::rolledBackUnderPaymentLock()) in a transaction that is
+     * then rolled back: it reads the outstanding interest under the lock, on
+     * 'pay' collects it through the real allocation (penalty first), and reads
+     * the carry figures after it through extensionFigures(), the method
+     * extendLoan() reads them with, so the preview and the extension cannot
+     * drift.
      *
      * @return array{interest_option: string, collect_now: array{amount: float, penalty_part: float, interest_part: float}, carry_principal: float, carry_interest: float, fresh_interest: float, new_interest_due: float, new_total_due: float, new_due_date: string}
      */
@@ -381,38 +383,39 @@ class LoanAdjustmentService
     {
         $this->assertExtendable($loan);
 
-        $collectNow = ['amount' => 0.0, 'penalty_part' => 0.0, 'interest_part' => 0.0];
-        $interestBefore = $this->outstandingInterest($this->openSchedules($loan));
+        return $this->repaymentService->rolledBackUnderPaymentLock($loan, function (Loan $loan) use ($interestOption, $user, $asOf): array {
+            $collectNow = ['amount' => 0.0, 'penalty_part' => 0.0, 'interest_part' => 0.0];
+            $interestBefore = $this->outstandingInterest($this->openSchedules($loan));
 
-        if ($interestOption === 'pay' && $interestBefore > 0) {
-            $allocation = $this->repaymentService->previewAllocation(
-                $loan,
-                $interestBefore,
-                $asOf->toDateString(),
-                $user,
-                fn (Loan $allocated): array => $this->extensionFigures($allocated),
-            );
+            if ($interestOption === 'pay' && $interestBefore > 0) {
+                $repayment = $this->repaymentService->recordRepaymentOnLockedLoan(
+                    $loan,
+                    $interestBefore,
+                    $asOf->toDateString(),
+                    $user,
+                    postToBooks: false,
+                );
 
-            $collectNow = [
-                'amount' => round($allocation['amount_paid'], 2),
-                'penalty_part' => round($allocation['total_penalty'], 2),
-                'interest_part' => round($allocation['total_interest'], 2),
-            ];
-            $figures = $allocation['read_after_allocation'];
-        } else {
+                $collectNow = [
+                    'amount' => round((float) $repayment->amount_paid, 2),
+                    'penalty_part' => round((float) $repayment->penalty_applied, 2),
+                    'interest_part' => round((float) $repayment->interest_applied, 2),
+                ];
+            }
+
             $figures = $this->extensionFigures($loan);
-        }
 
-        return [
-            'interest_option' => $interestOption,
-            'collect_now' => $collectNow,
-            'carry_principal' => $figures['carry_principal'],
-            'carry_interest' => $figures['carry_interest'],
-            'fresh_interest' => $figures['fresh_interest'],
-            'new_interest_due' => $figures['new_interest_due'],
-            'new_total_due' => $figures['new_total_due'],
-            'new_due_date' => $figures['new_due_date']->toDateString(),
-        ];
+            return [
+                'interest_option' => $interestOption,
+                'collect_now' => $collectNow,
+                'carry_principal' => $figures['carry_principal'],
+                'carry_interest' => $figures['carry_interest'],
+                'fresh_interest' => $figures['fresh_interest'],
+                'new_interest_due' => $figures['new_interest_due'],
+                'new_total_due' => $figures['new_total_due'],
+                'new_due_date' => $figures['new_due_date']->toDateString(),
+            ];
+        });
     }
 
     /**

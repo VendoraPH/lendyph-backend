@@ -35,9 +35,9 @@ class AmortizationScheduleResource extends JsonResource
 {
     /**
      * @param  mixed  $resource  the AmortizationSchedule
-     * @param  Loan|null  $scheduleLoan  the row's loan, handed over by forLoan() so a schedule never loads it once per row
+     * @param  Loan  $scheduleLoan  the row's loan, handed over (forLoan()) so a schedule never loads it once per row
      */
-    public function __construct($resource, private ?Loan $scheduleLoan = null)
+    public function __construct($resource, private Loan $scheduleLoan)
     {
         parent::__construct($resource);
     }
@@ -57,7 +57,7 @@ class AmortizationScheduleResource extends JsonResource
 
     public function toArray(Request $request): array
     {
-        $loan = $this->scheduleLoan ?? $this->resource->loan;
+        $loan = $this->scheduleLoan;
         $principalDue = (float) $this->principal_due;
         $interestDue = (float) $this->interest_due;
         $totalDue = (float) $this->total_due;

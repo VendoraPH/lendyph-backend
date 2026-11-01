@@ -1238,7 +1238,7 @@ DESC,
     #[OA\Get(
         path: '/api/loans/{id}/amortization-schedule',
         summary: 'View persisted amortization schedule with payment tracking',
-        description: 'Returns the saved amortization schedule with beginning balance, paid amounts, penalties, and status per installment, each with its `share_capital_build_up` (the loan\'s `scb_amount`, one per period, none on a period an extension or adjustment closed) and `total_payment` (`total_due` plus it). Includes summary totals; `summary.total_share_capital_build_up` and `summary.total_payment` are added up in whole centavos and equal POST /loans/preview\'s `amortization.totals` for the same loan.',
+        description: 'Returns the saved amortization schedule with beginning balance, paid amounts, penalties, and status per installment, each with its `share_capital_build_up` (the loan\'s `scb_amount`, one per period, none on a period an extension or adjustment closed) and `total_payment` (`total_due` plus it). Includes summary totals. `summary.total_due` includes penalty (each period\'s `total_due` plus its `penalty_amount`); `summary.total_payment` excludes penalty (each period\'s `total_due` plus its build-up). `summary.total_share_capital_build_up` and `summary.total_payment` are added up in whole centavos and equal POST /loans/preview\'s `amortization.totals` for the same loan.',
         tags: ['Amortization Schedule'],
         security: [['sanctum' => []]],
         parameters: [
