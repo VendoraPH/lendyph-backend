@@ -244,6 +244,78 @@ class AutoPayAmountUnderLockTest extends TestCase
         return $loan->fresh('amortizationSchedules');
     }
 
+    public function test_the_preview_grand_total_with_a_selected_part_paid_row_equals_what_the_run_posts(): void
+    {
+        // Two loans: one fully due, one whose period is part-paid and selected.
+        $full = $this->autoPayLoan();
+        $part = $this->autoPayLoan();
+        $fullPeriod = $full->amortizationSchedules()->reorder('period_number')->firstOrFail();
+        $partPeriod = $part->amortizationSchedules()->reorder('period_number')->firstOrFail();
+        $partPeriod->update(['interest_paid' => 1000, 'status' => 'partial']);
+
+        $summary = $this->previewFor($fullPeriod, [$partPeriod->id])->assertOk()->json('data.summary');
+
+        // ₱11,800 + (₱11,800 − ₱1,000).
+        $this->assertEquals(11800, $summary['total_amount']);
+        $this->assertEquals(10800, $summary['partial_total']);
+        $this->assertEquals(22600, $summary['grand_total']);
+
+        $posted = $this->postJson('/api/auto-pay/process', [
+            'date_from' => $fullPeriod->due_date->toDateString(),
+            'date_to' => $fullPeriod->due_date->toDateString(),
+            'include_schedule_ids' => [$partPeriod->id],
+        ])->assertCreated()->json('data.repayments');
+
+        $this->assertEquals($summary['grand_total'], array_sum(array_column($posted, 'amount_paid')));
+    }
+
+    public function test_the_preview_grand_total_counts_a_selected_row_s_late_penalty(): void
+    {
+        $loan = $this->autoPayLoan(now()->subMonths(2)->toDateString());
+        $period = $loan->amortizationSchedules()->reorder('period_number')->firstOrFail();
+        $period->update(['interest_paid' => 1000, 'status' => 'partial']);
+
+        $summary = $this->previewFor($period, [$period->id])->assertOk()->json('data.summary');
+
+        // ₱800 interest + ₱10,000 principal + 2% of ₱10,000 penalty.
+        $this->assertEquals(11000, $summary['partial_total']);
+
+        $posted = $this->postJson('/api/auto-pay/process', [
+            'date_from' => $period->due_date->toDateString(),
+            'date_to' => $period->due_date->toDateString(),
+            'include_schedule_ids' => [$period->id],
+        ])->assertCreated()->json('data.repayments.0.amount_paid');
+
+        $this->assertEquals($summary['grand_total'], $posted);
+    }
+
+    public function test_without_a_selection_the_grand_total_is_the_total_amount(): void
+    {
+        $loan = $this->autoPayLoan();
+        $period = $loan->amortizationSchedules()->reorder('period_number')->firstOrFail();
+
+        $summary = $this->previewFor($period)->assertOk()->json('data.summary');
+
+        $this->assertEquals(0, $summary['partial_total']);
+        $this->assertEquals($summary['total_amount'], $summary['grand_total']);
+    }
+
+    public function test_a_selected_row_outside_the_preview_is_refused(): void
+    {
+        $loan = $this->autoPayLoan();
+        $period = $loan->amortizationSchedules()->reorder('period_number')->firstOrFail();
+        // Fully due, not part-paid: not one of the preview's partial rows.
+        $later = $loan->amortizationSchedules()->reorder('period_number')->skip(1)->firstOrFail();
+
+        $this->previewFor($period, [$period->id])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('include_schedule_ids.0');
+
+        $this->previewFor($period, [$later->id])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('include_schedule_ids.0');
+    }
+
     private function waive(Loan $loan, AmortizationSchedule $period): void
     {
         app(RepaymentService::class)->applyPenalties($loan->fresh(), now());
@@ -257,12 +329,16 @@ class AutoPayAmountUnderLockTest extends TestCase
         $this->assertNotNull($period->fresh()->penalty_waiver_id, 'the waiver did not land, so this test proves nothing');
     }
 
-    private function previewFor(AmortizationSchedule $period): TestResponse
+    /**
+     * @param  list<int>  $includeScheduleIds
+     */
+    private function previewFor(AmortizationSchedule $period, array $includeScheduleIds = []): TestResponse
     {
-        return $this->getJson('/api/auto-pay/preview?'.http_build_query([
+        return $this->getJson('/api/auto-pay/preview?'.http_build_query(array_filter([
             'date_from' => $period->due_date->toDateString(),
             'date_to' => $period->due_date->toDateString(),
-        ]));
+            'include_schedule_ids' => $includeScheduleIds,
+        ])));
     }
 
     private function processFor(AmortizationSchedule $period): TestResponse

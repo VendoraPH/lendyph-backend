@@ -45,8 +45,15 @@ class AutoPayService
      *                   listed separately so staff can opt them in via include_schedule_ids
      *   skips         — loans a run would skip, with the reason: one with an
      *                   open period before the window is never charged
+     *
+     * `$includeScheduleIds` are the part-paid rows staff selected, as process()
+     * takes them; each must be one of `partial_rows` (422 otherwise). Their
+     * remaining amount is `summary.partial_total`, and `summary.grand_total`
+     * adds it to `total_amount`: what a run posts for the same selection.
+     *
+     * @param  list<int|string>  $includeScheduleIds
      */
-    public function preview(array $productIds, string $dateFrom, string $dateTo): array
+    public function preview(array $productIds, string $dateFrom, string $dateTo, array $includeScheduleIds = []): array
     {
         [$from, $to] = $this->parseRange($dateFrom, $dateTo);
         $asOf = now();
@@ -58,6 +65,7 @@ class AutoPayService
         $totals = ['principal' => 0, 'interest' => 0, 'penalty' => 0];
         $loanRows = [];
         $partialRows = [];
+        $partialRemaining = [];
         $skips = [];
 
         foreach ($loans as $loan) {
@@ -84,6 +92,7 @@ class AutoPayService
                 $remainingBalance = $principalRemaining + $interestRemaining + $penaltyRemaining;
 
                 if ($amountPaid > 0 && $remainingBalance > 0) {
+                    $partialRemaining[(int) $schedule->id] = $remainingBalance;
                     $partialRows[] = [
                         'loan_id' => $loan->id,
                         'schedule_id' => $schedule->id,
@@ -125,12 +134,33 @@ class AutoPayService
             }
         }
 
+        $partialTotal = 0;
+        $counted = [];
+
+        foreach (array_values($includeScheduleIds) as $index => $id) {
+            $scheduleId = (int) $id;
+
+            if (! array_key_exists($scheduleId, $partialRemaining)) {
+                throw ValidationException::withMessages([
+                    "include_schedule_ids.{$index}" => "Schedule {$scheduleId} is not one of this preview's part-paid rows.",
+                ]);
+            }
+
+            // A row selected twice is charged once, as a run charges it.
+            if (! isset($counted[$scheduleId])) {
+                $counted[$scheduleId] = true;
+                $partialTotal += $partialRemaining[$scheduleId];
+            }
+        }
+
         return [
             'summary' => [
                 'total_principal' => $totals['principal'] / 100,
                 'total_interest' => $totals['interest'] / 100,
                 'total_penalty' => $totals['penalty'] / 100,
                 'total_amount' => array_sum($totals) / 100,
+                'partial_total' => $partialTotal / 100,
+                'grand_total' => (array_sum($totals) + $partialTotal) / 100,
                 'loans_count' => count($loanRows),
             ],
             'loans' => $loanRows,
