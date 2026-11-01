@@ -410,7 +410,7 @@ it('rejects combining marks and Hangul fillers in display_name', function (strin
         ->assertStatus(422)
         ->assertJsonValidationErrors(['display_name']);
 })->with([
-    'combining acute' => "Jose\u{0301} Cashier",
+    'stray mark after a space' => "Desk \u{0301}Clerk",
     'combining overlay' => "Desk Cle\u{0336}rk",
     'U+115F' => "Desk\u{115F}Clerk",
     'U+1160' => "Desk\u{1160}Clerk",
@@ -424,4 +424,20 @@ it('saves a display_name with precomposed accents', function () {
     $this->putJson("/api/roles/{$role->id}", ['display_name' => "Jos\u{00E9} Cashier"])
         ->assertSuccessful()
         ->assertJsonPath('data.display_name', "Jos\u{00E9} Cashier");
+});
+
+it('saves a decomposed accent in display_name as the precomposed form', function () {
+    $role = Role::create(['name' => 'decomposed', 'guard_name' => 'web', 'is_system' => false]);
+
+    $this->putJson("/api/roles/{$role->id}", ['display_name' => "Jose\u{0301} Cashier"])
+        ->assertSuccessful()
+        ->assertJsonPath('data.display_name', "Jos\u{00E9} Cashier");
+
+    expect($role->fresh()->display_name)->toBe("Jos\u{00E9} Cashier");
+
+    $this->postJson('/api/roles', ['name' => 'decomposed_two', 'display_name' => "Jose\u{0301} Teller"])
+        ->assertCreated()
+        ->assertJsonPath('data.display_name', "Jos\u{00E9} Teller");
+
+    expect(Role::where('name', 'decomposed_two')->value('display_name'))->toBe("Jos\u{00E9} Teller");
 });

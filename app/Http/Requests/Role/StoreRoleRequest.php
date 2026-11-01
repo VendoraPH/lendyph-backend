@@ -5,6 +5,7 @@ namespace App\Http\Requests\Role;
 use App\Rules\UniqueRoleDisplayName;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
+use Normalizer;
 
 class StoreRoleRequest extends FormRequest
 {
@@ -14,13 +15,18 @@ class StoreRoleRequest extends FormRequest
     }
 
     /**
-     * Trim display_name before validation so the uniqueness and length checks
-     * see what is stored.
+     * Trim and NFC-normalise display_name before validation so the uniqueness,
+     * length and character checks see what is stored. NFC turns a decomposed
+     * accent (e + U+0301) into its precomposed form; marks with no
+     * precomposed form stay and are refused.
      */
     protected function prepareForValidation(): void
     {
         if (is_string($this->input('display_name'))) {
-            $this->merge(['display_name' => trim($this->input('display_name'))]);
+            $trimmed = trim($this->input('display_name'));
+            $composed = Normalizer::normalize($trimmed, Normalizer::FORM_C);
+
+            $this->merge(['display_name' => $composed === false ? $trimmed : $composed]);
         }
     }
 
