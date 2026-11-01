@@ -828,6 +828,16 @@ class LoanAdjustmentService
         );
     }
 
+    /**
+     * Spread a balance adjustment over the loan's open periods, in proportion
+     * to the principal each still owes, so the periods change by exactly the
+     * amount approved, to the centavo.
+     *
+     * Worked in whole centavos (balanceAdjustmentShares()). Paid periods are
+     * never touched. A reduction larger than the unpaid principal is refused
+     * (422 on `new_values.adjustment_amount`) rather than capped, so what is
+     * applied is always what was approved.
+     */
     private function applyBalanceAdjustment(LoanAdjustment $adjustment, Loan $loan): void
     {
         $adjustmentAmount = (float) $adjustment->ownNewValues()['adjustment_amount'];
@@ -835,31 +845,41 @@ class LoanAdjustmentService
         $unpaidSchedules = $loan->amortizationSchedules()
             ->whereIn('status', ['pending', 'partial', 'overdue'])
             ->orderBy('period_number')
-            ->get();
+            ->get()
+            ->values();
 
-        if ($unpaidSchedules->isEmpty()) {
+        $centavos = static fn (mixed $pesos): int => (int) round((float) $pesos * 100);
+        $amount = $centavos($adjustmentAmount);
+        $unpaid = $unpaidSchedules
+            ->map(fn ($s): int => max(0, $centavos($s->principal_due) - $centavos($s->principal_paid)))
+            ->all();
+        $totalUnpaid = array_sum($unpaid);
+
+        if ($amount < 0 && -$amount > $totalUnpaid) {
+            throw ValidationException::withMessages([
+                'new_values.adjustment_amount' => sprintf(
+                    'A reduction of ₱%s is more than the ₱%s of principal still unpaid on this loan.',
+                    number_format(-$amount / 100, 2),
+                    number_format($totalUnpaid / 100, 2),
+                ),
+            ]);
+        }
+
+        if ($totalUnpaid <= 0) {
             return;
         }
 
-        $totalUnpaidPrincipal = $unpaidSchedules->sum(fn ($s) => (float) $s->principal_due - (float) $s->principal_paid);
+        foreach ($this->balanceAdjustmentShares($amount, $unpaid) as $i => $share) {
+            if ($share === 0) {
+                continue;
+            }
 
-        if ($totalUnpaidPrincipal <= 0) {
-            return;
-        }
-
-        // Distribute proportionally
-        $runningBalance = null;
-        foreach ($unpaidSchedules as $i => $schedule) {
-            $unpaidPrincipal = (float) $schedule->principal_due - (float) $schedule->principal_paid;
-            $proportion = $unpaidPrincipal / $totalUnpaidPrincipal;
-            $adjustForThis = round($adjustmentAmount * $proportion, 2);
-
-            $newPrincipalDue = max(0, round((float) $schedule->principal_due + $adjustForThis, 2));
-            $newTotalDue = round($newPrincipalDue + (float) $schedule->interest_due, 2);
+            $schedule = $unpaidSchedules[$i];
+            $newPrincipalDue = $centavos($schedule->principal_due) + $share;
 
             $schedule->update([
-                'principal_due' => $newPrincipalDue,
-                'total_due' => $newTotalDue,
+                'principal_due' => $newPrincipalDue / 100,
+                'total_due' => ($newPrincipalDue + $centavos($schedule->interest_due)) / 100,
             ]);
         }
 
@@ -871,6 +891,50 @@ class LoanAdjustmentService
             $balance = round($balance - (float) $schedule->principal_due, 2);
             $schedule->update(['remaining_balance' => max(0, $balance)]);
         }
+    }
+
+    /**
+     * Each open period's share of a balance adjustment, in centavos, adding up
+     * to exactly `$amount`.
+     *
+     * Each share is the period's part of the unpaid principal, rounded; the
+     * rounding remainder goes to the last period that still owes principal. A
+     * reduction never takes a period below what has been paid on it: a share
+     * a period cannot absorb moves to the periods before it that still can.
+     *
+     * @param  int  $amount  centavos; negative reduces
+     * @param  list<int>  $unpaid  each period's unpaid principal, in centavos
+     * @return list<int>
+     */
+    private function balanceAdjustmentShares(int $amount, array $unpaid): array
+    {
+        $total = array_sum($unpaid);
+        $shares = array_fill(0, count($unpaid), 0);
+        $owing = array_keys(array_filter($unpaid, fn (int $u): bool => $u > 0));
+        $last = end($owing);
+
+        foreach ($owing as $i) {
+            if ($i !== $last) {
+                $shares[$i] = (int) round($amount * $unpaid[$i] / $total);
+            }
+        }
+
+        $shares[$last] = $amount - array_sum($shares);
+
+        if ($amount >= 0) {
+            return $shares;
+        }
+
+        // From the last period back: what a period cannot take, the one before it tries.
+        $excess = 0;
+
+        foreach (array_reverse($owing) as $i) {
+            $wanted = $shares[$i] + $excess;
+            $shares[$i] = max($wanted, -$unpaid[$i]);
+            $excess = $wanted - $shares[$i];
+        }
+
+        return $shares;
     }
 
     private function applyTermExtension(LoanAdjustment $adjustment, Loan $loan): void

@@ -90,18 +90,7 @@ class LoanService
         // Copied onto the loan, so editing the product later never reprices it.
         $snapshot = $this->productSnapshot($product);
 
-        // Validate principal against product min/max
-        if ($enforceMinimumAmount && $product->min_amount > 0 && $principal < (float) $product->min_amount) {
-            throw ValidationException::withMessages([
-                'principal_amount' => ["Minimum loan amount for this product is {$product->min_amount}."],
-            ]);
-        }
-        if ($product->max_amount > 0 && $principal > (float) $product->max_amount) {
-            throw ValidationException::withMessages([
-                'principal_amount' => ["Maximum loan amount for this product is {$product->max_amount}."],
-            ]);
-        }
-
+        $this->assertPrincipalWithinProductRange($principal, $product, $enforceMinimumAmount);
         $this->assertInterestRateWithinProductRange($interestRate, $product);
         $this->assertTermWithinProductRange($term, $product);
 
@@ -214,6 +203,29 @@ class LoanService
         if ($term < $minTerm || $term > $maxTerm) {
             throw ValidationException::withMessages([
                 'term' => ["Term must be between {$minTerm} and {$maxTerm} {$product->term_unit->value} for this product."],
+            ]);
+        }
+    }
+
+    /**
+     * A loan's principal must sit inside its product's `min_amount` to
+     * `max_amount` (a bound of 0 is no bound). A restructure skips the minimum
+     * only: its principal is a part-paid balance, routinely below it.
+     *
+     * Shared by createLoan() and updateLoan(), so an edit cannot move a
+     * principal somewhere creating the loan would have refused.
+     */
+    private function assertPrincipalWithinProductRange(float $principal, LoanProduct $product, bool $enforceMinimumAmount = true): void
+    {
+        if ($enforceMinimumAmount && $product->min_amount > 0 && $principal < (float) $product->min_amount) {
+            throw ValidationException::withMessages([
+                'principal_amount' => ["Minimum loan amount for this product is {$product->min_amount}."],
+            ]);
+        }
+
+        if ($product->max_amount > 0 && $principal > (float) $product->max_amount) {
+            throw ValidationException::withMessages([
+                'principal_amount' => ["Maximum loan amount for this product is {$product->max_amount}."],
             ]);
         }
     }
@@ -659,6 +671,17 @@ class LoanService
             $this->assertInterestRateWithinProductRange(
                 (float) ($validated['interest_rate'] ?? $loan->interest_rate),
                 $productChanges ? LoanProduct::findOrFail($validated['loan_product_id']) : $loan->loanProduct,
+            );
+        }
+
+        // Likewise only when the edit moves the principal, against the range
+        // createLoan() holds it to; a restructure stays exempt from the minimum.
+        if (isset($validated['principal_amount'])
+            && self::toCentavos((float) $validated['principal_amount']) !== self::toCentavos((float) $loan->principal_amount)) {
+            $this->assertPrincipalWithinProductRange(
+                (float) $validated['principal_amount'],
+                $productChanges ? LoanProduct::findOrFail($validated['loan_product_id']) : $loan->loanProduct,
+                ! $loan->isRestructure(),
             );
         }
 
