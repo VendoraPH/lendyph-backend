@@ -116,6 +116,105 @@ class AmortizationCalculatorTest extends TestCase
         $this->assertEquals($expected['totals'], $calculated['totals']);
     }
 
+    /**
+     * @return array<string, array{string}>
+     */
+    public static function methods(): array
+    {
+        return ['straight' => ['straight'], 'diminishing' => ['diminishing'], 'upon maturity' => ['upon_maturity']];
+    }
+
+    #[DataProvider('methods')]
+    public function test_every_method_with_build_up_equals_the_loan_form_preview(string $method): void
+    {
+        $input = ['interest_method' => $method, 'scb_amount' => 100.50] + self::calculatorCases()['diminishing, semi-monthly, centavo figures'][0];
+
+        $calculated = $this->postJson('/api/loans/amortization-calculator', $input)->assertOk()->json('data');
+        $expected = $this->previewFor($input);
+
+        $this->assertEquals($expected['rows'], $calculated['rows']);
+        $this->assertEquals($expected['totals'], $calculated['totals']);
+        $this->assertGreaterThan(0, $calculated['totals']['share_capital_build_up']);
+    }
+
+    public function test_with_compare_the_main_schedule_is_the_chosen_method_s_comparison_entry(): void
+    {
+        $input = ['interest_method' => 'diminishing', 'compare' => true] + self::calculatorCases()['diminishing, semi-monthly, centavo figures'][0];
+
+        $data = $this->postJson('/api/loans/amortization-calculator', $input)->assertOk()->json('data');
+        $chosen = $data['comparison']['diminishing'];
+
+        $this->assertSame($chosen['rows'], $data['rows']);
+        $this->assertSame($chosen['totals'], $data['totals']);
+        $this->assertSame($chosen['maturity_date'], $data['maturity_date']);
+        $this->assertSame('diminishing', $data['interest_method']);
+    }
+
+    /**
+     * A daily schedule over a days term: one instalment per day.
+     *
+     * @return array<string, mixed>
+     */
+    private function dailyTerm(int $days): array
+    {
+        return [
+            'principal_amount' => 10000, 'interest_rate' => 0.1, 'interest_rate_frequency' => 'daily',
+            'interest_method' => 'straight', 'term' => $days, 'term_unit' => 'days', 'frequency' => 'daily',
+            'start_date' => '2026-01-01',
+        ];
+    }
+
+    public function test_a_schedule_of_1000_instalments_is_built(): void
+    {
+        $this->postJson('/api/loans/amortization-calculator', $this->dailyTerm(1000))
+            ->assertOk()
+            ->assertJsonCount(1000, 'data.rows');
+    }
+
+    public function test_a_schedule_of_1001_instalments_is_refused_naming_the_limit(): void
+    {
+        $this->postJson('/api/loans/amortization-calculator', $this->dailyTerm(1001))
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['term' => 'at most 1,000']);
+    }
+
+    /**
+     * @return array<string, array{array<string, mixed>, string}>
+     */
+    public static function refusedInputs(): array
+    {
+        $base = self::calculatorCases()['straight, monthly, 6 months at 3% a month'][0];
+
+        return [
+            'a months term over 30 years' => [['term' => 361, 'term_unit' => 'months'] + $base, 'term'],
+            'a days term over 30 years' => [['term' => 10951, 'term_unit' => 'days', 'frequency' => 'upon_maturity'] + $base, 'term'],
+            'build-up over the column maximum' => [['scb_amount' => 10000000000] + $base, 'scb_amount'],
+            'build-up with three decimals' => [['scb_amount' => 100.505] + $base, 'scb_amount'],
+        ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $input
+     */
+    #[DataProvider('refusedInputs')]
+    public function test_it_refuses_out_of_bounds_inputs(array $input, string $field): void
+    {
+        $this->postJson('/api/loans/amortization-calculator', $input)
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors($field);
+    }
+
+    public function test_it_is_throttled_per_user(): void
+    {
+        $input = self::calculatorCases()['a single payment at maturity'][0];
+
+        for ($i = 0; $i < 30; $i++) {
+            $this->postJson('/api/loans/amortization-calculator', $input)->assertOk();
+        }
+
+        $this->postJson('/api/loans/amortization-calculator', $input)->assertTooManyRequests();
+    }
+
     public function test_compare_returns_the_schedule_under_every_interest_method(): void
     {
         $input = self::calculatorCases()['diminishing, semi-monthly, centavo figures'][0];

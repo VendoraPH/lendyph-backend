@@ -84,4 +84,32 @@ class DailyDuesSummaryTest extends TestCase
         $this->assertEquals(100.0, $summary['collection_rate']);
         $this->assertSame(['collected' => 2, 'partial' => 0, 'pending' => 0], $summary['counts']);
     }
+
+    public function test_a_period_with_only_its_penalty_paid_is_pending_and_collects_nothing(): void
+    {
+        $loan = $this->periodDue(800, 200, 0, 0, 150);
+
+        $response = $this->getJson('/api/dashboard/daily-dues?date='.self::DAY)->assertOk();
+
+        $row = collect($response->json('data'))->firstWhere('loan_id', $loan->id);
+        $this->assertSame('pending', $row['status']);
+        $this->assertEquals(150, $row['amount_paid']);
+        $this->assertEquals(0, $row['amount_collected']);
+        $this->assertEquals(0, $response->json('summary.total_collected'));
+        $this->assertEquals(0.0, $response->json('summary.collection_rate'));
+        $this->assertSame(['collected' => 0, 'partial' => 0, 'pending' => 1], $response->json('summary.counts'));
+    }
+
+    public function test_a_period_with_nothing_due_is_left_out_of_the_list_the_counts_and_the_totals(): void
+    {
+        $due = $this->periodDue(800, 200, 0, 0, 0);
+        $closed = $this->periodDue(0, 0, 0, 0, 0);
+
+        $response = $this->getJson('/api/dashboard/daily-dues?date='.self::DAY)->assertOk();
+
+        $this->assertSame([$due->id], array_column($response->json('data'), 'loan_id'));
+        $this->assertNotContains($closed->id, array_column($response->json('data'), 'loan_id'));
+        $this->assertEquals(1000, $response->json('summary.total_due'));
+        $this->assertSame(['collected' => 0, 'partial' => 0, 'pending' => 1], $response->json('summary.counts'));
+    }
 }

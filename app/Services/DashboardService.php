@@ -140,6 +140,8 @@ class DashboardService
             ->join('borrowers', 'loans.borrower_id', '=', 'borrowers.id')
             ->whereDate('amortization_schedules.due_date', $targetDate)
             ->whereIn('loans.status', ['released', 'ongoing'])
+            // A period with nothing due (closed by an adjustment) is not a due.
+            ->where('amortization_schedules.total_due', '>', 0)
             ->select(
                 'amortization_schedules.id',
                 'amortization_schedules.loan_id',
@@ -180,11 +182,13 @@ class DashboardService
     }
 
     /**
-     * One daily-dues row. A period is `collected` only once the principal and
-     * interest paid against it cover its `total_due`; penalty paid is never
-     * counted towards the amount due, so a period whose penalty was paid while
-     * principal or interest is still owed stays `partial`, and the collection
-     * rate can never pass 100%.
+     * One daily-dues row, by the principal and interest paid against it:
+     * `collected` once they cover its `total_due`, `partial` while some but not
+     * all of it is paid, `pending` while none is. Penalty paid never counts
+     * towards the amount due: a period with only its penalty paid (₱0
+     * principal and interest) is `pending`, one with penalty and part of the
+     * principal and interest paid is `partial`, and the collection rate can
+     * never pass 100%.
      *
      * `amount_collected` is the principal and interest paid towards the amount
      * due, capped at it. `amount_paid` stays everything paid, penalty included.

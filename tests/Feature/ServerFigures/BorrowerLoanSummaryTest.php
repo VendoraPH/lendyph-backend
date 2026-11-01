@@ -118,6 +118,29 @@ class BorrowerLoanSummaryTest extends TestCase
         $this->assertEquals(0, $summary['total_paid']);
     }
 
+    public function test_a_voided_payment_is_left_out_of_total_paid(): void
+    {
+        $loan = $this->loan(60000, 'released');
+        $payments = app(RepaymentService::class);
+
+        $payments->processRepayment($loan->fresh(), 3000, '2026-07-01', $this->admin);
+        $voided = $payments->processRepayment($loan->fresh(), 2000, '2026-07-02', $this->admin);
+        $payments->voidRepayment($voided->fresh(), 'Entered twice', $this->admin);
+
+        $this->assertEquals(3000, $this->getJson("/api/borrowers/{$this->member->id}/loan-summary")->assertOk()->json('data.total_paid'));
+    }
+
+    public function test_unpaid_insurance_owed_on_a_loan_counts_in_total_outstanding(): void
+    {
+        $loan = $this->loan(60000, 'released');
+        $loan->update(['insurance_remaining_balance' => 1500.25]);
+
+        $outstanding = $this->getJson("/api/borrowers/{$this->member->id}/loan-summary")->assertOk()->json('data.total_outstanding');
+
+        $this->assertEquals(61500.25, $outstanding);
+        $this->assertEquals($loan->fresh()->outstanding_balance, $outstanding);
+    }
+
     public function test_a_user_without_borrowers_view_gets_403(): void
     {
         $this->actingAs(User::factory()->create(['branch_id' => $this->branch->id]));

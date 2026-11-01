@@ -133,6 +133,17 @@ class ShareCapitalMembersTest extends TestCase
         ], $response->json('meta.summary'));
     }
 
+    public function test_a_later_page_of_one_member_s_ledger_carries_balances_counting_every_earlier_entry(): void
+    {
+        // Newest first: page 1 holds the 650.30 entry; page 2 starts at the
+        // entry before it, whose balance still counts the oldest one.
+        $page2 = $this->getJson("/api/share-capital/ledger?borrower_id={$this->ana->id}&per_page=1&page=2")->assertOk()->json('data');
+        $page3 = $this->getJson("/api/share-capital/ledger?borrower_id={$this->ana->id}&per_page=1&page=3")->assertOk()->json('data');
+
+        $this->assertEquals([750.35], array_column($page2, 'running_balance'));
+        $this->assertEquals([500.10], array_column($page3, 'running_balance'));
+    }
+
     public function test_a_user_without_share_capital_view_gets_403(): void
     {
         $this->actingAs(User::factory()->create(['branch_id' => $this->branch->id]));

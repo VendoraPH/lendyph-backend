@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Loan;
+use Illuminate\Support\Carbon;
 
 /**
  * The Amortization Calculator's schedule (POST /loans/amortization-calculator):
@@ -17,7 +18,29 @@ use App\Models\Loan;
  */
 class AmortizationCalculatorService
 {
+    /**
+     * The most instalments one schedule may have.
+     */
+    public const MAX_PERIODS = 1000;
+
+    public const METHODS = ['straight', 'diminishing', 'upon_maturity'];
+
     public function __construct(private readonly LoanService $loans) {}
+
+    /**
+     * How many instalments the engine builds for these terms: one for a
+     * single payment at maturity (LoanService::buildAmortizationPreview()),
+     * otherwise LoanTermSchedule::instalments(), which every method splits
+     * the term with.
+     */
+    public static function periodCount(string $startDate, int $term, string $termUnit, string $frequency): int
+    {
+        if ($frequency === 'upon_maturity') {
+            return 1;
+        }
+
+        return count(LoanTermSchedule::instalments(Carbon::parse($startDate), $term, $termUnit, $frequency));
+    }
 
     /**
      * @param  array{principal_amount: float|int|string, interest_rate: float|int|string, interest_rate_frequency: string, interest_method: string, term: int|string, term_unit: string, frequency: string, start_date: string, scb_amount?: float|int|string|null, compare?: bool|null}  $input
@@ -25,17 +48,18 @@ class AmortizationCalculatorService
      */
     public function calculate(array $input): array
     {
-        $result = $this->schedule($input, $input['interest_method']);
-
-        if (! empty($input['compare'])) {
-            $result['comparison'] = [];
-
-            foreach (['straight', 'diminishing', 'upon_maturity'] as $method) {
-                $result['comparison'][$method] = $this->schedule($input, $method);
-            }
+        if (empty($input['compare'])) {
+            return $this->schedule($input, $input['interest_method']);
         }
 
-        return $result;
+        // Each method built once; the chosen one is also the main schedule.
+        $comparison = [];
+
+        foreach (self::METHODS as $method) {
+            $comparison[$method] = $this->schedule($input, $method);
+        }
+
+        return [...$comparison[$input['interest_method']], 'comparison' => $comparison];
     }
 
     /**
@@ -59,6 +83,7 @@ class AmortizationCalculatorService
             'maturity_date' => $maturity,
         ]);
 
+        // Twin of LoanService::formSchedule()'s rows and totals: keep the two in step.
         $scb = LoanService::toCentavos((float) ($input['scb_amount'] ?? 0));
         $totals = ['principal_due' => 0, 'interest_due' => 0, 'share_capital_build_up' => 0, 'total_payment' => 0];
         $rows = [];

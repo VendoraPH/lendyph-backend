@@ -517,6 +517,15 @@ class AppServiceProvider extends ServiceProvider
         });
 
         /**
+         * POST /loans/amortization-calculator builds up to three schedules of
+         * up to AmortizationCalculatorService::MAX_PERIODS rows per request,
+         * so it gets a ceiling of its own beside the api group's.
+         */
+        RateLimiter::for('calculator', function (Request $request) {
+            return Limit::perMinute(30)->by('calculator:'.($request->user()?->id ?: $request->ip()));
+        });
+
+        /**
          * Anonymous borrower creation — POST /borrowers, one request per
          * registration. The KYC uploads that follow it are metered separately
          * by `registration-uploads` below.

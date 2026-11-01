@@ -231,7 +231,7 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     // the resource routes so `preview` is never read as a loan id.
     Route::post('/loans/preview', [LoanController::class, 'formPreview']);
     // The Amortization Calculator: a what-if schedule with no product or loan.
-    Route::post('/loans/amortization-calculator', AmortizationCalculatorController::class);
+    Route::post('/loans/amortization-calculator', AmortizationCalculatorController::class)->middleware('throttle:calculator');
     Route::apiResource('loans', LoanController::class);
     Route::patch('/loans/{loan}/submit', [LoanController::class, 'submit']);
     Route::patch('/loans/{loan}/approve', [LoanController::class, 'approve']);
