@@ -13,7 +13,8 @@ use Tests\Traits\SetupLendyPH;
  * After a balance adjustment, each open period's `remaining_balance` is the
  * principal still owed once that period is paid: a running balance from the
  * loan's actual unpaid principal (every earlier adjustment and payment
- * included) down through the open periods in due order. Paid periods, and
+ * included) down through the open periods in period order, the order a
+ * payment allocates. Paid periods, and
  * the rows an extension or a restructure closed, are never rewritten.
  *
  * The loan from createReleasedLoan(): ₱60,000 over 6 monthly periods of
@@ -90,6 +91,23 @@ class BalanceAdjustmentRemainingBalanceTest extends TestCase
         $this->assertRunningBalanceOfOpenPeriods($loan);
     }
 
+    public function test_the_running_balance_follows_period_order_when_due_dates_do_not(): void
+    {
+        $loan = $this->createReleasedLoan();
+        // Period 2 rescheduled past period 5's due date.
+        $period5Due = $this->period($loan, 5)->due_date->copy()->addDays(3)->toDateString();
+        AmortizationSchedule::where('loan_id', $loan->id)->where('period_number', 2)->update([
+            'due_date' => $period5Due,
+            'principal_due' => 12000,
+            'total_due' => 13800,
+        ]);
+
+        $this->applyBalanceAdjustment($loan, -1000);
+
+        $this->assertRunningBalanceOfOpenPeriods($loan);
+        $this->assertSame(0, $this->centavos($this->period($loan, 6)->remaining_balance));
+    }
+
     /**
      * Each open period's remaining balance is the unpaid principal of the open
      * periods after it, to the centavo.
@@ -98,7 +116,6 @@ class BalanceAdjustmentRemainingBalanceTest extends TestCase
     {
         $open = AmortizationSchedule::where('loan_id', $loan->id)
             ->whereIn('status', ['pending', 'partial', 'overdue'])
-            ->orderBy('due_date')
             ->orderBy('period_number')
             ->get();
 

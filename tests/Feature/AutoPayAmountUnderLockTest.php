@@ -51,6 +51,7 @@ class AutoPayAmountUnderLockTest extends TestCase
         $this->assertSame(1, $response->json('data.skipped'));
         $this->assertSame([[
             'loan_id' => $loan->id,
+            'loan_account_number' => $loan->loan_account_number,
             'reason' => 'Nothing was due any more once the loan was locked: another payment settled it.',
         ]], $response->json('data.skips'));
         $this->assertSame(0, Repayment::where('loan_id', $loan->id)->count());
@@ -116,15 +117,7 @@ class AutoPayAmountUnderLockTest extends TestCase
         $loan = $this->autoPayLoan(now()->subMonths(2)->toDateString());
         $period = $loan->amortizationSchedules()->reorder('period_number')->firstOrFail();
 
-        app(RepaymentService::class)->applyPenalties($loan->fresh(), now());
-        $service = app(LoanAdjustmentService::class);
-        $waiver = $service->createAdjustment($loan->fresh(), [
-            'adjustment_type' => 'penalty_waiver',
-            'new_values' => ['schedule_ids' => [$period->id]],
-        ], $this->admin);
-        $service->approveAdjustment($waiver, $this->admin, 'ok');
-        $service->applyAdjustment($waiver->fresh());
-        $this->assertNotNull($period->fresh()->penalty_waiver_id, 'the waiver did not land, so this test proves nothing');
+        $this->waive($loan, $period);
 
         $response = $this->processFor($period)->assertCreated();
 
@@ -132,6 +125,110 @@ class AutoPayAmountUnderLockTest extends TestCase
         $period->refresh();
         $this->assertSame('paid', $period->status);
         $this->assertEquals(0, $period->penalty_paid);
+    }
+
+    public function test_a_selected_period_part_paid_in_between_is_skipped_as_changed_not_settled(): void
+    {
+        $loan = $this->autoPayLoan();
+        $period = $loan->amortizationSchedules()->reorder('period_number')->firstOrFail();
+
+        $this->atTheLoanLock(function () use ($period): void {
+            DB::table('amortization_schedules')->where('id', $period->id)->update([
+                'interest_paid' => DB::raw('interest_due'),
+                'status' => 'partial',
+            ]);
+        });
+
+        $response = $this->processFor($period)->assertCreated();
+
+        $this->assertSame(0, $response->json('data.processed'));
+        $this->assertSame('Changed by another payment since the preview; run the preview again.', $response->json('data.skips.0.reason'));
+        $this->assertSame(0, Repayment::where('loan_id', $loan->id)->count());
+    }
+
+    public function test_the_preview_quotes_the_late_penalty_and_equals_what_the_run_posts(): void
+    {
+        $loan = $this->autoPayLoan(now()->subMonths(2)->toDateString());
+        $period = $loan->amortizationSchedules()->reorder('period_number')->firstOrFail();
+
+        $preview = $this->previewFor($period)->assertOk()->json('data');
+
+        $this->assertEquals(200, $preview['summary']['total_penalty']);
+        $this->assertEquals(12000, $preview['summary']['total_amount']);
+        $this->assertEquals([
+            'loan_id' => $loan->id,
+            'loan_account_number' => $loan->loan_account_number,
+            'borrower_name' => $preview['loans'][0]['borrower_name'],
+            'total_principal' => 10000,
+            'total_interest' => 1800,
+            'total_penalty' => 200,
+            'total_amount' => 12000,
+        ], $preview['loans'][0]);
+        $this->assertEquals(0, $period->fresh()->penalty_amount, 'the preview must write nothing');
+
+        $posted = $this->processFor($period)->assertCreated()->json('data.repayments.0.amount_paid');
+        $this->assertEquals($preview['summary']['total_amount'], $posted);
+    }
+
+    public function test_the_preview_quotes_no_penalty_on_a_waived_period(): void
+    {
+        $loan = $this->autoPayLoan(now()->subMonths(2)->toDateString());
+        $period = $loan->amortizationSchedules()->reorder('period_number')->firstOrFail();
+        $this->waive($loan, $period);
+
+        $summary = $this->previewFor($period)->assertOk()->json('data.summary');
+
+        $this->assertEquals(0, $summary['total_penalty']);
+        $this->assertEquals(11800, $summary['total_amount']);
+    }
+
+    public function test_a_loan_with_an_earlier_open_period_is_skipped_by_the_preview_and_the_run(): void
+    {
+        // Period 1 is still open; only period 2 is selected.
+        $loan = $this->autoPayLoan();
+        $period2 = $loan->amortizationSchedules()->reorder('period_number')->skip(1)->firstOrFail();
+        $skip = [
+            'loan_id' => $loan->id,
+            'loan_account_number' => $loan->loan_account_number,
+            'reason' => 'Has earlier unpaid periods; collect them first.',
+        ];
+
+        $preview = $this->previewFor($period2)->assertOk()->json('data');
+        $this->assertSame([$skip], $preview['skips']);
+        $this->assertSame(0, $preview['summary']['loans_count']);
+        $this->assertSame([], $preview['loans']);
+
+        $run = $this->processFor($period2)->assertCreated()->json('data');
+        $this->assertSame(0, $run['processed']);
+        $this->assertSame([$skip], $run['skips']);
+        $this->assertSame(0, Repayment::where('loan_id', $loan->id)->count());
+    }
+
+    public function test_a_failed_loan_is_named_with_its_reason(): void
+    {
+        $loan = $this->autoPayLoan();
+        $period = $loan->amortizationSchedules()->reorder('period_number')->firstOrFail();
+
+        // The loan closes between the run's read and its lock.
+        $fired = false;
+        DB::connection()->beforeExecuting(function (string $query) use (&$fired, $loan): void {
+            if ($fired || ! str_contains($query, 'from `loans`') || ! str_contains($query, 'for update')) {
+                return;
+            }
+
+            $fired = true;
+            DB::table('loans')->where('id', $loan->id)->update(['status' => 'completed']);
+        });
+
+        $run = $this->processFor($period)->assertCreated()->json('data');
+
+        $this->assertTrue($fired, 'the loan never closed in between, so this test proved nothing');
+        $this->assertSame(1, $run['failed']);
+        $this->assertSame([[
+            'loan_id' => $loan->id,
+            'loan_account_number' => $loan->loan_account_number,
+            'reason' => 'Another change to this loan was saved at the same time. Reload and try again.',
+        ]], $run['failures']);
     }
 
     private function autoPayLoan(?string $startDate = null): Loan
@@ -145,6 +242,27 @@ class AutoPayAmountUnderLockTest extends TestCase
         ]);
 
         return $loan->fresh('amortizationSchedules');
+    }
+
+    private function waive(Loan $loan, AmortizationSchedule $period): void
+    {
+        app(RepaymentService::class)->applyPenalties($loan->fresh(), now());
+        $service = app(LoanAdjustmentService::class);
+        $waiver = $service->createAdjustment($loan->fresh(), [
+            'adjustment_type' => 'penalty_waiver',
+            'new_values' => ['schedule_ids' => [$period->id]],
+        ], $this->admin);
+        $service->approveAdjustment($waiver, $this->admin, 'ok');
+        $service->applyAdjustment($waiver->fresh());
+        $this->assertNotNull($period->fresh()->penalty_waiver_id, 'the waiver did not land, so this test proves nothing');
+    }
+
+    private function previewFor(AmortizationSchedule $period): TestResponse
+    {
+        return $this->getJson('/api/auto-pay/preview?'.http_build_query([
+            'date_from' => $period->due_date->toDateString(),
+            'date_to' => $period->due_date->toDateString(),
+        ]));
     }
 
     private function processFor(AmortizationSchedule $period): TestResponse

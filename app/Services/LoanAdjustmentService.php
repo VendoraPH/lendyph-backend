@@ -911,7 +911,7 @@ class LoanAdjustmentService
     /**
      * Each open period's `remaining_balance`: the principal still owed once
      * it is paid, run down from the loan's actual unpaid principal through the
-     * open periods in due order, in centavos. Read after the adjustment is
+     * open periods in period order (the order a payment allocates), in centavos. Read after the adjustment is
      * written, so it carries every earlier adjustment and payment.
      *
      * Paid periods, the rows an extension or a restructure closed among them,
@@ -923,8 +923,8 @@ class LoanAdjustmentService
 
         $open = $loan->amortizationSchedules()
             ->whereIn('status', ['pending', 'partial', 'overdue'])
-            ->reorder('due_date')
-            ->orderBy('period_number')
+            ->reorder('period_number')
+            ->orderBy('due_date')
             ->get();
 
         $unpaid = static fn ($s): int => max(0, $centavos($s->principal_due) - $centavos($s->principal_paid));

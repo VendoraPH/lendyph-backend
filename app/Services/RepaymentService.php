@@ -922,29 +922,50 @@ class RepaymentService
      */
     public function applyPenalties(Loan $loan, Carbon $asOfDate): void
     {
-        $penaltyRate = (float) $loan->penalty_rate;
-
-        if ($penaltyRate <= 0) {
+        if ((float) $loan->penalty_rate <= 0) {
             return;
         }
 
         $lateBefore = AmortizationSchedule::pastGraceCutoff($loan->grace_period_days, $asOfDate);
-        $arrearsBaseline = $loan->imported_arrears_baseline;
 
         $loan->amortizationSchedules()
             ->where('due_date', '<', $lateBefore)
             ->whereIn('status', ['pending', 'partial', 'overdue'])
             ->whereNull('penalty_waiver_id')
-            ->each(function (AmortizationSchedule $schedule) use ($penaltyRate, $arrearsBaseline) {
-                if (! AmortizationSchedule::isPenalisable($arrearsBaseline, $schedule->due_date)) {
+            ->each(function (AmortizationSchedule $schedule) use ($loan, $asOfDate) {
+                $penalty = $this->penaltyAsOf($loan, $schedule, $asOfDate);
+
+                if ($penalty === null) {
                     return;
                 }
 
                 $schedule->update([
-                    'penalty_amount' => $this->penaltyFor($schedule, $penaltyRate),
+                    'penalty_amount' => $penalty,
                     'status' => 'overdue',
                 ]);
             });
+    }
+
+    /**
+     * The penalty applyPenalties() charges `$schedule` as of `$asOfDate`, or
+     * null when it leaves the period alone: no penalty rate, a closed or
+     * waived period, one not yet late past its grace, or one due before the
+     * loan's imported arrears baseline. Pure: writes nothing, so a preview
+     * (AutoPayService::preview()) quotes what a payment will charge.
+     */
+    public function penaltyAsOf(Loan $loan, AmortizationSchedule $schedule, Carbon $asOfDate): ?float
+    {
+        $penaltyRate = (float) $loan->penalty_rate;
+
+        if ($penaltyRate <= 0
+            || $schedule->penalty_waiver_id !== null
+            || ! in_array($schedule->status, ['pending', 'partial', 'overdue'], true)
+            || ! $schedule->due_date->lt(AmortizationSchedule::pastGraceCutoff($loan->grace_period_days, $asOfDate))
+            || ! AmortizationSchedule::isPenalisable($loan->imported_arrears_baseline, $schedule->due_date)) {
+            return null;
+        }
+
+        return $this->penaltyFor($schedule, $penaltyRate);
     }
 
     /**
