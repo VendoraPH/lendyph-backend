@@ -133,3 +133,55 @@ it('upserts when saving same type twice', function () {
     expect(ApprovalWorkflowSetting::where('type', 'normal')->count())->toBe(1);
     expect(ApprovalWorkflowSetting::where('type', 'normal')->first()->steps)->toHaveCount(3);
 });
+
+it('saves and returns each step status label', function () {
+    $steps = [
+        ['id' => 'lp', 'name' => 'Loan Processor', 'role' => 'loan_processor', 'kind' => 'submit', 'status' => 'Submitted'],
+        ['id' => 'mgr', 'name' => 'Manager', 'role' => 'manager', 'kind' => 'approve', 'status' => 'Credit Review'],
+        ['id' => 'cash', 'name' => 'Cashier', 'role' => 'cashier', 'kind' => 'release', 'status' => 'Ready for Release'],
+    ];
+
+    $saved = $this->putJson('/api/settings/approval-workflow', [
+        'type' => 'normal',
+        'steps' => $steps,
+    ])->assertSuccessful();
+
+    expect(collect($saved->json('data.steps'))->pluck('status')->all())
+        ->toBe(['Submitted', 'Credit Review', 'Ready for Release']);
+
+    $fetched = $this->getJson('/api/settings/approval-workflow?type=normal')->assertSuccessful();
+
+    expect($fetched->json('data.is_default'))->toBeFalse();
+    expect(collect($fetched->json('data.steps'))->pluck('status')->all())
+        ->toBe(['Submitted', 'Credit Review', 'Ready for Release']);
+});
+
+it('rejects a step status label longer than 100 characters', function () {
+    $this->putJson('/api/settings/approval-workflow', [
+        'type' => 'normal',
+        'steps' => [
+            ['id' => 'lp', 'name' => 'Loan Processor', 'role' => 'loan_processor', 'kind' => 'submit'],
+            ['id' => 'mgr', 'name' => 'Manager', 'role' => 'manager', 'kind' => 'approve', 'status' => str_repeat('a', 101)],
+            ['id' => 'cash', 'name' => 'Cashier', 'role' => 'cashier', 'kind' => 'release'],
+        ],
+    ])->assertStatus(422)
+        ->assertJsonValidationErrors(['steps.1.status']);
+});
+
+it('saves a chain where some steps have no status label', function () {
+    $this->putJson('/api/settings/approval-workflow', [
+        'type' => 'normal',
+        'steps' => [
+            ['id' => 'lp', 'name' => 'Loan Processor', 'role' => 'loan_processor', 'kind' => 'submit'],
+            ['id' => 'mgr', 'name' => 'Manager', 'role' => 'manager', 'kind' => 'approve', 'status' => null],
+            ['id' => 'cash', 'name' => 'Cashier', 'role' => 'cashier', 'kind' => 'release', 'status' => 'Ready for Release'],
+        ],
+    ])->assertSuccessful();
+
+    $steps = ApprovalWorkflowSetting::where('type', 'normal')->first()->steps;
+
+    expect($steps)->toHaveCount(3);
+    expect($steps[0]['status'] ?? null)->toBeNull();
+    expect($steps[1]['status'] ?? null)->toBeNull();
+    expect($steps[2]['status'] ?? null)->toBe('Ready for Release');
+});

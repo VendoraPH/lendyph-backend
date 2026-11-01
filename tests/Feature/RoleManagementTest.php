@@ -173,3 +173,82 @@ it('exposes users_count on GET', function () {
 
     expect($response->json('data.users_count'))->toBe(2);
 });
+
+it('saves a display_name on a custom role without changing its key', function () {
+    $role = Role::create(['name' => 'cash_manager', 'guard_name' => 'web', 'is_system' => false]);
+
+    $this->putJson("/api/roles/{$role->id}", [
+        'display_name' => 'Cash Desk Manager',
+    ])->assertSuccessful()
+        ->assertJsonPath('data.display_name', 'Cash Desk Manager')
+        ->assertJsonPath('data.name', 'cash_manager');
+
+    $this->assertDatabaseHas('roles', [
+        'id' => $role->id,
+        'name' => 'cash_manager',
+        'display_name' => 'Cash Desk Manager',
+    ]);
+});
+
+it('saves a display_name on a system role and still refuses a changed name', function () {
+    $loanOfficer = Role::where('name', 'loan_officer')->first();
+
+    $this->putJson("/api/roles/{$loanOfficer->id}", [
+        'display_name' => 'Account Officer',
+    ])->assertSuccessful()
+        ->assertJsonPath('data.display_name', 'Account Officer')
+        ->assertJsonPath('data.name', 'loan_officer');
+
+    $this->putJson("/api/roles/{$loanOfficer->id}", [
+        'name' => 'account_officer',
+        'display_name' => 'Renamed Again',
+    ])->assertStatus(422)
+        ->assertJsonValidationErrors(['name']);
+
+    expect($loanOfficer->fresh()->name)->toBe('loan_officer');
+    expect($loanOfficer->fresh()->display_name)->toBe('Account Officer');
+});
+
+it('returns display_name on role reads', function () {
+    $role = Role::create(['name' => 'counted_display', 'guard_name' => 'web', 'is_system' => false]);
+    $role->forceFill(['display_name' => 'Counted Display'])->save();
+
+    $this->getJson("/api/roles/{$role->id}")
+        ->assertSuccessful()
+        ->assertJsonPath('data.display_name', 'Counted Display');
+
+    $listed = collect($this->getJson('/api/roles')->assertSuccessful()->json('data'))
+        ->firstWhere('name', 'counted_display');
+
+    expect($listed)->toHaveKey('display_name');
+    expect($listed['display_name'])->toBe('Counted Display');
+});
+
+it('accepts display_name when creating a role', function () {
+    $this->postJson('/api/roles', [
+        'name' => 'branch_teller',
+        'display_name' => 'Branch Teller',
+    ])->assertCreated()
+        ->assertJsonPath('data.name', 'branch_teller')
+        ->assertJsonPath('data.display_name', 'Branch Teller');
+
+    $this->assertDatabaseHas('roles', [
+        'name' => 'branch_teller',
+        'display_name' => 'Branch Teller',
+    ]);
+});
+
+it('rejects a display_name longer than 100 characters', function () {
+    $role = Role::create(['name' => 'long_label', 'guard_name' => 'web', 'is_system' => false]);
+
+    $this->putJson("/api/roles/{$role->id}", [
+        'display_name' => str_repeat('a', 101),
+    ])->assertStatus(422)
+        ->assertJsonValidationErrors(['display_name']);
+
+    $this->postJson('/api/roles', [
+        'name' => 'long_label_two',
+        'display_name' => str_repeat('a', 101),
+    ])->assertStatus(422)
+        ->assertJsonValidationErrors(['display_name']);
+});

@@ -151,6 +151,56 @@ class LoanCurrentApproverTest extends TestCase
         $this->assertSame($small, $this->countQueriesForOnePage(), 'current_approver is doing per-row work');
     }
 
+    public function test_current_status_label_is_the_pending_steps_label(): void
+    {
+        ApprovalWorkflowSetting::updateOrCreate(
+            ['type' => ApprovalWorkflowSetting::TYPE_NORMAL],
+            ['steps' => [
+                ['id' => 'processor', 'name' => 'Loan Processor', 'role' => 'loan_processor', 'kind' => 'submit', 'status' => 'Submitted'],
+                ['id' => 'manager', 'name' => 'Manager', 'role' => 'manager', 'kind' => 'approve', 'status' => 'Credit Review'],
+                ['id' => 'bod', 'name' => 'BOD Chairman', 'role' => 'bod1', 'kind' => 'approve', 'status' => 'Board Vote'],
+                ['id' => 'teller', 'name' => 'Teller', 'role' => 'cashier', 'kind' => 'release'],
+            ]],
+        );
+
+        $loan = $this->submittedLoan();
+
+        $this->assertSame('Credit Review', $this->listedStatusLabel($loan));
+        $this->assertSame('Credit Review', $this->detailStatusLabel($loan));
+
+        $this->approveAs('manager', $loan);
+
+        $this->assertSame('Board Vote', $this->listedStatusLabel($loan));
+        $this->assertSame('Board Vote', $this->detailStatusLabel($loan));
+    }
+
+    public function test_current_status_label_is_null_when_the_pending_step_has_none(): void
+    {
+        $loan = $this->submittedLoan();
+
+        $this->assertNull($this->listedStatusLabel($loan));
+        $this->assertNull($this->detailStatusLabel($loan));
+    }
+
+    public function test_current_approver_still_names_the_step_when_it_has_a_status_label(): void
+    {
+        ApprovalWorkflowSetting::updateOrCreate(
+            ['type' => ApprovalWorkflowSetting::TYPE_NORMAL],
+            ['steps' => [
+                ['id' => 'processor', 'name' => 'Loan Processor', 'role' => 'loan_processor', 'kind' => 'submit'],
+                ['id' => 'manager', 'name' => 'Manager', 'role' => 'manager', 'kind' => 'approve', 'status' => 'Credit Review'],
+                ['id' => 'teller', 'name' => 'Teller', 'role' => 'cashier', 'kind' => 'release'],
+            ]],
+        );
+
+        $loan = $this->submittedLoan();
+
+        $this->assertSame('Manager', $this->listedApprover($loan));
+        $this->assertSame('Manager', $this->detailApprover($loan));
+        $this->assertSame('Credit Review', $this->listedStatusLabel($loan));
+        $this->assertSame('Credit Review', $this->detailStatusLabel($loan));
+    }
+
     private function assertAgreesWithApprovalSteps(Loan $loan, string $expected): void
     {
         $fromChain = collect($this->getJson("/api/loans/{$loan->id}/approval-steps")->assertOk()->json('data.current_steps'))
@@ -183,6 +233,30 @@ class LoanCurrentApproverTest extends TestCase
         $this->assertArrayHasKey('current_approver', $data);
 
         return $data['current_approver'];
+    }
+
+    /**
+     * The loan's `current_status_label` on GET /loans. Asserts the key is
+     * present, the same way listedApprover() does.
+     */
+    private function listedStatusLabel(Loan $loan): ?string
+    {
+        $row = collect($this->getJson('/api/loans?per_page=100')->assertOk()->json('data'))
+            ->firstWhere('id', $loan->id);
+
+        $this->assertNotNull($row, "loan {$loan->id} is not on the list");
+        $this->assertArrayHasKey('current_status_label', $row);
+
+        return $row['current_status_label'];
+    }
+
+    private function detailStatusLabel(Loan $loan): ?string
+    {
+        $data = $this->getJson("/api/loans/{$loan->id}")->assertOk()->json('data');
+
+        $this->assertArrayHasKey('current_status_label', $data);
+
+        return $data['current_status_label'];
     }
 
     private function countQueriesForOnePage(): int

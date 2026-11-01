@@ -861,6 +861,82 @@ class LoanApprovalChainTest extends TestCase
         $this->assertTrue($release['can_act'], 'The Release action would not render after a direct approval.');
     }
 
+    public function test_submitting_a_loan_copies_each_step_status_label_into_the_chain(): void
+    {
+        $this->labelledNormalChain();
+
+        $loan = $this->submittedLoan();
+
+        $steps = $loan->approvalSteps()->get();
+
+        $this->assertSame(
+            ['Submitted', 'Credit Review', null, 'Ready for Release'],
+            $steps->pluck('status_label')->all(),
+        );
+        // The progress enum is a separate column and is not replaced by the label.
+        $this->assertSame(['approved', 'pending', 'waiting', 'waiting'], $steps->pluck('status')->all());
+    }
+
+    public function test_send_back_carries_the_status_labels_into_the_new_round(): void
+    {
+        $this->labelledNormalChain();
+
+        $loan = $this->submittedLoan();
+        $this->approveAs('manager', $loan);
+
+        $bod = $this->pendingStep($loan);
+
+        $this->actingAs($this->userWithRole('bod1'))
+            ->patchJson("/api/loans/{$loan->id}/approval-steps/{$bod->id}/send-back", [
+                'target_step_order' => 1,
+                'remarks' => 'Collateral appraisal is out of date.',
+            ])
+            ->assertOk();
+
+        $roundTwo = $loan->approvalSteps()->where('round', 2)->orderBy('step_order')->get();
+
+        $this->assertCount(4, $roundTwo);
+        $this->assertSame(
+            ['Submitted', 'Credit Review', null, 'Ready for Release'],
+            $roundTwo->pluck('status_label')->all(),
+        );
+    }
+
+    public function test_editing_the_settings_later_does_not_rewrite_an_in_flight_loans_status_labels(): void
+    {
+        $this->labelledNormalChain();
+
+        $loan = $this->submittedLoan();
+
+        ApprovalWorkflowSetting::updateOrCreate(
+            ['type' => ApprovalWorkflowSetting::TYPE_NORMAL],
+            ['steps' => [
+                ['id' => 'loan-processor', 'name' => 'Loan Processor', 'role' => 'loan_processor', 'kind' => 'submit', 'status' => 'Changed'],
+                ['id' => 'manager', 'name' => 'Manager', 'role' => 'manager', 'kind' => 'approve', 'status' => 'Changed Too'],
+                ['id' => 'bod1', 'name' => 'BOD Chairman', 'role' => 'bod1', 'kind' => 'approve', 'status' => 'Board Vote'],
+                ['id' => 'bookkeeper', 'name' => 'General Bookkeeper', 'role' => 'general_bookkeeper', 'kind' => 'release', 'status' => 'Changed Three'],
+            ]],
+        );
+
+        $this->assertSame(
+            ['Submitted', 'Credit Review', null, 'Ready for Release'],
+            $loan->approvalSteps()->get()->pluck('status_label')->all(),
+        );
+    }
+
+    private function labelledNormalChain(): void
+    {
+        ApprovalWorkflowSetting::updateOrCreate(
+            ['type' => ApprovalWorkflowSetting::TYPE_NORMAL],
+            ['steps' => [
+                ['id' => 'loan-processor', 'name' => 'Loan Processor', 'role' => 'loan_processor', 'kind' => 'submit', 'status' => 'Submitted'],
+                ['id' => 'manager', 'name' => 'Manager', 'role' => 'manager', 'kind' => 'approve', 'status' => 'Credit Review'],
+                ['id' => 'bod1', 'name' => 'BOD Chairman', 'role' => 'bod1', 'kind' => 'approve'],
+                ['id' => 'bookkeeper', 'name' => 'General Bookkeeper', 'role' => 'general_bookkeeper', 'kind' => 'release', 'status' => 'Ready for Release'],
+            ]],
+        );
+    }
+
     private function submittedLoan(bool $policyException = false): Loan
     {
         $product = LoanProduct::factory()->create([
