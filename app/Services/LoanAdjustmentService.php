@@ -40,6 +40,16 @@ class LoanAdjustmentService
             ]);
         }
 
+        // Stated as a target: the server works the amount out, and records
+        // what it worked it out from beside it.
+        if ($validated['adjustment_type'] === 'balance_adjustment'
+            && ($validated['new_values']['target_principal_balance'] ?? null) !== null) {
+            $figures = $this->balanceAdjustmentFigures($loan, (float) $validated['new_values']['target_principal_balance']);
+            $validated['new_values']['adjustment_amount'] = $figures['adjustment_amount'];
+            $validated['new_values']['target_principal_balance'] = $figures['target_principal_balance'];
+            $validated['new_values']['outstanding_principal_at_request'] = $figures['outstanding_principal'];
+        }
+
         $oldValues = $this->captureOldValues($loan, $validated['adjustment_type'], $validated['new_values']);
 
         return LoanAdjustment::create([
@@ -52,6 +62,66 @@ class LoanAdjustmentService
             'remarks' => $validated['remarks'] ?? null,
             'adjusted_by' => $user->id,
         ]);
+    }
+
+    /**
+     * What a balance adjustment to `$targetPrincipalBalance` would be, for
+     * GET /loans/{loan}/balance-adjustment-preview. Refuses, as a request
+     * would, a loan that cannot be adjusted. Writes nothing.
+     *
+     * @return array{outstanding_principal: float|int, target_principal_balance: float|int, adjustment_amount: float|int, resulting_principal_balance: float|int}
+     */
+    public function balanceAdjustmentPreview(Loan $loan, float $targetPrincipalBalance): array
+    {
+        if (! in_array($loan->status, ['released', 'ongoing'])) {
+            throw ValidationException::withMessages([
+                'loan' => 'Adjustments can only be made on released or ongoing loans.',
+            ]);
+        }
+
+        return $this->balanceAdjustmentFigures($loan, $targetPrincipalBalance);
+    }
+
+    /**
+     * The amount that takes the loan's unpaid principal to the target, in
+     * centavos: target minus outstanding principal, negative for a reduction.
+     *
+     * @return array{outstanding_principal: float|int, target_principal_balance: float|int, adjustment_amount: float|int, resulting_principal_balance: float|int}
+     */
+    private function balanceAdjustmentFigures(Loan $loan, float $targetPrincipalBalance): array
+    {
+        $outstanding = $this->outstandingPrincipalCentavos($loan);
+        $target = (int) round($targetPrincipalBalance * 100);
+
+        return [
+            'outstanding_principal' => $outstanding / 100,
+            'target_principal_balance' => $target / 100,
+            'adjustment_amount' => ($target - $outstanding) / 100,
+            'resulting_principal_balance' => $target / 100,
+        ];
+    }
+
+    /**
+     * The loan's unpaid principal, in centavos: over its open periods, each
+     * period's principal due less what was paid on it, never below zero. The
+     * one figure a balance adjustment is worked out from, guarded against
+     * (applyBalanceAdjustment()) and run down from
+     * (restateOpenRemainingBalances()).
+     */
+    public function outstandingPrincipalCentavos(Loan $loan): int
+    {
+        return $loan->amortizationSchedules()
+            ->whereIn('status', ['pending', 'partial', 'overdue'])
+            ->get()
+            ->sum(fn (AmortizationSchedule $schedule): int => self::unpaidPrincipalCentavos($schedule));
+    }
+
+    /**
+     * One period's unpaid principal, in centavos, never below zero.
+     */
+    private static function unpaidPrincipalCentavos(AmortizationSchedule $schedule): int
+    {
+        return max(0, (int) round((float) $schedule->principal_due * 100) - (int) round((float) $schedule->principal_paid * 100));
     }
 
     /**
@@ -853,7 +923,7 @@ class LoanAdjustmentService
         $centavos = static fn (mixed $pesos): int => (int) round((float) $pesos * 100);
         $amount = $centavos($adjustmentAmount);
         $unpaid = $unpaidSchedules
-            ->map(fn ($s): int => max(0, $centavos($s->principal_due) - $centavos($s->principal_paid)))
+            ->map(fn (AmortizationSchedule $s): int => self::unpaidPrincipalCentavos($s))
             ->all();
         $totalUnpaid = array_sum($unpaid);
 
@@ -927,11 +997,10 @@ class LoanAdjustmentService
             ->orderBy('due_date')
             ->get();
 
-        $unpaid = static fn ($s): int => max(0, $centavos($s->principal_due) - $centavos($s->principal_paid));
-        $balance = $open->sum($unpaid);
+        $balance = $open->sum(fn (AmortizationSchedule $s): int => self::unpaidPrincipalCentavos($s));
 
         foreach ($open as $schedule) {
-            $balance -= $unpaid($schedule);
+            $balance -= self::unpaidPrincipalCentavos($schedule);
 
             if ($centavos($schedule->remaining_balance) !== $balance) {
                 $schedule->update(['remaining_balance' => $balance / 100]);
@@ -1092,10 +1161,7 @@ class LoanAdjustmentService
                     ])->values()->toArray(),
             ],
             'balance_adjustment' => [
-                'outstanding_principal' => $loan->amortizationSchedules()
-                    ->whereIn('status', ['pending', 'partial', 'overdue'])
-                    ->get()
-                    ->sum(fn ($s) => (float) $s->principal_due - (float) $s->principal_paid),
+                'outstanding_principal' => $this->outstandingPrincipalCentavos($loan) / 100,
             ],
             'term_extension' => [
                 'term' => $loan->term,

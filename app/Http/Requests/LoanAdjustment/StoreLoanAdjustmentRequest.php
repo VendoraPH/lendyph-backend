@@ -50,9 +50,13 @@ class StoreLoanAdjustmentRequest extends FormRequest
             'new_values.schedule_ids.*' => ['integer', 'exists:amortization_schedules,id'],
             'new_values.waive_all' => ['nullable', 'boolean'],
 
-            // Balance adjustment — a signed delta applied to the principal,
-            // not the resulting balance.
-            'new_values.adjustment_amount' => ['required_if:adjustment_type,balance_adjustment', 'nullable', 'numeric', 'decimal:0,2'],
+            // Balance adjustment — either a signed delta applied to the
+            // principal, or the principal balance to end on, from which the
+            // server works out the delta (exactly one; enforced in after()).
+            // The outstanding principal is always the server's own reading.
+            'new_values.adjustment_amount' => ['nullable', 'numeric', 'decimal:0,2'],
+            'new_values.target_principal_balance' => ['nullable', 'numeric', 'decimal:0,2', 'min:0'],
+            'new_values.outstanding_principal_at_request' => ['prohibited'],
             'new_values.reason' => ['nullable', 'string', 'max:500'],
 
             // Term extension — the number of extra periods, not the new term.
@@ -92,6 +96,29 @@ class StoreLoanAdjustmentRequest extends FormRequest
                         $validator->errors()->add(
                             "new_values.{$field}",
                             sprintf('A %s does not take %s.', str_replace('_', ' ', $type), $field),
+                        );
+                    }
+                }
+
+                // A balance adjustment states one figure: the amount, or the
+                // target principal balance the server works the amount out from.
+                if ($type === 'balance_adjustment' && is_array($newValues)) {
+                    $stated = array_filter(
+                        ['adjustment_amount', 'target_principal_balance'],
+                        fn (string $key): bool => ($newValues[$key] ?? null) !== null,
+                    );
+
+                    // Neither is reported on adjustment_amount, the key a missing
+                    // figure has always been reported on; both on new_values.
+                    if (count($stated) === 0) {
+                        $validator->errors()->add(
+                            'new_values.adjustment_amount',
+                            'Give adjustment_amount or target_principal_balance for a balance adjustment.',
+                        );
+                    } elseif (count($stated) > 1) {
+                        $validator->errors()->add(
+                            'new_values',
+                            'Give either adjustment_amount or target_principal_balance for a balance adjustment, not both.',
                         );
                     }
                 }

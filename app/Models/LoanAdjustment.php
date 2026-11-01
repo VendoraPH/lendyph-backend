@@ -21,7 +21,10 @@ class LoanAdjustment extends Model
     public const NEW_VALUE_FIELDS = [
         'restructure' => ['interest_rate', 'term', 'frequency'],
         'penalty_waiver' => ['waive_all', 'schedule_ids'],
-        'balance_adjustment' => ['adjustment_amount', 'reason'],
+        // `target_principal_balance` and `outstanding_principal_at_request`
+        // record how the server worked out `adjustment_amount` for a request
+        // stated as a target; the amount is what is approved and applied.
+        'balance_adjustment' => ['adjustment_amount', 'reason', 'target_principal_balance', 'outstanding_principal_at_request'],
         'term_extension' => ['additional_terms'],
     ];
 

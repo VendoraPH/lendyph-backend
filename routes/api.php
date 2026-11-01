@@ -278,6 +278,7 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     // Loan Adjustments
     Route::get('/loans/{loan}/adjustments', [LoanAdjustmentController::class, 'index']);
     Route::post('/loans/{loan}/adjustments', [LoanAdjustmentController::class, 'store']);
+    Route::get('/loans/{loan}/balance-adjustment-preview', [LoanAdjustmentController::class, 'balanceAdjustmentPreview']);
     Route::get('/loan-adjustments/{loanAdjustment}', [LoanAdjustmentController::class, 'show']);
     Route::patch('/loan-adjustments/{loanAdjustment}/approve', [LoanAdjustmentController::class, 'approve']);
     Route::patch('/loan-adjustments/{loanAdjustment}/reject', [LoanAdjustmentController::class, 'reject']);
