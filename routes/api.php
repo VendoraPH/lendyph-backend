@@ -241,6 +241,7 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     // The release dialog's "Add Co-Maker": approved loans only, `loans:release`.
     Route::post('/loans/{loan}/co-makers', [LoanController::class, 'addCoMaker'])->whereNumber('loan');
     Route::patch('/loans/{loan}/void', [LoanController::class, 'void']);
+    Route::get('/loans/{loan}/extension-preview', [LoanController::class, 'extensionPreview'])->whereNumber('loan');
     Route::post('/loans/{loan}/extend', [LoanController::class, 'extend']);
     Route::post('/loans/{loan}/restructure', [LoanController::class, 'restructure']);
     Route::get('/loans/{loan}/ledger-entries', [LoanController::class, 'ledgerEntries']);

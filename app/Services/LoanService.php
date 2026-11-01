@@ -1915,33 +1915,60 @@ class LoanService
             'maturity_date' => $maturity,
         ]);
 
-        $scb = $this->toCentavos((float) ($input['scb_amount'] ?? 0));
-        $totals = ['principal_due' => 0, 'interest_due' => 0, 'share_capital_build_up' => 0, 'total_payment' => 0];
-        $rows = [];
+        $schedule = $this->withShareCapitalBuildUp($this->buildAmortizationPreview($loan), (float) ($input['scb_amount'] ?? 0));
 
-        foreach ($this->buildAmortizationPreview($loan) as $row) {
-            $payment = $this->toCentavos((float) $row['total_due']) + $scb;
-
-            $rows[] = [
+        return [
+            'maturity_date' => $loan->maturity_date->toDateString(),
+            'interest_method' => $product->interest_method,
+            'rows' => array_map(fn (array $row): array => [
                 'period_number' => $row['period_number'],
                 'due_date' => $row['due_date'],
                 'principal_due' => $row['principal_due'],
                 'interest_due' => $row['interest_due'],
                 'total_due' => $row['total_due'],
-                'share_capital_build_up' => $scb / 100,
-                'total_payment' => $payment / 100,
+                'share_capital_build_up' => $row['share_capital_build_up'],
+                'total_payment' => $row['total_payment'],
                 'remaining_balance' => $row['remaining_balance'],
-            ];
+            ], $schedule['rows']),
+            'totals' => [
+                'principal_due' => $schedule['totals']['principal_due'],
+                'interest_due' => $schedule['totals']['interest_due'],
+                'share_capital_build_up' => $schedule['totals']['share_capital_build_up'],
+                'total_payment' => $schedule['totals']['total_payment'],
+            ],
+        ];
+    }
+
+    /**
+     * Schedule rows from buildAmortizationPreview(), each with its share
+     * capital build-up (`$scbAmount`, one per row) and total payment
+     * (`total_due` plus it), and their column totals in whole centavos.
+     *
+     * The one place POST /loans/preview's `amortization` and
+     * GET /loans/{id}/amortization-preview take these figures from.
+     *
+     * @param  list<array<string, mixed>>  $rows
+     * @return array{rows: list<array<string, mixed>>, totals: array{principal_due: float|int, interest_due: float|int, total_due: float|int, share_capital_build_up: float|int, total_payment: float|int}}
+     */
+    public function withShareCapitalBuildUp(array $rows, float $scbAmount): array
+    {
+        $scb = $this->toCentavos($scbAmount);
+        $totals = ['principal_due' => 0, 'interest_due' => 0, 'total_due' => 0, 'share_capital_build_up' => 0, 'total_payment' => 0];
+
+        foreach ($rows as $i => $row) {
+            $due = $this->toCentavos((float) $row['total_due']);
+
+            $rows[$i]['share_capital_build_up'] = $scb / 100;
+            $rows[$i]['total_payment'] = ($due + $scb) / 100;
 
             $totals['principal_due'] += $this->toCentavos((float) $row['principal_due']);
             $totals['interest_due'] += $this->toCentavos((float) $row['interest_due']);
+            $totals['total_due'] += $due;
             $totals['share_capital_build_up'] += $scb;
-            $totals['total_payment'] += $payment;
+            $totals['total_payment'] += $due + $scb;
         }
 
         return [
-            'maturity_date' => $loan->maturity_date->toDateString(),
-            'interest_method' => $product->interest_method,
             'rows' => $rows,
             'totals' => array_map(fn (int $centavos): float|int => $centavos / 100, $totals),
         ];
