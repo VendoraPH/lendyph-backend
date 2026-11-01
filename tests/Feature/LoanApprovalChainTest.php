@@ -11,6 +11,7 @@ use App\Models\LoanProduct;
 use App\Models\User;
 use App\Services\LoanService;
 use Database\Seeders\RoleAndPermissionSeeder;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Testing\TestResponse;
 use Spatie\Permission\Models\Permission;
 use Spatie\Permission\Models\Role;
@@ -922,6 +923,76 @@ class LoanApprovalChainTest extends TestCase
             ['Submitted', 'Credit Review', null, 'Ready for Release'],
             $loan->approvalSteps()->get()->pluck('status_label')->all(),
         );
+    }
+
+    public function test_a_status_label_that_reads_like_a_progress_state_changes_nothing_but_the_label(): void
+    {
+        ApprovalWorkflowSetting::updateOrCreate(
+            ['type' => ApprovalWorkflowSetting::TYPE_NORMAL],
+            ['steps' => [
+                ['id' => 'loan-processor', 'name' => 'Loan Processor', 'role' => 'loan_processor', 'kind' => 'submit', 'status' => 'pending'],
+                ['id' => 'manager', 'name' => 'Manager', 'role' => 'manager', 'kind' => 'approve', 'status' => 'approved'],
+                ['id' => 'bod1', 'name' => 'BOD Chairman', 'role' => 'bod1', 'kind' => 'approve', 'status' => 'released'],
+                ['id' => 'bookkeeper', 'name' => 'General Bookkeeper', 'role' => 'general_bookkeeper', 'kind' => 'release', 'status' => 'approved'],
+            ]],
+        );
+
+        $loan = $this->submittedLoan();
+
+        $this->assertSame('for_review', $loan->status);
+
+        $steps = $loan->approvalSteps()->get();
+        $this->assertSame(['approved', 'pending', 'waiting', 'waiting'], $steps->pluck('status')->all());
+        $this->assertSame(['pending', 'approved', 'released', 'approved'], $steps->pluck('status_label')->all());
+
+        $current = $this->actingAs($this->userWithRole('manager'))
+            ->getJson("/api/loans/{$loan->id}/approval-steps")
+            ->assertOk()
+            ->json('data.current_steps');
+
+        $this->assertSame(['approved', 'pending', 'waiting', 'waiting'], array_column($current, 'status'));
+        $this->assertSame([false, true, false, false], array_column($current, 'can_act'));
+    }
+
+    public function test_a_hand_edited_label_is_nulled_when_not_text_and_cut_to_100_characters(): void
+    {
+        DB::table('approval_workflow_settings')->insert([
+            'type' => ApprovalWorkflowSetting::TYPE_NORMAL,
+            'steps' => json_encode([
+                ['id' => 'loan-processor', 'name' => 'Loan Processor', 'role' => 'loan_processor', 'kind' => 'submit', 'status' => ['nested' => 'label']],
+                ['id' => 'manager', 'name' => 'Manager', 'role' => 'manager', 'kind' => 'approve', 'status' => 12345],
+                ['id' => 'bod1', 'name' => 'BOD Chairman', 'role' => 'bod1', 'kind' => 'approve', 'status' => str_repeat('b', 150)],
+                ['id' => 'bookkeeper', 'name' => 'General Bookkeeper', 'role' => 'general_bookkeeper', 'kind' => 'release', 'status' => '   '],
+            ]),
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $loan = $this->submittedLoan();
+
+        $steps = $loan->approvalSteps()->get();
+
+        // The configured chain was used, not the default fallback.
+        $this->assertSame(['loan-processor', 'manager', 'bod1', 'bookkeeper'], $steps->pluck('step_id')->all());
+        $this->assertSame([null, null, str_repeat('b', 100), null], $steps->pluck('status_label')->all());
+    }
+
+    public function test_the_approval_steps_endpoint_returns_each_steps_status_label(): void
+    {
+        $this->labelledNormalChain();
+
+        $loan = $this->submittedLoan();
+
+        $current = $this->getJson("/api/loans/{$loan->id}/approval-steps")
+            ->assertOk()
+            ->assertJsonStructure(['data' => ['current_steps' => [['status_label']]]])
+            ->json('data.current_steps');
+
+        $this->assertSame(
+            ['Submitted', 'Credit Review', null, 'Ready for Release'],
+            array_column($current, 'status_label'),
+        );
+        $this->assertSame(['Loan Processor', 'Manager', 'BOD Chairman', 'General Bookkeeper'], array_column($current, 'name'));
     }
 
     private function labelledNormalChain(): void

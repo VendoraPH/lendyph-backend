@@ -252,3 +252,100 @@ it('rejects a display_name longer than 100 characters', function () {
     ])->assertStatus(422)
         ->assertJsonValidationErrors(['display_name']);
 });
+
+function clientAdmin(): User
+{
+    $user = User::factory()->create();
+    $user->assignRole(Role::where('name', 'admin')->firstOrFail());
+
+    return $user;
+}
+
+it('refuses a client admin changing the super_admin display_name but allows other system roles', function () {
+    $superAdmin = Role::where('name', 'super_admin')->firstOrFail();
+    $cashier = Role::where('name', 'cashier')->firstOrFail();
+
+    $this->actingAs(clientAdmin())
+        ->putJson("/api/roles/{$superAdmin->id}", ['display_name' => 'Branch Clerk'])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['display_name']);
+
+    expect($superAdmin->fresh()->display_name)->toBeNull();
+
+    $this->actingAs(clientAdmin())
+        ->putJson("/api/roles/{$cashier->id}", ['display_name' => 'Teller'])
+        ->assertSuccessful()
+        ->assertJsonPath('data.display_name', 'Teller');
+});
+
+it('lets a super_admin change the super_admin display_name', function () {
+    $superAdmin = Role::where('name', 'super_admin')->firstOrFail();
+
+    $this->putJson("/api/roles/{$superAdmin->id}", ['display_name' => 'Platform Owner'])
+        ->assertSuccessful()
+        ->assertJsonPath('data.display_name', 'Platform Owner')
+        ->assertJsonPath('data.name', 'super_admin');
+});
+
+it('rejects a display_name that reads as another role key', function (string $label) {
+    $role = Role::create(['name' => 'lookalike', 'guard_name' => 'web', 'is_system' => false]);
+
+    $this->putJson("/api/roles/{$role->id}", ['display_name' => $label])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['display_name']);
+
+    $this->postJson('/api/roles', ['name' => 'lookalike_two', 'display_name' => $label])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['display_name']);
+})->with(['Admin', 'super admin', 'Super_Admin', '  super   ADMIN  ']);
+
+it('rejects a display_name that reads as another role display_name', function () {
+    $cashier = Role::where('name', 'cashier')->firstOrFail();
+    $cashier->forceFill(['display_name' => 'Cash Desk'])->save();
+
+    $role = Role::create(['name' => 'second_desk', 'guard_name' => 'web', 'is_system' => false]);
+
+    $this->putJson("/api/roles/{$role->id}", ['display_name' => 'cash_desk'])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['display_name']);
+});
+
+it('lets a role keep a display_name equal to its own key', function () {
+    $role = Role::create(['name' => 'cash_manager', 'guard_name' => 'web', 'is_system' => false]);
+
+    $this->putJson("/api/roles/{$role->id}", ['display_name' => '  Cash Manager '])
+        ->assertSuccessful()
+        ->assertJsonPath('data.display_name', 'Cash Manager');
+});
+
+it('rejects control, zero-width and bidi characters in display_name', function (string $label) {
+    $role = Role::create(['name' => 'odd_chars', 'guard_name' => 'web', 'is_system' => false]);
+
+    $this->putJson("/api/roles/{$role->id}", ['display_name' => $label])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['display_name']);
+})->with([
+    'control' => "Desk\u{0007}Clerk",
+    'zero-width space' => "Desk\u{200B}Clerk",
+    'right-to-left override' => "\u{202E}Desk Clerk",
+]);
+
+it('forbids creating or updating a role without settings:update', function () {
+    $role = Role::create(['name' => 'guarded_role', 'guard_name' => 'web', 'is_system' => false]);
+
+    $viewer = User::factory()->create();
+    $viewerRole = Role::create(['name' => 'settings_viewer_only', 'guard_name' => 'web', 'is_system' => false]);
+    $viewerRole->syncPermissions(['settings:view', 'users:view']);
+    $viewer->assignRole($viewerRole);
+
+    $this->actingAs($viewer)
+        ->putJson("/api/roles/{$role->id}", ['display_name' => 'Renamed'])
+        ->assertForbidden();
+
+    $this->actingAs($viewer)
+        ->postJson('/api/roles', ['name' => 'not_allowed', 'display_name' => 'Not Allowed'])
+        ->assertForbidden();
+
+    expect($role->fresh()->display_name)->toBeNull();
+    $this->assertDatabaseMissing('roles', ['name' => 'not_allowed']);
+});

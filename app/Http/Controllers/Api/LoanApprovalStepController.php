@@ -256,6 +256,9 @@ class LoanApprovalStepController extends Controller
             'index' => $step->step_order,
             'step_id' => $step->step_id,
             'name' => $step->name,
+            // The label configured for this step, snapshotted at submit, so the
+            // loan page reads it from the same row as the step name.
+            'status_label' => $step->status_label,
             'role' => $step->role,
             'kind' => $step->kind,
             'status' => $step->status,
