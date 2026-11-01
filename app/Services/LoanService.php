@@ -1380,11 +1380,7 @@ class LoanService
             if ($this->toCentavos((float) $loan->restructure_principal) > $periodsOwe
                 || $this->toCentavos((float) $loan->restructure_outstanding) > $periodsOwe) {
                 throw ValidationException::withMessages([
-                    'principal_amount' => [
-                        'The terms of this restructure counted the insurance premium still owed on the loan being restructured '
-                        .'as part of its balance. That premium now moves to the new loan as premium owed, so the terms have '
-                        .'changed. It must be re-approved before release.',
-                    ],
+                    'principal_amount' => ['The terms changed since approval; re-approve the restructure.'],
                 ]);
             }
         }

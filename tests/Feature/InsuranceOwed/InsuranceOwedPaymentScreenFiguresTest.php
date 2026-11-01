@@ -193,6 +193,33 @@ class InsuranceOwedPaymentScreenFiguresTest extends TestCase
         $this->assertEqualsWithDelta(500.00, (float) ShareCapitalLedger::where('repayment_id', $repayment->id)->sum('credit'), 0.001);
     }
 
+    public function test_the_build_up_quoted_with_late_periods_and_one_due_today_is_what_the_payment_credits(): void
+    {
+        $this->travelTo('2026-11-02 10:00:00');
+
+        // Periods 1 and 2 are late (due 2026-09-02 and 2026-10-02); period 3
+        // falls due today, so it is the current period and the build-up of all
+        // three is credited once it is settled.
+        $loan = $this->loanOwingPremium(startDate: '2026-08-02');
+        DB::table('loans')->where('id', $loan->id)->update(['scb_amount' => 500]);
+        $loan->refresh();
+
+        $due = $this->amountDueNow($loan);
+
+        $this->assertSame(1, $due['period_number']);
+        $this->assertSame(3, $due['last_period_number']);
+        $this->assertSame('2026-11-02', AmortizationSchedule::where('loan_id', $loan->id)->where('period_number', 3)->value('due_date')->toDateString());
+        $this->assertGreaterThan(0, $due['penalty'], 'setup: periods 1 and 2 owe a penalty');
+        $this->assertEquals(1500, $due['share_capital_build_up']);
+
+        $repayment = $this->pay($loan, (float) $due['amount']);
+
+        $credited = (int) round((float) ShareCapitalLedger::where('repayment_id', $repayment->id)->sum('credit') * 100);
+        $this->assertSame((int) round($due['share_capital_build_up'] * 100), $credited);
+        $this->assertEqualsWithDelta(0.00, $this->owed($loan), 0.001);
+        $this->assertSame(3, AmortizationSchedule::where('loan_id', $loan->id)->whereBetween('period_number', [1, 3])->where('status', 'paid')->count());
+    }
+
     public function test_amount_due_now_with_no_open_period_is_the_premium_alone(): void
     {
         $loan = $this->loanOwingPremium();

@@ -66,7 +66,7 @@ class InsuranceOwedRestructureTest extends TestCase
 
         $this->patchJson("/api/loans/{$new->id}/release")
             ->assertStatus(422)
-            ->assertJsonValidationErrors('principal_amount');
+            ->assertJsonValidationErrors(['principal_amount' => 'The terms changed since approval; re-approve the restructure.']);
 
         $this->assertSame('approved', $new->fresh()->status);
         $this->assertSame('released', $source->fresh()->status);
@@ -147,8 +147,53 @@ class InsuranceOwedRestructureTest extends TestCase
 
         $carriedLine = $items->firstWhere('name', 'Insurance premium carried from the previous loan');
         $this->assertEquals(
-            ['name' => 'Insurance premium carried from the previous loan', 'amount' => 400, 'deducted' => 0, 'owed' => 400],
+            ['name' => 'Insurance premium carried from the previous loan', 'amount' => 400, 'deducted' => 0, 'owed' => 400, 'provisional' => false],
             $carriedLine,
         );
+    }
+
+    public function test_the_disclosure_signed_before_release_shows_the_premium_to_be_carried_as_provisional(): void
+    {
+        $source = $this->loanOwingPremium();
+        $new = $this->approvedRestructure($source);
+        $this->assertSame('approved', $new->fresh()->status);
+
+        $line = collect($this->getJson("/api/loans/{$new->id}/disclosure")->assertOk()->json('data.non_finance_charges.items'))
+            ->firstWhere('name', 'Insurance premium carried from the previous loan');
+
+        $this->assertEquals(
+            ['name' => 'Insurance premium carried from the previous loan', 'amount' => 400, 'deducted' => 0, 'owed' => 400, 'provisional' => true],
+            $line,
+        );
+
+        // A payment on the source before release lowers it: the line follows.
+        $this->pay($source, 150);
+
+        $line = collect($this->getJson("/api/loans/{$new->id}/disclosure")->assertOk()->json('data.non_finance_charges.items'))
+            ->firstWhere('name', 'Insurance premium carried from the previous loan');
+        $this->assertEquals(250, $line['amount']);
+        $this->assertTrue($line['provisional']);
+    }
+
+    public function test_legacy_style_terms_on_a_source_owing_no_premium_still_release(): void
+    {
+        $source = $this->loanOwingPremium();
+        // The premium is paid off before the restructure; periods untouched.
+        $this->pay($source, self::OWED);
+        $this->assertEqualsWithDelta(0.00, $this->owed($source), 0.001);
+
+        $new = $this->approvedRestructure($source);
+
+        // A saved outstanding above what the periods owe, as an old
+        // application could carry: with no premium owed it is not refused.
+        DB::table('loans')->where('id', $new->id)->update([
+            'restructure_outstanding' => self::SCHEDULE_TOTAL + self::OWED,
+            'restructure_shortfall' => 0,
+        ]);
+
+        $this->patchJson("/api/loans/{$new->id}/release")->assertOk();
+
+        $this->assertSame('restructured', $source->fresh()->status);
+        $this->assertEqualsWithDelta(0.00, (float) $new->fresh()->insurance_remaining_balance, 0.001);
     }
 }
