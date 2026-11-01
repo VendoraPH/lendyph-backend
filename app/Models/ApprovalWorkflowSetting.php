@@ -14,6 +14,7 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'name', type: 'string', example: 'Loan Processor', description: 'Human-readable name'),
         new OA\Property(property: 'role', type: 'string', example: 'loan_processor', description: 'RBAC role slug required to act on this step'),
         new OA\Property(property: 'kind', type: 'string', enum: ['submit', 'approve', 'release'], description: 'Step type; chains must start with submit and end with release'),
+        new OA\Property(property: 'status', type: 'string', maxLength: 100, nullable: true, example: 'Credit Review', description: 'Label a loan shows while it waits at this step. Copied into the loan\'s chain when it is submitted; later edits do not change loans already in review.'),
     ],
 )]
 class ApprovalWorkflowSetting extends Model

@@ -26,6 +26,7 @@ class UpdateRoleRequest extends FormRequest
                 'regex:/^[a-z][a-z0-9_]*$/',
                 Rule::unique('roles', 'name')->ignore($roleId),
             ],
+            'display_name' => ['sometimes', 'nullable', 'string', 'max:100'],
             'description' => ['nullable', 'string', 'max:500'],
             'permissions' => ['nullable', 'array'],
             'permissions.*' => ['string', Rule::exists('permissions', 'name')],

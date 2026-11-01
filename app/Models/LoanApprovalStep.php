@@ -69,6 +69,7 @@ class LoanApprovalStep extends Model
         'step_order',
         'step_id',
         'name',
+        'status_label',
         'role',
         'kind',
         'status',

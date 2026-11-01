@@ -72,6 +72,8 @@ class LoanApprovalChainService
                 'step_order' => $order,
                 'step_id' => $step['id'],
                 'name' => $step['name'],
+                // The built-in default chains carry no label.
+                'status_label' => $step['status'] ?? null,
                 'role' => $step['role'],
                 'kind' => $step['kind'],
                 'status' => $order === 0
@@ -224,6 +226,7 @@ class LoanApprovalChainService
                     'step_order' => $previous->step_order,
                     'step_id' => $previous->step_id,
                     'name' => $previous->name,
+                    'status_label' => $previous->status_label,
                     'role' => $previous->role,
                     'kind' => $previous->kind,
                     'status' => match (true) {
@@ -504,8 +507,11 @@ class LoanApprovalChainService
      * outside the enum would be a MySQL strict-mode error. Anything not
      * perfectly shaped falls back to the built-in default instead.
      *
+     * `status` is an optional label, so a missing, blank or non-string value
+     * becomes null rather than throwing the whole chain back to the default.
+     *
      * @param  array<int|string, mixed>  $steps
-     * @return list<array{id: string, name: string, role: string, kind: string}>
+     * @return list<array{id: string, name: string, role: string, kind: string, status: ?string}>
      */
     private function sanitiseChain(array $steps): array
     {
@@ -537,6 +543,9 @@ class LoanApprovalChainService
                 'name' => (string) $step['name'],
                 'role' => (string) $step['role'],
                 'kind' => (string) $step['kind'],
+                'status' => is_string($step['status'] ?? null) && trim($step['status']) !== ''
+                    ? mb_substr($step['status'], 0, 100)
+                    : null,
             ];
         }
 
