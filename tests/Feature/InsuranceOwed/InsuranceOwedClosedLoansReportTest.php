@@ -11,9 +11,10 @@ use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
 /**
- * insurance:owed-on-closed-loans-report lists completed and restructured
- * loans that still show insurance premium owed, from before payments
- * collected it. It only reads.
+ * insurance:owed-on-closed-loans-report lists completed loans that still show
+ * insurance premium owed, from before payments collected it. Restructured
+ * loans never show any (closing one zeroes it), so they are not listed. It
+ * only reads.
  */
 class InsuranceOwedClosedLoansReportTest extends TestCase
 {
@@ -59,12 +60,11 @@ class InsuranceOwedClosedLoansReportTest extends TestCase
 
         $this->assertStringContainsString('Read only. Nothing is written.', $output);
         $this->assertStringContainsString($completed->loan_account_number, $output);
-        $this->assertStringContainsString($restructured->loan_account_number, $output);
+        $this->assertStringNotContainsString($restructured->loan_account_number, $output);
         $this->assertStringNotContainsString($open->loan_account_number, $output);
         $this->assertStringNotContainsString($settled->loan_account_number, $output);
         $this->assertMatchesRegularExpression('/completed\s*\|\s*1\s*\|\s*₱400\.00/', $output);
-        $this->assertMatchesRegularExpression('/restructured\s*\|\s*1\s*\|\s*₱150\.25/', $output);
-        $this->assertMatchesRegularExpression('/Closed loans showing premium owed:\s+2 loans, ₱550\.25/', $output);
+        $this->assertMatchesRegularExpression('/Closed loans showing premium owed:\s+1 loan, ₱400\.00/', $output);
     }
 
     public function test_it_writes_nothing(): void

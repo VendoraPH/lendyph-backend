@@ -1368,6 +1368,27 @@ class LoanService
             ]);
         }
 
+        // Terms approved while the insurance premium owed on the source still
+        // counted as restructurable balance (before it moved to the new loan
+        // as premium owed instead) would now charge it twice: once inside the
+        // principal and again as the premium carried over, or write it off
+        // in the shortfall while carrying it too. Such terms take more than
+        // the source's periods alone owe, so they are re-approved first.
+        if ($source->owesInsurancePremium()) {
+            $periodsOwe = $this->toCentavos($this->totalOutstanding($source));
+
+            if ($this->toCentavos((float) $loan->restructure_principal) > $periodsOwe
+                || $this->toCentavos((float) $loan->restructure_outstanding) > $periodsOwe) {
+                throw ValidationException::withMessages([
+                    'principal_amount' => [
+                        'The terms of this restructure counted the insurance premium still owed on the loan being restructured '
+                        .'as part of its balance. That premium now moves to the new loan as premium owed, so the terms have '
+                        .'changed. It must be re-approved before release.',
+                    ],
+                ]);
+            }
+        }
+
         return $source;
     }
 
@@ -1416,7 +1437,10 @@ class LoanService
             $newOwedBefore = (float) $newLoan->insurance_remaining_balance;
             $newOwed = (self::toCentavos($newOwedBefore) + $carriedPremium) / 100;
 
-            $newLoan->update(['insurance_remaining_balance' => $newOwed]);
+            $newLoan->update([
+                'insurance_remaining_balance' => $newOwed,
+                'insurance_carried_over' => (self::toCentavos((float) $newLoan->insurance_carried_over) + $carriedPremium) / 100,
+            ]);
 
             AuditLogService::log(
                 action: 'insurance_premium_carried_over',

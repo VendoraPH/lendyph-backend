@@ -12,14 +12,19 @@ use Illuminate\Console\Command;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 
 /**
- * Closed loans (completed or restructured) that still show insurance premium
- * owed (`insurance_remaining_balance`).
+ * Completed loans that still show insurance premium owed
+ * (`insurance_remaining_balance`).
  *
  * Payments collect the premium a release left owed first, and a loan that
  * owes it no longer completes. Before that, nothing collected it, so a loan
- * could complete, or be closed by a restructure, with the premium still on
- * it. Closed records are never recalculated: this command lists them, so the
- * accountant can decide what to do with each from the facts.
+ * could complete with the premium still on it. Closed records are never
+ * recalculated: this command lists them, so the accountant can decide what to
+ * do with each from the facts.
+ *
+ * Restructured loans are not listed: closing a source always zeroed its
+ * premium owed (into the restructured balance before, onto the new loan now),
+ * so none can show any. Past restructures that took a premium into the
+ * principal or the write-off are flagged separately.
  *
  * ## It only ever reads
  *
@@ -33,12 +38,12 @@ use Illuminate\Database\Eloquent\Collection as EloquentCollection;
  * chunks by id with their members, one query plus one per chunk.
  */
 #[Signature('insurance:owed-on-closed-loans-report')]
-#[Description('List completed or restructured loans that still show insurance premium owed. Read only')]
+#[Description('List completed loans that still show insurance premium owed (restructured loans never do: closing one zeroes it). Read only')]
 class ReportInsuranceOwedOnClosedLoans extends Command
 {
     private const CHUNK = 500;
 
-    private const CLOSED_STATUSES = ['completed', 'restructured'];
+    private const CLOSED_STATUSES = ['completed'];
 
     /** @var list<list<string>> */
     private array $rows = [];
@@ -94,7 +99,7 @@ class ReportInsuranceOwedOnClosedLoans extends Command
 
     private function report(): void
     {
-        $this->line('Closed loans that still show insurance premium owed');
+        $this->line('Completed loans that still show insurance premium owed');
 
         if ($this->rows === []) {
             $this->line('  None.');

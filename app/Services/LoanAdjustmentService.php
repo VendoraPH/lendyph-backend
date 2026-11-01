@@ -438,7 +438,7 @@ class LoanAdjustmentService
 
         return [
             'interest' => $interest,
-            'amount' => (LoanService::toCentavos($interest) + LoanService::toCentavos((float) $loan->insurance_remaining_balance)) / 100,
+            'amount' => (LoanService::toCentavos($interest) + max(0, LoanService::toCentavos((float) $loan->insurance_remaining_balance))) / 100,
         ];
     }
 

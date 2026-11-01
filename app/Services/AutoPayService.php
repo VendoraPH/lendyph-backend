@@ -42,9 +42,10 @@ class AutoPayService
      *                   interest, the late penalty the payment will charge
      *                   (RepaymentService::penaltyAsOf(), nothing written),
      *                   the insurance premium still owed (taken first, once
-     *                   per loan) and their sum, `total_amount`. A loan charged
-     *                   only through selected part-paid rows has its premium
-     *                   in `partial_total`; `total_insurance` covers both
+     *                   per loan) and their sum, `total_amount`, whose premium
+     *                   is `total_insurance`. A loan charged only through
+     *                   selected part-paid rows has its premium in
+     *                   `partial_total`, shown as `partial_insurance`
      *   loans         — the same per loan
      *   partial_rows  — schedule rows with amount_paid > 0 (already partially paid),
      *                   listed separately so staff can opt them in via include_schedule_ids
@@ -95,7 +96,7 @@ class AutoPayService
 
             $loanTotals = ['principal' => 0, 'interest' => 0, 'penalty' => 0, 'insurance' => 0];
             $loanHasFullDueRow = false;
-            $premiumOwed[$loan->id] = $this->centavos($loan->insurance_remaining_balance);
+            $premiumOwed[$loan->id] = max(0, $this->centavos($loan->insurance_remaining_balance));
 
             foreach ($schedules as $schedule) {
                 $principalRemaining = max(0, $this->centavos($schedule->principal_due) - $this->centavos($schedule->principal_paid));
@@ -197,7 +198,12 @@ class AutoPayService
                 'total_principal' => $totals['principal'] / 100,
                 'total_interest' => $totals['interest'] / 100,
                 'total_penalty' => $totals['penalty'] / 100,
-                'total_insurance' => ($totals['insurance'] + $partialPremium) / 100,
+                // Each insurance figure sits inside its own total: the premium
+                // of the loans in `loans` inside `total_amount`, that of loans
+                // charged only through selected part-paid rows inside
+                // `partial_total`.
+                'total_insurance' => $totals['insurance'] / 100,
+                'partial_insurance' => $partialPremium / 100,
                 'total_amount' => array_sum($totals) / 100,
                 'partial_total' => ($partialTotal + $partialPremium) / 100,
                 'grand_total' => (array_sum($totals) + $partialTotal + $partialPremium) / 100,
@@ -296,7 +302,7 @@ class AutoPayService
                         // Plus the insurance premium still owed, which the
                         // payment takes first, so the selected periods are
                         // still settled. Read from the locked loan row.
-                        return ($this->centavos($amount) + $this->centavos($locked->insurance_remaining_balance)) / 100;
+                        return ($this->centavos($amount) + max(0, $this->centavos($locked->insurance_remaining_balance))) / 100;
                     },
                     paymentDate: $this->runDate()->toDateString(),
                     user: $user,

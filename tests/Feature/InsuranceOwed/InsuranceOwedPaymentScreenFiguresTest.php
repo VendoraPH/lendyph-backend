@@ -17,8 +17,9 @@ use Tests\Traits\SetupLendyPH;
  * sent by the server:
  *
  * - LoanResource `amount_due_now`: what a payment must be today to clear the
- *   premium owed and the first open period in full, in the order the
- *   allocation takes money, with the build-up a payment credits;
+ *   premium owed and every open period due by today in full (the first open
+ *   period when none is due yet), in the order the allocation takes money,
+ *   with the build-up a payment credits;
  * - the payment preview's `balance_before` / `balance_after`: the loan's
  *   outstanding balance (principal plus premium owed) around the payment;
  * - GET /repayments `meta.totals.total_insurance_applied`.
@@ -50,9 +51,20 @@ class InsuranceOwedPaymentScreenFiguresTest extends TestCase
             ->first();
     }
 
+    /** @return list<AmortizationSchedule> the periods from `period_number` to `last_period_number` */
+    private function quotedPeriods(Loan $loan, array $due): array
+    {
+        return AmortizationSchedule::where('loan_id', $loan->id)
+            ->whereBetween('period_number', [$due['period_number'], $due['last_period_number']])
+            ->whereNull('closed_by_adjustment_id')
+            ->orderBy('period_number')
+            ->get()
+            ->all();
+    }
+
     /**
      * Builds the scenario twice: paying exactly `amount` clears the premium
-     * and the period; ₱0.01 less leaves the period unpaid.
+     * and every quoted period; ₱0.01 less leaves the last one unpaid.
      *
      * @param  Closure(): Loan  $scenario
      * @return array<string, mixed> the quoted figures
@@ -61,8 +73,8 @@ class InsuranceOwedPaymentScreenFiguresTest extends TestCase
     {
         $loan = $scenario();
         $due = $this->amountDueNow($loan);
-        $period = AmortizationSchedule::findOrFail($due['schedule_id']);
-        $this->assertSame($period->period_number, $due['period_number']);
+        $periods = $this->quotedPeriods($loan, $due);
+        $this->assertSame($due['schedule_id'], $periods[0]->id);
 
         // The parts add up to the amount, to the centavo.
         $parts = ['insurance', 'principal', 'interest', 'penalty', 'share_capital_build_up'];
@@ -73,13 +85,20 @@ class InsuranceOwedPaymentScreenFiguresTest extends TestCase
 
         $this->pay($loan, (float) $due['amount']);
         $this->assertEqualsWithDelta(0.00, $this->owed($loan), 0.001);
-        $this->assertSame('paid', $period->fresh()->status);
+        foreach ($periods as $period) {
+            $this->assertSame('paid', $period->fresh()->status, "period {$period->period_number}");
+        }
 
         $short = $scenario();
         $shortDue = $this->amountDueNow($short);
         $this->assertEquals($due['amount'], $shortDue['amount'], 'setup: both scenarios quote the same amount');
+        $shortPeriods = $this->quotedPeriods($short, $shortDue);
         $this->pay($short, round((float) $shortDue['amount'] - 0.01, 2));
-        $this->assertNotSame('paid', AmortizationSchedule::findOrFail($shortDue['schedule_id'])->status);
+        $lastShort = array_pop($shortPeriods);
+        foreach ($shortPeriods as $period) {
+            $this->assertSame('paid', $period->fresh()->status, "period {$period->period_number}");
+        }
+        $this->assertNotSame('paid', $lastShort->fresh()->status);
 
         return $due;
     }
@@ -95,6 +114,22 @@ class InsuranceOwedPaymentScreenFiguresTest extends TestCase
         $this->assertEquals(0, $due['penalty']);
         $this->assertEquals(0, $due['share_capital_build_up']);
         $this->assertSame(1, $due['period_number']);
+        // Nothing is due yet, so the first open period alone.
+        $this->assertSame(1, $due['last_period_number']);
+    }
+
+    public function test_amount_due_now_on_a_loan_three_periods_late_covers_all_three(): void
+    {
+        $due = $this->assertAmountClearsPremiumAndPeriod(
+            fn () => $this->loanOwingPremium(startDate: now()->subMonths(3)->subDays(10)->toDateString()),
+        );
+
+        $this->assertSame(1, $due['period_number']);
+        $this->assertSame(3, $due['last_period_number']);
+        $this->assertEquals(400, $due['insurance']);
+        $this->assertEquals(30000, $due['principal']);
+        $this->assertEquals(5400, $due['interest']);
+        $this->assertGreaterThan(0, $due['penalty']);
     }
 
     public function test_amount_due_now_on_a_part_paid_period(): void
@@ -137,6 +172,7 @@ class InsuranceOwedPaymentScreenFiguresTest extends TestCase
         $this->assertEquals(3600, $due['interest']);
         $this->assertEquals(64000, $due['amount']);
         $this->assertSame(2, $due['period_number']);
+        $this->assertSame(2, $due['last_period_number']);
     }
 
     public function test_amount_due_now_includes_the_build_up_a_payment_credits_as_share_capital(): void
@@ -173,6 +209,7 @@ class InsuranceOwedPaymentScreenFiguresTest extends TestCase
         $this->assertEquals(400, $due['insurance']);
         $this->assertEquals(0, $due['principal']);
         $this->assertNull($due['period_number']);
+        $this->assertNull($due['last_period_number']);
         $this->assertNull($due['schedule_id']);
         $this->assertNull($this->firstOpenPeriod($loan));
     }

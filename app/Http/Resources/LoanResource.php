@@ -68,7 +68,7 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'insurance_payment_type', type: 'string', nullable: true, enum: ['full', 'partial']),
         new OA\Property(property: 'insurance_partial_amount', type: 'number', nullable: true),
         new OA\Property(property: 'insurance_remaining_balance', type: 'number'),
-        new OA\Property(property: 'amount_due_now', type: 'object', nullable: true, description: 'What a payment must be today to clear the insurance premium owed and the first open period in full, in the order the allocation takes money, plus the share capital build-up the payment credits. Null unless the loan is released or ongoing. `period_number` and `schedule_id` are null when no period is open.', properties: [
+        new OA\Property(property: 'amount_due_now', type: 'object', nullable: true, description: 'What a payment must be today to clear the insurance premium owed and every open period due on or before today in full (the first open period when none is due yet), in the order the allocation takes money, plus the share capital build-up the payment credits. Null unless the loan is released or ongoing. `period_number` and `schedule_id` are the first of those periods and `last_period_number` the last; all null when no period is open.', properties: [
             new OA\Property(property: 'amount', type: 'number'),
             new OA\Property(property: 'insurance', type: 'number'),
             new OA\Property(property: 'principal', type: 'number'),
@@ -76,6 +76,7 @@ use OpenApi\Attributes as OA;
             new OA\Property(property: 'penalty', type: 'number'),
             new OA\Property(property: 'share_capital_build_up', type: 'number'),
             new OA\Property(property: 'period_number', type: 'integer', nullable: true),
+            new OA\Property(property: 'last_period_number', type: 'integer', nullable: true),
             new OA\Property(property: 'schedule_id', type: 'integer', nullable: true),
         ]),
         new OA\Property(property: 'insurance_owed', type: 'number', description: 'Insurance premium the release left unpaid and still owed: interest-free, never principal, collected first from each payment (same figure as `insurance_remaining_balance`)'),
@@ -245,7 +246,7 @@ class LoanResource extends JsonResource
             'penalty_amount' => $totalPenalty,
             'total_payable' => $totalPayable,
             // What a payment must be today to clear the insurance premium owed
-            // and the first open period, from the server
+            // and every open period due by today, from the server
             // (RepaymentService::amountDueNow()). Only for a loan that takes
             // payments, and only where the periods were loaded.
             'amount_due_now' => $this->relationLoaded('amortizationSchedules') && in_array($this->status, Loan::ACTIVE_STATUSES, true)

@@ -42,6 +42,10 @@ use App\Services\Accounting\PostingRules;
  * charged once the member starts paying. A hand-typed "Insurance Premium" on
  * a loan with no premium columns is deducted in full and owes nothing.
  *
+ * Premium a restructure moved onto the loan from the loan it closed
+ * (`insurance_carried_over`) is a second line, "Insurance premium carried
+ * from the previous loan": all of it owed, none deducted.
+ *
  * ## Rates
  *
  * The nominal annual rate is the contractual rate times the periods in a year
@@ -97,6 +101,9 @@ class DisclosureService
 
     /** The one line every insurance premium on a loan is disclosed under. */
     private const INSURANCE_LINE = 'Insurance Premium';
+
+    /** The premium a restructure carried over from the loan it closed. */
+    private const CARRIED_INSURANCE_LINE = 'Insurance premium carried from the previous loan';
 
     public function __construct(private LoanService $loanService) {}
 
@@ -288,6 +295,15 @@ class DisclosureService
                 'deducted' => $insuranceDeducted,
                 'owed' => $owed,
             ];
+        }
+
+        // The premium a restructure moved onto this loan from the loan it
+        // closed: owed on this loan, nothing of it deducted, so it is a line
+        // of its own rather than part of this release's premium.
+        $carried = max(0, self::centavos($loan->insurance_carried_over ?? 0));
+
+        if ($carried > 0) {
+            $nonFinance[] = ['name' => self::CARRIED_INSURANCE_LINE, 'amount' => $carried, 'deducted' => 0, 'owed' => $carried];
         }
 
         return ['finance' => $finance, 'non_finance' => array_values($nonFinance), 'share_capital' => $shareCapital];

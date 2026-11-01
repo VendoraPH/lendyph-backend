@@ -498,17 +498,22 @@ class RepaymentService
 
     /**
      * What a payment must be on `$asOf` to clear the insurance premium still
-     * owed and the loan's first open period in full, in the order the
-     * allocation takes money (recordRepaymentOnLockedLoan()): the premium,
-     * then that period's penalty as the payment's penalty step will charge it
-     * (penaltyAsOf(), nothing written), its interest and its principal. Then
-     * the share capital build-up, which a payment credits only on an
-     * SCB-bearing loan of a member once the current period is settled, so
-     * only when the first open period is the current one. `period_number` and
-     * `schedule_id` are null when no period is open. Reads only.
+     * owed and every open period due on or before `$asOf` in full (the first
+     * open period instead when none is due yet), in the order the allocation
+     * takes money (recordRepaymentOnLockedLoan()): the premium, then period by
+     * period its penalty as the payment's penalty step will charge it
+     * (penaltyAsOf(), nothing written), interest and principal. Then the share
+     * capital build-up of those periods, which a payment credits only on an
+     * SCB-bearing loan of a member once the current period is settled, so only
+     * when the current period is among them; otherwise the money would flow
+     * into the current period instead.
+     *
+     * `period_number` and `schedule_id` are the first of those periods,
+     * `last_period_number` the last; all three are null when no period is
+     * open. Reads only.
      *
      * @param  EloquentCollection<int, AmortizationSchedule>  $schedules  the loan's periods
-     * @return array{amount: float, insurance: float, principal: float, interest: float, penalty: float, share_capital_build_up: float, period_number: int|null, schedule_id: int|null}
+     * @return array{amount: float, insurance: float, principal: float, interest: float, penalty: float, share_capital_build_up: float, period_number: int|null, last_period_number: int|null, schedule_id: int|null}
      */
     public function amountDueNow(Loan $loan, EloquentCollection $schedules, Carbon $asOf): array
     {
@@ -519,26 +524,33 @@ class RepaymentService
             ->filter(fn (AmortizationSchedule $s) => in_array($s->status, ['pending', 'partial', 'overdue'], true))
             ->sortBy('period_number')
             ->values();
-        $first = $open->first();
+        $dueNow = $open->filter(fn (AmortizationSchedule $s) => $s->due_date->lte($paymentDate))->values();
+        $periods = $dueNow->isNotEmpty() ? $dueNow : $open->take(1);
 
         $insurance = max(0, $centavos($loan->insurance_remaining_balance));
         $principal = $interest = $penalty = $buildUp = 0;
 
-        if ($first !== null) {
-            $principal = max(0, $centavos($first->principal_due) - $centavos($first->principal_paid));
-            $interest = max(0, $centavos($first->interest_due) - $centavos($first->interest_paid));
-            $charged = $this->penaltyAsOf($loan, $first, $paymentDate) ?? (float) $first->penalty_amount;
-            $penalty = max(0, $centavos($charged) - $centavos($first->penalty_paid));
+        foreach ($periods as $period) {
+            $principal += max(0, $centavos($period->principal_due) - $centavos($period->principal_paid));
+            $interest += max(0, $centavos($period->interest_due) - $centavos($period->interest_paid));
+            $charged = $this->penaltyAsOf($loan, $period, $paymentDate) ?? (float) $period->penalty_amount;
+            $penalty += max(0, $centavos($charged) - $centavos($period->penalty_paid));
+        }
 
-            // The same "current" period the allocation picks.
-            $current = $open->first(fn (AmortizationSchedule $s) => $s->due_date->gte($paymentDate)) ?? $open->last();
+        // The same "current" period the allocation picks.
+        $current = $open->first(fn (AmortizationSchedule $s) => $s->due_date->gte($paymentDate)) ?? $open->last();
 
-            if ((float) $loan->scb_amount > 0
-                && $current->id === $first->id
-                && ! in_array($loan->borrower?->status, Borrower::NON_MEMBER_STATUSES, true)) {
-                $buildUp = PersistedScheduleFigures::shareCapitalBuildUpCentavos($loan, $first);
+        if ($current !== null
+            && (float) $loan->scb_amount > 0
+            && $periods->contains('id', $current->id)
+            && ! in_array($loan->borrower?->status, Borrower::NON_MEMBER_STATUSES, true)) {
+            foreach ($periods as $period) {
+                $buildUp += PersistedScheduleFigures::shareCapitalBuildUpCentavos($loan, $period);
             }
         }
+
+        $first = $periods->first();
+        $last = $periods->last();
 
         return [
             'amount' => round(($insurance + $penalty + $interest + $principal + $buildUp) / 100, 2),
@@ -547,7 +559,8 @@ class RepaymentService
             'interest' => round($interest / 100, 2),
             'penalty' => round($penalty / 100, 2),
             'share_capital_build_up' => round($buildUp / 100, 2),
-            'period_number' => $first?->period_number === null ? null : (int) $first->period_number,
+            'period_number' => $first === null ? null : (int) $first->period_number,
+            'last_period_number' => $last === null ? null : (int) $last->period_number,
             'schedule_id' => $first?->id,
         ];
     }

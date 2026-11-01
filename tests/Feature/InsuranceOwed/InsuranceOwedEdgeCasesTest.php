@@ -87,8 +87,11 @@ class InsuranceOwedEdgeCasesTest extends TestCase
             ->assertOk()
             ->json('data.summary');
 
-        // ₱11,700 left on the period plus the ₱400 premium.
-        $this->assertEqualsWithDelta(self::OWED, (float) ($summary['total_insurance'] ?? 0), 0.001);
+        // ₱11,700 left on the period plus the ₱400 premium, all inside
+        // `partial_total`; nothing is inside `total_amount`.
+        $this->assertEqualsWithDelta(self::OWED, (float) ($summary['partial_insurance'] ?? 0), 0.001);
+        $this->assertEqualsWithDelta(0.00, (float) $summary['total_insurance'], 0.001);
+        $this->assertEqualsWithDelta(0.00, (float) $summary['total_amount'], 0.001);
         $this->assertEqualsWithDelta(11700.00 + self::OWED, (float) $summary['partial_total'], 0.001);
         $this->assertEqualsWithDelta(11700.00 + self::OWED, (float) $summary['grand_total'], 0.001);
 

@@ -62,6 +62,37 @@ class InsuranceOwedAutoPayTest extends TestCase
         $this->assertEqualsWithDelta(self::PERIOD_DUE + self::OWED, (float) $data['summary']['grand_total'], 0.001);
     }
 
+    public function test_each_insurance_figure_sits_inside_its_own_total(): void
+    {
+        // One loan charged on a full due period, one only through a selected
+        // part-paid period; both owe ₱400 of premium and fall due the same day.
+        $full = $this->autoPayLoanOwingPremium();
+        $partial = $this->autoPayLoanOwingPremium();
+        $partialPeriod = $partial->amortizationSchedules->sortBy('period_number')->first();
+        $partialPeriod->update(['principal_paid' => 100.00, 'status' => 'partial']);
+
+        $window = $this->firstPeriodWindow($full);
+        $this->assertSame($window['date_from'], $partialPeriod->due_date->toDateString(), 'setup: same due date');
+        $window['include_schedule_ids'] = [$partialPeriod->id];
+
+        $summary = $this->getJson('/api/auto-pay/preview?'.http_build_query($window))->assertOk()->json('data.summary');
+
+        $cents = fn (string $key): int => (int) round(((float) $summary[$key]) * 100);
+
+        $this->assertSame($cents('grand_total'), $cents('total_amount') + $cents('partial_total'));
+        $this->assertSame(40_000, $cents('total_insurance'));
+        $this->assertSame(40_000, $cents('partial_insurance'));
+        $this->assertSame(1_220_000, $cents('total_amount'));
+        $this->assertSame(1_210_000, $cents('partial_total'));
+        $this->assertLessThanOrEqual($cents('total_amount'), $cents('total_insurance'));
+        $this->assertLessThanOrEqual($cents('partial_total'), $cents('partial_insurance'));
+
+        $this->postJson('/api/auto-pay/process', $window)->assertCreated()->assertJsonPath('data.processed', 2);
+
+        $posted = (int) round((float) Repayment::whereIn('loan_id', [$full->id, $partial->id])->sum('amount_paid') * 100);
+        $this->assertSame($cents('grand_total'), $posted);
+    }
+
     public function test_a_run_collects_the_premium_first_and_still_settles_the_selected_period(): void
     {
         $loan = $this->autoPayLoanOwingPremium();
