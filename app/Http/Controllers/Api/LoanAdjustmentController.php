@@ -128,6 +128,7 @@ class LoanAdjustmentController extends Controller
         ),
         responses: [
             new OA\Response(response: 200, description: 'Adjustment approved'),
+            new OA\Response(response: 409, description: 'The adjustment was approved, rejected or applied by another request since it was read, or the write deadlocked; nothing was written. Reload and try again'),
             new OA\Response(response: 422, description: 'Invalid status'),
         ],
     )]
@@ -160,6 +161,7 @@ class LoanAdjustmentController extends Controller
         ),
         responses: [
             new OA\Response(response: 200, description: 'Adjustment rejected'),
+            new OA\Response(response: 409, description: 'The adjustment was approved, rejected or applied by another request since it was read, or the write deadlocked; nothing was written. Reload and try again'),
             new OA\Response(response: 422, description: 'Invalid status'),
         ],
     )]
@@ -187,8 +189,8 @@ class LoanAdjustmentController extends Controller
         ],
         responses: [
             new OA\Response(response: 200, description: 'Adjustment applied'),
-            new OA\Response(response: 409, description: 'The adjustment was applied by another request at the same time, or the write deadlocked; nothing was written. Reload and try again'),
-            new OA\Response(response: 422, description: 'Invalid status'),
+            new OA\Response(response: 409, description: 'The adjustment was applied by another request at the same time, its loan was closed since it was read, or the write deadlocked; nothing was written. Reload and try again'),
+            new OA\Response(response: 422, description: 'Invalid status, or the loan is no longer released or ongoing (on `loan`)'),
         ],
     )]
     public function apply(LoanAdjustment $loanAdjustment): JsonResponse

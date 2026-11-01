@@ -4,6 +4,7 @@ namespace App\Services;
 
 use Closure;
 use Illuminate\Database\DetectsConcurrencyErrors;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Support\Facades\DB;
 use PDOException;
@@ -20,14 +21,21 @@ use PDOException;
  * does not promise that ORDER BY is the order it takes row locks in, and a
  * payment void, which locks its loan's collateral through
  * CollateralPledgeGuard::lockCollateralsOf(), still takes gap locks on
- * `loan_collaterals`. The loan writes outside this set (a release, a payment
- * void, a loan create, an adjustment apply and an extension) lock in the same
+ * `loan_collaterals`. The loan writes outside this set (a release, a payment,
+ * a payment void, a loan create, an adjustment apply and an extension) lock in the same
  * order, collateral rows, then loan rows, then their own row, and answer their
  * own clashes with a 409 through LoanWriteTransaction. When MySQL breaks a deadlock
  * or a lock wait times out, nothing the client sent was wrong; another change
  * got there first. The transaction is rolled back, so nothing of this one is
  * left, and the answer is a 409 the client can reload and retry from, never a
  * 500.
+ *
+ * Restructure creation also creates a loan, so it can lose its application
+ * number to a create that inserted the same one first, exactly as
+ * LoanWriteTransaction describes for a create. The caller names that unique
+ * index (run()'s `$racedUniqueIndex`) and the 409's wording for it, so only
+ * that collision becomes a 409 and every other unique violation stays the
+ * error it is. A deadlock keeps this class's own wording.
  *
  * Scoped to these paths on purpose. The global exception handler is left
  * alone, so a deadlock anywhere else still surfaces as the error it is.
@@ -41,19 +49,29 @@ final class CollateralWriteTransaction
      * timeout with a 409. Must be the OUTERMOST transaction, as
      * CollateralPledgeGuard::lockCollateralsOf() requires of its callers.
      *
-     * Any other database error is rethrown untouched.
+     * A duplicate-key error on `$racedUniqueIndex`, when given, is a 409 too,
+     * worded `$racedUniqueMessage`. Any other database error is rethrown
+     * untouched.
      *
      * @template TReturn
      *
      * @param  Closure(): TReturn  $callback
+     * @param  string|null  $racedUniqueIndex  the unique index ("loans_application_number_unique") whose collision means another write got there first
+     * @param  string|null  $racedUniqueMessage  the 409's message for that collision, when not conflict()'s own
      * @return TReturn
      *
-     * @throws HttpResponseException 409 on a deadlock or a lock wait timeout
+     * @throws HttpResponseException 409 on a deadlock, a lock wait timeout or a collision on `$racedUniqueIndex`
      */
-    public static function run(Closure $callback): mixed
+    public static function run(Closure $callback, ?string $racedUniqueIndex = null, ?string $racedUniqueMessage = null): mixed
     {
         try {
             return DB::transaction($callback);
+        } catch (UniqueConstraintViolationException $e) {
+            if ($racedUniqueIndex === null || $e->index !== $racedUniqueIndex) {
+                throw $e;
+            }
+
+            throw $racedUniqueMessage === null ? self::conflict() : LoanWriteTransaction::conflict($racedUniqueMessage);
         } catch (PDOException $e) {
             if (! (new self)->causedByConcurrencyError($e)) {
                 throw $e;

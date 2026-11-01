@@ -30,6 +30,15 @@ class LoanService
     private const DEDUCTIONS_EXCEED_PRINCIPAL = 'Total deductions exceed the principal amount.';
 
     /**
+     * The unique index a create collides on when another create took the
+     * same application number first, and the 409 both paths that create a
+     * loan answer it with: createLoan() and restructure().
+     */
+    private const APPLICATION_NUMBER_INDEX = 'loans_application_number_unique';
+
+    private const APPLICATION_NUMBER_TAKEN = 'Another loan application was created at the same moment. Submit again.';
+
+    /**
      * Create a draft loan application (POST /loans).
      *
      * In its own transaction, so the lock Loan::booted() takes on the newest
@@ -56,8 +65,8 @@ class LoanService
     {
         return LoanWriteTransaction::run(
             fn (): Loan => $this->createLoanRecord($validated, $user),
-            racedUniqueIndex: 'loans_application_number_unique',
-            conflictMessage: 'Another loan application was created at the same moment. Submit again.',
+            racedUniqueIndex: self::APPLICATION_NUMBER_INDEX,
+            conflictMessage: self::APPLICATION_NUMBER_TAKEN,
         );
     }
 
@@ -81,18 +90,7 @@ class LoanService
         // Copied onto the loan, so editing the product later never reprices it.
         $snapshot = $this->productSnapshot($product);
 
-        // Validate principal against product min/max
-        if ($enforceMinimumAmount && $product->min_amount > 0 && $principal < (float) $product->min_amount) {
-            throw ValidationException::withMessages([
-                'principal_amount' => ["Minimum loan amount for this product is {$product->min_amount}."],
-            ]);
-        }
-        if ($product->max_amount > 0 && $principal > (float) $product->max_amount) {
-            throw ValidationException::withMessages([
-                'principal_amount' => ["Maximum loan amount for this product is {$product->max_amount}."],
-            ]);
-        }
-
+        $this->assertPrincipalWithinProductRange($principal, $product, $enforceMinimumAmount);
         $this->assertInterestRateWithinProductRange($interestRate, $product);
         $this->assertTermWithinProductRange($term, $product);
 
@@ -205,6 +203,29 @@ class LoanService
         if ($term < $minTerm || $term > $maxTerm) {
             throw ValidationException::withMessages([
                 'term' => ["Term must be between {$minTerm} and {$maxTerm} {$product->term_unit->value} for this product."],
+            ]);
+        }
+    }
+
+    /**
+     * A loan's principal must sit inside its product's `min_amount` to
+     * `max_amount` (a bound of 0 is no bound). A restructure skips the minimum
+     * only: its principal is a part-paid balance, routinely below it.
+     *
+     * Shared by createLoan() and updateLoan(), so an edit cannot move a
+     * principal somewhere creating the loan would have refused.
+     */
+    private function assertPrincipalWithinProductRange(float $principal, LoanProduct $product, bool $enforceMinimumAmount = true): void
+    {
+        if ($enforceMinimumAmount && $product->min_amount > 0 && $principal < (float) $product->min_amount) {
+            throw ValidationException::withMessages([
+                'principal_amount' => ["Minimum loan amount for this product is {$product->min_amount}."],
+            ]);
+        }
+
+        if ($product->max_amount > 0 && $principal > (float) $product->max_amount) {
+            throw ValidationException::withMessages([
+                'principal_amount' => ["Maximum loan amount for this product is {$product->max_amount}."],
             ]);
         }
     }
@@ -350,6 +371,8 @@ class LoanService
         //
         // A collateral write, since it copies pledges onto the new loan, so a
         // deadlock in it is a 409 like the other pledge writes', not a 500.
+        // It creates a loan too, so losing the application number to another
+        // create is the same 409 a create answers (see createLoan()).
         // This is the outermost transaction: LoanController::restructure() is
         // the only caller.
         return CollateralWriteTransaction::run(function () use ($sourceLoan, $validated, $user, $principal, $remarks, $heldBefore) {
@@ -433,7 +456,7 @@ class LoanService
             );
 
             return $newLoan->refresh();
-        });
+        }, racedUniqueIndex: self::APPLICATION_NUMBER_INDEX, racedUniqueMessage: self::APPLICATION_NUMBER_TAKEN);
     }
 
     /**
@@ -648,6 +671,17 @@ class LoanService
             $this->assertInterestRateWithinProductRange(
                 (float) ($validated['interest_rate'] ?? $loan->interest_rate),
                 $productChanges ? LoanProduct::findOrFail($validated['loan_product_id']) : $loan->loanProduct,
+            );
+        }
+
+        // Likewise only when the edit moves the principal, against the range
+        // createLoan() holds it to; a restructure stays exempt from the minimum.
+        if (isset($validated['principal_amount'])
+            && self::toCentavos((float) $validated['principal_amount']) !== self::toCentavos((float) $loan->principal_amount)) {
+            $this->assertPrincipalWithinProductRange(
+                (float) $validated['principal_amount'],
+                $productChanges ? LoanProduct::findOrFail($validated['loan_product_id']) : $loan->loanProduct,
+                ! $loan->isRestructure(),
             );
         }
 

@@ -14,9 +14,12 @@ use PDOException;
  * and the order they lock in:
  *
  * - a loan release (LoanService::release());
+ * - recording a payment (RepaymentService::processRepayment());
  * - voiding a payment (RepaymentService::voidRepayment());
  * - creating a loan (LoanService::createLoan(), POST /loans);
- * - applying an approved adjustment (LoanAdjustmentService::applyAdjustment());
+ * - approving, rejecting and applying an adjustment
+ *   (LoanAdjustmentService::approveAdjustment(), rejectAdjustment(),
+ *   applyAdjustment());
  * - extending a loan (LoanAdjustmentService::extendLoan()).
  *
  * ── The lock order ───────────────────────────────────────────────────────
@@ -29,19 +32,22 @@ use PDOException;
  *      as the transaction's first locking read (and before its first plain
  *      read, for CollateralPledgeGuard's snapshot rule). A release and a void
  *      can move a loan into Loan::PLEDGING_STATUSES, so they take it; a
- *      create pledges nothing, and an adjustment or an extension neither
- *      changes what a loan pledges nor moves it into or out of that set, so
- *      those three have no collateral rows to lock;
+ *      create pledges nothing, a payment only moves a loan within that set or
+ *      out of it, and an adjustment or an extension neither changes what a
+ *      loan pledges nor moves it into or out of that set, so those four have
+ *      no collateral rows to lock;
  *   2. the loan rows, in ONE id-ordered statement (a release also locks the
  *      loan it restructures; a create locks the newest loan, for the next
- *      application number, in Loan::booted());
+ *      application number, in Loan::booted()). With no collateral to lock,
+ *      this is the transaction's first statement, before any plain read;
  *   3. the operation's own row: the payment being voided, the adjustment
- *      being applied.
+ *      being approved, rejected or applied.
  *
  * Under those locks each path reads again what it decided on before the
  * transaction opened, and answers conflict() when another write got there
- * first: a payment already voided, an adjustment already applied, a loan
- * already released or extended. A request that was wrong from the start is
+ * first: a payment already voided, an adjustment already decided or applied,
+ * a loan already released or extended, or one closed before a payment or an
+ * adjustment reached it. A request that was wrong from the start is
  * still the 422 it always was, checked before the transaction opens.
  *
  * ── What ordering cannot rule out ────────────────────────────────────────
@@ -108,6 +114,31 @@ final class LoanWriteTransaction
             }
 
             throw self::conflict($conflictMessage);
+        }
+    }
+
+    /**
+     * Run `$callback` inside a transaction that is always rolled back, for a
+     * preview that runs a real write to read its result and keeps none of it
+     * (RepaymentService::previewAllocation()). A deadlock or lock wait timeout
+     * on its locks answers 409, as run() does; any other error is rethrown.
+     *
+     * @throws HttpResponseException 409 on a concurrency error
+     */
+    public static function rolledBack(Closure $callback, ?string $conflictMessage = null): mixed
+    {
+        DB::beginTransaction();
+
+        try {
+            return $callback();
+        } catch (PDOException $e) {
+            if (! (new self)->causedByConcurrencyError($e)) {
+                throw $e;
+            }
+
+            throw self::conflict($conflictMessage);
+        } finally {
+            DB::rollBack();
         }
     }
 

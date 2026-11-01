@@ -22,13 +22,15 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Testing\TestResponse;
 use PDOException;
+use PHPUnit\Framework\Attributes\DataProvider;
 use ReflectionProperty;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
 /**
- * Voiding a payment, creating a loan, applying an adjustment and extending a
- * loan, when they collide with another write: the order every loan write
+ * Recording and voiding a payment, creating a loan, approving, rejecting and
+ * applying an adjustment, and extending a loan, when they collide with another
+ * write: the order every loan write
  * locks in (the collateral rows the operation touches in one id-ordered
  * statement, then the loan row, then the operation's own row), the state
  * re-read under those locks, and a 409 the client can reload from, never a
@@ -169,6 +171,136 @@ class LoanWriteCollisionTest extends TestCase
         $this->voidRequest($repayment)->assertStatus(500);
 
         $this->assertSame($before, $this->state());
+    }
+
+    // ── recording a payment ──────────────────────────────────────────────
+
+    public function test_a_payment_that_deadlocks_answers_409_and_writes_nothing(): void
+    {
+        $loan = $this->createReleasedLoan();
+        $before = $this->state();
+        $this->failOn(fn (string $sql): bool => str_starts_with($sql, 'insert into `repayment_allocations`'), self::DEADLOCK);
+
+        $this->paymentRequest($loan)->assertStatus(409)->assertExactJson(['message' => self::CONFLICT]);
+
+        $this->assertSame($before, $this->state());
+    }
+
+    public function test_a_payment_whose_lock_wait_times_out_answers_409_and_writes_nothing(): void
+    {
+        $loan = $this->createReleasedLoan();
+        $before = $this->state();
+        $this->failOn(fn (string $sql): bool => str_starts_with($sql, 'insert into `repayment_allocations`'), self::LOCK_WAIT_TIMEOUT);
+
+        $this->paymentRequest($loan)->assertStatus(409)->assertExactJson(['message' => self::CONFLICT]);
+
+        $this->assertSame($before, $this->state());
+    }
+
+    public function test_a_payment_preview_that_deadlocks_answers_409_and_writes_nothing(): void
+    {
+        $loan = $this->createReleasedLoan();
+        $before = $this->state();
+        $this->failOn(fn (string $sql): bool => str_starts_with($sql, 'insert into `repayment_allocations`'), self::DEADLOCK);
+
+        $this->previewRequest($loan)->assertStatus(409)->assertExactJson(['message' => self::CONFLICT]);
+
+        $this->assertSame($before, $this->state());
+    }
+
+    public function test_a_payment_preview_whose_lock_wait_times_out_answers_409_and_writes_nothing(): void
+    {
+        $loan = $this->createReleasedLoan();
+        $before = $this->state();
+        $this->failOn(fn (string $sql): bool => str_contains($sql, 'from `loans`') && str_contains($sql, 'for update'), self::LOCK_WAIT_TIMEOUT);
+
+        $this->previewRequest($loan)->assertStatus(409)->assertExactJson(['message' => self::CONFLICT]);
+
+        $this->assertSame($before, $this->state());
+    }
+
+    public function test_a_payment_preview_still_writes_nothing(): void
+    {
+        $loan = $this->createReleasedLoan();
+        $before = $this->state();
+
+        $this->previewRequest($loan)->assertOk()->assertJsonPath('data.is_preview', true);
+
+        $this->assertSame($before, $this->state());
+    }
+
+    public function test_a_payment_opens_its_transaction_with_the_loan_lock(): void
+    {
+        $loan = $this->createReleasedLoan();
+
+        $statements = $this->statementsInTransaction(fn () => $this->paymentRequest($loan)->assertCreated());
+
+        // The first statement, so no plain read fixes the snapshot before it.
+        $this->assertStringContainsString('from `loans`', $statements[0]['sql']);
+        $this->assertStringContainsString('for update', $statements[0]['sql']);
+        $this->assertSame([$loan->id], $this->lockedIds($statements[0]));
+        $this->assertStringNotContainsString('`collaterals`', implode(' ', array_column($statements, 'sql')), 'a payment never moves its loan into a pledging status, so it locks no collateral');
+    }
+
+    public function test_a_payment_rethrows_any_other_database_error(): void
+    {
+        $loan = $this->createReleasedLoan();
+        $before = $this->state();
+        $this->failOn(fn (string $sql): bool => str_starts_with($sql, 'insert into `repayment_allocations`'), self::DATA_TOO_LONG);
+
+        $this->paymentRequest($loan)->assertStatus(500);
+
+        $this->assertSame($before, $this->state());
+    }
+
+    /**
+     * @return array<string, array{0: string}>
+     */
+    public static function closedStatuses(): array
+    {
+        return [
+            'restructured' => ['restructured'],
+            'completed' => ['completed'],
+            'void' => ['void'],
+            'defaulted' => ['defaulted'],
+        ];
+    }
+
+    #[DataProvider('closedStatuses')]
+    public function test_a_payment_on_a_loan_closed_after_it_was_read_answers_409_and_writes_nothing(string $status): void
+    {
+        $loan = $this->createReleasedLoan();
+
+        // The request read the loan as released; another write closed it before
+        // the payment's transaction took its lock.
+        $requestsCopy = Loan::findOrFail($loan->id);
+        DB::table('loans')->where('id', $loan->id)->update(['status' => $status]);
+        $before = $this->state();
+
+        $this->assertConflict(fn () => app(RepaymentService::class)->processRepayment($requestsCopy, 5000, now()->toDateString(), $this->admin));
+
+        $this->assertSame($before, $this->state());
+    }
+
+    public function test_a_payment_on_a_loan_that_was_never_active_is_still_a_422(): void
+    {
+        $loan = $this->createReleasedLoan();
+        DB::table('loans')->where('id', $loan->id)->update(['status' => 'completed']);
+        $before = $this->state();
+
+        $this->paymentRequest($loan)->assertStatus(422)->assertJsonValidationErrors('loan');
+
+        $this->assertSame($before, $this->state());
+    }
+
+    public function test_a_payment_still_allocates_and_moves_the_loan_to_ongoing(): void
+    {
+        $loan = $this->createReleasedLoan();
+
+        $this->paymentRequest($loan)->assertCreated();
+
+        $this->assertSame('ongoing', $loan->fresh()->status);
+        $this->assertEquals(10000, (float) $loan->amortizationSchedules()->orderBy('period_number')->first()->principal_paid);
     }
 
     // ── creating a loan ──────────────────────────────────────────────────
@@ -359,6 +491,155 @@ class LoanWriteCollisionTest extends TestCase
         $this->assertSame($before, $this->state());
     }
 
+    public function test_an_apply_on_a_loan_that_is_no_longer_active_is_a_422_and_writes_nothing(): void
+    {
+        $adjustment = $this->approvedAdjustment();
+        DB::table('loans')->where('id', $adjustment->loan_id)->update(['status' => 'completed']);
+        $before = $this->state();
+
+        $this->patchJson("/api/loan-adjustments/{$adjustment->id}/apply")
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['loan' => 'Adjustments can only be applied to released or ongoing loans.']);
+
+        $this->assertSame($before, $this->state());
+    }
+
+    #[DataProvider('closedStatuses')]
+    public function test_an_apply_on_a_loan_closed_after_it_was_read_answers_409_and_writes_nothing(string $status): void
+    {
+        $adjustment = $this->approvedAdjustment();
+
+        // The request read the adjustment and its loan while the loan was
+        // released; another write closed the loan before the apply's lock.
+        $requestsCopy = LoanAdjustment::with('loan')->findOrFail($adjustment->id);
+        DB::table('loans')->where('id', $adjustment->loan_id)->update(['status' => $status]);
+        $before = $this->state();
+
+        $this->assertConflict(fn () => app(LoanAdjustmentService::class)->applyAdjustment($requestsCopy));
+
+        $this->assertSame($before, $this->state());
+    }
+
+    // ── approving and rejecting an adjustment ────────────────────────────
+
+    public function test_an_approve_locks_the_loan_then_the_adjustment(): void
+    {
+        $adjustment = $this->pendingAdjustment();
+
+        $reads = $this->lockingReads(fn () => $this->patchJson("/api/loan-adjustments/{$adjustment->id}/approve", ['remarks' => 'ok'])->assertOk());
+
+        $this->assertStringContainsString('from `loans`', $reads[0]['sql']);
+        $this->assertSame([$adjustment->loan_id], $this->lockedIds($reads[0]));
+
+        $this->assertStringContainsString('from `loan_adjustments`', $reads[1]['sql']);
+        $this->assertSame([$adjustment->id], $this->lockedIds($reads[1]));
+    }
+
+    public function test_a_reject_locks_the_loan_then_the_adjustment(): void
+    {
+        $adjustment = $this->pendingAdjustment();
+
+        $reads = $this->lockingReads(fn () => $this->patchJson("/api/loan-adjustments/{$adjustment->id}/reject", ['remarks' => 'no'])->assertOk());
+
+        $this->assertStringContainsString('from `loans`', $reads[0]['sql']);
+        $this->assertSame([$adjustment->loan_id], $this->lockedIds($reads[0]));
+
+        $this->assertStringContainsString('from `loan_adjustments`', $reads[1]['sql']);
+        $this->assertSame([$adjustment->id], $this->lockedIds($reads[1]));
+    }
+
+    public function test_a_late_reject_cannot_overwrite_an_adjustment_applied_since_it_was_read(): void
+    {
+        $adjustment = $this->pendingAdjustment();
+        $service = app(LoanAdjustmentService::class);
+
+        // The reject request read the adjustment as pending; meanwhile it was
+        // approved and applied.
+        $rejectRequestsCopy = LoanAdjustment::findOrFail($adjustment->id);
+        $service->approveAdjustment(LoanAdjustment::findOrFail($adjustment->id), $this->admin, 'ok');
+        $service->applyAdjustment(LoanAdjustment::findOrFail($adjustment->id));
+        $afterApply = $this->state();
+
+        $this->assertConflict(fn () => $service->rejectAdjustment($rejectRequestsCopy, $this->admin, 'too late'));
+
+        $this->assertSame($afterApply, $this->state());
+        $this->assertSame('applied', $adjustment->fresh()->status);
+    }
+
+    public function test_a_late_approve_cannot_overwrite_an_adjustment_rejected_since_it_was_read(): void
+    {
+        $adjustment = $this->pendingAdjustment();
+        $service = app(LoanAdjustmentService::class);
+
+        $approveRequestsCopy = LoanAdjustment::findOrFail($adjustment->id);
+        $service->rejectAdjustment(LoanAdjustment::findOrFail($adjustment->id), $this->admin, 'no');
+        $afterReject = $this->state();
+
+        $this->assertConflict(fn () => $service->approveAdjustment($approveRequestsCopy, $this->admin, 'ok'));
+
+        $this->assertSame($afterReject, $this->state());
+        $this->assertSame('rejected', $adjustment->fresh()->status);
+    }
+
+    public function test_a_second_approve_of_the_same_adjustment_answers_409(): void
+    {
+        $adjustment = $this->pendingAdjustment();
+        $service = app(LoanAdjustmentService::class);
+
+        $secondRequestsCopy = LoanAdjustment::findOrFail($adjustment->id);
+        $service->approveAdjustment(LoanAdjustment::findOrFail($adjustment->id), $this->admin, 'first');
+        $afterFirst = $this->state();
+
+        $this->assertConflict(fn () => $service->approveAdjustment($secondRequestsCopy, $this->admin, 'second'));
+
+        $this->assertSame($afterFirst, $this->state());
+    }
+
+    public function test_an_approve_that_deadlocks_answers_409_and_writes_nothing(): void
+    {
+        $adjustment = $this->pendingAdjustment();
+        $before = $this->state();
+        $this->failOn(fn (string $sql, array $bindings): bool => str_starts_with($sql, 'update `loan_adjustments`') && in_array('approved', $bindings, true), self::DEADLOCK);
+
+        $this->patchJson("/api/loan-adjustments/{$adjustment->id}/approve", ['remarks' => 'ok'])->assertStatus(409)->assertExactJson(['message' => self::CONFLICT]);
+
+        $this->assertSame($before, $this->state());
+    }
+
+    public function test_a_reject_whose_lock_wait_times_out_answers_409_and_writes_nothing(): void
+    {
+        $adjustment = $this->pendingAdjustment();
+        $before = $this->state();
+        $this->failOn(fn (string $sql, array $bindings): bool => str_starts_with($sql, 'update `loan_adjustments`') && in_array('rejected', $bindings, true), self::LOCK_WAIT_TIMEOUT);
+
+        $this->patchJson("/api/loan-adjustments/{$adjustment->id}/reject", ['remarks' => 'no'])->assertStatus(409)->assertExactJson(['message' => self::CONFLICT]);
+
+        $this->assertSame($before, $this->state());
+    }
+
+    public function test_approving_or_rejecting_an_adjustment_that_was_not_pending_when_read_is_still_a_422(): void
+    {
+        $adjustment = $this->approvedAdjustment();
+        $before = $this->state();
+
+        $this->patchJson("/api/loan-adjustments/{$adjustment->id}/approve", ['remarks' => 'again'])->assertStatus(422)->assertJsonValidationErrors('status');
+        $this->patchJson("/api/loan-adjustments/{$adjustment->id}/reject", ['remarks' => 'no'])->assertStatus(422)->assertJsonValidationErrors('status');
+
+        $this->assertSame($before, $this->state());
+    }
+
+    public function test_approve_and_reject_still_record_the_decision(): void
+    {
+        $approved = $this->pendingAdjustment();
+        $rejected = $this->pendingAdjustment();
+
+        $this->patchJson("/api/loan-adjustments/{$approved->id}/approve", ['remarks' => 'ok'])->assertOk();
+        $this->patchJson("/api/loan-adjustments/{$rejected->id}/reject", ['remarks' => 'no'])->assertOk();
+
+        $this->assertSame(['approved', $this->admin->id, 'ok'], [$approved->fresh()->status, $approved->fresh()->approved_by, $approved->fresh()->remarks]);
+        $this->assertSame(['rejected', $this->admin->id, 'no'], [$rejected->fresh()->status, $rejected->fresh()->approved_by, $rejected->fresh()->remarks]);
+    }
+
     // ── extending a loan ─────────────────────────────────────────────────
 
     public function test_an_extend_that_deadlocks_answers_409_and_writes_nothing(): void
@@ -434,6 +715,24 @@ class LoanWriteCollisionTest extends TestCase
         return $this->patchJson("/api/repayments/{$repayment->id}/void", ['void_reason' => 'Keyed twice']);
     }
 
+    /** The first period's instalment, ₱11,800, paid in cash today. */
+    private function paymentRequest(Loan $loan): TestResponse
+    {
+        return $this->postJson("/api/loans/{$loan->id}/repayments", [
+            'amount_paid' => 11800,
+            'payment_date' => now()->toDateString(),
+            'method' => 'cash',
+        ]);
+    }
+
+    private function previewRequest(Loan $loan): TestResponse
+    {
+        return $this->postJson("/api/loans/{$loan->id}/repayments/preview", [
+            'amount_paid' => 11800,
+            'payment_date' => now()->toDateString(),
+        ]);
+    }
+
     /**
      * @return array<string, mixed>
      */
@@ -462,15 +761,16 @@ class LoanWriteCollisionTest extends TestCase
     /** An approved balance adjustment taking ₱1,000 off a released loan's principal. */
     private function approvedAdjustment(): LoanAdjustment
     {
-        $loan = $this->createReleasedLoan();
-        $service = app(LoanAdjustmentService::class);
+        return app(LoanAdjustmentService::class)->approveAdjustment($this->pendingAdjustment(), $this->admin, 'ok')->fresh();
+    }
 
-        $adjustment = $service->createAdjustment($loan, [
+    /** A pending balance adjustment taking ₱1,000 off a released loan's principal. */
+    private function pendingAdjustment(): LoanAdjustment
+    {
+        return app(LoanAdjustmentService::class)->createAdjustment($this->createReleasedLoan(), [
             'adjustment_type' => 'balance_adjustment',
             'new_values' => ['adjustment_amount' => -1000],
         ], $this->admin);
-
-        return $service->approveAdjustment($adjustment, $this->admin, 'ok')->fresh();
     }
 
     /** A released one-month upon-maturity loan, which can be extended. */
@@ -586,6 +886,27 @@ class LoanWriteCollisionTest extends TestCase
         $act();
 
         return $reads;
+    }
+
+    /**
+     * Every statement issued while `$act` holds a transaction open, locking
+     * or not, in order.
+     *
+     * @return list<array{sql: string, bindings: array<int, mixed>}>
+     */
+    private function statementsInTransaction(callable $act): array
+    {
+        $statements = [];
+
+        DB::listen(function (QueryExecuted $query) use (&$statements): void {
+            if ($query->connection->transactionLevel() > 0) {
+                $statements[] = ['sql' => strtolower($query->sql), 'bindings' => $query->bindings];
+            }
+        });
+
+        $act();
+
+        return $statements;
     }
 
     /**

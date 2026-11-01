@@ -54,33 +54,63 @@ class LoanAdjustmentService
         ]);
     }
 
+    /**
+     * Approve a pending adjustment.
+     *
+     * The checks before the transaction refuse, with a 422, an approval that
+     * was wrong from the start. The transaction then takes the lock an apply
+     * takes, the loan and then this adjustment (lockAdjustmentRows()), and
+     * re-reads the adjustment under it: one rejected, approved or applied by
+     * another request since this one read it is a 409 and is left exactly as
+     * that request left it, as is a deadlock or a lock wait timeout.
+     *
+     * This is the outermost transaction: LoanAdjustmentController::approve()
+     * and the test helpers are the only callers.
+     */
     public function approveAdjustment(LoanAdjustment $adjustment, User $approver, ?string $remarks): LoanAdjustment
     {
         $this->guardStatus($adjustment, 'pending', 'approve');
         $this->assertPayloadFitsType($adjustment);
 
-        $adjustment->update([
-            'status' => 'approved',
-            'approved_by' => $approver->id,
-            'approved_at' => now(),
-            'remarks' => $remarks ?? $adjustment->remarks,
-        ]);
+        return LoanWriteTransaction::run(function () use ($adjustment, $approver, $remarks): LoanAdjustment {
+            $this->lockAdjustmentRows($adjustment, 'pending');
 
-        return $adjustment;
+            $adjustment->update([
+                'status' => 'approved',
+                'approved_by' => $approver->id,
+                'approved_at' => now(),
+                'remarks' => $remarks ?? $adjustment->remarks,
+            ]);
+
+            return $adjustment;
+        });
     }
 
+    /**
+     * Reject a pending adjustment, under the same lock and re-read as
+     * approveAdjustment(): a reject that read the adjustment as pending, when
+     * it has since been approved (and perhaps applied), is a 409 and never
+     * turns an applied adjustment into a rejected one.
+     *
+     * This is the outermost transaction: LoanAdjustmentController::reject()
+     * and the test helpers are the only callers.
+     */
     public function rejectAdjustment(LoanAdjustment $adjustment, User $approver, ?string $remarks): LoanAdjustment
     {
         $this->guardStatus($adjustment, 'pending', 'reject');
 
-        $adjustment->update([
-            'status' => 'rejected',
-            'approved_by' => $approver->id,
-            'approved_at' => now(),
-            'remarks' => $remarks ?? $adjustment->remarks,
-        ]);
+        return LoanWriteTransaction::run(function () use ($adjustment, $approver, $remarks): LoanAdjustment {
+            $this->lockAdjustmentRows($adjustment, 'pending');
 
-        return $adjustment;
+            $adjustment->update([
+                'status' => 'rejected',
+                'approved_by' => $approver->id,
+                'approved_at' => now(),
+                'remarks' => $remarks ?? $adjustment->remarks,
+            ]);
+
+            return $adjustment;
+        });
     }
 
     /**
@@ -141,7 +171,9 @@ class LoanAdjustmentService
 
         // A deadlock or lock wait timeout is a 409, not a 500. This is the
         // outermost transaction: LoanController::extend() and the test helpers
-        // are the only callers. processRepayment() below nests inside it.
+        // are the only callers. The interest is collected inside it, under its
+        // loan lock, through recordRepaymentOnLockedLoan(): processRepayment()
+        // opens a LoanWriteTransaction of its own, which must be the outermost.
         return LoanWriteTransaction::run(function () use ($loan, $user, $remarks, $interestOption) {
             // The loan row first, the order every loan write takes
             // (LoanWriteTransaction). No collateral lock: an extension writes
@@ -155,17 +187,16 @@ class LoanAdjustmentService
             $interestBefore = $this->outstandingInterest($openBefore);
 
             // Settle the accrued interest first so the new period starts clean.
-            // Allocation inside processRepayment runs penalty → interest →
-            // principal, so where a penalty is outstanding this amount is
-            // consumed by that first and some interest still carries. That
-            // matches what the UI did before this moved server-side, and the
-            // carry figures below are re-read afterwards, so the arithmetic
-            // stays correct either way.
+            // The allocation runs penalty → interest → principal, so where a
+            // penalty is outstanding this amount is consumed by that first and
+            // some interest still carries. That matches what the UI did before
+            // this moved server-side, and the carry figures below are re-read
+            // afterwards, so the arithmetic stays correct either way.
             $interestPaid = 0.0;
             $interestRepayment = null;
 
             if ($interestOption === 'pay' && $interestBefore > 0) {
-                $interestRepayment = $this->repaymentService->processRepayment(
+                $interestRepayment = $this->repaymentService->recordRepaymentOnLockedLoan(
                     $loan,
                     $interestBefore,
                     now()->toDateString(),
@@ -573,6 +604,11 @@ class LoanAdjustmentService
      * moves it into or out of Loan::PLEDGING_STATUSES (a restructure
      * adjustment keeps the loan's status on purpose; see applyRestructure()).
      *
+     * The loan must still be released or ongoing, as it had to be for the
+     * adjustment to be requested (createAdjustment()): one completed, closed
+     * by a restructure, defaulted or voided since is a 422 when the request
+     * reads it so, and a 409 when it moved between that read and the lock.
+     *
      * This is the outermost transaction: LoanAdjustmentController::apply() and
      * the test helpers are the only callers.
      */
@@ -581,8 +617,18 @@ class LoanAdjustmentService
         $this->guardStatus($adjustment, 'approved', 'apply');
         $this->assertPayloadFitsType($adjustment);
 
+        if (! in_array($adjustment->loan?->status, Loan::ACTIVE_STATUSES, true)) {
+            throw ValidationException::withMessages([
+                'loan' => 'Adjustments can only be applied to released or ongoing loans.',
+            ]);
+        }
+
         return LoanWriteTransaction::run(function () use ($adjustment) {
-            $loan = $this->lockAdjustmentRows($adjustment);
+            $loan = $this->lockAdjustmentRows($adjustment, 'approved');
+
+            if (! in_array($loan->status, Loan::ACTIVE_STATUSES, true)) {
+                throw LoanWriteTransaction::conflict();
+            }
 
             match ($adjustment->adjustment_type) {
                 'restructure' => $this->applyRestructure($adjustment, $loan),
@@ -602,21 +648,23 @@ class LoanAdjustmentService
 
     /**
      * Lock the adjustment's loan row, then the adjustment's own, and refuse
-     * with a 409 unless the adjustment is still approved.
+     * with a 409 unless the adjustment is still in `$expectedStatus`: pending
+     * for an approve or a reject, approved for an apply.
      *
      * Two locking reads, in the order every loan write takes
-     * (LoanWriteTransaction). The adjustment is refreshed from its locked row
-     * and handed the locked loan, so the apply works from what is committed
-     * rather than from what the request read before the lock.
+     * (LoanWriteTransaction), and the first statements of the transaction. The
+     * adjustment is refreshed from its locked row and handed the locked loan,
+     * so the write works from what is committed rather than from what the
+     * request read before the lock.
      *
-     * @throws HttpResponseException 409 when the adjustment was applied, or otherwise moved, since it was read
+     * @throws HttpResponseException 409 when the adjustment was decided, applied, or otherwise moved, since it was read
      */
-    private function lockAdjustmentRows(LoanAdjustment $adjustment): Loan
+    private function lockAdjustmentRows(LoanAdjustment $adjustment, string $expectedStatus): Loan
     {
         $loan = Loan::whereKey($adjustment->loan_id)->lockForUpdate()->first();
         $locked = LoanAdjustment::whereKey($adjustment->getKey())->lockForUpdate()->first();
 
-        if ($loan === null || $locked === null || $locked->status !== 'approved') {
+        if ($loan === null || $locked === null || $locked->status !== $expectedStatus) {
             throw LoanWriteTransaction::conflict();
         }
 
@@ -780,6 +828,18 @@ class LoanAdjustmentService
         );
     }
 
+    /**
+     * Spread a balance adjustment over the loan's open periods, in proportion
+     * to the principal each still owes, so the periods change by exactly the
+     * amount approved, to the centavo.
+     *
+     * Worked in whole centavos (balanceAdjustmentShares()). Paid periods are
+     * never touched. A reduction larger than the unpaid principal is refused
+     * (422 on `new_values.adjustment_amount`) rather than capped, so what is
+     * applied is always what was approved. A reduction that leaves a period
+     * owing nothing marks it `paid`, and one that leaves no open period
+     * completes the loan.
+     */
     private function applyBalanceAdjustment(LoanAdjustment $adjustment, Loan $loan): void
     {
         $adjustmentAmount = (float) $adjustment->ownNewValues()['adjustment_amount'];
@@ -787,32 +847,62 @@ class LoanAdjustmentService
         $unpaidSchedules = $loan->amortizationSchedules()
             ->whereIn('status', ['pending', 'partial', 'overdue'])
             ->orderBy('period_number')
-            ->get();
+            ->get()
+            ->values();
 
-        if ($unpaidSchedules->isEmpty()) {
-            return;
-        }
+        $centavos = static fn (mixed $pesos): int => (int) round((float) $pesos * 100);
+        $amount = $centavos($adjustmentAmount);
+        $unpaid = $unpaidSchedules
+            ->map(fn ($s): int => max(0, $centavos($s->principal_due) - $centavos($s->principal_paid)))
+            ->all();
+        $totalUnpaid = array_sum($unpaid);
 
-        $totalUnpaidPrincipal = $unpaidSchedules->sum(fn ($s) => (float) $s->principal_due - (float) $s->principal_paid);
-
-        if ($totalUnpaidPrincipal <= 0) {
-            return;
-        }
-
-        // Distribute proportionally
-        $runningBalance = null;
-        foreach ($unpaidSchedules as $i => $schedule) {
-            $unpaidPrincipal = (float) $schedule->principal_due - (float) $schedule->principal_paid;
-            $proportion = $unpaidPrincipal / $totalUnpaidPrincipal;
-            $adjustForThis = round($adjustmentAmount * $proportion, 2);
-
-            $newPrincipalDue = max(0, round((float) $schedule->principal_due + $adjustForThis, 2));
-            $newTotalDue = round($newPrincipalDue + (float) $schedule->interest_due, 2);
-
-            $schedule->update([
-                'principal_due' => $newPrincipalDue,
-                'total_due' => $newTotalDue,
+        if ($amount < 0 && -$amount > $totalUnpaid) {
+            throw ValidationException::withMessages([
+                'new_values.adjustment_amount' => sprintf(
+                    'A reduction of ₱%s is more than the ₱%s of principal still unpaid on this loan.',
+                    number_format(-$amount / 100, 2),
+                    number_format($totalUnpaid / 100, 2),
+                ),
             ]);
+        }
+
+        if ($totalUnpaid <= 0) {
+            return;
+        }
+
+        foreach ($this->balanceAdjustmentShares($amount, $unpaid) as $i => $share) {
+            if ($share === 0) {
+                continue;
+            }
+
+            $schedule = $unpaidSchedules[$i];
+            $newPrincipalDue = $centavos($schedule->principal_due) + $share;
+            $changes = [
+                'principal_due' => $newPrincipalDue / 100,
+                'total_due' => ($newPrincipalDue + $centavos($schedule->interest_due)) / 100,
+            ];
+
+            // A reduction that leaves the period owing nothing settles it, by
+            // the rule a payment uses (RepaymentService::allocateToSchedule()).
+            $penaltySettled = $centavos($schedule->penalty_amount) === 0
+                || $centavos($schedule->penalty_paid) >= $centavos($schedule->penalty_amount);
+
+            if ($share < 0
+                && $centavos($schedule->principal_paid) >= $newPrincipalDue
+                && $centavos($schedule->interest_paid) >= $centavos($schedule->interest_due)
+                && $penaltySettled) {
+                $changes['status'] = 'paid';
+            }
+
+            $schedule->update($changes);
+        }
+
+        // As a payment does (RepaymentService, step 6): a loan with no open
+        // period left is completed. `completed` leaves the pledging statuses,
+        // so no collateral guard applies.
+        if ($amount < 0 && ! $loan->amortizationSchedules()->whereIn('status', ['pending', 'partial', 'overdue'])->exists()) {
+            $loan->update(['status' => 'completed']);
         }
 
         // Recalculate remaining_balance chain
@@ -823,6 +913,50 @@ class LoanAdjustmentService
             $balance = round($balance - (float) $schedule->principal_due, 2);
             $schedule->update(['remaining_balance' => max(0, $balance)]);
         }
+    }
+
+    /**
+     * Each open period's share of a balance adjustment, in centavos, adding up
+     * to exactly `$amount`.
+     *
+     * Each share is the period's part of the unpaid principal, rounded; the
+     * rounding remainder goes to the last period that still owes principal. A
+     * reduction never takes a period below what has been paid on it: a share
+     * a period cannot absorb moves to the periods before it that still can.
+     *
+     * @param  int  $amount  centavos; negative reduces
+     * @param  list<int>  $unpaid  each period's unpaid principal, in centavos
+     * @return list<int>
+     */
+    private function balanceAdjustmentShares(int $amount, array $unpaid): array
+    {
+        $total = array_sum($unpaid);
+        $shares = array_fill(0, count($unpaid), 0);
+        $owing = array_keys(array_filter($unpaid, fn (int $u): bool => $u > 0));
+        $last = end($owing);
+
+        foreach ($owing as $i) {
+            if ($i !== $last) {
+                $shares[$i] = (int) round($amount * $unpaid[$i] / $total);
+            }
+        }
+
+        $shares[$last] = $amount - array_sum($shares);
+
+        if ($amount >= 0) {
+            return $shares;
+        }
+
+        // From the last period back: what a period cannot take, the one before it tries.
+        $excess = 0;
+
+        foreach (array_reverse($owing) as $i) {
+            $wanted = $shares[$i] + $excess;
+            $shares[$i] = max($wanted, -$unpaid[$i]);
+            $excess = $wanted - $shares[$i];
+        }
+
+        return $shares;
     }
 
     private function applyTermExtension(LoanAdjustment $adjustment, Loan $loan): void

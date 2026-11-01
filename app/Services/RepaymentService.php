@@ -27,6 +27,28 @@ class RepaymentService
 
     /**
      * Record a repayment and allocate it across schedules.
+     *
+     * The check before the transaction refuses, with a 422, a payment that was
+     * wrong from the start. The transaction then locks the loan row as its
+     * FIRST statement (lockLoanForPayment()), the order every loan write takes
+     * (LoanWriteTransaction), and records the payment under that lock
+     * (recordRepaymentOnLockedLoan()).
+     *
+     * The lock is what keeps a void of an earlier payment from being lost.
+     * Under REPEATABLE READ the transaction's snapshot is fixed by its first
+     * plain read, and the allocation writes each period it pays from what it
+     * read. Without the lock, a void that committed after this payment's first
+     * read of the schedule had its reversal written back over by this
+     * payment's figures. Holding the loan row, a void (which locks the same
+     * row) waits until this payment commits, and every read here comes after
+     * the lock, so it starts from what the last write left.
+     *
+     * A loan closed between the request reading it and the lock is a 409, as
+     * is a deadlock or a lock wait timeout, with nothing of the payment left.
+     * This is the outermost transaction: RepaymentController::store(),
+     * AutoPayService::process(), DemoSeeder and the test helpers are the
+     * callers. A caller that already holds the loan's lock in its own
+     * transaction calls recordRepaymentOnLockedLoan() instead.
      */
     public function processRepayment(
         Loan $loan,
@@ -36,266 +58,320 @@ class RepaymentService
         ?string $remarks = null,
         string $method = 'cash',
         ?string $referenceNumber = null,
-        bool $postToBooks = true,
     ): Repayment {
-        if (! in_array($loan->status, ['released', 'ongoing'])) {
+        if (! in_array($loan->status, Loan::ACTIVE_STATUSES, true)) {
             throw ValidationException::withMessages([
                 'loan' => 'Repayments can only be recorded for released or ongoing loans.',
             ]);
         }
 
+        return LoanWriteTransaction::run(function () use ($loan, $amountPaid, $paymentDate, $user, $remarks, $method, $referenceNumber): Repayment {
+            $this->lockLoanForPayment($loan);
+
+            return $this->recordRepaymentOnLockedLoan($loan, $amountPaid, $paymentDate, $user, $remarks, $method, $referenceNumber);
+        });
+    }
+
+    /**
+     * Lock the loan a payment is recorded on and refuse with a 409 unless it
+     * is still released or ongoing.
+     *
+     * A locking read, and the first statement of the transaction, so it fixes
+     * no snapshot: every plain read after it sees what is committed once the
+     * lock is held. No collateral rows: a payment moves a loan from `released`
+     * to `ongoing` or out to `completed`, never INTO Loan::PLEDGING_STATUSES
+     * from outside it, so it has no pledge to guard. `$loan` is refreshed from
+     * the locked row.
+     *
+     * @throws HttpResponseException 409 when the loan was closed since it was read
+     */
+    private function lockLoanForPayment(Loan $loan): void
+    {
+        $locked = Loan::whereKey($loan->getKey())->lockForUpdate()->first();
+
+        if ($locked === null || ! in_array($locked->status, Loan::ACTIVE_STATUSES, true)) {
+            throw LoanWriteTransaction::conflict();
+        }
+
+        $loan->setRawAttributes($locked->getAttributes(), true);
+    }
+
+    /**
+     * Record a repayment on a loan whose row the caller has already locked,
+     * inside the caller's own transaction, and allocate it across schedules.
+     *
+     * For a caller that holds the loan's lock in an outermost transaction of
+     * its own and must not open another: LoanAdjustmentService::extendLoan(),
+     * which collects the interest under its extension's lock, and
+     * previewAllocation(), whose transaction is rolled back. Everyone else
+     * calls processRepayment().
+     */
+    public function recordRepaymentOnLockedLoan(
+        Loan $loan,
+        float $amountPaid,
+        string $paymentDate,
+        User $user,
+        ?string $remarks = null,
+        string $method = 'cash',
+        ?string $referenceNumber = null,
+        bool $postToBooks = true,
+    ): Repayment {
         $paymentDate = Carbon::parse($paymentDate);
 
-        return DB::transaction(function () use ($loan, $amountPaid, $paymentDate, $user, $remarks, $method, $referenceNumber, $postToBooks) {
-            // Step 1: Compute penalties on overdue schedules
-            $this->applyPenalties($loan, $paymentDate);
+        // Step 1: Compute penalties on overdue schedules
+        $this->applyPenalties($loan, $paymentDate);
 
-            // Capture outstanding principal balance before payment
-            $balanceBefore = (float) $loan->amortizationSchedules()
-                ->whereIn('status', ['pending', 'partial', 'overdue'])
-                ->sum(DB::raw('principal_due - principal_paid'));
+        // Capture outstanding principal balance before payment
+        $balanceBefore = (float) $loan->amortizationSchedules()
+            ->whereIn('status', ['pending', 'partial', 'overdue'])
+            ->sum(DB::raw('principal_due - principal_paid'));
 
-            // Step 2: Get all unpaid/partial schedules ordered by period
-            $schedules = $loan->amortizationSchedules()
-                ->whereIn('status', ['pending', 'partial', 'overdue'])
-                ->orderBy('period_number')
-                ->get();
+        // Step 2: Get all unpaid/partial schedules ordered by period
+        $schedules = $loan->amortizationSchedules()
+            ->whereIn('status', ['pending', 'partial', 'overdue'])
+            ->orderBy('period_number')
+            ->get();
 
-            // Identify "current" schedule = first not-overdue schedule (due_date >= paymentDate)
-            // If all unpaid are overdue, the current = the most recent overdue (largest period_number among overdue)
-            $currentScheduleId = null;
-            $firstNotOverdue = $schedules->first(fn ($s) => $s->due_date->gte($paymentDate));
-            if ($firstNotOverdue) {
-                $currentScheduleId = $firstNotOverdue->id;
+        // Identify "current" schedule = first not-overdue schedule (due_date >= paymentDate)
+        // If all unpaid are overdue, the current = the most recent overdue (largest period_number among overdue)
+        $currentScheduleId = null;
+        $firstNotOverdue = $schedules->first(fn ($s) => $s->due_date->gte($paymentDate));
+        if ($firstNotOverdue) {
+            $currentScheduleId = $firstNotOverdue->id;
+        } else {
+            $currentScheduleId = $schedules->last()?->id;
+        }
+
+        $remaining = $amountPaid;
+        $principalApplied = 0.0;
+        $interestApplied = 0.0;
+        $penaltyApplied = 0.0;
+        $overdueInterestApplied = 0.0;
+        $currentInterestApplied = 0.0;
+        $currentPrincipalApplied = 0.0;
+        $nextInterestApplied = 0.0;
+        $nextPrincipalApplied = 0.0;
+        $touchedFutureSchedule = false;
+        $allocations = [];
+
+        // Business rule (frontend PR #106): on SCB-bearing loans, overpayment must NOT pre-pay
+        // future amortization — it becomes share capital instead. The frontend computes the SCB
+        // credit and posts to /share-capital/ledger separately; here we just stop cascading so
+        // the remainder surfaces as `overpayment` on the repayment row.
+        $hasScb = (float) $loan->scb_amount > 0;
+        $currentHandled = false;
+
+        foreach ($schedules as $schedule) {
+            if ($remaining <= 0) {
+                break;
+            }
+
+            $isCurrent = $schedule->id === $currentScheduleId;
+            $isOverdue = $schedule->due_date->lt($paymentDate);
+            $isFuture = $schedule->due_date->gt($paymentDate);
+
+            // With SCB: once the current schedule is fully allocated, stop the cascade.
+            // Overdue schedules earlier in the period list still get caught up (rule #2 in allocation order).
+            if ($hasScb && $currentHandled && ! $isOverdue) {
+                break;
+            }
+
+            if ($isFuture && ! $hasScb) {
+                $touchedFutureSchedule = true;
+            }
+
+            // Allocate: penalty → interest → principal
+            [$remaining, $pPaid, $iPaid, $penPaid] = $this->allocateToSchedule(
+                $schedule,
+                $remaining,
+            );
+
+            $principalApplied += $pPaid;
+            $interestApplied += $iPaid;
+            $penaltyApplied += $penPaid;
+
+            if ($pPaid > 0 || $iPaid > 0 || $penPaid > 0) {
+                $allocations[] = [
+                    'amortization_schedule_id' => $schedule->id,
+                    'period_number' => $schedule->period_number,
+                    'penalty' => round($penPaid, 2),
+                    'interest' => round($iPaid, 2),
+                    'principal' => round($pPaid, 2),
+                ];
+            }
+
+            // Categorize into 6-tier breakdown for frontend display:
+            // - Schedules with due_date < paymentDate → "overdue" buckets (interest + principal both go here)
+            // - The "current" schedule (first not-overdue, or most recent overdue if all are overdue) → "current" buckets
+            // - Schedules after the current → "next" buckets
+            if ($isCurrent) {
+                $currentInterestApplied += $iPaid;
+                $currentPrincipalApplied += $pPaid;
+                $currentHandled = true;
+            } elseif ($isOverdue) {
+                // Overdue but not the "current" schedule → bucket as overdue interest
+                // (overdue principal collapses into the current period principal display in the UI;
+                // we don't have a dedicated overdue_principal column)
+                $overdueInterestApplied += $iPaid;
+                $currentPrincipalApplied += $pPaid;
             } else {
-                $currentScheduleId = $schedules->last()?->id;
+                // Future schedule (excess flows here when scb_amount == 0)
+                $nextInterestApplied += $iPaid;
+                $nextPrincipalApplied += $pPaid;
             }
+        }
 
-            $remaining = $amountPaid;
-            $principalApplied = 0.0;
-            $interestApplied = 0.0;
-            $penaltyApplied = 0.0;
-            $overdueInterestApplied = 0.0;
-            $currentInterestApplied = 0.0;
-            $currentPrincipalApplied = 0.0;
-            $nextInterestApplied = 0.0;
-            $nextPrincipalApplied = 0.0;
-            $touchedFutureSchedule = false;
-            $allocations = [];
+        // Step 3: Remainder becomes overpayment
+        $overpayment = max(0, $remaining);
 
-            // Business rule (frontend PR #106): on SCB-bearing loans, overpayment must NOT pre-pay
-            // future amortization — it becomes share capital instead. The frontend computes the SCB
-            // credit and posts to /share-capital/ledger separately; here we just stop cascading so
-            // the remainder surfaces as `overpayment` on the repayment row.
-            $hasScb = (float) $loan->scb_amount > 0;
-            $currentHandled = false;
+        // Step 4: Determine payment type
+        $allDueSchedules = $loan->amortizationSchedules()
+            ->where('due_date', '<=', $paymentDate)
+            ->whereIn('status', ['pending', 'partial', 'overdue'])
+            ->count();
 
-            foreach ($schedules as $schedule) {
-                if ($remaining <= 0) {
-                    break;
-                }
+        if ($touchedFutureSchedule) {
+            $paymentType = 'advance';
+        } elseif ($allDueSchedules === 0 && $overpayment == 0) {
+            $paymentType = 'exact';
+        } else {
+            $paymentType = 'partial';
+        }
 
-                $isCurrent = $schedule->id === $currentScheduleId;
-                $isOverdue = $schedule->due_date->lt($paymentDate);
-                $isFuture = $schedule->due_date->gt($paymentDate);
+        // Step 5: Persist repayment
+        $balanceAfter = max(0, $balanceBefore - round($principalApplied, 2));
 
-                // With SCB: once the current schedule is fully allocated, stop the cascade.
-                // Overdue schedules earlier in the period list still get caught up (rule #2 in allocation order).
-                if ($hasScb && $currentHandled && ! $isOverdue) {
-                    break;
-                }
+        $repayment = Repayment::create([
+            'loan_id' => $loan->id,
+            'payment_date' => $paymentDate,
+            'method' => $method,
+            'reference_number' => $referenceNumber,
+            'amount_paid' => $amountPaid,
+            'principal_applied' => round($principalApplied, 2),
+            'interest_applied' => round($interestApplied, 2),
+            'penalty_applied' => round($penaltyApplied, 2),
+            'overdue_interest_applied' => round($overdueInterestApplied, 2),
+            'current_interest_applied' => round($currentInterestApplied, 2),
+            'current_principal_applied' => round($currentPrincipalApplied, 2),
+            'next_interest_applied' => round($nextInterestApplied, 2),
+            'next_principal_applied' => round($nextPrincipalApplied, 2),
+            'overpayment' => round($overpayment, 2),
+            'balance_before' => round($balanceBefore, 2),
+            'balance_after' => round($balanceAfter, 2),
+            'payment_type' => $paymentType,
+            'status' => 'posted',
+            'received_by' => $user->id,
+            'remarks' => $remarks,
+        ]);
 
-                if ($isFuture && ! $hasScb) {
-                    $touchedFutureSchedule = true;
-                }
+        // What went on each period, so a void can take back exactly that.
+        $repayment->allocations()->createMany($allocations);
 
-                // Allocate: penalty → interest → principal
-                [$remaining, $pPaid, $iPaid, $penPaid] = $this->allocateToSchedule(
-                    $schedule,
-                    $remaining,
-                );
+        // Step 6: Loan status lifecycle
+        // released → ongoing on first payment, → completed when all schedules paid
+        $unpaidCount = $loan->amortizationSchedules()
+            ->whereIn('status', ['pending', 'partial', 'overdue'])
+            ->count();
 
-                $principalApplied += $pPaid;
-                $interestApplied += $iPaid;
-                $penaltyApplied += $penPaid;
+        if ($unpaidCount === 0) {
+            $loan->update(['status' => 'completed']);
+        } elseif ($loan->status === 'released') {
+            // No CollateralPledgeGuard call here on purpose. `released` and
+            // `ongoing` are BOTH in Loan::PLEDGING_STATUSES, so this loan is
+            // already an active holder of whatever it holds and this write
+            // cannot add one. The guard is for transitions INTO the active
+            // set from outside it; see voidRepayment() below.
+            $loan->update(['status' => 'ongoing']);
+        }
 
-                if ($pPaid > 0 || $iPaid > 0 || $penPaid > 0) {
-                    $allocations[] = [
-                        'amortization_schedule_id' => $schedule->id,
-                        'period_number' => $schedule->period_number,
-                        'penalty' => round($penPaid, 2),
-                        'interest' => round($iPaid, 2),
-                        'principal' => round($pPaid, 2),
-                    ];
-                }
+        // Share capital build-up: on an SCB-bearing loan, whatever the
+        // allocation loop above could not apply to the current schedule
+        // becomes a share capital credit instead of sitting as unallocated
+        // overpayment. Posted in THIS transaction — see the docblock above
+        // for why the whole payment has to be one all-or-nothing unit.
+        //
+        // `$hasScb` gates this, not bare `$overpayment > 0`: a full payoff
+        // plus excess cash on a loan with no SCB is ordinary overpayment,
+        // not share capital, and must not be credited here.
+        //
+        // NON_MEMBER_STATUSES mirrors the same gate
+        // StoreShareCapitalLedgerRequest::memberBorrowerRule() enforces on
+        // the standalone endpoint this replaces — a `pending` or `rejected`
+        // borrower is not a member yet and cannot hold share capital.
+        //
+        // Rounded BEFORE the `> 0` check, not after: gating on the raw
+        // float would let sub-centavo residue from the allocation loop's
+        // arithmetic (e.g. 1.0E-13) through as "an overpayment", writing a
+        // credited $0.00 row that reverseShareCapitalCredit()'s `credit >
+        // 0` lookup would then never find to clean up on a later void.
+        $scbCredit = round($overpayment, 2);
 
-                // Categorize into 6-tier breakdown for frontend display:
-                // - Schedules with due_date < paymentDate → "overdue" buckets (interest + principal both go here)
-                // - The "current" schedule (first not-overdue, or most recent overdue if all are overdue) → "current" buckets
-                // - Schedules after the current → "next" buckets
-                if ($isCurrent) {
-                    $currentInterestApplied += $iPaid;
-                    $currentPrincipalApplied += $pPaid;
-                    $currentHandled = true;
-                } elseif ($isOverdue) {
-                    // Overdue but not the "current" schedule → bucket as overdue interest
-                    // (overdue principal collapses into the current period principal display in the UI;
-                    // we don't have a dedicated overdue_principal column)
-                    $overdueInterestApplied += $iPaid;
-                    $currentPrincipalApplied += $pPaid;
-                } else {
-                    // Future schedule (excess flows here when scb_amount == 0)
-                    $nextInterestApplied += $iPaid;
-                    $nextPrincipalApplied += $pPaid;
-                }
-            }
-
-            // Step 3: Remainder becomes overpayment
-            $overpayment = max(0, $remaining);
-
-            // Step 4: Determine payment type
-            $allDueSchedules = $loan->amortizationSchedules()
-                ->where('due_date', '<=', $paymentDate)
-                ->whereIn('status', ['pending', 'partial', 'overdue'])
-                ->count();
-
-            if ($touchedFutureSchedule) {
-                $paymentType = 'advance';
-            } elseif ($allDueSchedules === 0 && $overpayment == 0) {
-                $paymentType = 'exact';
-            } else {
-                $paymentType = 'partial';
-            }
-
-            // Step 5: Persist repayment
-            $balanceAfter = max(0, $balanceBefore - round($principalApplied, 2));
-
-            $repayment = Repayment::create([
-                'loan_id' => $loan->id,
-                'payment_date' => $paymentDate,
-                'method' => $method,
-                'reference_number' => $referenceNumber,
-                'amount_paid' => $amountPaid,
-                'principal_applied' => round($principalApplied, 2),
-                'interest_applied' => round($interestApplied, 2),
-                'penalty_applied' => round($penaltyApplied, 2),
-                'overdue_interest_applied' => round($overdueInterestApplied, 2),
-                'current_interest_applied' => round($currentInterestApplied, 2),
-                'current_principal_applied' => round($currentPrincipalApplied, 2),
-                'next_interest_applied' => round($nextInterestApplied, 2),
-                'next_principal_applied' => round($nextPrincipalApplied, 2),
-                'overpayment' => round($overpayment, 2),
-                'balance_before' => round($balanceBefore, 2),
-                'balance_after' => round($balanceAfter, 2),
-                'payment_type' => $paymentType,
-                'status' => 'posted',
-                'received_by' => $user->id,
-                'remarks' => $remarks,
+        if ($hasScb && $scbCredit > 0 && ! in_array($loan->borrower->status, Borrower::NON_MEMBER_STATUSES, true)) {
+            ShareCapitalLedger::create([
+                'borrower_id' => $loan->borrower_id,
+                'repayment_id' => $repayment->id,
+                'date' => $paymentDate,
+                'description' => "Share capital build-up from payment {$repayment->receipt_number} (Loan {$loan->loan_account_number})",
+                'debit' => 0,
+                'credit' => $scbCredit,
+                'created_by' => $user->id,
             ]);
+        }
 
-            // What went on each period, so a void can take back exactly that.
-            $repayment->allocations()->createMany($allocations);
+        /*
+         * THE BOOKS. Explicit, and the LAST thing in this transaction.
+         *
+         * Last because the entry is built from the persisted repayment row —
+         * `amount_paid` against `principal_applied` / `interest_applied` /
+         * `penalty_applied` / `overpayment` — and those are only final once
+         * the allocation loop above has run and the row has been written.
+         *
+         * ## This is exactly why it is not an observer
+         *
+         * previewAllocation() calls this method inside a transaction it then
+         * ROLLS BACK, so the preview matches the real allocation exactly. A
+         * `Repayment::created` observer would fire during that preview and
+         * post a journal for a payment nobody made. Being inside the same
+         * transaction is what makes the preview leave no trace: the rollback
+         * takes the journal and its lines with it, by the same mechanism
+         * that takes the repayment row.
+         *
+         * A throw rolls the payment back rather than recording a collection
+         * the books do not mention.
+         */
+        // The loan is already in memory, so hand it over rather than let
+        // the poster lazy-load it. AutoPayService::run() calls this method
+        // in a loop over every auto-pay loan, and an avoidable SELECT per
+        // repayment multiplies by the size of the batch.
+        $repayment->setRelation('loan', $loan);
 
-            // Step 6: Loan status lifecycle
-            // released → ongoing on first payment, → completed when all schedules paid
-            $unpaidCount = $loan->amortizationSchedules()
-                ->whereIn('status', ['pending', 'partial', 'overdue'])
-                ->count();
+        $poster = app(AutomaticPoster::class);
 
-            if ($unpaidCount === 0) {
-                $loan->update(['status' => 'completed']);
-            } elseif ($loan->status === 'released') {
-                // No CollateralPledgeGuard call here on purpose. `released` and
-                // `ongoing` are BOTH in Loan::PLEDGING_STATUSES, so this loan is
-                // already an active holder of whatever it holds and this write
-                // cannot add one. The guard is for transitions INTO the active
-                // set from outside it; see voidRepayment() below.
-                $loan->update(['status' => 'ongoing']);
-            }
+        // previewAllocation() passes false. It still runs every rule — so a
+        // preview refuses exactly where a real payment would — but writes
+        // no journal, because JournalPoster::allocateJournalNo() takes a
+        // row lock on the ledger's numbering hot row and a preview is a
+        // read-only affordance called far more often than a payment.
+        $postToBooks
+            ? $poster->loanCollection($repayment, $user->id)
+            : $poster->assertCollectionIsPostable($repayment);
 
-            // Share capital build-up: on an SCB-bearing loan, whatever the
-            // allocation loop above could not apply to the current schedule
-            // becomes a share capital credit instead of sitting as unallocated
-            // overpayment. Posted in THIS transaction — see the docblock above
-            // for why the whole payment has to be one all-or-nothing unit.
-            //
-            // `$hasScb` gates this, not bare `$overpayment > 0`: a full payoff
-            // plus excess cash on a loan with no SCB is ordinary overpayment,
-            // not share capital, and must not be credited here.
-            //
-            // NON_MEMBER_STATUSES mirrors the same gate
-            // StoreShareCapitalLedgerRequest::memberBorrowerRule() enforces on
-            // the standalone endpoint this replaces — a `pending` or `rejected`
-            // borrower is not a member yet and cannot hold share capital.
-            //
-            // Rounded BEFORE the `> 0` check, not after: gating on the raw
-            // float would let sub-centavo residue from the allocation loop's
-            // arithmetic (e.g. 1.0E-13) through as "an overpayment", writing a
-            // credited $0.00 row that reverseShareCapitalCredit()'s `credit >
-            // 0` lookup would then never find to clean up on a later void.
-            $scbCredit = round($overpayment, 2);
-
-            if ($hasScb && $scbCredit > 0 && ! in_array($loan->borrower->status, Borrower::NON_MEMBER_STATUSES, true)) {
-                ShareCapitalLedger::create([
-                    'borrower_id' => $loan->borrower_id,
-                    'repayment_id' => $repayment->id,
-                    'date' => $paymentDate,
-                    'description' => "Share capital build-up from payment {$repayment->receipt_number} (Loan {$loan->loan_account_number})",
-                    'debit' => 0,
-                    'credit' => $scbCredit,
-                    'created_by' => $user->id,
-                ]);
-            }
-
-            /*
-             * THE BOOKS. Explicit, and the LAST thing in this transaction.
-             *
-             * Last because the entry is built from the persisted repayment row —
-             * `amount_paid` against `principal_applied` / `interest_applied` /
-             * `penalty_applied` / `overpayment` — and those are only final once
-             * the allocation loop above has run and the row has been written.
-             *
-             * ## This is exactly why it is not an observer
-             *
-             * previewAllocation() calls this method inside a transaction it then
-             * ROLLS BACK, so the preview matches the real allocation exactly. A
-             * `Repayment::created` observer would fire during that preview and
-             * post a journal for a payment nobody made. Being inside the same
-             * transaction is what makes the preview leave no trace: the rollback
-             * takes the journal and its lines with it, by the same mechanism
-             * that takes the repayment row.
-             *
-             * A throw rolls the payment back rather than recording a collection
-             * the books do not mention.
-             */
-            // The loan is already in memory, so hand it over rather than let
-            // the poster lazy-load it. AutoPayService::run() calls this method
-            // in a loop over every auto-pay loan, and an avoidable SELECT per
-            // repayment multiplies by the size of the batch.
-            $repayment->setRelation('loan', $loan);
-
-            $poster = app(AutomaticPoster::class);
-
-            // previewAllocation() passes false. It still runs every rule — so a
-            // preview refuses exactly where a real payment would — but writes
-            // no journal, because JournalPoster::allocateJournalNo() takes a
-            // row lock on the ledger's numbering hot row and a preview is a
-            // read-only affordance called far more often than a payment.
-            $postToBooks
-                ? $poster->loanCollection($repayment, $user->id)
-                : $poster->assertCollectionIsPostable($repayment);
-
-            return $repayment;
-        });
+        return $repayment;
     }
 
     /**
      * Compute how a hypothetical repayment would be allocated without persisting anything.
      *
      * Uses a real-but-rolled-back database transaction so the preview matches the actual
-     * processRepayment logic exactly (penalty computation, schedule allocation, status flip).
-     * Nothing is saved because the outer DB::beginTransaction() wraps the inner transaction
-     * inside processRepayment and rolls back everything, including the Repayment row itself.
+     * allocation exactly (penalty computation, schedule allocation, status flip): it runs
+     * recordRepaymentOnLockedLoan(), the method processRepayment() records with, and then
+     * rolls back everything, including the Repayment row itself. Not processRepayment(),
+     * whose LoanWriteTransaction must be the outermost transaction.
+     *
+     * It locks the loan row first, as a payment does. The allocation it runs writes the
+     * loan's periods (rolled back afterwards, but locked while it runs), so taking the
+     * loan row in the same order as a payment keeps a preview and a payment on the same
+     * loan from waiting on each other's rows the other way round.
      */
     public function previewAllocation(
         Loan $loan,
@@ -303,17 +379,19 @@ class RepaymentService
         string $paymentDate,
         User $user,
     ): array {
-        if (! in_array($loan->status, ['released', 'ongoing'])) {
+        if (! in_array($loan->status, Loan::ACTIVE_STATUSES, true)) {
             throw ValidationException::withMessages([
                 'loan' => 'Repayment preview is only available for released or ongoing loans.',
             ]);
         }
 
-        DB::beginTransaction();
+        // Rolled back whatever happens; a deadlock or lock wait timeout on the
+        // loan lock answers 409, as recording the payment does.
+        return LoanWriteTransaction::rolledBack(function () use ($loan, $amountPaid, $paymentDate, $user): array {
+            $this->lockLoanForPayment($loan);
 
-        try {
             $owedIds = $this->owedScheduleIds($loan, Carbon::parse($paymentDate));
-            $repayment = $this->processRepayment($loan, $amountPaid, $paymentDate, $user, postToBooks: false);
+            $repayment = $this->recordRepaymentOnLockedLoan($loan, $amountPaid, $paymentDate, $user, postToBooks: false);
             $allocations = $this->previewedAllocations($repayment);
 
             return [
@@ -341,9 +419,7 @@ class RepaymentService
                 'allocations' => $allocations,
                 'is_preview' => true,
             ];
-        } finally {
-            DB::rollBack();
-        }
+        });
     }
 
     /**

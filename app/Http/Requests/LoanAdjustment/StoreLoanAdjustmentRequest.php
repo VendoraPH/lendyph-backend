@@ -52,7 +52,7 @@ class StoreLoanAdjustmentRequest extends FormRequest
 
             // Balance adjustment — a signed delta applied to the principal,
             // not the resulting balance.
-            'new_values.adjustment_amount' => ['required_if:adjustment_type,balance_adjustment', 'nullable', 'numeric'],
+            'new_values.adjustment_amount' => ['required_if:adjustment_type,balance_adjustment', 'nullable', 'numeric', 'decimal:0,2'],
             'new_values.reason' => ['nullable', 'string', 'max:500'],
 
             // Term extension — the number of extra periods, not the new term.

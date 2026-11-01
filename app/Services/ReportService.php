@@ -1204,16 +1204,30 @@ class ReportService
      * Cash IN is what actually crossed the counter: posted repayments — scoped
      * through releasedLoanScope() so the figure reconciles exactly with
      * dailyCollection()'s `total_collected` for the same period — plus share
-     * capital credits that were paid in.
+     * capital paid in on its own.
      *
      * Share capital withheld from a loan at release (a ledger row carrying a
      * `loan_id`, written by ShareCapitalReleaseCredit) is NOT cash in: the
      * money was kept out of the loan, never received. Those rows are left out
-     * of `inflows`, `outflows` and the `share_capital` block, and reported
-     * under `non_cash.share_capital_at_release` instead. The Share Capital
-     * report counts them, because the member's equity did grow: add
-     * `non_cash.share_capital_at_release` to `share_capital.credit` to reach
-     * that report's credits for the same period and branch.
+     * of `inflows`, `outflows` and the `share_capital` cash figures, and
+     * reported under `non_cash.share_capital_at_release` instead.
+     *
+     * A payment's share capital build-up (a ledger row carrying a
+     * `repayment_id`, written by RepaymentService on a loan with `scb_amount`)
+     * IS cash, but it is already counted: it is the payment's `overpayment`,
+     * inside `inflows.repayments`. Counting the ledger row again under
+     * `share_capital_credit` reported the build-up twice, and a void's
+     * reversal debit (which carries the same `repayment_id`) as cash paid out
+     * that never left the till. Those rows are left out of every cash figure
+     * too, and reported under `share_capital.build_up_from_payments` (net),
+     * with `build_up_credit` and `build_up_debit` beside it.
+     *
+     * The Share Capital report counts all three kinds, because each moved the
+     * members' equity. For the same period and branch:
+     *
+     *     report credits = share_capital.credit + share_capital.build_up_credit
+     *                      + non_cash.share_capital_at_release
+     *     report debits  = share_capital.debit + share_capital.build_up_debit
      *
      * Cash OUT is `net_proceeds`, NOT `principal_amount`. Deductions are
      * withheld at release and never leave the till, so booking the gross
@@ -1272,8 +1286,11 @@ class ReportService
             ->first();
 
         // Scoped through the member's branch, identically to shareCapital().
-        // A row with a `loan_id` was withheld at release, not paid in, so it
-        // is summed apart and kept out of every cash figure.
+        // A row with a `loan_id` was withheld at release, not paid in; a row
+        // with a `repayment_id` is a payment's build-up (or its void's
+        // reversal), cash already inside the repayment line. Both are summed
+        // apart and kept out of every cash figure; only the rows with neither
+        // are share capital paid in or out on its own.
         $share = DB::table('share_capital_ledger')
             ->when($branchId, fn ($q, $b) => $q->whereIn(
                 'share_capital_ledger.borrower_id',
@@ -1281,10 +1298,12 @@ class ReportService
             ))
             ->whereBetween('date', [$fromDate, $toDate])
             ->selectRaw('
-                COALESCE(SUM(CASE WHEN loan_id IS NULL THEN 1 ELSE 0 END), 0) as entry_count,
-                COALESCE(SUM(CASE WHEN loan_id IS NULL THEN credit ELSE 0 END), 0) as credit,
-                COALESCE(SUM(CASE WHEN loan_id IS NULL THEN debit ELSE 0 END), 0) as debit,
-                COALESCE(SUM(CASE WHEN loan_id IS NOT NULL THEN credit - debit ELSE 0 END), 0) as at_release
+                COALESCE(SUM(CASE WHEN loan_id IS NULL AND repayment_id IS NULL THEN 1 ELSE 0 END), 0) as entry_count,
+                COALESCE(SUM(CASE WHEN loan_id IS NULL AND repayment_id IS NULL THEN credit ELSE 0 END), 0) as credit,
+                COALESCE(SUM(CASE WHEN loan_id IS NULL AND repayment_id IS NULL THEN debit ELSE 0 END), 0) as debit,
+                COALESCE(SUM(CASE WHEN loan_id IS NOT NULL THEN credit - debit ELSE 0 END), 0) as at_release,
+                COALESCE(SUM(CASE WHEN loan_id IS NULL AND repayment_id IS NOT NULL THEN credit ELSE 0 END), 0) as build_up_credit,
+                COALESCE(SUM(CASE WHEN loan_id IS NULL AND repayment_id IS NOT NULL THEN debit ELSE 0 END), 0) as build_up_debit
             ')
             ->first();
 
@@ -1300,6 +1319,8 @@ class ReportService
         $shareCredit = round((float) ($share->credit ?? 0), 2);
         $shareDebit = round((float) ($share->debit ?? 0), 2);
         $shareAtRelease = round((float) ($share->at_release ?? 0), 2);
+        $buildUpCredit = round((float) ($share->build_up_credit ?? 0), 2);
+        $buildUpDebit = round((float) ($share->build_up_debit ?? 0), 2);
         $netProceedsOut = round((float) ($release->net_proceeds ?? 0), 2);
 
         $totalIn = round($repaymentsIn + $shareCredit, 2);
@@ -1341,19 +1362,27 @@ class ReportService
                 'share_capital_at_release' => $shareAtRelease,
                 'note' => 'Deductions are withheld at release and never leave the till; principal_released = net_proceeds + total_deductions. share_capital_at_release is the share capital withheld from loans at release and credited to the members\' share capital: it is in their Share Capital balance but was never received as cash, so it is excluded from inflows and from share_capital.',
             ],
-            // Same scope vocabulary as the Share Capital report. Cash only:
-            // with non_cash.share_capital_at_release added back, the credits
-            // equal that report's for the same period and branch.
+            // Same scope vocabulary as the Share Capital report. `credit`,
+            // `debit`, `net_movement` and `count` are share capital paid in and
+            // out on its own; with the build-up and
+            // non_cash.share_capital_at_release added back, they equal that
+            // report's credits and debits for the same period and branch.
             'share_capital' => [
                 'branch_scope' => $shareScope,
                 'credit' => $shareCredit,
                 'debit' => $shareDebit,
                 'net_movement' => round($shareCredit - $shareDebit, 2),
                 'count' => (int) ($share->entry_count ?? 0),
+                // Credited from payments on loans with share capital build-up,
+                // net of any void's reversal. Already cash inside
+                // inflows.repayments (its overpayment), so in no total here.
+                'build_up_from_payments' => round($buildUpCredit - $buildUpDebit, 2),
+                'build_up_credit' => $buildUpCredit,
+                'build_up_debit' => $buildUpDebit,
                 'note' => ($branchId
                     ? 'share_capital_ledger has no branch column, so branch_id is honoured through the member\'s branch, matching the Share Capital report. Excluded from by_branch.'
                     : 'No branch filter applied, so these figures are organisation-wide. Share capital is always excluded from by_branch.')
-                    .' Cash paid in and out only: share capital withheld at release is under non_cash.share_capital_at_release.',
+                    .' credit and debit are share capital paid in and out on its own. build_up_from_payments is the share capital build-up credited from loan payments, net of void reversals: that cash is already in inflows.repayments (as overpayment), so it is in no total here. Share capital withheld at release is under non_cash.share_capital_at_release. The Share Capital report\'s credits for the same period and branch = credit + build_up_credit + non_cash.share_capital_at_release; its debits = debit + build_up_debit.',
             ],
             'by_branch' => $byBranch,
             // Loan cash only, like the rows: the repayment and release totals
