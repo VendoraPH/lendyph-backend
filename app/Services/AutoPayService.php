@@ -31,6 +31,8 @@ class AutoPayService
 
     private const SKIP_CHANGED_MEANWHILE = 'Changed by another payment since the preview; run the preview again.';
 
+    private const SKIP_UNSELECTED_PART_PAID_FIRST = "Has a part-paid period that isn't selected; select it or collect it first.";
+
     /**
      * Build the staff-facing preview for a date window, as of today (the date
      * a run posts on).
@@ -56,7 +58,7 @@ class AutoPayService
     public function preview(array $productIds, string $dateFrom, string $dateTo, array $includeScheduleIds = []): array
     {
         [$from, $to] = $this->parseRange($dateFrom, $dateTo);
-        $asOf = now();
+        $asOf = $this->runDate();
 
         $loans = $this->eligibleLoansQuery($productIds)
             ->with(['borrower:id,first_name,middle_name,last_name,suffix'])
@@ -66,6 +68,7 @@ class AutoPayService
         $loanRows = [];
         $partialRows = [];
         $partialRemaining = [];
+        $notCharged = [];
         $skips = [];
 
         foreach ($loans as $loan) {
@@ -117,6 +120,17 @@ class AutoPayService
                 $loanHasFullDueRow = true;
             }
 
+            // Its part-paid rows stay listed, so staff can select them.
+            if ($this->unselectedPartPaidComesFirst($schedules, $includeScheduleIds)) {
+                $skips[] = $this->skip($loan, self::SKIP_UNSELECTED_PART_PAID_FIRST);
+
+                foreach ($schedules as $schedule) {
+                    $notCharged[(int) $schedule->id] = true;
+                }
+
+                continue;
+            }
+
             if ($loanHasFullDueRow) {
                 foreach ($loanTotals as $key => $centavos) {
                     $totals[$key] += $centavos;
@@ -146,8 +160,9 @@ class AutoPayService
                 ]);
             }
 
-            // A row selected twice is charged once, as a run charges it.
-            if (! isset($counted[$scheduleId])) {
+            // A row selected twice is charged once, as a run charges it; one on
+            // a loan the run skips is not charged at all.
+            if (! isset($counted[$scheduleId]) && ! isset($notCharged[$scheduleId])) {
                 $counted[$scheduleId] = true;
                 $partialTotal += $partialRemaining[$scheduleId];
             }
@@ -206,6 +221,7 @@ class AutoPayService
 
             $reason = match (true) {
                 $this->hasEarlierArrears($loan, $from) => self::SKIP_EARLIER_ARREARS,
+                $this->unselectedPartPaidComesFirst($allSchedules, $includeScheduleIds) => self::SKIP_UNSELECTED_PART_PAID_FIRST,
                 $this->filterIncludedSchedules($allSchedules, $includeScheduleIds)->isEmpty() => self::SKIP_PART_PAID_UNSELECTED,
                 $this->totalRemaining($this->filterIncludedSchedules($allSchedules, $includeScheduleIds)) <= 0 => self::SKIP_NOTHING_DUE,
                 default => null,
@@ -234,6 +250,15 @@ class AutoPayService
                         }
 
                         $due = $this->dueSchedules($locked, $from, $to);
+
+                        // A period another payment part-paid since the first
+                        // look would now take money meant for a later one.
+                        if ($this->unselectedPartPaidComesFirst($due, $includeScheduleIds)) {
+                            $whyNothing = self::SKIP_CHANGED_MEANWHILE;
+
+                            return 0;
+                        }
+
                         $amount = $this->totalRemaining($this->filterIncludedSchedules($due, $includeScheduleIds));
 
                         if ($amount <= 0) {
@@ -242,7 +267,7 @@ class AutoPayService
 
                         return $amount;
                     },
-                    paymentDate: now()->toDateString(),
+                    paymentDate: $this->runDate()->toDateString(),
                     user: $user,
                     remarks: 'Auto-pay run '.$from->toDateString().' → '.$to->toDateString(),
                     method: 'auto_pay',
@@ -372,6 +397,39 @@ class AutoPayService
         $firstInitial = $borrower->first_name ? mb_substr($borrower->first_name, 0, 1).'.' : '';
 
         return trim($firstInitial.' '.($borrower->last_name ?? ''));
+    }
+
+    /**
+     * The date a run posts on and a preview quotes as of: today, at midnight,
+     * as RepaymentService reads a payment date. Shared, so the preview's
+     * penalty cut-off is the run's whatever the time of day.
+     */
+    private function runDate(): Carbon
+    {
+        return now()->startOfDay();
+    }
+
+    /**
+     * Whether a part-paid period staff did not select comes before one the
+     * run would charge. A payment allocates in period order, so that period
+     * would take the money meant for the later one.
+     *
+     * @param  Collection<int, AmortizationSchedule>  $due
+     * @param  list<int|string>  $includeScheduleIds
+     */
+    private function unselectedPartPaidComesFirst(Collection $due, array $includeScheduleIds): bool
+    {
+        $included = $this->filterIncludedSchedules($due, $includeScheduleIds);
+
+        if ($included->isEmpty()) {
+            return false;
+        }
+
+        $lastCharged = (int) $included->max('period_number');
+        $includedIds = $included->pluck('id')->map(fn ($id): int => (int) $id)->all();
+
+        return $due->contains(fn (AmortizationSchedule $schedule): bool => ! in_array((int) $schedule->id, $includedIds, true)
+            && (int) $schedule->period_number < $lastCharged);
     }
 
     /**

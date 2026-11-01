@@ -133,6 +133,56 @@ class BalanceAdjustmentTargetTest extends TestCase
         $this->assertSame(5000000, $this->unpaidPrincipal($loan));
     }
 
+    public function test_a_target_request_is_refused_at_approval_when_principal_moved_since_it_was_requested(): void
+    {
+        $loan = $this->loanWithInterestOwed();
+        $id = $this->requestTarget($loan, 50000);
+
+        // ₱2,000 of principal paid before anyone approves: the stored -₱6,800
+        // would now take the loan to ₱48,000, ₱2,000 past the target.
+        app(RepaymentService::class)->processRepayment($loan->fresh(), 2000, now()->toDateString(), $this->admin);
+
+        $this->patchJson("/api/loan-adjustments/{$id}/approve")
+            ->assertStatus(409)
+            ->assertExactJson(['message' => "The loan's principal changed since this adjustment was requested; request it again."]);
+
+        $this->assertSame('pending', LoanAdjustment::findOrFail($id)->status);
+    }
+
+    public function test_a_target_request_is_refused_at_apply_when_principal_moved_since_it_was_approved(): void
+    {
+        $loan = $this->loanWithInterestOwed();
+        $id = $this->requestTarget($loan, 50000);
+        $this->patchJson("/api/loan-adjustments/{$id}/approve")->assertOk();
+
+        app(RepaymentService::class)->processRepayment($loan->fresh(), 2000, now()->toDateString(), $this->admin);
+        $before = $this->unpaidPrincipal($loan);
+
+        $this->patchJson("/api/loan-adjustments/{$id}/apply")
+            ->assertStatus(409)
+            ->assertExactJson(['message' => "The loan's principal changed since this adjustment was requested; request it again."]);
+
+        $this->assertSame('approved', LoanAdjustment::findOrFail($id)->status);
+        $this->assertSame($before, $this->unpaidPrincipal($loan));
+    }
+
+    public function test_a_request_by_amount_still_applies_after_principal_moved(): void
+    {
+        $loan = $this->loanWithInterestOwed();
+        $id = $this->postJson("/api/loans/{$loan->id}/adjustments", [
+            'adjustment_type' => 'balance_adjustment',
+            'new_values' => ['adjustment_amount' => -1000],
+        ])->assertCreated()->json('data.id');
+
+        app(RepaymentService::class)->processRepayment($loan->fresh(), 2000, now()->toDateString(), $this->admin);
+        $before = $this->unpaidPrincipal($loan);
+
+        $this->patchJson("/api/loan-adjustments/{$id}/approve")->assertOk();
+        $this->patchJson("/api/loan-adjustments/{$id}/apply")->assertOk();
+
+        $this->assertSame($before - 100000, $this->unpaidPrincipal($loan));
+    }
+
     public function test_a_request_by_amount_is_still_accepted(): void
     {
         $loan = $this->createReleasedLoan();
@@ -181,6 +231,14 @@ class BalanceAdjustmentTargetTest extends TestCase
 
         $this->assertCount(1, $attributes);
         $this->assertSame('/api/loans/{loan}/balance-adjustment-preview', $attributes[0]->newInstance()->path);
+    }
+
+    private function requestTarget(Loan $loan, float $target): int
+    {
+        return $this->postJson("/api/loans/{$loan->id}/adjustments", [
+            'adjustment_type' => 'balance_adjustment',
+            'new_values' => ['target_principal_balance' => $target],
+        ])->assertCreated()->json('data.id');
     }
 
     private function loanWithInterestOwed(): Loan

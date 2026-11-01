@@ -117,6 +117,31 @@ class LoanAdjustmentService
     }
 
     /**
+     * A balance adjustment requested as a target principal balance stores the
+     * amount worked out at request time, so it lands on the target only while
+     * the loan's unpaid principal is still what it was then. Checked under the
+     * loan's lock at approval and at apply; a moved principal is a 409 and the
+     * request has to be made again. One requested by amount is not checked.
+     *
+     * @throws HttpResponseException 409 when the principal moved since the request
+     */
+    private function assertTargetPrincipalUnchanged(LoanAdjustment $adjustment, Loan $loan): void
+    {
+        $own = $adjustment->ownNewValues();
+
+        if ($adjustment->adjustment_type !== 'balance_adjustment'
+            || ($own['target_principal_balance'] ?? null) === null) {
+            return;
+        }
+
+        $atRequest = (int) round((float) ($own['outstanding_principal_at_request'] ?? -1) * 100);
+
+        if ($this->outstandingPrincipalCentavos($loan) !== $atRequest) {
+            throw LoanWriteTransaction::conflict("The loan's principal changed since this adjustment was requested; request it again.");
+        }
+    }
+
+    /**
      * One period's unpaid principal, in centavos, never below zero.
      */
     private static function unpaidPrincipalCentavos(AmortizationSchedule $schedule): int
@@ -143,7 +168,8 @@ class LoanAdjustmentService
         $this->assertPayloadFitsType($adjustment);
 
         return LoanWriteTransaction::run(function () use ($adjustment, $approver, $remarks): LoanAdjustment {
-            $this->lockAdjustmentRows($adjustment, 'pending');
+            $loan = $this->lockAdjustmentRows($adjustment, 'pending');
+            $this->assertTargetPrincipalUnchanged($adjustment, $loan);
 
             $adjustment->update([
                 'status' => 'approved',
@@ -699,6 +725,8 @@ class LoanAdjustmentService
             if (! in_array($loan->status, Loan::ACTIVE_STATUSES, true)) {
                 throw LoanWriteTransaction::conflict();
             }
+
+            $this->assertTargetPrincipalUnchanged($adjustment, $loan);
 
             match ($adjustment->adjustment_type) {
                 'restructure' => $this->applyRestructure($adjustment, $loan),

@@ -316,6 +316,64 @@ class AutoPayAmountUnderLockTest extends TestCase
             ->assertJsonValidationErrors('include_schedule_ids.0');
     }
 
+    public function test_at_the_grace_boundary_the_preview_and_the_run_agree_whatever_the_time_of_day(): void
+    {
+        // 2:00 pm on 20 November: a period due 17 November is exactly at the
+        // end of its 3-day grace, so the run (dated the 20th) charges no penalty.
+        $this->travelTo('2026-11-20 14:00:00');
+        $loan = $this->autoPayLoan('2026-10-17');
+        $period = $loan->amortizationSchedules()->reorder('period_number')->firstOrFail();
+        $this->assertSame('2026-11-17', $period->due_date->toDateString());
+
+        $summary = $this->previewFor($period)->assertOk()->json('data.summary');
+        $posted = $this->processFor($period)->assertCreated()->json('data.repayments.0.amount_paid');
+
+        $this->assertEquals(0, $summary['total_penalty']);
+        $this->assertEquals($summary['grand_total'], $posted);
+    }
+
+    public function test_a_loan_whose_unselected_part_paid_period_comes_first_is_skipped(): void
+    {
+        // Period 1 part-paid and not selected, period 2 fully due: a payment
+        // for period 2 would land on period 1 first.
+        $loan = $this->autoPayLoan();
+        [$period1, $period2] = $loan->amortizationSchedules()->reorder('period_number')->take(2)->get()->all();
+        $period1->update(['interest_paid' => 1000, 'status' => 'partial']);
+        $skip = [
+            'loan_id' => $loan->id,
+            'loan_account_number' => $loan->loan_account_number,
+            'reason' => "Has a part-paid period that isn't selected; select it or collect it first.",
+        ];
+        $range = ['date_from' => $period1->due_date->toDateString(), 'date_to' => $period2->due_date->toDateString()];
+
+        $preview = $this->getJson('/api/auto-pay/preview?'.http_build_query($range))->assertOk()->json('data');
+        $this->assertSame([$skip], $preview['skips']);
+        $this->assertSame([], $preview['loans']);
+        $this->assertSame([$period1->id], array_column($preview['partial_rows'], 'schedule_id'), 'the row stays selectable');
+
+        $run = $this->postJson('/api/auto-pay/process', $range)->assertCreated()->json('data');
+        $this->assertSame(0, $run['processed']);
+        $this->assertSame([$skip], $run['skips']);
+        $this->assertSame(0, Repayment::where('loan_id', $loan->id)->count());
+    }
+
+    public function test_once_the_part_paid_period_is_selected_both_are_charged_and_the_preview_agrees(): void
+    {
+        $loan = $this->autoPayLoan();
+        [$period1, $period2] = $loan->amortizationSchedules()->reorder('period_number')->take(2)->get()->all();
+        $period1->update(['interest_paid' => 1000, 'status' => 'partial']);
+        $range = ['date_from' => $period1->due_date->toDateString(), 'date_to' => $period2->due_date->toDateString(), 'include_schedule_ids' => [$period1->id]];
+
+        $summary = $this->getJson('/api/auto-pay/preview?'.http_build_query($range))->assertOk()->json('data.summary');
+        $posted = $this->postJson('/api/auto-pay/process', $range)->assertCreated()->json('data.repayments.0.amount_paid');
+
+        // ₱10,800 left on period 1 + ₱11,800 on period 2.
+        $this->assertEquals(22600, $summary['grand_total']);
+        $this->assertEquals($summary['grand_total'], $posted);
+        $this->assertSame('paid', $period1->fresh()->status);
+        $this->assertSame('paid', $period2->fresh()->status);
+    }
+
     private function waive(Loan $loan, AmortizationSchedule $period): void
     {
         app(RepaymentService::class)->applyPenalties($loan->fresh(), now());
