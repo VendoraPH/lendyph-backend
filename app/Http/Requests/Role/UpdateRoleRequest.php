@@ -32,15 +32,18 @@ class UpdateRoleRequest extends FormRequest
 
         return [
             'name' => [
+                'bail',
                 'sometimes',
                 'string',
                 'max:100',
                 'regex:/^[a-z][a-z0-9_]*$/',
                 Rule::unique('roles', 'name')->ignore($roleId),
+                // Nor may the key read as another role's display name.
+                new UniqueRoleDisplayName($roleId),
             ],
-            // No control, zero-width or bidi characters: they let two labels
-            // look identical in the role picker.
-            'display_name' => ['sometimes', 'nullable', 'string', 'max:100', 'not_regex:/[\p{Cc}\p{Cf}]/u', new UniqueRoleDisplayName($roleId)],
+            // No control, zero-width, bidi, combining or Hangul filler
+            // characters: they let two labels look identical in the role picker.
+            'display_name' => ['sometimes', 'nullable', 'string', 'max:100', 'not_regex:'.UniqueRoleDisplayName::FORBIDDEN_CHARACTERS, new UniqueRoleDisplayName($roleId)],
             'description' => ['nullable', 'string', 'max:500'],
             'permissions' => ['nullable', 'array'],
             'permissions.*' => ['string', Rule::exists('permissions', 'name')],

@@ -30,15 +30,18 @@ class StoreRoleRequest extends FormRequest
             // Role name is used as the identifier in permission checks,
             // so enforce snake_case and uniqueness.
             'name' => [
+                'bail',
                 'required',
                 'string',
                 'max:100',
                 'regex:/^[a-z][a-z0-9_]*$/',
                 Rule::unique('roles', 'name'),
+                // Nor may the key read as another role's display name.
+                new UniqueRoleDisplayName,
             ],
-            // No control, zero-width or bidi characters: they let two labels
-            // look identical in the role picker.
-            'display_name' => ['sometimes', 'nullable', 'string', 'max:100', 'not_regex:/[\p{Cc}\p{Cf}]/u', new UniqueRoleDisplayName],
+            // No control, zero-width, bidi, combining or Hangul filler
+            // characters: they let two labels look identical in the role picker.
+            'display_name' => ['sometimes', 'nullable', 'string', 'max:100', 'not_regex:'.UniqueRoleDisplayName::FORBIDDEN_CHARACTERS, new UniqueRoleDisplayName],
             'description' => ['nullable', 'string', 'max:500'],
             'permissions' => ['nullable', 'array'],
             'permissions.*' => ['string', Rule::exists('permissions', 'name')],
