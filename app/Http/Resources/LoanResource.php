@@ -3,8 +3,10 @@
 namespace App\Http\Resources;
 
 use App\Models\AmortizationSchedule;
+use App\Models\Loan;
 use App\Services\CollateralSecurity;
 use App\Services\PersistedScheduleFigures;
+use App\Services\RepaymentService;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 use OpenApi\Attributes as OA;
@@ -40,7 +42,7 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'current_due', type: 'number'),
         new OA\Property(property: 'overdue_amount', type: 'number'),
         new OA\Property(property: 'penalty_amount', type: 'number'),
-        new OA\Property(property: 'total_payable', type: 'number'),
+        new OA\Property(property: 'total_payable', type: 'number', description: 'Principal, interest and penalty still owed on the periods, plus `insurance_owed`'),
         new OA\Property(property: 'unitemised_deductions', type: 'number', description: '`total_deductions` less the itemised `deductions`, in whole centavos, signed: positive when the total is more than the items, negative when the items add up to more, 0 when they agree. The release voucher prints it as its own line.'),
         new OA\Property(property: 'amortization_schedule_totals', type: 'object', description: 'Only with `amortization_schedules`. Each column of the schedule added up in whole centavos.', properties: [
             new OA\Property(property: 'principal', type: 'number'),
@@ -66,6 +68,17 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'insurance_payment_type', type: 'string', nullable: true, enum: ['full', 'partial']),
         new OA\Property(property: 'insurance_partial_amount', type: 'number', nullable: true),
         new OA\Property(property: 'insurance_remaining_balance', type: 'number'),
+        new OA\Property(property: 'amount_due_now', type: 'object', nullable: true, description: 'What a payment must be today to clear the insurance premium owed and the first open period in full, in the order the allocation takes money, plus the share capital build-up the payment credits. Null unless the loan is released or ongoing. `period_number` and `schedule_id` are null when no period is open.', properties: [
+            new OA\Property(property: 'amount', type: 'number'),
+            new OA\Property(property: 'insurance', type: 'number'),
+            new OA\Property(property: 'principal', type: 'number'),
+            new OA\Property(property: 'interest', type: 'number'),
+            new OA\Property(property: 'penalty', type: 'number'),
+            new OA\Property(property: 'share_capital_build_up', type: 'number'),
+            new OA\Property(property: 'period_number', type: 'integer', nullable: true),
+            new OA\Property(property: 'schedule_id', type: 'integer', nullable: true),
+        ]),
+        new OA\Property(property: 'insurance_owed', type: 'number', description: 'Insurance premium the release left unpaid and still owed: interest-free, never principal, collected first from each payment (same figure as `insurance_remaining_balance`)'),
         new OA\Property(property: 'source_loan_id', type: 'integer', nullable: true, description: 'The loan this one was restructured out of'),
         new OA\Property(property: 'is_restructure', type: 'boolean', description: 'True when source_loan_id is set'),
         new OA\Property(property: 'restructured_at', type: 'string', format: 'date-time', nullable: true, description: 'When this loan was closed because its balance moved to a restructure'),
@@ -157,12 +170,14 @@ class LoanResource extends JsonResource
                 return max(0, (float) ($s->penalty_amount ?? 0) - (float) ($s->penalty_paid ?? 0));
             }), 2);
 
-            // Total payable = all remaining amounts (principal + interest + penalty)
+            // Total payable = all remaining amounts (principal + interest +
+            // penalty) plus the insurance premium still owed on the loan:
+            // "Total Payable" is the amount still owed.
             $totalPayable = round($this->amortizationSchedules->sum(function ($s) {
                 return max(0, (float) $s->principal_due - (float) $s->principal_paid)
                     + max(0, (float) $s->interest_due - (float) $s->interest_paid)
                     + max(0, (float) ($s->penalty_amount ?? 0) - (float) ($s->penalty_paid ?? 0));
-            }), 2);
+            }) + (float) $this->insurance_remaining_balance, 2);
         }
 
         return [
@@ -229,6 +244,13 @@ class LoanResource extends JsonResource
             'overdue_amount' => $overdueAmount,
             'penalty_amount' => $totalPenalty,
             'total_payable' => $totalPayable,
+            // What a payment must be today to clear the insurance premium owed
+            // and the first open period, from the server
+            // (RepaymentService::amountDueNow()). Only for a loan that takes
+            // payments, and only where the periods were loaded.
+            'amount_due_now' => $this->relationLoaded('amortizationSchedules') && in_array($this->status, Loan::ACTIVE_STATUSES, true)
+                ? app(RepaymentService::class)->amountDueNow($this->resource, $this->amortizationSchedules, now())
+                : null,
             'approval_remarks' => $this->approval_remarks,
             'approved_at' => $this->approved_at,
             'rejection_remarks' => $this->rejection_remarks,
@@ -248,6 +270,7 @@ class LoanResource extends JsonResource
                 ? (float) $this->insurance_partial_amount
                 : null,
             'insurance_remaining_balance' => (float) $this->insurance_remaining_balance,
+            'insurance_owed' => (float) $this->insurance_remaining_balance,
             'is_editable' => $this->is_editable,
             'is_releasable' => $this->is_releasable,
             'borrower' => new BorrowerResource($this->whenLoaded('borrower')),

@@ -616,13 +616,18 @@ class LoanService
     }
 
     /**
-     * Everything the borrower still owes on a loan: unpaid principal, unpaid
-     * interest, unpaid penalty, plus any insurance premium still on the books.
+     * Everything on a loan's periods the borrower still owes: unpaid
+     * principal, unpaid interest and unpaid penalty. The most a restructure
+     * may take as the new loan's principal.
      *
-     * Deliberately WIDER than the `Loan::outstanding_balance` accessor
-     * (principal + insurance only) because a restructure normally capitalizes
-     * arrears — the borrower's whole obligation moves to the new loan, not just
-     * the principal slice of it.
+     * Deliberately WIDER than the principal in `Loan::outstanding_balance`
+     * because a restructure normally capitalizes arrears — the borrower's whole
+     * obligation on the periods moves to the new loan, not just the principal
+     * slice of it.
+     *
+     * The insurance premium still owed is NOT in it: the premium is never
+     * principal. closeRestructuredSource() moves it to the new loan as premium
+     * owed, still interest-free and collected first.
      */
     private function totalOutstanding(Loan $loan): float
     {
@@ -637,7 +642,7 @@ class LoanService
                 + max(0, (float) ($s->penalty_amount ?? 0) - (float) ($s->penalty_paid ?? 0)),
         );
 
-        return round((float) $unpaid + (float) $loan->insurance_remaining_balance, 2);
+        return round((float) $unpaid, 2);
     }
 
     /**
@@ -1385,6 +1390,7 @@ class LoanService
         // one. CollateralPledgeGuard is deliberately not called from here.
         $previousStatus = $source->status;
         $closingBalance = $this->totalOutstanding($source);
+        $carriedPremium = self::toCentavos((float) $source->insurance_remaining_balance);
 
         $this->clearOpenSchedules($source);
 
@@ -1402,12 +1408,37 @@ class LoanService
             'insurance_remaining_balance' => 0,
         ]);
 
+        // The insurance premium still owed moves to the new loan as premium
+        // owed: never principal, never written off. Its row is locked with the
+        // source's (lockAndGuardReleaseRows()), and applyInsuranceOnRelease()
+        // has already set whatever its own release left owed.
+        if ($carriedPremium > 0) {
+            $newOwedBefore = (float) $newLoan->insurance_remaining_balance;
+            $newOwed = (self::toCentavos($newOwedBefore) + $carriedPremium) / 100;
+
+            $newLoan->update(['insurance_remaining_balance' => $newOwed]);
+
+            AuditLogService::log(
+                action: 'insurance_premium_carried_over',
+                auditable: $newLoan,
+                oldValues: ['insurance_remaining_balance' => $newOwedBefore],
+                newValues: [
+                    'insurance_remaining_balance' => $newOwed,
+                    'carried_from_loan_id' => $source->id,
+                    'carried_premium' => $carriedPremium / 100,
+                ],
+                description: 'Insurance premium owed of '.Money::format($carriedPremium)
+                    .' carried over from restructured loan '.($source->loan_account_number ?? $source->application_number),
+            );
+        }
+
         AuditLogService::log(
             action: 'restructure_closed',
             auditable: $source,
             oldValues: [
                 'status' => $previousStatus,
                 'outstanding_balance' => $closingBalance,
+                'insurance_remaining_balance' => $carriedPremium / 100,
             ],
             newValues: [
                 'status' => 'restructured',
@@ -1415,6 +1446,7 @@ class LoanService
                 'restructured_into_application_number' => $newLoan->application_number,
                 'restructured_into_loan_account_number' => $newLoan->loan_account_number,
                 'restructured_balance' => $closingBalance,
+                'insurance_premium_carried_over' => $carriedPremium / 100,
                 'new_principal' => (float) $newLoan->principal_amount,
                 'write_off_amount' => $writeOff,
                 // The approved figures the write-off came from, plus how far the

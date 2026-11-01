@@ -920,8 +920,9 @@ DESC,
                 content: new OA\JsonContent(properties: [
                     new OA\Property(property: 'data', type: 'object', properties: [
                         new OA\Property(property: 'interest_option', type: 'string', enum: ['pay', 'defer']),
-                        new OA\Property(property: 'collect_now', type: 'object', description: 'Collected before extending: zero on "defer"', properties: [
+                        new OA\Property(property: 'collect_now', type: 'object', description: 'Collected before extending: zero on "defer". On "pay" one payment of the insurance premium still owed (taken first) plus the interest outstanding', properties: [
                             new OA\Property(property: 'amount', type: 'number', example: 1800),
+                            new OA\Property(property: 'insurance_part', type: 'number', example: 0),
                             new OA\Property(property: 'penalty_part', type: 'number', example: 600),
                             new OA\Property(property: 'interest_part', type: 'number', example: 1200),
                         ]),

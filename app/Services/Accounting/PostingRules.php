@@ -415,8 +415,14 @@ final class PostingRules
      * without also adding the reversing entry that a cash-basis book does not
      * need.
      *
+     * The insurance premium a payment collected (`repayments.insurance_applied`,
+     * the part of the premium the release left owed) is credited to
+     * `insurance_premium_payable`, the account the release booked the part it
+     * withheld to: money held for the insurer, never income.
+     *
      * @param  int  $received  `repayments.amount_paid` — every peso that arrived
      * @param  int  $overpayment  the part of it that settled nothing
+     * @param  int  $insurance  the part of it that paid the insurance premium owed
      */
     public static function loanCollection(
         int $received,
@@ -427,15 +433,17 @@ final class PostingRules
         int $overpayment,
         string $method,
         AccountMap $map,
+        int $insurance = 0,
     ): array {
         self::requireComponent($principal, 'The principal component');
         self::requireComponent($interest, 'The interest component');
         self::requireComponent($penalty, 'The penalty component');
         self::requireComponent($fees, 'The fees component');
+        self::requireComponent($insurance, 'The insurance premium component');
         self::requireComponent($overpayment, 'The overpayment');
         self::requireAmount($received, 'A collection');
 
-        $allocated = $principal + $interest + $penalty + $fees;
+        $allocated = $principal + $interest + $penalty + $fees + $insurance;
 
         if ($allocated + $overpayment !== $received) {
             throw CannotPostToTheBooksException::because(
@@ -449,6 +457,7 @@ final class PostingRules
             'description' => 'Loan collection',
             'lines' => self::used([
                 self::debitIfAny($map, SettlementMethod::assertIsSettlementRole($method), $received),
+                self::creditIfAny($map, 'insurance_premium_payable', $insurance),
                 self::creditIfAny($map, 'loans_receivable', $principal),
                 self::creditIfAny($map, 'interest_income', $interest),
                 self::creditIfAny($map, 'penalty_income', $penalty),

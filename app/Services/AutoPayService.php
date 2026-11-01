@@ -40,8 +40,11 @@ class AutoPayService
      * Returns:
      *   summary       — totals across the loans a run would charge: principal,
      *                   interest, the late penalty the payment will charge
-     *                   (RepaymentService::penaltyAsOf(), nothing written) and
-     *                   their sum, `total_amount`
+     *                   (RepaymentService::penaltyAsOf(), nothing written),
+     *                   the insurance premium still owed (taken first, once
+     *                   per loan) and their sum, `total_amount`. A loan charged
+     *                   only through selected part-paid rows has its premium
+     *                   in `partial_total`; `total_insurance` covers both
      *   loans         — the same per loan
      *   partial_rows  — schedule rows with amount_paid > 0 (already partially paid),
      *                   listed separately so staff can opt them in via include_schedule_ids
@@ -64,12 +67,18 @@ class AutoPayService
             ->with(['borrower:id,first_name,middle_name,last_name,suffix'])
             ->get();
 
-        $totals = ['principal' => 0, 'interest' => 0, 'penalty' => 0];
+        $totals = ['principal' => 0, 'interest' => 0, 'penalty' => 0, 'insurance' => 0];
         $loanRows = [];
         $partialRows = [];
         $partialRemaining = [];
+        $partialLoanIds = [];
         $notCharged = [];
         $skips = [];
+        // The insurance premium owed on each loan a run would charge, and the
+        // loans already charged it: a run takes it once per loan, first.
+        $premiumOwed = [];
+        $premiumCharged = [];
+        $partialPremium = 0;
 
         foreach ($loans as $loan) {
             $schedules = $this->dueSchedules($loan, $from, $to);
@@ -84,8 +93,9 @@ class AutoPayService
                 continue;
             }
 
-            $loanTotals = ['principal' => 0, 'interest' => 0, 'penalty' => 0];
+            $loanTotals = ['principal' => 0, 'interest' => 0, 'penalty' => 0, 'insurance' => 0];
             $loanHasFullDueRow = false;
+            $premiumOwed[$loan->id] = $this->centavos($loan->insurance_remaining_balance);
 
             foreach ($schedules as $schedule) {
                 $principalRemaining = max(0, $this->centavos($schedule->principal_due) - $this->centavos($schedule->principal_paid));
@@ -96,6 +106,7 @@ class AutoPayService
 
                 if ($amountPaid > 0 && $remainingBalance > 0) {
                     $partialRemaining[(int) $schedule->id] = $remainingBalance;
+                    $partialLoanIds[(int) $schedule->id] = $loan->id;
                     $partialRows[] = [
                         'loan_id' => $loan->id,
                         'schedule_id' => $schedule->id,
@@ -132,6 +143,9 @@ class AutoPayService
             }
 
             if ($loanHasFullDueRow) {
+                $loanTotals['insurance'] = $premiumOwed[$loan->id];
+                $premiumCharged[$loan->id] = true;
+
                 foreach ($loanTotals as $key => $centavos) {
                     $totals[$key] += $centavos;
                 }
@@ -143,6 +157,7 @@ class AutoPayService
                     'total_principal' => $loanTotals['principal'] / 100,
                     'total_interest' => $loanTotals['interest'] / 100,
                     'total_penalty' => $loanTotals['penalty'] / 100,
+                    'total_insurance' => $loanTotals['insurance'] / 100,
                     'total_amount' => array_sum($loanTotals) / 100,
                 ];
             }
@@ -165,6 +180,15 @@ class AutoPayService
             if (! isset($counted[$scheduleId]) && ! isset($notCharged[$scheduleId])) {
                 $counted[$scheduleId] = true;
                 $partialTotal += $partialRemaining[$scheduleId];
+
+                // A loan the run charges only through its selected part-paid
+                // rows still pays its premium owed first, once.
+                $loanId = $partialLoanIds[$scheduleId];
+
+                if (! isset($premiumCharged[$loanId])) {
+                    $premiumCharged[$loanId] = true;
+                    $partialPremium += $premiumOwed[$loanId];
+                }
             }
         }
 
@@ -173,9 +197,10 @@ class AutoPayService
                 'total_principal' => $totals['principal'] / 100,
                 'total_interest' => $totals['interest'] / 100,
                 'total_penalty' => $totals['penalty'] / 100,
+                'total_insurance' => ($totals['insurance'] + $partialPremium) / 100,
                 'total_amount' => array_sum($totals) / 100,
-                'partial_total' => $partialTotal / 100,
-                'grand_total' => (array_sum($totals) + $partialTotal) / 100,
+                'partial_total' => ($partialTotal + $partialPremium) / 100,
+                'grand_total' => (array_sum($totals) + $partialTotal + $partialPremium) / 100,
                 'loans_count' => count($loanRows),
             ],
             'loans' => $loanRows,
@@ -190,8 +215,9 @@ class AutoPayService
      * - One Repayment per loan, method = 'auto_pay'.
      * - amount = sum of remaining due across all included schedules for that loan
      *   (full-due rows in [from, to] + any partial rows whose ids appear in $includeScheduleIds),
-     *   late penalty included, worked out under the payment's loan lock, so a
-     *   payment landing after the first read is never charged again.
+     *   late penalty included, plus the insurance premium still owed (taken
+     *   first), worked out under the payment's loan lock, so a payment
+     *   landing after the first read is never charged again.
      * - A loan with an open period before the window is skipped: the payment
      *   would land on periods staff did not select.
      * - Each skipped loan is listed in `skips` with the reason, each failed
@@ -263,9 +289,14 @@ class AutoPayService
 
                         if ($amount <= 0) {
                             $whyNothing = $this->totalRemaining($due) > 0 ? self::SKIP_CHANGED_MEANWHILE : self::SKIP_SETTLED_MEANWHILE;
+
+                            return $amount;
                         }
 
-                        return $amount;
+                        // Plus the insurance premium still owed, which the
+                        // payment takes first, so the selected periods are
+                        // still settled. Read from the locked loan row.
+                        return ($this->centavos($amount) + $this->centavos($locked->insurance_remaining_balance)) / 100;
                     },
                     paymentDate: $this->runDate()->toDateString(),
                     user: $user,

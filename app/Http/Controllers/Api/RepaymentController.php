@@ -66,6 +66,7 @@ class RepaymentController extends Controller
                         new OA\Property(property: 'totals', type: 'object', description: 'SUM(amount_paid) per status in pesos, summed in SQL and rounded once to 2 dp, over the `search`, `loan_id`, `borrower_id`, `date_from` and `date_to` filters. The `status` filter is ignored: the two figures are split by status already. `amount_paid` already includes any penalty, so nothing is added to it.', properties: [
                             new OA\Property(property: 'collected', type: 'number', format: 'float', description: 'Posted payments'),
                             new OA\Property(property: 'voided', type: 'number', format: 'float', description: 'Voided payments'),
+                            new OA\Property(property: 'total_insurance_applied', type: 'number', format: 'float', description: 'Insurance premium the posted payments collected (part of `collected`)'),
                         ]),
                     ]),
                 ]),
@@ -170,6 +171,9 @@ class RepaymentController extends Controller
             ->groupBy('status')
             ->pluck('total', 'status');
 
+        // The insurance premium the same posted payments collected first.
+        $insuranceApplied = $filtered()->where('status', 'posted')->sum('insurance_applied');
+
         return RepaymentResource::collection($repayments)
             ->additional(['meta' => [
                 'stats' => [
@@ -179,6 +183,7 @@ class RepaymentController extends Controller
                 'totals' => [
                     'collected' => round((float) ($sums['posted'] ?? 0), 2),
                     'voided' => round((float) ($sums['voided'] ?? 0), 2),
+                    'total_insurance_applied' => round((float) $insuranceApplied, 2),
                 ],
             ]]);
     }

@@ -589,6 +589,16 @@ class Loan extends Model
         });
     }
 
+    /**
+     * Whether insurance premium the release left unpaid is still owed on this
+     * loan (`insurance_remaining_balance`). Payments collect it first, and a
+     * loan that owes it never completes.
+     */
+    public function owesInsurancePremium(): bool
+    {
+        return (int) round((float) $this->insurance_remaining_balance * 100) > 0;
+    }
+
     public function documents(): MorphMany
     {
         return $this->morphMany(Document::class, 'documentable');
