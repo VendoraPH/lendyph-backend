@@ -42,11 +42,7 @@ class AutoPayService
         $partialRows = [];
 
         foreach ($loans as $loan) {
-            $schedules = $loan->amortizationSchedules()
-                ->whereIn('status', ['pending', 'partial', 'overdue'])
-                ->whereBetween('due_date', [$from->toDateString(), $to->toDateString()])
-                ->orderBy('period_number')
-                ->get();
+            $schedules = $this->dueSchedules($loan, $from, $to);
 
             if ($schedules->isEmpty()) {
                 continue;
@@ -110,7 +106,10 @@ class AutoPayService
      *
      * - One Repayment per loan, method = 'auto_pay'.
      * - amount = sum of remaining due across all included schedules for that loan
-     *   (full-due rows in [from, to] + any partial rows whose ids appear in $includeScheduleIds).
+     *   (full-due rows in [from, to] + any partial rows whose ids appear in $includeScheduleIds),
+     *   worked out under the payment's loan lock, so a payment landing after
+     *   the first read is never charged again.
+     * - Each skipped loan is listed in `skips` with the reason.
      * - Per-loan failures are isolated; the run continues and reports skipped/failed.
      */
     public function process(array $productIds, string $dateFrom, string $dateTo, array $includeScheduleIds, User $user): array
@@ -123,13 +122,12 @@ class AutoPayService
         $skipped = 0;
         $failed = 0;
         $repayments = [];
+        $skips = [];
 
         foreach ($loans as $loan) {
-            $allSchedules = $loan->amortizationSchedules()
-                ->whereIn('status', ['pending', 'partial', 'overdue'])
-                ->whereBetween('due_date', [$from->toDateString(), $to->toDateString()])
-                ->orderBy('period_number')
-                ->get();
+            // A first look, to skip loans with nothing to do. The amount itself
+            // is worked out again under the loan's lock, below.
+            $allSchedules = $this->dueSchedules($loan, $from, $to);
 
             if ($allSchedules->isEmpty()) {
                 continue;
@@ -139,28 +137,39 @@ class AutoPayService
 
             if ($included->isEmpty()) {
                 $skipped++;
+                $skips[] = ['loan_id' => $loan->id, 'reason' => 'Only part-paid periods are due, and none of them was selected.'];
 
                 continue;
             }
 
-            $amount = $this->totalRemaining($included);
-
-            if ($amount <= 0) {
+            if ($this->totalRemaining($included) <= 0) {
                 $skipped++;
+                $skips[] = ['loan_id' => $loan->id, 'reason' => 'Nothing is due on the selected periods.'];
 
                 continue;
             }
 
             try {
-                $repayment = $this->repaymentService->processRepayment(
+                // Under the payment's own lock, from what is committed then: a
+                // payment that landed since the look above is not charged again.
+                $repayment = $this->repaymentService->processRepaymentWithAmountUnderLock(
                     loan: $loan,
-                    amountPaid: round($amount, 2),
+                    amountUnderLock: fn (Loan $locked): float => $this->totalRemaining(
+                        $this->filterIncludedSchedules($this->dueSchedules($locked, $from, $to), $includeScheduleIds),
+                    ),
                     paymentDate: now()->toDateString(),
                     user: $user,
                     remarks: 'Auto-pay run '.$from->toDateString().' → '.$to->toDateString(),
                     method: 'auto_pay',
                     referenceNumber: $loan->cbs_reference,
                 );
+
+                if ($repayment === null) {
+                    $skipped++;
+                    $skips[] = ['loan_id' => $loan->id, 'reason' => 'Nothing was due any more once the loan was locked: another payment settled it.'];
+
+                    continue;
+                }
 
                 $processed++;
                 $repayments[] = [
@@ -188,6 +197,7 @@ class AutoPayService
             'skipped' => $skipped,
             'failed' => $failed,
             'repayments' => $repayments,
+            'skips' => $skips,
         ];
     }
 
@@ -272,6 +282,20 @@ class AutoPayService
         $firstInitial = $borrower->first_name ? mb_substr($borrower->first_name, 0, 1).'.' : '';
 
         return trim($firstInitial.' '.($borrower->last_name ?? ''));
+    }
+
+    /**
+     * The loan's open periods falling due in the run's range, in period order.
+     *
+     * @return Collection<int, AmortizationSchedule>
+     */
+    private function dueSchedules(Loan $loan, Carbon $from, Carbon $to): Collection
+    {
+        return $loan->amortizationSchedules()
+            ->whereIn('status', ['pending', 'partial', 'overdue'])
+            ->whereBetween('due_date', [$from->toDateString(), $to->toDateString()])
+            ->orderBy('period_number')
+            ->get();
     }
 
     /**

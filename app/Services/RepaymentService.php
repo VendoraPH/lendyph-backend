@@ -12,6 +12,7 @@ use App\Models\ShareCapitalLedger;
 use App\Models\User;
 use App\Services\Accounting\AutomaticPoster;
 use Carbon\Carbon;
+use Closure;
 use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -46,9 +47,9 @@ class RepaymentService
      * A loan closed between the request reading it and the lock is a 409, as
      * is a deadlock or a lock wait timeout, with nothing of the payment left.
      * This is the outermost transaction: RepaymentController::store(),
-     * AutoPayService::process(), DemoSeeder and the test helpers are the
-     * callers. A caller that already holds the loan's lock in its own
-     * transaction calls recordRepaymentOnLockedLoan() instead.
+     * DemoSeeder and the test helpers are the callers; AutoPayService goes
+     * through processRepaymentWithAmountUnderLock(). A caller that already
+     * holds the loan's lock in its own transaction calls recordRepaymentOnLockedLoan() instead.
      */
     public function processRepayment(
         Loan $loan,
@@ -69,6 +70,46 @@ class RepaymentService
             $this->lockLoanForPayment($loan);
 
             return $this->recordRepaymentOnLockedLoan($loan, $amountPaid, $paymentDate, $user, $remarks, $method, $referenceNumber);
+        });
+    }
+
+    /**
+     * Record a repayment whose amount is worked out under the loan's lock, as
+     * processRepayment() records one: same transaction, same lock order (the
+     * loan row first, no collateral), same 409s.
+     *
+     * `$amountUnderLock` gets the locked loan and returns what to pay, read
+     * from what is committed once the lock is held, so a payment that landed
+     * after the caller first read the periods is seen. When it returns 0 or
+     * less nothing is recorded and null is returned. For AutoPayService.
+     *
+     * @param  Closure(Loan): float  $amountUnderLock
+     */
+    public function processRepaymentWithAmountUnderLock(
+        Loan $loan,
+        Closure $amountUnderLock,
+        string $paymentDate,
+        User $user,
+        ?string $remarks = null,
+        string $method = 'cash',
+        ?string $referenceNumber = null,
+    ): ?Repayment {
+        if (! in_array($loan->status, Loan::ACTIVE_STATUSES, true)) {
+            throw ValidationException::withMessages([
+                'loan' => 'Repayments can only be recorded for released or ongoing loans.',
+            ]);
+        }
+
+        return LoanWriteTransaction::run(function () use ($loan, $amountUnderLock, $paymentDate, $user, $remarks, $method, $referenceNumber): ?Repayment {
+            $this->lockLoanForPayment($loan);
+
+            $amount = round((float) $amountUnderLock($loan), 2);
+
+            if ($amount <= 0) {
+                return null;
+            }
+
+            return $this->recordRepaymentOnLockedLoan($loan, $amount, $paymentDate, $user, $remarks, $method, $referenceNumber);
         });
     }
 

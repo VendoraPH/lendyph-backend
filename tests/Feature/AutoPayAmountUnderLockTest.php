@@ -8,6 +8,7 @@ use App\Models\Repayment;
 use Closure;
 use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Testing\TestResponse;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
@@ -51,7 +52,7 @@ class AutoPayAmountUnderLockTest extends TestCase
             'reason' => 'Nothing was due any more once the loan was locked: another payment settled it.',
         ]], $response->json('data.skips'));
         $this->assertSame(0, Repayment::where('loan_id', $loan->id)->count());
-        $this->assertSame(0, AmortizationSchedule::where('loan_id', $loan->id)->where('period_number', '>', 1)->sum('principal_paid') + 0);
+        $this->assertEquals(0, AmortizationSchedule::where('loan_id', $loan->id)->where('period_number', '>', 1)->sum('principal_paid'), 'nothing may spill into a later period');
     }
 
     public function test_a_period_part_paid_between_the_read_and_the_lock_is_charged_only_what_is_left(): void
@@ -75,7 +76,7 @@ class AutoPayAmountUnderLockTest extends TestCase
         // ₱11,800 due, ₱1,800 of it paid in between: ₱10,000 left.
         $this->assertSame(1, $response->json('data.processed'));
         $this->assertEquals(10000, $response->json('data.repayments.0.amount_paid'));
-        $this->assertSame(0, AmortizationSchedule::where('loan_id', $loan->id)->where('period_number', '>', 1)->sum('principal_paid') + 0);
+        $this->assertEquals(0, AmortizationSchedule::where('loan_id', $loan->id)->where('period_number', '>', 1)->sum('principal_paid'), 'nothing may spill into a later period');
     }
 
     public function test_without_a_competing_payment_the_full_amount_is_charged(): void
@@ -103,7 +104,7 @@ class AutoPayAmountUnderLockTest extends TestCase
         return $loan->fresh('amortizationSchedules');
     }
 
-    private function processFor(AmortizationSchedule $period): \Illuminate\Testing\TestResponse
+    private function processFor(AmortizationSchedule $period): TestResponse
     {
         return $this->postJson('/api/auto-pay/process', [
             'date_from' => $period->due_date->toDateString(),

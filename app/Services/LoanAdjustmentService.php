@@ -905,13 +905,37 @@ class LoanAdjustmentService
             $loan->update(['status' => 'completed']);
         }
 
-        // Recalculate remaining_balance chain
-        $allSchedules = $loan->amortizationSchedules()->orderBy('period_number')->get();
-        $balance = (float) $loan->principal_amount + $adjustmentAmount;
+        $this->restateOpenRemainingBalances($loan);
+    }
 
-        foreach ($allSchedules as $schedule) {
-            $balance = round($balance - (float) $schedule->principal_due, 2);
-            $schedule->update(['remaining_balance' => max(0, $balance)]);
+    /**
+     * Each open period's `remaining_balance`: the principal still owed once
+     * it is paid, run down from the loan's actual unpaid principal through the
+     * open periods in due order, in centavos. Read after the adjustment is
+     * written, so it carries every earlier adjustment and payment.
+     *
+     * Paid periods, the rows an extension or a restructure closed among them,
+     * are never rewritten: what they recorded stays as it was.
+     */
+    private function restateOpenRemainingBalances(Loan $loan): void
+    {
+        $centavos = static fn (mixed $pesos): int => (int) round((float) $pesos * 100);
+
+        $open = $loan->amortizationSchedules()
+            ->whereIn('status', ['pending', 'partial', 'overdue'])
+            ->reorder('due_date')
+            ->orderBy('period_number')
+            ->get();
+
+        $unpaid = static fn ($s): int => max(0, $centavos($s->principal_due) - $centavos($s->principal_paid));
+        $balance = $open->sum($unpaid);
+
+        foreach ($open as $schedule) {
+            $balance -= $unpaid($schedule);
+
+            if ($centavos($schedule->remaining_balance) !== $balance) {
+                $schedule->update(['remaining_balance' => $balance / 100]);
+            }
         }
     }
 
