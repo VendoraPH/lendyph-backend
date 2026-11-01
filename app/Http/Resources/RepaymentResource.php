@@ -23,6 +23,7 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'borrower_id', type: 'integer', nullable: true, description: "The loan's borrower"),
         new OA\Property(property: 'loan_account_number', type: 'string', nullable: true),
         new OA\Property(property: 'borrower_name', type: 'string', nullable: true),
+        new OA\Property(property: 'borrower_first_last', type: 'string', nullable: true, description: 'First and last name, as the list search matches it'),
         new OA\Property(property: 'loan_product_name', type: 'string', nullable: true),
         new OA\Property(property: 'payment_date', type: 'string', format: 'date'),
         new OA\Property(property: 'paid_at', type: 'string', format: 'date', description: 'Alias for payment_date'),
@@ -105,6 +106,9 @@ class RepaymentResource extends JsonResource
             'borrower_id' => $this->loan?->borrower_id,
             'loan_account_number' => $this->loan?->loan_account_number,
             'borrower_name' => $this->loan?->borrower?->full_name,
+            // "first last", exactly what the list's `search` matches (CONCAT of the two),
+            // so the Payment History table can filter its rows the way the totals do.
+            'borrower_first_last' => $this->firstLastName(),
             'loan_product_name' => $this->loan?->loanProduct?->name,
             'payment_date' => $this->payment_date?->toDateString(),
             'paid_at' => $this->payment_date?->toDateString(),
@@ -156,5 +160,16 @@ class RepaymentResource extends JsonResource
             'remarks' => $this->remarks,
             'created_at' => $this->created_at?->toDateTimeString(),
         ];
+    }
+
+    /** The borrower's "first last" name, or null when either part is missing (as SQL CONCAT gives). */
+    private function firstLastName(): ?string
+    {
+        $borrower = $this->loan?->borrower;
+        if ($borrower === null || $borrower->first_name === null || $borrower->last_name === null) {
+            return null;
+        }
+
+        return $borrower->first_name.' '.$borrower->last_name;
     }
 }

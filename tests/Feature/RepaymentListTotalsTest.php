@@ -134,6 +134,19 @@ class RepaymentListTotalsTest extends TestCase
         );
     }
 
+    public function test_each_row_carries_the_first_last_name_the_search_matches(): void
+    {
+        $borrower = $this->second->borrower;
+        $name = $borrower->first_name.' '.$borrower->last_name;
+
+        $rows = $this->getJson('/api/repayments?search='.urlencode($name))->assertOk()->json('data');
+
+        $this->assertNotEmpty($rows);
+        foreach ($rows as $row) {
+            $this->assertSame($name, $row['borrower_first_last']);
+        }
+    }
+
     public function test_a_filter_no_payment_matches_gives_zero_totals(): void
     {
         $this->assertSame(
