@@ -1212,7 +1212,7 @@ DESC,
     #[OA\Get(
         path: '/api/loans/{id}/amortization-preview',
         summary: 'Preview amortization schedule',
-        description: 'Compute and return amortization schedule without persisting',
+        description: 'Compute and return amortization schedule without persisting. `data` is the list of rows, each with its `share_capital_build_up` (the loan\'s `scb_amount`, one per row) and `total_payment` (`total_due` plus it). `totals`, a sibling of `data`, adds up `principal_due`, `interest_due`, `total_due`, `share_capital_build_up` and `total_payment` in whole centavos, built by the same code as POST /loans/preview\'s `amortization.totals`.',
         tags: ['Amortization Schedule'],
         security: [['sanctum' => []]],
         parameters: [
@@ -1227,9 +1227,12 @@ DESC,
     {
         $this->authorize('loans:view');
 
-        $schedule = $this->loanService->buildAmortizationPreview($loan);
+        $schedule = $this->loanService->withShareCapitalBuildUp(
+            $this->loanService->buildAmortizationPreview($loan),
+            (float) $loan->scb_amount,
+        );
 
-        return response()->json(['data' => $schedule]);
+        return response()->json(['data' => $schedule['rows'], 'totals' => $schedule['totals']]);
     }
 
     #[OA\Get(
