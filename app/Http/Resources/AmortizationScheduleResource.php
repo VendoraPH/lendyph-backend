@@ -2,7 +2,11 @@
 
 namespace App\Http\Resources;
 
+use App\Models\AmortizationSchedule;
+use App\Models\Loan;
+use App\Services\PersistedScheduleFigures;
 use Illuminate\Http\Request;
+use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Http\Resources\Json\JsonResource;
 use OpenApi\Attributes as OA;
 
@@ -16,6 +20,8 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'principal_due', type: 'number'),
         new OA\Property(property: 'interest_due', type: 'number'),
         new OA\Property(property: 'total_due', type: 'number'),
+        new OA\Property(property: 'share_capital_build_up', type: 'number', description: 'The loan\'s `scb_amount` for this period; 0 on a period an extension or adjustment closed'),
+        new OA\Property(property: 'total_payment', type: 'number', description: '`total_due` plus `share_capital_build_up`, in whole centavos'),
         new OA\Property(property: 'remaining_balance', type: 'number'),
         new OA\Property(property: 'status', type: 'string', enum: ['pending', 'paid', 'partial', 'overdue']),
         new OA\Property(property: 'principal', type: 'number', description: 'Alias for principal_due'),
@@ -27,8 +33,31 @@ use OpenApi\Attributes as OA;
 )]
 class AmortizationScheduleResource extends JsonResource
 {
+    /**
+     * @param  mixed  $resource  the AmortizationSchedule
+     * @param  Loan|null  $scheduleLoan  the row's loan, handed over by forLoan() so a schedule never loads it once per row
+     */
+    public function __construct($resource, private ?Loan $scheduleLoan = null)
+    {
+        parent::__construct($resource);
+    }
+
+    /**
+     * `$rows` of `$loan`, each given the loan its build-up is read from.
+     *
+     * @param  iterable<AmortizationSchedule>  $rows
+     */
+    public static function forLoan(Loan $loan, iterable $rows): AnonymousResourceCollection
+    {
+        return new AnonymousResourceCollection(
+            collect($rows)->map(fn ($row): self => new self($row, $loan)),
+            self::class,
+        );
+    }
+
     public function toArray(Request $request): array
     {
+        $loan = $this->scheduleLoan ?? $this->resource->loan;
         $principalDue = (float) $this->principal_due;
         $interestDue = (float) $this->interest_due;
         $totalDue = (float) $this->total_due;
@@ -49,6 +78,8 @@ class AmortizationScheduleResource extends JsonResource
             'interest_due' => $interestDue,
             'penalty_amount' => (float) ($this->penalty_amount ?? 0),
             'total_due' => $totalDue,
+            'share_capital_build_up' => PersistedScheduleFigures::shareCapitalBuildUpCentavos($loan, $this->resource) / 100,
+            'total_payment' => PersistedScheduleFigures::totalPaymentCentavos($loan, $this->resource) / 100,
             'remaining_balance' => $remainingBalance,
             'principal_paid' => $principalPaid,
             'interest_paid' => $interestPaid,

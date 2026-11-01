@@ -243,28 +243,7 @@ class LoanAdjustmentService
         User $user,
         string $interestOption = 'pay',
     ): LoanAdjustment {
-        // Extension is limited to one-month-term loans, whatever the product.
-        // Loan::isOneMonthTerm() reads the ORIGINAL term rather than the
-        // current one — each extension below bumps `term`, so checking the
-        // stored value would allow exactly one extension and then lock the
-        // loan out. A one-month loan can roll forward as often as needed.
-        if (! $loan->isOneMonthTerm()) {
-            throw ValidationException::withMessages([
-                'term' => 'Only loans with a one-month term can be extended.',
-            ]);
-        }
-
-        if (! in_array($loan->status, ['released', 'ongoing'])) {
-            throw ValidationException::withMessages([
-                'status' => 'Only released or ongoing loans can be extended.',
-            ]);
-        }
-
-        if (! $loan->amortizationSchedules()->whereIn('status', ['pending', 'partial', 'overdue'])->exists()) {
-            throw ValidationException::withMessages([
-                'loan' => 'Loan has no open period to extend.',
-            ]);
-        }
+        $this->assertExtendable($loan);
 
         // A deadlock or lock wait timeout is a 409, not a 500. This is the
         // outermost transaction: LoanController::extend() and the test helpers
@@ -304,32 +283,21 @@ class LoanAdjustmentService
                 $interestPaid = $interestBefore;
             }
 
-            // Re-read: on the 'pay' path the rows above have just been
-            // allocated against, so this is what genuinely remains.
-            $openSchedules = $this->openSchedules($loan);
+            // Read after the collection: on the 'pay' path the rows above have
+            // just been allocated against, so this is what genuinely remains.
+            // extensionPreview() reads the same figures the same way.
+            [
+                'carry_principal' => $carryPrincipal,
+                'carry_interest' => $carryInterest,
+                'fresh_interest' => $freshInterest,
+                'new_interest_due' => $newInterestDue,
+                'new_total_due' => $newTotalDue,
+                'new_due_date' => $newDueDate,
+                'latest_open_due_date' => $latestOpenDueDate,
+            ] = $this->extensionFigures($loan);
 
-            $carryPrincipal = round($openSchedules->sum(
-                fn ($s) => (float) $s->principal_due - (float) $s->principal_paid,
-            ), 2);
-            $carryInterest = $this->outstandingInterest($openSchedules);
-
-            $latestOpenDueDate = Carbon::parse($openSchedules->max('due_date'));
             $maxPeriodNumber = (int) $loan->amortizationSchedules()->max('period_number');
 
-            // One month's interest at the loan's rate, whatever period it is
-            // quoted per. One flat cycle regardless of how many days it spans.
-            $freshInterest = round($carryPrincipal * LoanTermSchedule::rateForDays(
-                (float) $loan->interest_rate,
-                $loan->interest_rate_frequency->value,
-                LoanTermSchedule::DAYS_PER_MONTH,
-            ), 2);
-
-            $newDueDate = $this->nextCycleDueDate($loan, $latestOpenDueDate);
-
-            // On 'defer' this is where the stacking happens: the unpaid interest
-            // is still in $carryInterest and the fresh cycle is added on top.
-            $newInterestDue = round($carryInterest + $freshInterest, 2);
-            $newTotalDue = round($carryPrincipal + $newInterestDue, 2);
             $oldValues = [
                 'maturity_date' => $oldMaturityDate,
                 'term' => $oldTerm,
@@ -394,6 +362,129 @@ class LoanAdjustmentService
 
             return $adjustment;
         });
+    }
+
+    /**
+     * What POST /loans/{loan}/extend with `$interestOption` would collect and
+     * record, for GET /loans/{loan}/extension-preview. Writes nothing.
+     *
+     * Refuses, with the same 422s, a loan the extension would refuse. On
+     * 'pay' the collection runs through RepaymentService::previewAllocation(),
+     * the real allocation (penalty first) inside a transaction it rolls back,
+     * and the carry figures are read inside that same transaction, after the
+     * allocation, exactly where extendLoan() reads them. Both go through
+     * extensionFigures(), so the preview and the extension cannot drift.
+     *
+     * @return array{interest_option: string, collect_now: array{amount: float, penalty_part: float, interest_part: float}, carry_principal: float, carry_interest: float, fresh_interest: float, new_interest_due: float, new_total_due: float, new_due_date: string}
+     */
+    public function extensionPreview(Loan $loan, string $interestOption, User $user, Carbon $asOf): array
+    {
+        $this->assertExtendable($loan);
+
+        $collectNow = ['amount' => 0.0, 'penalty_part' => 0.0, 'interest_part' => 0.0];
+        $interestBefore = $this->outstandingInterest($this->openSchedules($loan));
+
+        if ($interestOption === 'pay' && $interestBefore > 0) {
+            $allocation = $this->repaymentService->previewAllocation(
+                $loan,
+                $interestBefore,
+                $asOf->toDateString(),
+                $user,
+                fn (Loan $allocated): array => $this->extensionFigures($allocated),
+            );
+
+            $collectNow = [
+                'amount' => round($allocation['amount_paid'], 2),
+                'penalty_part' => round($allocation['total_penalty'], 2),
+                'interest_part' => round($allocation['total_interest'], 2),
+            ];
+            $figures = $allocation['read_after_allocation'];
+        } else {
+            $figures = $this->extensionFigures($loan);
+        }
+
+        return [
+            'interest_option' => $interestOption,
+            'collect_now' => $collectNow,
+            'carry_principal' => $figures['carry_principal'],
+            'carry_interest' => $figures['carry_interest'],
+            'fresh_interest' => $figures['fresh_interest'],
+            'new_interest_due' => $figures['new_interest_due'],
+            'new_total_due' => $figures['new_total_due'],
+            'new_due_date' => $figures['new_due_date']->toDateString(),
+        ];
+    }
+
+    /**
+     * Refuse, with a 422, a loan that cannot be extended.
+     *
+     * Extension is limited to one-month-term loans, whatever the product.
+     * Loan::isOneMonthTerm() reads the ORIGINAL term rather than the current
+     * one: each extension moves the maturity date, so checking the stored
+     * figures would allow exactly one extension and then lock the loan out. A
+     * one-month loan can roll forward as often as needed.
+     */
+    private function assertExtendable(Loan $loan): void
+    {
+        if (! $loan->isOneMonthTerm()) {
+            throw ValidationException::withMessages([
+                'term' => 'Only loans with a one-month term can be extended.',
+            ]);
+        }
+
+        if (! in_array($loan->status, ['released', 'ongoing'])) {
+            throw ValidationException::withMessages([
+                'status' => 'Only released or ongoing loans can be extended.',
+            ]);
+        }
+
+        if (! $loan->amortizationSchedules()->whereIn('status', ['pending', 'partial', 'overdue'])->exists()) {
+            throw ValidationException::withMessages([
+                'loan' => 'Loan has no open period to extend.',
+            ]);
+        }
+    }
+
+    /**
+     * The figures an extension records, read from the loan's open periods as
+     * they stand: after the 'pay' collection has been allocated, or untouched
+     * on 'defer'. The one place extendLoan() and extensionPreview() take them
+     * from. Reads only.
+     *
+     * The fresh interest is one month's interest at the loan's rate, whatever
+     * period the rate is quoted per: one flat cycle regardless of how many
+     * days it spans. On 'defer' the unpaid interest is still in the carry, so
+     * the fresh cycle stacks on top of it.
+     *
+     * @return array{carry_principal: float, carry_interest: float, fresh_interest: float, new_interest_due: float, new_total_due: float, new_due_date: Carbon, latest_open_due_date: Carbon}
+     */
+    private function extensionFigures(Loan $loan): array
+    {
+        $openSchedules = $this->openSchedules($loan);
+
+        $carryPrincipal = round($openSchedules->sum(
+            fn ($s) => (float) $s->principal_due - (float) $s->principal_paid,
+        ), 2);
+        $carryInterest = $this->outstandingInterest($openSchedules);
+
+        $freshInterest = round($carryPrincipal * LoanTermSchedule::rateForDays(
+            (float) $loan->interest_rate,
+            $loan->interest_rate_frequency->value,
+            LoanTermSchedule::DAYS_PER_MONTH,
+        ), 2);
+
+        $latestOpenDueDate = Carbon::parse($openSchedules->max('due_date'));
+        $newInterestDue = round($carryInterest + $freshInterest, 2);
+
+        return [
+            'carry_principal' => $carryPrincipal,
+            'carry_interest' => $carryInterest,
+            'fresh_interest' => $freshInterest,
+            'new_interest_due' => $newInterestDue,
+            'new_total_due' => round($carryPrincipal + $newInterestDue, 2),
+            'new_due_date' => $this->nextCycleDueDate($loan, $latestOpenDueDate),
+            'latest_open_due_date' => $latestOpenDueDate,
+        ];
     }
 
     /**

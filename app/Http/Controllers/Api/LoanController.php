@@ -8,6 +8,7 @@ use App\Http\Requests\Loan\AddLoanCoMakerRequest;
 use App\Http\Requests\Loan\ApproveLoanRequest;
 use App\Http\Requests\Loan\AssignAccountOfficerRequest;
 use App\Http\Requests\Loan\ExtendLoanRequest;
+use App\Http\Requests\Loan\ExtensionPreviewRequest;
 use App\Http\Requests\Loan\PreviewLoanRequest;
 use App\Http\Requests\Loan\RejectLoanRequest;
 use App\Http\Requests\Loan\ReleaseLoanRequest;
@@ -29,6 +30,7 @@ use App\Services\LikePattern;
 use App\Services\LoanAdjustmentService;
 use App\Services\LoanReleaseFeeService;
 use App\Services\LoanService;
+use App\Services\PersistedScheduleFigures;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Exceptions\HttpResponseException;
@@ -901,6 +903,55 @@ DESC,
         return response()->json(['message' => 'Loan voided.', 'data' => new LoanResource($loan)]);
     }
 
+    #[OA\Get(
+        path: '/api/loans/{id}/extension-preview',
+        summary: 'Preview what extending a loan by one cycle would collect and record',
+        description: 'The Extend Loan dialog\'s figures, computed with the arithmetic POST /api/loans/{id}/extend records, so the dialog never quotes a figure the extension does not charge. The fresh interest is one month at the loan\'s rate converted from its interest_rate_frequency. On "pay" the collection is the outstanding interest, allocated as a real payment would be (penalty first), and the carry figures are what that allocation leaves. Writes nothing; same permission and the same 422s as the extension.',
+        tags: ['Loans'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
+            new OA\Parameter(name: 'interest_option', in: 'query', required: true, schema: new OA\Schema(type: 'string', enum: ['pay', 'defer'])),
+        ],
+        responses: [
+            new OA\Response(
+                response: 200,
+                description: 'Extension figures',
+                content: new OA\JsonContent(properties: [
+                    new OA\Property(property: 'data', type: 'object', properties: [
+                        new OA\Property(property: 'interest_option', type: 'string', enum: ['pay', 'defer']),
+                        new OA\Property(property: 'collect_now', type: 'object', description: 'Collected before extending: zero on "defer"', properties: [
+                            new OA\Property(property: 'amount', type: 'number', example: 1800),
+                            new OA\Property(property: 'penalty_part', type: 'number', example: 600),
+                            new OA\Property(property: 'interest_part', type: 'number', example: 1200),
+                        ]),
+                        new OA\Property(property: 'carry_principal', type: 'number', example: 60000),
+                        new OA\Property(property: 'carry_interest', type: 'number', example: 600),
+                        new OA\Property(property: 'fresh_interest', type: 'number', example: 1800),
+                        new OA\Property(property: 'new_interest_due', type: 'number', example: 2400),
+                        new OA\Property(property: 'new_total_due', type: 'number', example: 62400),
+                        new OA\Property(property: 'new_due_date', type: 'string', format: 'date', example: '2026-06-27'),
+                    ]),
+                ]),
+            ),
+            new OA\Response(response: 403, description: 'Missing loans:extend permission'),
+            new OA\Response(response: 404, description: 'Loan not found'),
+            new OA\Response(response: 409, description: 'Another change to this loan was being saved at the same time. Try again'),
+            new OA\Response(response: 422, description: 'interest_option missing or invalid, or the loan cannot be extended: not a one-month term, not released/ongoing, or no open period'),
+        ],
+    )]
+    public function extensionPreview(ExtensionPreviewRequest $request, Loan $loan): JsonResponse
+    {
+        return response()->json([
+            'data' => $this->loanAdjustmentService->extensionPreview(
+                $loan,
+                $request->validated('interest_option'),
+                $request->user(),
+                now(),
+            ),
+        ]);
+    }
+
     #[OA\Post(
         path: '/api/loans/{id}/extend',
         summary: 'Extend an upon-maturity loan by one cycle',
@@ -1184,7 +1235,7 @@ DESC,
     #[OA\Get(
         path: '/api/loans/{id}/amortization-schedule',
         summary: 'View persisted amortization schedule with payment tracking',
-        description: 'Returns the saved amortization schedule with beginning balance, paid amounts, penalties, and status per installment. Includes summary totals.',
+        description: 'Returns the saved amortization schedule with beginning balance, paid amounts, penalties, and status per installment, each with its `share_capital_build_up` (the loan\'s `scb_amount`, one per period, none on a period an extension or adjustment closed) and `total_payment` (`total_due` plus it). Includes summary totals; `summary.total_share_capital_build_up` and `summary.total_payment` are added up in whole centavos and equal POST /loans/preview\'s `amortization.totals` for the same loan.',
         tags: ['Amortization Schedule'],
         security: [['sanctum' => []]],
         parameters: [
@@ -1230,8 +1281,14 @@ DESC,
             'periods_pending' => $schedules->where('status', 'pending')->count(),
         ];
 
+        // The same whole-centavo totals as LoanResource's
+        // `amortization_schedule_totals` and POST /loans/preview.
+        $figures = PersistedScheduleFigures::totals($loan, $schedules);
+        $summary['total_share_capital_build_up'] = $figures['share_capital_build_up'];
+        $summary['total_payment'] = $figures['total_payment'];
+
         return response()->json([
-            'data' => AmortizationScheduleResource::collection($schedules),
+            'data' => AmortizationScheduleResource::forLoan($loan, $schedules),
             'summary' => $summary,
         ]);
     }
