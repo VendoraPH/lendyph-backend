@@ -2,10 +2,12 @@
 
 namespace App\Services;
 
+use App\Exceptions\CannotPostToTheBooksException;
 use App\Models\AmortizationSchedule;
 use App\Models\Loan;
 use App\Models\User;
 use Carbon\Carbon;
+use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
@@ -19,51 +21,81 @@ class AutoPayService
 {
     public function __construct(private RepaymentService $repaymentService) {}
 
+    private const SKIP_PART_PAID_UNSELECTED = 'Only part-paid periods are due, and none of them was selected.';
+
+    private const SKIP_NOTHING_DUE = 'Nothing is due on the selected periods.';
+
+    private const SKIP_EARLIER_ARREARS = 'Has earlier unpaid periods; collect them first.';
+
+    private const SKIP_SETTLED_MEANWHILE = 'Nothing was due any more once the loan was locked: another payment settled it.';
+
+    private const SKIP_CHANGED_MEANWHILE = 'Changed by another payment since the preview; run the preview again.';
+
+    private const SKIP_UNSELECTED_PART_PAID_FIRST = "Has a part-paid period that isn't selected; select it or collect it first.";
+
     /**
-     * Build the staff-facing preview for a date window.
+     * Build the staff-facing preview for a date window, as of today (the date
+     * a run posts on).
      *
      * Returns:
-     *   summary       — totals across loans whose due rows fully fall in [date_from, date_to]
+     *   summary       — totals across the loans a run would charge: principal,
+     *                   interest, the late penalty the payment will charge
+     *                   (RepaymentService::penaltyAsOf(), nothing written) and
+     *                   their sum, `total_amount`
+     *   loans         — the same per loan
      *   partial_rows  — schedule rows with amount_paid > 0 (already partially paid),
      *                   listed separately so staff can opt them in via include_schedule_ids
+     *   skips         — loans a run would skip, with the reason: one with an
+     *                   open period before the window is never charged
+     *
+     * `$includeScheduleIds` are the part-paid rows staff selected, as process()
+     * takes them; each must be one of `partial_rows` (422 otherwise). Their
+     * remaining amount is `summary.partial_total`, and `summary.grand_total`
+     * adds it to `total_amount`: what a run posts for the same selection.
+     *
+     * @param  list<int|string>  $includeScheduleIds
      */
-    public function preview(array $productIds, string $dateFrom, string $dateTo): array
+    public function preview(array $productIds, string $dateFrom, string $dateTo, array $includeScheduleIds = []): array
     {
         [$from, $to] = $this->parseRange($dateFrom, $dateTo);
+        $asOf = $this->runDate();
 
         $loans = $this->eligibleLoansQuery($productIds)
             ->with(['borrower:id,first_name,middle_name,last_name,suffix'])
             ->get();
 
-        $totalPrincipal = 0.0;
-        $totalInterest = 0.0;
-        $totalAmount = 0.0;
-        $loansCount = 0;
+        $totals = ['principal' => 0, 'interest' => 0, 'penalty' => 0];
+        $loanRows = [];
         $partialRows = [];
+        $partialRemaining = [];
+        $notCharged = [];
+        $skips = [];
 
         foreach ($loans as $loan) {
-            $schedules = $loan->amortizationSchedules()
-                ->whereIn('status', ['pending', 'partial', 'overdue'])
-                ->whereBetween('due_date', [$from->toDateString(), $to->toDateString()])
-                ->orderBy('period_number')
-                ->get();
+            $schedules = $this->dueSchedules($loan, $from, $to);
 
             if ($schedules->isEmpty()) {
                 continue;
             }
 
-            $loanPrincipal = 0.0;
-            $loanInterest = 0.0;
+            if ($this->hasEarlierArrears($loan, $from)) {
+                $skips[] = $this->skip($loan, self::SKIP_EARLIER_ARREARS);
+
+                continue;
+            }
+
+            $loanTotals = ['principal' => 0, 'interest' => 0, 'penalty' => 0];
             $loanHasFullDueRow = false;
 
             foreach ($schedules as $schedule) {
-                $principalRemaining = max(0, (float) $schedule->principal_due - (float) $schedule->principal_paid);
-                $interestRemaining = max(0, (float) $schedule->interest_due - (float) $schedule->interest_paid);
-                $penaltyRemaining = max(0, (float) ($schedule->penalty_amount ?? 0) - (float) ($schedule->penalty_paid ?? 0));
-                $amountPaid = (float) $schedule->principal_paid + (float) $schedule->interest_paid + (float) ($schedule->penalty_paid ?? 0);
+                $principalRemaining = max(0, $this->centavos($schedule->principal_due) - $this->centavos($schedule->principal_paid));
+                $interestRemaining = max(0, $this->centavos($schedule->interest_due) - $this->centavos($schedule->interest_paid));
+                $penaltyRemaining = $this->penaltyRemainingAsOf($loan, $schedule, $asOf);
+                $amountPaid = $this->centavos($schedule->principal_paid) + $this->centavos($schedule->interest_paid) + $this->centavos($schedule->penalty_paid);
                 $remainingBalance = $principalRemaining + $interestRemaining + $penaltyRemaining;
 
                 if ($amountPaid > 0 && $remainingBalance > 0) {
+                    $partialRemaining[(int) $schedule->id] = $remainingBalance;
                     $partialRows[] = [
                         'loan_id' => $loan->id,
                         'schedule_id' => $schedule->id,
@@ -71,37 +103,84 @@ class AutoPayService
                         'loan_account' => $loan->loan_account_number,
                         'due_date' => $schedule->due_date->toDateString(),
                         'period_number' => (int) $schedule->period_number,
-                        'total_due' => round((float) $schedule->total_due + $penaltyRemaining, 2),
-                        'amount_paid' => round($amountPaid, 2),
-                        'remaining_balance' => round($remainingBalance, 2),
-                        'principal_remaining' => round($principalRemaining, 2),
-                        'interest_remaining' => round($interestRemaining, 2),
+                        'total_due' => ($this->centavos($schedule->total_due) + $penaltyRemaining) / 100,
+                        'amount_paid' => $amountPaid / 100,
+                        'remaining_balance' => $remainingBalance / 100,
+                        'principal_remaining' => $principalRemaining / 100,
+                        'interest_remaining' => $interestRemaining / 100,
+                        'penalty_remaining' => $penaltyRemaining / 100,
                     ];
 
                     continue;
                 }
 
-                $loanPrincipal += $principalRemaining;
-                $loanInterest += $interestRemaining;
+                $loanTotals['principal'] += $principalRemaining;
+                $loanTotals['interest'] += $interestRemaining;
+                $loanTotals['penalty'] += $penaltyRemaining;
                 $loanHasFullDueRow = true;
             }
 
+            // Its part-paid rows stay listed, so staff can select them.
+            if ($this->unselectedPartPaidComesFirst($schedules, $includeScheduleIds)) {
+                $skips[] = $this->skip($loan, self::SKIP_UNSELECTED_PART_PAID_FIRST);
+
+                foreach ($schedules as $schedule) {
+                    $notCharged[(int) $schedule->id] = true;
+                }
+
+                continue;
+            }
+
             if ($loanHasFullDueRow) {
-                $totalPrincipal += $loanPrincipal;
-                $totalInterest += $loanInterest;
-                $totalAmount += $loanPrincipal + $loanInterest;
-                $loansCount++;
+                foreach ($loanTotals as $key => $centavos) {
+                    $totals[$key] += $centavos;
+                }
+
+                $loanRows[] = [
+                    'loan_id' => $loan->id,
+                    'loan_account_number' => $loan->loan_account_number,
+                    'borrower_name' => $this->shortBorrowerName($loan),
+                    'total_principal' => $loanTotals['principal'] / 100,
+                    'total_interest' => $loanTotals['interest'] / 100,
+                    'total_penalty' => $loanTotals['penalty'] / 100,
+                    'total_amount' => array_sum($loanTotals) / 100,
+                ];
+            }
+        }
+
+        $partialTotal = 0;
+        $counted = [];
+
+        foreach (array_values($includeScheduleIds) as $index => $id) {
+            $scheduleId = (int) $id;
+
+            if (! array_key_exists($scheduleId, $partialRemaining)) {
+                throw ValidationException::withMessages([
+                    "include_schedule_ids.{$index}" => "Schedule {$scheduleId} is not one of this preview's part-paid rows.",
+                ]);
+            }
+
+            // A row selected twice is charged once, as a run charges it; one on
+            // a loan the run skips is not charged at all.
+            if (! isset($counted[$scheduleId]) && ! isset($notCharged[$scheduleId])) {
+                $counted[$scheduleId] = true;
+                $partialTotal += $partialRemaining[$scheduleId];
             }
         }
 
         return [
             'summary' => [
-                'total_principal' => round($totalPrincipal, 2),
-                'total_interest' => round($totalInterest, 2),
-                'total_amount' => round($totalAmount, 2),
-                'loans_count' => $loansCount,
+                'total_principal' => $totals['principal'] / 100,
+                'total_interest' => $totals['interest'] / 100,
+                'total_penalty' => $totals['penalty'] / 100,
+                'total_amount' => array_sum($totals) / 100,
+                'partial_total' => $partialTotal / 100,
+                'grand_total' => (array_sum($totals) + $partialTotal) / 100,
+                'loans_count' => count($loanRows),
             ],
+            'loans' => $loanRows,
             'partial_rows' => $partialRows,
+            'skips' => $skips,
         ];
     }
 
@@ -110,7 +189,13 @@ class AutoPayService
      *
      * - One Repayment per loan, method = 'auto_pay'.
      * - amount = sum of remaining due across all included schedules for that loan
-     *   (full-due rows in [from, to] + any partial rows whose ids appear in $includeScheduleIds).
+     *   (full-due rows in [from, to] + any partial rows whose ids appear in $includeScheduleIds),
+     *   late penalty included, worked out under the payment's loan lock, so a
+     *   payment landing after the first read is never charged again.
+     * - A loan with an open period before the window is skipped: the payment
+     *   would land on periods staff did not select.
+     * - Each skipped loan is listed in `skips` with the reason, each failed
+     *   one in `failures`.
      * - Per-loan failures are isolated; the run continues and reports skipped/failed.
      */
     public function process(array $productIds, string $dateFrom, string $dateTo, array $includeScheduleIds, User $user): array
@@ -121,46 +206,80 @@ class AutoPayService
 
         $processed = 0;
         $skipped = 0;
-        $failed = 0;
         $repayments = [];
+        $skips = [];
+        $failures = [];
 
         foreach ($loans as $loan) {
-            $allSchedules = $loan->amortizationSchedules()
-                ->whereIn('status', ['pending', 'partial', 'overdue'])
-                ->whereBetween('due_date', [$from->toDateString(), $to->toDateString()])
-                ->orderBy('period_number')
-                ->get();
+            // A first look, to skip loans with nothing to do. The amount itself
+            // is worked out again under the loan's lock, below.
+            $allSchedules = $this->dueSchedules($loan, $from, $to);
 
             if ($allSchedules->isEmpty()) {
                 continue;
             }
 
-            $included = $this->filterIncludedSchedules($allSchedules, $includeScheduleIds);
+            $reason = match (true) {
+                $this->hasEarlierArrears($loan, $from) => self::SKIP_EARLIER_ARREARS,
+                $this->unselectedPartPaidComesFirst($allSchedules, $includeScheduleIds) => self::SKIP_UNSELECTED_PART_PAID_FIRST,
+                $this->filterIncludedSchedules($allSchedules, $includeScheduleIds)->isEmpty() => self::SKIP_PART_PAID_UNSELECTED,
+                $this->totalRemaining($this->filterIncludedSchedules($allSchedules, $includeScheduleIds)) <= 0 => self::SKIP_NOTHING_DUE,
+                default => null,
+            };
 
-            if ($included->isEmpty()) {
+            if ($reason !== null) {
                 $skipped++;
-
-                continue;
-            }
-
-            $amount = $this->totalRemaining($included);
-
-            if ($amount <= 0) {
-                $skipped++;
+                $skips[] = $this->skip($loan, $reason);
 
                 continue;
             }
 
             try {
-                $repayment = $this->repaymentService->processRepayment(
+                // Under the payment's own lock, after its penalty step, from
+                // what is committed then. Why nothing was charged, if so, is
+                // read from the same moment.
+                $whyNothing = null;
+
+                $repayment = $this->repaymentService->processRepaymentWithAmountUnderLock(
                     loan: $loan,
-                    amountPaid: round($amount, 2),
-                    paymentDate: now()->toDateString(),
+                    amountUnderLock: function (Loan $locked) use ($from, $to, $includeScheduleIds, &$whyNothing): float {
+                        if ($this->hasEarlierArrears($locked, $from)) {
+                            $whyNothing = self::SKIP_EARLIER_ARREARS;
+
+                            return 0;
+                        }
+
+                        $due = $this->dueSchedules($locked, $from, $to);
+
+                        // A period another payment part-paid since the first
+                        // look would now take money meant for a later one.
+                        if ($this->unselectedPartPaidComesFirst($due, $includeScheduleIds)) {
+                            $whyNothing = self::SKIP_CHANGED_MEANWHILE;
+
+                            return 0;
+                        }
+
+                        $amount = $this->totalRemaining($this->filterIncludedSchedules($due, $includeScheduleIds));
+
+                        if ($amount <= 0) {
+                            $whyNothing = $this->totalRemaining($due) > 0 ? self::SKIP_CHANGED_MEANWHILE : self::SKIP_SETTLED_MEANWHILE;
+                        }
+
+                        return $amount;
+                    },
+                    paymentDate: $this->runDate()->toDateString(),
                     user: $user,
                     remarks: 'Auto-pay run '.$from->toDateString().' → '.$to->toDateString(),
                     method: 'auto_pay',
                     referenceNumber: $loan->cbs_reference,
                 );
+
+                if ($repayment === null) {
+                    $skipped++;
+                    $skips[] = $this->skip($loan, $whyNothing ?? self::SKIP_SETTLED_MEANWHILE);
+
+                    continue;
+                }
 
                 $processed++;
                 $repayments[] = [
@@ -169,7 +288,11 @@ class AutoPayService
                     'amount_paid' => (float) $repayment->amount_paid,
                 ];
             } catch (Throwable $e) {
-                $failed++;
+                $failures[] = [
+                    'loan_id' => $loan->id,
+                    'loan_account_number' => $loan->loan_account_number,
+                    'reason' => $this->failureReason($e),
+                ];
 
                 // The message is the whole value of this exception. A refused
                 // posting (CannotPostToTheBooksException) carries the one
@@ -186,8 +309,10 @@ class AutoPayService
         return [
             'processed' => $processed,
             'skipped' => $skipped,
-            'failed' => $failed,
+            'failed' => count($failures),
             'repayments' => $repayments,
+            'skips' => $skips,
+            'failures' => $failures,
         ];
     }
 
@@ -272,6 +397,106 @@ class AutoPayService
         $firstInitial = $borrower->first_name ? mb_substr($borrower->first_name, 0, 1).'.' : '';
 
         return trim($firstInitial.' '.($borrower->last_name ?? ''));
+    }
+
+    /**
+     * The date a run posts on and a preview quotes as of: today, at midnight,
+     * as RepaymentService reads a payment date. Shared, so the preview's
+     * penalty cut-off is the run's whatever the time of day.
+     */
+    private function runDate(): Carbon
+    {
+        return now()->startOfDay();
+    }
+
+    /**
+     * Whether a part-paid period staff did not select comes before one the
+     * run would charge. A payment allocates in period order, so that period
+     * would take the money meant for the later one.
+     *
+     * @param  Collection<int, AmortizationSchedule>  $due
+     * @param  list<int|string>  $includeScheduleIds
+     */
+    private function unselectedPartPaidComesFirst(Collection $due, array $includeScheduleIds): bool
+    {
+        $included = $this->filterIncludedSchedules($due, $includeScheduleIds);
+
+        if ($included->isEmpty()) {
+            return false;
+        }
+
+        $lastCharged = (int) $included->max('period_number');
+        $includedIds = $included->pluck('id')->map(fn ($id): int => (int) $id)->all();
+
+        return $due->contains(fn (AmortizationSchedule $schedule): bool => ! in_array((int) $schedule->id, $includedIds, true)
+            && (int) $schedule->period_number < $lastCharged);
+    }
+
+    /**
+     * Whether the loan has an open period due before the window. A payment
+     * allocates oldest first, so a run on such a loan would land on periods
+     * staff did not select.
+     */
+    private function hasEarlierArrears(Loan $loan, Carbon $from): bool
+    {
+        return $loan->amortizationSchedules()
+            ->whereIn('status', ['pending', 'partial', 'overdue'])
+            ->where('due_date', '<', $from->toDateString())
+            ->exists();
+    }
+
+    /**
+     * What is left of a period's late penalty once the payment's penalty step
+     * has run as of `$asOf`, in centavos, by the rule that step applies
+     * (RepaymentService::penaltyAsOf()). Writes nothing.
+     */
+    private function penaltyRemainingAsOf(Loan $loan, AmortizationSchedule $schedule, Carbon $asOf): int
+    {
+        $charged = $this->repaymentService->penaltyAsOf($loan, $schedule, $asOf) ?? (float) $schedule->penalty_amount;
+
+        return max(0, $this->centavos($charged) - $this->centavos($schedule->penalty_paid));
+    }
+
+    /**
+     * @return array{loan_id: int, loan_account_number: string|null, reason: string}
+     */
+    private function skip(Loan $loan, string $reason): array
+    {
+        return ['loan_id' => $loan->id, 'loan_account_number' => $loan->loan_account_number, 'reason' => $reason];
+    }
+
+    /**
+     * A failed loan's reason for staff: the refusal's own words where it was
+     * written for them (a validation error, a 409, a refused posting), never
+     * an unexpected error's internals, which stay in the log.
+     */
+    private function failureReason(Throwable $e): string
+    {
+        return match (true) {
+            $e instanceof ValidationException => (string) collect($e->errors())->flatten()->first(),
+            $e instanceof HttpResponseException => (string) (json_decode((string) $e->getResponse()->getContent(), true)['message'] ?? 'The payment was refused.'),
+            $e instanceof CannotPostToTheBooksException => $e->getMessage(),
+            default => 'An unexpected error stopped this payment; the details are in the server log.',
+        };
+    }
+
+    private function centavos(mixed $pesos): int
+    {
+        return (int) round((float) ($pesos ?? 0) * 100);
+    }
+
+    /**
+     * The loan's open periods falling due in the run's range, in period order.
+     *
+     * @return Collection<int, AmortizationSchedule>
+     */
+    private function dueSchedules(Loan $loan, Carbon $from, Carbon $to): Collection
+    {
+        return $loan->amortizationSchedules()
+            ->whereIn('status', ['pending', 'partial', 'overdue'])
+            ->whereBetween('due_date', [$from->toDateString(), $to->toDateString()])
+            ->orderBy('period_number')
+            ->get();
     }
 
     /**

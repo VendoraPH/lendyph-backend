@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Http\Requests\LoanAdjustment\ApproveLoanAdjustmentRequest;
+use App\Http\Requests\LoanAdjustment\BalanceAdjustmentPreviewRequest;
 use App\Http\Requests\LoanAdjustment\StoreLoanAdjustmentRequest;
 use App\Http\Resources\LoanAdjustmentResource;
 use App\Models\Loan;
@@ -54,6 +55,7 @@ class LoanAdjustmentController extends Controller
     #[OA\Post(
         path: '/api/loans/{loan}/adjustments',
         summary: 'Create a loan adjustment',
+        description: 'A `balance_adjustment` states exactly one of `new_values.adjustment_amount` (a signed change to the principal) or `new_values.target_principal_balance` (the unpaid principal to end on, at least 0, two decimals at most). Given a target, the server works out `adjustment_amount` = target − the loan\'s unpaid principal (GET /loans/{loan}/balance-adjustment-preview shows it first) and stores it with `target_principal_balance` and `outstanding_principal_at_request`; the stored `adjustment_amount` is what is approved and applied. Both or neither is a 422 on `new_values`; `outstanding_principal_at_request` may not be sent.',
         tags: ['Loan Adjustments'],
         security: [['sanctum' => []]],
         parameters: [
@@ -65,7 +67,7 @@ class LoanAdjustmentController extends Controller
                 required: ['adjustment_type', 'new_values'],
                 properties: [
                     new OA\Property(property: 'adjustment_type', type: 'string', enum: ['restructure', 'penalty_waiver', 'balance_adjustment', 'term_extension']),
-                    new OA\Property(property: 'new_values', type: 'object'),
+                    new OA\Property(property: 'new_values', type: 'object', example: ['target_principal_balance' => 50000, 'reason' => 'Agreed settlement']),
                     new OA\Property(property: 'description', type: 'string', nullable: true),
                     new OA\Property(property: 'remarks', type: 'string', nullable: true),
                 ],
@@ -89,6 +91,37 @@ class LoanAdjustmentController extends Controller
         return (new LoanAdjustmentResource($adjustment))
             ->response()
             ->setStatusCode(201);
+    }
+
+    #[OA\Get(
+        path: '/api/loans/{loan}/balance-adjustment-preview',
+        summary: 'Preview a balance adjustment to a target principal balance',
+        description: 'What a balance adjustment to `target_principal_balance` would be, worked out in centavos from the loan\'s unpaid principal (principal due less paid over its open periods; interest is never part of it): `adjustment_amount` = target − `outstanding_principal`, negative for a reduction. Read-only: writes nothing. Needs loan_adjustments:create; the loan must be released or ongoing (422 on `loan`).',
+        tags: ['Loan Adjustments'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'loan', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
+            new OA\Parameter(name: 'target_principal_balance', in: 'query', required: true, schema: new OA\Schema(type: 'number', minimum: 0, example: 50000)),
+        ],
+        responses: [
+            new OA\Response(response: 200, description: 'The adjustment', content: new OA\JsonContent(properties: [
+                new OA\Property(property: 'data', type: 'object', properties: [
+                    new OA\Property(property: 'outstanding_principal', type: 'number', example: 56800),
+                    new OA\Property(property: 'target_principal_balance', type: 'number', example: 50000),
+                    new OA\Property(property: 'adjustment_amount', type: 'number', example: -6800),
+                    new OA\Property(property: 'resulting_principal_balance', type: 'number', example: 50000),
+                ]),
+            ])),
+            new OA\Response(response: 403, description: 'Missing loan_adjustments:create'),
+            new OA\Response(response: 422, description: 'A missing, negative or more-than-two-decimal target, or a loan that cannot be adjusted'),
+        ],
+    )]
+    public function balanceAdjustmentPreview(BalanceAdjustmentPreviewRequest $request, Loan $loan): JsonResponse
+    {
+        return response()->json(['data' => $this->adjustmentService->balanceAdjustmentPreview(
+            $loan,
+            (float) $request->validated('target_principal_balance'),
+        )]);
     }
 
     #[OA\Get(

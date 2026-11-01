@@ -12,6 +12,7 @@ use App\Models\ShareCapitalLedger;
 use App\Models\User;
 use App\Services\Accounting\AutomaticPoster;
 use Carbon\Carbon;
+use Closure;
 use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -46,9 +47,9 @@ class RepaymentService
      * A loan closed between the request reading it and the lock is a 409, as
      * is a deadlock or a lock wait timeout, with nothing of the payment left.
      * This is the outermost transaction: RepaymentController::store(),
-     * AutoPayService::process(), DemoSeeder and the test helpers are the
-     * callers. A caller that already holds the loan's lock in its own
-     * transaction calls recordRepaymentOnLockedLoan() instead.
+     * DemoSeeder and the test helpers are the callers; AutoPayService goes
+     * through processRepaymentWithAmountUnderLock(). A caller that already
+     * holds the loan's lock in its own transaction calls recordRepaymentOnLockedLoan() instead.
      */
     public function processRepayment(
         Loan $loan,
@@ -69,6 +70,54 @@ class RepaymentService
             $this->lockLoanForPayment($loan);
 
             return $this->recordRepaymentOnLockedLoan($loan, $amountPaid, $paymentDate, $user, $remarks, $method, $referenceNumber);
+        });
+    }
+
+    /**
+     * Record a repayment whose amount is worked out under the loan's lock, as
+     * processRepayment() records one: same transaction, same lock order (the
+     * loan row first, no collateral), same 409s.
+     *
+     * `$amountUnderLock` gets the locked loan and returns what to pay, read
+     * from what is committed once the lock is held, so a payment that landed
+     * after the caller first read the periods is seen. Late penalties are
+     * applied first (applyPenalties()), so the amount covers the penalty the
+     * payment charges. When it returns 0 or less nothing is recorded and null
+     * is returned. For AutoPayService.
+     *
+     * @param  Closure(Loan): float  $amountUnderLock
+     */
+    public function processRepaymentWithAmountUnderLock(
+        Loan $loan,
+        Closure $amountUnderLock,
+        string $paymentDate,
+        User $user,
+        ?string $remarks = null,
+        string $method = 'cash',
+        ?string $referenceNumber = null,
+    ): ?Repayment {
+        if (! in_array($loan->status, Loan::ACTIVE_STATUSES, true)) {
+            throw ValidationException::withMessages([
+                'loan' => 'Repayments can only be recorded for released or ongoing loans.',
+            ]);
+        }
+
+        return LoanWriteTransaction::run(function () use ($loan, $amountUnderLock, $paymentDate, $user, $remarks, $method, $referenceNumber): ?Repayment {
+            $this->lockLoanForPayment($loan);
+
+            // The payment's own first step, run before the amount is worked out
+            // so it includes the late penalty the payment will charge (waived
+            // periods excluded, never below what was paid). Running it again in
+            // recordRepaymentOnLockedLoan() writes the same figures.
+            $this->applyPenalties($loan, Carbon::parse($paymentDate));
+
+            $amount = round((float) $amountUnderLock($loan), 2);
+
+            if ($amount <= 0) {
+                return null;
+            }
+
+            return $this->recordRepaymentOnLockedLoan($loan, $amount, $paymentDate, $user, $remarks, $method, $referenceNumber);
         });
     }
 
@@ -873,29 +922,50 @@ class RepaymentService
      */
     public function applyPenalties(Loan $loan, Carbon $asOfDate): void
     {
-        $penaltyRate = (float) $loan->penalty_rate;
-
-        if ($penaltyRate <= 0) {
+        if ((float) $loan->penalty_rate <= 0) {
             return;
         }
 
         $lateBefore = AmortizationSchedule::pastGraceCutoff($loan->grace_period_days, $asOfDate);
-        $arrearsBaseline = $loan->imported_arrears_baseline;
 
         $loan->amortizationSchedules()
             ->where('due_date', '<', $lateBefore)
             ->whereIn('status', ['pending', 'partial', 'overdue'])
             ->whereNull('penalty_waiver_id')
-            ->each(function (AmortizationSchedule $schedule) use ($penaltyRate, $arrearsBaseline) {
-                if (! AmortizationSchedule::isPenalisable($arrearsBaseline, $schedule->due_date)) {
+            ->each(function (AmortizationSchedule $schedule) use ($loan, $asOfDate) {
+                $penalty = $this->penaltyAsOf($loan, $schedule, $asOfDate);
+
+                if ($penalty === null) {
                     return;
                 }
 
                 $schedule->update([
-                    'penalty_amount' => $this->penaltyFor($schedule, $penaltyRate),
+                    'penalty_amount' => $penalty,
                     'status' => 'overdue',
                 ]);
             });
+    }
+
+    /**
+     * The penalty applyPenalties() charges `$schedule` as of `$asOfDate`, or
+     * null when it leaves the period alone: no penalty rate, a closed or
+     * waived period, one not yet late past its grace, or one due before the
+     * loan's imported arrears baseline. Pure: writes nothing, so a preview
+     * (AutoPayService::preview()) quotes what a payment will charge.
+     */
+    public function penaltyAsOf(Loan $loan, AmortizationSchedule $schedule, Carbon $asOfDate): ?float
+    {
+        $penaltyRate = (float) $loan->penalty_rate;
+
+        if ($penaltyRate <= 0
+            || $schedule->penalty_waiver_id !== null
+            || ! in_array($schedule->status, ['pending', 'partial', 'overdue'], true)
+            || ! $schedule->due_date->lt(AmortizationSchedule::pastGraceCutoff($loan->grace_period_days, $asOfDate))
+            || ! AmortizationSchedule::isPenalisable($loan->imported_arrears_baseline, $schedule->due_date)) {
+            return null;
+        }
+
+        return $this->penaltyFor($schedule, $penaltyRate);
     }
 
     /**

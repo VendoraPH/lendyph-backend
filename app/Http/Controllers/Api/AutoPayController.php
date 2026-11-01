@@ -16,13 +16,14 @@ class AutoPayController extends Controller
     #[OA\Get(
         path: '/api/auto-pay/preview',
         summary: 'Preview auto-pay deductions for a date window',
-        description: 'Returns summary totals plus a list of partial-payment rows so staff can decide which to include in the next process call.',
+        description: 'Returns summary totals plus a list of partial-payment rows so staff can decide which to include in the next process call. `include_schedule_ids[]` takes the selected part-paid rows exactly as the process call does (each must be one of `partial_rows`, else 422); `summary.partial_total` is their remaining amount, late penalty included as of today, and `summary.grand_total` = `total_amount` + `partial_total`, what the process call posts for the same selection. Read-only.',
         tags: ['Auto-Pay'],
         security: [['sanctum' => []]],
         parameters: [
             new OA\Parameter(name: 'product_ids[]', in: 'query', required: false, schema: new OA\Schema(type: 'array', items: new OA\Items(type: 'integer'))),
             new OA\Parameter(name: 'date_from', in: 'query', required: true, schema: new OA\Schema(type: 'string', format: 'date'), example: '2026-04-01'),
             new OA\Parameter(name: 'date_to', in: 'query', required: true, schema: new OA\Schema(type: 'string', format: 'date'), example: '2026-04-30'),
+            new OA\Parameter(name: 'include_schedule_ids[]', in: 'query', required: false, schema: new OA\Schema(type: 'array', items: new OA\Items(type: 'integer'))),
         ],
         responses: [
             new OA\Response(response: 200, description: 'Preview totals and partial rows'),
@@ -37,6 +38,7 @@ class AutoPayController extends Controller
             productIds: $request->input('product_ids', []) ?? [],
             dateFrom: $request->input('date_from'),
             dateTo: $request->input('date_to'),
+            includeScheduleIds: $request->input('include_schedule_ids', []) ?? [],
         );
 
         return response()->json(['data' => $data]);
