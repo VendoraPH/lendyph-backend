@@ -68,6 +68,8 @@ class PrintableFiguresTest extends TestCase
             'penalty' => 12.34,
             'total_due' => 70800,
             'amount_paid' => 11800,
+            'share_capital_build_up' => 0,
+            'total_payment' => 70800,
         ], $data['amortization_schedule_totals']);
     }
 

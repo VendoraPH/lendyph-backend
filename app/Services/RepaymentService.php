@@ -151,9 +151,10 @@ class RepaymentService
      *
      * For a caller that holds the loan's lock in an outermost transaction of
      * its own and must not open another: LoanAdjustmentService::extendLoan(),
-     * which collects the interest under its extension's lock, and
-     * previewAllocation(), whose transaction is rolled back. Everyone else
-     * calls processRepayment().
+     * which collects the interest under its extension's lock, and the
+     * previews that run in rolledBackUnderPaymentLock(): previewAllocation()
+     * and LoanAdjustmentService::extensionPreview(). Everyone else calls
+     * processRepayment().
      */
     public function recordRepaymentOnLockedLoan(
         Loan $loan,
@@ -434,11 +435,7 @@ class RepaymentService
             ]);
         }
 
-        // Rolled back whatever happens; a deadlock or lock wait timeout on the
-        // loan lock answers 409, as recording the payment does.
-        return LoanWriteTransaction::rolledBack(function () use ($loan, $amountPaid, $paymentDate, $user): array {
-            $this->lockLoanForPayment($loan);
-
+        return $this->rolledBackUnderPaymentLock($loan, function (Loan $loan) use ($amountPaid, $paymentDate, $user): array {
             $owedIds = $this->owedScheduleIds($loan, Carbon::parse($paymentDate));
             $repayment = $this->recordRepaymentOnLockedLoan($loan, $amountPaid, $paymentDate, $user, postToBooks: false);
             $allocations = $this->previewedAllocations($repayment);
@@ -468,6 +465,31 @@ class RepaymentService
                 'allocations' => $allocations,
                 'is_preview' => true,
             ];
+        });
+    }
+
+    /**
+     * Run `$read` on the loan locked as a payment locks it, inside a transaction
+     * that is rolled back whatever happens, so a preview can record and allocate
+     * a payment with recordRepaymentOnLockedLoan() and read the result without
+     * leaving a trace or a lock behind. A deadlock or lock wait timeout on the
+     * loan lock answers 409, as recording the payment does.
+     *
+     * For previewAllocation() and LoanAdjustmentService::extensionPreview(),
+     * which reads what the extension would collect under this lock, as
+     * extendLoan() does under its own.
+     *
+     * @template TResult
+     *
+     * @param  Closure(Loan): TResult  $read
+     * @return TResult
+     */
+    public function rolledBackUnderPaymentLock(Loan $loan, Closure $read): mixed
+    {
+        return LoanWriteTransaction::rolledBack(function () use ($loan, $read): mixed {
+            $this->lockLoanForPayment($loan);
+
+            return $read($loan);
         });
     }
 
