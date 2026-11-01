@@ -349,3 +349,79 @@ it('forbids creating or updating a role without settings:update', function () {
     expect($role->fresh()->display_name)->toBeNull();
     $this->assertDatabaseMissing('roles', ['name' => 'not_allowed']);
 });
+
+it('rejects a new role key that reads as another role display_name', function (string $label, string $key) {
+    Role::where('name', 'cashier')->firstOrFail()->forceFill(['display_name' => $label])->save();
+
+    $this->postJson('/api/roles', ['name' => $key])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['name']);
+
+    expect(Role::where('name', $key)->exists())->toBeFalse();
+})->with([
+    'single word' => ['Teller', 'teller'],
+    'spaced label' => ['Head  Teller', 'head_teller'],
+]);
+
+it('rejects renaming a custom role key to another role display_name', function () {
+    Role::where('name', 'cashier')->firstOrFail()->forceFill(['display_name' => 'Teller'])->save();
+    $role = Role::create(['name' => 'front_desk', 'guard_name' => 'web', 'is_system' => false]);
+
+    $this->putJson("/api/roles/{$role->id}", ['name' => 'teller'])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['name']);
+
+    expect($role->fresh()->name)->toBe('front_desk');
+});
+
+it('lets a custom role rename its key to its own display_name', function () {
+    $role = Role::create(['name' => 'front_desk', 'guard_name' => 'web', 'is_system' => false, 'display_name' => 'Desk Lead']);
+
+    $this->putJson("/api/roles/{$role->id}", ['name' => 'desk_lead'])
+        ->assertSuccessful()
+        ->assertJsonPath('data.name', 'desk_lead')
+        ->assertJsonPath('data.display_name', 'Desk Lead');
+});
+
+it('rejects a compatibility-form display_name that reads as another role key', function (string $label) {
+    $role = Role::create(['name' => 'lookalike', 'guard_name' => 'web', 'is_system' => false]);
+
+    $this->putJson("/api/roles/{$role->id}", ['display_name' => $label])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['display_name']);
+
+    $this->postJson('/api/roles', ['name' => 'lookalike_two', 'display_name' => $label])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['display_name']);
+})->with([
+    'fullwidth' => "\u{FF21}\u{FF44}\u{FF4D}\u{FF49}\u{FF4E}",
+    'mathematical bold' => "\u{1D400}\u{1D41D}\u{1D426}\u{1D422}\u{1D427}",
+    'fullwidth underscore' => "super\u{FF3F}admin",
+]);
+
+it('rejects combining marks and Hangul fillers in display_name', function (string $label) {
+    $role = Role::create(['name' => 'odd_marks', 'guard_name' => 'web', 'is_system' => false]);
+
+    $this->putJson("/api/roles/{$role->id}", ['display_name' => $label])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['display_name']);
+
+    $this->postJson('/api/roles', ['name' => 'odd_marks_two', 'display_name' => $label])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['display_name']);
+})->with([
+    'combining acute' => "Jose\u{0301} Cashier",
+    'combining overlay' => "Desk Cle\u{0336}rk",
+    'U+115F' => "Desk\u{115F}Clerk",
+    'U+1160' => "Desk\u{1160}Clerk",
+    'U+3164' => "Desk\u{3164}Clerk",
+    'U+FFA0' => "Desk\u{FFA0}Clerk",
+]);
+
+it('saves a display_name with precomposed accents', function () {
+    $role = Role::create(['name' => 'accented', 'guard_name' => 'web', 'is_system' => false]);
+
+    $this->putJson("/api/roles/{$role->id}", ['display_name' => "Jos\u{00E9} Cashier"])
+        ->assertSuccessful()
+        ->assertJsonPath('data.display_name', "Jos\u{00E9} Cashier");
+});
