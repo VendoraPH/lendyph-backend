@@ -2,6 +2,7 @@
 
 use App\Models\Role;
 use App\Models\User;
+use Illuminate\Support\Facades\DB;
 use Tests\TestCase;
 
 uses(TestCase::class);
@@ -416,6 +417,11 @@ it('rejects combining marks and Hangul fillers in display_name', function (strin
     'U+1160' => "Desk\u{1160}Clerk",
     'U+3164' => "Desk\u{3164}Clerk",
     'U+FFA0' => "Desk\u{FFA0}Clerk",
+    'unassigned U+2065' => "Desk\u{2065}Clerk",
+    'unassigned U+FFF0' => "Desk\u{FFF0}Clerk",
+    'unassigned tag area U+E0080' => "Desk\u{E0080}Clerk",
+    'Braille blank U+2800' => "Desk\u{2800}Clerk",
+    'private use U+E000' => "Desk\u{E000}Clerk",
 ]);
 
 it('saves a display_name with precomposed accents', function () {
@@ -440,4 +446,87 @@ it('saves a decomposed accent in display_name as the precomposed form', function
         ->assertJsonPath('data.display_name', "Jos\u{00E9} Teller");
 
     expect(Role::where('name', 'decomposed_two')->value('display_name'))->toBe("Jos\u{00E9} Teller");
+});
+
+it('refuses invalid UTF-8 in a form-encoded display_name with 422, not 500', function () {
+    $role = Role::create(['name' => 'bytes_role', 'guard_name' => 'web', 'is_system' => false]);
+
+    $this->put("/api/roles/{$role->id}", ['display_name' => "Admin\xFF"], ['Accept' => 'application/json'])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['display_name']);
+
+    $this->post('/api/roles', ['name' => 'bytes_role_two', 'display_name' => "Desk\xC3("], ['Accept' => 'application/json'])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['display_name']);
+
+    expect($role->fresh()->display_name)->toBeNull()
+        ->and(Role::where('name', 'bytes_role_two')->exists())->toBeFalse();
+});
+
+it('rejects a new role key that reads as another role full-width display_name', function () {
+    Role::where('name', 'cashier')->firstOrFail()->forceFill(['display_name' => "\u{FF34}\u{FF45}\u{FF4C}\u{FF4C}\u{FF45}\u{FF52}"])->save();
+
+    $this->postJson('/api/roles', ['name' => 'teller'])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['name']);
+});
+
+it('rejects a new role key that normalises to an existing key', function () {
+    Role::create(['name' => 'head_teller', 'guard_name' => 'web', 'is_system' => false]);
+
+    $this->postJson('/api/roles', ['name' => 'head__teller'])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['name']);
+
+    expect(Role::where('name', 'head__teller')->exists())->toBeFalse();
+});
+
+/**
+ * Run `$land` once, right after the form request's role lookup (the last
+ * read before the controller opens its transaction), so a competing write
+ * lands deterministically in the window between validation and the write.
+ */
+function landAfterRoleValidation(Closure $land): Closure
+{
+    $landed = false;
+    DB::listen(function ($query) use (&$landed, $land) {
+        $sql = strtolower($query->sql);
+
+        if (! $landed && str_contains($sql, 'select `id`, `name`, `display_name` from `roles`') && ! str_contains($sql, 'for update')) {
+            $landed = true;
+            $land();
+        }
+    });
+
+    return function () use (&$landed) {
+        return $landed;
+    };
+}
+
+it('refuses a new key when another role takes it as a label between validation and the write', function () {
+    $landed = landAfterRoleValidation(fn () => DB::table('roles')->where('name', 'cashier')->update(['display_name' => 'Teller']));
+
+    $this->postJson('/api/roles', ['name' => 'teller'])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['name'])
+        ->assertJsonFragment(['name' => ['The name is already used by another role.']]);
+
+    expect($landed())->toBeTrue('the competing relabel never landed, so this test proved nothing')
+        ->and(Role::where('name', 'teller')->exists())->toBeFalse();
+});
+
+it('refuses a label when another role takes it as a key between validation and the write', function () {
+    $cashier = Role::where('name', 'cashier')->firstOrFail();
+    $landed = landAfterRoleValidation(fn () => DB::table('roles')->insert([
+        'name' => 'teller', 'guard_name' => 'web', 'is_system' => false, 'is_active' => true,
+        'created_at' => now(), 'updated_at' => now(),
+    ]));
+
+    $this->putJson("/api/roles/{$cashier->id}", ['display_name' => 'Teller'])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['display_name'])
+        ->assertJsonFragment(['display_name' => ['The display name is already used by another role.']]);
+
+    expect($landed())->toBeTrue('the competing create never landed, so this test proved nothing')
+        ->and($cashier->fresh()->display_name)->toBeNull();
 });

@@ -7,6 +7,7 @@ use App\Http\Requests\Role\StoreRoleRequest;
 use App\Http\Requests\Role\UpdateRoleRequest;
 use App\Http\Resources\RoleResource;
 use App\Models\Role;
+use App\Rules\UniqueRoleDisplayName;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Support\Facades\DB;
@@ -98,6 +99,8 @@ class RoleController extends Controller
         $validated = $request->validated();
 
         $role = DB::transaction(function () use ($validated) {
+            self::lockAndRecheckLabels($validated);
+
             $role = Role::create([
                 'name' => $validated['name'],
                 'guard_name' => 'web',
@@ -151,6 +154,8 @@ class RoleController extends Controller
         $validated = $request->validated();
 
         DB::transaction(function () use ($role, $validated) {
+            self::lockAndRecheckLabels($validated, $role->id);
+
             $fields = collect($validated)->only(['name', 'display_name', 'description'])->toArray();
             if ($fields !== []) {
                 $role->update($fields);
@@ -252,5 +257,36 @@ class RoleController extends Controller
         $role->delete();
 
         return response()->json(['message' => 'Role deleted successfully.']);
+    }
+
+    /**
+     * The form request checks that a key or label doesn't read as another
+     * role's before the transaction opens, so two writes racing through that
+     * window (relabel cashier "Teller" while a role keyed `teller` is created)
+     * could both pass. Lock every role row, then repeat the check against the
+     * locked rows: the second writer waits for the first, sees its row and is
+     * refused with the same 422 the form request gives.
+     *
+     * @param  array<string, mixed>  $validated
+     *
+     * @throws ValidationException
+     */
+    private static function lockAndRecheckLabels(array $validated, ?int $ignoreRoleId = null): void
+    {
+        $roles = Role::query()->orderBy('id')->lockForUpdate()->get(['id', 'name', 'display_name']);
+
+        $errors = [];
+        foreach (['name', 'display_name'] as $field) {
+            $value = $validated[$field] ?? null;
+
+            if (is_string($value) && trim($value) !== ''
+                && UniqueRoleDisplayName::readsAsAnotherRole($roles, $value, $ignoreRoleId)) {
+                $errors[$field] = UniqueRoleDisplayName::message($field);
+            }
+        }
+
+        if ($errors !== []) {
+            throw ValidationException::withMessages($errors);
+        }
     }
 }

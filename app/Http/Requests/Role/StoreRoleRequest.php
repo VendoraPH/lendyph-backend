@@ -3,9 +3,9 @@
 namespace App\Http\Requests\Role;
 
 use App\Rules\UniqueRoleDisplayName;
+use App\Rules\ValidUtf8;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
-use Normalizer;
 
 class StoreRoleRequest extends FormRequest
 {
@@ -18,15 +18,17 @@ class StoreRoleRequest extends FormRequest
      * Trim and NFC-normalise display_name before validation so the uniqueness,
      * length and character checks see what is stored. NFC turns a decomposed
      * accent (e + U+0301) into its precomposed form; marks with no
-     * precomposed form stay and are refused.
+     * precomposed form stay and are refused. Invalid UTF-8 is left as sent,
+     * for ValidUtf8 to refuse.
      */
     protected function prepareForValidation(): void
     {
-        if (is_string($this->input('display_name'))) {
-            $trimmed = trim($this->input('display_name'));
-            $composed = Normalizer::normalize($trimmed, Normalizer::FORM_C);
+        $composed = is_string($this->input('display_name'))
+            ? UniqueRoleDisplayName::compose($this->input('display_name'))
+            : null;
 
-            $this->merge(['display_name' => $composed === false ? $trimmed : $composed]);
+        if ($composed !== null) {
+            $this->merge(['display_name' => $composed]);
         }
     }
 
@@ -45,9 +47,10 @@ class StoreRoleRequest extends FormRequest
                 // Nor may the key read as another role's display name.
                 new UniqueRoleDisplayName,
             ],
-            // No control, zero-width, bidi, combining or Hangul filler
-            // characters: they let two labels look identical in the role picker.
-            'display_name' => ['sometimes', 'nullable', 'string', 'max:100', 'not_regex:'.UniqueRoleDisplayName::FORBIDDEN_CHARACTERS, new UniqueRoleDisplayName],
+            // Valid UTF-8 first (bail): a /u pattern never matches invalid
+            // bytes. Then no character that lets two labels look identical in
+            // the role picker (see UniqueRoleDisplayName::FORBIDDEN_CHARACTERS).
+            'display_name' => ['bail', 'sometimes', 'nullable', 'string', new ValidUtf8, 'max:100', 'not_regex:'.UniqueRoleDisplayName::FORBIDDEN_CHARACTERS, new UniqueRoleDisplayName],
             'description' => ['nullable', 'string', 'max:500'],
             'permissions' => ['nullable', 'array'],
             'permissions.*' => ['string', Rule::exists('permissions', 'name')],
