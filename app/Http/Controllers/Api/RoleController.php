@@ -77,6 +77,7 @@ class RoleController extends Controller
                 required: ['name'],
                 properties: [
                     new OA\Property(property: 'name', type: 'string', example: 'branch_manager'),
+                    new OA\Property(property: 'display_name', type: 'string', maxLength: 100, nullable: true, example: 'Branch Manager'),
                     new OA\Property(property: 'description', type: 'string', nullable: true, example: 'Manages a single branch'),
                     new OA\Property(
                         property: 'permissions',
@@ -100,6 +101,7 @@ class RoleController extends Controller
             $role = Role::create([
                 'name' => $validated['name'],
                 'guard_name' => 'web',
+                'display_name' => $validated['display_name'] ?? null,
                 'description' => $validated['description'] ?? null,
                 'is_active' => true,
                 'is_system' => false,
@@ -133,6 +135,7 @@ class RoleController extends Controller
             content: new OA\JsonContent(
                 properties: [
                     new OA\Property(property: 'name', type: 'string', description: 'Only editable on custom roles'),
+                    new OA\Property(property: 'display_name', type: 'string', maxLength: 100, nullable: true, description: 'Label shown for the role. Editable on system roles too; never changes `name`.'),
                     new OA\Property(property: 'description', type: 'string', nullable: true),
                     new OA\Property(property: 'permissions', type: 'array', items: new OA\Items(type: 'string')),
                 ],
@@ -148,7 +151,7 @@ class RoleController extends Controller
         $validated = $request->validated();
 
         DB::transaction(function () use ($role, $validated) {
-            $fields = collect($validated)->only(['name', 'description'])->toArray();
+            $fields = collect($validated)->only(['name', 'display_name', 'description'])->toArray();
             if ($fields !== []) {
                 $role->update($fields);
             }
