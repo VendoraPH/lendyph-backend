@@ -140,6 +140,8 @@ class DashboardService
             ->join('borrowers', 'loans.borrower_id', '=', 'borrowers.id')
             ->whereDate('amortization_schedules.due_date', $targetDate)
             ->whereIn('loans.status', ['released', 'ongoing'])
+            // A period with nothing due (closed by an adjustment) is not a due.
+            ->where('amortization_schedules.total_due', '>', 0)
             ->select(
                 'amortization_schedules.id',
                 'amortization_schedules.loan_id',
@@ -150,42 +152,70 @@ class DashboardService
                 'loans.loan_account_number',
                 DB::raw("CONCAT(borrowers.first_name, ' ', borrowers.last_name) as borrower_name")
             )
+            ->orderBy('amortization_schedules.id')
             ->get();
 
-        $items = $schedules->map(function ($s) {
-            $amountDue = (float) $s->total_due;
-            $amountPaid = (float) $s->principal_paid + (float) $s->interest_paid + (float) $s->penalty_paid;
+        $items = $schedules->map(fn ($s): array => $this->dailyDueItem($s));
 
-            if ($amountPaid >= $amountDue) {
-                $status = 'collected';
-            } elseif ($amountPaid > 0) {
-                $status = 'partial';
-            } else {
-                $status = 'pending';
-            }
-
-            return [
-                'loan_id' => $s->loan_id,
-                'loan_account_number' => $s->loan_account_number,
-                'borrower_name' => $s->borrower_name,
-                'amount_due' => round($amountDue, 2),
-                'amount_paid' => round($amountPaid, 2),
-                'status' => $status,
-            ];
-        });
-
-        $totalDue = $items->sum('amount_due');
-        $totalCollected = $items->where('status', 'collected')->sum('amount_due')
-            + $items->where('status', 'partial')->sum('amount_paid');
+        $centavos = fn (float $pesos): int => (int) round($pesos * 100);
+        $totalDue = $items->sum(fn (array $item): int => $centavos($item['amount_due']));
+        $collectedInFull = $items->where('status', 'collected')->sum(fn (array $item): int => $centavos($item['amount_due']));
+        $partiallyCollected = $items->where('status', 'partial')->sum(fn (array $item): int => $centavos($item['amount_collected']));
+        $totalCollected = $collectedInFull + $partiallyCollected;
 
         return [
             'data' => $items->values()->toArray(),
             'summary' => [
-                'total_due' => round($totalDue, 2),
-                'total_collected' => round($totalCollected, 2),
+                'total_due' => $totalDue / 100,
+                'total_collected' => $totalCollected / 100,
+                'collected_in_full' => $collectedInFull / 100,
+                'partially_collected' => $partiallyCollected / 100,
                 'collection_rate' => $totalDue > 0 ? round($totalCollected / $totalDue * 100, 1) : 0,
-                'uncollected' => round(max(0, $totalDue - $totalCollected), 2),
+                'uncollected' => max(0, $totalDue - $totalCollected) / 100,
+                'counts' => [
+                    'collected' => $items->where('status', 'collected')->count(),
+                    'partial' => $items->where('status', 'partial')->count(),
+                    'pending' => $items->where('status', 'pending')->count(),
+                ],
             ],
+        ];
+    }
+
+    /**
+     * One daily-dues row, by the principal and interest paid against it:
+     * `collected` once they cover its `total_due`, `partial` while some but not
+     * all of it is paid, `pending` while none is. Penalty paid never counts
+     * towards the amount due: a period with only its penalty paid (₱0
+     * principal and interest) is `pending`, one with penalty and part of the
+     * principal and interest paid is `partial`, and the collection rate can
+     * never pass 100%.
+     *
+     * `amount_collected` is the principal and interest paid towards the amount
+     * due, capped at it. `amount_paid` stays everything paid, penalty included.
+     *
+     * @return array{loan_id: int, loan_account_number: string|null, borrower_name: string, amount_due: float, amount_paid: float, amount_collected: float, status: string}
+     */
+    private function dailyDueItem(object $schedule): array
+    {
+        $amountDue = (int) round((float) $schedule->total_due * 100);
+        $principalAndInterest = (int) round((float) $schedule->principal_paid * 100) + (int) round((float) $schedule->interest_paid * 100);
+        $amountPaid = $principalAndInterest + (int) round((float) $schedule->penalty_paid * 100);
+        $collected = min($principalAndInterest, $amountDue);
+
+        $status = match (true) {
+            $collected >= $amountDue => 'collected',
+            $collected > 0 => 'partial',
+            default => 'pending',
+        };
+
+        return [
+            'loan_id' => $schedule->loan_id,
+            'loan_account_number' => $schedule->loan_account_number,
+            'borrower_name' => $schedule->borrower_name,
+            'amount_due' => $amountDue / 100,
+            'amount_paid' => $amountPaid / 100,
+            'amount_collected' => $collected / 100,
+            'status' => $status,
         ];
     }
 

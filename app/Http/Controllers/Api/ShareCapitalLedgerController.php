@@ -7,8 +7,10 @@ use App\Http\Requests\ShareCapital\StoreShareCapitalLedgerRequest;
 use App\Http\Resources\ShareCapitalLedgerResource;
 use App\Models\ShareCapitalLedger;
 use App\Services\LikePattern;
+use App\Services\ShareCapitalMemberService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
+use Illuminate\Http\Resources\Json\JsonResource;
 use OpenApi\Attributes as OA;
 
 class ShareCapitalLedgerController extends Controller
@@ -16,6 +18,7 @@ class ShareCapitalLedgerController extends Controller
     #[OA\Get(
         path: '/api/share-capital/ledger',
         summary: 'List share capital ledger entries',
+        description: 'Each entry carries `running_balance`: the member\'s balance after it, over all of the member\'s entries in posting order (date, then id), whatever the filters. With `borrower_id`, `meta.summary` carries that member\'s `opening_balance` (before `date_from`), `total_credits` and `total_debits` (from `date_from` to `date_to`) and `ending_balance`.',
         tags: ['Share Capital'],
         security: [['sanctum' => []]],
         parameters: [
@@ -30,7 +33,7 @@ class ShareCapitalLedgerController extends Controller
             new OA\Response(response: 401, description: 'Unauthenticated'),
         ],
     )]
-    public function index(): AnonymousResourceCollection
+    public function index(ShareCapitalMemberService $members): AnonymousResourceCollection
     {
         $this->authorize('share_capital:view');
 
@@ -60,7 +63,8 @@ class ShareCapitalLedgerController extends Controller
         $dateTo = $filters['date_to'] ?? null;
         $search = $filters['search'] ?? null;
 
-        $entries = ShareCapitalLedger::with('borrower', 'createdByUser')
+        $entries = $members->withRunningBalance(ShareCapitalLedger::query())
+            ->with('borrower', 'createdByUser')
             ->when(filled($borrowerId), fn ($q) => $q->where('borrower_id', $borrowerId))
             ->when(filled($dateFrom), fn ($q) => $q->whereDate('date', '>=', $dateFrom))
             ->when(filled($dateTo), fn ($q) => $q->whereDate('date', '<=', $dateTo))
@@ -78,7 +82,56 @@ class ShareCapitalLedgerController extends Controller
             ->orderByDesc('id')
             ->paginate(min(max((int) ($filters['per_page'] ?? 15), 1), 100));
 
-        return ShareCapitalLedgerResource::collection($entries);
+        $collection = ShareCapitalLedgerResource::collection($entries);
+
+        if (filled($borrowerId)) {
+            $collection->additional(['meta' => [
+                'summary' => $members->memberPeriod((int) $borrowerId, $dateFrom, $dateTo),
+            ]]);
+        }
+
+        return $collection;
+    }
+
+    #[OA\Get(
+        path: '/api/share-capital/members',
+        summary: 'Share capital balance per member',
+        description: 'One row per member with ledger entries: `total_credits`, `total_debits`, `balance`, `entry_count` and `last_transaction_date`, over every entry. Each `balance` equals the member\'s share capital statement `closing_balance`. `meta.totals` covers the whole book (`member_count`, `total_credits`, `total_debits`, `balance`); `meta.matching_totals` covers the members matching `search`. `search` matches the member code and name, with %, _ and \\ taken literally.',
+        tags: ['Share Capital'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'search', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
+            new OA\Parameter(name: 'sort', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['name', 'balance'], default: 'name')),
+            new OA\Parameter(name: 'direction', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['asc', 'desc'], default: 'asc')),
+            new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 25, maximum: 100)),
+        ],
+        responses: [
+            new OA\Response(response: 200, description: 'Paginated member balances with book totals'),
+            new OA\Response(response: 403, description: 'Missing share_capital:view'),
+        ],
+    )]
+    public function members(ShareCapitalMemberService $members): AnonymousResourceCollection
+    {
+        $this->authorize('share_capital:view');
+
+        $filters = request()->validate([
+            'search' => ['nullable', 'string', 'max:255'],
+            'sort' => ['nullable', 'in:name,balance'],
+            'direction' => ['nullable', 'in:asc,desc'],
+            'per_page' => ['nullable', 'integer', 'min:1'],
+        ]);
+
+        $result = $members->members(
+            $filters['search'] ?? null,
+            $filters['sort'] ?? 'name',
+            $filters['direction'] ?? 'asc',
+            min((int) ($filters['per_page'] ?? 25), 100),
+        );
+
+        return JsonResource::collection($result['members'])->additional(['meta' => [
+            'totals' => $result['totals'],
+            'matching_totals' => $result['matching_totals'],
+        ]]);
     }
 
     #[OA\Post(
