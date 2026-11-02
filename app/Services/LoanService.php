@@ -1857,8 +1857,9 @@ class LoanService
      * per month of the term, kept between its bounds), each to the centavo by
      * FeeAmount, the calculation every fee amount comes from, keeping the
      * stated value as `original_value`. A formula item also keeps its
-     * per-month flag and bounds; a per-month one with no known term charges
-     * no months, so only its minimum.
+     * per-month flag and bounds. A per-month one with no known term is left
+     * out, as LoanReleaseFeeService leaves such a catalog fee out, never
+     * charged for zero months.
      *
      * computeDeductions() and the form preview both build their items here,
      * so the preview lists exactly what saving the loan would store.
@@ -1873,10 +1874,15 @@ class LoanService
 
         foreach ($deductions as $deduction) {
             $type = (string) $deduction['type'];
+            $amount = FeeAmount::forCustomFee($deduction, $principalAmount, $termMonths);
+
+            if ($amount === null) {
+                continue;
+            }
 
             $items[] = [
                 'name' => $deduction['name'],
-                'amount' => FeeAmount::forCustomFee($deduction, $principalAmount, $termMonths ?? [0, 1]),
+                'amount' => $amount,
                 'type' => $type,
                 'original_value' => $deduction['amount'],
                 ...FeeAmount::formulaFields($type, $deduction),
@@ -1974,7 +1980,7 @@ class LoanService
         $preview = [
             'collateral' => CollateralSecurity::summary($principal, $pledged),
             'maturity_date' => $maturity?->toDateString(),
-            'deductions' => $product === null || $principal <= 0 ? null : $this->formDeductions($product, $input, $principal, $maturity),
+            'deductions' => $product === null || $principal <= 0 ? null : $this->formDeductions($product, $input, $principal, $maturity, $edited?->term_unit),
             'amortization' => $product === null || $maturity === null ? null : $this->formSchedule($product, $input, $principal, $maturity),
         ];
 
@@ -2152,9 +2158,12 @@ class LoanService
      * @param  array<string, mixed>  $input
      * @return array{items: list<array<string, mixed>>, stated_total: float|int, configured_fees: list<array<string, mixed>>, configured_total: float|int, total_deductions: float|int, net_proceeds: float|int|null, error: string|null}
      */
-    private function formDeductions(LoanProduct $product, array $input, int $principal, ?Carbon $maturity): array
+    private function formDeductions(LoanProduct $product, array $input, int $principal, ?Carbon $maturity, ?TermUnit $storedTermUnit = null): array
     {
-        $termMonths = FeeAmount::termMonths($input['term'] ?? null, $product->term_unit);
+        // The unit the loan carries at release: an edited loan's own stored
+        // one; a new loan, a restructure's included, copies the product's.
+        $termUnit = $storedTermUnit ?? $product->term_unit;
+        $termMonths = FeeAmount::termMonths($input['term'] ?? null, $termUnit);
         $items = $this->deductionItems($principal / 100, $input['deductions'] ?? $this->productFeeDeductions($product), $termMonths);
         $stated = 0;
 
@@ -2168,7 +2177,7 @@ class LoanService
             // The term a per-month formula fee multiplies by: the form's, in
             // the product's unit, as the saved loan will carry it.
             'term' => $input['term'] ?? null,
-            'term_unit' => $product->term_unit,
+            'term_unit' => $termUnit,
             'start_date' => $input['start_date'] ?? null,
             'maturity_date' => $maturity?->toDateString(),
             'deductions' => $items,

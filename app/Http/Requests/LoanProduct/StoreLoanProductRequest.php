@@ -87,4 +87,13 @@ class StoreLoanProductRequest extends FormRequest
         $this->guardAgainstFeeCatalogOverlap($validator);
         $this->guardCustomFeeFormulaBounds($validator);
     }
+
+    /**
+     * @param  string|null  $key
+     * @param  mixed  $default
+     */
+    public function validated($key = null, $default = null): mixed
+    {
+        return data_get($this->withCustomFeeFormulaFieldsNormalised(parent::validated()), $key, $default);
+    }
 }

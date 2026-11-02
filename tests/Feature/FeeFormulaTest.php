@@ -8,7 +8,10 @@ use App\Models\Loan;
 use App\Models\LoanProduct;
 use App\Services\DisclosureService;
 use App\Services\FeeAmount;
+use App\Services\LoanReleaseFeeService;
 use App\Services\LoanService;
+use Illuminate\Support\Facades\DB;
+use RuntimeException;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
@@ -328,5 +331,166 @@ class FeeFormulaTest extends TestCase
         $product = $this->freeProduct();
         $this->putJson("/api/loan-products/{$product->id}", ['custom_fees' => [['name' => 'Handling', 'type' => 'formula', 'value' => 0.5, 'min_amount' => 300, 'max_amount' => 100]]])
             ->assertUnprocessable()->assertJsonValidationErrors('custom_fees.0.max_amount');
+    }
+
+    // ── Review follow-ups ────────────────────────────────────────────────
+
+    /**
+     * The hash development gives these two fees (computed from its
+     * fingerprint(): sha256 of the JSON rows [id, name, type, value]). A
+     * fixed or percentage fee's fingerprint must not move, or a preview
+     * issued before the deploy would answer 409 at release.
+     */
+    public function test_fixed_and_percentage_fingerprints_are_unchanged_from_development(): void
+    {
+        $fees = [
+            (new Fee)->forceFill(['id' => 7, 'name' => 'Flat Fee', 'type' => 'fixed', 'value' => 500, 'per_month' => true, 'min_amount' => 1, 'max_amount' => 2]),
+            (new Fee)->forceFill(['id' => 8, 'name' => 'Share Fee', 'type' => 'percentage', 'value' => 2.5]),
+        ];
+
+        $this->assertSame(
+            'e036d0bab5bbf28ff76ad8c6dedea1e5c39bec3c4d5e4371aef5723371aa2377',
+            app(LoanReleaseFeeService::class)->fingerprint($fees),
+        );
+    }
+
+    public function test_flipping_per_month_since_the_preview_is_refused_with_409(): void
+    {
+        $product = $this->freeProduct();
+        $fee = $this->formulaFee($product, ['per_month' => false]);
+        $loan = $this->approvedLoan($product, 10000);
+
+        $fingerprint = $this->getJson("/api/loans/{$loan->id}/release-preview")->assertOk()->json('data.fee_fingerprint');
+
+        $fee->update(['per_month' => true]);
+
+        $this->patchJson("/api/loans/{$loan->id}/release", ['fee_fingerprint' => $fingerprint])
+            ->assertStatus(409)->assertJsonValidationErrors(['fee_fingerprint']);
+        $this->assertSame('approved', $loan->fresh()->status);
+    }
+
+    private function formulaMigration(): object
+    {
+        return require database_path('migrations/2026_11_02_210500_add_formula_type_to_fees_table.php');
+    }
+
+    public function test_the_rollback_is_refused_while_a_formula_fee_exists(): void
+    {
+        $this->formulaFee($this->freeProduct());
+
+        try {
+            $this->formulaMigration()->down();
+            $this->fail('The rollback ran with a formula fee in Settings.');
+        } catch (RuntimeException $e) {
+            $this->assertStringContainsString('Formula fees exist', $e->getMessage());
+        }
+
+        $this->assertTrue(DB::getSchemaBuilder()->hasColumn('fees', 'per_month'));
+        $this->assertSame(1, Fee::where('type', 'formula')->count());
+    }
+
+    public function test_the_rollback_is_refused_while_a_product_carries_a_formula_custom_fee(): void
+    {
+        $this->freeProduct(['custom_fees' => [['name' => 'Flat', 'type' => 'fixed', 'value' => 50]]]);
+        $this->freeProduct(['custom_fees' => [['name' => 'Handling', 'type' => 'formula', 'value' => 0.5, 'per_month' => true]]]);
+
+        try {
+            $this->formulaMigration()->down();
+            $this->fail('The rollback ran with a formula custom fee on a product.');
+        } catch (RuntimeException $e) {
+            $this->assertStringContainsString('formula custom fees', $e->getMessage());
+        }
+
+        $this->assertTrue(DB::getSchemaBuilder()->hasColumn('fees', 'per_month'));
+    }
+
+    public function test_a_formula_rate_above_100_percent_is_refused(): void
+    {
+        $this->postJson('/api/fees', ['name' => 'Runaway', 'type' => 'formula', 'value' => 100.0001])
+            ->assertUnprocessable()->assertJsonValidationErrors('value');
+        $this->postJson('/api/fees', ['name' => 'Whole', 'type' => 'formula', 'value' => 100])->assertCreated();
+
+        // A ₱500 fixed fee switched to formula without a new rate would be 500%.
+        $fixed = Fee::create(['name' => 'Five Hundred', 'type' => 'fixed', 'value' => 500]);
+        $this->putJson("/api/fees/{$fixed->id}", ['type' => 'formula'])
+            ->assertUnprocessable()->assertJsonValidationErrors('value');
+        $this->putJson("/api/fees/{$fixed->id}", ['type' => 'formula', 'value' => 1.5])->assertOk();
+
+        // A fixed fee is pesos, never capped at 100.
+        $this->postJson('/api/fees', ['name' => 'Big Fixed', 'type' => 'fixed', 'value' => 500])->assertCreated();
+
+        $this->postJson('/api/loan-products', $this->productPayload(['name' => 'Handling', 'type' => 'formula', 'value' => 150]))
+            ->assertUnprocessable()->assertJsonValidationErrors('custom_fees.0.value');
+    }
+
+    public function test_a_product_custom_fee_that_is_not_a_formula_drops_the_formula_fields(): void
+    {
+        $id = $this->postJson('/api/loan-products', array_merge($this->productPayload(['name' => 'Flat', 'type' => 'fixed', 'value' => 50, 'per_month' => true, 'min_amount' => 10, 'max_amount' => 20]), [
+            'custom_fees' => [
+                ['name' => 'Flat', 'type' => 'fixed', 'value' => 50, 'per_month' => true, 'min_amount' => 10, 'max_amount' => 20],
+                ['name' => 'Handling', 'type' => 'formula', 'value' => 0.5, 'per_month' => true, 'min_amount' => 10],
+            ],
+        ]))->assertCreated()->json('data.id');
+
+        $this->assertSame(
+            [['name' => 'Flat', 'type' => 'fixed', 'value' => 50], ['name' => 'Handling', 'type' => 'formula', 'value' => 0.5, 'per_month' => true, 'min_amount' => 10]],
+            LoanProduct::find($id)->custom_fees,
+        );
+
+        $this->putJson("/api/loan-products/{$id}", ['custom_fees' => [['name' => 'Handling', 'type' => 'percentage', 'value' => 0.5, 'per_month' => true, 'max_amount' => 20]]])->assertOk();
+        $this->assertSame([['name' => 'Handling', 'type' => 'percentage', 'value' => 0.5]], LoanProduct::find($id)->custom_fees);
+    }
+
+    public function test_a_per_month_formula_deduction_with_no_known_term_is_left_out(): void
+    {
+        $deductions = [
+            ['name' => 'Flat', 'amount' => 50, 'type' => 'fixed'],
+            ['name' => 'Handling', 'amount' => 1, 'type' => 'formula', 'per_month' => true, 'min_amount' => 100],
+        ];
+        $loans = app(LoanService::class);
+
+        $unknown = $loans->computeDeductions(10000, $deductions);
+        $this->assertSame(['Flat'], array_column($unknown['items'], 'name'));
+        $this->assertEquals(50, $unknown['total']);
+
+        // 1% × 6 months of ₱10,000.00, once the term is known.
+        $known = $loans->computeDeductions(10000, $deductions, FeeAmount::termMonths(6, 'months'));
+        $this->assertSame([50.0, 600.0], array_column($known['items'], 'amount'));
+    }
+
+    public function test_the_edit_preview_uses_the_loans_stored_term_unit_as_the_release_does(): void
+    {
+        $product = $this->freeProduct();
+        $this->formulaFee($product, ['per_month' => true]);
+
+        $loans = app(LoanService::class);
+        $loan = $loans->createLoan([
+            'borrower_id' => Borrower::factory()->create(['branch_id' => $this->branch->id])->id,
+            'loan_product_id' => $product->id,
+            'principal_amount' => 10000,
+            'start_date' => now()->toDateString(),
+            'deductions' => [],
+        ], $this->admin);
+
+        // The product moves to a days term after the loan copied its months.
+        $product->update(['term_unit' => 'days']);
+        $this->assertSame('months', $loan->fresh()->term_unit->value);
+
+        $form = $this->postJson('/api/loans/preview', [
+            'loan_id' => $loan->id,
+            'loan_product_id' => $product->id,
+            'principal_amount' => 10000,
+            'interest_rate' => 3,
+            'term' => 6,
+            'frequency' => 'monthly',
+            'deductions' => [],
+        ])->assertOk()->json('data.deductions.configured_fees');
+
+        $loans->submitForReview($loan);
+        $loans->approve($loan, $this->admin, 'Approved for testing');
+
+        // 1% × 6 months of ₱10,000.00, not 6 days' worth.
+        $this->assertSame(600.0, $this->previewedFeeAmount($loan->fresh()));
+        $this->assertEquals(600, $form[0]['amount']);
     }
 }

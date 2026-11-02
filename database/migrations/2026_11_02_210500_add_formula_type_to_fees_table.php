@@ -27,13 +27,24 @@ return new class extends Migration
     }
 
     /**
-     * Refused while any formula fee exists: turning one into another type
-     * would silently change what every later release charges.
+     * Refused while any formula fee exists, in Settings > Fees or among a
+     * loan product's custom fees: turning one into another type would
+     * silently change what it charges.
      */
     public function down(): void
     {
         if (DB::table('fees')->where('type', 'formula')->exists()) {
             throw new RuntimeException('Formula fees exist. Change or delete them in Settings before rolling this migration back.');
+        }
+
+        $productsWithFormula = DB::table('loan_products')
+            ->whereNotNull('custom_fees')
+            ->pluck('custom_fees')
+            ->contains(fn (mixed $fees): bool => collect(json_decode((string) $fees, true) ?: [])
+                ->contains(fn (mixed $fee): bool => is_array($fee) && ($fee['type'] ?? null) === 'formula'));
+
+        if ($productsWithFormula) {
+            throw new RuntimeException('Loan products carry formula custom fees. Change or remove them before rolling this migration back.');
         }
 
         Schema::table('fees', function (Blueprint $table) {

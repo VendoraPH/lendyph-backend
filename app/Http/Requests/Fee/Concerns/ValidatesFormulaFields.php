@@ -9,15 +9,18 @@ use Illuminate\Contracts\Validation\Validator;
 /**
  * The fields of fee type "formula" (decision 5e), on a catalog fee and on a
  * product's custom fees: `value` is the rate (a percentage of the principal,
- * as for a percentage fee), `per_month` multiplies it by the term in months,
- * and `min_amount` / `max_amount` are optional peso bounds, to the centavo,
- * with the minimum no larger than the maximum. See {@see FeeAmount}.
+ * at most 100, as the frontend caps it), `per_month` multiplies it by the
+ * term in months, and `min_amount` / `max_amount` are optional peso bounds, to
+ * the centavo, with the minimum no larger than the maximum. See
+ * {@see FeeAmount}.
  *
  * Shared by `StoreFeeRequest`, `UpdateFeeRequest` and the two loan product
  * requests.
  */
 trait ValidatesFormulaFields
 {
+    private const RATE_CAP_MESSAGE = 'A formula fee\'s rate cannot exceed 100% of the loan amount.';
+
     protected function feeTypeRule(): string
     {
         return 'in:'.implode(',', FeeAmount::TYPES);
@@ -36,13 +39,21 @@ trait ValidatesFormulaFields
     }
 
     /**
-     * A catalog fee's minimum may not exceed its maximum. On an update a bound
-     * that isn't resent is the stored one, so lowering only the maximum below
-     * the stored minimum is caught too.
+     * A catalog fee's minimum may not exceed its maximum, and a formula's rate
+     * may not exceed 100%. On an update a field that isn't resent is the stored
+     * one, so lowering only the maximum below the stored minimum, or switching
+     * a ₱500 fixed fee to formula without a new rate, is caught too.
      */
     protected function guardFormulaBounds(Validator $validator, ?Fee $existing = null): void
     {
         $validator->after(function (Validator $v) use ($existing): void {
+            $type = $this->has('type') ? $this->input('type') : $existing?->type;
+            $rate = $this->has('value') ? $this->input('value') : $existing?->value;
+
+            if ($type === 'formula' && ! $v->errors()->has('value') && $this->rateIsAboveCap($rate)) {
+                $v->errors()->add('value', self::RATE_CAP_MESSAGE);
+            }
+
             if ($v->errors()->hasAny(['min_amount', 'max_amount'])) {
                 return;
             }
@@ -69,7 +80,15 @@ trait ValidatesFormulaFields
             }
 
             foreach ($fees as $index => $fee) {
-                if (! is_array($fee) || $v->errors()->hasAny(["custom_fees.{$index}.min_amount", "custom_fees.{$index}.max_amount"])) {
+                if (! is_array($fee)) {
+                    continue;
+                }
+
+                if (($fee['type'] ?? null) === 'formula' && ! $v->errors()->has("custom_fees.{$index}.value") && $this->rateIsAboveCap($fee['value'] ?? null)) {
+                    $v->errors()->add("custom_fees.{$index}.value", self::RATE_CAP_MESSAGE);
+                }
+
+                if ($v->errors()->hasAny(["custom_fees.{$index}.min_amount", "custom_fees.{$index}.max_amount"])) {
                     continue;
                 }
 
@@ -102,6 +121,35 @@ trait ValidatesFormulaFields
         }
 
         return array_merge($validated, ['per_month' => false, 'min_amount' => null, 'max_amount' => null]);
+    }
+
+    /**
+     * The validated data with each product custom fee that isn't a formula
+     * stripped of the formula fields, as a catalog fee is
+     * ({@see self::withFormulaFieldsNormalised()}).
+     *
+     * @param  array<string, mixed>  $validated
+     * @return array<string, mixed>
+     */
+    protected function withCustomFeeFormulaFieldsNormalised(array $validated): array
+    {
+        if (! isset($validated['custom_fees']) || ! is_array($validated['custom_fees'])) {
+            return $validated;
+        }
+
+        $validated['custom_fees'] = array_map(
+            static fn (mixed $fee): mixed => is_array($fee) && ($fee['type'] ?? null) !== 'formula'
+                ? array_diff_key($fee, array_flip(['per_month', 'min_amount', 'max_amount']))
+                : $fee,
+            $validated['custom_fees'],
+        );
+
+        return $validated;
+    }
+
+    private function rateIsAboveCap(mixed $rate): bool
+    {
+        return is_numeric($rate) && (float) $rate > 100;
     }
 
     private function boundsAreInverted(mixed $min, mixed $max): bool
