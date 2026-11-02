@@ -368,7 +368,7 @@ class RepaymentController extends Controller
     #[OA\Get(
         path: '/api/loans/{loan}/summary',
         summary: 'Loan balance summary',
-        description: 'Returns outstanding balance, overdue amounts, next due date, and payment totals',
+        description: 'Returns outstanding balance, overdue amounts, next due date, and payment totals. `outstanding_balance` is principal, interest and penalty still owed plus `insurance_owed` (the insurance premium still owed), the same figure as the loan\'s `total_payable`; `outstanding_principal` is principal only.',
         tags: ['Repayments'],
         security: [['sanctum' => []]],
         parameters: [

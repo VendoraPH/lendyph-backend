@@ -256,6 +256,24 @@ class InsuranceOwedPaymentScreenFiguresTest extends TestCase
         $this->assertEquals((float) $loan->fresh()->outstanding_balance, $data['balance_before']);
     }
 
+    public function test_the_loan_summary_s_outstanding_balance_includes_the_premium_owed(): void
+    {
+        $loan = $this->loanOwingPremium();
+
+        $summary = $this->getJson("/api/loans/{$loan->id}/summary")->assertOk()->json('data');
+        $totalPayable = $this->getJson("/api/loans/{$loan->id}")->assertOk()->json('data.total_payable');
+
+        $this->assertEquals(self::SCHEDULE_TOTAL + self::OWED, $summary['outstanding_balance']);
+        $this->assertEquals(self::OWED, $summary['insurance_owed'] ?? null);
+        $this->assertEquals($totalPayable, $summary['outstanding_balance']);
+        // The principal-only figure is unchanged.
+        $this->assertEquals(60000, $summary['outstanding_principal']);
+
+        $this->pay($loan, 150);
+        $summary = $this->getJson("/api/loans/{$loan->id}/summary")->assertOk()->json('data');
+        $this->assertEquals(self::SCHEDULE_TOTAL + 250, $summary['outstanding_balance']);
+    }
+
     public function test_the_repayments_list_totals_the_premium_collected_by_posted_payments(): void
     {
         $first = $this->loanOwingPremium();

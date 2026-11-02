@@ -270,8 +270,12 @@ class ReportService
                 // Canonical principal-side balance (Loan::$outstanding_balance):
                 // the closing figure of the running-balance ledger above.
                 'principal_balance' => $loan->outstanding_balance,
-                // Everything still owed — the amount to settle the loan today.
-                'outstanding_balance' => round($outstandingPrincipal + $outstandingInterest + $outstandingPenalty, 2),
+                // The insurance premium the release left owed, still owed.
+                'insurance_owed' => max(0, $centavosOf($loan->insurance_remaining_balance)) / 100,
+                // Everything still owed — the amount to settle the loan today,
+                // the insurance premium owed included (as `total_payable`).
+                'outstanding_balance' => ($centavosOf($outstandingPrincipal) + $centavosOf($outstandingInterest)
+                    + $centavosOf($outstandingPenalty) + max(0, $centavosOf($loan->insurance_remaining_balance))) / 100,
             ],
             'generated_at' => now()->toDateTimeString(),
         ];

@@ -259,6 +259,26 @@ class InsuranceOwedReportsTest extends TestCase
         $this->assertEqualsWithDelta(self::PERIOD_DUE, (float) $data['total_due'], 0.001);
     }
 
+    public function test_the_statement_s_outstanding_balance_includes_the_premium_owed(): void
+    {
+        $loan = $this->loanOwingPremium();
+        $this->pay($loan, 150);
+
+        $summary = $this->statement($loan)['summary'];
+
+        // ₱70,800 on the periods plus the ₱250 premium still owed.
+        $this->assertEqualsWithDelta(self::SCHEDULE_TOTAL + 250, (float) $summary['outstanding_balance'], 0.001);
+        $this->assertEqualsWithDelta(250.00, (float) ($summary['insurance_owed'] ?? -1), 0.001);
+        $this->assertEqualsWithDelta(
+            (float) $this->getJson("/api/loans/{$loan->id}")->json('data.total_payable'),
+            (float) $summary['outstanding_balance'],
+            0.001,
+        );
+        // Principal-side figures unchanged.
+        $this->assertEqualsWithDelta(60000.00, (float) $summary['outstanding_principal'], 0.001);
+        $this->assertEqualsWithDelta((float) $loan->fresh()->outstanding_balance, (float) $summary['principal_balance'], 0.001);
+    }
+
     public function test_the_income_report_never_counts_the_premium_as_interest(): void
     {
         $loan = $this->loanOwingPremium();

@@ -992,7 +992,11 @@ class RepaymentService
             'outstanding_penalty' => round($outstandingPenalty, 2),
             // Frontend reads `penalty_amount` meaning the remaining penalty to collect.
             'penalty_amount' => round($outstandingPenalty, 2),
-            'outstanding_balance' => round($outstandingPrincipal + $outstandingInterest + $outstandingPenalty, 2),
+            // The insurance premium the release left owed, still owed: part of
+            // what the loan owes, as in LoanResource's `total_payable`.
+            'insurance_owed' => max(0, LoanService::toCentavos((float) $loan->insurance_remaining_balance)) / 100,
+            'outstanding_balance' => (LoanService::toCentavos($outstandingPrincipal) + LoanService::toCentavos($outstandingInterest)
+                + LoanService::toCentavos($outstandingPenalty) + max(0, LoanService::toCentavos((float) $loan->insurance_remaining_balance))) / 100,
             'overdue_amount' => round($overdueAmount, 2),
             'overdue_schedules_count' => $overdueSchedules->count(),
             'next_due_date' => $nextSchedule?->due_date->toDateString(),
