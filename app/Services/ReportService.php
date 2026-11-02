@@ -147,9 +147,17 @@ class ReportService
         // premium a restructure carried over is in it too), and each payment
         // takes off its principal and its premium, so that after the last
         // payment the running balance lands exactly on Loan::$outstanding_balance.
+        //
+        // A restructured loan's premium owed was zeroed when the restructure
+        // carried it to the new loan, so what it carried out is added back
+        // from the released new loan's `insurance_carried_over`, which never
+        // changes after that release: the opening stays the same over time.
         $centavosOf = fn (mixed $pesos): int => (int) round((float) $pesos * 100);
         $premiumCollected = $repayments->sum(fn ($r) => $centavosOf($r->insurance_applied));
-        $openingCentavos = $centavosOf($loan->principal_amount) + $centavosOf($loan->insurance_remaining_balance) + $premiumCollected;
+        $premiumCarriedOut = $loan->status === 'restructured'
+            ? $centavosOf($loan->restructuredInto()->whereNotNull('released_at')->sum('insurance_carried_over'))
+            : 0;
+        $openingCentavos = $centavosOf($loan->principal_amount) + $centavosOf($loan->insurance_remaining_balance) + $premiumCollected + $premiumCarriedOut;
         $openingBalance = $openingCentavos / 100;
         $runningCentavos = $openingCentavos;
 

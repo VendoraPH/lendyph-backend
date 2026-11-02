@@ -2,6 +2,16 @@
 
 namespace Tests\Feature\InsuranceOwed;
 
+use App\Models\AmortizationSchedule;
+use App\Models\Borrower;
+use App\Models\Branch;
+use App\Models\Loan;
+use App\Models\LoanProduct;
+use App\Models\Role;
+use App\Models\User;
+use App\Services\LoanService;
+use App\Services\RepaymentService;
+use Illuminate\Support\Facades\DB;
 use Tests\Feature\InsuranceOwed\Concerns\OwesInsurancePremium;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
@@ -124,6 +134,129 @@ class InsuranceOwedReportsTest extends TestCase
 
         $this->assertEqualsWithDelta((float) $loan->fresh()->outstanding_balance, (float) $second['running_balance'], 0.001);
         $this->assertEqualsWithDelta((float) $data['summary']['principal_balance'], (float) $second['running_balance'], 0.001);
+    }
+
+    /** @return array<string, mixed> */
+    private function statement(Loan $loan): array
+    {
+        return $this->getJson("/api/reports/statement-of-account/{$loan->id}")->assertOk()->json('data');
+    }
+
+    public function test_voiding_a_payment_takes_its_premium_out_of_every_report_and_keeps_the_opening(): void
+    {
+        $loan = $this->loanOwingPremium();
+        $this->pay($loan, 150);
+        $voided = $this->pay($loan, 1000);
+
+        $openingBefore = $this->statement($loan)['summary']['opening_balance'];
+
+        app(RepaymentService::class)->voidRepayment($voided->fresh(), 'Keyed twice', $this->admin);
+
+        $this->assertEqualsWithDelta(150.00, (float) $this->getJson('/api/reports/cash-flow?'.$this->today())->json('data.inflows.repayments.insurance'), 0.001);
+        $this->assertEqualsWithDelta(0.00, (float) $this->getJson('/api/reports/daily-collection?'.$this->today())->json('data.total_received'), 0.001);
+        $this->assertEqualsWithDelta(150.00, (float) $this->getJson('/api/reports/repayments?'.$this->today())->json('totals.total_insurance_applied'), 0.001);
+
+        $statement = $this->statement($loan);
+        $this->assertEquals($openingBefore, $statement['summary']['opening_balance']);
+        $this->assertEqualsWithDelta(60400.00, (float) $statement['summary']['opening_balance'], 0.001);
+        $this->assertCount(1, $statement['transactions']);
+        $this->assertEqualsWithDelta(150.00, (float) $statement['transactions'][0]['insurance_applied'], 0.001);
+        $this->assertEqualsWithDelta(60250.00, (float) $statement['transactions'][0]['running_balance'], 0.001);
+        $this->assertEqualsWithDelta((float) $loan->fresh()->outstanding_balance, (float) $statement['transactions'][0]['running_balance'], 0.001);
+    }
+
+    public function test_the_statements_of_a_restructure_open_with_the_premium_carried_on_both_loans(): void
+    {
+        $source = $this->loanOwingPremium();
+
+        $newId = $this->postJson("/api/loans/{$source->id}/restructure", [
+            'borrower_id' => $source->borrower_id,
+            'loan_product_id' => $source->loan_product_id,
+            'principal_amount' => self::SCHEDULE_TOTAL,
+            'start_date' => now()->toDateString(),
+        ])->assertCreated()->json('data.id');
+        $this->patchJson("/api/loans/{$newId}/submit")->assertOk();
+        $approver = User::factory()->create();
+        $approver->assignRole(Role::where('name', 'admin')->first());
+        $this->actingAs($approver);
+        $this->patchJson("/api/loans/{$newId}/approve", ['approval_remarks' => 'ok'])->assertOk();
+        $this->actingAs($this->admin);
+        $this->patchJson("/api/loans/{$newId}/release")->assertOk();
+
+        $this->assertSame('restructured', $source->fresh()->status);
+
+        // The source still opens at principal + the ₱400 it carried out.
+        $this->assertEqualsWithDelta(60400.00, (float) $this->statement($source)['summary']['opening_balance'], 0.001);
+
+        // The new loan opens at its principal + the ₱400 carried in.
+        $new = Loan::findOrFail($newId);
+        $this->assertEqualsWithDelta(self::SCHEDULE_TOTAL + self::OWED, (float) $this->statement($new)['summary']['opening_balance'], 0.001);
+
+        // Collecting it on the new loan moves neither opening.
+        $this->pay($new, self::OWED);
+        $this->assertEqualsWithDelta(60400.00, (float) $this->statement($source)['summary']['opening_balance'], 0.001);
+        $this->assertEqualsWithDelta(self::SCHEDULE_TOTAL + self::OWED, (float) $this->statement($new)['summary']['opening_balance'], 0.001);
+    }
+
+    public function test_the_statement_of_a_loan_whose_premium_was_paid_in_full_at_release_opens_at_principal(): void
+    {
+        $product = LoanProduct::factory()->create([
+            'interest_rate' => 3.0, 'interest_method' => 'straight', 'term' => 6, 'frequency' => 'monthly',
+            'penalty_rate' => 2.0, 'grace_period_days' => 3,
+        ]);
+        $borrower = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+        $loans = app(LoanService::class);
+        $loan = $loans->createLoan([
+            'borrower_id' => $borrower->id,
+            'loan_product_id' => $product->id,
+            'principal_amount' => 60000,
+            'start_date' => now()->toDateString(),
+        ], $this->admin);
+        $loans->submitForReview($loan);
+        $loans->approve($loan, $this->admin, 'Approved for testing');
+        $loans->release($loan, $this->admin, ['insurance_premium_percentage' => 1.0, 'insurance_payment_type' => 'full']);
+
+        $this->assertEqualsWithDelta(0.00, $this->owed($loan), 0.001);
+        $this->pay($loan, 1000);
+
+        $statement = $this->statement($loan);
+        $this->assertEqualsWithDelta(60000.00, (float) $statement['summary']['opening_balance'], 0.001);
+        $this->assertSame([0.0], array_map('floatval', array_column($statement['transactions'], 'insurance_applied')));
+    }
+
+    public function test_the_branch_filter_keeps_each_branch_s_premium_apart(): void
+    {
+        $other = Branch::factory()->create();
+        $here = $this->loanOwingPremium();
+        $there = $this->loanOwingPremium();
+        DB::table('loans')->where('id', $there->id)->update(['branch_id' => $other->id]);
+
+        $this->pay($here, 1000);
+        $this->pay($there, 150);
+
+        $daily = fn (int $branch) => (float) $this->getJson('/api/reports/daily-collection?'.$this->today().'&branch_id='.$branch)
+            ->assertOk()->json('data.total_received');
+        $premium = fn (int $branch) => (float) $this->getJson('/api/reports/repayments?'.$this->today().'&branch_id='.$branch)
+            ->assertOk()->json('totals.total_insurance_applied');
+
+        $this->assertEqualsWithDelta(600.00, $daily($here->branch_id), 0.001);
+        $this->assertEqualsWithDelta(0.00, $daily($other->id), 0.001);
+        $this->assertEqualsWithDelta(self::OWED, $premium($here->branch_id), 0.001);
+        $this->assertEqualsWithDelta(150.00, $premium($other->id), 0.001);
+    }
+
+    public function test_total_collected_stays_principal_and_interest_when_a_payment_collected_premium(): void
+    {
+        $loan = $this->loanOwingPremium();
+        AmortizationSchedule::where('loan_id', $loan->id)->where('period_number', 1)->update(['due_date' => now()->toDateString()]);
+
+        $this->pay($loan, self::PERIOD_DUE + self::OWED);
+
+        $data = $this->getJson('/api/reports/daily-collection?'.$this->today())->assertOk()->json('data');
+
+        $this->assertEqualsWithDelta(self::PERIOD_DUE, (float) $data['total_collected'], 0.001);
+        $this->assertEqualsWithDelta(self::PERIOD_DUE, (float) $data['total_received'], 0.001);
+        $this->assertEqualsWithDelta(self::PERIOD_DUE, (float) $data['total_due'], 0.001);
     }
 
     public function test_the_income_report_never_counts_the_premium_as_interest(): void
