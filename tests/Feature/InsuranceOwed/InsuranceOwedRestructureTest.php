@@ -162,7 +162,7 @@ class InsuranceOwedRestructureTest extends TestCase
             ->firstWhere('name', 'Insurance premium carried from the previous loan');
 
         $this->assertEquals(
-            ['name' => 'Insurance premium carried from the previous loan', 'amount' => 400, 'deducted' => 0, 'owed' => 400, 'provisional' => true],
+            ['name' => 'Insurance premium carried from the previous loan', 'amount' => 400, 'deducted' => 0, 'owed' => 400, 'provisional' => true, 'provisional_reason' => 'carried_premium'],
             $line,
         );
 

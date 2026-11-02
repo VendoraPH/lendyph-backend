@@ -592,6 +592,40 @@ class Loan extends Model
     }
 
     /**
+     * What the loan still owes, in whole centavos, from `$schedules` (its
+     * periods): each period's unpaid principal, interest and penalty, floored
+     * at zero per period, plus the insurance premium still owed.
+     *
+     * `total` is the API's `total_outstanding` (everything owed) and
+     * `principal` its `outstanding_principal`, on GET /loans, GET /loans/{id}
+     * and GET /loans/{id}/summary alike, so one loan never shows two
+     * "outstanding" figures. A period a restructure, extension or adjustment
+     * closed has its dues cut to what was paid, so it adds nothing.
+     *
+     * Not Loan::$outstanding_balance, which stays principal plus premium for
+     * the reports.
+     *
+     * @param  iterable<AmortizationSchedule>  $schedules
+     * @return array{principal: int, interest: int, penalty: int, insurance: int, total: int}
+     */
+    public function owedCentavos(iterable $schedules): array
+    {
+        $centavos = fn (mixed $pesos): int => (int) round((float) ($pesos ?? 0) * 100);
+        $owed = ['principal' => 0, 'interest' => 0, 'penalty' => 0];
+
+        foreach ($schedules as $schedule) {
+            $owed['principal'] += max(0, $centavos($schedule->principal_due) - $centavos($schedule->principal_paid));
+            $owed['interest'] += max(0, $centavos($schedule->interest_due) - $centavos($schedule->interest_paid));
+            $owed['penalty'] += max(0, $centavos($schedule->penalty_amount) - $centavos($schedule->penalty_paid));
+        }
+
+        $owed['insurance'] = max(0, $centavos($this->insurance_remaining_balance));
+        $owed['total'] = $owed['principal'] + $owed['interest'] + $owed['penalty'] + $owed['insurance'];
+
+        return $owed;
+    }
+
+    /**
      * Whether insurance premium the release left unpaid is still owed on this
      * loan (`insurance_remaining_balance`). Payments collect it first, and a
      * loan that owes it never completes.

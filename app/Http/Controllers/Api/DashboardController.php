@@ -14,6 +14,7 @@ class DashboardController extends Controller
     #[OA\Get(
         path: '/api/dashboard/stats',
         summary: 'Dashboard KPI stats',
+        description: '`total_collected` (month to date, and the `collected` sparkline) counts what posted payments collected for the loans, leaving out the insurance premium a payment collected first; that premium is `insurance_collected`, held for the insurer.',
         tags: ['Dashboard'],
         security: [['sanctum' => []]],
         responses: [
@@ -31,7 +32,7 @@ class DashboardController extends Controller
     #[OA\Get(
         path: '/api/dashboard/collections-trend',
         summary: 'Collections trend time-series',
-        description: 'Default is 12 weekly buckets. Pass `?period=month` for 12 monthly buckets or `?period=year` for 5 yearly buckets.',
+        description: 'Default is 12 weekly buckets. Pass `?period=month` for 12 monthly buckets or `?period=year` for 5 yearly buckets. Each bucket\'s `value` leaves out the insurance premium payments collected, which is the bucket\'s `insurance_collected`.',
         tags: ['Dashboard'],
         security: [['sanctum' => []]],
         parameters: [
@@ -62,7 +63,7 @@ class DashboardController extends Controller
             new OA\Parameter(name: 'date', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
         ],
         responses: [
-            new OA\Response(response: 200, description: 'Daily dues list with summary. A row is `collected` only once the principal and interest paid cover its `total_due` (penalty paid never counts towards it); `amount_collected` is that principal and interest, capped at the amount due. `summary` carries the dashboard pie: `collected_in_full`, `partially_collected`, `uncollected`, `total_collected`, `collection_rate` (never above 100) and `counts` per status.'),
+            new OA\Response(response: 200, description: 'Daily dues list with summary. One item per loan: a period an extension or restructure closed early and its rescheduled remainder due the same day are one item, whose `amount_due` and `amount_collected` both include the closed part. A row is `collected` only once the principal and interest paid cover its `total_due` (penalty paid never counts towards it); `amount_collected` is that principal and interest, capped at the amount due. `summary` carries the dashboard pie: `collected_in_full`, `partially_collected`, `uncollected`, `total_collected`, `collection_rate` (never above 100) and `counts` per status.'),
         ],
     )]
     public function dailyDues(): JsonResponse
