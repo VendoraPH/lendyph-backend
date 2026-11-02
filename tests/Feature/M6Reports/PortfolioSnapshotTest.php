@@ -40,7 +40,7 @@ class PortfolioSnapshotTest extends TestCase
         $this->moveSchedule($hundred, 1, 100);
 
         // Two days past its due date, inside a 3-day grace: not overdue, but
-        // PAR is struck from the bare due date, so PAR 1.
+        // PAR is struck from the bare due date, so PAR 1 (1 or more days).
         $withinGrace = $this->loan(grace: 3);
         $this->moveSchedule($withinGrace, 1, 2);
 
@@ -65,6 +65,9 @@ class PortfolioSnapshotTest extends TestCase
         $this->assertSame($this->getJson('/api/dashboard/stats')->json('data.overdue_count'), $snapshot->overdue_loans_count);
         $this->assertEqualsWithDelta($summaries->sum('overdue_amount'), (float) $snapshot->overdue_amount, 0.001);
         $this->assertEqualsWithDelta($summaries->sum('total_outstanding'), (float) $snapshot->total_outstanding, 0.001);
+        // The PAR ratio's denominator, stored so any recorded day's ratio can be worked out.
+        $this->assertEqualsWithDelta($summaries->sum('outstanding_principal'), (float) $snapshot->outstanding_principal, 0.001);
+        $this->assertGreaterThan((float) $snapshot->par_30_amount, (float) $snapshot->outstanding_principal);
         $this->assertEqualsWithDelta($principal($forty, $hundred, $withinGrace), (float) $snapshot->par_1_amount, 0.001);
         $this->assertEqualsWithDelta($principal($forty, $hundred), (float) $snapshot->par_30_amount, 0.001);
         $this->assertEqualsWithDelta($principal($hundred), (float) $snapshot->par_90_amount, 0.001);
@@ -85,16 +88,42 @@ class PortfolioSnapshotTest extends TestCase
         $this->assertEquals(0, (float) $snapshot->par_90_amount);
     }
 
-    public function test_exactly_thirty_days_is_not_yet_par_30(): void
+    public function test_par_1_counts_a_loan_one_day_past_due_but_not_one_due_today(): void
     {
-        $loan = $this->loan(grace: 0);
-        $this->moveSchedule($loan, 1, 30);
+        $oneDay = $this->loan(grace: 0);
+        $this->moveSchedule($oneDay, 1, 1);
+
+        $dueToday = $this->loan(grace: 0);
+        $this->moveSchedule($dueToday, 1, 0);
+
+        $this->artisan('portfolio:snapshot')->assertSuccessful();
+
+        $summary = $this->getJson("/api/loans/{$oneDay->id}/summary")->json('data');
+        $snapshot = PortfolioDailySnapshot::query()->sole();
+
+        $this->assertEqualsWithDelta($summary['outstanding_principal'], (float) $snapshot->par_1_amount, 0.001, 'One day late is PAR 1; due today is not late.');
+        $this->assertEquals(0, (float) $snapshot->par_30_amount);
+    }
+
+    public function test_exactly_thirty_days_is_not_yet_par_30_and_thirty_one_is(): void
+    {
+        $thirty = $this->loan(grace: 0);
+        $this->moveSchedule($thirty, 1, 30);
 
         $this->artisan('portfolio:snapshot')->assertSuccessful();
 
         $snapshot = PortfolioDailySnapshot::query()->sole();
-        $this->assertGreaterThan(0, (float) $snapshot->par_1_amount);
-        $this->assertEquals(0, (float) $snapshot->par_30_amount);
+        $thirtySummary = $this->getJson("/api/loans/{$thirty->id}/summary")->json('data');
+        $this->assertEqualsWithDelta($thirtySummary['outstanding_principal'], (float) $snapshot->par_1_amount, 0.001);
+        $this->assertEquals(0, (float) $snapshot->par_30_amount, 'Exactly 30 days is not more than 30.');
+
+        $thirtyOne = $this->loan(grace: 0);
+        $this->moveSchedule($thirtyOne, 1, 31);
+
+        $this->artisan('portfolio:snapshot')->assertSuccessful();
+
+        $thirtyOneSummary = $this->getJson("/api/loans/{$thirtyOne->id}/summary")->json('data');
+        $this->assertEqualsWithDelta($thirtyOneSummary['outstanding_principal'], (float) PortfolioDailySnapshot::query()->sole()->par_30_amount, 0.001);
     }
 
     public function test_a_re_run_replaces_the_day_and_adds_no_row(): void
@@ -131,11 +160,59 @@ class PortfolioSnapshotTest extends TestCase
         $this->moveSchedule($loan, 1, 3);
 
         $day = Carbon::today()->subDays(5)->toDateString();
-        $this->artisan('portfolio:snapshot', ['--date' => $day])->assertSuccessful();
+        $this->artisan('portfolio:snapshot', ['--date' => $day])
+            ->expectsOutputToContain("Replay: {$day} was recorded with today's payment state")
+            ->assertSuccessful();
 
         $snapshot = PortfolioDailySnapshot::query()->sole();
         $this->assertSame($day, $snapshot->snapshot_date->toDateString());
         $this->assertSame(0, $snapshot->overdue_loans_count, 'Five days ago the period was not yet due.');
+    }
+
+    public function test_a_backdated_run_over_an_existing_row_is_refused_without_force(): void
+    {
+        $day = Carbon::today()->subDays(3)->toDateString();
+        $this->snapshot(3, 7);
+
+        $loan = $this->loan(grace: 0);
+        $this->moveSchedule($loan, 1, 10);
+
+        $this->artisan('portfolio:snapshot', ['--date' => $day])
+            ->expectsOutputToContain('already has a snapshot')
+            ->assertFailed();
+
+        $this->assertSame(7, PortfolioDailySnapshot::query()->sole()->overdue_loans_count, 'History is never rewritten.');
+
+        $this->artisan('portfolio:snapshot', ['--date' => $day, '--force' => true])
+            ->expectsOutputToContain('Replay:')
+            ->assertSuccessful();
+
+        $replaced = PortfolioDailySnapshot::query()->sole();
+        $this->assertSame($day, $replaced->snapshot_date->toDateString());
+        $this->assertSame(1, $replaced->overdue_loans_count);
+    }
+
+    public function test_today_is_rewritten_without_force_and_prints_no_replay_warning(): void
+    {
+        $this->snapshot(0, 7);
+
+        $this->artisan('portfolio:snapshot', ['--date' => Carbon::today()->toDateString()])
+            ->doesntExpectOutputToContain('Replay:')
+            ->assertSuccessful();
+
+        $this->assertSame(0, PortfolioDailySnapshot::query()->sole()->overdue_loans_count);
+    }
+
+    public function test_a_future_date_is_refused_even_with_force(): void
+    {
+        $tomorrow = Carbon::tomorrow()->toDateString();
+
+        $this->artisan('portfolio:snapshot', ['--date' => $tomorrow])
+            ->expectsOutputToContain('is in the future')
+            ->assertFailed();
+        $this->artisan('portfolio:snapshot', ['--date' => $tomorrow, '--force' => true])->assertFailed();
+
+        $this->assertSame(0, PortfolioDailySnapshot::query()->count());
     }
 
     public function test_an_invalid_date_is_refused_and_writes_nothing(): void
@@ -179,6 +256,37 @@ class PortfolioSnapshotTest extends TestCase
         $this->assertSame(1, $stats['overdue_count']);
     }
 
+    public function test_the_sparkline_cache_key_changes_at_midnight(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-11-02 23:59:00'));
+        $before = $this->getJson('/api/dashboard/stats')->assertOk()->json('data.sparklines.overdue');
+        $this->assertSame([null, null, null, null, null, null, 0], array_column($before, 'v'));
+
+        // The 23:55 run's row for 2 November, then midnight, well inside the
+        // ten minutes the points are cached for.
+        PortfolioDailySnapshot::query()->create([
+            'snapshot_date' => '2026-11-02',
+            'overdue_loans_count' => 4,
+            'overdue_amount' => 0,
+            'total_outstanding' => 0,
+            'outstanding_principal' => 0,
+            'par_1_amount' => 0,
+            'par_30_amount' => 0,
+            'par_90_amount' => 0,
+        ]);
+        Carbon::setTestNow(Carbon::parse('2026-11-03 00:01:00'));
+
+        $after = $this->getJson('/api/dashboard/stats')->assertOk()->json('data.sparklines.overdue');
+
+        $this->assertSame(
+            [null, null, null, null, null, 4, 0],
+            array_column($after, 'v'),
+            'A new day reads fresh points: yesterday is the snapshot, not the points cached before midnight.',
+        );
+
+        Carbon::setTestNow();
+    }
+
     public function test_with_no_snapshots_every_past_point_is_null(): void
     {
         $stats = $this->getJson('/api/dashboard/stats')->assertOk()->json('data');
@@ -193,6 +301,7 @@ class PortfolioSnapshotTest extends TestCase
             'overdue_loans_count' => $count,
             'overdue_amount' => 0,
             'total_outstanding' => 0,
+            'outstanding_principal' => 0,
             'par_1_amount' => 0,
             'par_30_amount' => 0,
             'par_90_amount' => 0,

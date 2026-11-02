@@ -22,6 +22,8 @@ return new class extends Migration
             $table->unsignedInteger('overdue_loans_count');
             $table->decimal('overdue_amount', 15, 2);
             $table->decimal('total_outstanding', 15, 2);
+            // The PAR ratio's denominator: PAR n ÷ outstanding principal.
+            $table->decimal('outstanding_principal', 15, 2);
             $table->decimal('par_1_amount', 15, 2);
             $table->decimal('par_30_amount', 15, 2);
             $table->decimal('par_90_amount', 15, 2);

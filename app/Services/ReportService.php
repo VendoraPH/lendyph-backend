@@ -533,12 +533,12 @@ class ReportService
     {
         $today = Carbon::today()->toDateString();
 
+        $pastDueOnly = filter_var($filters['past_due_only'] ?? false, FILTER_VALIDATE_BOOLEAN);
+
         return AmortizationSchedule::query()
-            ->whereHas('loan', fn ($q) => $q->whereIn('status', Loan::COLLECTIBLE_STATUSES))
-            ->when(
-                filter_var($filters['past_due_only'] ?? false, FILTER_VALIDATE_BOOLEAN),
-                fn ($q) => $q->whereHas('loan', fn ($lq) => $lq->whereRaw(AmortizationSchedule::pastGraceSql(), [$today])),
-            )
+            ->whereHas('loan', fn ($q) => $q
+                ->whereIn('status', Loan::COLLECTIBLE_STATUSES)
+                ->when($pastDueOnly, fn ($lq) => $lq->whereRaw(AmortizationSchedule::pastGraceSql(), [$today])))
             ->whereIn('status', AmortizationSchedule::UNPAID_STATUSES)
             ->where('due_date', '<=', $today)
             ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->where('due_date', '>=', $d))
@@ -1769,13 +1769,21 @@ class ReportService
         $fromDate = $from->toDateString();
         $toDate = $to->toDateString();
         $branchId = $filters['branch_id'] ?? null;
+        $byBranch = $this->collectionEfficiencyByBranch($fromDate, $toDate, $branchId);
 
         return array_merge(
             $this->periodCollection($fromDate, $toDate, $branchId),
             [
                 'date_from' => $fromDate,
                 'date_to' => $toDate,
-                'by_branch' => $this->collectionEfficiencyByBranch($fromDate, $toDate, $branchId),
+                'by_branch' => $byBranch,
+                // Every period is in exactly one branch row, so these equal
+                // the headline figures. The rate is a ratio and has no total.
+                'by_branch_totals' => self::columnTotals($byBranch, [
+                    'total_due' => 'money',
+                    'total_collected' => 'money',
+                    'uncollected' => 'money',
+                ]),
                 'by_period' => $this->collectionEfficiencyByPeriod($from, $to, $branchId),
                 'note' => 'Counted by period: collected is the principal and interest paid on the periods due in the range (each branch, each due month), capped at what each period owes, so no rate exceeds 100%. Penalty and cash taken in are penalty_collected and total_received.',
                 'generated_at' => now()->toDateTimeString(),
@@ -2023,8 +2031,10 @@ class ReportService
         $releasedInPeriod = '1 = 1';
         $releasedBindings = [];
         // Whole Manila days, the same bounds as every other report's
-        // `released_at` filter (decision 5c), left bare so an index can serve
-        // them.
+        // `released_at` filter (decision 5c). These sit inside a CASE in the
+        // SELECT, not in the WHERE, so they decide which loans count as
+        // production but no index serves them; the bare comparison is for
+        // the day bound, not for speed.
         if ($dateFrom !== null) {
             $releasedInPeriod .= ' AND loans.released_at >= ?';
             $releasedBindings[] = self::dayStart($dateFrom);

@@ -117,6 +117,7 @@ class DashboardOverdueGraceTest extends TestCase
             'overdue_loans_count' => 4,
             'overdue_amount' => 0,
             'total_outstanding' => 0,
+            'outstanding_principal' => 0,
             'par_1_amount' => 0,
             'par_30_amount' => 0,
             'par_90_amount' => 0,

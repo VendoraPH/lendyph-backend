@@ -7,8 +7,10 @@ use Illuminate\Database\Eloquent\Model;
 /**
  * The portfolio's arrears figures as they stood at the end of one day,
  * written by `portfolio:snapshot` (App\Console\Commands\SnapshotPortfolio).
- * One row per `snapshot_date`; a re-run of the same day overwrites its
- * figures, and `created_at` keeps the first write.
+ * One row per `snapshot_date`. A re-run of today overwrites its figures; a
+ * past day that already has a row is only rewritten with `--force`.
+ * `created_at` keeps the first write. PAR ratio for a day =
+ * `par_n_amount` ÷ `outstanding_principal`.
  */
 class PortfolioDailySnapshot extends Model
 {
@@ -19,6 +21,7 @@ class PortfolioDailySnapshot extends Model
         'overdue_loans_count',
         'overdue_amount',
         'total_outstanding',
+        'outstanding_principal',
         'par_1_amount',
         'par_30_amount',
         'par_90_amount',
@@ -31,6 +34,7 @@ class PortfolioDailySnapshot extends Model
             'overdue_loans_count' => 'integer',
             'overdue_amount' => 'decimal:2',
             'total_outstanding' => 'decimal:2',
+            'outstanding_principal' => 'decimal:2',
             'par_1_amount' => 'decimal:2',
             'par_30_amount' => 'decimal:2',
             'par_90_amount' => 'decimal:2',

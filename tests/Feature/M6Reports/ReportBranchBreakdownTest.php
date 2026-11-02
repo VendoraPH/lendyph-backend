@@ -8,6 +8,7 @@ use App\Models\Branch;
 use App\Models\Loan;
 use App\Models\LoanProduct;
 use App\Models\ShareCapitalLedger;
+use Carbon\Carbon;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
@@ -79,6 +80,55 @@ class ReportBranchBreakdownTest extends TestCase
             $filtered = $this->getJson("/api/reports/{$report}?".self::PERIOD."&branch_id={$empty->id}")->assertOk()->json('data.by_branch');
             $this->assertSame([$empty->id], array_column($filtered, 'branch_id'), "{$report}: the filter lists only its branch.");
         }
+    }
+
+    public function test_every_breakdown_s_totals_equal_the_report_s_headline(): void
+    {
+        $north = Branch::factory()->create(['is_active' => true]);
+        Branch::factory()->create(['is_active' => true]);
+
+        $main = $this->createReleasedLoan();
+        $remote = $this->createReleasedLoan(['principal_amount' => 30000]);
+        $remote->forceFill(['branch_id' => $north->id])->save();
+        $remote->borrower->forceFill(['branch_id' => $north->id])->save();
+
+        foreach ([$main, $remote] as $loan) {
+            $loan->amortizationSchedules()->where('period_number', 1)->update(['due_date' => Carbon::today()->subDays(10)->toDateString()]);
+        }
+        $this->postJson("/api/loans/{$main->id}/repayments", [
+            'payment_date' => Carbon::today()->toDateString(),
+            'amount_paid' => 4000,
+            'method' => 'cash',
+        ])->assertCreated();
+        $this->ledger(Borrower::factory()->create(['branch_id' => $north->id]), Carbon::today()->toDateString(), credit: 1200);
+
+        $period = 'date_from='.Carbon::today()->subDays(40)->toDateString().'&date_to='.Carbon::today()->toDateString();
+
+        $summary = $this->getJson("/api/reports/loan-balance-summary?{$period}")->assertOk()->json('data');
+        $this->assertEquals([
+            'loan_count' => $summary['portfolio']['loan_count'],
+            'total_released' => $summary['portfolio']['total_released'],
+            'outstanding_balance' => $summary['outstanding_balance'],
+        ], $summary['by_branch_totals']);
+        $this->assertSame(2, $summary['by_branch_totals']['loan_count']);
+
+        $efficiency = $this->getJson("/api/reports/collection-efficiency?{$period}")->assertOk()->json('data');
+        $this->assertEquals([
+            'total_due' => $efficiency['total_due'],
+            'total_collected' => $efficiency['total_collected'],
+            'uncollected' => $efficiency['uncollected'],
+        ], $efficiency['by_branch_totals']);
+        $this->assertGreaterThan(0, $efficiency['by_branch_totals']['total_collected']);
+
+        $performance = $this->getJson("/api/reports/performance?{$period}")->assertOk()->json('data');
+        $this->assertEquals($performance['totals'], $performance['by_branch_totals']);
+        $this->assertSame(2, $performance['by_branch_totals']['released_count']);
+
+        $cashFlow = $this->getJson("/api/reports/cash-flow?{$period}")->assertOk()->json('data');
+        $this->assertEquals($cashFlow['inflows']['total'], $cashFlow['by_branch_totals']['inflow_total']);
+        $this->assertEquals($cashFlow['outflows']['total'], $cashFlow['by_branch_totals']['outflow_total']);
+        $this->assertEquals($cashFlow['net_movement'], $cashFlow['by_branch_totals']['net_movement']);
+        $this->assertEquals(1200, $cashFlow['by_branch_totals']['inflow_share_capital']);
     }
 
     public function test_performance_takes_whole_manila_days_of_released_at(): void

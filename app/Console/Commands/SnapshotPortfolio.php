@@ -25,23 +25,37 @@ use Illuminate\Support\Facades\DB;
  *   `meta.totals` (unpaid periods past the due date plus the loan's grace).
  * - `total_outstanding`: LoanListTotals' everything owed (principal,
  *   interest, penalty and insurance premium owed).
+ * - `outstanding_principal`: LoanListTotals' principal still unpaid, the
+ *   denominator of the day's PAR ratio (PAR n ÷ outstanding principal).
  * - `par_1_amount`, `par_30_amount`, `par_90_amount`: the outstanding
- *   principal of the loans whose oldest unpaid period is more than 1, 30 or
- *   90 days past its due date. Measured from the bare due date, grace
- *   ignored, the way ReportService::loanBalanceSummary() strikes its PAR 30:
- *   PAR is a prudential ratio reported the same way everywhere.
+ *   principal of the loans whose oldest unpaid period is past due by 1 or
+ *   more days (due before the as-of date), more than 30 days, or more than
+ *   90 days: the common microfinance definitions (lead, 2026-11-02).
+ *   Measured from the bare due date, grace ignored, the way
+ *   ReportService::loanBalanceSummary() strikes its PAR 30.
  *
- * Idempotent: it upserts on `snapshot_date`, so a re-run of a day replaces
- * its figures and never adds a second row. `--date` sets the as-of date for
- * every date comparison; payment state is always the database's current one,
- * so a backdated run is not a history and nothing is backfilled.
+ * History is never rewritten. A run for today upserts, so the schedule can
+ * re-run safely. `--date` may name a past day only: a day that already has a
+ * row is refused unless `--force` is passed, and a future day is always
+ * refused. A past day is a replay: every date comparison uses that day, but
+ * payment state is the database's current one, and the command says so.
+ * Nothing is backfilled on its own.
  */
-#[Signature('portfolio:snapshot {--date= : The day to record (Y-m-d), default today in the app timezone}')]
-#[Description('Record the day\'s portfolio arrears (overdue count and amount, total outstanding, PAR 1/30/90) for the dashboard sparkline')]
+#[Signature('portfolio:snapshot
+    {--date= : A past day to record (Y-m-d); default today in the app timezone}
+    {--force : Replace a past day that already has a row}')]
+#[Description('Record the day\'s portfolio arrears (overdue count and amount, total and principal outstanding, PAR 1/30/90) for the dashboard sparkline')]
 class SnapshotPortfolio extends Command
 {
-    /** @var array<string, int> */
-    private const PAR_DAYS = ['par_1_amount' => 1, 'par_30_amount' => 30, 'par_90_amount' => 90];
+    /**
+     * Each PAR bucket's cutoff, in days before the as-of date: a loan is in
+     * the bucket when its oldest unpaid period is due strictly before it.
+     * PAR 1 is 1 or more days late (cutoff 0, due before the as-of date);
+     * PAR 30 and PAR 90 are more than 30 and 90 days late.
+     *
+     * @var array<string, int>
+     */
+    private const PAR_CUTOFF_DAYS = ['par_1_amount' => 0, 'par_30_amount' => 30, 'par_90_amount' => 90];
 
     public function handle(LoanListTotals $listTotals): int
     {
@@ -53,7 +67,23 @@ class SnapshotPortfolio extends Command
             return self::INVALID;
         }
 
-        $asOf = $date === null ? Carbon::today() : Carbon::createFromFormat('!Y-m-d', (string) $date);
+        $today = Carbon::today();
+        $asOf = $date === null ? $today : Carbon::createFromFormat('!Y-m-d', (string) $date);
+        $day = $asOf->toDateString();
+
+        if ($asOf->gt($today)) {
+            $this->error("Refused: {$day} is in the future. A snapshot records a day that has happened.");
+
+            return self::FAILURE;
+        }
+
+        $isReplay = $asOf->lt($today);
+
+        if ($isReplay && ! $this->option('force') && PortfolioDailySnapshot::query()->where('snapshot_date', $day)->exists()) {
+            $this->error("Refused: {$day} already has a snapshot, and history is never rewritten. Pass --force to replace it.");
+
+            return self::FAILURE;
+        }
 
         $totals = $listTotals->for(
             Loan::query()->whereIn('loans.status', Loan::COLLECTIBLE_STATUSES),
@@ -64,18 +94,23 @@ class SnapshotPortfolio extends Command
             'overdue_loans_count' => $totals['overdue_count'],
             'overdue_amount' => $totals['overdue_amount'],
             'total_outstanding' => $totals['total_outstanding'],
+            'outstanding_principal' => $totals['outstanding_principal'],
             ...$this->parAmounts($asOf),
         ];
 
         PortfolioDailySnapshot::query()->upsert(
-            [['snapshot_date' => $asOf->toDateString(), ...$figures, 'created_at' => now()]],
+            [['snapshot_date' => $day, ...$figures, 'created_at' => now()]],
             ['snapshot_date'],
             array_keys($figures),
         );
 
+        if ($isReplay) {
+            $this->warn("Replay: {$day} was recorded with today's payment state, not as that day ended. Payments made since then are counted as already paid on {$day}.");
+        }
+
         $this->info(sprintf(
             'Portfolio snapshot for %s: %d overdue loans, overdue ₱%s, outstanding ₱%s.',
-            $asOf->toDateString(),
+            $day,
             $figures['overdue_loans_count'],
             number_format($figures['overdue_amount'], 2),
             number_format($figures['total_outstanding'], 2),
@@ -88,7 +123,7 @@ class SnapshotPortfolio extends Command
      * PAR 1, 30 and 90 in one grouped query: per collectible loan, its oldest
      * unpaid due date and its principal still unpaid, then each bucket sums
      * the principal of the loans whose oldest unpaid period is due before
-     * the as-of date less the bucket's days.
+     * the bucket's cutoff.
      *
      * @return array<string, float>
      */
@@ -108,7 +143,7 @@ class SnapshotPortfolio extends Command
 
         $select = [];
         $bindings = [];
-        foreach (self::PAR_DAYS as $column => $days) {
+        foreach (self::PAR_CUTOFF_DAYS as $column => $days) {
             $select[] = "COALESCE(SUM(CASE WHEN per_loan.oldest_unpaid < ? THEN per_loan.principal ELSE 0 END), 0) as {$column}";
             $bindings[] = $asOf->copy()->subDays($days)->toDateString();
         }
@@ -118,9 +153,11 @@ class SnapshotPortfolio extends Command
             ->selectRaw(implode(', ', $select), $bindings)
             ->first();
 
+        $columns = array_keys(self::PAR_CUTOFF_DAYS);
+
         return array_map(
             fn (string $column): float => round((float) ($row->{$column} ?? 0), 2),
-            array_combine(array_keys(self::PAR_DAYS), array_keys(self::PAR_DAYS)),
+            array_combine($columns, $columns),
         );
     }
 
