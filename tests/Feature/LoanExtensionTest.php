@@ -20,10 +20,18 @@ class LoanExtensionTest extends TestCase
 {
     use SetupLendyPH;
 
+    /**
+     * A fixed clock: the loans start on 27 Apr 2026 and fall due on 27 May,
+     * so on 10 Jun they are two weeks overdue (past the 3-day grace) and
+     * still within one anchored cycle of their due date, where an extension
+     * moves them exactly one cycle. OverdueExtensionCyclesTest covers loans
+     * overdue by more than a cycle.
+     */
     protected function setUp(): void
     {
         parent::setUp();
         $this->seedAndLogin();
+        $this->travelTo('2026-06-10 09:00:00');
     }
 
     private function makeUponMaturityLoan(?array $overrides = []): Loan
@@ -79,6 +87,7 @@ class LoanExtensionTest extends TestCase
         $this->assertSame('Borrower needs more time', $adj->remarks);
         $this->assertSame($originalDueDate, $adj->old_values['open_schedule_due_date']);
         $this->assertSame($expectedNewDueDate, $adj->new_values['new_due_date']);
+        $this->assertSame(1, $adj->new_values['cycles']);
     }
 
     public function test_it_carries_over_only_unpaid_interest_when_partial_payment_recorded(): void

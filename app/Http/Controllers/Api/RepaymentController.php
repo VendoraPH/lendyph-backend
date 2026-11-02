@@ -268,7 +268,7 @@ class RepaymentController extends Controller
                 required: ['payment_date', 'amount_paid'],
                 properties: [
                     new OA\Property(property: 'payment_date', type: 'string', format: 'date', example: '2026-04-15'),
-                    new OA\Property(property: 'amount_paid', type: 'number', example: 5000.00),
+                    new OA\Property(property: 'amount_paid', type: 'number', example: 5000.00, description: 'Pesos, at most two decimals (more is a 422 on `amount_paid`)'),
                     new OA\Property(property: 'remarks', type: 'string', nullable: true),
                 ],
             ),
@@ -276,7 +276,7 @@ class RepaymentController extends Controller
         responses: [
             new OA\Response(response: 201, description: 'Repayment recorded'),
             new OA\Response(response: 409, description: 'The loan was closed (completed, restructured, voided or defaulted) since it was read, or the write deadlocked; nothing was recorded. Reload and try again'),
-            new OA\Response(response: 422, description: 'Validation error (including a `payment_date` before the loan\'s release date, read in the app timezone), or the loan is not released or ongoing (on `loan`)'),
+            new OA\Response(response: 422, description: 'Validation error (including an `amount_paid` with more than two decimals, or a `payment_date` before the loan\'s release date, read in the app timezone), or the loan is not released or ongoing (on `loan`)'),
         ],
     )]
     public function store(StoreRepaymentRequest $request, Loan $loan): JsonResponse
@@ -414,14 +414,14 @@ class RepaymentController extends Controller
             content: new OA\JsonContent(
                 required: ['amount_paid', 'payment_date'],
                 properties: [
-                    new OA\Property(property: 'amount_paid', type: 'number', example: 5000.00),
+                    new OA\Property(property: 'amount_paid', type: 'number', example: 5000.00, description: 'Pesos, at most two decimals (more is a 422 on `amount_paid`)'),
                     new OA\Property(property: 'payment_date', type: 'string', format: 'date', example: '2026-04-15'),
                 ],
             ),
         ),
         responses: [
             new OA\Response(response: 200, description: 'Allocation preview', content: new OA\JsonContent(properties: [
-                new OA\Property(property: 'data', type: 'object', description: 'Partial list: only the balance figures are described here. The response also carries the allocation totals (`total_principal`, `total_interest`, `total_penalty`, `total_insurance`, `excess`, the `allocated_to_*` buckets), `payment_type`, `payment_badge`, `allocations` and `is_preview`.', properties: [
+                new OA\Property(property: 'data', type: 'object', description: 'Partial list: only the balance figures are described here. The response also carries the allocation totals (`total_principal`, `total_interest`, `total_penalty`, `total_insurance`, `excess`, the `allocated_to_*` buckets), `payment_type`, `payment_badge`, `allocations` and `is_preview`. On a Share Capital Build-Up loan, a member\'s overpayment of exactly the build-up credited to share capital for the periods settled is not money paid past what was owed: `payment_type` and `payment_badge` say exact.', properties: [
                     new OA\Property(property: 'balance_before', type: 'number', description: 'Unpaid principal plus the premium owed, before the payment'),
                     new OA\Property(property: 'balance_after', type: 'number', description: 'Unpaid principal plus the premium owed, after the payment'),
                     new OA\Property(property: 'total_outstanding_before', type: 'number', description: 'Everything owed (principal, interest, penalty and premium) before the payment, including any penalty it charges as of `payment_date`'),
@@ -429,7 +429,7 @@ class RepaymentController extends Controller
                 ]),
             ])),
             new OA\Response(response: 409, description: 'The loan was closed (completed, restructured, voided or defaulted) since it was read. Reload and try again'),
-            new OA\Response(response: 422, description: 'Validation error, including a `payment_date` before the loan\'s release date (read in the app timezone)'),
+            new OA\Response(response: 422, description: 'Validation error, including an `amount_paid` with more than two decimals or a `payment_date` before the loan\'s release date (read in the app timezone)'),
             new OA\Response(response: 404, description: 'Loan not found'),
         ],
     )]
@@ -438,7 +438,7 @@ class RepaymentController extends Controller
         $this->authorize('payments:view');
 
         $validated = request()->validate([
-            'amount_paid' => ['required', 'numeric', 'min:0.01'],
+            'amount_paid' => ['required', 'numeric', 'decimal:0,2', 'min:0.01'],
             'payment_date' => ['required', 'date', StoreRepaymentRequest::notBeforeRelease($loan)],
         ]);
 

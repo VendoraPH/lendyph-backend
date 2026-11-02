@@ -397,6 +397,8 @@ class AnchoredMonthlyDueDatesTest extends TestCase
 
     public function test_extending_a_one_month_loan_on_the_31st_keeps_rolling_on_the_31st(): void
     {
+        // Extended on the release day, so each extension moves one cycle.
+        $this->travelTo('2027-01-31 09:00:00');
         $loan = $this->createReleasedLoan([
             'product' => ['interest_method' => 'upon_maturity', 'term' => 1, 'frequency' => 'monthly'],
             'start_date' => '2027-01-31',
@@ -417,6 +419,8 @@ class AnchoredMonthlyDueDatesTest extends TestCase
 
     public function test_extending_a_single_payment_loan_on_the_31st_keeps_rolling_on_the_31st(): void
     {
+        // Extended on the release day, so each extension moves one cycle.
+        $this->travelTo('2027-01-31 09:00:00');
         $loan = $this->createReleasedLoan([
             'product' => ['term' => 1, 'frequency' => 'upon_maturity'],
             'start_date' => '2027-01-31',
@@ -431,6 +435,8 @@ class AnchoredMonthlyDueDatesTest extends TestCase
 
     public function test_extending_from_an_overflowed_row_rolls_to_the_same_months_anchor(): void
     {
+        // Extended on the release day, so each extension moves one cycle.
+        $this->travelTo('2027-01-31 09:00:00');
         $loan = $this->createReleasedLoan([
             'product' => ['interest_method' => 'upon_maturity', 'term' => 1, 'frequency' => 'monthly'],
             'start_date' => '2027-01-31',
@@ -454,6 +460,8 @@ class AnchoredMonthlyDueDatesTest extends TestCase
 
     public function test_extending_from_an_imported_maturity_short_of_the_anchor_rolls_a_whole_month(): void
     {
+        // Extended on the release day, so each extension moves one cycle.
+        $this->travelTo('2027-01-15 09:00:00');
         $loan = $this->createReleasedLoan([
             'product' => ['interest_method' => 'upon_maturity', 'term' => 1, 'frequency' => 'monthly'],
             'start_date' => '2027-01-15',
