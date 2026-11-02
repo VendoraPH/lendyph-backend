@@ -10,6 +10,7 @@ use App\Http\Resources\ShareCapitalLedgerResource;
 use App\Http\Resources\ShareCapitalPledgeResource;
 use App\Models\Borrower;
 use App\Models\ShareCapitalPledge;
+use App\Services\BranchAccess;
 use App\Services\LikePattern;
 use App\Services\LoanService;
 use App\Services\ShareCapitalService;
@@ -43,6 +44,15 @@ class ShareCapitalPledgeController extends Controller
      * permission; it is the borrower's registration state that is wrong. That
      * is the same shape of refusal approveRegistration() already returns.
      */
+    /**
+     * Another branch's pledge answers 404, exactly like one that does not
+     * exist. A pledge takes its branch from its member (BranchAccess).
+     */
+    private function abortUnlessVisible(ShareCapitalPledge $pledge): void
+    {
+        abort_unless(app(BranchAccess::class)->canSee(request()->user(), $pledge->borrower?->branch_id), 404);
+    }
+
     private function assertBorrowerIsMember(ShareCapitalPledge $pledge): void
     {
         $status = $pledge->borrower?->status;
@@ -118,6 +128,9 @@ DESC,
 
         $filtered = ShareCapitalPledge::query()
             ->forMembers()
+            // Only pledges of members in the caller's branches (BranchAccess);
+            // `meta.totals` follows, since it sums the same query.
+            ->whereHas('borrower', fn ($q) => $q->visibleTo(request()->user()))
             ->when(filled($schedule), fn ($q) => $q->where('schedule', $schedule))
             ->when(request()->has('auto_credit'), fn ($q) => $q->where('auto_credit', filter_var(request('auto_credit'), FILTER_VALIDATE_BOOLEAN)))
             ->when(filled($search), function ($q) use ($search) {
@@ -156,6 +169,7 @@ DESC,
     )]
     public function update(UpdateShareCapitalPledgeRequest $request, ShareCapitalPledge $pledge): ShareCapitalPledgeResource
     {
+        $this->abortUnlessVisible($pledge);
         $this->assertBorrowerIsMember($pledge);
 
         $pledge->update($request->validated());
@@ -181,6 +195,7 @@ DESC,
     {
         $this->authorize('share_capital:update');
 
+        $this->abortUnlessVisible($pledge);
         $this->assertBorrowerIsMember($pledge);
 
         $pledge->update(['auto_credit' => ! $pledge->auto_credit]);
@@ -207,6 +222,7 @@ DESC,
     )]
     public function manualEntry(ShareCapitalManualEntryRequest $request, ShareCapitalPledge $pledge): JsonResponse
     {
+        $this->abortUnlessVisible($pledge);
         $this->assertBorrowerIsMember($pledge);
 
         $entry = $this->shareCapitalService->createManualEntry(
@@ -245,10 +261,20 @@ DESC,
          * batch and checked before any work starts, so the caller gets a single
          * 422 naming the problem rather than a rolled-back transaction.
          */
-        ShareCapitalPledge::with('borrower')
+        $pledges = ShareCapitalPledge::with('borrower')
             ->whereIn('id', array_column($request->entries, 'pledge_id'))
-            ->get()
-            ->each(fn (ShareCapitalPledge $pledge) => $this->assertBorrowerIsMember($pledge));
+            ->get();
+
+        // A pledge of a member outside the caller's branches is refused as if
+        // it did not exist, and nothing is written.
+        $access = app(BranchAccess::class);
+        if ($pledges->contains(fn (ShareCapitalPledge $pledge) => ! $access->canSee($request->user(), $pledge->borrower?->branch_id))) {
+            throw ValidationException::withMessages([
+                'entries' => __('validation.exists', ['attribute' => 'pledge id']),
+            ]);
+        }
+
+        $pledges->each(fn (ShareCapitalPledge $pledge) => $this->assertBorrowerIsMember($pledge));
 
         $entries = $this->shareCapitalService->bulkManualEntries(
             $request->entries,

@@ -122,12 +122,14 @@ class LoanApprovalChainTest extends TestCase
     public function test_the_chain_roles_hold_only_what_they_need_before_the_accounting_branch_lands(): void
     {
         // Board roles sign; they do not prepare. Their authority comes from
-        // holding the role named on the step, not from a permission.
+        // holding the role named on the step, not from a permission. They see
+        // every branch (`branches:view_all`, decision 5b), which grants no
+        // action.
         foreach (['bod1', 'bod7'] as $roleName) {
-            $this->assertSame(
-                ['loans:view'],
+            $this->assertEqualsCanonicalizing(
+                ['branches:view_all', 'loans:view'],
                 Role::where('name', $roleName)->firstOrFail()->permissions->pluck('name')->all(),
-                "{$roleName} holds more than loans:view.",
+                "{$roleName} holds more than loans:view and branches:view_all.",
             );
         }
 
@@ -161,16 +163,18 @@ class LoanApprovalChainTest extends TestCase
 
         $manager = Role::where('name', 'manager')->firstOrFail()->fresh('permissions');
 
+        // Plus `branches:view_all` (decision 5b): a manager oversees every
+        // branch.
         $this->assertEqualsCanonicalizing(
-            array_merge(['loans:view'], $accounting),
+            array_merge(['loans:view', 'branches:view_all'], $accounting),
             $manager->permissions->pluck('name')->all(),
         );
 
         // Board roles get no accounting access at all, and the accounting
         // branch's preparer/approver split must not be widened from here.
         foreach (['bod1', 'bod7'] as $roleName) {
-            $this->assertSame(
-                ['loans:view'],
+            $this->assertEqualsCanonicalizing(
+                ['branches:view_all', 'loans:view'],
                 Role::where('name', $roleName)->firstOrFail()->fresh('permissions')->permissions->pluck('name')->all(),
                 "{$roleName} was granted accounting access it must not have.",
             );

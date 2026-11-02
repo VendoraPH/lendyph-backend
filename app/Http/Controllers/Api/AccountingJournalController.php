@@ -9,6 +9,8 @@ use App\Http\Requests\Accounting\UpdateJournalRequest;
 use App\Http\Resources\JournalEntryResource;
 use App\Models\AccountingJournal;
 use App\Services\Accounting\JournalPoster;
+use App\Services\BranchAccess;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Validation\Rule;
@@ -97,7 +99,9 @@ class AccountingJournalController extends Controller
 
         $perPage = min((int) ($filters['per_page'] ?? 15), 100);
 
-        $journals = AccountingJournal::query()
+        app(BranchAccess::class)->authorizeBranchFilter(request()->user(), $filters['branch_id'] ?? null);
+
+        $journals = $this->visibleToCaller(AccountingJournal::query())
             ->withRegisterRelations()
             ->when(isset($filters['from']), fn ($q) => $q->where('date', '>=', $filters['from']))
             ->when(isset($filters['to']), fn ($q) => $q->where('date', '<=', $filters['to']))
@@ -180,6 +184,7 @@ class AccountingJournalController extends Controller
     public function show(AccountingJournal $journal): JsonResponse
     {
         $this->authorize('journals:view');
+        $this->abortUnlessVisible($journal);
 
         return $this->respond($journal);
     }
@@ -202,6 +207,8 @@ class AccountingJournalController extends Controller
     )]
     public function update(UpdateJournalRequest $request, AccountingJournal $journal): JsonResponse
     {
+        $this->abortUnlessVisible($journal);
+
         $updated = $this->poster->updateDraft(
             $journal,
             $request->journalAttributes(),
@@ -229,6 +236,7 @@ class AccountingJournalController extends Controller
     public function post(AccountingJournal $journal): JsonResponse
     {
         $this->authorize('journals:post');
+        $this->abortUnlessVisible($journal);
 
         $posted = $this->poster->post($journal, request()->user()?->id);
 
@@ -259,6 +267,8 @@ class AccountingJournalController extends Controller
     )]
     public function reverse(ReverseJournalRequest $request, AccountingJournal $journal): JsonResponse
     {
+        $this->abortUnlessVisible($journal);
+
         $reversal = $this->poster->reverse(
             $journal,
             $request->input('date') ?: now()->toDateString(),
@@ -290,5 +300,27 @@ class AccountingJournalController extends Controller
         $journal->loadPostable();
 
         return (new JournalEntryResource($journal))->response()->setStatusCode($status);
+    }
+
+    /**
+     * Rows in the caller's branches (BranchAccess). A row with no branch is
+     * visible only to `branches:view_all`.
+     *
+     * @param  Builder<AccountingJournal>  $query
+     * @return Builder<AccountingJournal>
+     */
+    private function visibleToCaller(Builder $query): Builder
+    {
+        $branchIds = app(BranchAccess::class)->for(request()->user());
+
+        return $branchIds === null ? $query : $query->whereIn('branch_id', $branchIds);
+    }
+
+    /**
+     * Another branch's row answers 404, exactly like one that does not exist.
+     */
+    private function abortUnlessVisible(AccountingJournal $journal): void
+    {
+        abort_unless(app(BranchAccess::class)->canSee(request()->user(), $journal->branch_id), 404);
     }
 }

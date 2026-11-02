@@ -12,6 +12,7 @@ use App\Http\Requests\User\UpdateUserRequest;
 use App\Http\Resources\UserResource;
 use App\Models\User;
 use App\Services\AuditLogService;
+use App\Services\BranchAccess;
 use App\Services\LikePattern;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
@@ -82,7 +83,14 @@ class UserController extends Controller
         $branchId = $filters['branch_id'] ?? null;
         $role = $filters['role'] ?? null;
 
+        $viewer = request()->user();
+        app(BranchAccess::class)->authorizeBranchFilter($viewer, $branchId);
+
+        // Only users sharing one of the caller's branches, unless the caller
+        // holds `branches:view_all`. The list and `meta.stats` take the same
+        // scope, so the tabs count the rows the caller can see.
         $users = User::with('branch', 'branches', 'roles')
+            ->visibleTo($viewer)
             ->when(filled($search), function ($query) use ($search) {
                 $like = LikePattern::contains($search);
 
@@ -107,7 +115,8 @@ class UserController extends Controller
         // a second request. Branch-scoped on the same filled() gate as the list
         // above — the two must agree, or the tabs report the whole organisation
         // while the rows report one branch.
-        $stats = User::when(filled($branchId), fn ($q) => $q->forBranch($branchId))
+        $stats = User::visibleTo($viewer)
+            ->when(filled($branchId), fn ($q) => $q->forBranch($branchId))
             ->selectRaw('status, COUNT(*) as count')
             ->groupBy('status')
             ->pluck('count', 'status')

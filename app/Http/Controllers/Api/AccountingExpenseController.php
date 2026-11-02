@@ -9,6 +9,8 @@ use App\Http\Requests\Accounting\UpdateExpenseRequest;
 use App\Http\Resources\AccountingExpenseResource;
 use App\Models\AccountingExpense;
 use App\Services\Accounting\ExpenseRecorder;
+use App\Services\BranchAccess;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Validation\Rule;
@@ -67,7 +69,9 @@ class AccountingExpenseController extends Controller
         // drains pages instead of asking for a big number.
         $perPage = min((int) ($filters['per_page'] ?? 15), 100);
 
-        $expenses = AccountingExpense::query()
+        app(BranchAccess::class)->authorizeBranchFilter(request()->user(), $filters['branch_id'] ?? null);
+
+        $expenses = $this->visibleToCaller(AccountingExpense::query())
             // One query for the whole page instead of one per row. The table
             // renders `expense_account_name` on every line.
             ->with('expenseAccount:id,code,name')
@@ -140,6 +144,7 @@ class AccountingExpenseController extends Controller
     public function show(AccountingExpense $expense): JsonResponse
     {
         $this->authorize('expenses:view');
+        $this->abortUnlessVisible($expense);
 
         return $this->respond($expense);
     }
@@ -160,6 +165,8 @@ class AccountingExpenseController extends Controller
     )]
     public function update(UpdateExpenseRequest $request, AccountingExpense $expense): JsonResponse
     {
+        $this->abortUnlessVisible($expense);
+
         $expense->update($request->validated());
 
         return $this->respond($expense->refresh());
@@ -191,6 +198,8 @@ class AccountingExpenseController extends Controller
     )]
     public function pay(PayExpenseRequest $request, AccountingExpense $expense): JsonResponse
     {
+        $this->abortUnlessVisible($expense);
+
         $paid = $this->recorder->pay($expense, $request->validated(), $request->user()?->id);
 
         return $this->respond($paid);
@@ -205,5 +214,27 @@ class AccountingExpenseController extends Controller
         $expense->load('expenseAccount:id,code,name');
 
         return (new AccountingExpenseResource($expense))->response()->setStatusCode($status);
+    }
+
+    /**
+     * Rows in the caller's branches (BranchAccess). A row with no branch is
+     * visible only to `branches:view_all`.
+     *
+     * @param  Builder<AccountingExpense>  $query
+     * @return Builder<AccountingExpense>
+     */
+    private function visibleToCaller(Builder $query): Builder
+    {
+        $branchIds = app(BranchAccess::class)->for(request()->user());
+
+        return $branchIds === null ? $query : $query->whereIn('branch_id', $branchIds);
+    }
+
+    /**
+     * Another branch's row answers 404, exactly like one that does not exist.
+     */
+    private function abortUnlessVisible(AccountingExpense $expense): void
+    {
+        abort_unless(app(BranchAccess::class)->canSee(request()->user(), $expense->branch_id), 404);
     }
 }

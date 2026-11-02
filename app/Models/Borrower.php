@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Services\BranchAccess;
 use App\Services\LikePattern;
 use App\Services\SequenceCode;
 use App\Services\SignedFileLink;
@@ -213,6 +214,33 @@ class Borrower extends Model
     public function scopeForBranch($query, int $branchId)
     {
         return $query->where('branch_id', $branchId);
+    }
+
+    /**
+     * Borrowers in the branches $user may see (BranchAccess). A borrower with
+     * no branch (an anonymous registration not yet assigned) is visible only
+     * to `branches:view_all`. A local scope only: jobs and commands never
+     * call it.
+     */
+    public function scopeVisibleTo($query, User $user)
+    {
+        $branchIds = app(BranchAccess::class)->for($user);
+
+        return $branchIds === null ? $query : $query->whereIn('borrowers.branch_id', $branchIds);
+    }
+
+    /**
+     * Every `{borrower}` route parameter resolves only to a borrower the
+     * signed-in user may see, so another branch's member answers 404. Without
+     * a signed-in user (submission-token uploads, signed links, console) the
+     * binding is unscoped.
+     */
+    public function resolveRouteBindingQuery($query, $value, $field = null)
+    {
+        $query = parent::resolveRouteBindingQuery($query, $value, $field);
+        $user = request()->user();
+
+        return $user instanceof User ? $query->visibleTo($user) : $query;
     }
 
     /**

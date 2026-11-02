@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Services\BranchAccess;
 use App\Traits\Auditable;
 use Database\Factories\UserFactory;
 use Illuminate\Database\Eloquent\Attributes\Hidden;
@@ -126,11 +127,10 @@ class User extends Authenticatable
      * Always a superset of `branch()` — `users.branch_id` is maintained as one
      * member of this set, never as something outside it.
      *
-     * Assignment is DISPLAY-ONLY. Nothing reads it to decide what a user may
-     * see or do, there are no policies and no global scopes, and that is a
-     * deliberate property rather than an oversight:
-     * tests/Feature/BranchAssignmentIsDisplayOnlyTest.php fails loudly if
-     * anyone starts scoping on it without designing that first.
+     * Assignment decides which branches' data the user sees unless they hold
+     * `branches:view_all` (App\Services\BranchAccess, decision 5b). It does so
+     * through local scopes only, never a global scope or a policy:
+     * tests/Feature/BranchAccessTest.php covers both.
      *
      * @return BelongsToMany<Branch, $this>
      */
@@ -163,6 +163,29 @@ class User extends Authenticatable
     public function scopeForBranch($query, int $branchId)
     {
         return $query->whereHas('branches', fn ($q) => $q->where('branches.id', $branchId));
+    }
+
+    /**
+     * Users who share at least one branch with $viewer (BranchAccess), for the
+     * users and staff lists. `branches:view_all` sees everyone; a viewer with
+     * no branch sees no one.
+     *
+     * A listed user's branches are read the way BranchAccess reads the
+     * viewer's: the pivot, or the legacy `users.branch_id` column. Local scope
+     * only, never global.
+     */
+    public function scopeVisibleTo($query, self $viewer)
+    {
+        $branchIds = app(BranchAccess::class)->for($viewer);
+
+        if ($branchIds === null) {
+            return $query;
+        }
+
+        return $query->where(function ($q) use ($branchIds) {
+            $q->whereHas('branches', fn ($b) => $b->whereIn('branches.id', $branchIds))
+                ->orWhereIn('users.branch_id', $branchIds);
+        });
     }
 
     /**

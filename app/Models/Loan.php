@@ -4,6 +4,7 @@ namespace App\Models;
 
 use App\Enums\InterestRateFrequency;
 use App\Enums\TermUnit;
+use App\Services\BranchAccess;
 use App\Services\SequenceCode;
 use App\Traits\Auditable;
 use Illuminate\Database\Eloquent\Casts\Attribute;
@@ -645,6 +646,31 @@ class Loan extends Model
         // Qualified: the loans list joins `borrowers` to sort by borrower name,
         // and that table has a `branch_id` of its own.
         return $query->where('loans.branch_id', $branchId);
+    }
+
+    /**
+     * Loans in the branches $user may see (BranchAccess). A local scope only:
+     * jobs, commands and reports that aggregate the whole book never call it.
+     */
+    public function scopeVisibleTo($query, User $user)
+    {
+        $branchIds = app(BranchAccess::class)->for($user);
+
+        return $branchIds === null ? $query : $query->whereIn('loans.branch_id', $branchIds);
+    }
+
+    /**
+     * Every `{loan}` route parameter resolves only to a loan the signed-in user
+     * may see, so another branch's loan answers 404 on every `/loans/{loan}/*`
+     * read and write, whichever controller serves it. Without a signed-in user
+     * (signed links, console) the binding is unscoped.
+     */
+    public function resolveRouteBindingQuery($query, $value, $field = null)
+    {
+        $query = parent::resolveRouteBindingQuery($query, $value, $field);
+        $user = request()->user();
+
+        return $user instanceof User ? $query->visibleTo($user) : $query;
     }
 
     /**

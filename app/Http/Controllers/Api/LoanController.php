@@ -21,9 +21,12 @@ use App\Http\Resources\AmortizationScheduleResource;
 use App\Http\Resources\CoMakerResource;
 use App\Http\Resources\LoanLedgerEntryResource;
 use App\Http\Resources\LoanResource;
+use App\Models\Borrower;
 use App\Models\Loan;
+use App\Models\User;
 use App\Services\AmortizationBalanceService;
 use App\Services\AutoPayService;
+use App\Services\BranchAccess;
 use App\Services\CollateralAttacher;
 use App\Services\CollateralWriteTransaction;
 use App\Services\LikePattern;
@@ -188,7 +191,11 @@ principal, interest and penalty unpaid on periods past their due date and the
 loan's grace period (each row's `overdue_amount`, summed), and `overdue_count`
 is how many of those loans have an overdue amount. One aggregate query.
 
-`meta.stats` is always organisation-wide — narrowed by `branch_id` and
+Every figure covers only the loans in the caller's branches (all branches with
+`branches:view_all`; none for a user with no branch). A `branch_id` outside the
+caller's branches answers 403.
+
+`meta.stats` covers every loan the caller can see, narrowed by `branch_id` and
 `borrower_id` only, and never by `search`, `status`, `loan_product_id`,
 `awaiting_me` or the date range. Those counts are the KPI cards and tab badges: scoping them to the
 current filter would make every tab read the number of rows already on screen.
@@ -214,6 +221,7 @@ DESC,
         responses: [
             new OA\Response(response: 200, description: 'Paginated loan list'),
             new OA\Response(response: 401, description: 'Unauthenticated'),
+            new OA\Response(response: 403, description: 'A `branch_id` outside the caller\'s branches'),
             new OA\Response(response: 422, description: 'Unknown sort key, bad direction or malformed date'),
         ],
     )]
@@ -261,9 +269,14 @@ DESC,
         $dateTo = $filters['date_to'] ?? null;
         $awaitingMe = filter_var($filters['awaiting_me'] ?? false, FILTER_VALIDATE_BOOLEAN);
 
+        $viewer = request()->user();
+        app(BranchAccess::class)->authorizeBranchFilter($viewer, $branchId);
+
         // The filters alone, shared by the page and by `meta.totals`, so the
-        // totals cover exactly the loans the page is drawn from.
-        $filtered = Loan::query()
+        // totals cover exactly the loans the page is drawn from. Every query
+        // below starts from the caller's visible branches (BranchAccess), so
+        // the page, `meta.stats` and `meta.totals` all follow the same scope.
+        $filtered = Loan::visibleTo($viewer)
             ->when(filled($search), function ($q) use ($search) {
                 $like = LikePattern::contains($search);
 
@@ -325,7 +338,8 @@ DESC,
          * reason the page is, and the two must agree: fixing one alone would
          * sit a borrower-filtered page underneath whole-book counts.
          */
-        $stats = Loan::when(filled($branchId), fn ($q) => $q->forBranch($branchId))
+        $stats = Loan::visibleTo($viewer)
+            ->when(filled($branchId), fn ($q) => $q->forBranch($branchId))
             ->when(filled($borrowerId), fn ($q) => $q->where('loans.borrower_id', $borrowerId))
             ->selectRaw('status, COUNT(*) as count')
             ->groupBy('status')
@@ -348,7 +362,8 @@ DESC,
          * meta.stats: branch and borrower only, never `search`, `status`,
          * `loan_product_id` or the date range.
          */
-        $pastDueCount = Loan::when(filled($branchId), fn ($q) => $q->forBranch($branchId))
+        $pastDueCount = Loan::visibleTo($viewer)
+            ->when(filled($branchId), fn ($q) => $q->forBranch($branchId))
             ->when(filled($borrowerId), fn ($q) => $q->where('loans.borrower_id', $borrowerId))
             ->pastDue()
             ->count();
@@ -405,6 +420,36 @@ DESC,
                     'past_due' => $pastDueCount,
                 ],
             ]]);
+    }
+
+    /**
+     * Refuse a body that names a borrower or loan outside the caller's
+     * branches, exactly as if the id did not exist (the `exists` rule's own
+     * message), so the answer never reveals another branch's record. A loan
+     * takes its branch from its borrower, so this is also what stops a loan
+     * being created in a branch its creator can't see.
+     *
+     * @param  array<string, mixed>  $input
+     */
+    private function assertReferencesVisible(User $viewer, array $input): void
+    {
+        $references = [
+            'borrower_id' => Borrower::class,
+            'loan_id' => Loan::class,
+            'source_loan_id' => Loan::class,
+        ];
+
+        foreach ($references as $field => $model) {
+            if (! filled($input[$field] ?? null)) {
+                continue;
+            }
+
+            if (! $model::visibleTo($viewer)->whereKey($input[$field])->exists()) {
+                throw ValidationException::withMessages([
+                    $field => __('validation.exists', ['attribute' => str_replace('_', ' ', $field)]),
+                ]);
+            }
+        }
     }
 
     /**
@@ -512,6 +557,8 @@ DESC,
     )]
     public function store(StoreLoanRequest $request): JsonResponse
     {
+        $this->assertReferencesVisible($request->user(), $request->validated());
+
         $loan = $this->loanService->createLoan($request->validated(), $request->user());
         $loan->load('borrower', 'loanProduct', 'branch', 'coMakers', 'createdByUser');
 
@@ -1243,6 +1290,8 @@ DESC,
     )]
     public function formPreview(PreviewLoanRequest $request): JsonResponse
     {
+        $this->assertReferencesVisible($request->user(), $request->validated());
+
         return response()->json(['data' => $this->loanService->formPreview($request->validated())]);
     }
 
