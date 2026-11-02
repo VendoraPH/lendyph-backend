@@ -10,6 +10,7 @@ use App\Models\Loan;
 use App\Models\LoanProduct;
 use App\Models\ShareCapitalLedger;
 use App\Models\User;
+use App\Services\CollateralSecurity;
 use App\Services\LoanService;
 use Illuminate\Support\Facades\DB;
 use Tests\Feature\BrowserMoneyRound\Concerns\BuildsReleasedLoans;
@@ -150,6 +151,104 @@ class CollateralServerValueTest extends TestCase
             ->assertJsonPath('data.pivot.snapshot_value', 40000);
     }
 
+    // ── the loan's collateral summary ────────────────────────────────────
+
+    public function test_a_loan_summary_withholds_a_share_capital_pledge_from_a_caller_who_cannot_see_balances(): void
+    {
+        $loan = $this->draftLoan();
+        $collateral = $this->shareCapitalCollateral($loan->borrower_id, 7250.5);
+        $this->postJson("/api/loans/{$loan->id}/collaterals", ['collateral_id' => $collateral->id])->assertCreated();
+        $loan->load('collaterals');
+
+        $this->assertSame(
+            ['total_value' => null, 'security_status' => 'partially_secured', 'short_by' => null, 'value_unknown' => true],
+            CollateralSecurity::ofLoan($loan, $this->userWith('loans:view')),
+        );
+        $this->assertSame(
+            ['total_value' => null, 'security_status' => 'partially_secured', 'short_by' => null, 'value_unknown' => true],
+            CollateralSecurity::ofLoan($loan->fresh('collaterals')),
+        );
+        $this->assertEquals(
+            ['total_value' => 7250.5, 'security_status' => 'partially_secured', 'short_by' => 92749.5],
+            CollateralSecurity::ofLoan($loan->fresh('collaterals'), $this->userWith('loans:view', 'share_capital:view')),
+        );
+    }
+
+    public function test_a_loan_summary_without_share_capital_is_shown_to_everyone(): void
+    {
+        $loan = $this->draftLoan();
+        $land = Collateral::factory()->create(['borrower_id' => $loan->borrower_id, 'amount' => 40000]);
+        $this->postJson("/api/loans/{$loan->id}/collaterals", ['collateral_id' => $land->id])->assertCreated();
+
+        $this->assertEquals(
+            ['total_value' => 40000, 'security_status' => 'partially_secured', 'short_by' => 60000],
+            CollateralSecurity::ofLoan($loan->fresh('collaterals'), $this->userWith('loans:view')),
+        );
+    }
+
+    // ── POST /loans/preview with loan_id (the edit page) ─────────────────
+
+    public function test_an_edit_preview_carries_held_pledges_at_their_pledged_value(): void
+    {
+        $loan = $this->draftLoan();
+        $held = Collateral::factory()->create(['borrower_id' => $loan->borrower_id, 'amount' => 30000]);
+        $added = Collateral::factory()->create(['borrower_id' => $loan->borrower_id, 'amount' => 20000]);
+        $this->postJson("/api/loans/{$loan->id}/collaterals", ['collateral_id' => $held->id])->assertCreated();
+        // Re-valued after it was pledged: the pledge keeps 30,000.
+        $this->putJson("/api/collaterals/{$held->id}", ['amount' => 45000])->assertOk();
+
+        $card = $this->getJson("/api/loans/{$loan->id}")->assertOk()->json('data.collateral_summary');
+        $preview = $this->postJson('/api/loans/preview', [
+            'loan_id' => $loan->id,
+            'principal_amount' => 100000,
+            'collaterals' => [['collateral_id' => $held->id]],
+        ])->assertOk()->json('data.collateral');
+
+        $this->assertEquals(30000, $card['total_value']);
+        $this->assertSame($card, $preview);
+
+        $this->postJson('/api/loans/preview', [
+            'loan_id' => $loan->id,
+            'principal_amount' => 100000,
+            'collaterals' => [['collateral_id' => $held->id], ['collateral_id' => $added->id]],
+        ])->assertOk()->assertJsonPath('data.collateral.total_value', 50000);
+    }
+
+    public function test_an_edit_preview_follows_the_edit_rules(): void
+    {
+        $loan = $this->draftLoan();
+        $body = ['loan_id' => $loan->id, 'principal_amount' => 100000];
+
+        $this->postJson('/api/loans/preview', [...$body, 'borrower_id' => Borrower::factory()->create(['branch_id' => $this->branch->id])->id])
+            ->assertUnprocessable()->assertJsonValidationErrors(['borrower_id']);
+
+        $this->postJson('/api/loans/preview', [...$body, 'source_loan_id' => $loan->id])
+            ->assertUnprocessable()->assertJsonValidationErrors(['loan_id']);
+
+        $this->actingAs($this->userWith('loans:create'));
+        $this->postJson('/api/loans/preview', $body)->assertForbidden();
+
+        $this->actingAs($this->userWith('loans:update'));
+        $this->postJson('/api/loans/preview', $body)->assertOk();
+
+        $loan->update(['status' => 'approved']);
+        $this->postJson('/api/loans/preview', $body)->assertUnprocessable()->assertJsonValidationErrors(['status']);
+    }
+
+    public function test_listing_collateral_in_a_preview_needs_collaterals_view(): void
+    {
+        $borrower = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+        $land = Collateral::factory()->create(['borrower_id' => $borrower->id, 'amount' => 50000]);
+        $body = ['borrower_id' => $borrower->id, 'principal_amount' => 10000, 'collaterals' => [['collateral_id' => $land->id]]];
+
+        $this->actingAs($this->userWith('loans:create'));
+        $this->postJson('/api/loans/preview', $body)->assertUnprocessable()->assertJsonValidationErrors(['collaterals']);
+        $this->postJson('/api/loans/preview', ['principal_amount' => 10000, 'collaterals' => []])->assertOk();
+
+        $this->actingAs($this->userWith('loans:create', 'collaterals:view'));
+        $this->postJson('/api/loans/preview', $body)->assertOk()->assertJsonPath('data.collateral.total_value', 50000);
+    }
+
     // ── POST /loans/preview collateral ───────────────────────────────────
 
     public function test_the_preview_values_share_capital_at_the_balance(): void
@@ -173,7 +272,7 @@ class CollateralServerValueTest extends TestCase
         $shareCapital = $this->shareCapitalCollateral($borrower, 12000);
         $land = Collateral::factory()->create(['borrower_id' => $borrower->id, 'amount' => 50000]);
 
-        $this->actingAs($this->userWith('loans:create'));
+        $this->actingAs($this->userWith('loans:create', 'collaterals:view'));
 
         $this->postJson('/api/loans/preview', [
             'borrower_id' => $borrower->id,
@@ -246,6 +345,36 @@ class CollateralServerValueTest extends TestCase
             'borrower_id' => Borrower::factory()->create(['branch_id' => $this->branch->id])->id,
             'principal_amount' => 70800,
         ])->assertUnprocessable()->assertJsonValidationErrors(['borrower_id']);
+    }
+
+    public function test_a_restructure_preview_counts_every_pledge_of_the_source_listed_or_not(): void
+    {
+        $borrower = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+        $source = $this->releasedLoanFor($borrower);
+        $first = Collateral::factory()->create(['borrower_id' => $borrower->id, 'amount' => 30000]);
+        $second = Collateral::factory()->create(['borrower_id' => $borrower->id, 'amount' => 10000]);
+        $source->collaterals()->attach($first->id, ['snapshot_value' => 25000, 'attached_at' => now()]);
+        $source->collaterals()->attach($second->id, ['snapshot_value' => 10000, 'attached_at' => now()]);
+        $body = ['source_loan_id' => $source->id, 'principal_amount' => 70800];
+
+        $this->postJson('/api/loans/preview', $body)->assertOk()->assertJsonPath('data.collateral.total_value', 35000);
+        $this->postJson('/api/loans/preview', [...$body, 'collaterals' => [['collateral_id' => $first->id]]])
+            ->assertOk()->assertJsonPath('data.collateral.total_value', 35000);
+    }
+
+    public function test_a_restructure_preview_of_a_loan_secured_by_share_capital_needs_share_capital_view(): void
+    {
+        $borrower = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+        $source = $this->releasedLoanFor($borrower);
+        $shareCapital = $this->shareCapitalCollateral($borrower, 9000);
+        $source->collaterals()->attach($shareCapital->id, ['snapshot_value' => 9000, 'attached_at' => now()]);
+        $body = ['source_loan_id' => $source->id, 'principal_amount' => 70800];
+
+        $this->actingAs($this->userWith('loans:restructure'));
+        $this->postJson('/api/loans/preview', $body)->assertUnprocessable()->assertJsonValidationErrors(['source_loan_id']);
+
+        $this->actingAs($this->userWith('loans:restructure', 'share_capital:view'));
+        $this->postJson('/api/loans/preview', $body)->assertOk()->assertJsonPath('data.collateral.total_value', 9000);
     }
 
     public function test_a_restructure_preview_needs_the_restructure_permission(): void

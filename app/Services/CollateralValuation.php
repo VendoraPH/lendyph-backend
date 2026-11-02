@@ -87,8 +87,10 @@ final class CollateralValuation
      *  - `share_capital`: its member's share capital balance, clamped at 0, since
      *    a negative balance secures nothing.
      *
-     * An attach calls it on the row it holds the lock on, so the figure is the
-     * one standing when the pledge is written.
+     * An attach calls it on the collateral row it has locked, and the balance
+     * is read during the attach's transaction. The collateral lock does not
+     * cover the share capital ledger, so the balance is the one that
+     * transaction reads, not one held still until it commits.
      */
     public static function pledgeValue(Collateral $collateral): float
     {

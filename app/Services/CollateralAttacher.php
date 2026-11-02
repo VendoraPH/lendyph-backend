@@ -197,8 +197,8 @@ class CollateralAttacher
      *
      * The pledge's value is the server's, CollateralValuation::pledgeValue() of
      * the locked row, never a figure the client sends: its `amount`, or its
-     * member's share capital balance (at least 0), read while this transaction
-     * holds the collateral's lock.
+     * member's share capital balance (at least 0), read during the attach's
+     * transaction.
      *
      * @param  Collateral|null  $collateral  lock()'s row for this id, null when it was not found
      *

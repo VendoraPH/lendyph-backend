@@ -558,7 +558,7 @@ DESC,
     #[OA\Put(
         path: '/api/loans/{id}',
         summary: 'Update loan',
-        description: 'Update loan application (only if draft or for_review). `collaterals` is optional and is the loan\'s complete collateral list. Absent: collateral is not touched. A list (`[]` included): collateral the loan holds and the list leaves out is detached, listed collateral it does not hold yet is attached with its `snapshot_value` (same rules and guards as POST /api/loans/{loanId}/collaterals), and collateral it already holds keeps its original snapshot. Each collateral attached or detached is recorded in the audit log against the loan (`collateral_attached`, `collateral_detached`). `null` is a 422. Sending the key requires `collaterals:update` as well as `loans:update`. The loan fields and the collateral change are saved together or not at all.',
+        description: 'Update loan application (only if draft or for_review). `collaterals` is optional and is the loan\'s complete collateral list. Absent: collateral is not touched. A list (`[]` included): collateral the loan holds and the list leaves out is detached, listed collateral it does not hold yet is attached at the server\'s value, its `amount` or for share capital its member\'s balance (same rules and guards as POST /api/loans/{loanId}/collaterals; a sent `snapshot_value` is ignored), and collateral it already holds keeps the value it was pledged at. Each collateral attached or detached is recorded in the audit log against the loan (`collateral_attached`, `collateral_detached`). `null` is a 422. Sending the key requires `collaterals:update` as well as `loans:update`. The loan fields and the collateral change are saved together or not at all.',
         tags: ['Loans'],
         security: [['sanctum' => []]],
         parameters: [
@@ -571,10 +571,10 @@ DESC,
                     type: 'array',
                     description: 'The complete list. Each collateral must be registered to the loan\'s borrower, listed once, and not pledged to another active loan.',
                     items: new OA\Items(
-                        required: ['collateral_id', 'snapshot_value'],
+                        required: ['collateral_id'],
                         properties: [
                             new OA\Property(property: 'collateral_id', type: 'integer', example: 1),
-                            new OA\Property(property: 'snapshot_value', type: 'number', minimum: 0, maximum: 99999999.99, example: 250000),
+                            new OA\Property(property: 'snapshot_value', type: 'number', deprecated: true, description: 'Ignored. The server values the pledge.'),
                         ],
                     ),
                 ),
@@ -1189,13 +1189,17 @@ DESC,
         description: <<<'TXT'
         Read-only. Every field is optional; each section is computed from what was sent.
 
-        `collateral` is always present: `total_value` (the stated snapshot values added up), `security_status` (`unsecured` with no principal or nothing pledged, `secured` when the total reaches the principal, else `partially_secured`) and `short_by` (the principal less the total, never below 0; 0 without a principal). GET /api/loans/{id} `collateral_summary` uses the same rule for a saved loan's pledges.
+        `collateral` is always present: `total_value` (each listed collateral valued by the server by `collateral_id` on the borrower's register: its `amount`, or for share capital its member's balance, at least 0; collateral the edited loan (`loan_id`) or the source loan (`source_loan_id`) already holds counts at the value it was pledged at, and on a restructure every pledge of the source counts, listed or not. A sent `snapshot_value` is ignored), `security_status` (`unsecured` with no principal or nothing pledged, `secured` when the total reaches the principal, else `partially_secured`) and `short_by` (the principal less the total, never below 0; 0 without a principal). GET /api/loans/{id} `collateral_summary` uses the same rule for a saved loan's pledges.
 
         `maturity_date` is where the loan would mature, as creating it would store it: null until `loan_product_id`, a `term` inside the product's term range, `frequency` and `start_date` are sent (the principal and the rate are not needed).
 
         `deductions` is null until `loan_product_id` and a `principal_amount` above 0 are sent. Send `deductions` as the create, edit and restructure payloads do (`{name, amount, type}`; a percentage's `amount` is the rate); absent or null means the product's own processing, service and notarial fee rates, as creating the loan falls back to, and `[]` means none. `items` are those deductions as the loan would store them (`{name, amount, type, original_value}`), `stated_total` their total; `configured_fees` are the Settings fees a release of this loan would add, matched to its product and its conditions (loan amount, term in days once `maturity_date` is known) by the release's own code, each with its `fee_id`, and `configured_total` their total; `total_deductions` is both totals, and `net_proceeds` the principal less it. When the deductions are more than the principal, `net_proceeds` is null and `error` carries the refusal saving or releasing would give (else `error` is null), in this 200 body so the rest of the preview still shows. Pesos as JSON numbers, totals added in whole centavos.
 
         `amortization` is null until `loan_product_id`, a `principal_amount` above 0, an `interest_rate` above 0, `term`, `frequency` and `start_date` are all sent. Its `rows` are the schedule a release of the same loan writes, built with the product's interest method, term unit and rate frequency (`interest_method` says which), each with the `share_capital_build_up` (`scb_amount`) and `total_payment` (`total_due` plus it); `totals` adds up principal, interest, build-up and payment.
+
+        `restructure` is present only with `source_loan_id`: `{restructurable_balance, principal, shortfall, remarks_required, write_off_permission_required}`, by the rule POST /api/loans/{id}/restructure applies. `shortfall` is 0 when the principal reaches or exceeds the balance. The two flags state what the restructure needs, not whether the caller holds `loans:write_off`.
+
+        Listing collateral needs `collaterals:view`, and a share capital collateral (listed, or held by the source loan on a restructure) needs `share_capital:view`.
 
         The product's amount, rate and term ranges are not checked here; saving the loan enforces them.
         TXT,
@@ -1204,6 +1208,9 @@ DESC,
         requestBody: new OA\RequestBody(
             content: new OA\JsonContent(
                 properties: [
+                    new OA\Property(property: 'loan_id', type: 'integer', nullable: true, description: 'The loan being edited (the edit page). Needs loans:update; the loan must be draft or for_review. Cannot be sent with source_loan_id'),
+                    new OA\Property(property: 'source_loan_id', type: 'integer', nullable: true, description: 'The loan being restructured (the restructure page). Needs loans:restructure'),
+                    new OA\Property(property: 'borrower_id', type: 'integer', nullable: true, description: 'Required when collaterals is not empty, unless loan_id or source_loan_id is sent; if sent with either, it must be that loan\'s borrower'),
                     new OA\Property(property: 'loan_product_id', type: 'integer', nullable: true),
                     new OA\Property(property: 'principal_amount', type: 'number', nullable: true),
                     new OA\Property(property: 'interest_rate', type: 'number', nullable: true),
@@ -1213,8 +1220,8 @@ DESC,
                     new OA\Property(property: 'scb_amount', type: 'number', nullable: true),
                     new OA\Property(property: 'collaterals', type: 'array', nullable: true, items: new OA\Items(
                         properties: [
-                            new OA\Property(property: 'collateral_id', type: 'integer', nullable: true),
-                            new OA\Property(property: 'snapshot_value', type: 'number'),
+                            new OA\Property(property: 'collateral_id', type: 'integer'),
+                            new OA\Property(property: 'snapshot_value', type: 'number', deprecated: true, description: 'Ignored. The server values the pledge.'),
                         ],
                     )),
                     new OA\Property(property: 'deductions', type: 'array', nullable: true, items: new OA\Items(
@@ -1228,9 +1235,9 @@ DESC,
             ),
         ),
         responses: [
-            new OA\Response(response: 200, description: '`{data: {collateral, maturity_date, deductions, amortization}}`'),
-            new OA\Response(response: 403, description: 'Missing both loans:create and loans:update'),
-            new OA\Response(response: 422, description: 'Malformed input'),
+            new OA\Response(response: 200, description: '`{data: {collateral, maturity_date, deductions, amortization, restructure?}}`'),
+            new OA\Response(response: 403, description: 'Missing both loans:create and loans:update; with `loan_id`, missing loans:update; with `source_loan_id`, missing loans:restructure'),
+            new OA\Response(response: 422, description: 'Malformed input, a collateral not on the borrower\'s register, collateral without collaterals:view, a share capital collateral without share_capital:view, a loan that can no longer be edited, or a source loan that cannot be restructured'),
         ],
     )]
     public function formPreview(PreviewLoanRequest $request): JsonResponse

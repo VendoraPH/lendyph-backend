@@ -538,7 +538,7 @@ class CollateralController extends Controller
     #[OA\Post(
         path: '/api/loans/{loanId}/collaterals',
         summary: 'Attach a collateral to a loan',
-        description: 'Creates a row in `loan_collaterals` whose `snapshot_value` the server sets at attach time: the collateral\'s `amount`, or for a share capital collateral its member\'s share capital balance (at least 0), read under the collateral\'s lock. A sent `snapshot_value` is ignored. Recorded as `collateral_attached` in the audit log against the loan. Only while the loan is in draft or for_review status. The collateral must belong to the loan\'s own borrower. Rejects re-attaching the same collateral, and rejects a collateral already pledged to another loan in an active status.',
+        description: 'Creates a row in `loan_collaterals` whose `snapshot_value` the server sets at attach time: the collateral\'s `amount`, or for a share capital collateral its member\'s share capital balance (at least 0), read during the attach\'s transaction. A sent `snapshot_value` is ignored. Recorded as `collateral_attached` in the audit log against the loan. Only while the loan is in draft or for_review status. The collateral must belong to the loan\'s own borrower. Rejects re-attaching the same collateral, and rejects a collateral already pledged to another loan in an active status.',
         tags: ['Collaterals'],
         security: [['sanctum' => []]],
         parameters: [

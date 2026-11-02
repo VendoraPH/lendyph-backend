@@ -1916,7 +1916,8 @@ class LoanService
      *   values against the principal, the rule the loan page's collaterals
      *   card uses too. Each is valued by its id, on the borrower's register,
      *   at what saving would pledge it at (previewPledgedCentavos()); a sent
-     *   `snapshot_value` is ignored.
+     *   `snapshot_value` is ignored. With `loan_id` (the edit page) the
+     *   borrower is that loan's, and with `source_loan_id` the source's.
      * - `maturity_date`: where the loan would mature, by the code a create
      *   stores it with. Null until the product, a term inside its range, the
      *   frequency and the start date are known; the principal and the rate
@@ -1937,17 +1938,23 @@ class LoanService
      *
      * Money is added in whole centavos, never as peso floats. Writes nothing.
      *
-     * @param  array{source_loan_id?: int|null, borrower_id?: int|null, loan_product_id?: int|null, principal_amount?: float|int|string|null, interest_rate?: float|int|string|null, term?: int|null, frequency?: string|null, start_date?: string|null, scb_amount?: float|int|string|null, collaterals?: list<array{collateral_id: int}>|null, deductions?: list<array{name: string, amount: float|int|string, type: string}>|null}  $input
+     * @param  array{loan_id?: int|null, source_loan_id?: int|null, borrower_id?: int|null, loan_product_id?: int|null, principal_amount?: float|int|string|null, interest_rate?: float|int|string|null, term?: int|null, frequency?: string|null, start_date?: string|null, scb_amount?: float|int|string|null, collaterals?: list<array{collateral_id: int}>|null, deductions?: list<array{name: string, amount: float|int|string, type: string}>|null}  $input
      * @return array{collateral: array{total_value: float|int, security_status: string, short_by: float|int}, maturity_date: string|null, deductions: array<string, mixed>|null, amortization: array<string, mixed>|null, restructure?: array{restructurable_balance: float, principal: float, shortfall: float, remarks_required: bool, write_off_permission_required: bool}}
      *
-     * @throws ValidationException when the source cannot be restructured, or a collateral is not on the borrower's register
+     * @throws ValidationException when the edited loan cannot be edited, the source cannot be restructured, or a collateral is not on the borrower's register
      */
     public function formPreview(array $input): array
     {
         $principal = $this->toCentavos((float) ($input['principal_amount'] ?? 0));
+        $edited = isset($input['loan_id']) ? $this->previewEditedLoan((int) $input['loan_id'], $input['borrower_id'] ?? null) : null;
         $source = isset($input['source_loan_id']) ? $this->previewSource((int) $input['source_loan_id'], $input['borrower_id'] ?? null) : null;
-        $borrowerId = $source?->borrower_id ?? ($input['borrower_id'] ?? null);
-        $pledged = $this->previewPledgedCentavos($input['collaterals'] ?? [], $borrowerId === null ? null : (int) $borrowerId, $source);
+        $borrowerId = $edited?->borrower_id ?? $source?->borrower_id ?? ($input['borrower_id'] ?? null);
+        $pledged = $this->previewPledgedCentavos(
+            $input['collaterals'] ?? [],
+            $borrowerId === null ? null : (int) $borrowerId,
+            $edited ?? $source,
+            carriesEveryPledge: $source !== null,
+        );
 
         $product = isset($input['loan_product_id']) ? LoanProduct::find($input['loan_product_id']) : null;
         $maturity = $this->formMaturity($product, $input);
@@ -1964,6 +1971,39 @@ class LoanService
         }
 
         return $preview;
+    }
+
+    /**
+     * The loan an edit preview is for: one updateLoan() would still edit, and
+     * no other borrower's. A plain read, like previewSource().
+     *
+     * @throws ValidationException when the loan is gone or no longer editable, or a different borrower is named
+     */
+    private function previewEditedLoan(int $loanId, int|string|null $borrowerId): Loan
+    {
+        $loan = Loan::find($loanId);
+
+        if (! $loan) {
+            throw ValidationException::withMessages([
+                'loan_id' => ['The loan being edited no longer exists.'],
+            ]);
+        }
+
+        // As updateLoan() refuses it.
+        if (! $loan->is_editable) {
+            throw ValidationException::withMessages([
+                'status' => ['Loan can only be edited in draft or for_review status.'],
+            ]);
+        }
+
+        // The member is fixed after creation.
+        if ($borrowerId !== null && (int) $borrowerId !== (int) $loan->borrower_id) {
+            throw ValidationException::withMessages([
+                'borrower_id' => ['A loan\'s borrower cannot be changed.'],
+            ]);
+        }
+
+        return $loan;
     }
 
     /**
@@ -1993,37 +2033,42 @@ class LoanService
     }
 
     /**
-     * What the listed collateral would be pledged at, in whole centavos: each
-     * row found by its id on the borrower's register, never by a figure the
-     * client sends.
+     * What the loan would be pledged with, in whole centavos: each listed row
+     * found by its id on the borrower's register, never by a figure the client
+     * sends.
      *
-     * The value is the one saving would store. A new pledge is
-     * CollateralValuation::pledgeValue(). On a restructure preview, collateral
-     * the source loan holds is carried over at the value it was pledged at, as
-     * inheritCollaterals() copies it; anything else the page adds is attached,
-     * so it takes pledgeValue() too.
+     * The value is the one saving would store:
+     *
+     *  - A collateral `$holder` already holds keeps the value it was pledged
+     *    at. On the edit page (`loan_id`) that is what updateLoan() leaves on
+     *    a held and listed pledge; on a restructure (`source_loan_id`) it is
+     *    what inheritCollaterals() copies.
+     *  - Anything else is a new pledge: CollateralValuation::pledgeValue().
+     *  - With `$carriesEveryPledge` (a restructure), every pledge the source
+     *    holds counts whether it is listed or not, because the restructure
+     *    copies all of them. On the edit page an unlisted pledge is one the
+     *    edit detaches, so it does not count.
      *
      * @param  list<array{collateral_id: int|string}>  $rows
      *
      * @throws ValidationException on `collaterals.{index}.collateral_id` when a row is not on the register
      */
-    private function previewPledgedCentavos(array $rows, ?int $borrowerId, ?Loan $source): int
+    private function previewPledgedCentavos(array $rows, ?int $borrowerId, ?Loan $holder, bool $carriesEveryPledge = false): int
     {
-        if ($rows === []) {
-            return 0;
-        }
+        $held = $holder === null
+            ? []
+            : array_map('floatval', $holder->collaterals()->pluck('loan_collaterals.snapshot_value', 'collaterals.id')->all());
+        $listedIds = array_map(static fn (array $row): int => (int) $row['collateral_id'], $rows);
 
-        $collaterals = Collateral::query()
-            ->whereKey(array_map(static fn (array $row): int => (int) $row['collateral_id'], $rows))
-            ->where('borrower_id', $borrowerId ?? 0)
-            ->get()
-            ->keyBy('id');
+        $collaterals = $listedIds === []
+            ? new EloquentCollection
+            : Collateral::query()
+                ->whereKey($listedIds)
+                ->where('borrower_id', $borrowerId ?? 0)
+                ->get()
+                ->keyBy('id');
 
         $values = CollateralValuation::pledgeValues($collaterals);
-        $carried = $source === null
-            ? []
-            : $source->collaterals()->pluck('loan_collaterals.snapshot_value', 'collaterals.id')->all();
-
         $pledged = 0;
 
         foreach ($rows as $index => $row) {
@@ -2035,7 +2080,13 @@ class LoanService
                 ]);
             }
 
-            $pledged += $this->toCentavos((float) ($carried[$collateralId] ?? $values[$collateralId]));
+            $pledged += $this->toCentavos($held[$collateralId] ?? $values[$collateralId]);
+        }
+
+        if ($carriesEveryPledge) {
+            foreach (array_diff_key($held, array_flip($listedIds)) as $value) {
+                $pledged += $this->toCentavos($value);
+            }
         }
 
         return $pledged;
