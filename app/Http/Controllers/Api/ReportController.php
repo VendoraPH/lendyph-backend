@@ -160,7 +160,7 @@ class ReportController extends Controller
     #[OA\Get(
         path: '/api/reports/statement-of-account/{loan}',
         summary: 'Statement of Account',
-        description: 'All transactions, schedule, and balance for a specific loan. Each `amortization_schedule` row also carries the demand letter\'s arrears: `remaining` (`principal`, `interest`, `penalty` still owed, never below 0), `amount_due` (their sum), `days_overdue` (whole days past the due date, today in Asia/Manila; 0 when not yet due) and `is_overdue` (due before today with something still owed). `total_demanded` is every `is_overdue` row\'s `amount_due` plus, when there are any, the insurance premium still owed (a payment takes it first), and `demand_totals` (`principal`, `interest`, `penalty`, `amount_due`) the columns over those rows, with `insurance_owed` the premium included in `total_demanded`. `summary` also carries `insurance_owed`, inside `outstanding_balance`. Totals in whole centavos.',
+        description: 'All transactions, schedule, and balance for a specific loan. Each `amortization_schedule` row also carries the demand letter\'s arrears: `remaining` (`principal`, `interest`, `penalty` still owed, never below 0), `amount_due` (their sum), `days_overdue` (whole days past the due date, today in Asia/Manila; 0 when not yet due) and `is_overdue` (due before today with something still owed). `total_demanded` is every `is_overdue` row\'s `amount_due` plus, when there are any, the insurance premium still owed (a payment takes it first), and `demand_totals` (`principal`, `interest`, `penalty`, `amount_due`) the columns over those rows, with `insurance_owed` the premium included in `total_demanded`. `summary` also carries `insurance_owed`, inside `outstanding_balance`, and `overdue_amount`: the principal, interest and penalty still unpaid on late periods (past the due date plus the loan\'s grace), equal to GET /loans/{id}/summary `overdue_amount`. Each schedule row also carries `amount_remaining`, its principal, interest and penalty still owed. Totals in whole centavos.',
         tags: ['Reports'],
         security: [['sanctum' => []]],
         parameters: [
@@ -277,6 +277,7 @@ class ReportController extends Controller
             new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15)),
+            new OA\Parameter(name: 'past_due_only', in: 'query', required: false, description: 'When 1, only periods past the due date plus the loan\'s grace (late); the totals follow the same filter. Without it every unpaid period due by today is listed.', schema: new OA\Schema(type: 'boolean')),
         ],
         responses: [
             new OA\Response(response: 200, description: 'Paginated due/past-due schedules', content: new OA\JsonContent(properties: [
@@ -305,7 +306,7 @@ class ReportController extends Controller
     {
         $this->authorize('reports:view');
 
-        $filters = $this->reportFilters();
+        $filters = $this->reportFilters(['past_due_only' => ['nullable', 'boolean']]);
         $results = $this->reportService->listOfDuePastDue($filters);
         $today = Carbon::today();
         $loanFigures = $this->reportService->duePastDueLoanFigures(
@@ -865,7 +866,7 @@ class ReportController extends Controller
         // loan statuses and the cutoff (`now()` vs `Carbon::today()`), so the
         // CSV did not match the screen it was exported from.
         $query = $this->reportService
-            ->duePastDueQuery($this->reportFilters())
+            ->duePastDueQuery($this->reportFilters(['past_due_only' => ['nullable', 'boolean']]))
             ->with('loan.borrower');
 
         $today = Carbon::today();

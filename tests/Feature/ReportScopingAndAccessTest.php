@@ -179,10 +179,11 @@ class ReportScopingAndAccessTest extends TestCase
     }
 
     /**
-     * Share capital stays out of by_branch — that part was right and must not
-     * drift while the headline is being fixed.
+     * Share capital is in by_branch by the member's branch (decision 5c,
+     * 2026-11-02), so the rows reach the headline without adding anything
+     * back.
      */
-    public function test_share_capital_remains_excluded_from_by_branch(): void
+    public function test_share_capital_is_in_by_branch_by_the_member_s_branch(): void
     {
         $today = Carbon::today()->toDateString();
         $this->ledgerEntry($this->memberOf($this->branch), $today, credit: 4000);
@@ -190,19 +191,11 @@ class ReportScopingAndAccessTest extends TestCase
         $data = $this->getJson("/api/reports/cash-flow?date_from={$today}&date_to={$today}")
             ->assertOk()->json('data');
 
-        foreach ($data['by_branch'] as $row) {
-            $this->assertArrayNotHasKey('share_capital_credit', $row);
-            $this->assertArrayNotHasKey('share_capital_debit', $row);
-        }
+        $row = collect($data['by_branch'])->firstWhere('branch_id', $this->branch->id);
+        $this->assertEqualsWithDelta(4000, $row['inflow_share_capital'], 0.01);
 
-        // by_branch reconciles to the loan cash only; add share capital back to
-        // reach the headline, exactly as the docblock promises.
         $branchInflow = array_sum(array_column($data['by_branch'], 'inflow_total'));
-        $this->assertEqualsWithDelta(
-            $data['inflows']['total'],
-            $branchInflow + $data['inflows']['share_capital_credit'],
-            0.01,
-        );
+        $this->assertEqualsWithDelta($data['inflows']['total'], $branchInflow, 0.01);
     }
 
     // ── 2. by_member is roster data, not aggregate data ──────────────────
