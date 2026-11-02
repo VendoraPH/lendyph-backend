@@ -2,8 +2,11 @@
 
 namespace Tests\Feature;
 
+use App\Models\AmortizationSchedule;
 use App\Models\Borrower;
+use App\Models\Loan;
 use App\Models\ShareCapitalPledge;
+use App\Services\RepaymentService;
 use Illuminate\Support\Carbon;
 use Tests\Feature\BrowserMoneyRound\Concerns\BuildsReleasedLoans;
 use Tests\Feature\InsuranceOwed\Concerns\OwesInsurancePremium;
@@ -14,7 +17,8 @@ use Tests\Traits\SetupLendyPH;
  * The parts of the list-totals, premium-split and daily-dues fold work that
  * the BrowserMoneyRound contract tests leave out: the overdue figures and
  * filters of GET /loans `meta.totals`, the pledge total under a filter, the
- * collections trend's premium split, and the folded daily due's amounts.
+ * collections trend's premium split, the folded daily due's amounts, and
+ * voided payments.
  */
 class ListTotalsAndDailyDuesFoldTest extends TestCase
 {
@@ -105,6 +109,33 @@ class ListTotalsAndDailyDuesFoldTest extends TestCase
 
     public function test_the_folded_daily_due_counts_the_closed_part_in_due_and_collected(): void
     {
+        [$loan, $closed, $remainder] = $this->loanWithAFoldedDueOn20260415();
+
+        $response = $this->getJson('/api/dashboard/daily-dues?date=2026-04-15')->assertOk();
+        $item = collect($response->json('data'))->firstWhere('loan_id', $loan->id);
+
+        $this->assertEqualsWithDelta((float) $closed->total_due + (float) $remainder->total_due, (float) $item['amount_due'], 0.001);
+        $this->assertEqualsWithDelta(
+            (float) $closed->principal_paid + (float) $closed->interest_paid + (float) $remainder->principal_paid + (float) $remainder->interest_paid,
+            (float) $item['amount_collected'],
+            0.001,
+        );
+        $this->assertGreaterThanOrEqual(5000.00, (float) $item['amount_collected']);
+        // The remainder is unpaid, so the one due is part paid, not collected.
+        $this->assertSame('partial', $item['status']);
+        $this->assertSame(1, $response->json('summary.counts.partial') + $response->json('summary.counts.collected') + $response->json('summary.counts.pending'));
+    }
+
+    /**
+     * ₱60,000 over six at 3% straight from 2026-01-15: periods 1 and 2 paid
+     * in full, period 3 (due 2026-04-15) paid ₱5,000, then an in-place
+     * restructure over six, which closes period 3 at what it collected and
+     * starts the remainder on the same date.
+     *
+     * @return array{0: Loan, 1: AmortizationSchedule, 2: AmortizationSchedule}
+     */
+    private function loanWithAFoldedDueOn20260415(): array
+    {
         $this->travelTo(Carbon::parse('2026-01-15 09:00'));
         $loan = $this->createReleasedLoan(['start_date' => '2026-01-15']);
         foreach (['2026-02-10' => 11800, '2026-03-10' => 11800, '2026-04-10' => 5000] as $date => $amount) {
@@ -125,18 +156,116 @@ class ListTotalsAndDailyDuesFoldTest extends TestCase
         $this->assertNotNull($closed, 'setup: a closed period on 2026-04-15');
         $this->assertNotNull($remainder, 'setup: its remainder on 2026-04-15');
 
-        $response = $this->getJson('/api/dashboard/daily-dues?date=2026-04-15')->assertOk();
-        $item = collect($response->json('data'))->firstWhere('loan_id', $loan->id);
+        return [$loan, $closed, $remainder];
+    }
 
+    public function test_the_folded_daily_due_turns_collected_once_the_remainder_is_paid(): void
+    {
+        [$loan, $closed, $remainder] = $this->loanWithAFoldedDueOn20260415();
+
+        $this->assertSame('partial', collect($this->getJson('/api/dashboard/daily-dues?date=2026-04-15')->assertOk()->json('data'))
+            ->firstWhere('loan_id', $loan->id)['status'], 'setup: part paid before the remainder is paid');
+
+        // The remainder is the earliest open period, and it is not yet late,
+        // so its own total_due pays it exactly.
+        $this->travelTo(Carbon::parse('2026-04-14 09:00'));
+        $this->postJson("/api/loans/{$loan->id}/repayments", [
+            'amount_paid' => (float) $remainder->total_due,
+            'payment_date' => '2026-04-14',
+        ])->assertCreated();
+        $this->assertSame('paid', $remainder->fresh()->status, 'setup: the remainder is paid');
+
+        $response = $this->getJson('/api/dashboard/daily-dues?date=2026-04-15')->assertOk();
+        $items = collect($response->json('data'))->where('loan_id', $loan->id);
+        $item = $items->first();
+
+        $this->assertCount(1, $items);
+        $this->assertSame('collected', $item['status']);
         $this->assertEqualsWithDelta((float) $closed->total_due + (float) $remainder->total_due, (float) $item['amount_due'], 0.001);
-        $this->assertEqualsWithDelta(
-            (float) $closed->principal_paid + (float) $closed->interest_paid + (float) $remainder->principal_paid + (float) $remainder->interest_paid,
-            (float) $item['amount_collected'],
-            0.001,
-        );
-        $this->assertGreaterThanOrEqual(5000.00, (float) $item['amount_collected']);
-        // The remainder is unpaid, so the one due is part paid, not collected.
-        $this->assertSame('partial', $item['status']);
-        $this->assertSame(1, $response->json('summary.counts.partial') + $response->json('summary.counts.collected') + $response->json('summary.counts.pending'));
+        $this->assertEqualsWithDelta((float) $item['amount_due'], (float) $item['amount_collected'], 0.001);
+        $this->assertSame(1, $response->json('summary.counts.collected'));
+        $this->assertEquals(100, $response->json('summary.collection_rate'));
+    }
+
+    public function test_a_voided_payment_drops_out_of_every_collected_and_paid_figure(): void
+    {
+        $voidedLoan = $this->loanOwingPremium();
+        $keptLoan = $this->loanOwingPremium();
+        $today = now()->toDateString();
+
+        $stats = fn (): array => $this->getJson('/api/dashboard/stats')->assertOk()->json('data');
+        $trend = fn (): array => collect($this->getJson('/api/dashboard/collections-trend?period=month')->assertOk()->json('data'))->last();
+        $performance = fn (): array => collect($this->getJson("/api/reports/performance?date_from={$today}&date_to={$today}")->assertOk()->json('data.by_branch'))
+            ->firstWhere('branch_id', $keptLoan->branch_id);
+        $statsBefore = $stats();
+        $trendBefore = $trend();
+        $performanceBefore = $performance();
+        $this->assertNotNull($performanceBefore, 'setup: the branch has a row');
+
+        // Each ₱1,000 takes the ₱400 premium owed, then ₱600 interest.
+        $voided = $this->pay($voidedLoan, 1000);
+        $this->pay($keptLoan, 1000);
+        app(RepaymentService::class)->voidRepayment($voided->fresh(), 'Entered on the wrong loan', $this->admin);
+        $this->assertSame('voided', $voided->fresh()->status, 'setup: the payment is voided');
+
+        // Only the kept payment counts.
+        $statsAfter = $stats();
+        $this->assertEqualsWithDelta(600.00, (float) $statsAfter['total_collected'] - (float) $statsBefore['total_collected'], 0.001);
+        $this->assertEqualsWithDelta(self::OWED, (float) $statsAfter['insurance_collected'] - (float) $statsBefore['insurance_collected'], 0.001);
+
+        $trendAfter = $trend();
+        $this->assertEqualsWithDelta(600.00, (float) $trendAfter['value'] - (float) $trendBefore['value'], 0.001);
+        $this->assertEqualsWithDelta(self::OWED, (float) $trendAfter['insurance_collected'] - (float) $trendBefore['insurance_collected'], 0.001);
+
+        $performanceAfter = $performance();
+        $this->assertEqualsWithDelta(600.00, (float) $performanceAfter['collected'] - (float) $performanceBefore['collected'], 0.001);
+        $this->assertEqualsWithDelta(self::OWED, (float) $performanceAfter['insurance_collected'] - (float) $performanceBefore['insurance_collected'], 0.001);
+
+        $voidedMember = $this->getJson("/api/borrowers/{$voidedLoan->borrower_id}/loan-summary")->assertOk()->json('data');
+        $this->assertEquals(0, $voidedMember['total_paid']);
+        $this->assertEquals(0, $voidedMember['insurance_paid']);
+
+        $keptMember = $this->getJson("/api/borrowers/{$keptLoan->borrower_id}/loan-summary")->assertOk()->json('data');
+        $this->assertEqualsWithDelta(1000.00, (float) $keptMember['total_paid'], 0.001);
+        $this->assertEqualsWithDelta(self::OWED, (float) $keptMember['insurance_paid'], 0.001);
+    }
+
+    /**
+     * `search` and `status=past_due` are the filters whose subqueries carry
+     * their own placeholders (LIKE patterns, the as-of date), so the totals
+     * query must take them with their bindings in the right order.
+     */
+    public function test_loan_list_totals_are_right_under_search_and_past_due(): void
+    {
+        $this->travelTo(Carbon::parse('2026-09-01 09:00'));
+        // Two loans with two periods past grace (07-01, 08-01, ₱11,800 each),
+        // one with nothing due yet.
+        $searched = $this->releasedLoanFor(Borrower::factory()->create(['branch_id' => $this->branch->id, 'last_name' => 'Quillfeather']), 60000, '2026-06-01');
+        $otherLate = $this->releasedLoanFor(null, 60000, '2026-06-01');
+        $current = $this->releasedLoanFor(null, 30000, '2026-08-20');
+        $owed = fn (Loan ...$loans): float => array_sum(array_map(fn (Loan $loan): float => (float) $this->summaryOf($loan)['outstanding_balance'], $loans));
+
+        $bySearch = $this->getJson('/api/loans?search=quillfeather')->assertOk();
+        $this->assertSame([$searched->id], array_column($bySearch->json('data'), 'id'), 'setup: search finds one loan');
+        $this->assertEqualsWithDelta($owed($searched), (float) $bySearch->json('meta.totals.total_outstanding'), 0.001);
+        $this->assertEqualsWithDelta(23600.00, (float) $bySearch->json('meta.totals.overdue_amount'), 0.001);
+        $this->assertSame(1, $bySearch->json('meta.totals.overdue_count'));
+
+        $pastDue = $this->getJson('/api/loans?status=past_due&per_page=1')->assertOk();
+        $this->assertSame(2, $pastDue->json('meta.total'), 'setup: two loans are past due');
+        $this->assertEqualsWithDelta($owed($searched, $otherLate), (float) $pastDue->json('meta.totals.total_outstanding'), 0.001);
+        $this->assertEqualsWithDelta(47200.00, (float) $pastDue->json('meta.totals.overdue_amount'), 0.001);
+        // Both read lateness through AmortizationSchedule::pastGraceSql():
+        // the Past Due tab holds the collectible loans with an unpaid period
+        // past grace, and overdue_count the matched loans owing on one. With
+        // no other filter they are the same loans.
+        $this->assertSame(2, $pastDue->json('meta.totals.overdue_count'));
+        $this->assertSame($pastDue->json('meta.stats.past_due'), $pastDue->json('meta.totals.overdue_count'));
+
+        $both = $this->getJson('/api/loans?status=past_due&search=quillfeather')->assertOk()->json('meta.totals');
+        $this->assertEqualsWithDelta($owed($searched), (float) $both['total_outstanding'], 0.001);
+        $this->assertSame(1, $both['overdue_count']);
+
+        $this->assertNotContains($current->id, array_column($this->getJson('/api/loans?status=past_due&per_page=100')->json('data'), 'id'));
     }
 }
