@@ -120,30 +120,55 @@ class AuditLogResource extends JsonResource
         return "{$basename} #{$this->auditable_id}";
     }
 
+    /**
+     * The fields this row changed, for display.
+     *
+     * Only keys present in the new values are listed, and only when their
+     * shown value differs from the old one. An `updated` row's old values hold
+     * the WHOLE original row while its new values hold only the changed
+     * columns, so comparing every key listed each untouched field as changed
+     * to nothing. A `created` row lists nothing: its new values are the whole
+     * inserted row (id and timestamps included) and the action already says
+     * what happened. Display only; old_values and new_values are returned as
+     * stored.
+     *
+     * @return list<array{field: string, old: string|null, new: string|null}>
+     */
     private function buildChanges(): array
     {
+        if ($this->action === 'created') {
+            return [];
+        }
+
         $old = is_array($this->old_values) ? $this->old_values : [];
         $new = is_array($this->new_values) ? $this->new_values : [];
 
-        $fields = array_unique(array_merge(array_keys($old), array_keys($new)));
         $changes = [];
 
-        foreach ($fields as $field) {
-            $oldValue = $old[$field] ?? null;
-            $newValue = $new[$field] ?? null;
+        foreach ($new as $field => $value) {
+            $oldShown = self::shown($old[$field] ?? null);
+            $newShown = self::shown($value);
 
-            // Skip noise: unchanged values
-            if ($oldValue === $newValue) {
+            if ($oldShown === $newShown) {
                 continue;
             }
 
             $changes[] = [
-                'field' => $field,
-                'old' => $oldValue !== null ? (string) (is_scalar($oldValue) ? $oldValue : json_encode($oldValue)) : null,
-                'new' => $newValue !== null ? (string) (is_scalar($newValue) ? $newValue : json_encode($newValue)) : null,
+                'field' => (string) $field,
+                'old' => $oldShown,
+                'new' => $newShown,
             ];
         }
 
         return $changes;
+    }
+
+    private static function shown(mixed $value): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        return is_scalar($value) ? (string) $value : json_encode($value);
     }
 }
