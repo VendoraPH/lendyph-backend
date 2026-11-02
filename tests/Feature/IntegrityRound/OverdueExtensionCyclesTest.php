@@ -28,13 +28,13 @@ class OverdueExtensionCyclesTest extends TestCase
         $this->seedAndLogin();
     }
 
-    private function oneMonthLoan(string $startDate = '2026-04-27'): Loan
+    private function oneMonthLoan(string $startDate = '2026-04-27', float $principal = 60000, float $rate = 3.0): Loan
     {
         $this->travelTo($startDate.' 09:00:00');
 
         return $this->createReleasedLoan([
-            'product' => ['interest_method' => 'upon_maturity', 'term' => 1, 'frequency' => 'monthly', 'interest_rate' => 3.0],
-            'principal_amount' => 60000,
+            'product' => ['interest_method' => 'upon_maturity', 'term' => 1, 'frequency' => 'monthly', 'interest_rate' => $rate],
+            'principal_amount' => $principal,
             'start_date' => $startDate,
         ]);
     }
@@ -143,5 +143,27 @@ class OverdueExtensionCyclesTest extends TestCase
 
         $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'defer'])->assertOk();
         $this->assertSame('2026-04-30', $loan->fresh()->maturity_date->toDateString());
+    }
+
+    public function test_one_cycle_is_rounded_to_the_centavo_then_multiplied(): void
+    {
+        // ₱33,333.00 at 2.5%: one cycle is ₱833.325, ₱833.33 to the centavo.
+        // Due 27 May and extended on 1 Aug, it moves three cycles, to 27 Aug:
+        // 3 × ₱833.33 = ₱2,499.99, not ₱2,499.98 (₱833.325 × 3, rounded once).
+        $loan = $this->oneMonthLoan(principal: 33333, rate: 2.5);
+        $this->travelTo('2026-08-01 10:00:00');
+
+        $preview = $this->getJson("/api/loans/{$loan->id}/extension-preview?interest_option=defer")->assertOk()->json('data');
+
+        $this->assertSame(3, $preview['cycles']);
+        $this->assertSame('2026-08-27', $preview['new_due_date']);
+        $this->assertEqualsWithDelta(2499.99, (float) $preview['fresh_interest'], 0.001);
+        $this->assertEqualsWithDelta((float) $preview['carry_interest'] + 2499.99, (float) $preview['new_interest_due'], 0.001);
+
+        $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'defer'])->assertOk();
+
+        $adjustment = LoanAdjustment::where('loan_id', $loan->id)->where('adjustment_type', 'extension')->sole();
+        $this->assertSame(3, $adjustment->new_values['cycles']);
+        $this->assertEqualsWithDelta(2499.99, (float) $adjustment->new_values['fresh_interest'], 0.001);
     }
 }

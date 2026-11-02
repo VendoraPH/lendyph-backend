@@ -505,7 +505,10 @@ class LoanAdjustmentService
      * the rate is quoted per: one flat cycle regardless of how many days it
      * spans, rounded to the centavo once and then multiplied, so an overdue
      * loan pays for every month it moves. On 'defer' the unpaid interest is
-     * still in the carry, so the fresh cycles stack on top of it.
+     * still in the carry, so the fresh cycles stack on top of it. The new
+     * period is one row, so a loan with a Share Capital Build-Up carries one
+     * build-up on it however many cycles it moves
+     * (PersistedScheduleFigures): no share capital for the months skipped.
      *
      * @return array{carry_principal: float, carry_interest: float, cycles: int, fresh_interest: float, new_interest_due: float, new_total_due: float, new_due_date: Carbon, latest_open_due_date: Carbon}
      */

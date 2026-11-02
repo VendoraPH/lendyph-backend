@@ -185,6 +185,10 @@ class RepaymentService
             ->orderBy('period_number')
             ->get();
 
+        // What the payment is measured against, as the preview's badge measures
+        // it: read before the loop below allocates to these periods.
+        $owedIds = self::owedAmong($schedules, $paymentDate);
+
         // Identify "current" schedule = first not-overdue schedule (due_date >= paymentDate)
         // If all unpaid are overdue, the current = the most recent overdue (largest period_number among overdue)
         $currentScheduleId = null;
@@ -299,18 +303,18 @@ class RepaymentService
             ->whereIn('status', ['pending', 'partial', 'overdue'])
             ->count();
 
-        // On a build-up loan, a member's overpayment of exactly the build-up of
-        // the periods it settled is that build-up, credited to share capital
-        // below, not money paid past what was owed: the payment is exact.
-        $overpaymentIsTheBuildUp = $this->overpaymentIsTheBuildUp(
-            $loan,
-            $overpayment,
-            $schedules->whereIn('id', array_column($allocations, 'amortization_schedule_id')),
-        );
-
-        if ($touchedFutureSchedule) {
+        if ($hasScb) {
+            $paymentType = $this->buildUpLoanPaymentType(
+                $loan,
+                $schedules,
+                $owedIds,
+                array_column($allocations, 'amortization_schedule_id'),
+                $overpayment,
+                $insuranceOwed - $insuranceCentavos > 0,
+            );
+        } elseif ($touchedFutureSchedule) {
             $paymentType = 'advance';
-        } elseif ($allDueSchedules === 0 && ($overpayment === 0 || $overpaymentIsTheBuildUp)) {
+        } elseif ($allDueSchedules === 0 && $overpayment === 0) {
             $paymentType = 'exact';
         } else {
             $paymentType = 'partial';
@@ -484,7 +488,7 @@ class RepaymentService
             $buildUpOnly = $this->overpaymentIsTheBuildUp(
                 $loan,
                 $overpaymentCentavos,
-                AmortizationSchedule::whereIn('id', array_column($allocations, 'schedule_id'))->get(),
+                AmortizationSchedule::whereIn('id', $owedIds)->get(),
             );
             $owedAfter = $loan->owedCentavos($loan->amortizationSchedules()->get())['total'];
             $applied = LoanService::toCentavos((float) $repayment->amount_paid) - LoanService::toCentavos((float) $repayment->overpayment);
@@ -633,14 +637,27 @@ class RepaymentService
      */
     private function owedScheduleIds(Loan $loan, Carbon $paymentDate): array
     {
-        $open = $loan->amortizationSchedules()
-            ->whereIn('status', AmortizationSchedule::UNPAID_STATUSES)
-            ->orderBy('period_number')
-            ->get();
+        return self::owedAmong(
+            $loan->amortizationSchedules()
+                ->whereIn('status', AmortizationSchedule::UNPAID_STATUSES)
+                ->orderBy('period_number')
+                ->get(),
+            $paymentDate,
+        );
+    }
 
+    /**
+     * owedScheduleIds() over open periods already read, in period order: the
+     * ones due on or before the payment date, or the first if none is due.
+     *
+     * @param  EloquentCollection<int, AmortizationSchedule>  $open
+     * @return list<int>
+     */
+    private static function owedAmong(EloquentCollection $open, Carbon $paymentDate): array
+    {
         $due = $open->filter(fn (AmortizationSchedule $s) => $s->due_date->lte($paymentDate));
 
-        return ($due->isNotEmpty() ? $due : $open->take(1))->pluck('id')->all();
+        return ($due->isNotEmpty() ? $due : $open->take(1))->pluck('id')->values()->all();
     }
 
     /**
@@ -676,19 +693,56 @@ class RepaymentService
     }
 
     /**
+     * The stored `payment_type` of a payment on a loan with a Share Capital
+     * Build-Up, decided exactly as the preview's badge (paymentBadge()) is, so
+     * the two agree on exact and advance.
+     *
+     * - Advance when the payment reaches any period past what is owed
+     *   (owedAmong(): the periods due on or before the payment date, or the
+     *   first open one when none is due yet), whatever the build-up.
+     * - Exact when every owed period is settled, no insurance premium is left
+     *   owed, and the overpayment is nothing or exactly the build-up of those
+     *   periods (overpaymentIsTheBuildUp()), the figure amountDueNow() adds.
+     * - Partial otherwise, as before: an owed period left unpaid, or an extra
+     *   that is not the build-up (the badge says advance there).
+     *
+     * `$schedules` are the open periods the allocation just wrote to, so their
+     * status is what it left.
+     *
+     * @param  EloquentCollection<int, AmortizationSchedule>  $schedules
+     * @param  list<int>  $owedIds
+     * @param  list<int>  $allocatedIds
+     */
+    private function buildUpLoanPaymentType(Loan $loan, EloquentCollection $schedules, array $owedIds, array $allocatedIds, int $overpaymentCentavos, bool $premiumStillOwed): string
+    {
+        if (array_diff($allocatedIds, $owedIds) !== []) {
+            return 'advance';
+        }
+
+        $owed = $schedules->whereIn('id', $owedIds);
+        $owedPaid = ! $premiumStillOwed && $owed->every(fn (AmortizationSchedule $s) => $s->status === 'paid');
+
+        if ($owedPaid && ($overpaymentCentavos === 0 || $this->overpaymentIsTheBuildUp($loan, $overpaymentCentavos, $owed))) {
+            return 'exact';
+        }
+
+        return 'partial';
+    }
+
+    /**
      * Whether a payment's overpayment is exactly the share capital build-up of
-     * the periods it settled, which the allocation credits to a member's share
-     * capital (recordRepaymentOnLockedLoan()): the 1-period preset on a
-     * build-up loan, the period's amount due plus its build-up.
+     * the owed periods it settled, which the allocation credits to a member's
+     * share capital (recordRepaymentOnLockedLoan()): the period's amount due
+     * plus its build-up, or every overdue period plus one build-up each, the
+     * amount amountDueNow() quotes.
      *
      * Only on a loan with a build-up and only for a member; a non-member's
      * extra is not credited and stays an ordinary overpayment. Compared in
-     * whole centavos, against each settled period's build-up
-     * (PersistedScheduleFigures, none on a period closed early). A positive
-     * overpayment on a build-up loan means the allocation settled every period
-     * it reached, the current one included, before it stopped.
+     * whole centavos, against each period's build-up (PersistedScheduleFigures,
+     * none on a period closed early). The callers check first that the payment
+     * settled every owed period and reached none past them.
      *
-     * @param  iterable<AmortizationSchedule>  $settled  the periods the payment allocated to
+     * @param  iterable<AmortizationSchedule>  $settled  the owed periods the payment settled
      */
     private function overpaymentIsTheBuildUp(Loan $loan, int $overpaymentCentavos, iterable $settled): bool
     {
@@ -714,10 +768,11 @@ class RepaymentService
      * still owed on the loan) is not fully paid, advance
      * when it is and money went past it, to a later period or as an
      * overpayment, and exact otherwise. A member's overpayment of exactly the
-     * build-up credited to share capital is passed as none
-     * (overpaymentIsTheBuildUp()). Only the preview says this: the stored
-     * `payment_type` keeps its own meaning, under which anything paid before a
-     * period's due date is `advance`.
+     * build-up of the owed periods is passed as none
+     * (overpaymentIsTheBuildUp()), and on a build-up loan the stored
+     * `payment_type` is decided the same way (buildUpLoanPaymentType()).
+     * Otherwise the stored `payment_type` keeps its own meaning, under which
+     * anything paid before a period's due date is `advance`.
      *
      * @param  list<int>  $owedIds
      * @param  list<array{schedule_id: int}>  $allocations
