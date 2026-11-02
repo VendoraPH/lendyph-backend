@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Enums\TermUnit;
 use App\Models\Loan;
 use App\Services\Accounting\PostingRules;
+use Illuminate\Validation\ValidationException;
 
 /**
  * The disclosure statement R.A. 3765 (Truth in Lending) requires, figures and all.
@@ -31,6 +32,23 @@ use App\Services\Accounting\PostingRules;
  * Every figure is worked in whole centavos, so the printed lines add up
  * exactly and the browser adds nothing.
  *
+ * ## Before release: the catalog fees the release will charge
+ *
+ * The statement is signed before release, but the release appends every
+ * catalog fee that applies ({@see LoanReleaseFeeService::applyOnRelease()}).
+ * So until the loan is released the statement adds the fees
+ * {@see LoanReleaseFeeService::itemsFor()} names, the very code the release
+ * and GET /loans/{id}/release-preview run, each sorted by kindOf() like a
+ * stored item and marked `provisional` (the fee rules can still change before
+ * release) with `provisional_reason` "release_fee". `total_deductions`, the
+ * three `net_proceeds` and the amount financed include them, so the net
+ * proceeds equal the release preview's `net_proceeds` before insurance. Only
+ * an open application (draft, for review, approved) gets them: a rejected or
+ * void loan will never be released. Fees that would take the net proceeds
+ * below zero are refused with the release preview's own 422, never printed
+ * as a negative net. Once released the fees are stored items and nothing is
+ * added.
+ *
  * ## Insurance
  *
  * One line, whatever the release did: `amount` is the premium charged,
@@ -45,7 +63,7 @@ use App\Services\Accounting\PostingRules;
  * Premium a restructure moved onto the loan from the loan it closed
  * (`insurance_carried_over`) is a second line, "Insurance premium carried
  * from the previous loan": all of it owed, none deducted, with `provisional`
- * true before release, when it is the open source's live premium owed.
+ * true (and `provisional_reason` "carried_premium") before release, when it is the open source's live premium owed.
  *
  * ## Rates
  *
@@ -100,13 +118,30 @@ class DisclosureService
 
     private const SHARE_CAPITAL = 'share_capital';
 
+    /** Why a line is provisional: a catalog fee the release will charge. */
+    public const REASON_RELEASE_FEE = 'release_fee';
+
+    /** Why a line is provisional: premium the release will carry from the loan it closes. */
+    public const REASON_CARRIED_PREMIUM = 'carried_premium';
+
+    /**
+     * The statuses of an application still on its way to release: the only
+     * loans the catalog fees are added to before release.
+     *
+     * @var list<string>
+     */
+    private const OPEN_APPLICATION_STATUSES = ['draft', 'for_review', 'approved'];
+
+    /** The keys that mark a line provisional, passed through as they are. */
+    private const PROVISIONAL_KEYS = ['provisional' => true, 'provisional_reason' => true];
+
     /** The one line every insurance premium on a loan is disclosed under. */
     private const INSURANCE_LINE = 'Insurance Premium';
 
     /** The premium a restructure carried over from the loan it closed. */
     private const CARRIED_INSURANCE_LINE = 'Insurance premium carried from the previous loan';
 
-    public function __construct(private LoanService $loanService) {}
+    public function __construct(private LoanService $loanService, private LoanReleaseFeeService $releaseFees) {}
 
     public function generateDisclosure(Loan $loan): array
     {
@@ -131,6 +166,20 @@ class DisclosureService
         $totalInterest = $sumOf('interest_due');
         $principal = self::centavos($loan->principal_amount);
         $charges = $this->sortDeductions($loan);
+        $totalDeductions = self::centavos($loan->total_deductions) + $charges['provisional_total'];
+        $netProceeds = self::centavos($loan->net_proceeds) - $charges['provisional_total'];
+
+        // What the release preview refuses, refused here with its own 422 and
+        // message (LoanReleaseFeeService::assertWithinPrincipal()).
+        if ($charges['provisional_total'] > 0 && $netProceeds < 0) {
+            throw ValidationException::withMessages([
+                'fees' => [LoanReleaseFeeService::overrunMessage(
+                    $charges['provisional_total'] / 100,
+                    $totalDeductions / 100,
+                    (float) $loan->principal_amount,
+                )],
+            ]);
+        }
 
         $financeItems = array_sum(array_column($charges['finance'], 'amount'));
         $financeTotal = $totalInterest + $financeItems;
@@ -169,10 +218,13 @@ class DisclosureService
                 'maturity_date' => $loan->maturity_date->toDateString(),
             ],
 
+            // The stored items, then (before release) the catalog fees the
+            // release will add, each marked provisional; the two figures
+            // include them.
             'deductions' => [
-                'items' => $loan->deductions ?? [],
-                'total_deductions' => (float) $loan->total_deductions,
-                'net_proceeds' => (float) $loan->net_proceeds,
+                'items' => array_merge(is_array($loan->deductions) ? $loan->deductions : [], $charges['provisional_items']),
+                'total_deductions' => $totalDeductions / 100,
+                'net_proceeds' => $netProceeds / 100,
             ],
 
             'totals' => [
@@ -181,8 +233,8 @@ class DisclosureService
                 'total_obligation' => ($totalPrincipal + $totalInterest) / 100,
                 // The schedule's Total Amortization column added up.
                 'total_amortization' => $sumOf('total_due') / 100,
-                'total_deductions' => (float) $loan->total_deductions,
-                'net_proceeds' => (float) $loan->net_proceeds,
+                'total_deductions' => $totalDeductions / 100,
+                'net_proceeds' => $netProceeds / 100,
                 // Interest plus the cooperative's own fees: the finance charges
                 // R.A. 3765 has disclosed. Not every deduction, as it once was.
                 'total_finance_charges' => $financeTotal / 100,
@@ -195,7 +247,8 @@ class DisclosureService
 
             'finance_charges' => [
                 'interest' => $totalInterest / 100,
-                'items' => array_map(fn (array $item) => ['name' => $item['name'], 'amount' => $item['amount'] / 100], $charges['finance']),
+                'items' => array_map(fn (array $item) => ['name' => $item['name'], 'amount' => $item['amount'] / 100]
+                    + array_intersect_key($item, self::PROVISIONAL_KEYS), $charges['finance']),
                 'total' => $financeTotal / 100,
             ],
 
@@ -205,14 +258,15 @@ class DisclosureService
                     'amount' => $item['amount'] / 100,
                     'deducted' => $item['deducted'] / 100,
                     'owed' => $item['owed'] / 100,
-                ] + (array_key_exists('provisional', $item) ? ['provisional' => $item['provisional']] : []), $charges['non_finance']),
+                ] + array_intersect_key($item, self::PROVISIONAL_KEYS), $charges['non_finance']),
                 'total' => $nonFinanceTotal / 100,
             ],
 
             // Exact by construction: the three deducted parts are every item
             // plus the unitemised remainder, i.e. `total_deductions`, so the
             // net is `principal_amount - total_deductions` — what every write
-            // path stores as `net_proceeds`.
+            // path stores as `net_proceeds` (before release, less the catalog
+            // fees the release will charge).
             'proceeds' => [
                 'principal' => $principal / 100,
                 'finance_charges_deducted' => $financeItems / 100,
@@ -239,12 +293,20 @@ class DisclosureService
      *
      * An entry with no numeric amount is not an item here, exactly as
      * {@see Loan::unitemisedDeductions()} reads it: its money, if any, is in
-     * the remainder, which closes the finance list.
+     * the remainder, which closes the stored finance items.
+     *
+     * Before release the catalog fees the release will charge follow the
+     * stored items (and the remainder), sorted the same way and marked
+     * `provisional` with reason "release_fee"; they are
+     * also returned as deduction items (`provisional_items`) with their sum
+     * (`provisional_total`, centavos), 0 once released.
      *
      * @return array{
-     *     finance: list<array{name: string, amount: int}>,
-     *     non_finance: list<array{name: string, amount: int, deducted: int, owed: int, provisional?: bool}>,
+     *     finance: list<array{name: string, amount: int, provisional?: bool, provisional_reason?: string}>,
+     *     non_finance: list<array{name: string, amount: int, deducted: int, owed: int, provisional?: bool, provisional_reason?: string}>,
      *     share_capital: int,
+     *     provisional_items: list<array<string, mixed>>,
+     *     provisional_total: int,
      * }
      */
     private function sortDeductions(Loan $loan): array
@@ -254,14 +316,25 @@ class DisclosureService
         $shareCapital = 0;
         $insuranceAt = null;
         $insuranceDeducted = 0;
+        $insuranceProvisional = false;
+        $provisionalItems = $this->feesToChargeAtRelease($loan);
+        $provisionalTotal = 0;
 
-        foreach (is_array($loan->deductions) ? $loan->deductions : [] as $item) {
+        $stored = array_map(fn ($item) => [$item, false], is_array($loan->deductions) ? $loan->deductions : []);
+        $pending = array_map(fn (array $item) => [$item, true], $provisionalItems);
+
+        foreach ([...$stored, ...$pending] as [$item, $provisional]) {
             if (! is_array($item) || ! is_numeric($item['amount'] ?? null)) {
                 continue;
             }
 
             $name = is_string($item['name'] ?? null) ? $item['name'] : '';
             $amount = self::centavos($item['amount']);
+            $flag = $provisional ? self::releaseFeeFlag() : [];
+
+            if ($provisional) {
+                $provisionalTotal += $amount;
+            }
 
             switch (self::kindOf($name)) {
                 case self::SHARE_CAPITAL:
@@ -272,19 +345,22 @@ class DisclosureService
                     $insuranceAt ??= count($nonFinance);
                     $nonFinance[$insuranceAt] = null;
                     $insuranceDeducted += $amount;
+                    $insuranceProvisional = $insuranceProvisional || $provisional;
                     break;
                 case self::NON_FINANCE:
-                    $nonFinance[] = ['name' => $name, 'amount' => $amount, 'deducted' => $amount, 'owed' => 0];
+                    $nonFinance[] = ['name' => $name, 'amount' => $amount, 'deducted' => $amount, 'owed' => 0] + $flag;
                     break;
                 default:
-                    $finance[] = ['name' => $name, 'amount' => $amount];
+                    $finance[] = ['name' => $name, 'amount' => $amount] + $flag;
             }
         }
 
         $remainder = self::centavos($loan->unitemisedDeductions());
 
         if ($remainder !== 0) {
-            $finance[] = ['name' => $remainder > 0 ? 'Other Charges' : 'Adjustment', 'amount' => $remainder];
+            // After the stored items, before the fees the release will add.
+            $storedCount = count(array_filter($finance, fn (array $item) => ! isset($item['provisional'])));
+            array_splice($finance, $storedCount, 0, [['name' => $remainder > 0 ? 'Other Charges' : 'Adjustment', 'amount' => $remainder]]);
         }
 
         $owed = $this->insuranceOwedAtRelease($loan);
@@ -295,7 +371,7 @@ class DisclosureService
                 'amount' => $insuranceDeducted + $owed,
                 'deducted' => $insuranceDeducted,
                 'owed' => $owed,
-            ];
+            ] + ($insuranceProvisional ? self::releaseFeeFlag() : []);
         }
 
         // The premium a restructure moved onto this loan from the loan it
@@ -304,10 +380,41 @@ class DisclosureService
         [$carried, $provisional] = $this->carriedPremium($loan);
 
         if ($carried > 0) {
-            $nonFinance[] = ['name' => self::CARRIED_INSURANCE_LINE, 'amount' => $carried, 'deducted' => 0, 'owed' => $carried, 'provisional' => $provisional];
+            $nonFinance[] = ['name' => self::CARRIED_INSURANCE_LINE, 'amount' => $carried, 'deducted' => 0, 'owed' => $carried, 'provisional' => $provisional]
+                + ($provisional ? ['provisional_reason' => self::REASON_CARRIED_PREMIUM] : []);
         }
 
-        return ['finance' => $finance, 'non_finance' => array_values($nonFinance), 'share_capital' => $shareCapital];
+        return [
+            'finance' => $finance,
+            'non_finance' => array_values($nonFinance),
+            'share_capital' => $shareCapital,
+            'provisional_items' => array_map(fn (array $item) => $item + self::releaseFeeFlag(), $provisionalItems),
+            'provisional_total' => $provisionalTotal,
+        ];
+    }
+
+    /**
+     * The catalog fee items the release will append to `$loan`: for an open
+     * application not yet released, {@see LoanReleaseFeeService::itemsFor()},
+     * the same two steps applyOnRelease() and the release preview take. None
+     * once released, because the release stored them, and none for a loan
+     * that will never be released (rejected, void).
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function feesToChargeAtRelease(Loan $loan): array
+    {
+        if ($loan->released_at !== null || ! in_array($loan->status, self::OPEN_APPLICATION_STATUSES, true)) {
+            return [];
+        }
+
+        return $this->releaseFees->itemsFor($loan);
+    }
+
+    /** @return array{provisional: true, provisional_reason: string} */
+    private static function releaseFeeFlag(): array
+    {
+        return ['provisional' => true, 'provisional_reason' => self::REASON_RELEASE_FEE];
     }
 
     /**

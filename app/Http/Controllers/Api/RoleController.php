@@ -10,11 +10,14 @@ use App\Models\Role;
 use App\Rules\UniqueRoleDisplayName;
 use App\Services\RolePermissionAudit;
 use App\Services\RolePermissionGrants;
+use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 use OpenApi\Attributes as OA;
+use Spatie\Permission\PermissionRegistrar;
 
 class RoleController extends Controller
 {
@@ -102,6 +105,7 @@ class RoleController extends Controller
 
         $role = DB::transaction(function () use ($validated) {
             self::lockAndRecheckLabels($validated);
+            self::forgetPermissionCacheAfterCommit();
 
             $role = Role::create([
                 'name' => $validated['name'],
@@ -149,6 +153,7 @@ class RoleController extends Controller
         ),
         responses: [
             new OA\Response(response: 200, description: 'Role updated'),
+            new OA\Response(response: 409, description: 'The role was deleted by another request while this one waited; nothing was written. Reload and try again'),
             new OA\Response(response: 422, description: 'Validation error; system-role rename attempted; a non-super_admin changing super_admin\'s display_name (clearing included) or permissions; or adding a permission the actor does not hold (`errors.display_name` / `errors.permissions`)'),
         ],
     )]
@@ -164,8 +169,10 @@ class RoleController extends Controller
         // erase a stored "Super Admin". So they are left alone.
         $guardedSuperAdmin = $role->name === 'super_admin' && ! $actor->hasRole('super_admin');
 
-        DB::transaction(function () use ($role, $validated, $actor, $guardedSuperAdmin) {
+        $role = DB::transaction(function () use ($role, $validated, $actor, $guardedSuperAdmin) {
             self::lockAndRecheckLabels($validated, $role->id);
+            $role = self::relockedOrConflict($role);
+            self::forgetPermissionCacheAfterCommit();
 
             $fields = collect($validated)
                 ->only($guardedSuperAdmin ? ['name', 'description'] : ['name', 'display_name', 'description'])
@@ -192,6 +199,8 @@ class RoleController extends Controller
                 $role->syncPermissions($sent);
                 RolePermissionAudit::record($role, $before, RolePermissionAudit::names($role));
             }
+
+            return $role;
         });
 
         $role->load('permissions')->loadCount('users');
@@ -210,10 +219,11 @@ class RoleController extends Controller
         ],
         responses: [
             new OA\Response(response: 200, description: 'Role deactivated'),
-            new OA\Response(response: 422, description: 'Cannot deactivate admin role'),
+            new OA\Response(response: 409, description: 'The role was deleted by another request while this one waited; nothing was written. Reload and try again'),
+            new OA\Response(response: 422, description: 'A protected role (admin, super_admin), or a role the actor holds themselves (`errors.role`)'),
         ],
     )]
-    public function deactivate(Role $role): RoleResource
+    public function deactivate(Request $request, Role $role): RoleResource
     {
         $this->authorize('settings:update');
 
@@ -223,8 +233,31 @@ class RoleController extends Controller
             ]);
         }
 
-        // The change and its audit row commit together.
-        DB::transaction(fn () => $role->update(['is_active' => false]));
+        // The change and its audit row commit together. A deactivated role
+        // grants nothing (User::getPermissionsViaRoles()), so the permission
+        // cache is cleared once the change is visible to other requests.
+        //
+        // Re-read under the role locks, as update() and destroy() do: a role
+        // deleted while this request waited answers 409 and writes nothing.
+        $actor = $request->user();
+
+        $role = DB::transaction(function () use ($role, $actor) {
+            self::lockAndRecheckLabels([]);
+            $role = self::relockedOrConflict($role);
+
+            // Deactivating a role you hold takes your own access with it,
+            // possibly the access needed to switch it back on.
+            if ($actor->roles->contains(fn ($held) => (int) $held->getKey() === (int) $role->getKey())) {
+                throw ValidationException::withMessages([
+                    'role' => 'You can\'t deactivate a role you hold. Another administrator has to do it for you.',
+                ]);
+            }
+
+            self::forgetPermissionCacheAfterCommit();
+            $role->update(['is_active' => false]);
+
+            return $role;
+        });
         $role->load('permissions')->loadCount('users');
 
         return new RoleResource($role);
@@ -240,13 +273,38 @@ class RoleController extends Controller
         ],
         responses: [
             new OA\Response(response: 200, description: 'Role reactivated'),
+            new OA\Response(response: 422, description: 'The role carries a permission the actor (not a super_admin) does not hold (`errors.role`)'),
+            new OA\Response(response: 409, description: 'The role was deleted by another request while this one waited; nothing was written. Reload and try again'),
         ],
     )]
-    public function reactivate(Role $role): RoleResource
+    public function reactivate(Request $request, Role $role): RoleResource
     {
         $this->authorize('settings:update');
 
-        DB::transaction(fn () => $role->update(['is_active' => true]));
+        $actor = $request->user();
+
+        // Re-read under the role locks, as deactivate() does.
+        $role = DB::transaction(function () use ($role, $actor) {
+            self::lockAndRecheckLabels([]);
+            $role = self::relockedOrConflict($role);
+
+            // Reactivating gives the role's permissions back to everyone who
+            // holds it, so it's a grant: someone who isn't a super_admin can't
+            // grant a permission they don't hold, as on a role edit.
+            if (! $actor->hasRole('super_admin')) {
+                $missing = RolePermissionGrants::ungrantable($actor, RolePermissionAudit::names($role), []);
+                if ($missing !== []) {
+                    throw ValidationException::withMessages([
+                        'role' => RolePermissionGrants::refusal($missing),
+                    ]);
+                }
+            }
+
+            self::forgetPermissionCacheAfterCommit();
+            $role->update(['is_active' => true]);
+
+            return $role;
+        });
         $role->load('permissions')->loadCount('users');
 
         return new RoleResource($role);
@@ -263,6 +321,7 @@ class RoleController extends Controller
         ],
         responses: [
             new OA\Response(response: 200, description: 'Role deleted'),
+            new OA\Response(response: 409, description: 'The role was already deleted by another request; nothing was written. Reload and try again'),
             new OA\Response(response: 422, description: 'System role or role in use'),
         ],
     )]
@@ -283,6 +342,8 @@ class RoleController extends Controller
             // and the user count and permission list below are read after any
             // save that got there first.
             self::lockAndRecheckLabels([]);
+            $role = self::relockedOrConflict($role);
+            self::forgetPermissionCacheAfterCommit();
 
             $usersCount = $role->users()->count();
             if ($usersCount > 0) {
@@ -298,6 +359,47 @@ class RoleController extends Controller
         });
 
         return response()->json(['message' => 'Role deleted successfully.']);
+    }
+
+    /**
+     * The role as it stands now that every role row is locked.
+     *
+     * The route binding loaded the role before this request waited for the
+     * locks, so a delete that committed meanwhile leaves `$role` pointing at
+     * a row that's gone. Acting on it would audit a change that never
+     * happened (a second `deleted` row, a phantom `updated` row) or insert
+     * permission rows for a missing role id (a foreign key error, 500).
+     * Re-read it under the lock; when it's gone, nothing is written and the
+     * client is told to reload.
+     *
+     * @throws HttpResponseException 409 when the role no longer exists
+     */
+    private static function relockedOrConflict(Role $role): Role
+    {
+        $current = Role::query()->whereKey($role->getKey())->lockForUpdate()->first();
+
+        if ($current === null) {
+            throw new HttpResponseException(response()->json([
+                'message' => 'This role was changed or deleted by another request. Reload and try again.',
+            ], 409));
+        }
+
+        return $current;
+    }
+
+    /**
+     * Clear Spatie's permission cache once the current transaction commits.
+     *
+     * syncPermissions() and the role model's own hooks clear it while the
+     * transaction is still open, so a request in between can rebuild it from
+     * the old committed rows and keep that copy for the cache's lifetime
+     * (24 hours, config/permission.php). Spatie's own clear stays; this one
+     * runs after the new rows are visible. A rolled-back write clears nothing,
+     * and has nothing to clear.
+     */
+    private static function forgetPermissionCacheAfterCommit(): void
+    {
+        DB::afterCommit(fn () => app(PermissionRegistrar::class)->forgetCachedPermissions());
     }
 
     /**
