@@ -150,15 +150,17 @@ final class PostingRules
      */
     private const TAX_PATTERNS = [
         '/\\b(d ?s ?t|doc(umentary)? stamps?)\\b/' => self::DOCUMENTARY_STAMP_TAX_ROLE,
-        '/\\bwithholding\\b/' => self::WITHHOLDING_TAX_ROLE,
+        '/\\b(withholding tax(es)?|ewt|cwt)\\b/' => self::WITHHOLDING_TAX_ROLE,
         '/\\btax(es)?\\b/' => self::OTHER_TAXES_ROLE,
     ];
 
     /**
      * A type that reads like a tax and is not one: a tax clearance fee is a
-     * fee charged for a certificate, not a levy.
+     * fee charged for a certificate, not a levy, and a "tax-exempt" or
+     * "non-tax" charge says outright that it is no tax. Hyphens are spaces by
+     * the time the type is read.
      */
-    private const NOT_A_TAX_PATTERN = '/\\btax clearance\\b/';
+    private const NOT_A_TAX_PATTERN = '/\\b(tax clearance|tax exempt|non tax)\\b/';
 
     /**
      * Where a deduction with no entry in {@see self::DEDUCTION_ROLES} is
@@ -468,11 +470,14 @@ final class PostingRules
      *
      * - "DST", "D.S.T.", "Doc Stamp", "Documentary Stamp(s)"
      *   → {@see self::DOCUMENTARY_STAMP_TAX_ROLE};
-     * - "Withholding Tax" → {@see self::WITHHOLDING_TAX_ROLE};
+     * - "Withholding Tax(es)", "EWT", "CWT" → {@see self::WITHHOLDING_TAX_ROLE};
      * - any other "Tax" or "Taxes" → {@see self::OTHER_TAXES_ROLE}.
      *
-     * Not taxes: "Taxi Fare", "Non-taxable", "Syntax", and a "Tax Clearance
-     * Fee" ({@see self::NOT_A_TAX_PATTERN}).
+     * Not taxes: "Taxi Fare", "Non-taxable", "Syntax", a withholding that is
+     * no tax ("CBU Withholding", "Savings Withholding"), and anything
+     * {@see self::NOT_A_TAX_PATTERN} matches ("Tax Clearance Fee",
+     * "Tax-exempt …", "Non-tax …"). Plain "VAT" is not recognised: most
+     * cooperatives are VAT-exempt.
      */
     public static function taxRoleFor(string $name): ?string
     {
