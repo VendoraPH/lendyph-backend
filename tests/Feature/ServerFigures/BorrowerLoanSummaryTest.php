@@ -80,15 +80,23 @@ class BorrowerLoanSummaryTest extends TestCase
         // Never draft, for_review, approved, rejected or void.
         $this->assertEquals(90000, $summary['total_borrowed']);
 
+        // Everything owed: the sum of each collectible loan's own summary
+        // `outstanding_balance` (principal, interest, penalty and premium).
+        $owed = fn (Loan $loan): float => (float) $this->getJson("/api/loans/{$loan->id}/summary")->assertOk()->json('data.outstanding_balance');
         $collectible = Loan::whereIn('id', [$released->id, $defaulted->id])->get();
         $this->assertEquals(
-            round($collectible->sum(fn (Loan $loan): float => $loan->outstanding_balance), 2),
+            round($collectible->sum($owed), 2),
             $summary['total_outstanding'],
         );
         $this->assertNotEquals(
-            round($collectible->sum(fn (Loan $loan): float => $loan->outstanding_balance) + $restructured->outstanding_balance, 2),
+            round($collectible->sum($owed) + $owed($restructured), 2),
             $summary['total_outstanding'],
             'a restructured loan owes through its successor, not itself',
+        );
+        // Principal alone (no premium is owed on these loans).
+        $this->assertEquals(
+            round($collectible->sum(fn (Loan $loan): float => $loan->outstanding_balance), 2),
+            $summary['outstanding_principal'],
         );
 
         $this->assertEquals(
@@ -130,15 +138,18 @@ class BorrowerLoanSummaryTest extends TestCase
         $this->assertEquals(3000, $this->getJson("/api/borrowers/{$this->member->id}/loan-summary")->assertOk()->json('data.total_paid'));
     }
 
-    public function test_unpaid_insurance_owed_on_a_loan_counts_in_total_outstanding(): void
+    public function test_unpaid_insurance_owed_on_a_loan_counts_in_total_outstanding_but_not_in_outstanding_principal(): void
     {
         $loan = $this->loan(60000, 'released');
         $loan->update(['insurance_remaining_balance' => 1500.25]);
 
         $outstanding = $this->getJson("/api/borrowers/{$this->member->id}/loan-summary")->assertOk()->json('data.total_outstanding');
 
-        $this->assertEquals(61500.25, $outstanding);
-        $this->assertEquals($loan->fresh()->outstanding_balance, $outstanding);
+        // ₱60,000 principal, ₱10,800 interest and the ₱1,500.25 premium owed:
+        // everything owed, as the loan's own summary states it.
+        $this->assertEquals(72300.25, $outstanding);
+        $this->assertEquals($this->getJson("/api/loans/{$loan->id}/summary")->assertOk()->json('data.outstanding_balance'), $outstanding);
+        $this->assertEquals(60000, $this->getJson("/api/borrowers/{$this->member->id}/loan-summary")->json('data.outstanding_principal'));
     }
 
     public function test_a_user_without_borrowers_view_gets_403(): void

@@ -14,9 +14,16 @@ use App\Models\Repayment;
  *   (Loan::EVER_RELEASED_STATUSES) except `restructured` ones. A restructure's
  *   successor loan already carries the rolled-over balance as its principal,
  *   so counting the source too would count that money twice.
- * - `total_outstanding`: Loan::$outstanding_balance over the loans still owed
- *   (Loan::COLLECTIBLE_STATUSES), the figure the loan page shows for each.
- * - `total_paid`: every posted (not voided) payment on the member's loans.
+ * - `total_outstanding`: everything the loans still owed
+ *   (Loan::COLLECTIBLE_STATUSES) owe: the periods' principal, interest and
+ *   penalty plus the insurance premium owed, the parts of each loan's
+ *   GET /loans/{id}/summary `outstanding_balance` (LoanListTotals).
+ * - `outstanding_principal`: the principal still owed on those loans, without
+ *   the premium.
+ * - `overdue_amount`: what those loans owe on periods that are late (past the
+ *   due date and the loan's grace period), not their whole balance.
+ * - `total_paid`: every posted (not voided) payment on the member's loans,
+ *   insurance premium included; `insurance_paid` is the premium inside it.
  * - `counts`: the member's loans per status, every status present, and
  *   `current_loans`, the loans in Loan::ACTIVE_STATUSES.
  *
@@ -25,6 +32,8 @@ use App\Models\Repayment;
  */
 class BorrowerLoanSummaryService
 {
+    public function __construct(private LoanListTotals $totals) {}
+
     /**
      * Every value `loans.status` can hold.
      */
@@ -34,7 +43,7 @@ class BorrowerLoanSummaryService
     ];
 
     /**
-     * @return array{total_borrowed: float|int, total_outstanding: float|int, total_paid: float|int, current_loans: int, counts: array<string, int>}
+     * @return array{total_borrowed: float|int, total_outstanding: float, outstanding_principal: float, overdue_amount: float, total_paid: float|int, insurance_paid: float|int, current_loans: int, counts: array<string, int>}
      */
     public function summarize(Borrower $borrower): array
     {
@@ -55,25 +64,25 @@ class BorrowerLoanSummaryService
             }
         }
 
-        $outstanding = 0;
+        $owed = $this->totals->for(
+            Loan::query()
+                ->where('loans.borrower_id', $borrower->id)
+                ->whereIn('loans.status', Loan::COLLECTIBLE_STATUSES),
+        );
 
-        $borrower->loans()
-            ->whereIn('status', Loan::COLLECTIBLE_STATUSES)
-            ->with('amortizationSchedules')
-            ->get()
-            ->each(function (Loan $loan) use (&$outstanding): void {
-                $outstanding += LoanService::toCentavos($loan->outstanding_balance);
-            });
-
-        $paid = (float) Repayment::query()
+        $paid = Repayment::query()
             ->whereIn('loan_id', $borrower->loans()->select('id'))
             ->where('status', 'posted')
-            ->sum('amount_paid');
+            ->selectRaw('COALESCE(SUM(amount_paid), 0) as amount_paid, COALESCE(SUM(insurance_applied), 0) as insurance_applied')
+            ->first();
 
         return [
             'total_borrowed' => $borrowed / 100,
-            'total_outstanding' => $outstanding / 100,
-            'total_paid' => LoanService::toCentavos($paid) / 100,
+            'total_outstanding' => $owed['total_outstanding'],
+            'outstanding_principal' => $owed['outstanding_principal'],
+            'overdue_amount' => $owed['overdue_amount'],
+            'total_paid' => LoanService::toCentavos((float) $paid->amount_paid) / 100,
+            'insurance_paid' => LoanService::toCentavos((float) $paid->insurance_applied) / 100,
             'current_loans' => array_sum(array_intersect_key($counts, array_flip(Loan::ACTIVE_STATUSES))),
             'counts' => $counts,
         ];

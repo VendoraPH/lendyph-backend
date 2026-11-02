@@ -1785,8 +1785,10 @@ class ReportService
      * Production and portfolio quality per account officer, mirrored by branch.
      *
      * Two different clocks, deliberately:
-     *  - `released_*` and `collected` are PERIOD figures (`date_from`/`date_to`,
-     *    unbounded when omitted, as in incomeReport()/disbursementReport()).
+     *  - `released_*`, `collected` and `insurance_collected` are PERIOD figures
+     *    (`date_from`/`date_to`, unbounded when omitted, as in
+     *    incomeReport()/disbursementReport()). `collected` leaves out the
+     *    insurance premium payments collected, which is `insurance_collected`.
      *  - `outstanding*`, `overdue_amount`, `at_risk_amount`, `par_ratio` and
      *    `active_borrowers` are POINT-IN-TIME over the officer's WHOLE book.
      *    Date-scoping the portfolio would hide the book an officer actually
@@ -1811,6 +1813,7 @@ class ReportService
             'released_count' => 'count',
             'released_amount' => 'money',
             'collected' => 'money',
+            'insurance_collected' => 'money',
             'outstanding' => 'money',
             'overdue_amount' => 'money',
         ];
@@ -1826,7 +1829,7 @@ class ReportService
             'by_officer_totals' => $officerTotals,
             'by_branch' => $byBranch,
             'by_branch_totals' => self::columnTotals($byBranch, $columns),
-            'note' => 'released_* and collected cover date_from..date_to; outstanding, overdue, at_risk and active_borrowers are as_of_date figures over the whole book.',
+            'note' => 'released_*, collected and insurance_collected cover date_from..date_to (collected leaves out the insurance premium, which is insurance_collected); outstanding, overdue, at_risk and active_borrowers are as_of_date figures over the whole book.',
             'generated_at' => now()->toDateTimeString(),
         ];
     }
@@ -1864,7 +1867,10 @@ class ReportService
             ->when($dateFrom, fn ($q, $d) => $q->where('payment_date', '>=', self::filterDay($d)))
             ->when($dateTo, fn ($q, $d) => $q->where('payment_date', '<=', self::filterDay($d)))
             ->groupBy('loan_id')
-            ->selectRaw('loan_id, COALESCE(SUM(amount_paid), 0) as collected, COUNT(*) as payment_count');
+            // The insurance premium a payment collected first is held for the
+            // insurer, not loan collection: left out of `collected` (as Daily
+            // Collection and Collection Efficiency do) and stated on its own.
+            ->selectRaw('loan_id, COALESCE(SUM(amount_paid - insurance_applied), 0) as collected, COALESCE(SUM(insurance_applied), 0) as insurance_collected, COUNT(*) as payment_count');
 
         $collectible = implode(', ', array_fill(0, count(Loan::COLLECTIBLE_STATUSES), '?'));
 
@@ -1899,6 +1905,7 @@ class ReportService
             SUM(CASE WHEN '.$releasedInPeriod.' THEN 1 ELSE 0 END) as released_count,
             COALESCE(SUM(CASE WHEN '.$releasedInPeriod.' THEN loans.principal_amount ELSE 0 END), 0) as released_amount,
             COALESCE(SUM(repayment_totals.collected), 0) as collected,
+            COALESCE(SUM(repayment_totals.insurance_collected), 0) as insurance_collected,
             COALESCE(SUM(repayment_totals.payment_count), 0) as payment_count,
             COALESCE(SUM(schedule_totals.remaining_principal), 0) as outstanding_principal,
             COALESCE(SUM(loans.insurance_remaining_balance), 0) as insurance_remaining,
@@ -1931,6 +1938,7 @@ class ReportService
                 'released_count' => (int) $row->released_count,
                 'released_amount' => round((float) $row->released_amount, 2),
                 'collected' => round((float) $row->collected, 2),
+                'insurance_collected' => round((float) $row->insurance_collected, 2),
                 'payment_count' => (int) $row->payment_count,
                 'outstanding' => round($outstandingPrincipal + (float) $row->insurance_remaining, 2),
                 'outstanding_principal' => $outstandingPrincipal,
