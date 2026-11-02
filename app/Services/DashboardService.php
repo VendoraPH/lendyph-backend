@@ -38,18 +38,21 @@ class DashboardService
         $totalCollectedMtd = (float) $collectedMtd->collected;
         $insuranceCollectedMtd = (float) $collectedMtd->insurance;
 
-        $overdueLoansCount = (int) DB::table('amortization_schedules')
-            ->where('status', 'overdue')
-            ->distinct('loan_id')
-            ->count('loan_id');
+        $overdueLoansCount = $this->overdueLoansCount(Carbon::today());
 
-        // Cache sparklines for 10 minutes (28 queries → 0 on cache hit)
-        $sparklines = Cache::remember('dashboard:sparklines', 600, fn () => [
+        // Cache sparklines for 10 minutes (27 queries → 0 on cache hit). v2:
+        // the overdue points moved to the grace rule, so points cached under
+        // the old key's rule are not served after a deploy.
+        $sparklines = Cache::remember('dashboard:sparklines:v2', 600, fn () => [
             'portfolio' => $this->portfolioSparkline(),
             'active_loans' => $this->activeLoansSparkline(),
             'collected' => $this->collectionsSparkline(),
-            'overdue' => $this->overdueSparkline(),
+            'overdue' => $this->pastOverdueSparkline(),
         ]);
+
+        // Today's point is the card's live figure, never a cached one, so the
+        // two always agree.
+        $sparklines['overdue'][] = ['v' => $overdueLoansCount];
 
         return [
             'total_portfolio' => round($totalPortfolio, 2),
@@ -348,17 +351,31 @@ class DashboardService
         })->toArray();
     }
 
-    private function overdueSparkline(): array
+    /**
+     * The six days before today by the same rule as the card, with that day
+     * as the grace cutoff's date; stats() adds today's point from the card.
+     * Payment state is today's, as before: a loan paid since a past day no
+     * longer counts on it. A true history would need daily snapshots.
+     */
+    private function pastOverdueSparkline(): array
     {
-        return collect(range(6, 0))->map(function ($daysAgo) {
-            $day = Carbon::today()->subDays($daysAgo);
-            $value = (int) DB::table('amortization_schedules')
-                ->where('status', 'overdue')
-                ->where('due_date', '<=', $day)
-                ->distinct('loan_id')
-                ->count('loan_id');
+        return collect(range(6, 1))->map(fn ($daysAgo) => [
+            'v' => $this->overdueLoansCount(Carbon::today()->subDays($daysAgo)),
+        ])->toArray();
+    }
 
-            return ['v' => $value];
-        })->toArray();
+    /**
+     * Collectible loans with an unpaid period past the due date plus the
+     * loan's grace, as of `$asOf`: LoanListTotals' `overdue_count`, the rule
+     * GET /loans `meta.totals.overdue_count` counts by. A period's stored
+     * `overdue` status is not read, as it is only stamped when a payment or
+     * the penalty run touches the loan.
+     */
+    private function overdueLoansCount(Carbon $asOf): int
+    {
+        return app(LoanListTotals::class)->for(
+            Loan::query()->whereIn('loans.status', Loan::COLLECTIBLE_STATUSES),
+            $asOf,
+        )['overdue_count'];
     }
 }
