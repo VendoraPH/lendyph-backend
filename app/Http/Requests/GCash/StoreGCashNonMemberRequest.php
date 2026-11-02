@@ -59,8 +59,7 @@ class StoreGCashNonMemberRequest extends FormRequest
             function (Validator $validator): void {
                 if ($validator->errors()->isNotEmpty()
                     || $this->hasIdAfterSave()
-                    || $this->boolean('acknowledge_possible_duplicate')
-                    || ! $this->shouldCheckNameAndMobile()) {
+                    || $this->boolean('acknowledge_possible_duplicate')) {
                     return;
                 }
 
@@ -68,6 +67,7 @@ class StoreGCashNonMemberRequest extends FormRequest
                     (string) $this->input('full_name'),
                     (string) $this->input('mobile_number'),
                     $this->ignoredWalkInId(),
+                    $this->onlyMatchesWithId(),
                 );
 
                 if ($match !== null) {
@@ -96,10 +96,10 @@ class StoreGCashNonMemberRequest extends FormRequest
         return $this->filled('id_number');
     }
 
-    /** Every new walk-in without an ID is checked; an update narrows this. */
-    protected function shouldCheckNameAndMobile(): bool
+    /** A new walk-in without an ID is checked against every walk-in; an update narrows this. */
+    protected function onlyMatchesWithId(): bool
     {
-        return true;
+        return false;
     }
 
     /** The walk-in being edited, which never counts as its own duplicate; none on store. */

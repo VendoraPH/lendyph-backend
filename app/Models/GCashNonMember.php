@@ -62,9 +62,14 @@ class GCashNonMember extends Model
      * The first active walk-in (soft-deleted ones excluded) with the same name
      * and mobile number, other than $ignoreId. The mobile number narrows the
      * rows in SQL; the name is compared here so both sides use one normaliser.
+     * $onlyWithId limits the matches to walk-ins that have an ID.
      */
-    public static function findPossibleDuplicate(string $fullName, string $mobileNumber, ?int $ignoreId = null): ?self
-    {
+    public static function findPossibleDuplicate(
+        string $fullName,
+        string $mobileNumber,
+        ?int $ignoreId = null,
+        bool $onlyWithId = false,
+    ): ?self {
         $mobile = self::comparableMobile($mobileNumber);
         $name = self::comparableName($fullName);
 
@@ -75,6 +80,7 @@ class GCashNonMember extends Model
         return self::query()
             ->whereRaw(self::COMPARABLE_MOBILE_COLUMN.' = ?', [$mobile])
             ->when($ignoreId, fn (Builder $query, int $id) => $query->whereKeyNot($id))
+            ->when($onlyWithId, fn (Builder $query) => $query->whereNotNull('id_number'))
             ->orderBy('id')
             ->get()
             ->first(fn (self $candidate) => self::comparableName($candidate->full_name) === $name);

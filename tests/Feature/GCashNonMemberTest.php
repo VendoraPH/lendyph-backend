@@ -364,6 +364,57 @@ class GCashNonMemberTest extends TestCase
         ])->assertOk();
     }
 
+    /**
+     * A walk-in saved with an ID never runs the name check, so the pair is only
+     * caught from the no-ID side. Its unrelated edits still check against
+     * matches that have an ID; no-ID pairs keep their quiet edits.
+     */
+    public function test_update_of_a_walk_in_without_an_id_warns_about_a_later_match_that_has_an_id(): void
+    {
+        $withoutId = GCashNonMember::factory()->withoutId()->create([
+            'full_name' => 'Carla Dizon',
+            'mobile_number' => '09171112222',
+        ]);
+
+        // Saved with an ID, so its own save runs no name check.
+        $this->postJson('/api/gcash/non-members', [
+            'full_name' => 'carla  dizon',
+            'mobile_number' => '+63 917 111 2222',
+            'id_type' => 'UMID',
+            'id_number' => 'CD12345678',
+        ])->assertCreated();
+
+        $edit = [
+            'full_name' => 'Carla Dizon',
+            'mobile_number' => '09171112222',
+            'id_type' => null,
+            'id_number' => null,
+            'remarks' => 'Comes on Fridays',
+        ];
+
+        $response = $this->putJson("/api/gcash/non-members/{$withoutId->id}", $edit)
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['possible_duplicate']);
+        $this->assertStringContainsString('carla  dizon', $response->json('errors.possible_duplicate.0'));
+        $this->assertDatabaseHas('gcash_non_members', ['id' => $withoutId->id, 'remarks' => null]);
+
+        $this->putJson("/api/gcash/non-members/{$withoutId->id}", $edit + ['acknowledge_possible_duplicate' => true])
+            ->assertOk()
+            ->assertJsonPath('data.remarks', 'Comes on Fridays');
+    }
+
+    public function test_store_sending_only_a_null_id_type_is_refused(): void
+    {
+        $this->postJson('/api/gcash/non-members', [
+            'full_name' => 'Carla Dizon',
+            'mobile_number' => '09171112222',
+            'id_type' => null,
+        ])->assertStatus(422)
+            ->assertJsonPath('errors.id_number.0', 'Send both ID fields, or neither.');
+
+        $this->assertDatabaseCount('gcash_non_members', 0);
+    }
+
     public function test_update_of_an_acknowledged_pair_warns_when_the_mobile_changes_to_another_match(): void
     {
         GCashNonMember::factory()->withoutId()->create([

@@ -21,19 +21,23 @@ class UpdateGCashNonMemberRequest extends StoreGCashNonMemberRequest
     }
 
     /**
-     * Only when the name or mobile number really changed (as the check compares
-     * them), or the ID was just removed. A pair the teller already saved anyway
-     * must not warn again on an unrelated edit such as the remarks. Asked only
-     * when the saved walk-in will have no ID, so a saved ID here means this
-     * edit removes it.
+     * The full check (every walk-in) only when the name or mobile number really
+     * changed, as the check compares them, or the ID was just removed: a no-ID
+     * pair the teller already saved anyway must not warn again on an unrelated
+     * edit such as the remarks. Asked only when the saved walk-in will have no
+     * ID, so a saved ID here means this edit removes it.
+     *
+     * Otherwise the check still runs against walk-ins that have an ID. One saved
+     * with an ID runs no name check of its own, so a later one matching this
+     * walk-in is only ever caught from this side.
      */
-    protected function shouldCheckNameAndMobile(): bool
+    protected function onlyMatchesWithId(): bool
     {
         $nonMember = $this->nonMember();
 
-        return GCashNonMember::comparableName((string) $this->input('full_name')) !== GCashNonMember::comparableName($nonMember->full_name)
-            || GCashNonMember::comparableMobile((string) $this->input('mobile_number')) !== GCashNonMember::comparableMobile($nonMember->mobile_number)
-            || $nonMember->id_number !== null;
+        return GCashNonMember::comparableName((string) $this->input('full_name')) === GCashNonMember::comparableName($nonMember->full_name)
+            && GCashNonMember::comparableMobile((string) $this->input('mobile_number')) === GCashNonMember::comparableMobile($nonMember->mobile_number)
+            && $nonMember->id_number === null;
     }
 
     /**
