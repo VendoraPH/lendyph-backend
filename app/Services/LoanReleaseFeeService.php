@@ -365,12 +365,21 @@ final class LoanReleaseFeeService
         $rows = [];
 
         foreach ($fees as $fee) {
-            $rows[] = [
+            $row = [
                 (int) $fee->id,
                 (string) $fee->name,
                 (string) $fee->type,
                 (string) $fee->value,
             ];
+
+            // A formula fee's bounds and per-month flag move its amount too.
+            // Only formula rows carry them, so every other fee's fingerprint is
+            // the one it always had.
+            if ($fee->type === 'formula') {
+                array_push($row, (bool) $fee->per_month, (string) $fee->min_amount, (string) $fee->max_amount);
+            }
+
+            $rows[] = $row;
         }
 
         return hash('sha256', json_encode($rows, JSON_THROW_ON_ERROR));
@@ -535,6 +544,7 @@ final class LoanReleaseFeeService
         $items = [];
 
         $principal = (float) $loan->principal_amount;
+        $months = FeeAmount::termMonths($loan->term, $loan->term_unit);
 
         foreach ($fees as $fee) {
             $id = (int) $fee->id;
@@ -550,11 +560,13 @@ final class LoanReleaseFeeService
             // where it was meant to be summed.
             $rate = (float) $fee->value;
 
-            $amount = $fee->type === 'percentage'
-                ? round($principal * $rate / 100, 2)
-                : round($rate, 2);
+            // FeeAmount, the calculation every fee amount comes from. Null for a
+            // per-month formula fee on a loan whose term isn't known yet (an
+            // unsaved form preview): it applies once the term is, as a term-day
+            // condition waits for the maturity date.
+            $amount = FeeAmount::forFee($fee, $principal, $months);
 
-            if ($amount <= 0.0) {
+            if ($amount === null || $amount <= 0.0) {
                 continue;
             }
 
@@ -562,10 +574,11 @@ final class LoanReleaseFeeService
                 'name' => $fee->name,
                 'amount' => $amount,
                 'type' => $fee->type,
-                // The RATE for a percentage fee, the peso figure for a fixed
-                // one — the same convention computeDeductions() uses, so a
-                // later recompute reads a fee item the way it reads its own.
+                // The RATE for a percentage or formula fee, the peso figure for
+                // a fixed one — the same convention computeDeductions() uses, so
+                // a later recompute reads a fee item the way it reads its own.
                 'original_value' => $rate,
+                ...FeeAmount::formulaFields((string) $fee->type, $fee->only(['per_month', 'min_amount', 'max_amount'])),
                 self::ITEM_FEE_KEY => $id,
             ];
         }

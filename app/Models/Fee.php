@@ -14,6 +14,9 @@ class Fee extends Model
         'name',
         'type',
         'value',
+        'per_month',
+        'min_amount',
+        'max_amount',
         'applicable_product_ids',
         'conditions',
     ];
@@ -22,6 +25,9 @@ class Fee extends Model
     {
         return [
             'value' => 'decimal:4',
+            'per_month' => 'boolean',
+            'min_amount' => 'decimal:2',
+            'max_amount' => 'decimal:2',
             'applicable_product_ids' => 'array',
             'conditions' => 'array',
         ];

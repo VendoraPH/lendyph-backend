@@ -5,13 +5,14 @@ namespace App\Http\Requests\LoanProduct;
 use App\Enums\InterestRateFrequency;
 use App\Enums\LoanFrequency;
 use App\Enums\TermUnit;
+use App\Http\Requests\Fee\Concerns\ValidatesFormulaFields;
 use App\Http\Requests\LoanProduct\Concerns\GuardsAgainstFeeCatalogOverlap;
 use Illuminate\Contracts\Validation\Validator;
 use Illuminate\Foundation\Http\FormRequest;
 
 class StoreLoanProductRequest extends FormRequest
 {
-    use GuardsAgainstFeeCatalogOverlap;
+    use GuardsAgainstFeeCatalogOverlap, ValidatesFormulaFields;
 
     public function authorize(): bool
     {
@@ -43,8 +44,9 @@ class StoreLoanProductRequest extends FormRequest
             'notarial_fee' => ['nullable', 'numeric', 'min:0', 'decimal:0,4'],
             'custom_fees' => ['nullable', 'array'],
             'custom_fees.*.name' => ['required_with:custom_fees', 'string', 'max:255'],
-            'custom_fees.*.type' => ['required_with:custom_fees', 'in:fixed,percentage'],
+            'custom_fees.*.type' => ['required_with:custom_fees', $this->feeTypeRule()],
             'custom_fees.*.value' => ['required_with:custom_fees', 'numeric', 'min:0', 'decimal:0,4'],
+            ...$this->formulaFieldRules('custom_fees.*.'),
             'custom_fees.*.conditions' => ['nullable', 'array'],
             'penalty_rate' => ['nullable', 'numeric', 'min:0', 'max:100', 'decimal:0,4'],
             'grace_period_days' => ['nullable', 'integer', 'min:0'],
@@ -83,5 +85,6 @@ class StoreLoanProductRequest extends FormRequest
     public function withValidator(Validator $validator): void
     {
         $this->guardAgainstFeeCatalogOverlap($validator);
+        $this->guardCustomFeeFormulaBounds($validator);
     }
 }
