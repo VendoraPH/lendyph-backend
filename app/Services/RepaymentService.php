@@ -965,6 +965,7 @@ class RepaymentService
 
         // Loan::owedCentavos(), the rule LoanResource states the same figures by.
         $owed = $loan->owedCentavos($schedules);
+        $takesPayments = in_array($loan->status, Loan::ACTIVE_STATUSES, true);
 
         // Late, not merely due — same cutoff and same helper as
         // LoanResource's `overdue_amount`, so the loans list and the loan
@@ -1013,8 +1014,10 @@ class RepaymentService
             'total_outstanding' => $owed['total'] / 100,
             // Deprecated alias of `total_outstanding`, kept one release.
             'outstanding_balance' => $owed['total'] / 100,
-            'advance_presets' => $this->advancePresets($loan, $schedules, $today),
-            'payoff_amount' => $this->payoffCentavos($loan, $schedules, $today) / 100,
+            // Only for a loan that takes payments (Loan::ACTIVE_STATUSES); a
+            // payment on any other is refused, so there is nothing to preset.
+            'advance_presets' => $takesPayments ? $this->advancePresets($loan, $schedules, $today) : [],
+            'payoff_amount' => $takesPayments ? $this->payoffCentavos($loan, $schedules, $today) / 100 : null,
             'overdue_amount' => round($overdueAmount, 2),
             'overdue_schedules_count' => $overdueSchedules->count(),
             'next_due_date' => $nextSchedule?->due_date->toDateString(),
@@ -1084,7 +1087,13 @@ class RepaymentService
      * plus every open period's penalty (as the payment will charge it),
      * interest and principal. The stored `total_outstanding` unless a period
      * fell late past its grace since penalties were last stamped, which this
-     * counts so the figure clears the loan.
+     * counts so the figure clears a loan without a Share Capital Build-Up.
+     *
+     * On a loan WITH a Share Capital Build-Up it is the amount owed to show,
+     * not an amount one Record Payment settles the loan with: the allocation
+     * stops after the current period (recordRepaymentOnLockedLoan()), so
+     * recording it pays the current period and any overdue ones and credits
+     * the rest to the member's share capital.
      *
      * @param  EloquentCollection<int, AmortizationSchedule>  $schedules
      */

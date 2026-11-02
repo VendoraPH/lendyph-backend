@@ -376,16 +376,16 @@ class RepaymentController extends Controller
         ],
         responses: [
             new OA\Response(response: 200, description: 'Loan summary', content: new OA\JsonContent(properties: [
-                new OA\Property(property: 'data', type: 'object', properties: [
+                new OA\Property(property: 'data', type: 'object', description: 'Partial list: only the outstanding figures and the Record Payment presets are described here. The response also carries the other summary fields named in the description above (paid totals, overdue figures, next due date, `restructurable_balance`, and so on).', properties: [
                     new OA\Property(property: 'total_outstanding', type: 'number', description: 'Everything still owed: principal, interest, penalty and `insurance_owed`, in whole centavos'),
                     new OA\Property(property: 'outstanding_principal', type: 'number', description: 'Unpaid principal only'),
                     new OA\Property(property: 'insurance_owed', type: 'number'),
                     new OA\Property(property: 'outstanding_balance', type: 'number', deprecated: true, description: 'Deprecated alias of `total_outstanding`, kept one release'),
-                    new OA\Property(property: 'advance_presets', type: 'array', description: 'One entry per open period, in allocation order. `amount` is what a payment today must be to leave the first `periods` open periods paid: the premium owed, then each period\'s penalty as the payment charges it, its remaining interest and principal, in whole centavos. On a loan with a Share Capital Build-Up only the 1-period entry is sent (the allocation turns money past the current period into share capital), and it adds that period\'s build-up when the period is the one the allocation treats as current and the borrower is a member, as `amount_due_now` does: paying it leaves the period paid and credits exactly the build-up. Empty when no period is open.', items: new OA\Items(properties: [
+                    new OA\Property(property: 'advance_presets', type: 'array', description: 'One entry per open period, in allocation order. `amount` is what a payment today must be to leave the first `periods` open periods paid: the premium owed, then each period\'s penalty as the payment charges it, its remaining interest and principal, in whole centavos. Empty, too, when the loan is not released or ongoing (payments are refused there). On a loan with a Share Capital Build-Up only the 1-period entry is sent (the allocation turns money past the current period into share capital), and it adds that period\'s build-up when the period is the one the allocation treats as current and the borrower is a member, as `amount_due_now` does: paying it leaves the period paid and credits exactly the build-up. Empty when no period is open.', items: new OA\Items(properties: [
                         new OA\Property(property: 'periods', type: 'integer'),
                         new OA\Property(property: 'amount', type: 'number'),
                     ])),
-                    new OA\Property(property: 'payoff_amount', type: 'number', description: 'Everything owed today: `total_outstanding`, plus the penalty of any period that fell late past its grace since penalties were last stamped. On a loan without a Share Capital Build-Up it equals the last `advance_presets` amount (when a period is open).'),
+                    new OA\Property(property: 'payoff_amount', type: 'number', nullable: true, description: 'Everything owed today: `total_outstanding`, plus the penalty of any period that fell late past its grace since penalties were last stamped. On a loan without a Share Capital Build-Up it equals the last `advance_presets` amount (when a period is open), and recording it settles the loan. On a loan WITH a Share Capital Build-Up it is the amount owed to show, not an amount one Record Payment settles the loan with: recording it pays the current period (and any overdue ones) and credits the rest to share capital. Null when the loan is not released or ongoing.'),
                 ]),
             ])),
             new OA\Response(response: 404, description: 'Loan not found'),
@@ -421,7 +421,7 @@ class RepaymentController extends Controller
         ),
         responses: [
             new OA\Response(response: 200, description: 'Allocation preview', content: new OA\JsonContent(properties: [
-                new OA\Property(property: 'data', type: 'object', properties: [
+                new OA\Property(property: 'data', type: 'object', description: 'Partial list: only the balance figures are described here. The response also carries the allocation totals (`total_principal`, `total_interest`, `total_penalty`, `total_insurance`, `excess`, the `allocated_to_*` buckets), `payment_type`, `payment_badge`, `allocations` and `is_preview`.', properties: [
                     new OA\Property(property: 'balance_before', type: 'number', description: 'Unpaid principal plus the premium owed, before the payment'),
                     new OA\Property(property: 'balance_after', type: 'number', description: 'Unpaid principal plus the premium owed, after the payment'),
                     new OA\Property(property: 'total_outstanding_before', type: 'number', description: 'Everything owed (principal, interest, penalty and premium) before the payment, including any penalty it charges as of `payment_date`'),

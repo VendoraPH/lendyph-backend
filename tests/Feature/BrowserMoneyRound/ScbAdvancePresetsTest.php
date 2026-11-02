@@ -38,7 +38,7 @@ class ScbAdvancePresetsTest extends TestCase
         $this->seedAndLogin();
     }
 
-    private function releasedLoanWithBuildUp(?string $startDate = null): Loan
+    private function releasedLoanWithBuildUp(?string $startDate = null, ?Borrower $borrower = null, float $principal = 60000): Loan
     {
         $product = LoanProduct::factory()->create([
             'interest_rate' => 3.0,
@@ -51,9 +51,9 @@ class ScbAdvancePresetsTest extends TestCase
 
         $loans = app(LoanService::class);
         $loan = $loans->createLoan([
-            'borrower_id' => Borrower::factory()->create(['branch_id' => $this->branch->id])->id,
+            'borrower_id' => ($borrower ?? Borrower::factory()->create(['branch_id' => $this->branch->id]))->id,
             'loan_product_id' => $product->id,
-            'principal_amount' => 60000,
+            'principal_amount' => $principal,
             'scb_amount' => 100,
             'start_date' => $startDate ?? now()->toDateString(),
         ], $this->admin);
@@ -102,6 +102,27 @@ class ScbAdvancePresetsTest extends TestCase
         $this->assertEqualsWithDelta(11800.00 + 200.00, (float) $presets[0]['amount'], 0.001);
 
         $repayment = $this->payLoan($loan, (float) $presets[0]['amount']);
+        $this->assertSame('paid', AmortizationSchedule::where('loan_id', $loan->id)->where('period_number', 1)->sole()->status);
+        $this->assertSame('pending', AmortizationSchedule::where('loan_id', $loan->id)->where('period_number', 2)->sole()->status);
+        $this->assertSame(0, ShareCapitalLedger::where('repayment_id', $repayment->id)->count());
+    }
+
+    public function test_a_borrower_who_is_not_a_member_gets_no_build_up_in_the_preset(): void
+    {
+        // A pending borrower is not a member yet and holds no share capital.
+        // ₱61,234.57: ₱10,205.76 principal and ₱1,837.04 interest on period 1.
+        $borrower = Borrower::factory()->create(['branch_id' => $this->branch->id, 'status' => 'pending']);
+        $loan = $this->releasedLoanWithBuildUp(borrower: $borrower, principal: 61234.57);
+
+        $summary = $this->summaryOf($loan);
+        $data = $this->getJson("/api/loans/{$loan->id}")->assertOk()->json('data');
+
+        $this->assertCount(1, $summary['advance_presets']);
+        $this->assertEqualsWithDelta(12042.80, (float) $summary['advance_presets'][0]['amount'], 0.001);
+        $this->assertEqualsWithDelta((float) $data['amount_due_now']['amount'], (float) $summary['advance_presets'][0]['amount'], 0.001);
+
+        $repayment = $this->payLoan($loan, (float) $summary['advance_presets'][0]['amount']);
+
         $this->assertSame('paid', AmortizationSchedule::where('loan_id', $loan->id)->where('period_number', 1)->sole()->status);
         $this->assertSame('pending', AmortizationSchedule::where('loan_id', $loan->id)->where('period_number', 2)->sole()->status);
         $this->assertSame(0, ShareCapitalLedger::where('repayment_id', $repayment->id)->count());
