@@ -25,10 +25,15 @@ return new class extends Migration
         'documentary_stamp_tax_payable' => ['code' => '2230', 'name' => 'Documentary Stamp Tax Payable', 'type' => 'liability', 'parent' => '2200', 'cash_flow_category' => 'financing'],
     ];
 
-    private const OTHER_TAXES_CODE = '2220';
+    /** role => [code, name] of the existing account it points at. */
+    private const EXISTING = [
+        'withholding_tax_payable' => ['2210', 'Withholding Tax Payable'],
+        'other_taxes_payable' => ['2220', 'Other Taxes Payable'],
+    ];
 
     private const DEDUCTIONS = [
         'documentary_stamp_tax_payable' => 'documentary stamp taxes',
+        'withholding_tax_payable' => 'withholding taxes',
         'other_taxes_payable' => 'other taxes',
     ];
 
@@ -37,8 +42,10 @@ return new class extends Migration
     /**
      * Add the tax payable roles (decision 4b, 2026-11-02) to a chart seeded
      * before them: 2230 Documentary Stamp Tax Payable, a new liability under
-     * 2200 Taxes Payable, for `documentary_stamp_tax_payable`, and the
-     * existing 2220 Other Taxes Payable for `other_taxes_payable`.
+     * 2200 Taxes Payable, for
+     * `documentary_stamp_tax_payable`; the existing 2210 Withholding Tax
+     * Payable for `withholding_tax_payable`; and the existing 2220 Other Taxes
+     * Payable for `other_taxes_payable`.
      *
      * The same accounts, roles, skips and audit rows as
      * ReleaseDeductionAccountsBackfill gives these two roles (its docblock
@@ -119,8 +126,8 @@ return new class extends Migration
             return;
         }
 
-        [$account, $reason] = $role === 'other_taxes_payable'
-            ? $this->existing(self::OTHER_TAXES_CODE, 'Other Taxes Payable', 'liability')
+        [$account, $reason] = isset(self::EXISTING[$role])
+            ? $this->existing(self::EXISTING[$role][0], self::EXISTING[$role][1], 'liability')
             : $this->byCode(self::NEW_ACCOUNTS[$role]);
 
         if ($reason !== null) {
@@ -142,8 +149,8 @@ return new class extends Migration
 
     /**
      * An existing account by code that must already be right: active,
-     * postable, of the role's type, and still carrying its name. A 2220 an
-     * administrator renamed for something else is not taken on its code alone.
+     * postable, of the role's type, and still carrying its name. A 2210 or
+     * 2220 an administrator renamed for something else is not taken on its code alone.
      *
      * @return array{0: object|null, 1: string|null}
      */

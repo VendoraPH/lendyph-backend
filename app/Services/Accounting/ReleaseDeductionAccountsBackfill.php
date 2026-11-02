@@ -29,6 +29,8 @@ use Illuminate\Support\Facades\DB;
  *
  * - `documentary_stamp_tax_payable` → 2230 Documentary Stamp Tax Payable, a
  *   new liability under 2200 Taxes Payable.
+ * - `withholding_tax_payable` → the existing 2210 Withholding Tax Payable
+ *   (code and name).
  * - `other_taxes_payable` → the existing 2220 Other Taxes Payable (code and
  *   name).
  *
@@ -46,7 +48,7 @@ use Illuminate\Support\Facades\DB;
  *   a second run changes nothing;
  * - a name carried by more than one account, or by one that cannot be posted
  *   to, and a code already taken by an account with another name;
- * - 4040 or 2220 missing, unusable, or renamed;
+ * - 4040, 2210 or 2220 missing, unusable, or renamed;
  * - share capital when two equity accounts carry the name, or when equity
  *   accounts mention share capital but none is named exactly that, so it never
  *   adds a second share capital account next to the cooperative's own.
@@ -89,6 +91,9 @@ class ReleaseDeductionAccountsBackfill
     /** The existing account `service_fee_income` points at. */
     public const SERVICE_FEE_CODE = '4040';
 
+    /** The existing account `withholding_tax_payable` points at. */
+    public const WITHHOLDING_TAX_CODE = '2210';
+
     /** The existing account `other_taxes_payable` points at. */
     public const OTHER_TAXES_CODE = '2220';
 
@@ -99,6 +104,7 @@ class ReleaseDeductionAccountsBackfill
         'share_capital',
         'other_fee_income',
         'documentary_stamp_tax_payable',
+        'withholding_tax_payable',
         'other_taxes_payable',
     ];
 
@@ -109,6 +115,7 @@ class ReleaseDeductionAccountsBackfill
         'share_capital' => 'share capital',
         'other_fee_income' => 'catalog fees',
         'documentary_stamp_tax_payable' => 'documentary stamp taxes',
+        'withholding_tax_payable' => 'withholding taxes',
         'other_taxes_payable' => 'other taxes',
     ];
 
@@ -120,6 +127,7 @@ class ReleaseDeductionAccountsBackfill
         'share_capital' => 'as the accountant confirmed on 2026-10-03',
         'other_fee_income' => 'as the accountant confirmed on 2026-10-03',
         'documentary_stamp_tax_payable' => 'as approved on 2026-11-02',
+        'withholding_tax_payable' => 'as approved on 2026-11-02',
         'other_taxes_payable' => 'as approved on 2026-11-02',
     ];
 
@@ -193,6 +201,7 @@ class ReleaseDeductionAccountsBackfill
 
         [$account, $reason] = match ($role) {
             'service_fee_income' => $this->existing(self::SERVICE_FEE_CODE, 'Service Fee Income', 'income'),
+            'withholding_tax_payable' => $this->existing(self::WITHHOLDING_TAX_CODE, 'Withholding Tax Payable', 'liability'),
             'other_taxes_payable' => $this->existing(self::OTHER_TAXES_CODE, 'Other Taxes Payable', 'liability'),
             'share_capital' => $this->shareCapital(),
             default => $this->byCode(self::NEW_ACCOUNTS[$role]),

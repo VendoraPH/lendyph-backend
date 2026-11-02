@@ -19,7 +19,8 @@ use Tests\Traits\SetupLendyPH;
  * that previews it, and the migration that runs it on deploy. Then the two
  * tax roles (decision 4b, 2026-11-02), which the same command previews and a
  * second migration runs: 2230 Documentary Stamp Tax Payable, a new account,
- * and 2220 Other Taxes Payable, an account every seeded chart already has.
+ * and 2210 Withholding Tax Payable and 2220 Other Taxes Payable, accounts
+ * every seeded chart already has.
  */
 class ReleaseDeductionAccountsBackfillTest extends TestCase
 {
@@ -39,7 +40,7 @@ class ReleaseDeductionAccountsBackfillTest extends TestCase
 
     private const TAX_MIGRATION = 'migrations/2026_11_02_220500_add_tax_payable_accounts.php';
 
-    private const TAX_ROLES = ['documentary_stamp_tax_payable', 'other_taxes_payable'];
+    private const TAX_ROLES = ['documentary_stamp_tax_payable', 'withholding_tax_payable', 'other_taxes_payable'];
 
     private const TAX_CODES = ['2230'];
 
@@ -264,6 +265,7 @@ class ReleaseDeductionAccountsBackfillTest extends TestCase
         $this->assertNotContains('notarial_fees_payable', array_column($result['created'], 'role'));
         $this->assertContains(['role' => 'documentary_stamp_tax_payable', 'code' => '2230', 'name' => 'Documentary Stamp Tax Payable', 'type' => 'liability'], $result['created']);
         $this->assertContains(['role' => 'other_taxes_payable', 'code' => '2220', 'name' => 'Other Taxes Payable'], $result['mapped']);
+        $this->assertContains(['role' => 'withholding_tax_payable', 'code' => '2210', 'name' => 'Withholding Tax Payable'], $result['mapped']);
 
         Log::spy();
         $this->migration()->up();
@@ -279,7 +281,7 @@ class ReleaseDeductionAccountsBackfillTest extends TestCase
             fn (string $message, array $context): bool => $message === ReleaseDeductionAccountsBackfill::summary($releasePart) && $context === $releasePart,
         )->once();
         Log::shouldHaveReceived('info')->withArgs(
-            fn (string $message, array $context): bool => str_starts_with($message, 'tax payable accounts: 1 account(s) added, 2 role(s) mapped') && $context === $taxPart,
+            fn (string $message, array $context): bool => str_starts_with($message, 'tax payable accounts: 1 account(s) added, 3 role(s) mapped') && $context === $taxPart,
         )->once();
     }
 
@@ -290,13 +292,16 @@ class ReleaseDeductionAccountsBackfillTest extends TestCase
         $this->taxMigration()->up();
 
         $this->assertAccount('2230', 'Documentary Stamp Tax Payable', 'liability', '2200', 'financing');
-        $this->assertSame(['documentary_stamp_tax_payable' => '2230', 'other_taxes_payable' => '2220'], $this->mappingsOf(self::TAX_ROLES));
+        $this->assertSame(
+            ['documentary_stamp_tax_payable' => '2230', 'withholding_tax_payable' => '2210', 'other_taxes_payable' => '2220'],
+            $this->mappingsOf(self::TAX_ROLES),
+        );
 
         $accountRows = AuditLog::where('action', ReleaseDeductionAccountsBackfill::AUDIT_ACCOUNT_ADDED)->get();
         $mappingRows = AuditLog::where('action', ReleaseDeductionAccountsBackfill::AUDIT_ROLE_MAPPED)->get();
 
         $this->assertCount(1, $accountRows);
-        $this->assertCount(2, $mappingRows);
+        $this->assertCount(3, $mappingRows);
 
         foreach ([...$accountRows, ...$mappingRows] as $row) {
             $this->assertNull($row->user_id, 'a system change carries no user');
@@ -330,8 +335,9 @@ class ReleaseDeductionAccountsBackfillTest extends TestCase
         $this->artisan('accounting:backfill-release-deduction-accounts', ['--dry-run' => true])
             ->expectsOutputToContain('Would add 2230 Documentary Stamp Tax Payable (liability)')
             ->expectsOutputToContain('Would map documentary_stamp_tax_payable to 2230 Documentary Stamp Tax Payable')
+            ->expectsOutputToContain('Would map withholding_tax_payable to 2210 Withholding Tax Payable')
             ->expectsOutputToContain('Would map other_taxes_payable to 2220 Other Taxes Payable')
-            ->expectsOutputToContain('Would add 1 account(s) and map 2 role(s); 0 skipped.')
+            ->expectsOutputToContain('Would add 1 account(s) and map 3 role(s); 0 skipped.')
             ->assertSuccessful();
 
         $this->assertSame($before, $this->snapshot());
@@ -351,6 +357,34 @@ class ReleaseDeductionAccountsBackfillTest extends TestCase
         Log::shouldHaveReceived('warning')->withArgs(
             fn (string $message, array $context): bool => array_column($context['rows'], 'role') === ['other_taxes_payable'],
         )->once();
+    }
+
+    public function test_the_tax_migration_skips_documentary_stamp_tax_when_2230_is_taken_by_another_account(): void
+    {
+        $this->chartSeededBeforeTheTaxAccounts();
+        $this->account3('2230', 'VAT Payable', 'liability');
+
+        $this->artisan('accounting:backfill-release-deduction-accounts', ['--dry-run' => true])
+            ->expectsOutputToContain('documentary_stamp_tax_payable skipped: 2230 is already used by VAT Payable')
+            ->assertSuccessful();
+
+        $this->taxMigration()->up();
+
+        $this->assertArrayNotHasKey('documentary_stamp_tax_payable', AccountingAccountMapping::resolved());
+        $this->assertSame('VAT Payable', AccountingAccount::where('code', '2230')->value('name'));
+        // The rest still goes in.
+        $this->assertSame('2220', $this->mappingsOf(self::TAX_ROLES)['other_taxes_payable']);
+    }
+
+    public function test_the_tax_migration_maps_a_documentary_stamp_tax_account_kept_under_another_code(): void
+    {
+        $this->chartSeededBeforeTheTaxAccounts();
+        $own = $this->account3('2250', 'DOCUMENTARY STAMP TAX PAYABLE', 'liability');
+
+        $this->taxMigration()->up();
+
+        $this->assertSame((int) $own->id, AccountingAccountMapping::resolved()['documentary_stamp_tax_payable']);
+        $this->assertFalse(AccountingAccount::where('code', '2230')->exists());
     }
 
     public function test_the_tax_migration_never_changes_a_mapping_an_administrator_already_set(): void

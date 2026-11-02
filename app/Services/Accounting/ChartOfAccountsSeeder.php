@@ -222,6 +222,7 @@ final class ChartOfAccountsSeeder
         // Taxes withheld at release (decision 4b, 2026-11-02). Charts seeded
         // before these existed get them from the 2026_11_02_220500 migration.
         'documentary_stamp_tax_payable' => '2230',
+        'withholding_tax_payable' => '2210',
         'other_taxes_payable' => '2220',
     ];
 

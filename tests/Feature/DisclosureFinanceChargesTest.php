@@ -8,6 +8,7 @@ use App\Models\Loan;
 use App\Models\LoanProduct;
 use App\Services\LoanService;
 use Illuminate\Support\Facades\DB;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
@@ -158,6 +159,44 @@ class DisclosureFinanceChargesTest extends TestCase
         $this->assertEquals(50000, $data['totals']['total_principal']);
         $this->assertEquals(0, $data['totals']['unitemised_deductions']);
         $this->assertCount(7, $data['deductions']['items']);
+    }
+
+    /**
+     * Whether a hand-typed deduction is a tax (a non-finance charge) is decided
+     * by the books' own matcher (PostingRules::taxRoleFor()), on whole words.
+     *
+     * @return array<string, array{string, bool}>
+     */
+    public static function taxLikeNames(): array
+    {
+        return [
+            'DST' => ['DST', true],
+            'D.S.T.' => ['D.S.T.', true],
+            'Doc Stamp' => ['Doc Stamp', true],
+            'Documentary Stamps' => ['Documentary Stamps', true],
+            'Withholding Tax' => ['Withholding Tax', true],
+            'Local Business Tax' => ['Local Business Tax', true],
+            'Taxi Fare' => ['Taxi Fare', false],
+            'Tax Clearance Fee' => ['Tax Clearance Fee', false],
+            'Non-taxable Charge' => ['Non-taxable Charge', false],
+            'Syntax Review Fee' => ['Syntax Review Fee', false],
+        ];
+    }
+
+    #[DataProvider('taxLikeNames')]
+    public function test_a_deduction_is_a_non_finance_charge_only_when_the_tax_matcher_says_it_is_a_tax(string $name, bool $isTax): void
+    {
+        $loan = $this->draftLoan([], 20000, [['name' => $name, 'amount' => 100, 'type' => 'fixed']]);
+        $service = app(LoanService::class);
+        $service->submitForReview($loan);
+        $service->approve($loan, $this->admin, 'Approved for testing');
+
+        $data = $this->disclosure($loan->fresh());
+        $nonFinance = array_column($data['non_finance_charges']['items'], 'name');
+        $finance = array_column($data['finance_charges']['items'], 'name');
+
+        $this->assertSame($isTax, in_array($name, $nonFinance, true), "{$name} non-finance");
+        $this->assertSame(! $isTax, in_array($name, $finance, true), "{$name} finance");
     }
 
     public function test_the_rates_state_the_nominal_and_effective_interest_rate(): void

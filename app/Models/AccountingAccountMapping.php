@@ -79,6 +79,7 @@ class AccountingAccountMapping extends Model
         'share_capital',
         'other_fee_income',
         'documentary_stamp_tax_payable',
+        'withholding_tax_payable',
         'other_taxes_payable',
     ];
 
@@ -183,6 +184,7 @@ class AccountingAccountMapping extends Model
          * cooperative collects and remits, never its own income: liabilities.
          */
         'documentary_stamp_tax_payable' => ['type' => 'liability'],
+        'withholding_tax_payable' => ['type' => 'liability'],
         'other_taxes_payable' => ['type' => 'liability'],
     ];
 

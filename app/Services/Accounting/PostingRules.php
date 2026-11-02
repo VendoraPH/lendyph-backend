@@ -6,7 +6,6 @@ namespace App\Services\Accounting;
 
 use App\Exceptions\CannotPostToTheBooksException;
 use App\Services\FeeOverlapDetector;
-use Illuminate\Support\Facades\Log;
 
 /**
  * The automatic posting engine's rule set. A lending event goes in, a balanced
@@ -20,9 +19,7 @@ use Illuminate\Support\Facades\Log;
  *
  * ## Pure, and deliberately so
  *
- * Nothing here touches the database, the clock, or the request. The one side
- * effect is a log warning when a release books a tax to its fallback account
- * ({@see self::loanRelease()}). A rule takes
+ * Nothing here touches the database, the clock, or the request. A rule takes
  * integer centavos and a resolved {@see AccountMap} and returns line data. That
  * is what lets every rule be unit-tested against a literal mapping, and it is
  * why {@see AutomaticPoster} — not this class — owns the peso/centavo boundary
@@ -132,8 +129,36 @@ final class PostingRules
      */
     public const DOCUMENTARY_STAMP_TAX_ROLE = 'documentary_stamp_tax_payable';
 
-    /** Where any other tax withheld at release is credited: 2220 Other Taxes Payable by default. */
+    /** Where a withholding tax withheld at release is credited: 2210 Withholding Tax Payable by default. */
+    public const WITHHOLDING_TAX_ROLE = 'withholding_tax_payable';
+
+    /**
+     * Where any other tax withheld at release is credited: 2220 Other Taxes
+     * Payable by default. Also where a Documentary Stamp Tax or a withholding
+     * tax goes when the chart has no account for its own role, so it stays a
+     * liability ({@see self::classifyDeductions()}).
+     */
     public const OTHER_TAXES_ROLE = 'other_taxes_payable';
+
+    /**
+     * What makes a deduction's type a tax, tried in this order on the type
+     * ({@see self::deductionType()}: lower case, words split by single spaces),
+     * each on whole words. The single matcher both the books and the
+     * disclosure (DisclosureService::kindOf()) use (decided 2026-11-02).
+     *
+     * @var array<string, string> pattern => role
+     */
+    private const TAX_PATTERNS = [
+        '/\\b(d ?s ?t|doc(umentary)? stamps?)\\b/' => self::DOCUMENTARY_STAMP_TAX_ROLE,
+        '/\\bwithholding\\b/' => self::WITHHOLDING_TAX_ROLE,
+        '/\\btax(es)?\\b/' => self::OTHER_TAXES_ROLE,
+    ];
+
+    /**
+     * A type that reads like a tax and is not one: a tax clearance fee is a
+     * fee charged for a certificate, not a levy.
+     */
+    private const NOT_A_TAX_PATTERN = '/\\btax clearance\\b/';
 
     /**
      * Where a deduction with no entry in {@see self::DEDUCTION_ROLES} is
@@ -186,10 +211,13 @@ final class PostingRules
      *
      * A tax (see {@see self::taxRoleFor()}) is credited to its payable role,
      * hand-typed or from the catalog. When `$map` has no account for that
-     * role it is booked where it went before (a catalog fee on
+     * role, a Documentary Stamp Tax or withholding tax goes to
+     * {@see self::OTHER_TAXES_ROLE} if that has one, so it stays a liability;
+     * otherwise the tax is booked where it went before (a catalog fee on
      * {@see self::CATALOG_FEE_ROLE}, a hand-typed one on
-     * {@see self::UNMAPPED_DEDUCTION_ROLE}) and a warning is logged, so a chart
-     * without the account never stops a release.
+     * {@see self::UNMAPPED_DEDUCTION_ROLE}). A chart without the account never
+     * stops a release; AutomaticPoster::loanRelease() logs a warning for it
+     * ({@see self::taxAccountFallbacks()}).
      *
      * One credit line per ROLE, not per item: items that resolve to the same
      * role are summed.
@@ -250,16 +278,6 @@ final class PostingRules
             $lines[] = self::creditIfAny($map, $role, $amount);
         }
 
-        $fallbacks = self::taxAccountFallbacks($items, $map);
-
-        if ($fallbacks !== []) {
-            Log::warning(
-                "{$loan}: a tax withheld at release was booked where it went before, because its role has no account. "
-                .'Set it in Accounting → Settings → Default Accounts so later releases book it as a tax payable.',
-                ['loan' => $loan, 'fallbacks' => $fallbacks],
-            );
-        }
-
         return [
             'source' => 'loan_release',
             'description' => 'Loan release',
@@ -295,9 +313,9 @@ final class PostingRules
      * service fee. A tax comes next ({@see self::taxRoleFor()}), so a catalog
      * fee called "Documentary Stamp Tax" is credited to its payable role.
      *
-     * Given `$map`, a tax whose role it has no account for takes the role it
-     * had before taxes had one ({@see self::taxAccountFallbacks()}). Without
-     * a map, every tax takes its payable role.
+     * Given `$map`, a tax whose role it has no account for takes its fallback
+     * ({@see self::taxAccountFallbacks()}). Without a map, every tax takes its
+     * payable role.
      *
      * A hand-typed tax whose amount cannot be booked is set aside, as it was
      * while taxes had no role: the old rule posted those loans.
@@ -376,7 +394,7 @@ final class PostingRules
 
         $credits = [];
 
-        foreach ([...array_unique(self::DEDUCTION_ROLES), self::DOCUMENTARY_STAMP_TAX_ROLE, self::OTHER_TAXES_ROLE, self::CATALOG_FEE_ROLE] as $role) {
+        foreach ([...array_unique(self::DEDUCTION_ROLES), self::DOCUMENTARY_STAMP_TAX_ROLE, self::WITHHOLDING_TAX_ROLE, self::OTHER_TAXES_ROLE, self::CATALOG_FEE_ROLE] as $role) {
             if (($mapped[$role] ?? 0) > 0) {
                 $credits[$role] = $mapped[$role];
             }
@@ -440,34 +458,46 @@ final class PostingRules
     }
 
     /**
-     * The payable role a deduction named `$name` is credited to when it is a
-     * tax, or null when it is not one, or its type has a role of its own in
-     * {@see self::DEDUCTION_ROLES}.
+     * The payable role a deduction named `$name` (or its type) is credited to
+     * when it is a tax, or null when it is not one, or its type has a role of
+     * its own in {@see self::DEDUCTION_ROLES}.
      *
-     * The same recognition as the disclosure's (DisclosureService::kindOf()),
-     * so the statement the borrower signs and the books agree on what a tax
-     * is: the type exactly "dst" or containing "documentary stamp" is a
-     * Documentary Stamp Tax; any other type containing "tax" is another tax.
+     * The one tax matcher: DisclosureService::kindOf() calls it too, so the
+     * statement the borrower signs and the books can never disagree on what a
+     * tax is. On whole words of the type ({@see self::TAX_PATTERNS}):
+     *
+     * - "DST", "D.S.T.", "Doc Stamp", "Documentary Stamp(s)"
+     *   → {@see self::DOCUMENTARY_STAMP_TAX_ROLE};
+     * - "Withholding Tax" → {@see self::WITHHOLDING_TAX_ROLE};
+     * - any other "Tax" or "Taxes" → {@see self::OTHER_TAXES_ROLE}.
+     *
+     * Not taxes: "Taxi Fare", "Non-taxable", "Syntax", and a "Tax Clearance
+     * Fee" ({@see self::NOT_A_TAX_PATTERN}).
      */
     public static function taxRoleFor(string $name): ?string
     {
         $type = self::deductionType($name);
 
-        if (isset(self::DEDUCTION_ROLES[$type])) {
+        if (isset(self::DEDUCTION_ROLES[$type]) || preg_match(self::NOT_A_TAX_PATTERN, $type) === 1) {
             return null;
         }
 
-        return match (true) {
-            $type === 'dst', str_contains($type, 'documentary stamp') => self::DOCUMENTARY_STAMP_TAX_ROLE,
-            str_contains($type, 'tax') => self::OTHER_TAXES_ROLE,
-            default => null,
-        };
+        foreach (self::TAX_PATTERNS as $pattern => $role) {
+            if (preg_match($pattern, $type) === 1) {
+                return $role;
+            }
+        }
+
+        return null;
     }
 
     /**
      * The taxes among `$items` that `$map` has no account for, each with the
      * role it would have taken and the role it is booked to instead, in item
-     * order. Empty when every tax can go to its payable account.
+     * order. Empty when every tax can go to its own payable account.
+     *
+     * Pure: AutomaticPoster::loanRelease() logs these as a warning, and only
+     * there, so the read-only `accounting:loan-release-diff` logs nothing.
      *
      * @param  array<array-key, mixed>  $items  as {@see self::classifyDeductions()} takes them
      * @return list<array{type: string, role: string, booked_to: string}>
@@ -488,22 +518,34 @@ final class PostingRules
                 continue;
             }
 
+            $type = self::deductionType($name);
+
             $fallbacks[] = [
-                'type' => self::deductionType($name),
+                'type' => $type,
                 'role' => $role,
-                'booked_to' => ($item['catalog_fee'] ?? false) === true ? self::CATALOG_FEE_ROLE : self::UNMAPPED_DEDUCTION_ROLE,
+                'booked_to' => self::bookableTaxRole($type, $map)
+                    ?? (($item['catalog_fee'] ?? false) === true ? self::CATALOG_FEE_ROLE : self::UNMAPPED_DEDUCTION_ROLE),
             ];
         }
 
         return $fallbacks;
     }
 
-    /** A tax type's payable role, or null when it is no tax or `$map` has no account for it. */
+    /**
+     * The payable role a tax type is booked to under `$map`: its own role
+     * when the map has an account for it (or there is no map), else
+     * {@see self::OTHER_TAXES_ROLE} when the map has that, else null (no tax,
+     * or booked where it went before).
+     */
     private static function bookableTaxRole(string $type, ?AccountMap $map): ?string
     {
         $role = self::taxRoleFor($type);
 
-        return $role !== null && ($map === null || $map->has($role)) ? $role : null;
+        if ($role === null || $map === null || $map->has($role)) {
+            return $role;
+        }
+
+        return $role !== self::OTHER_TAXES_ROLE && $map->has(self::OTHER_TAXES_ROLE) ? self::OTHER_TAXES_ROLE : null;
     }
 
     /**

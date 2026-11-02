@@ -52,6 +52,7 @@ class AccountingPostingRulesTest extends TestCase
             'share_capital' => 3060,
             'other_fee_income' => 4080,
             'documentary_stamp_tax_payable' => 2230,
+            'withholding_tax_payable' => 2210,
             'other_taxes_payable' => 2220,
         ]);
     }
@@ -307,8 +308,7 @@ class AccountingPostingRulesTest extends TestCase
         $this->assertSame(['documentary_stamp_tax_payable' => 45_000], $deductions['mapped']);
         $this->assertSame([], $deductions['unmapped']);
         $this->assertSame(['amount' => 10_000, 'role' => 'documentary_stamp_tax_payable'], $deductions['types']['dst']);
-        $this->assertSame('documentary_stamp_tax_payable', PostingRules::taxRoleFor('DST.'));
-        $this->assertNull(PostingRules::taxRoleFor('DST Processing'), 'only the type exactly "dst" is DST by that name');
+        $this->assertSame('documentary_stamp_tax_payable', PostingRules::taxRoleFor('D.S.T.'));
     }
 
     /**
@@ -369,6 +369,106 @@ class AccountingPostingRulesTest extends TestCase
             PostingRules::taxAccountFallbacks($items, $map),
         );
         $this->assertSame([], PostingRules::taxAccountFallbacks($items, $this->map()));
+    }
+
+    /**
+     * Without 2230 (or 2210), a Documentary Stamp Tax (or a withholding tax)
+     * goes to Other Taxes Payable when the chart has that, so it stays a
+     * liability; only without that too does it go back to income.
+     */
+    public function test_a_tax_without_its_own_account_falls_back_to_other_taxes_payable_first(): void
+    {
+        $roles = $this->map()->all();
+        unset($roles['documentary_stamp_tax_payable'], $roles['withholding_tax_payable']);
+        $map = AccountMap::fromArray($roles);
+
+        $items = [
+            ['name' => 'Documentary Stamp Tax', 'amount' => 30_000, 'catalog_fee' => true],
+            ['name' => 'DST', 'amount' => 10_000],
+            ['name' => 'Withholding Tax', 'amount' => 5_000],
+        ];
+
+        $posting = PostingRules::loanRelease(5_000_000, 4_955_000, 45_000, 'cash', $map, items: $items);
+
+        $this->assertBalancedAndNonEmpty($posting);
+        $this->assertCount(3, $posting['lines']);
+        $this->assertSame(45_000, $this->amountOn($posting, 2220, 'credit'));
+        $this->assertSame(
+            [
+                ['type' => 'documentary stamp tax', 'role' => 'documentary_stamp_tax_payable', 'booked_to' => 'other_taxes_payable'],
+                ['type' => 'dst', 'role' => 'documentary_stamp_tax_payable', 'booked_to' => 'other_taxes_payable'],
+                ['type' => 'withholding tax', 'role' => 'withholding_tax_payable', 'booked_to' => 'other_taxes_payable'],
+            ],
+            PostingRules::taxAccountFallbacks($items, $map),
+        );
+    }
+
+    public function test_a_withholding_tax_is_credited_to_withholding_tax_payable(): void
+    {
+        $items = [['name' => 'Withholding Tax', 'amount' => 12_000], ['name' => 'EWT Withholding', 'amount' => 3_000, 'catalog_fee' => true]];
+
+        $posting = PostingRules::loanRelease(5_000_000, 4_985_000, 15_000, 'cash', $this->map(), items: $items);
+
+        $this->assertBalancedAndNonEmpty($posting);
+        $this->assertSame(15_000, $this->amountOn($posting, 2210, 'credit'));
+        $this->assertSame(0, $this->amountOn($posting, 2220, 'credit'));
+    }
+
+    /**
+     * Deduction names and the tax role each is recognised as, on whole words.
+     * The same matcher decides the disclosure (DisclosureFinanceChargesTest).
+     *
+     * @return array<string, array{string, string|null}>
+     */
+    public static function taxNames(): array
+    {
+        return [
+            'DST' => ['DST', 'documentary_stamp_tax_payable'],
+            'D.S.T.' => ['D.S.T.', 'documentary_stamp_tax_payable'],
+            'Documentary Stamp Tax' => ['Documentary Stamp Tax', 'documentary_stamp_tax_payable'],
+            'Documentary Stamps' => ['Documentary Stamps', 'documentary_stamp_tax_payable'],
+            'Doc Stamp' => ['Doc Stamp', 'documentary_stamp_tax_payable'],
+            'DST on loan' => ['DST on loan', 'documentary_stamp_tax_payable'],
+            'Withholding Tax' => ['Withholding Tax', 'withholding_tax_payable'],
+            'Local Business Tax' => ['Local Business Tax', 'other_taxes_payable'],
+            'Other Taxes' => ['Other Taxes', 'other_taxes_payable'],
+            'TAX' => ['TAX', 'other_taxes_payable'],
+            'Taxi Fare' => ['Taxi Fare', null],
+            'Tax Clearance Fee' => ['Tax Clearance Fee', null],
+            'Non-taxable Charge' => ['Non-taxable Charge', null],
+            'Syntax Review Fee' => ['Syntax Review Fee', null],
+            'Taxation Seminar' => ['Taxation Seminar', null],
+            'Documentary Fee' => ['Documentary Fee', null],
+            'Distribution Fee' => ['Distribution Fee', null],
+            'Processing Fee' => ['Processing Fee', null],
+        ];
+    }
+
+    #[DataProvider('taxNames')]
+    public function test_the_tax_matcher_reads_whole_words(string $name, ?string $role): void
+    {
+        $this->assertSame($role, PostingRules::taxRoleFor($name));
+        $this->assertSame($role, PostingRules::taxRoleFor(PostingRules::deductionType($name)), 'the type reads the same as the name');
+    }
+
+    /**
+     * Hand-typed taxes now have an account of their own, so ones that add up
+     * to more than the loan withheld are refused like any other typed item,
+     * rather than crediting 2230 with money the loan does not show was kept.
+     */
+    public function test_hand_typed_taxes_above_the_total_deductions_are_refused(): void
+    {
+        $this->expectException(CannotPostToTheBooksException::class);
+        $this->expectExceptionMessageMatches('/LN-000042.*₱1,600\.00.*₱1,500\.00/s');
+
+        PostingRules::loanRelease(
+            5_000_000, 4_850_000, 150_000, 'cash', $this->map(),
+            items: [
+                ['name' => 'Processing Fee', 'amount' => 100_000],
+                ['name' => 'DST', 'amount' => 60_000],
+            ],
+            loan: 'LN-000042',
+        );
     }
 
     /**
@@ -579,7 +679,8 @@ class AccountingPostingRulesTest extends TestCase
      * credit the net, then each role its share in a fixed order — processing
      * fee income (with whatever no item explains), service fee income,
      * notarial fees payable, insurance premium payable, share capital,
-     * documentary stamp tax payable, other taxes payable, other fee income.
+     * documentary stamp tax payable, withholding tax payable, other taxes
+     * payable, other fee income.
      *
      * @return array<string, array{int, int, int, list<array<string, mixed>>, list<array{int, int}>}>
      */
@@ -603,8 +704,9 @@ class AccountingPostingRulesTest extends TestCase
                 ['name' => 'Documentary Stamp Tax', 'amount' => 15_000, 'catalog_fee' => true],
                 ['name' => 'DST', 'amount' => 10_000],
                 ['name' => 'Local Business Tax', 'amount' => 5_000],
-                ['name' => 'Credit Investigation Fee', 'amount' => 10_000, 'catalog_fee' => true],
-            ], [[4030, 30_000], [2230, 25_000], [2220, 5_000], [4080, 10_000]]],
+                ['name' => 'Withholding Tax', 'amount' => 2_000],
+                ['name' => 'Credit Investigation Fee', 'amount' => 8_000, 'catalog_fee' => true],
+            ], [[4030, 30_000], [2230, 25_000], [2210, 2_000], [2220, 5_000], [4080, 8_000]]],
             'processing fee only' => [5_000_000, 4_876_544, 123_456, [
                 ['name' => 'Processing Fee', 'amount' => 123_456],
             ], [[4030, 123_456]]],
