@@ -71,7 +71,7 @@ class RepaymentService
             $this->lockLoanForPayment($loan);
 
             return $this->recordRepaymentOnLockedLoan($loan, $amountPaid, $paymentDate, $user, $remarks, $method, $referenceNumber);
-        });
+        }, racedUniqueIndex: Repayment::RECEIPT_NUMBER_INDEX);
     }
 
     /**
@@ -119,7 +119,7 @@ class RepaymentService
             }
 
             return $this->recordRepaymentOnLockedLoan($loan, $amount, $paymentDate, $user, $remarks, $method, $referenceNumber);
-        });
+        }, racedUniqueIndex: Repayment::RECEIPT_NUMBER_INDEX);
     }
 
     /**
@@ -166,6 +166,7 @@ class RepaymentService
         string $method = 'cash',
         ?string $referenceNumber = null,
         bool $postToBooks = true,
+        bool $preview = false,
     ): Repayment {
         $paymentDate = Carbon::parse($paymentDate);
 
@@ -323,6 +324,9 @@ class RepaymentService
             'status' => 'posted',
             'received_by' => $user->id,
             'remarks' => $remarks,
+            // A preview numbers its rolled-back row with a placeholder and
+            // takes no lock on the newest receipt (Repayment::booted()).
+            'receipt_number' => $preview ? Repayment::previewReceiptNumber() : null,
         ]);
 
         // What went on each period, so a void can take back exactly that.
@@ -457,7 +461,7 @@ class RepaymentService
         return $this->rolledBackUnderPaymentLock($loan, function (Loan $loan) use ($amountPaid, $paymentDate, $user): array {
             $owedIds = $this->owedScheduleIds($loan, Carbon::parse($paymentDate));
             $premiumBefore = LoanService::toCentavos((float) $loan->insurance_remaining_balance);
-            $repayment = $this->recordRepaymentOnLockedLoan($loan, $amountPaid, $paymentDate, $user, postToBooks: false);
+            $repayment = $this->recordRepaymentOnLockedLoan($loan, $amountPaid, $paymentDate, $user, postToBooks: false, preview: true);
             $premiumAfter = LoanService::toCentavos((float) $loan->insurance_remaining_balance);
             $allocations = $this->previewedAllocations($repayment);
             $owedAfter = $loan->owedCentavos($loan->amortizationSchedules()->get())['total'];
@@ -1093,7 +1097,8 @@ class RepaymentService
      * not an amount one Record Payment settles the loan with: the allocation
      * stops after the current period (recordRepaymentOnLockedLoan()), so
      * recording it pays the current period and any overdue ones and credits
-     * the rest to the member's share capital.
+     * the rest to a member's share capital (for a borrower who isn't a member
+     * it stays as overpayment).
      *
      * @param  EloquentCollection<int, AmortizationSchedule>  $schedules
      */

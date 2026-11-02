@@ -282,7 +282,11 @@ class LoanAdjustmentService
                     $remarks ?: '[EXTENSION INTEREST]',
                 );
 
-                $interestPaid = $interestBefore;
+                // What the payment applied to interest, not the interest
+                // outstanding before it: a penalty owed takes its share first,
+                // and the credit entry and `interest_paid` must say what went
+                // to interest (GET /loans/{id}/ledger reads the repayment).
+                $interestPaid = (float) $interestRepayment->interest_applied;
                 $insurancePaid = (float) $interestRepayment->insurance_applied;
             }
 
@@ -365,7 +369,7 @@ class LoanAdjustmentService
             );
 
             return $adjustment;
-        });
+        }, racedUniqueIndex: Repayment::RECEIPT_NUMBER_INDEX);
     }
 
     /**
@@ -398,6 +402,7 @@ class LoanAdjustmentService
                     $asOf->toDateString(),
                     $user,
                     postToBooks: false,
+                    preview: true,
                 );
 
                 $collectNow = [

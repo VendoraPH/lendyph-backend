@@ -385,7 +385,7 @@ class RepaymentController extends Controller
                         new OA\Property(property: 'periods', type: 'integer'),
                         new OA\Property(property: 'amount', type: 'number'),
                     ])),
-                    new OA\Property(property: 'payoff_amount', type: 'number', nullable: true, description: 'Everything owed today: `total_outstanding`, plus the penalty of any period that fell late past its grace since penalties were last stamped. On a loan without a Share Capital Build-Up it equals the last `advance_presets` amount (when a period is open), and recording it settles the loan. On a loan WITH a Share Capital Build-Up it is the amount owed to show, not an amount one Record Payment settles the loan with: recording it pays the current period (and any overdue ones) and credits the rest to share capital. Null when the loan is not released or ongoing.'),
+                    new OA\Property(property: 'payoff_amount', type: 'number', nullable: true, description: 'Everything owed today: `total_outstanding`, plus the penalty of any period that fell late past its grace since penalties were last stamped. On a loan without a Share Capital Build-Up it equals the last `advance_presets` amount (when a period is open), and recording it settles the loan. On a loan WITH a Share Capital Build-Up it is the amount owed to show, not an amount one Record Payment settles the loan with: recording it pays the current period (and any overdue ones) and credits the rest to a member\'s share capital (for a borrower who isn\'t a member it stays as overpayment). Null when the loan is not released or ongoing.'),
                 ]),
             ])),
             new OA\Response(response: 404, description: 'Loan not found'),

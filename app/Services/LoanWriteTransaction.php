@@ -40,8 +40,16 @@ use PDOException;
  *      loan it restructures; a create locks the newest loan, for the next
  *      application number, in Loan::booted()). With no collateral to lock,
  *      this is the transaction's first statement, before any plain read;
- *   3. the operation's own row: the payment being voided, the adjustment
- *      being approved, rejected or applied.
+ *   3. the newest repayment row, for the next receipt number, when the
+ *      operation records a payment: recording one (processRepayment(),
+ *      processRepaymentWithAmountUnderLock()) or an extension collecting its
+ *      interest (extendLoan()). A locking read in Repayment::booted(), after
+ *      the loan rows. A preview numbers its rolled-back payment with a
+ *      placeholder and takes no such lock;
+ *   4. the operation's own row: the payment being voided, the adjustment
+ *      being approved, rejected or applied. A void locks only the repayment
+ *      it voids and never the newest one, so it holds no receipt lock a
+ *      payment could be waiting on while it waits for that payment's loan.
  *
  * Under those locks each path reads again what it decided on before the
  * transaction opened, and answers conflict() when another write got there
@@ -63,7 +71,9 @@ use PDOException;
  *
  * The same goes for a unique index two concurrent writers can both pass the
  * check for: a create that read the newest application number while another
- * create was inserting the next one gets that number's duplicate-key error.
+ * create was inserting the next one gets that number's duplicate-key error,
+ * and so does a payment that read the newest receipt number while another
+ * payment was inserting the next one (Repayment::RECEIPT_NUMBER_INDEX).
  * The caller names the index (run()'s `$racedUniqueIndex`), so only that
  * collision becomes a 409 and every other unique violation stays the error it
  * is.
