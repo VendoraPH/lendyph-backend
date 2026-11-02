@@ -12,6 +12,7 @@ use App\Services\RolePermissionAudit;
 use App\Services\RolePermissionGrants;
 use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -219,10 +220,10 @@ class RoleController extends Controller
         responses: [
             new OA\Response(response: 200, description: 'Role deactivated'),
             new OA\Response(response: 409, description: 'The role was deleted by another request while this one waited; nothing was written. Reload and try again'),
-            new OA\Response(response: 422, description: 'Cannot deactivate admin role'),
+            new OA\Response(response: 422, description: 'A protected role (admin, super_admin), or a role the actor holds themselves (`errors.role`)'),
         ],
     )]
-    public function deactivate(Role $role): RoleResource
+    public function deactivate(Request $request, Role $role): RoleResource
     {
         $this->authorize('settings:update');
 
@@ -238,9 +239,20 @@ class RoleController extends Controller
         //
         // Re-read under the role locks, as update() and destroy() do: a role
         // deleted while this request waited answers 409 and writes nothing.
-        $role = DB::transaction(function () use ($role) {
+        $actor = $request->user();
+
+        $role = DB::transaction(function () use ($role, $actor) {
             self::lockAndRecheckLabels([]);
             $role = self::relockedOrConflict($role);
+
+            // Deactivating a role you hold takes your own access with it,
+            // possibly the access needed to switch it back on.
+            if ($actor->roles->contains(fn ($held) => (int) $held->getKey() === (int) $role->getKey())) {
+                throw ValidationException::withMessages([
+                    'role' => 'You can\'t deactivate a role you hold. Another administrator has to do it for you.',
+                ]);
+            }
+
             self::forgetPermissionCacheAfterCommit();
             $role->update(['is_active' => false]);
 
@@ -261,17 +273,33 @@ class RoleController extends Controller
         ],
         responses: [
             new OA\Response(response: 200, description: 'Role reactivated'),
+            new OA\Response(response: 422, description: 'The role carries a permission the actor (not a super_admin) does not hold (`errors.role`)'),
             new OA\Response(response: 409, description: 'The role was deleted by another request while this one waited; nothing was written. Reload and try again'),
         ],
     )]
-    public function reactivate(Role $role): RoleResource
+    public function reactivate(Request $request, Role $role): RoleResource
     {
         $this->authorize('settings:update');
 
+        $actor = $request->user();
+
         // Re-read under the role locks, as deactivate() does.
-        $role = DB::transaction(function () use ($role) {
+        $role = DB::transaction(function () use ($role, $actor) {
             self::lockAndRecheckLabels([]);
             $role = self::relockedOrConflict($role);
+
+            // Reactivating gives the role's permissions back to everyone who
+            // holds it, so it's a grant: someone who isn't a super_admin can't
+            // grant a permission they don't hold, as on a role edit.
+            if (! $actor->hasRole('super_admin')) {
+                $missing = RolePermissionGrants::ungrantable($actor, RolePermissionAudit::names($role), []);
+                if ($missing !== []) {
+                    throw ValidationException::withMessages([
+                        'role' => RolePermissionGrants::refusal($missing),
+                    ]);
+                }
+            }
+
             self::forgetPermissionCacheAfterCommit();
             $role->update(['is_active' => true]);
 

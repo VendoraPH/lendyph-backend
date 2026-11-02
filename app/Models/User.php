@@ -200,12 +200,19 @@ class User extends Authenticatable
      * false switches a role off; a role created in this request without the
      * column set is active, as its row is.
      *
+     * admin and super_admin (Role::PROTECTED_KEYS) always count. They can't be
+     * deactivated through the API, and the Gate::before bypass, the approval
+     * bypass and canManageAccount() check them with hasRole(), which ignores
+     * `is_active`; a row switched off by hand mustn't make those checks and
+     * the permission checks disagree.
+     *
      * @return Collection<int, Role>
      */
     public function activeRoles(): Collection
     {
         return $this->loadMissing('roles')->roles
-            ->filter(fn (Role $role) => $role->is_active !== false)
+            ->filter(fn (Role $role) => $role->is_active !== false
+                || in_array($role->name, Role::PROTECTED_KEYS, true))
             ->values();
     }
 
