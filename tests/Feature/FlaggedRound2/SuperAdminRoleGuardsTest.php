@@ -264,10 +264,57 @@ it('judges a grant again against the role\'s permissions under the lock', functi
         }
     });
 
+    $before = flaggedRoleAuditCount();
+
     $this->actingAs($clerk)
         ->putJson("/api/roles/{$target->id}", ['description' => 'Desk', 'permissions' => ['dashboard:view', 'loans:approve']])
         ->assertStatus(422)
         ->assertJsonValidationErrors(['permissions']);
 
     expect($target->fresh()->description)->not->toBe('Desk');
+    expect(flaggedRoleAuditCount())->toBe($before);
+});
+
+it('refuses a protected key as a new role name even when that role\'s row is missing', function (string $key) {
+    DB::table('roles')->where('name', $key)->delete();
+    $custom = Role::create(['name' => 'desk_lead', 'guard_name' => 'web', 'is_system' => false]);
+
+    // Refused for every actor, super_admin included where the row is admin's.
+    $actor = $key === 'super_admin' ? flaggedClientAdmin() : User::where('username', 'super_admin')->firstOrFail();
+
+    $this->actingAs($actor)
+        ->postJson('/api/roles', ['name' => $key])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['name']);
+
+    $this->actingAs($actor)
+        ->putJson("/api/roles/{$custom->id}", ['name' => $key])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['name']);
+
+    expect(Role::where('name', $key)->exists())->toBeFalse();
+    expect($custom->fresh()->name)->toBe('desk_lead');
+})->with(['super_admin', 'admin']);
+
+it('locks every role row before counting users or touching links when a role is deleted', function () {
+    $role = Role::create(['name' => 'temp_desk', 'guard_name' => 'web', 'is_system' => false]);
+    $role->syncPermissions(['dashboard:view']);
+
+    $queries = [];
+    DB::listen(function ($query) use (&$queries) {
+        $queries[] = strtolower($query->sql);
+    });
+
+    $this->actingAs(User::where('username', 'super_admin')->firstOrFail())
+        ->deleteJson("/api/roles/{$role->id}")
+        ->assertSuccessful();
+
+    $first = fn (callable $matches) => collect($queries)->search(fn (string $sql) => $matches($sql));
+    $lock = $first(fn (string $sql) => str_contains($sql, 'from `roles`') && str_contains($sql, 'for update'));
+    $userCount = $first(fn (string $sql) => str_contains($sql, 'model_has_roles') && str_contains($sql, 'count('));
+    $firstWrite = $first(fn (string $sql) => str_starts_with($sql, 'delete') || str_starts_with($sql, 'insert'));
+
+    expect($lock)->toBeInt();
+    expect($lock)->toBeLessThan($userCount);
+    expect($lock)->toBeLessThan($firstWrite);
 });

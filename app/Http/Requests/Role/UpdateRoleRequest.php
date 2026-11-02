@@ -92,6 +92,17 @@ class UpdateRoleRequest extends FormRequest
                     );
                 }
 
+                // Nor may a role take a protected key, even on a database
+                // missing that row: the Gate::before bypass and every name
+                // check key off it.
+                if ($this->filled('name') && $this->input('name') !== $role->name
+                    && in_array($this->input('name'), Role::PROTECTED_KEYS, true)) {
+                    $validator->errors()->add(
+                        'name',
+                        "The role name {$this->input('name')} is reserved."
+                    );
+                }
+
                 // Only a super_admin may relabel super_admin. Otherwise a
                 // client admin could label it "Admin" (and admin something
                 // else), and a platform super_admin picking "Admin" for a user

@@ -277,6 +277,13 @@ class RoleController extends Controller
         }
 
         DB::transaction(function () use ($role) {
+            // Every role row first, in id order, as store() and update() take
+            // them: a delete racing a save of the same role then waits instead
+            // of deadlocking on the pivot rows Spatie's delete hook removes,
+            // and the user count and permission list below are read after any
+            // save that got there first.
+            self::lockAndRecheckLabels([]);
+
             $usersCount = $role->users()->count();
             if ($usersCount > 0) {
                 throw ValidationException::withMessages([
