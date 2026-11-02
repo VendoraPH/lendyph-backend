@@ -659,7 +659,7 @@ class ReportController extends Controller
     #[OA\Get(
         path: '/api/reports/performance',
         summary: 'Officer / Branch Performance',
-        description: 'Loans released and amounts collected for the period, alongside outstanding portfolio, overdue amount, PAR ratio and active borrowers as of today, grouped by account officer and mirrored by branch. Loans with no officer appear as an Unassigned row.',
+        description: 'Loans released and amounts collected for the period (`collected` leaves out the insurance premium payments collected, stated as `insurance_collected`), alongside outstanding portfolio, overdue amount, PAR ratio and active borrowers as of today, grouped by account officer and mirrored by branch. Loans with no officer appear as an Unassigned row.',
         tags: ['Reports'],
         security: [['sanctum' => []]],
         parameters: [

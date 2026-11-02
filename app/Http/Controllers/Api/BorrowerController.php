@@ -1003,7 +1003,7 @@ DESC,
     #[OA\Get(
         path: '/api/borrowers/{id}/loan-summary',
         summary: 'Member loan totals',
-        description: 'The Member Overview totals, computed by the server. `total_borrowed` is the principal of every released loan (released, ongoing, completed, defaulted) except restructured ones, whose rolled-over balance the successor loan already carries. `total_outstanding` is the outstanding balance over released, ongoing and defaulted loans. `total_paid` adds up posted payments. `counts` has every loan status; `current_loans` is released plus ongoing. Applications that never released count in `counts` only.',
+        description: 'The Member Overview totals, computed by the server. `total_borrowed` is the principal of every released loan (released, ongoing, completed, defaulted) except restructured ones, whose rolled-over balance the successor loan already carries. `total_outstanding` is everything still owed on released, ongoing and defaulted loans (principal, interest and penalty on the periods plus the insurance premium owed, the parts of each loan\'s summary `outstanding_balance`); `outstanding_principal` is the principal alone; `overdue_amount` is what those loans owe on periods past their due date and grace period. `total_paid` adds up posted payments, insurance premium included; `insurance_paid` is the premium inside it. `counts` has every loan status; `current_loans` is released plus ongoing. Applications that never released count in `counts` only.',
         tags: ['Borrowers'],
         security: [['sanctum' => []]],
         parameters: [
