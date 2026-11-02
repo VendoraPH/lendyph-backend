@@ -97,6 +97,59 @@ class CollateralServerValueTest extends TestCase
         $this->assertEqualsWithDelta(0.00, $this->pledgedValue($loan, $collateral), 0.001);
     }
 
+    // ── who sees a share capital pledge's value ──────────────────────────
+
+    public function test_a_caller_who_cannot_see_balances_does_not_see_a_share_capital_pledge(): void
+    {
+        $loan = $this->draftLoan();
+        $collateral = $this->shareCapitalCollateral($loan->borrower_id, 7250.5);
+
+        $this->actingAs($this->userWith('collaterals:update', 'loans:update', 'collaterals:view'));
+
+        $attached = $this->postJson("/api/loans/{$loan->id}/collaterals", ['collateral_id' => $collateral->id])
+            ->assertCreated()
+            ->json('data');
+
+        // Pledged at the real balance all the same; only the response withholds it.
+        $this->assertEqualsWithDelta(7250.50, $this->pledgedValue($loan, $collateral), 0.001);
+        $this->assertTrue($attached['value_unknown']);
+        $this->assertArrayHasKey('snapshot_value', $attached['pivot']);
+        $this->assertNull($attached['pivot']['snapshot_value']);
+
+        $listed = $this->getJson("/api/loans/{$loan->id}/collaterals")->assertOk()->json('data.0');
+        $this->assertSame($collateral->id, $listed['id']);
+        $this->assertNull($listed['pivot']['snapshot_value']);
+    }
+
+    public function test_a_caller_who_can_see_balances_sees_a_share_capital_pledge(): void
+    {
+        $loan = $this->draftLoan();
+        $collateral = $this->shareCapitalCollateral($loan->borrower_id, 7250.5);
+
+        $this->actingAs($this->userWith('collaterals:update', 'loans:update', 'collaterals:view', 'share_capital:view'));
+
+        $this->postJson("/api/loans/{$loan->id}/collaterals", ['collateral_id' => $collateral->id])
+            ->assertCreated()
+            ->assertJsonPath('data.value_unknown', false)
+            ->assertJsonPath('data.pivot.snapshot_value', 7250.5);
+
+        $this->getJson("/api/loans/{$loan->id}/collaterals")
+            ->assertOk()
+            ->assertJsonPath('data.0.pivot.snapshot_value', 7250.5);
+    }
+
+    public function test_a_caller_who_cannot_see_balances_still_sees_a_manual_pledge(): void
+    {
+        $loan = $this->draftLoan();
+        $land = Collateral::factory()->create(['borrower_id' => $loan->borrower_id, 'amount' => 40000]);
+
+        $this->actingAs($this->userWith('collaterals:update', 'loans:update', 'collaterals:view'));
+
+        $this->postJson("/api/loans/{$loan->id}/collaterals", ['collateral_id' => $land->id])
+            ->assertCreated()
+            ->assertJsonPath('data.pivot.snapshot_value', 40000);
+    }
+
     // ── POST /loans/preview collateral ───────────────────────────────────
 
     public function test_the_preview_values_share_capital_at_the_balance(): void

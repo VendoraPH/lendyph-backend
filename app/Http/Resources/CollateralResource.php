@@ -38,7 +38,7 @@ use OpenApi\Attributes as OA;
             description: 'Present only on the loan collateral list and the attach response.',
             properties: [
                 new OA\Property(property: 'loan_id', type: 'integer'),
-                new OA\Property(property: 'snapshot_value', type: 'number', description: 'The value the operator stated when attaching it to this loan.'),
+                new OA\Property(property: 'snapshot_value', type: 'number', nullable: true, description: 'The value the server pledged it at when it was attached to this loan: its `amount`, or for share capital its member\'s balance (at least 0). Null for a share capital collateral when the caller lacks `share_capital:view` (when `value_unknown` is true), because it is that balance.'),
                 new OA\Property(property: 'attached_at', type: 'string', format: 'date-time', nullable: true),
             ],
         ),
@@ -145,11 +145,32 @@ class CollateralResource extends JsonResource
             ),
             'pivot' => $this->whenPivotLoaded('loan_collaterals', fn () => [
                 'loan_id' => $this->pivot->loan_id,
-                'snapshot_value' => (float) $this->pivot->snapshot_value,
+                'snapshot_value' => $this->withholdsBalance($request) ? null : (float) $this->pivot->snapshot_value,
                 'attached_at' => $this->pivot->attached_at,
             ]),
             'created_at' => $this->created_at,
             'updated_at' => $this->updated_at,
         ];
+    }
+
+    /**
+     * Whether this row's pledged value must be withheld from the caller: a
+     * share capital collateral is pledged at its member's balance, so its
+     * `snapshot_value` IS that balance, and a caller without
+     * `share_capital:view` must not read it here any more than in
+     * `effective_value`.
+     *
+     * The same condition as `value_unknown` when the resource was valued; one
+     * that was not is judged from its type and the request's user, failing
+     * closed without one.
+     */
+    private function withholdsBalance(Request $request): bool
+    {
+        if ($this->valuation !== null) {
+            return $this->valuation['value_unknown'];
+        }
+
+        return CollateralValuation::isShareCapital($this->resource)
+            && ! $request->user()?->can('share_capital:view');
     }
 }
