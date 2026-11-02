@@ -73,11 +73,244 @@ class GCashNonMemberTest extends TestCase
         $this->assertDatabaseHas('gcash_non_members', ['full_name' => 'Carla Dizon']);
     }
 
+    /**
+     * Name and mobile number are always required. The ID is optional (Kevin's
+     * request, approved by Arvin), so a request without one fails on the
+     * mobile number only.
+     */
     public function test_store_requires_identifying_fields(): void
     {
+        $this->postJson('/api/gcash/non-members', [])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['full_name', 'mobile_number'])
+            ->assertJsonMissingValidationErrors(['id_type', 'id_number']);
+
         $this->postJson('/api/gcash/non-members', ['full_name' => 'No ID'])
             ->assertStatus(422)
-            ->assertJsonValidationErrors(['mobile_number', 'id_type', 'id_number']);
+            ->assertJsonValidationErrors(['mobile_number'])
+            ->assertJsonMissingValidationErrors(['id_type', 'id_number']);
+    }
+
+    public function test_store_creates_a_walk_in_without_an_id(): void
+    {
+        $this->postJson('/api/gcash/non-members', [
+            'full_name' => 'Carla Dizon',
+            'mobile_number' => '09171112222',
+        ])->assertCreated()
+            ->assertJsonPath('data.full_name', 'Carla Dizon')
+            ->assertJsonPath('data.id_type', null)
+            ->assertJsonPath('data.id_number', null);
+
+        $this->assertDatabaseHas('gcash_non_members', [
+            'full_name' => 'Carla Dizon',
+            'id_type' => null,
+            'id_number' => null,
+        ]);
+    }
+
+    public function test_store_treats_blank_id_fields_as_no_id(): void
+    {
+        $this->postJson('/api/gcash/non-members', [
+            'full_name' => 'Carla Dizon',
+            'mobile_number' => '09171112222',
+            'id_type' => '',
+            'id_number' => '',
+        ])->assertCreated()->assertJsonPath('data.id_number', null);
+    }
+
+    public function test_store_refuses_an_id_type_without_an_id_number(): void
+    {
+        $this->postJson('/api/gcash/non-members', [
+            'full_name' => 'Carla Dizon',
+            'mobile_number' => '09171112222',
+            'id_type' => 'UMID',
+        ])->assertStatus(422)
+            ->assertJsonValidationErrors(['id_number'])
+            ->assertJsonMissingValidationErrors(['id_type']);
+
+        $this->assertDatabaseCount('gcash_non_members', 0);
+    }
+
+    public function test_store_refuses_an_id_number_without_an_id_type(): void
+    {
+        $this->postJson('/api/gcash/non-members', [
+            'full_name' => 'Carla Dizon',
+            'mobile_number' => '09171112222',
+            'id_number' => 'CD12345678',
+        ])->assertStatus(422)
+            ->assertJsonValidationErrors(['id_type'])
+            ->assertJsonMissingValidationErrors(['id_number']);
+
+        $this->assertDatabaseCount('gcash_non_members', 0);
+    }
+
+    public function test_update_may_remove_a_walk_ins_id(): void
+    {
+        $walkIn = GCashNonMember::factory()->create(['id_type' => 'UMID', 'id_number' => 'CD12345678']);
+
+        $this->putJson("/api/gcash/non-members/{$walkIn->id}", [
+            'full_name' => $walkIn->full_name,
+            'mobile_number' => $walkIn->mobile_number,
+            'id_type' => null,
+            'id_number' => null,
+        ])->assertOk()->assertJsonPath('data.id_number', null);
+
+        $this->assertDatabaseHas('gcash_non_members', ['id' => $walkIn->id, 'id_type' => null, 'id_number' => null]);
+    }
+
+    public function test_store_without_an_id_warns_when_name_and_mobile_match_another_walk_in(): void
+    {
+        GCashNonMember::factory()->withoutId()->create([
+            'full_name' => 'Carla  Dizon',
+            'mobile_number' => '0917-111-2222',
+        ]);
+
+        $response = $this->postJson('/api/gcash/non-members', [
+            'full_name' => ' carla dizon ',
+            'mobile_number' => '+63 917 111 2222',
+        ])->assertStatus(422)
+            ->assertJsonValidationErrors(['possible_duplicate']);
+
+        $this->assertStringContainsString('Carla  Dizon', $response->json('errors.possible_duplicate.0'));
+        $this->assertStringNotContainsStringIgnoringCase('non-member', $response->getContent());
+        $this->assertDatabaseCount('gcash_non_members', 1);
+    }
+
+    public function test_store_without_an_id_warns_on_a_match_that_has_an_id(): void
+    {
+        GCashNonMember::factory()->create([
+            'full_name' => 'Carla Dizon',
+            'mobile_number' => '09171112222',
+            'id_type' => 'UMID',
+            'id_number' => 'CD12345678',
+        ]);
+
+        $this->postJson('/api/gcash/non-members', [
+            'full_name' => 'Carla Dizon',
+            'mobile_number' => '639171112222',
+        ])->assertStatus(422)->assertJsonValidationErrors(['possible_duplicate']);
+    }
+
+    public function test_store_without_an_id_saves_a_possible_duplicate_once_acknowledged(): void
+    {
+        GCashNonMember::factory()->withoutId()->create([
+            'full_name' => 'Carla Dizon',
+            'mobile_number' => '09171112222',
+        ]);
+
+        $this->postJson('/api/gcash/non-members', [
+            'full_name' => 'Carla Dizon',
+            'mobile_number' => '09171112222',
+            'acknowledge_possible_duplicate' => true,
+        ])->assertCreated()->assertJsonMissingPath('data.acknowledge_possible_duplicate');
+
+        $this->assertDatabaseCount('gcash_non_members', 2);
+    }
+
+    public function test_store_without_an_id_does_not_warn_when_only_the_name_matches(): void
+    {
+        GCashNonMember::factory()->withoutId()->create([
+            'full_name' => 'Carla Dizon',
+            'mobile_number' => '09171112222',
+        ]);
+
+        $this->postJson('/api/gcash/non-members', [
+            'full_name' => 'Carla Dizon',
+            'mobile_number' => '09179998888',
+        ])->assertCreated();
+    }
+
+    public function test_store_without_an_id_does_not_warn_about_a_removed_walk_in(): void
+    {
+        GCashNonMember::factory()->withoutId()->create([
+            'full_name' => 'Carla Dizon',
+            'mobile_number' => '09171112222',
+        ])->delete();
+
+        $this->postJson('/api/gcash/non-members', [
+            'full_name' => 'Carla Dizon',
+            'mobile_number' => '09171112222',
+        ])->assertCreated();
+    }
+
+    public function test_store_with_an_id_does_not_get_the_name_and_mobile_warning(): void
+    {
+        GCashNonMember::factory()->withoutId()->create([
+            'full_name' => 'Carla Dizon',
+            'mobile_number' => '09171112222',
+        ]);
+
+        $this->postJson('/api/gcash/non-members', [
+            'full_name' => 'Carla Dizon',
+            'mobile_number' => '09171112222',
+            'id_type' => 'UMID',
+            'id_number' => 'CD12345678',
+        ])->assertCreated();
+    }
+
+    public function test_update_without_an_id_does_not_warn_about_the_record_itself(): void
+    {
+        $walkIn = GCashNonMember::factory()->withoutId()->create([
+            'full_name' => 'Carla Dizon',
+            'mobile_number' => '09171112222',
+        ]);
+
+        $this->putJson("/api/gcash/non-members/{$walkIn->id}", [
+            'full_name' => 'Carla Dizon',
+            'mobile_number' => '09171112222',
+            'remarks' => 'Comes on Fridays',
+        ])->assertOk()->assertJsonPath('data.remarks', 'Comes on Fridays');
+    }
+
+    public function test_update_without_an_id_warns_when_another_walk_in_matches(): void
+    {
+        GCashNonMember::factory()->withoutId()->create([
+            'full_name' => 'Carla Dizon',
+            'mobile_number' => '09171112222',
+        ]);
+        $walkIn = GCashNonMember::factory()->withoutId()->create([
+            'full_name' => 'Carla D.',
+            'mobile_number' => '09171112222',
+        ]);
+
+        $this->putJson("/api/gcash/non-members/{$walkIn->id}", [
+            'full_name' => 'Carla Dizon',
+            'mobile_number' => '09171112222',
+        ])->assertStatus(422)->assertJsonValidationErrors(['possible_duplicate']);
+
+        $this->putJson("/api/gcash/non-members/{$walkIn->id}", [
+            'full_name' => 'Carla Dizon',
+            'mobile_number' => '09171112222',
+            'acknowledge_possible_duplicate' => true,
+        ])->assertOk()->assertJsonPath('data.full_name', 'Carla Dizon');
+    }
+
+    public function test_index_search_handles_walk_ins_without_an_id(): void
+    {
+        GCashNonMember::factory()->withoutId()->create(['full_name' => 'Ana Reyes']);
+        GCashNonMember::factory()->create(['full_name' => 'Ben Cruz', 'id_number' => '12345678']);
+
+        $this->getJson('/api/gcash/non-members?search=Ana')
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.id_number', null);
+
+        $this->getJson('/api/gcash/non-members?search=1234-5678')
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.full_name', 'Ben Cruz');
+    }
+
+    public function test_transaction_can_be_recorded_for_a_walk_in_without_an_id(): void
+    {
+        $walkIn = GCashNonMember::factory()->withoutId()->create();
+
+        $this->postJson('/api/gcash/transactions', [
+            'gcash_non_member_id' => $walkIn->id,
+            'type' => 'cash_in',
+            'amount' => 1000,
+        ])->assertCreated()
+            ->assertJsonPath('data.non_member.full_name', $walkIn->full_name);
     }
 
     public function test_update_changes_the_record(): void

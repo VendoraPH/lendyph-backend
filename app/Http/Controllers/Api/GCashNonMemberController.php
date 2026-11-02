@@ -81,15 +81,26 @@ class GCashNonMemberController extends Controller
         summary: 'Register a GCash walk-in customer',
         tags: ['GCash'],
         security: [['sanctum' => []]],
+        requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent(
+            required: ['full_name', 'mobile_number'],
+            properties: [
+                new OA\Property(property: 'full_name', type: 'string', maxLength: 255),
+                new OA\Property(property: 'mobile_number', type: 'string', maxLength: 32),
+                new OA\Property(property: 'id_type', type: 'string', maxLength: 64, nullable: true, description: 'Optional. Both ID fields or neither.'),
+                new OA\Property(property: 'id_number', type: 'string', maxLength: 64, nullable: true, description: 'Optional. Both ID fields or neither. Unique per ID type among active walk-ins, ignoring spaces, dashes and case.'),
+                new OA\Property(property: 'remarks', type: 'string', nullable: true, maxLength: 2000),
+                new OA\Property(property: 'acknowledge_possible_duplicate', type: 'boolean', description: 'Saves a walk-in without an ID even when another active walk-in has the same name and mobile number.'),
+            ],
+        )),
         responses: [
             new OA\Response(response: 201, description: 'Walk-in registered'),
             new OA\Response(response: 403, description: 'Missing gcash:transact permission'),
-            new OA\Response(response: 422, description: 'Validation error'),
+            new OA\Response(response: 422, description: 'Validation error. errors.possible_duplicate: a walk-in without an ID matches another active walk-in by name and mobile number; resend with acknowledge_possible_duplicate: true to save anyway.'),
         ],
     )]
     public function store(StoreGCashNonMemberRequest $request): JsonResponse
     {
-        $nonMember = GCashNonMember::create($request->validated());
+        $nonMember = GCashNonMember::create($request->walkInAttributes());
 
         AuditLogService::log(
             action: 'created',
@@ -111,16 +122,27 @@ class GCashNonMemberController extends Controller
         parameters: [
             new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
         ],
+        requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent(
+            required: ['full_name', 'mobile_number'],
+            properties: [
+                new OA\Property(property: 'full_name', type: 'string', maxLength: 255),
+                new OA\Property(property: 'mobile_number', type: 'string', maxLength: 32),
+                new OA\Property(property: 'id_type', type: 'string', maxLength: 64, nullable: true, description: 'Optional. Both ID fields or neither.'),
+                new OA\Property(property: 'id_number', type: 'string', maxLength: 64, nullable: true, description: 'Optional. Both ID fields or neither. Unique per ID type among active walk-ins, ignoring spaces, dashes and case.'),
+                new OA\Property(property: 'remarks', type: 'string', nullable: true, maxLength: 2000),
+                new OA\Property(property: 'acknowledge_possible_duplicate', type: 'boolean', description: 'Saves a walk-in without an ID even when another active walk-in has the same name and mobile number.'),
+            ],
+        )),
         responses: [
             new OA\Response(response: 200, description: 'Walk-in updated'),
             new OA\Response(response: 403, description: 'Missing gcash:transact permission'),
-            new OA\Response(response: 422, description: 'Validation error'),
+            new OA\Response(response: 422, description: 'Validation error. errors.possible_duplicate: a walk-in without an ID matches another active walk-in by name and mobile number; resend with acknowledge_possible_duplicate: true to save anyway.'),
         ],
     )]
     public function update(UpdateGCashNonMemberRequest $request, GCashNonMember $nonMember): JsonResponse
     {
         $before = $nonMember->toArray();
-        $nonMember->update($request->validated());
+        $nonMember->update($request->walkInAttributes());
 
         AuditLogService::log(
             action: 'updated',
