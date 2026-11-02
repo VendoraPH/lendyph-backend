@@ -442,11 +442,11 @@ class AccountingAutomaticPostingTest extends TestCase
             'an empty list beside a non-zero total' => ['[]', '1234.56', 123_456, true],
             'string and float amounts' => [json_encode([
                 ['name' => 'Processing Fee', 'amount' => '0.10', 'type' => 'fixed'],
-                ['name' => 'Documentary Stamp', 'amount' => 0.20, 'type' => 'fixed'],
+                ['name' => 'Inspection Fee', 'amount' => 0.20, 'type' => 'fixed'],
             ]), '0.30', 30, true],
             'an unmapped item with no amount' => [json_encode([
                 ['name' => 'Processing Fee', 'amount' => 1000, 'type' => 'fixed'],
-                ['name' => 'Documentary Stamp', 'type' => 'fixed'],
+                ['name' => 'Inspection Fee', 'type' => 'fixed'],
             ]), '1234.56', 123_456, true],
         ];
     }

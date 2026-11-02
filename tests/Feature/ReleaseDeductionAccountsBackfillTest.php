@@ -16,7 +16,10 @@ use Tests\Traits\SetupLendyPH;
 /**
  * The accounts and posting roles for release deductions (accountant-confirmed
  * 2026-10-03), added to charts seeded before they existed: the artisan command
- * that previews it, and the migration that runs it on deploy.
+ * that previews it, and the migration that runs it on deploy. Then the two
+ * tax roles (decision 4b, 2026-11-02), which the same command previews and a
+ * second migration runs: 2230 Documentary Stamp Tax Payable, a new account,
+ * and 2220 Other Taxes Payable, an account every seeded chart already has.
  */
 class ReleaseDeductionAccountsBackfillTest extends TestCase
 {
@@ -33,6 +36,12 @@ class ReleaseDeductionAccountsBackfillTest extends TestCase
     ];
 
     private const NEW_CODES = ['2030', '2040', '3060', '4080'];
+
+    private const TAX_MIGRATION = 'migrations/2026_11_02_220500_add_tax_payable_accounts.php';
+
+    private const TAX_ROLES = ['documentary_stamp_tax_payable', 'other_taxes_payable'];
+
+    private const TAX_CODES = ['2230'];
 
     protected function setUp(): void
     {
@@ -234,9 +243,10 @@ class ReleaseDeductionAccountsBackfillTest extends TestCase
         $this->assertSame($lines, DB::table('accounting_journal_lines')->orderBy('id')->get()->map(fn (object $row): array => (array) $row)->all());
     }
 
-    public function test_the_migration_writes_exactly_what_the_service_writes(): void
+    public function test_the_migrations_write_exactly_what_the_service_writes(): void
     {
         $this->chartSeededBeforeTheseAccounts();
+        $this->chartSeededBeforeTheTaxAccounts();
         // One role skipped (its code taken), one reused by name, one created.
         $this->account3('2040', 'Customer Deposits', 'liability');
         $this->account3('2050', 'Notarial Fees Payable', 'liability');
@@ -252,14 +262,135 @@ class ReleaseDeductionAccountsBackfillTest extends TestCase
         $this->assertCount(1, $result['skipped']);
         $this->assertContains(['role' => 'notarial_fees_payable', 'code' => '2050', 'name' => 'Notarial Fees Payable'], $result['mapped']);
         $this->assertNotContains('notarial_fees_payable', array_column($result['created'], 'role'));
+        $this->assertContains(['role' => 'documentary_stamp_tax_payable', 'code' => '2230', 'name' => 'Documentary Stamp Tax Payable', 'type' => 'liability'], $result['created']);
+        $this->assertContains(['role' => 'other_taxes_payable', 'code' => '2220', 'name' => 'Other Taxes Payable'], $result['mapped']);
 
         Log::spy();
         $this->migration()->up();
+        $this->taxMigration()->up();
 
         $this->assertSame($byService, $this->outcome());
+
+        // Each migration logs its own share of the service's result.
+        $releasePart = $this->part($result, self::NEW_ROLES);
+        $taxPart = $this->part($result, self::TAX_ROLES);
+
         Log::shouldHaveReceived('info')->withArgs(
-            fn (string $message, array $context): bool => $message === ReleaseDeductionAccountsBackfill::summary($result) && $context === $result,
+            fn (string $message, array $context): bool => $message === ReleaseDeductionAccountsBackfill::summary($releasePart) && $context === $releasePart,
         )->once();
+        Log::shouldHaveReceived('info')->withArgs(
+            fn (string $message, array $context): bool => str_starts_with($message, 'tax payable accounts: 1 account(s) added, 2 role(s) mapped') && $context === $taxPart,
+        )->once();
+    }
+
+    public function test_the_tax_migration_adds_2230_and_maps_both_tax_roles_on_a_chart_seeded_before_them(): void
+    {
+        $this->chartSeededBeforeTheTaxAccounts();
+
+        $this->taxMigration()->up();
+
+        $this->assertAccount('2230', 'Documentary Stamp Tax Payable', 'liability', '2200', 'financing');
+        $this->assertSame(['documentary_stamp_tax_payable' => '2230', 'other_taxes_payable' => '2220'], $this->mappingsOf(self::TAX_ROLES));
+
+        $accountRows = AuditLog::where('action', ReleaseDeductionAccountsBackfill::AUDIT_ACCOUNT_ADDED)->get();
+        $mappingRows = AuditLog::where('action', ReleaseDeductionAccountsBackfill::AUDIT_ROLE_MAPPED)->get();
+
+        $this->assertCount(1, $accountRows);
+        $this->assertCount(2, $mappingRows);
+
+        foreach ([...$accountRows, ...$mappingRows] as $row) {
+            $this->assertNull($row->user_id, 'a system change carries no user');
+            $this->assertStringStartsWith('System change:', $row->description);
+            $this->assertStringContainsString('2026-11-02', $row->description);
+        }
+    }
+
+    public function test_the_tax_migration_without_a_chart_adds_nothing_and_running_it_again_changes_nothing(): void
+    {
+        $this->taxMigration()->up();
+
+        $this->assertSame(0, AccountingAccount::count());
+        $this->assertSame(0, AccountingAccountMapping::count());
+
+        $this->chartSeededBeforeTheTaxAccounts();
+        $this->taxMigration()->up();
+        $after = $this->snapshot();
+
+        $this->taxMigration()->up();
+        $this->artisan('accounting:backfill-release-deduction-accounts')->assertSuccessful();
+
+        $this->assertSame($after, $this->snapshot());
+    }
+
+    public function test_a_dry_run_lists_the_tax_changes_and_writes_nothing(): void
+    {
+        $this->chartSeededBeforeTheTaxAccounts();
+        $before = $this->snapshot();
+
+        $this->artisan('accounting:backfill-release-deduction-accounts', ['--dry-run' => true])
+            ->expectsOutputToContain('Would add 2230 Documentary Stamp Tax Payable (liability)')
+            ->expectsOutputToContain('Would map documentary_stamp_tax_payable to 2230 Documentary Stamp Tax Payable')
+            ->expectsOutputToContain('Would map other_taxes_payable to 2220 Other Taxes Payable')
+            ->expectsOutputToContain('Would add 1 account(s) and map 2 role(s); 0 skipped.')
+            ->assertSuccessful();
+
+        $this->assertSame($before, $this->snapshot());
+    }
+
+    public function test_the_tax_migration_skips_other_taxes_payable_when_2220_was_renamed_for_something_else(): void
+    {
+        $this->chartSeededBeforeTheTaxAccounts();
+        AccountingAccount::where('code', '2220')->update(['name' => 'VAT Payable']);
+
+        Log::spy();
+        $this->taxMigration()->up();
+
+        $this->assertArrayNotHasKey('other_taxes_payable', AccountingAccountMapping::resolved());
+        $this->assertSame('2230', $this->mappingsOf(self::TAX_ROLES)['documentary_stamp_tax_payable']);
+
+        Log::shouldHaveReceived('warning')->withArgs(
+            fn (string $message, array $context): bool => array_column($context['rows'], 'role') === ['other_taxes_payable'],
+        )->once();
+    }
+
+    public function test_the_tax_migration_never_changes_a_mapping_an_administrator_already_set(): void
+    {
+        $this->chartSeededBeforeTheTaxAccounts();
+        AccountingAccountMapping::create(['role' => 'documentary_stamp_tax_payable', 'accounting_account_id' => $this->account('2220')]);
+
+        $this->taxMigration()->up();
+
+        $this->assertSame($this->account('2220'), AccountingAccountMapping::resolved()['documentary_stamp_tax_payable']);
+        $this->assertFalse(AccountingAccount::where('code', '2230')->exists());
+    }
+
+    public function test_the_tax_migration_changes_no_posted_journal(): void
+    {
+        $this->chartSeededBeforeTheTaxAccounts();
+        $this->postSimpleJournal('1010', '4080', 150_000);
+        $journals = DB::table('accounting_journals')->orderBy('id')->get()->map(fn (object $row): array => (array) $row)->all();
+        $lines = DB::table('accounting_journal_lines')->orderBy('id')->get()->map(fn (object $row): array => (array) $row)->all();
+
+        $this->taxMigration()->up();
+
+        $this->assertSame($journals, DB::table('accounting_journals')->orderBy('id')->get()->map(fn (object $row): array => (array) $row)->all());
+        $this->assertSame($lines, DB::table('accounting_journal_lines')->orderBy('id')->get()->map(fn (object $row): array => (array) $row)->all());
+    }
+
+    public function test_the_tax_migration_calls_no_application_class_and_its_down_changes_nothing(): void
+    {
+        $source = file_get_contents(database_path(self::TAX_MIGRATION));
+
+        $this->assertDoesNotMatchRegularExpression('/^use App\\\\/m', $source);
+        $this->assertStringNotContainsString('App\\Services', $source);
+
+        $this->chartSeededBeforeTheTaxAccounts();
+        $this->taxMigration()->up();
+        $after = $this->snapshot();
+
+        $this->taxMigration()->down();
+
+        $this->assertSame($after, $this->snapshot());
     }
 
     public function test_the_migration_calls_no_application_class(): void
@@ -284,6 +415,46 @@ class ReleaseDeductionAccountsBackfillTest extends TestCase
     private function migration(): Migration
     {
         return require database_path(self::MIGRATION);
+    }
+
+    private function taxMigration(): Migration
+    {
+        return require database_path(self::TAX_MIGRATION);
+    }
+
+    /**
+     * The default chart as a deployment that adopted accounting before
+     * 2026-11-02 has it: no 2230, and neither tax role.
+     */
+    private function chartSeededBeforeTheTaxAccounts(): void
+    {
+        if (! AccountingAccount::query()->exists()) {
+            $this->seedChartOfAccounts();
+        }
+
+        AccountingAccountMapping::query()->whereIn('role', self::TAX_ROLES)->delete();
+        AccountingAccount::query()->whereIn('code', self::TAX_CODES)->delete();
+    }
+
+    /**
+     * The service's result cut down to `$roles`, as the migration that
+     * handles only those roles reports it.
+     *
+     * @param  array{chart: bool, created: list<array{role: string}>, mapped: list<array{role: string}>, kept: list<array{role: string}>, skipped: list<array{role: string}>}  $result
+     * @param  list<string>  $roles
+     * @return array{chart: bool, created: list<array{role: string}>, mapped: list<array{role: string}>, kept: list<array{role: string}>, skipped: list<array{role: string}>}
+     */
+    private function part(array $result, array $roles): array
+    {
+        $only = fn (array $rows): array => array_values(array_filter($rows, fn (array $row): bool => in_array($row['role'], $roles, true)));
+
+        return [
+            'chart' => $result['chart'],
+            'created' => $only($result['created']),
+            'mapped' => $only($result['mapped']),
+            'kept' => $only($result['kept']),
+            'skipped' => $only($result['skipped']),
+        ];
     }
 
     /**
@@ -326,10 +497,19 @@ class ReleaseDeductionAccountsBackfillTest extends TestCase
     /** @return array<string, string> role => account code, for the five new roles */
     private function newMappings(): array
     {
+        return $this->mappingsOf(self::NEW_ROLES);
+    }
+
+    /**
+     * @param  list<string>  $roles
+     * @return array<string, string> role => account code
+     */
+    private function mappingsOf(array $roles): array
+    {
         $codes = AccountingAccount::query()->pluck('code', 'id');
         $mappings = [];
 
-        foreach (self::NEW_ROLES as $role) {
+        foreach ($roles as $role) {
             $id = AccountingAccountMapping::resolved()[$role] ?? null;
 
             if ($id !== null) {

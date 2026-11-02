@@ -9,6 +9,7 @@ use App\Models\Fee;
 use App\Models\Loan;
 use App\Models\LoanProduct;
 use App\Services\LoanService;
+use Illuminate\Support\Facades\Log;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 use Tests\Traits\PostsJournals;
@@ -25,6 +26,12 @@ use Tests\Traits\SetupLendyPH;
  *   Insurance Premium  -> 2040 Insurance Premium Payable
  *   Share Capital      -> 3060 Share Capital
  *   catalog fees       -> 4080 Other Fee Income
+ *
+ * and each tax to its payable account (decision 4b, 2026-11-02), hand-typed
+ * or from the fee catalog:
+ *
+ *   Documentary Stamp Tax -> 2230 Documentary Stamp Tax Payable
+ *   any other tax         -> 2220 Other Taxes Payable
  */
 class AccountingReleaseDeductionAccountsTest extends TestCase
 {
@@ -87,7 +94,7 @@ class AccountingReleaseDeductionAccountsTest extends TestCase
     public function test_a_deduction_with_no_account_of_its_own_and_any_unitemised_remainder_stay_on_processing_fee_income(): void
     {
         $loan = $this->draftLoan([
-            ['name' => 'Documentary Stamp', 'amount' => 1234.56, 'type' => 'fixed'],
+            ['name' => 'Inspection Fee', 'amount' => 1234.56, 'type' => 'fixed'],
         ]);
         // A total above its items: the part no item explains.
         $loan->update(['total_deductions' => 1334.56, 'net_proceeds' => 48665.44]);
@@ -97,6 +104,68 @@ class AccountingReleaseDeductionAccountsTest extends TestCase
 
         $this->assertSame(1_334_56, $this->lineOn($journal, '4030', 'credit'));
         $this->assertBalanced($journal);
+    }
+
+    public function test_a_documentary_stamp_tax_is_credited_to_2230_hand_typed_or_from_the_catalog(): void
+    {
+        Fee::create(['name' => 'Documentary Stamp Tax', 'type' => 'fixed', 'value' => 1234.56, 'applicable_product_ids' => null, 'conditions' => null]);
+
+        $loan = $this->draftLoan([['name' => 'DST', 'amount' => 500, 'type' => 'fixed']]);
+        $this->approveAndRelease($loan);
+
+        $journal = $this->releaseJournal($loan->fresh());
+
+        $this->assertSame(1_734_56, $this->lineOn($journal, '2230', 'credit'));
+        $this->assertSame(0, $this->lineOn($journal, '4030', 'credit'));
+        $this->assertSame(0, $this->lineOn($journal, '4080', 'credit'));
+        $this->assertSame(5_000_000 - 1_734_56, $this->lineOn($journal, '1010', 'credit'));
+        $this->assertBalanced($journal);
+    }
+
+    public function test_another_tax_is_credited_to_2220_hand_typed_or_from_the_catalog(): void
+    {
+        Fee::create(['name' => 'Local Business Tax', 'type' => 'fixed', 'value' => 1234.56, 'applicable_product_ids' => null, 'conditions' => null]);
+
+        $loan = $this->draftLoan([['name' => 'Other Taxes', 'amount' => 250, 'type' => 'fixed']]);
+        $this->approveAndRelease($loan);
+
+        $journal = $this->releaseJournal($loan->fresh());
+
+        $this->assertSame(1_484_56, $this->lineOn($journal, '2220', 'credit'));
+        $this->assertSame(0, $this->lineOn($journal, '2230', 'credit'));
+        $this->assertSame(0, $this->lineOn($journal, '4030', 'credit'));
+        $this->assertSame(0, $this->lineOn($journal, '4080', 'credit'));
+        $this->assertBalanced($journal);
+    }
+
+    /**
+     * A chart where the tax role has no account (an administrator removed it,
+     * or the backfill skipped it) never stops a release: the tax is booked
+     * where it went before (a catalog fee on 4080, a hand-typed one on 4030)
+     * and a warning names the loan and the role.
+     */
+    public function test_a_chart_without_the_tax_account_books_the_tax_as_before_and_logs_a_warning(): void
+    {
+        AccountingAccountMapping::query()->where('role', 'documentary_stamp_tax_payable')->delete();
+        Fee::create(['name' => 'Documentary Stamp Tax', 'type' => 'fixed', 'value' => 1234.56, 'applicable_product_ids' => null, 'conditions' => null]);
+
+        $loan = $this->draftLoan([['name' => 'DST', 'amount' => 500, 'type' => 'fixed']]);
+
+        Log::spy();
+        $this->approveAndRelease($loan);
+
+        $journal = $this->releaseJournal($loan->fresh());
+
+        $this->assertSame(1_234_56, $this->lineOn($journal, '4080', 'credit'));
+        $this->assertSame(500_00, $this->lineOn($journal, '4030', 'credit'));
+        $this->assertSame(0, $this->lineOn($journal, '2230', 'credit'));
+        $this->assertBalanced($journal);
+
+        Log::shouldHaveReceived('warning')->withArgs(
+            fn (string $message, array $context = []): bool => str_contains($message, 'Default Accounts')
+                && ($context['loan'] ?? null) === $loan->application_number
+                && array_column($context['fallbacks'] ?? [], 'role') === ['documentary_stamp_tax_payable', 'documentary_stamp_tax_payable'],
+        )->once();
     }
 
     public function test_a_catalog_fee_named_like_a_product_fee_goes_to_that_fee_s_account(): void

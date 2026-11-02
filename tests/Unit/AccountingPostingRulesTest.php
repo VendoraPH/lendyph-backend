@@ -51,6 +51,8 @@ class AccountingPostingRulesTest extends TestCase
             'insurance_premium_payable' => 2040,
             'share_capital' => 3060,
             'other_fee_income' => 4080,
+            'documentary_stamp_tax_payable' => 2230,
+            'other_taxes_payable' => 2220,
         ]);
     }
 
@@ -239,13 +241,15 @@ class AccountingPostingRulesTest extends TestCase
         $this->assertBalancedAndNonEmpty($posting);
         $this->assertSame(30_000, $this->amountOn($posting, 4080, 'credit'));
         $this->assertSame(20_000, $this->amountOn($posting, 4040, 'credit'));
-        $this->assertSame(10_000, $this->amountOn($posting, 4030, 'credit'));
+        // A hand-typed Documentary Stamp is a tax: 2230, no longer 4030.
+        $this->assertSame(10_000, $this->amountOn($posting, 2230, 'credit'));
+        $this->assertSame(0, $this->amountOn($posting, 4030, 'credit'));
 
         $deductions = PostingRules::classifyDeductions(60_000, $items);
 
-        $this->assertSame(['other_fee_income' => 30_000, 'service_fee_income' => 20_000], $deductions['mapped']);
-        $this->assertSame(['service_fee_income' => 20_000, 'other_fee_income' => 30_000, 'processing_fee_income' => 10_000], $deductions['credits']);
-        $this->assertSame(['documentary stamp' => 10_000], $deductions['unmapped']);
+        $this->assertSame(['other_fee_income' => 30_000, 'service_fee_income' => 20_000, 'documentary_stamp_tax_payable' => 10_000], $deductions['mapped']);
+        $this->assertSame(['service_fee_income' => 20_000, 'documentary_stamp_tax_payable' => 10_000, 'other_fee_income' => 30_000], $deductions['credits']);
+        $this->assertSame([], $deductions['unmapped']);
         $this->assertSame(['amount' => 30_000, 'role' => 'other_fee_income'], $deductions['types']['credit investigation fee']);
     }
 
@@ -258,7 +262,7 @@ class AccountingPostingRulesTest extends TestCase
     {
         $items = [
             ['name' => 'Processing Fee', 'amount' => 100_000],
-            ['name' => 'Documentary Stamp', 'amount' => 50_000],
+            ['name' => 'Inspection Fee', 'amount' => 50_000],
         ];
 
         $posting = PostingRules::loanRelease(5_000_000, 4_850_000, 150_000, 'cash', $this->map(), items: $items);
@@ -270,9 +274,127 @@ class AccountingPostingRulesTest extends TestCase
         $deductions = PostingRules::classifyDeductions(150_000, $items);
 
         $this->assertSame(['processing_fee_income' => 100_000], $deductions['mapped']);
-        $this->assertSame(['documentary stamp' => 50_000], $deductions['unmapped']);
-        $this->assertSame(['amount' => 50_000, 'role' => null], $deductions['types']['documentary stamp']);
+        $this->assertSame(['inspection fee' => 50_000], $deductions['unmapped']);
+        $this->assertSame(['amount' => 50_000, 'role' => null], $deductions['types']['inspection fee']);
         $this->assertSame(['processing_fee_income' => 150_000], $deductions['credits']);
+    }
+
+    /**
+     * A Documentary Stamp Tax is a government levy the cooperative collects
+     * and owes on, so it is credited to 2230 Documentary Stamp Tax Payable,
+     * hand-typed or from the fee catalog. Recognised as the disclosure
+     * recognises a tax: the type is exactly "dst" or contains "documentary
+     * stamp" (decision 4b, 2026-11-02).
+     */
+    public function test_a_documentary_stamp_tax_is_credited_to_documentary_stamp_tax_payable(): void
+    {
+        $items = [
+            ['name' => 'Documentary Stamp Tax', 'amount' => 30_000, 'catalog_fee' => true],
+            ['name' => 'DST', 'amount' => 10_000],
+            ['name' => 'documentary-stamp', 'amount' => 5_000],
+        ];
+
+        $posting = PostingRules::loanRelease(5_000_000, 4_955_000, 45_000, 'cash', $this->map(), items: $items);
+
+        $this->assertBalancedAndNonEmpty($posting);
+        $this->assertCount(3, $posting['lines']);
+        $this->assertSame(45_000, $this->amountOn($posting, 2230, 'credit'));
+        $this->assertSame(0, $this->amountOn($posting, 4030, 'credit'));
+        $this->assertSame(0, $this->amountOn($posting, 4080, 'credit'));
+
+        $deductions = PostingRules::classifyDeductions(45_000, $items);
+
+        $this->assertSame(['documentary_stamp_tax_payable' => 45_000], $deductions['mapped']);
+        $this->assertSame([], $deductions['unmapped']);
+        $this->assertSame(['amount' => 10_000, 'role' => 'documentary_stamp_tax_payable'], $deductions['types']['dst']);
+        $this->assertSame('documentary_stamp_tax_payable', PostingRules::taxRoleFor('DST.'));
+        $this->assertNull(PostingRules::taxRoleFor('DST Processing'), 'only the type exactly "dst" is DST by that name');
+    }
+
+    /**
+     * Any other tax (a type containing "tax") is credited to 2220 Other Taxes
+     * Payable, hand-typed or from the fee catalog.
+     */
+    public function test_another_tax_is_credited_to_other_taxes_payable(): void
+    {
+        $items = [
+            ['name' => 'Local Business Tax', 'amount' => 20_000, 'catalog_fee' => true],
+            ['name' => 'Other Taxes', 'amount' => 10_000],
+            ['name' => 'Service Fee', 'amount' => 5_000],
+        ];
+
+        $posting = PostingRules::loanRelease(5_000_000, 4_965_000, 35_000, 'cash', $this->map(), items: $items);
+
+        $this->assertBalancedAndNonEmpty($posting);
+        $this->assertSame(30_000, $this->amountOn($posting, 2220, 'credit'));
+        $this->assertSame(5_000, $this->amountOn($posting, 4040, 'credit'));
+        $this->assertSame(0, $this->amountOn($posting, 4080, 'credit'));
+        $this->assertSame(0, $this->amountOn($posting, 4030, 'credit'));
+
+        $deductions = PostingRules::classifyDeductions(35_000, $items);
+
+        $this->assertSame(['service_fee_income' => 5_000, 'other_taxes_payable' => 30_000], $deductions['credits']);
+        $this->assertSame('other_taxes_payable', PostingRules::taxRoleFor('Other Taxes'));
+        $this->assertNull(PostingRules::taxRoleFor('Credit Investigation Fee'));
+    }
+
+    /**
+     * A chart without an account for a tax role books that tax where it went
+     * before, rather than refusing the release: a catalog fee on Other Fee
+     * Income, a hand-typed deduction on processing fee income. The release
+     * logs a warning for it (AccountingReleaseDeductionAccountsTest).
+     */
+    public function test_a_tax_whose_role_the_chart_has_no_account_for_is_booked_where_it_went_before(): void
+    {
+        $roles = $this->map()->all();
+        unset($roles['documentary_stamp_tax_payable'], $roles['other_taxes_payable']);
+        $map = AccountMap::fromArray($roles);
+
+        $items = [
+            ['name' => 'Documentary Stamp Tax', 'amount' => 30_000, 'catalog_fee' => true],
+            ['name' => 'DST', 'amount' => 10_000],
+            ['name' => 'Other Taxes', 'amount' => 5_000],
+        ];
+
+        $deductions = PostingRules::classifyDeductions(45_000, $items, 'LN-000042', $map);
+
+        $this->assertSame(['other_fee_income' => 30_000, 'processing_fee_income' => 15_000], $deductions['credits']);
+        $this->assertSame(['dst' => 10_000, 'other taxes' => 5_000], $deductions['unmapped']);
+        $this->assertSame(
+            [
+                ['type' => 'documentary stamp tax', 'role' => 'documentary_stamp_tax_payable', 'booked_to' => 'other_fee_income'],
+                ['type' => 'dst', 'role' => 'documentary_stamp_tax_payable', 'booked_to' => 'processing_fee_income'],
+                ['type' => 'other taxes', 'role' => 'other_taxes_payable', 'booked_to' => 'processing_fee_income'],
+            ],
+            PostingRules::taxAccountFallbacks($items, $map),
+        );
+        $this->assertSame([], PostingRules::taxAccountFallbacks($items, $this->map()));
+    }
+
+    /**
+     * A hand-typed tax whose amount cannot be read is set aside and booked as
+     * before, as it was while it had no account of its own: the old rule
+     * posted these loans. A catalog tax with no usable amount is refused, as
+     * any catalog fee already was.
+     */
+    public function test_a_hand_typed_tax_without_a_usable_amount_is_set_aside_and_booked_as_before(): void
+    {
+        $items = [
+            ['name' => 'Processing Fee', 'amount' => 100_000],
+            ['name' => 'Documentary Stamp', 'amount' => null],
+        ];
+
+        $posting = PostingRules::loanRelease(5_000_000, 4_850_000, 150_000, 'cash', $this->map(), items: $items);
+
+        $this->assertBalancedAndNonEmpty($posting);
+        $this->assertSame(150_000, $this->amountOn($posting, 4030, 'credit'));
+        $this->assertSame(0, $this->amountOn($posting, 2230, 'credit'));
+        $this->assertSame([['type' => 'documentary stamp', 'reason' => 'no usable amount']], PostingRules::classifyDeductions(150_000, $items)['unusable']);
+
+        $this->expectException(CannotPostToTheBooksException::class);
+        $this->expectExceptionMessageMatches('/LN-000042.*"DST"/s');
+
+        PostingRules::classifyDeductions(150_000, [['name' => 'DST', 'amount' => null, 'catalog_fee' => true]], 'LN-000042');
     }
 
     /**
@@ -329,7 +451,7 @@ class AccountingPostingRulesTest extends TestCase
             5_000_000, 4_850_000, 150_000, 'cash', $this->map(),
             items: [
                 ['name' => 'Processing Fee', 'amount' => 100_000],
-                ['name' => 'Documentary Stamp', 'amount' => 90_000],
+                ['name' => 'Inspection Fee', 'amount' => 90_000],
             ],
         );
 
@@ -337,7 +459,7 @@ class AccountingPostingRulesTest extends TestCase
         $this->assertSame(150_000, $this->amountOn($posting, 4030, 'credit'));
         $this->assertSame(-40_000, PostingRules::classifyDeductions(150_000, [
             ['name' => 'Processing Fee', 'amount' => 100_000],
-            ['name' => 'Documentary Stamp', 'amount' => 90_000],
+            ['name' => 'Inspection Fee', 'amount' => 90_000],
         ])['remainder']);
     }
 
@@ -402,7 +524,7 @@ class AccountingPostingRulesTest extends TestCase
     {
         $items = [
             ['name' => 'Processing Fee', 'amount' => 100_000],
-            ['name' => 'Documentary Stamp', 'amount' => $amount],
+            ['name' => 'Inspection Fee', 'amount' => $amount],
         ];
 
         $posting = PostingRules::loanRelease(5_000_000, 4_850_000, 150_000, 'cash', $this->map(), items: $items);
@@ -414,9 +536,9 @@ class AccountingPostingRulesTest extends TestCase
         $deductions = PostingRules::classifyDeductions(150_000, $items);
 
         $this->assertSame([], $deductions['unmapped']);
-        $this->assertArrayNotHasKey('documentary stamp', $deductions['types']);
+        $this->assertArrayNotHasKey('inspection fee', $deductions['types']);
         $this->assertCount(1, $deductions['unusable']);
-        $this->assertSame('documentary stamp', $deductions['unusable'][0]['type']);
+        $this->assertSame('inspection fee', $deductions['unusable'][0]['type']);
         $this->assertSame(50_000, $deductions['remainder']);
     }
 
@@ -456,8 +578,8 @@ class AccountingPostingRulesTest extends TestCase
      * The lines a release posts for typical item lists: debit the gross,
      * credit the net, then each role its share in a fixed order — processing
      * fee income (with whatever no item explains), service fee income,
-     * notarial fees payable, insurance premium payable, share capital, other
-     * fee income.
+     * notarial fees payable, insurance premium payable, share capital,
+     * documentary stamp tax payable, other taxes payable, other fee income.
      *
      * @return array<string, array{int, int, int, list<array<string, mixed>>, list<array{int, int}>}>
      */
@@ -473,9 +595,16 @@ class AccountingPostingRulesTest extends TestCase
                 ['name' => 'Processing Fee', 'amount' => 100_000],
                 ['name' => 'Service Fee', 'amount' => 25_000],
                 ['name' => 'Notarial Fee', 'amount' => 25_000],
-                ['name' => 'Documentary Stamp', 'amount' => 5_000, 'catalog_fee' => true],
+                ['name' => 'Credit Investigation Fee', 'amount' => 5_000, 'catalog_fee' => true],
                 ['name' => 'Insurance Premium', 'amount' => 50_000],
             ], [[4030, 100_000], [4040, 25_000], [2030, 25_000], [2040, 50_000], [4080, 5_000]]],
+            'taxes, hand-typed and catalog' => [5_000_000, 4_930_000, 70_000, [
+                ['name' => 'Processing Fee', 'amount' => 30_000],
+                ['name' => 'Documentary Stamp Tax', 'amount' => 15_000, 'catalog_fee' => true],
+                ['name' => 'DST', 'amount' => 10_000],
+                ['name' => 'Local Business Tax', 'amount' => 5_000],
+                ['name' => 'Credit Investigation Fee', 'amount' => 10_000, 'catalog_fee' => true],
+            ], [[4030, 30_000], [2230, 25_000], [2220, 5_000], [4080, 10_000]]],
             'processing fee only' => [5_000_000, 4_876_544, 123_456, [
                 ['name' => 'Processing Fee', 'amount' => 123_456],
             ], [[4030, 123_456]]],
