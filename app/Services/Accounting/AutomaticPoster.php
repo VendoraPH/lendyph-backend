@@ -13,6 +13,7 @@ use App\Services\LoanReleaseFeeService;
 use DateTimeInterface;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Log;
 
 /**
  * The automatic posting engine. Lending services call this; nothing else does.
@@ -115,7 +116,9 @@ final class AutomaticPoster
             return null;
         }
 
-        $posting = $this->releasePosting($loan, AccountMap::resolve(), $method);
+        $map = AccountMap::resolve();
+        $posting = $this->releasePosting($loan, $map, $method);
+        $this->warnAboutTaxFallbacks($loan, $map);
 
         return $this->write($posting, $loan, [
             'date' => $this->releaseDate($loan),
@@ -168,8 +171,37 @@ final class AutomaticPoster
     }
 
     /**
+     * Log a warning when a tax this release withholds has no account of its
+     * own in this chart and is booked to its fallback instead
+     * ({@see PostingRules::taxAccountFallbacks()}). Only the real release
+     * logs it; `accounting:loan-release-diff` reads the same posting through
+     * {@see self::releasePosting()} and logs nothing.
+     */
+    private function warnAboutTaxFallbacks(Loan $loan, AccountMap $map): void
+    {
+        $fallbacks = PostingRules::taxAccountFallbacks($this->deductionItems($loan), $map);
+
+        if ($fallbacks === []) {
+            return;
+        }
+
+        $label = $this->releaseLabel($loan);
+
+        Log::warning(
+            "{$label}: a tax withheld at release was booked to a fallback account, because its own role has no account. "
+            .'Set it in Accounting → Settings → Default Accounts so later releases book it to its own payable account.',
+            ['loan' => $label, 'fallbacks' => $fallbacks],
+        );
+    }
+
+    /**
      * The loan's deductions sorted by type, as the release rule books them.
      * Read only. See {@see PostingRules::classifyDeductions()}.
+     *
+     * Classified against this organisation's account mapping when it keeps
+     * books, so a tax whose role has no account takes the same fallback the
+     * release posting does, and ShareCapitalReleaseCredit and the diff command
+     * read the posting's own answer.
      *
      * @return array{
      *     types: array<string, array{amount: int, role: string|null}>,
@@ -186,6 +218,7 @@ final class AutomaticPoster
             $this->centavos($loan->total_deductions, 'total deductions', $loan),
             $this->deductionItems($loan),
             $this->releaseLabel($loan),
+            $this->enabled() ? AccountMap::resolve() : null,
         );
     }
 

@@ -23,9 +23,9 @@ use Illuminate\Validation\ValidationException;
  *   the part of `total_deductions` no item explains (the unitemised
  *   remainder, signed: "Other Charges" above zero, "Adjustment" below);
  * - non-finance charge: a notarial fee or an insurance premium (both booked
- *   as owed to somebody else), and any tax: a type containing "tax" or
- *   "documentary stamp", or exactly "dst". A tax wins over being a catalog
- *   fee, but not over a type with an account of its own;
+ *   as owed to somebody else), and any tax, recognised by the same matcher
+ *   as the books (PostingRules::taxRoleFor()). A tax wins over being a
+ *   catalog fee, but not over a type with an account of its own;
  * - share capital: the member's own equity, deducted from the proceeds and
  *   shown there, never a charge.
  *
@@ -435,7 +435,7 @@ class DisclosureService
             return self::KIND_BY_ROLE[$role] ?? self::FINANCE;
         }
 
-        if ($type === 'dst' || str_contains($type, 'tax') || str_contains($type, 'documentary stamp')) {
+        if (PostingRules::taxRoleFor($type) !== null) {
             return self::NON_FINANCE;
         }
 
