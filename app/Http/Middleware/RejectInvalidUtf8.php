@@ -24,7 +24,9 @@ use Symfony\Component\HttpFoundation\Response;
  *
  * The 422 is answered here as JSON, in the framework's validation shape,
  * whatever the Accept header: a ValidationException would redirect a caller
- * that did not ask for JSON, and this API has nowhere to redirect to.
+ * that did not ask for JSON, and this API has nowhere to redirect to. It runs
+ * before the api group's SecurityHeaders, so it sets nosniff itself, and the
+ * echoed field names are hex-escaped so no markup survives in the body.
  */
 class RejectInvalidUtf8
 {
@@ -41,10 +43,12 @@ class RejectInvalidUtf8
 
         $exception = ValidationException::withMessages($messages);
 
-        return new JsonResponse([
-            'message' => $exception->getMessage(),
-            'errors' => $exception->errors(),
-        ], 422);
+        return new JsonResponse(
+            ['message' => $exception->getMessage(), 'errors' => $exception->errors()],
+            422,
+            ['X-Content-Type-Options' => 'nosniff'],
+            JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT,
+        );
     }
 
     /**

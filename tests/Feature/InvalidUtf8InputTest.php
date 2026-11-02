@@ -106,3 +106,16 @@ it('refuses invalid UTF-8 on a public route before it reaches the database', fun
         ->assertStatus(422)
         ->assertJsonValidationErrors(['password' => 'valid UTF-8']);
 });
+
+it('sends nosniff and hex-escapes markup in the 422 body', function () {
+    $response = $this->post('/api/auth/login', ['login' => 'x', 'password' => 'y', "<b>'&\"\xFF" => 'z'], ['Accept' => 'application/json'])
+        ->assertStatus(422)
+        ->assertHeader('X-Content-Type-Options', 'nosniff');
+
+    expect($response->getContent())
+        ->not->toContain('<b>')
+        ->toContain('\u003Cb\u003E')
+        ->toContain('\u0027')
+        ->toContain('\u0026')
+        ->toContain('\u0022');
+});

@@ -12,8 +12,10 @@ use Illuminate\Database\Eloquent\Builder;
  *
  * - Self-service auth events (login, logout, profile and password changes)
  *   are `auth`, whatever their auditable type: a login row carries the User.
- * - Otherwise the auditable class decides (MODULE_MAP).
- * - A row whose class is not mapped, or that has none, is `system`.
+ * - Otherwise the auditable class decides (MODULE_MAP). Every class that
+ *   writes audit rows is listed there, `system` ones included, and
+ *   AuditLogModuleMapTest keeps it that way.
+ * - A row with no auditable class is `system`.
  */
 class AuditLogModules
 {
@@ -52,6 +54,21 @@ class AuditLogModules
         'Role' => 'roles',
         'ShareCapitalPledge' => 'collections',
         'ShareCapitalLedger' => 'collections',
+        'AccountingAccount' => 'accounting',
+        'AccountingAccountMapping' => 'accounting',
+        'AccountingExpense' => 'accounting',
+        'AccountingExpensePayment' => 'accounting',
+        'AccountingJournal' => 'accounting',
+        'AccountingJournalLine' => 'accounting',
+        'AccountingPeriod' => 'accounting',
+        'AccountingReconciliation' => 'accounting',
+        'AccountingReconciliationLine' => 'accounting',
+        'GCashTransaction' => 'gcash',
+        'GCashNonMember' => 'gcash',
+        'GCashTier' => 'gcash',
+        // Deliberately system: an import run is housekeeping, not a record
+        // any module's screen shows.
+        'CsvImportRun' => self::UNMAPPED,
     ];
 
     /**
@@ -78,6 +95,15 @@ class AuditLogModules
             : self::UNMAPPED;
     }
 
+    /**
+     * Whether the class is filed under a module on purpose (`system`
+     * included), rather than falling through to `system` by omission.
+     */
+    public static function isMapped(string $auditableType): bool
+    {
+        return isset(self::MODULE_MAP[class_basename($auditableType)]);
+    }
+
     public static function isAuthAction(?string $action): bool
     {
         return in_array($action, self::AUTH_ACTIONS, true);
@@ -98,17 +124,18 @@ class AuditLogModules
 
         $query->whereNotIn('action', self::AUTH_ACTIONS);
 
+        $types = self::types(array_keys(array_filter(self::MODULE_MAP, fn (string $mapped) => $mapped === $module)));
+
         if ($module === self::UNMAPPED) {
             $query->where(fn (Builder $q) => $q
                 ->whereNull('auditable_type')
+                ->orWhereIn('auditable_type', $types)
                 ->orWhereNotIn('auditable_type', self::types(array_keys(self::MODULE_MAP))));
 
             return;
         }
 
-        $query->whereIn('auditable_type', self::types(array_keys(
-            array_filter(self::MODULE_MAP, fn (string $mapped) => $mapped === $module),
-        )));
+        $query->whereIn('auditable_type', $types);
     }
 
     /**

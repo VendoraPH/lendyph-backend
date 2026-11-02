@@ -56,8 +56,8 @@ class Role extends SpatieRole
      */
     /**
      * The description on this role's automatic `updated` audit row: its
-     * auditLabel() and the fields that changed, e.g. "Role Teller updated:
-     * display_name, description". Other actions keep no description.
+     * auditName() and the fields that changed, e.g. `Role "Teller" (cashier)
+     * updated: display_name, description`. Other actions keep no description.
      */
     public function describeAuditEvent(string $action): ?string
     {
@@ -67,7 +67,17 @@ class Role extends SpatieRole
 
         $fields = array_keys(array_diff_key($this->getChanges(), [self::UPDATED_AT => true]));
 
-        return sprintf('Role %s updated: %s', $this->auditLabel(), implode(', ', $fields));
+        return sprintf('Role %s updated: %s', $this->auditName(), implode(', ', $fields));
+    }
+
+    /**
+     * How audit descriptions name this role: the editable label in quotes and
+     * the fixed key in brackets, e.g. `"Teller" (cashier)`, so a row still
+     * identifies the role after the label changes.
+     */
+    public function auditName(): string
+    {
+        return sprintf('"%s" (%s)', $this->auditLabel(), $this->name);
     }
 
     /**

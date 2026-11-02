@@ -9,6 +9,21 @@ use Illuminate\Database\Eloquent\Relations\MorphTo;
 
 class Document extends Model
 {
+    /**
+     * The longest original filename kept (the column's length).
+     */
+    public const ORIGINAL_FILENAME_MAX_LENGTH = 255;
+
+    /**
+     * An uploaded file's client-supplied name as it may be stored: valid UTF-8
+     * and within the column. A multipart filename can carry any bytes, and a
+     * raw one made the insert fail with a 500.
+     */
+    public static function cleanOriginalFilename(string $name): string
+    {
+        return mb_substr(mb_scrub($name, 'UTF-8'), 0, self::ORIGINAL_FILENAME_MAX_LENGTH, 'UTF-8');
+    }
+
     protected $fillable = [
         'documentable_type',
         'documentable_id',

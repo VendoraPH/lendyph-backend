@@ -115,9 +115,9 @@ it('labels a permission change row and its target by the role display name', fun
     $this->putJson("/api/roles/{$plain->id}", ['permissions' => ['loans:view']])->assertSuccessful();
 
     $row = latestAuditRow('role_permissions_changed', $labelled->getMorphClass(), $labelled->id);
-    expect($row->description)->toBe('Permissions for role Desk Viewer changed: added [loans:view], removed []');
+    expect($row->description)->toBe('Permissions for role "Desk Viewer" (desk_viewer) changed: added [loans:view], removed []');
     expect(latestAuditRow('role_permissions_changed', $plain->getMorphClass(), $plain->id)->description)
-        ->toBe('Permissions for role Night Clerk changed: added [loans:view], removed []');
+        ->toBe('Permissions for role "Night Clerk" (night_clerk) changed: added [loans:view], removed []');
 
     $this->getJson("/api/audit-logs/{$row->id}")
         ->assertOk()

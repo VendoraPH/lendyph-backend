@@ -80,15 +80,16 @@ class UserRouteRefusalAuditTest extends TestCase
     /**
      * @return Collection<int, AuditLog>
      */
-    private function refusalRows()
+    private function refusalRows(int $afterId = 0)
     {
-        return AuditLog::where('action', 'user_access_denied')->orderBy('id')->get();
+        return AuditLog::where('action', 'user_access_denied')->where('id', '>', $afterId)->orderBy('id')->get();
     }
 
     public function test_every_refused_user_route_writes_exactly_one_audit_row(): void
     {
         foreach ($this->userRoutes() as $name => [$verb, $template, $payload]) {
-            AuditLog::where('action', 'user_access_denied')->delete();
+            // Audit rows are append-only: count only the rows this request adds.
+            $before = (int) AuditLog::max('id');
 
             // reactivate is the one route a live target makes a no-op for, so
             // it gets an inactive one — the refusal must be recorded for the
@@ -100,7 +101,7 @@ class UserRouteRefusalAuditTest extends TestCase
             $this->{$verb}(str_replace('{id}', (string) $target->id, $template), $payload)
                 ->assertNotFound();
 
-            $rows = $this->refusalRows();
+            $rows = $this->refusalRows($before);
 
             $this->assertCount(1, $rows, "{$name} did not write exactly one refusal row.");
 
@@ -270,7 +271,7 @@ class UserRouteRefusalAuditTest extends TestCase
      */
     public function test_a_target_refusal_is_recorded_under_its_own_action(): void
     {
-        AuditLog::query()->delete();
+        $before = (int) AuditLog::max('id');
 
         $superAdmin = User::where('username', 'super_admin')->firstOrFail();
 
@@ -288,8 +289,8 @@ class UserRouteRefusalAuditTest extends TestCase
         $this->putJson("/api/users/{$ordinary->id}", ['first_name' => 'Nope'])
             ->assertNotFound();
 
-        $targetRefusals = AuditLog::where('action', 'user_target_refused')->get();
-        $accessDenials = AuditLog::where('action', 'user_access_denied')->get();
+        $targetRefusals = AuditLog::where('action', 'user_target_refused')->where('id', '>', $before)->get();
+        $accessDenials = AuditLog::where('action', 'user_access_denied')->where('id', '>', $before)->get();
 
         $this->assertCount(1, $targetRefusals, 'The super_admin refusal should record user_target_refused.');
         $this->assertCount(1, $accessDenials, 'The permission miss should record user_access_denied.');

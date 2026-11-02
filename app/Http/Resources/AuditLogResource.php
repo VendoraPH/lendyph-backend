@@ -137,7 +137,8 @@ class AuditLogResource extends JsonResource
      * columns, so comparing every key listed each untouched field as changed
      * to nothing. Timestamps are never listed, and a `created` row lists
      * nothing: its new values are the whole inserted row and the action
-     * already says what happened. User ids show as names. Display only;
+     * already says what happened. A row with no new values (a deletion) lists
+     * its old fields, already redacted when written, with `new: null`. User ids show as names. Display only;
      * old_values and new_values are returned as stored.
      *
      * @return list<array{field: string, old: string|null, new: string|null}>
@@ -149,11 +150,12 @@ class AuditLogResource extends JsonResource
         }
 
         $old = is_array($this->old_values) ? $this->old_values : [];
-        $new = is_array($this->new_values) ? $this->new_values : [];
+        $new = is_array($this->new_values) ? $this->new_values : null;
 
         $changes = [];
 
-        foreach ($new as $field => $value) {
+        // A row with no new values (a deletion) lists what was removed.
+        foreach (array_keys($new ?? $old) as $field) {
             $field = (string) $field;
 
             if (in_array($field, self::TIMESTAMP_KEYS, true)) {
@@ -161,7 +163,7 @@ class AuditLogResource extends JsonResource
             }
 
             $oldShown = $this->shownFor($field, $old[$field] ?? null);
-            $newShown = $this->shownFor($field, $value);
+            $newShown = $this->shownFor($field, $new[$field] ?? null);
 
             if ($oldShown === $newShown) {
                 continue;

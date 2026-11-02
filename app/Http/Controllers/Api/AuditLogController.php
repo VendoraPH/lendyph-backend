@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Http\Controllers\Api\Traits\CsvExportTrait;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\AuditLogResource;
 use App\Models\AuditLog;
@@ -15,6 +16,8 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class AuditLogController extends Controller
 {
+    use CsvExportTrait;
+
     #[OA\Get(
         path: '/api/audit-logs',
         summary: 'List audit logs',
@@ -26,7 +29,7 @@ class AuditLogController extends Controller
             new OA\Parameter(name: 'user_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
             new OA\Parameter(name: 'action', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
             new OA\Parameter(name: 'auditable_type', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
-            new OA\Parameter(name: 'module', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['borrowers', 'loans', 'payments', 'users', 'roles', 'collections', 'auth', 'system']), description: 'The `module` each row carries (auth = sign-in and self-service events; system = rows of no other module); an unknown value is a 422'),
+            new OA\Parameter(name: 'module', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['auth', 'borrowers', 'loans', 'payments', 'collections', 'users', 'roles', 'accounting', 'gcash', 'system']), description: 'The `module` each row carries (auth = sign-in and self-service events; system = rows of no other module); an unknown value is a 422'),
             new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15)),
@@ -92,7 +95,7 @@ class AuditLogController extends Controller
             new OA\Parameter(name: 'user_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
             new OA\Parameter(name: 'action', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
             new OA\Parameter(name: 'auditable_type', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
-            new OA\Parameter(name: 'module', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['borrowers', 'loans', 'payments', 'users', 'roles', 'collections', 'auth', 'system']), description: 'The `module` each row carries (auth = sign-in and self-service events; system = rows of no other module); an unknown value is a 422'),
+            new OA\Parameter(name: 'module', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['auth', 'borrowers', 'loans', 'payments', 'collections', 'users', 'roles', 'accounting', 'gcash', 'system']), description: 'The `module` each row carries (auth = sign-in and self-service events; system = rows of no other module); an unknown value is a 422'),
             new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
         ],
@@ -138,7 +141,7 @@ class AuditLogController extends Controller
                 ->orderBy('id')
                 ->chunk(500, function ($chunk) use ($handle) {
                     foreach ($chunk as $log) {
-                        fputcsv($handle, [
+                        fputcsv($handle, array_map(self::sanitizeCsvCell(...), [
                             $log->created_at?->toDateTimeString(),
                             $log->user?->full_name ?? ($log->user_id ? "User #{$log->user_id}" : 'system'),
                             $log->action,
@@ -148,7 +151,7 @@ class AuditLogController extends Controller
                             $log->ip_address,
                             $log->old_values ? json_encode($log->old_values) : '',
                             $log->new_values ? json_encode($log->new_values) : '',
-                        ]);
+                        ]));
                     }
                 });
 

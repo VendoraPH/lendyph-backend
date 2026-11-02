@@ -8,8 +8,8 @@ use Tests\TestCase;
 uses(TestCase::class);
 
 /*
- * A role's `updated` audit row says what changed ("Role Teller updated:
- * display_name, description"), and the Audit Trail files every role row
+ * A role's `updated` audit row says what changed (`Role "Teller" (cashier)
+ * updated: display_name, description`), and the Audit Trail files every role row
  * (created, updated, deleted, role_permissions_changed) under the `roles`
  * module, not `users`.
  */
@@ -35,7 +35,7 @@ it('describes an updated role row by its display name and the changed fields', f
         ->assertSuccessful();
 
     expect(roleAuditRow($cashier, 'updated')->description)
-        ->toBe('Role Teller updated: display_name, description');
+        ->toBe('Role "Teller" (cashier) updated: display_name, description');
 });
 
 it('falls back to the default label when the role has no display name', function () {
@@ -43,7 +43,7 @@ it('falls back to the default label when the role has no display name', function
 
     $this->putJson("/api/roles/{$role->id}", ['description' => 'Files paperwork'])->assertSuccessful();
 
-    expect(roleAuditRow($role, 'updated')->description)->toBe('Role Branch Clerk updated: description');
+    expect(roleAuditRow($role, 'updated')->description)->toBe('Role "Branch Clerk" (branch_clerk) updated: description');
 });
 
 it('describes a deactivation as an update of is_active', function () {
@@ -51,7 +51,7 @@ it('describes a deactivation as an update of is_active', function () {
 
     $this->patchJson("/api/roles/{$role->id}/deactivate")->assertSuccessful();
 
-    expect(roleAuditRow($role, 'updated')->description)->toBe('Role Seasonal updated: is_active');
+    expect(roleAuditRow($role, 'updated')->description)->toBe('Role "Seasonal" (seasonal_staff) updated: is_active');
 });
 
 it('files role rows under the roles module in the Audit Trail', function () {

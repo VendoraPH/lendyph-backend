@@ -23,6 +23,13 @@ class AuditLogIsAppendOnlyException extends RuntimeException
         );
     }
 
+    public static function bulk(string $operation): self
+    {
+        return new self(
+            "audit_logs cannot be changed with {$operation}(): audit rows are append-only. Nothing was written."
+        );
+    }
+
     public static function delete(?int $id): self
     {
         return new self(

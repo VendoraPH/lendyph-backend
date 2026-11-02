@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use App\Exceptions\AuditLogIsAppendOnlyException;
+use App\Models\Builders\AuditLogBuilder;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -44,6 +45,16 @@ class AuditLog extends Model
             'new_values' => 'array',
             'created_at' => 'datetime',
         ];
+    }
+
+    /**
+     * Bulk writes are refused too: see AuditLogBuilder.
+     *
+     * @param  \Illuminate\Database\Query\Builder  $query
+     */
+    public function newEloquentBuilder($query): AuditLogBuilder
+    {
+        return new AuditLogBuilder($query);
     }
 
     /**

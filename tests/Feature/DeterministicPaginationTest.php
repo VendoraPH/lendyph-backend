@@ -175,20 +175,20 @@ it('serves every row exactly once, in key order, when the whole list ties on its
     },
 
     'GET /api/audit-logs' => function () {
-        foreach (range(1, 7) as $i) {
-            AuditLog::create([
-                'user_id' => $this->admin->id,
-                'action' => 'updated',
-                'description' => "Bulk change {$i}",
-            ]);
-        }
-        AuditLog::query()->update(['created_at' => '2026-01-15 09:00:00']);
+        // Audit rows are append-only, so the tie is inserted rather than
+        // stamped on afterwards, and the list is narrowed to these rows.
+        DB::table('audit_logs')->insert(array_map(fn (int $i) => [
+            'user_id' => $this->admin->id,
+            'action' => 'updated',
+            'description' => "Tied bulk change {$i}",
+            'created_at' => '2026-01-15 09:00:00',
+        ], range(1, 7)));
 
         return [
-            'url' => '/api/audit-logs',
+            'url' => '/api/audit-logs?search=Tied%20bulk%20change',
             'model' => AuditLog::class,
             'direction' => 'desc',
-            'expected' => AuditLog::query()->orderByDesc('id')->pluck('id')->all(),
+            'expected' => AuditLog::query()->where('description', 'like', 'Tied bulk change %')->orderByDesc('id')->pluck('id')->all(),
         ];
     },
 
@@ -294,7 +294,6 @@ it('exports every audit row exactly once when a run of ties spans a chunk bounda
         'description' => sprintf('probe-%04d', $i),
         'created_at' => '2026-01-15 09:00:00',
     ], range(1, 520)));
-    AuditLog::query()->update(['created_at' => '2026-01-15 09:00:00']);
 
     DB::flushQueryLog();
     DB::enableQueryLog();

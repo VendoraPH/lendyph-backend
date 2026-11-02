@@ -1,6 +1,5 @@
 <?php
 
-use App\Models\AuditLog;
 use App\Models\Role;
 use App\Models\User;
 use App\Services\AuditLogService;
@@ -16,11 +15,9 @@ uses(TestCase::class);
 
 beforeEach(function () {
     $this->actingAs(User::where('username', 'super_admin')->firstOrFail());
-    AuditLog::query()->delete();
-
     $this->role = Role::create(['name' => 'module_probe', 'guard_name' => 'web', 'is_system' => false]);
     $this->user = User::factory()->create();
-    AuditLogService::log('login', null, null, null, 'Signed in');
+    $this->login = AuditLogService::log('login', null, null, null, 'Signed in');
 });
 
 function auditListModules(array $rows): array
@@ -33,7 +30,8 @@ it('returns only role rows for module=roles', function () {
 
     expect($rows)->not->toBeEmpty()
         ->and(auditListModules($rows))->toBe(['roles'])
-        ->and(collect($rows)->pluck('auditable_id')->unique()->all())->toBe([$this->role->id]);
+        ->and(collect($rows)->pluck('auditable_type')->unique()->all())->toBe(['Role'])
+        ->and(collect($rows)->pluck('auditable_id'))->toContain($this->role->id);
 });
 
 it('returns only user rows for module=users', function () {
@@ -41,13 +39,14 @@ it('returns only user rows for module=users', function () {
 
     expect($rows)->not->toBeEmpty()
         ->and(auditListModules($rows))->toBe(['users'])
-        ->and(collect($rows)->pluck('auditable_type')->unique()->all())->toBe(['User']);
+        ->and(collect($rows)->pluck('auditable_type')->unique()->all())->toBe(['User'])
+        ->and(collect($rows)->pluck('auditable_id'))->toContain($this->user->id);
 });
 
 it('returns auth events for module=auth', function () {
     $rows = $this->getJson('/api/audit-logs?module=auth&per_page=100')->assertOk()->json('data');
 
-    expect(collect($rows)->pluck('action')->all())->toBe(['login'])
+    expect(collect($rows)->pluck('id'))->toContain($this->login->id)
         ->and(auditListModules($rows))->toBe(['auth']);
 });
 

@@ -84,3 +84,19 @@ it('lists the list fields of a permission change row', function () {
         ->assertOk()
         ->assertJsonPath('data.changes', [['field' => 'permissions', 'old' => '[]', 'new' => '["loans:view"]']]);
 });
+
+it('lists the old fields of a deleted row with new: null, without timestamps', function () {
+    $role = Role::create(['name' => 'deleted_probe', 'guard_name' => 'web', 'is_system' => false, 'description' => 'Gone soon']);
+
+    $this->deleteJson("/api/roles/{$role->id}")->assertSuccessful();
+    $row = auditRowFor($role, 'deleted');
+
+    expect($row->new_values)->toBeNull();
+
+    $changes = collect($this->getJson("/api/audit-logs/{$row->id}")->assertOk()->json('data.changes'))->keyBy('field');
+
+    expect($changes->get('name'))->toBe(['field' => 'name', 'old' => 'deleted_probe', 'new' => null])
+        ->and($changes->get('description'))->toBe(['field' => 'description', 'old' => 'Gone soon', 'new' => null])
+        ->and($changes->keys()->intersect(['created_at', 'updated_at', 'deleted_at'])->all())->toBe([])
+        ->and($changes->pluck('new')->filter()->all())->toBe([]);
+});

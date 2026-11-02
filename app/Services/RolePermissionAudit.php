@@ -57,7 +57,7 @@ class RolePermissionAudit
             newValues: ['permissions' => $after],
             description: $description ?? sprintf(
                 'Permissions for role %s changed: added [%s], removed [%s]',
-                $role->auditLabel(),
+                $role->auditName(),
                 implode(', ', $added),
                 implode(', ', $removed),
             ),
