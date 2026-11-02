@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Loan;
+use App\Models\PortfolioDailySnapshot;
 use App\Models\Repayment;
 use Carbon\Carbon;
 use Illuminate\Support\Collection;
@@ -40,10 +41,12 @@ class DashboardService
 
         $overdueLoansCount = $this->overdueLoansCount(Carbon::today());
 
-        // Cache sparklines for 10 minutes (27 queries → 0 on cache hit). v2:
-        // the overdue points moved to the grace rule, so points cached under
-        // the old key's rule are not served after a deploy.
-        $sparklines = Cache::remember('dashboard:sparklines:v2', 600, fn () => [
+        // Cache sparklines for 10 minutes (22 queries → 0 on cache hit). v3:
+        // the overdue points moved to the daily snapshots, so points cached
+        // under the old key's rule are not served after a deploy. The day is
+        // in the key so points cached before midnight are not served as the
+        // next day's.
+        $sparklines = Cache::remember('dashboard:sparklines:v3:'.Carbon::today()->toDateString(), 600, fn () => [
             'portfolio' => $this->portfolioSparkline(),
             'active_loans' => $this->activeLoansSparkline(),
             'collected' => $this->collectionsSparkline(),
@@ -352,16 +355,25 @@ class DashboardService
     }
 
     /**
-     * The six days before today by the same rule as the card, with that day
-     * as the grace cutoff's date; stats() adds today's point from the card.
-     * Payment state is today's, as before: a loan paid since a past day no
-     * longer counts on it. A true history would need daily snapshots.
+     * The six days before today from the daily portfolio snapshots
+     * (`portfolio:snapshot`, decision 2d): each point is that day's
+     * `overdue_loans_count`, or null when no snapshot was recorded for it (no
+     * backfill). stats() adds today's point from the live card.
+     *
+     * @return array<int, array{v: int|null}>
      */
     private function pastOverdueSparkline(): array
     {
-        return collect(range(6, 1))->map(fn ($daysAgo) => [
-            'v' => $this->overdueLoansCount(Carbon::today()->subDays($daysAgo)),
-        ])->toArray();
+        $today = Carbon::today();
+
+        $counts = PortfolioDailySnapshot::query()
+            ->whereBetween('snapshot_date', [$today->copy()->subDays(6)->toDateString(), $today->copy()->subDay()->toDateString()])
+            ->get(['snapshot_date', 'overdue_loans_count'])
+            ->mapWithKeys(fn (PortfolioDailySnapshot $snapshot) => [$snapshot->snapshot_date->toDateString() => $snapshot->overdue_loans_count]);
+
+        return collect(range(6, 1))->map(fn (int $daysAgo) => [
+            'v' => $counts[$today->copy()->subDays($daysAgo)->toDateString()] ?? null,
+        ])->values()->all();
     }
 
     /**
