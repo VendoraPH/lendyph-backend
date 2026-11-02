@@ -19,8 +19,11 @@ use Illuminate\Contracts\Validation\ValidationRule;
  * of the balance, so that is a direct path from "client admin" to "destroys
  * debt unilaterally".
  *
- * Two things are refused:
+ * Three things are refused:
  *
+ * 0. A deactivated role. It grants nothing (User::getPermissionsViaRoles()),
+ *    so handing it out would give the user a role that does nothing until
+ *    someone reactivates it, outside this check.
  * 1. `super_admin`, unless the actor already holds it. Its permission set is
  *    identical to `admin`'s, so the superset check below cannot tell them
  *    apart — super_admin's extra power lives in the Gate bypass and the
@@ -55,6 +58,12 @@ class AssignableRole implements ValidationRule
             return;
         }
 
+        if ($role->is_active === false) {
+            $fail('The selected role is deactivated. Reactivate it before assigning it.');
+
+            return;
+        }
+
         if (! $this->actor instanceof User) {
             $fail('The :attribute cannot be assigned.');
 
@@ -75,6 +84,7 @@ class AssignableRole implements ValidationRule
 
         $missing = $role->permissions
             ->pluck('name')
+            // Active roles only: what the actor holds, not what they're assigned.
             ->diff($this->actor->getAllPermissions()->pluck('name'))
             ->sort()
             ->values();
