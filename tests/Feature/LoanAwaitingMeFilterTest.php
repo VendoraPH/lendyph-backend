@@ -93,6 +93,20 @@ class LoanAwaitingMeFilterTest extends TestCase
         $this->assertNotContains($atManager->id, $this->awaitingIdsFor($holder));
     }
 
+    /**
+     * admin and super_admin always count (Role::PROTECTED_KEYS): a row
+     * switched off by hand mustn't hide their own steps.
+     */
+    public function test_a_deactivated_admin_role_still_sees_admin_steps(): void
+    {
+        $loan = $this->submittedLoan();
+        $this->pendingStep($loan)->update(['role' => 'admin']);
+
+        Role::where('name', 'admin')->update(['is_active' => false]);
+
+        $this->assertSame([$loan->id], $this->awaitingIdsFor($this->userWithRoles('admin')));
+    }
+
     public function test_a_user_holding_several_roles_sees_each_role_s_loans(): void
     {
         $atManager = $this->submittedLoan();

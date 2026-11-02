@@ -78,6 +78,45 @@ class DashboardOverdueGraceTest extends TestCase
         $this->assertSame([0, 0, 0, 0, 0, 1, 1], $points);
     }
 
+    /**
+     * The past points read TODAY's payment state, as the old sparkline did: a
+     * loan that was late four days ago and has since been paid counts on no
+     * point, past ones included. A true history would need daily snapshots.
+     */
+    public function test_a_loan_paid_since_leaves_the_past_points(): void
+    {
+        $loan = $this->loan(grace: 0);
+        $period = $this->moveSchedule($loan, 1, 5);
+        $period->update([
+            'principal_paid' => $period->principal_due,
+            'interest_paid' => $period->interest_due,
+            'status' => 'paid',
+        ]);
+
+        $stats = $this->getJson('/api/dashboard/stats')->assertOk()->json('data');
+
+        $this->assertSame(0, $stats['overdue_count']);
+        $this->assertSame([0, 0, 0, 0, 0, 0, 0], array_column($stats['sparklines']['overdue'], 'v'));
+    }
+
+    /**
+     * The past points are cached for ten minutes; today's is the card's live
+     * figure, so a loan that turns late inside that window moves both.
+     */
+    public function test_today_s_point_is_live_while_the_past_points_are_cached(): void
+    {
+        $this->getJson('/api/dashboard/stats')->assertOk();
+
+        $loan = $this->loan(grace: 0);
+        $this->moveSchedule($loan, 1, 3);
+
+        $stats = $this->getJson('/api/dashboard/stats')->assertOk()->json('data');
+        $points = array_column($stats['sparklines']['overdue'], 'v');
+
+        $this->assertSame(1, $stats['overdue_count']);
+        $this->assertSame([0, 0, 0, 0, 0, 0, 1], $points, 'Past points come from the cache; today is live.');
+    }
+
     private function loan(int $grace): Loan
     {
         return $this->createReleasedLoan(['product' => ['grace_period_days' => $grace]]);

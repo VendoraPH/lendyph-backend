@@ -3,7 +3,9 @@
 namespace Tests\Feature;
 
 use App\Models\AmortizationSchedule;
+use App\Models\Branch;
 use App\Models\Loan;
+use App\Services\LoanAdjustmentService;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 use Tests\TestCase;
@@ -165,6 +167,122 @@ class DuePastDueLoanFiguresTest extends TestCase
         }
 
         $this->assertSame($oneLoan, $this->countQueries(expectedRows: 7));
+    }
+
+    public function test_a_loan_owing_insurance_premium_counts_it_in_the_total_but_not_in_the_past_due_amount(): void
+    {
+        $loan = $this->releasedDaysAgo(60, grace: 0);
+        $this->moveSchedule($loan, 1, 20);
+        $loan->forceFill(['insurance_remaining_balance' => 500])->save();
+
+        $summary = $this->getJson("/api/loans/{$loan->id}/summary")->assertOk()->json('data');
+        $row = $this->getJson('/api/reports/due-past-due')->assertOk()->json('data.0');
+
+        $this->assertEquals(500, $summary['insurance_owed']);
+        $this->assertEquals($summary['total_outstanding'], $row['loan_total_outstanding'], 'The ₱500.00 premium owed is part of everything owed.');
+        $this->assertEquals($summary['overdue_amount'], $row['loan_past_due_amount'], 'The premium is never past due.');
+        $this->assertEqualsWithDelta(
+            $summary['outstanding_principal'] + $summary['outstanding_interest'] + $summary['outstanding_penalty'] + 500,
+            $row['loan_total_outstanding'],
+            0.001,
+        );
+    }
+
+    public function test_a_penalty_partly_paid_and_the_rest_waived_matches_the_summary(): void
+    {
+        $loan = $this->releasedDaysAgo(60, grace: 0);
+        $first = $this->moveSchedule($loan, 1, 40);
+        $this->moveSchedule($loan, 2, 10);
+
+        // The payment stamps the late penalty first, then pays part of it.
+        $this->pay($loan, 50, Carbon::today());
+
+        $first->refresh();
+        $this->assertGreaterThan(50, (float) $first->penalty_amount, 'The penalty must exceed what was paid for this to test anything.');
+        $this->assertEquals(50, (float) $first->penalty_paid);
+
+        $adjustments = app(LoanAdjustmentService::class);
+        $waiver = $adjustments->createAdjustment($loan->fresh(), [
+            'adjustment_type' => 'penalty_waiver',
+            'new_values' => ['schedule_ids' => [$first->id]],
+        ], $this->admin);
+        $adjustments->approveAdjustment($waiver, $this->admin, 'Waive the rest');
+        $adjustments->applyAdjustment($waiver->fresh());
+
+        $first->refresh();
+        $this->assertNotNull($first->penalty_waiver_id, 'The waiver did not land.');
+        $this->assertEquals(50, (float) $first->penalty_amount, 'The waiver brings the charge down to what was paid.');
+
+        $summary = $this->getJson("/api/loans/{$loan->id}/summary")->assertOk()->json('data');
+        $rows = collect($this->getJson('/api/reports/due-past-due?per_page=100')->assertOk()->json('data'))
+            ->where('loan_id', $loan->id);
+
+        $this->assertNotEmpty($rows);
+        foreach ($rows as $row) {
+            $this->assertEquals($summary['overdue_amount'], $row['loan_past_due_amount']);
+            $this->assertEquals($summary['total_outstanding'], $row['loan_total_outstanding']);
+        }
+    }
+
+    public function test_the_totals_follow_the_branch_filter(): void
+    {
+        $other = Branch::factory()->create();
+
+        $here = $this->releasedDaysAgo(60, grace: 0);
+        $this->moveSchedule($here, 1, 20);
+
+        $there = $this->releasedDaysAgo(60, grace: 0);
+        $this->moveSchedule($there, 1, 20);
+        $this->moveSchedule($there, 2, 5);
+        $there->forceFill(['branch_id' => $other->id])->save();
+
+        foreach ([[$this->branch->id, $here, 1], [$other->id, $there, 2]] as [$branchId, $loan, $rows]) {
+            $response = $this->getJson("/api/reports/due-past-due?branch_id={$branchId}")->assertOk();
+            $summary = $this->getJson("/api/loans/{$loan->id}/summary")->json('data');
+
+            $this->assertSame($rows, $response->json('totals.count'));
+            $this->assertEquals($summary['total_outstanding'], $response->json('totals.total_outstanding'));
+            $this->assertEquals($summary['overdue_amount'], $response->json('totals.past_due_amount'));
+        }
+    }
+
+    public function test_the_totals_equal_the_distinct_loans_row_figures(): void
+    {
+        $threeRows = $this->releasedDaysAgo(60, grace: 0);
+        $this->moveSchedule($threeRows, 1, 45);
+        $this->moveSchedule($threeRows, 2, 30);
+        $this->moveSchedule($threeRows, 3, 15);
+        $this->pay($threeRows, 2500, Carbon::today()->subDays(10));
+
+        $oneRow = $this->releasedDaysAgo(60, grace: 0);
+        $this->moveSchedule($oneRow, 1, 8);
+
+        $response = $this->getJson('/api/reports/due-past-due?per_page=100')->assertOk();
+        $perLoan = collect($response->json('data'))->groupBy('loan_id');
+
+        $this->assertCount(3, $perLoan[$threeRows->id]);
+        $this->assertCount(1, $perLoan[$oneRow->id]);
+
+        $distinct = $perLoan->map(fn ($rows) => $rows->first());
+
+        $this->assertEqualsWithDelta($distinct->sum('loan_total_outstanding'), $response->json('totals.total_outstanding'), 0.001);
+        $this->assertEqualsWithDelta($distinct->sum('loan_past_due_amount'), $response->json('totals.past_due_amount'), 0.001);
+    }
+
+    public function test_another_loan_s_later_payment_does_not_leak_into_the_last_payment_date(): void
+    {
+        $earlier = $this->releasedDaysAgo(60, grace: 0);
+        $this->moveSchedule($earlier, 1, 30);
+        $this->pay($earlier, 1000, Carbon::today()->subDays(20));
+
+        $later = $this->releasedDaysAgo(60, grace: 0);
+        $this->moveSchedule($later, 1, 30);
+        $this->pay($later, 1000, Carbon::today()->subDays(2));
+
+        $rows = collect($this->getJson('/api/reports/due-past-due?per_page=100')->assertOk()->json('data'))->keyBy('loan_id');
+
+        $this->assertSame(Carbon::today()->subDays(20)->toDateString(), $rows[$earlier->id]['loan_last_payment_date']);
+        $this->assertSame(Carbon::today()->subDays(2)->toDateString(), $rows[$later->id]['loan_last_payment_date']);
     }
 
     // ── Fixtures ─────────────────────────────────────────────────────────

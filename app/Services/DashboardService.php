@@ -40,13 +40,19 @@ class DashboardService
 
         $overdueLoansCount = $this->overdueLoansCount(Carbon::today());
 
-        // Cache sparklines for 10 minutes (28 queries → 0 on cache hit)
-        $sparklines = Cache::remember('dashboard:sparklines', 600, fn () => [
+        // Cache sparklines for 10 minutes (27 queries → 0 on cache hit). v2:
+        // the overdue points moved to the grace rule, so points cached under
+        // the old key's rule are not served after a deploy.
+        $sparklines = Cache::remember('dashboard:sparklines:v2', 600, fn () => [
             'portfolio' => $this->portfolioSparkline(),
             'active_loans' => $this->activeLoansSparkline(),
             'collected' => $this->collectionsSparkline(),
-            'overdue' => $this->overdueSparkline(),
+            'overdue' => $this->pastOverdueSparkline(),
         ]);
+
+        // Today's point is the card's live figure, never a cached one, so the
+        // two always agree.
+        $sparklines['overdue'][] = ['v' => $overdueLoansCount];
 
         return [
             'total_portfolio' => round($totalPortfolio, 2),
@@ -346,14 +352,14 @@ class DashboardService
     }
 
     /**
-     * Each of the last seven days by the same rule as the card, with that day
-     * as the grace cutoff's date, so today's point is the card's figure.
-     * Payment state is today's: a period paid since that day no longer counts
-     * on it, as before.
+     * The six days before today by the same rule as the card, with that day
+     * as the grace cutoff's date; stats() adds today's point from the card.
+     * Payment state is today's, as before: a loan paid since a past day no
+     * longer counts on it. A true history would need daily snapshots.
      */
-    private function overdueSparkline(): array
+    private function pastOverdueSparkline(): array
     {
-        return collect(range(6, 0))->map(fn ($daysAgo) => [
+        return collect(range(6, 1))->map(fn ($daysAgo) => [
             'v' => $this->overdueLoansCount(Carbon::today()->subDays($daysAgo)),
         ])->toArray();
     }

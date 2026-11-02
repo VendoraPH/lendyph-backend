@@ -173,11 +173,12 @@ not one per row.
 `awaiting_me=1` keeps only the loans waiting on the signed-in user's role:
 `for_review` loans whose current approval step (the step `current_approver`
 names, the first `pending` step of the latest round) has a `role` equal to one
-of the user's active role names (a deactivated role counts for nothing),
-compared exactly. A `pending` row left in an earlier round does not count. There is no admin/super_admin bypass: those roles see
-only steps that name `admin` or `super_admin`. For the "awaiting me" badge, read
-`meta.total` of `?awaiting_me=1&per_page=1`. `awaiting_me=0` or absent changes
-nothing.
+of the user's active role names, compared exactly. A deactivated role counts
+for nothing, except `admin` and `super_admin`, which always count. A `pending`
+row left in an earlier round does not count. There is no admin/super_admin
+bypass: those roles see only steps that name `admin` or `super_admin`. For the
+"awaiting me" badge, read `meta.total` of `?awaiting_me=1&per_page=1`.
+`awaiting_me=0` or absent changes nothing.
 
 `meta.totals` adds up every loan the filters match (every filter, not just the
 page): `total_outstanding` is everything those loans still owe (the periods'
