@@ -6,6 +6,7 @@ use App\Http\Requests\Borrower\Concerns\HasBorrowerRules;
 use App\Models\Borrower;
 use App\Rules\NoDuplicateBorrower;
 use App\Services\BorrowerSubmissionTokenService;
+use App\Services\BranchAccess;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Support\Carbon;
 use Illuminate\Validation\Rule;
@@ -103,14 +104,18 @@ class StoreBorrowerRequest extends FormRequest
             $firstNameRules[] = new NoDuplicateBorrower(
                 ignoreId: $ignoreId,
                 revealDetails: (bool) $this->user(),
+                viewer: $this->user(),
             );
         }
 
         // Anonymous public-registration applicants may omit branch_id — the
         // public branch list can be empty or skipped, and an admin assigns the
         // branch during review. Authenticated operators must still pick one.
+        //
+        // An operator may only place a member in one of their own branches
+        // (BranchAccess; any branch with `branches:view_all`).
         $branchRules = $this->user()
-            ? ['required', 'exists:branches,id']
+            ? ['required', app(BranchAccess::class)->constrainBranchExists(Rule::exists('branches', 'id'), $this->user())]
             : ['nullable', 'exists:branches,id'];
 
         $rules = array_merge(

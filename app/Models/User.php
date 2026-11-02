@@ -128,9 +128,12 @@ class User extends Authenticatable
      * member of this set, never as something outside it.
      *
      * Assignment decides which branches' data the user sees unless they hold
-     * `branches:view_all` (App\Services\BranchAccess, decision 5b). It does so
-     * through local scopes only, never a global scope or a policy:
-     * tests/Feature/BranchAccessTest.php covers both.
+     * `branches:view_all` (decision 5b). App\Services\BranchAccess reads it,
+     * falling back to `users.branch_id` when this set is empty, and the HTTP
+     * layer applies it through local `visibleTo()` scopes, route-model
+     * bindings and visibility-aware `exists` rules. Never a global scope, so
+     * jobs and commands see every branch. Covered by
+     * tests/Feature/BranchAccessTest.php and BranchAccessRouteSweepTest.php.
      *
      * @return BelongsToMany<Branch, $this>
      */
@@ -186,6 +189,30 @@ class User extends Authenticatable
             $q->whereHas('branches', fn ($b) => $b->whereIn('branches.id', $branchIds))
                 ->orWhereIn('users.branch_id', $branchIds);
         });
+    }
+
+    /**
+     * Every `{user}` route parameter resolves only to a user the signed-in
+     * caller may see (scopeVisibleTo), or to the caller themselves, so another
+     * branch's account answers 404 on show, update and every action, the same
+     * answer as an id that does not exist. Without a signed-in user the
+     * binding is unscoped.
+     */
+    public function resolveRouteBindingQuery($query, $value, $field = null)
+    {
+        $query = parent::resolveRouteBindingQuery($query, $value, $field);
+        $viewer = request()->user();
+
+        // `branches:view_all` sees everyone. Checked here rather than left to
+        // scopeVisibleTo(), whose unrestricted case adds no condition and
+        // would leave only the "is the caller" half of the OR below.
+        if (! $viewer instanceof self || app(BranchAccess::class)->for($viewer) === null) {
+            return $query;
+        }
+
+        return $query->where(fn ($q) => $q
+            ->whereKey($viewer->getKey())
+            ->orWhere(fn ($visible) => $visible->visibleTo($viewer)));
     }
 
     /**

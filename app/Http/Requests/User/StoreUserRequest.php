@@ -42,9 +42,11 @@ class StoreUserRequest extends FormRequest
              * so a client that sends both, with the legacy field blanked, is
              * not failed on a value the array has already overruled.
              */
-            'branch_id' => ['required_without:branch_ids', 'nullable', 'exists:branches,id'],
+            // Within the caller's own branches unless they hold
+            // `branches:view_all` (BranchAccess).
+            'branch_id' => ['required_without:branch_ids', 'nullable', $this->assignableBranchRule()],
             'branch_ids' => ['required_without:branch_id', 'array', 'min:1'],
-            'branch_ids.*' => ['integer', 'exists:branches,id'],
+            'branch_ids.*' => ['integer', $this->assignableBranchRule()],
             'role' => ['required', 'string', 'exists:roles,name', new AssignableRole($this->user())],
         ];
     }

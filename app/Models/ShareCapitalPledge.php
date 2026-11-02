@@ -48,4 +48,20 @@ class ShareCapitalPledge extends Model
     {
         return $query->whereHas('borrower', fn ($q) => $q->members());
     }
+
+    /**
+     * Every `{pledge}` route parameter resolves only to a row whose member
+     * the signed-in user may see (Borrower::visibleTo), so another branch's
+     * row answers 404 before any validation runs. Without a signed-in user the
+     * binding is unscoped.
+     */
+    public function resolveRouteBindingQuery($query, $value, $field = null)
+    {
+        $query = parent::resolveRouteBindingQuery($query, $value, $field);
+        $user = request()->user();
+
+        return $user instanceof User
+            ? $query->whereHas('borrower', fn ($q) => $q->visibleTo($user))
+            : $query;
+    }
 }

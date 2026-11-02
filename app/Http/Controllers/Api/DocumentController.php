@@ -10,14 +10,18 @@ use App\Models\CoMaker;
 use App\Models\Document;
 use App\Models\Loan;
 use App\Services\AuditLogService;
+use Closure;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
+use Illuminate\Routing\Controllers\HasMiddleware;
+use Illuminate\Routing\Controllers\Middleware;
 use Illuminate\Support\Facades\Storage;
 use OpenApi\Attributes as OA;
 use Throwable;
 
-class DocumentController extends Controller
+class DocumentController extends Controller implements HasMiddleware
 {
     private const PARENT_MODELS = [
         'borrower' => Borrower::class,
@@ -25,15 +29,45 @@ class DocumentController extends Controller
         'loan' => Loan::class,
     ];
 
+    /**
+     * Resolve the `{borrower}`, `{coMaker}` or `{loan}` parent before anything
+     * else runs, StoreDocumentRequest's validation included.
+     *
+     * The routes can't type-hint one parent, so implicit binding never sees
+     * it. Resolving it here, through the model's own route binding, scopes it
+     * to the caller's branches exactly as a typed parameter is: another
+     * branch's parent answers 404 whatever the body, never 422.
+     */
+    public static function middleware(): array
+    {
+        return [
+            new Middleware(function (Request $request, Closure $next) {
+                foreach (self::PARENT_MODELS as $key => $modelClass) {
+                    $value = $request->route($key);
+
+                    if ($value === null || $value instanceof Model) {
+                        continue;
+                    }
+
+                    $request->route()->setParameter(
+                        $key,
+                        (new $modelClass)->resolveRouteBinding($value) ?? abort(404),
+                    );
+                }
+
+                return $next($request);
+            }, only: ['index', 'store']),
+        ];
+    }
+
     private function resolveParent(): Model
     {
-        foreach (self::PARENT_MODELS as $key => $modelClass) {
+        foreach (array_keys(self::PARENT_MODELS) as $key) {
             $value = request()->route($key);
-            if ($value === null) {
-                continue;
-            }
 
-            return $value instanceof Model ? $value : $modelClass::findOrFail($value);
+            if ($value instanceof Model) {
+                return $value;
+            }
         }
 
         abort(404, 'Document parent not found.');

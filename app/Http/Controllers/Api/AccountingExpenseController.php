@@ -144,7 +144,6 @@ class AccountingExpenseController extends Controller
     public function show(AccountingExpense $expense): JsonResponse
     {
         $this->authorize('expenses:view');
-        $this->abortUnlessVisible($expense);
 
         return $this->respond($expense);
     }
@@ -165,8 +164,6 @@ class AccountingExpenseController extends Controller
     )]
     public function update(UpdateExpenseRequest $request, AccountingExpense $expense): JsonResponse
     {
-        $this->abortUnlessVisible($expense);
-
         $expense->update($request->validated());
 
         return $this->respond($expense->refresh());
@@ -198,8 +195,6 @@ class AccountingExpenseController extends Controller
     )]
     public function pay(PayExpenseRequest $request, AccountingExpense $expense): JsonResponse
     {
-        $this->abortUnlessVisible($expense);
-
         $paid = $this->recorder->pay($expense, $request->validated(), $request->user()?->id);
 
         return $this->respond($paid);
@@ -228,13 +223,5 @@ class AccountingExpenseController extends Controller
         $branchIds = app(BranchAccess::class)->for(request()->user());
 
         return $branchIds === null ? $query : $query->whereIn('branch_id', $branchIds);
-    }
-
-    /**
-     * Another branch's row answers 404, exactly like one that does not exist.
-     */
-    private function abortUnlessVisible(AccountingExpense $expense): void
-    {
-        abort_unless(app(BranchAccess::class)->canSee(request()->user(), $expense->branch_id), 404);
     }
 }

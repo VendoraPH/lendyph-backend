@@ -21,9 +21,7 @@ use App\Http\Resources\AmortizationScheduleResource;
 use App\Http\Resources\CoMakerResource;
 use App\Http\Resources\LoanLedgerEntryResource;
 use App\Http\Resources\LoanResource;
-use App\Models\Borrower;
 use App\Models\Loan;
-use App\Models\User;
 use App\Services\AmortizationBalanceService;
 use App\Services\AutoPayService;
 use App\Services\BranchAccess;
@@ -423,36 +421,6 @@ DESC,
     }
 
     /**
-     * Refuse a body that names a borrower or loan outside the caller's
-     * branches, exactly as if the id did not exist (the `exists` rule's own
-     * message), so the answer never reveals another branch's record. A loan
-     * takes its branch from its borrower, so this is also what stops a loan
-     * being created in a branch its creator can't see.
-     *
-     * @param  array<string, mixed>  $input
-     */
-    private function assertReferencesVisible(User $viewer, array $input): void
-    {
-        $references = [
-            'borrower_id' => Borrower::class,
-            'loan_id' => Loan::class,
-            'source_loan_id' => Loan::class,
-        ];
-
-        foreach ($references as $field => $model) {
-            if (! filled($input[$field] ?? null)) {
-                continue;
-            }
-
-            if (! $model::visibleTo($viewer)->whereKey($input[$field])->exists()) {
-                throw ValidationException::withMessages([
-                    $field => __('validation.exists', ['attribute' => str_replace('_', ' ', $field)]),
-                ]);
-            }
-        }
-    }
-
-    /**
      * Order the loans list by one already-whitelisted sort key.
      *
      * `$sort` has been checked against self::SORT_KEYS by index() before it
@@ -557,8 +525,6 @@ DESC,
     )]
     public function store(StoreLoanRequest $request): JsonResponse
     {
-        $this->assertReferencesVisible($request->user(), $request->validated());
-
         $loan = $this->loanService->createLoan($request->validated(), $request->user());
         $loan->load('borrower', 'loanProduct', 'branch', 'coMakers', 'createdByUser');
 
@@ -1290,8 +1256,6 @@ DESC,
     )]
     public function formPreview(PreviewLoanRequest $request): JsonResponse
     {
-        $this->assertReferencesVisible($request->user(), $request->validated());
-
         return response()->json(['data' => $this->loanService->formPreview($request->validated())]);
     }
 

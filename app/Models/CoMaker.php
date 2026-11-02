@@ -72,4 +72,20 @@ class CoMaker extends Model
             ->withPivot('added_by')
             ->withTimestamps();
     }
+
+    /**
+     * Every `{coMaker}` route parameter resolves only to a co-maker whose
+     * borrower the signed-in user may see (Borrower::visibleTo), so another
+     * branch's co-maker answers 404. Without a signed-in user the binding is
+     * unscoped.
+     */
+    public function resolveRouteBindingQuery($query, $value, $field = null)
+    {
+        $query = parent::resolveRouteBindingQuery($query, $value, $field);
+        $user = request()->user();
+
+        return $user instanceof User
+            ? $query->whereHas('borrower', fn ($q) => $q->visibleTo($user))
+            : $query;
+    }
 }

@@ -21,10 +21,11 @@ class ShareCapitalService
      * somebody who is not a member — and now that the pledge list hides those
      * rows, the flag would not even be visible to switch back off.
      */
-    public function processAutoCredit(User $user): AutoCreditRun
+    public function processAutoCredit(User $user, ?User $scopeTo = null): AutoCreditRun
     {
         $eligiblePledges = ShareCapitalPledge::with('borrower')
             ->forMembers()
+            ->when($scopeTo !== null, fn ($q) => $q->whereHas('borrower', fn ($b) => $b->visibleTo($scopeTo)))
             ->where('auto_credit', true)
             ->where('amount', '>', 0)
             ->get();
@@ -63,11 +64,17 @@ class ShareCapitalService
      * post; a `pending` applicant must not show up under `no_pledge_members`
      * as somebody to chase for a pledge amount.
      *
+     * With `$scopeTo`, only the pledges of members in that user's branches
+     * (Borrower::visibleTo), the same set processAutoCredit() posts for them.
+     *
      * @return array<string, mixed>
      */
-    public function getAutoCreditStatus(): array
+    public function getAutoCreditStatus(?User $scopeTo = null): array
     {
-        $allPledges = ShareCapitalPledge::with('borrower')->forMembers()->get();
+        $allPledges = ShareCapitalPledge::with('borrower')
+            ->forMembers()
+            ->when($scopeTo !== null, fn ($q) => $q->whereHas('borrower', fn ($b) => $b->visibleTo($scopeTo)))
+            ->get();
 
         $activeMembers = $allPledges->filter(fn ($p) => $p->auto_credit && (float) $p->amount > 0);
         $disabledMembers = $allPledges->filter(fn ($p) => ! $p->auto_credit);

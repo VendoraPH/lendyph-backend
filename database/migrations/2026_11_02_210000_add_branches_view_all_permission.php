@@ -13,10 +13,11 @@ use Spatie\Permission\PermissionRegistrar;
  * branch data at all.
  *
  * Granted to the roles that oversee the whole cooperative: super_admin, admin,
- * manager, general_bookkeeper, and every board role, meaning every role whose
- * key starts with `bod`. That covers bod1-bod7 and custom board roles such as
- * `bod_chairwoman`, which exists on staging. Any other custom role gets it
- * only when an admin ticks it in the role editor.
+ * manager, general_bookkeeper, and every board role: a key that is `bod`
+ * followed by digits, or starts with `bod_` (case-sensitive). That covers
+ * bod1-bod7 and custom board roles such as `bod_chairwoman`, which exists on
+ * staging, and not an unrelated key that merely begins with "bod". Any other
+ * custom role gets it only when an admin ticks it in the role editor.
  *
  * Mirrors 2026_10_03_110000_add_loan_products_manage_permission. This migration
  * grants it on already-migrated deployments; RoleAndPermissionSeeder carries
@@ -29,7 +30,10 @@ return new class extends Migration
 
     private const ROLES = ['super_admin', 'admin', 'manager', 'general_bookkeeper'];
 
-    private const BOARD_ROLE_PREFIX = 'bod';
+    /**
+     * Same pattern as RoleAndPermissionSeeder::BOARD_ROLE_PATTERN.
+     */
+    private const BOARD_ROLE_PATTERN = '/^bod(\d+$|_)/';
 
     public function up(): void
     {
@@ -47,11 +51,14 @@ return new class extends Migration
             ->where('name', self::PERMISSION)
             ->value('id');
 
+        // Matched in PHP rather than with LIKE or REGEXP: both follow the
+        // column's case-insensitive collation, and the board pattern is
+        // case-sensitive.
         $roleIds = DB::table('roles')
             ->where('guard_name', $guard)
-            ->where(fn ($q) => $q
-                ->whereIn('name', self::ROLES)
-                ->orWhere('name', 'like', self::BOARD_ROLE_PREFIX.'%'))
+            ->get(['id', 'name'])
+            ->filter(fn (object $role) => in_array($role->name, self::ROLES, true)
+                || preg_match(self::BOARD_ROLE_PATTERN, $role->name) === 1)
             ->pluck('id');
 
         foreach ($roleIds as $roleId) {

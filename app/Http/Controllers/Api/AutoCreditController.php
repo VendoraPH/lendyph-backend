@@ -25,7 +25,8 @@ class AutoCreditController extends Controller
     {
         $this->authorize('share_capital:view');
 
-        return response()->json(['data' => $this->shareCapitalService->getAutoCreditStatus()]);
+        // Only the caller's branches' members (BranchAccess; all with view_all).
+        return response()->json(['data' => $this->shareCapitalService->getAutoCreditStatus(request()->user())]);
     }
 
     #[OA\Post(
@@ -42,7 +43,8 @@ class AutoCreditController extends Controller
     {
         $this->authorize('auto_credit:process');
 
-        $run = $this->shareCapitalService->processAutoCredit(request()->user());
+        // Credits only the caller's branches' members (all with view_all).
+        $run = $this->shareCapitalService->processAutoCredit(request()->user(), request()->user());
 
         return response()->json([
             'message' => "Auto-credit processed for {$run->member_count} members. Total: ₱".number_format((float) $run->total_amount, 2).'.',

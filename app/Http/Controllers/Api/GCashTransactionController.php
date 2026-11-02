@@ -6,7 +6,9 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\GCash\PreviewGCashTransactionRequest;
 use App\Http\Requests\GCash\StoreGCashTransactionRequest;
 use App\Http\Resources\GCashTransactionResource;
+use App\Models\Borrower;
 use App\Models\GCashTransaction;
+use App\Services\BranchAccess;
 use App\Services\GCashService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -46,8 +48,15 @@ class GCashTransactionController extends Controller
             'per_page' => ['nullable', 'integer', 'min:1'],
         ])['per_page'] ?? 25);
 
+        $branchIds = app(BranchAccess::class)->for($request->user());
+
         $transactions = GCashTransaction::query()
             ->with(['borrower', 'nonMember', 'transactor'])
+            // Member transactions follow the member's branch (BranchAccess).
+            // Walk-in transactions belong to no branch and stay visible.
+            ->when($branchIds !== null, fn ($q) => $q->where(fn ($party) => $party
+                ->whereNull('borrower_id')
+                ->orWhereHas('borrower', fn ($b) => $b->whereIn('borrowers.branch_id', $branchIds))))
             ->when($request->query('type'), fn ($q, $t) => $q->where('type', $t))
             ->when($request->query('status'), fn ($q, $s) => $q->where('status', $s))
             ->when($request->query('borrower_id'), fn ($q, $b) => $q->where('borrower_id', $b))
@@ -151,6 +160,13 @@ class GCashTransactionController extends Controller
     public function markPaid(GCashTransaction $transaction): JsonResponse
     {
         $this->authorize('gcash:transact');
+
+        // Another branch's member transaction answers 404, like a missing one.
+        abort_if(
+            $transaction->borrower_id !== null
+                && ! Borrower::visibleTo(request()->user())->whereKey($transaction->borrower_id)->exists(),
+            404,
+        );
 
         $tx = $this->gcash->markPaid($transaction, request()->user());
         $tx->load(['borrower', 'nonMember', 'transactor', 'paidByUser']);

@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\User;
 use Illuminate\Http\Request;
+use Illuminate\Validation\Rules\Exists;
 
 /**
  * Which branches a user may see (decision 5b, least privilege).
@@ -68,6 +69,22 @@ final class BranchAccess
     }
 
     /**
+     * Narrow a query to rows whose `$column` is one of $user's branches. Rows
+     * with no branch drop out unless $user holds `branches:view_all`.
+     *
+     * @template TQuery of \Illuminate\Contracts\Database\Query\Builder
+     *
+     * @param  TQuery  $query
+     * @return TQuery
+     */
+    public function constrain($query, User $user, string $column)
+    {
+        $branchIds = $this->for($user);
+
+        return $branchIds === null ? $query : $query->whereIn($column, $branchIds);
+    }
+
+    /**
      * Refuse a list's `?branch_id=` filter naming a branch $user can't see.
      *
      * 403 rather than an empty page: the caller asked for a branch outside
@@ -81,6 +98,69 @@ final class BranchAccess
         }
 
         abort_unless($this->canSee($user, (int) $branchId), 403, 'You do not have access to this branch.');
+    }
+
+    /**
+     * Narrow an `exists` rule on a table with its own `branch_id` (borrowers,
+     * loans) to the rows $user may see, so an id in another branch fails with
+     * the same "doesn't exist" message as a missing one. Unchanged without a
+     * user or with `branches:view_all`.
+     */
+    public function constrainExists(Exists $rule, ?User $user): Exists
+    {
+        $branchIds = $user === null ? null : $this->for($user);
+
+        return $branchIds === null ? $rule : $rule->whereIn('branch_id', $branchIds);
+    }
+
+    /**
+     * Narrow an `exists` rule on `branches` to $user's own branches, for any
+     * field that assigns a branch (a user's, a member's, a journal's): a
+     * caller can only place things in branches they can see.
+     */
+    public function constrainBranchExists(Exists $rule, ?User $user): Exists
+    {
+        $branchIds = $user === null ? null : $this->for($user);
+
+        return $branchIds === null ? $rule : $rule->whereIn('id', $branchIds);
+    }
+
+    /**
+     * Narrow an `exists` rule on `users` to the users $user may see (those
+     * sharing one of their branches, as User::scopeVisibleTo()).
+     */
+    public function constrainUserExists(Exists $rule, ?User $user): Exists
+    {
+        $branchIds = $user === null ? null : $this->for($user);
+
+        if ($branchIds === null) {
+            return $rule;
+        }
+
+        return $rule->where(fn ($query) => $query
+            ->whereIn('users.branch_id', $branchIds)
+            ->orWhereExists(fn ($pivot) => $pivot->from('branch_user')
+                ->whereColumn('branch_user.user_id', 'users.id')
+                ->whereIn('branch_user.branch_id', $branchIds)));
+    }
+
+    /**
+     * The branch a restricted user's new row defaults to: their legacy
+     * primary branch, else their first assigned one. Null for
+     * `branches:view_all` (an organisation-wide row) and for a user with no
+     * branch.
+     */
+    public function defaultBranchFor(User $user): ?int
+    {
+        $branchIds = $this->for($user);
+
+        if ($branchIds === null || $branchIds === []) {
+            return null;
+        }
+
+        $primary = $user->branch_id === null ? null : (int) $user->branch_id;
+
+        return in_array($primary, $branchIds, true) ? $primary : $branchIds[0];
     }
 
     /**

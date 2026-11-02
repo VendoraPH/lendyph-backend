@@ -57,4 +57,32 @@ class Document extends Model
             ['document' => $this->getKey()],
         ));
     }
+
+    /**
+     * Every `{document}` route parameter resolves only to a document whose
+     * owner the signed-in user may see: a borrower or loan in their branches,
+     * or a co-maker whose borrower is. Another branch's document answers 404.
+     *
+     * Without a signed-in user the binding is unscoped, which is what keeps
+     * the signed `/files/documents/{document}` links working: the signature
+     * is their authorisation.
+     */
+    public function resolveRouteBindingQuery($query, $value, $field = null)
+    {
+        $query = parent::resolveRouteBindingQuery($query, $value, $field);
+        $user = request()->user();
+
+        if (! $user instanceof User) {
+            return $query;
+        }
+
+        return $query->whereHasMorph(
+            'documentable',
+            [Borrower::class, CoMaker::class, Loan::class],
+            fn ($owner, string $type) => match ($type) {
+                CoMaker::class => $owner->whereHas('borrower', fn ($q) => $q->visibleTo($user)),
+                default => $owner->visibleTo($user),
+            },
+        );
+    }
 }

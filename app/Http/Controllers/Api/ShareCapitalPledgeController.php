@@ -44,15 +44,6 @@ class ShareCapitalPledgeController extends Controller
      * permission; it is the borrower's registration state that is wrong. That
      * is the same shape of refusal approveRegistration() already returns.
      */
-    /**
-     * Another branch's pledge answers 404, exactly like one that does not
-     * exist. A pledge takes its branch from its member (BranchAccess).
-     */
-    private function abortUnlessVisible(ShareCapitalPledge $pledge): void
-    {
-        abort_unless(app(BranchAccess::class)->canSee(request()->user(), $pledge->borrower?->branch_id), 404);
-    }
-
     private function assertBorrowerIsMember(ShareCapitalPledge $pledge): void
     {
         $status = $pledge->borrower?->status;
@@ -169,7 +160,6 @@ DESC,
     )]
     public function update(UpdateShareCapitalPledgeRequest $request, ShareCapitalPledge $pledge): ShareCapitalPledgeResource
     {
-        $this->abortUnlessVisible($pledge);
         $this->assertBorrowerIsMember($pledge);
 
         $pledge->update($request->validated());
@@ -195,7 +185,6 @@ DESC,
     {
         $this->authorize('share_capital:update');
 
-        $this->abortUnlessVisible($pledge);
         $this->assertBorrowerIsMember($pledge);
 
         $pledge->update(['auto_credit' => ! $pledge->auto_credit]);
@@ -222,7 +211,6 @@ DESC,
     )]
     public function manualEntry(ShareCapitalManualEntryRequest $request, ShareCapitalPledge $pledge): JsonResponse
     {
-        $this->abortUnlessVisible($pledge);
         $this->assertBorrowerIsMember($pledge);
 
         $entry = $this->shareCapitalService->createManualEntry(

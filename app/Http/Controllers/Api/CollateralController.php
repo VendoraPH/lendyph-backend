@@ -214,8 +214,6 @@ class CollateralController extends Controller
     )]
     public function store(StoreCollateralRequest $request): JsonResponse
     {
-        $this->assertBorrowerVisible($request->user(), $request->validated('borrower_id'));
-
         $collateral = Collateral::create($request->validated());
         $collateral->load(['collateralType', 'activeLoans']);
 
@@ -246,7 +244,6 @@ class CollateralController extends Controller
     public function show(Collateral $collateral): CollateralResource
     {
         $this->authorize('collaterals:view');
-        $this->abortUnlessVisible($collateral);
 
         $collateral->load(['collateralType', 'activeLoans']);
 
@@ -277,13 +274,7 @@ class CollateralController extends Controller
     )]
     public function update(UpdateCollateralRequest $request, Collateral $collateral): CollateralResource
     {
-        $this->abortUnlessVisible($collateral);
-
         $validated = $request->validated();
-
-        if (array_key_exists('borrower_id', $validated)) {
-            $this->assertBorrowerVisible($request->user(), $validated['borrower_id']);
-        }
 
         // Locked, because the guard below is check-then-act and the thing it
         // checks is written by somebody else's endpoint.
@@ -507,7 +498,6 @@ class CollateralController extends Controller
     public function destroy(Collateral $collateral): JsonResponse
     {
         $this->authorize('collaterals:delete');
-        $this->abortUnlessVisible($collateral);
 
         $attachedCount = $collateral->loans()->count();
         if ($attachedCount > 0) {
@@ -689,37 +679,5 @@ class CollateralController extends Controller
         });
 
         return response()->json(['message' => 'Collateral detached successfully.']);
-    }
-
-    /**
-     * Another branch's collateral answers 404, exactly like one that does not
-     * exist. Collateral takes its branch from its member (BranchAccess).
-     */
-    private function abortUnlessVisible(Collateral $collateral): void
-    {
-        $branchId = Borrower::whereKey($collateral->borrower_id)->value('branch_id');
-
-        abort_unless(
-            app(BranchAccess::class)->canSee(request()->user(), $branchId === null ? null : (int) $branchId),
-            404,
-        );
-    }
-
-    /**
-     * Refuse a `borrower_id` outside the caller's branches as if it did not
-     * exist, so collateral is never registered to, or moved to, a member the
-     * caller can't see.
-     */
-    private function assertBorrowerVisible(User $viewer, mixed $borrowerId): void
-    {
-        if (! filled($borrowerId)) {
-            return;
-        }
-
-        if (! Borrower::visibleTo($viewer)->whereKey($borrowerId)->exists()) {
-            throw ValidationException::withMessages([
-                'borrower_id' => __('validation.exists', ['attribute' => 'borrower id']),
-            ]);
-        }
     }
 }

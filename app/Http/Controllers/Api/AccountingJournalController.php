@@ -184,7 +184,6 @@ class AccountingJournalController extends Controller
     public function show(AccountingJournal $journal): JsonResponse
     {
         $this->authorize('journals:view');
-        $this->abortUnlessVisible($journal);
 
         return $this->respond($journal);
     }
@@ -207,8 +206,6 @@ class AccountingJournalController extends Controller
     )]
     public function update(UpdateJournalRequest $request, AccountingJournal $journal): JsonResponse
     {
-        $this->abortUnlessVisible($journal);
-
         $updated = $this->poster->updateDraft(
             $journal,
             $request->journalAttributes(),
@@ -236,7 +233,6 @@ class AccountingJournalController extends Controller
     public function post(AccountingJournal $journal): JsonResponse
     {
         $this->authorize('journals:post');
-        $this->abortUnlessVisible($journal);
 
         $posted = $this->poster->post($journal, request()->user()?->id);
 
@@ -267,8 +263,6 @@ class AccountingJournalController extends Controller
     )]
     public function reverse(ReverseJournalRequest $request, AccountingJournal $journal): JsonResponse
     {
-        $this->abortUnlessVisible($journal);
-
         $reversal = $this->poster->reverse(
             $journal,
             $request->input('date') ?: now()->toDateString(),
@@ -314,13 +308,5 @@ class AccountingJournalController extends Controller
         $branchIds = app(BranchAccess::class)->for(request()->user());
 
         return $branchIds === null ? $query : $query->whereIn('branch_id', $branchIds);
-    }
-
-    /**
-     * Another branch's row answers 404, exactly like one that does not exist.
-     */
-    private function abortUnlessVisible(AccountingJournal $journal): void
-    {
-        abort_unless(app(BranchAccess::class)->canSee(request()->user(), $journal->branch_id), 404);
     }
 }

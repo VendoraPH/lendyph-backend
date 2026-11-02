@@ -12,10 +12,11 @@ use Spatie\Permission\PermissionRegistrar;
 class RoleAndPermissionSeeder extends Seeder
 {
     /**
-     * Every role whose key starts with this is a board role and holds
-     * `branches:view_all`.
+     * A board role's key: `bod` followed by digits, or starting with `bod_`
+     * (case-sensitive). Board roles hold `branches:view_all`. Same pattern as
+     * 2026_11_02_210000_add_branches_view_all_permission.
      */
-    private const BOARD_ROLE_PREFIX = 'bod';
+    public const BOARD_ROLE_PATTERN = '/^bod(\d+$|_)/';
 
     /**
      * Seeding writes no audit rows: a fresh database's roles are the baseline,
@@ -131,7 +132,7 @@ class RoleAndPermissionSeeder extends Seeder
             // branches they are assigned to (App\Services\BranchAccess).
             // Held by the roles that oversee the whole cooperative: super_admin
             // and admin (Permission::all() below), manager, general_bookkeeper
-            // and every board role (key starting with `bod`). Mirrors
+            // and every board role (BOARD_ROLE_PATTERN). Mirrors
             // 2026_11_02_210000_add_branches_view_all_permission, which grants
             // it on the already-migrated deployments.
             BranchAccess::VIEW_ALL,
@@ -383,7 +384,7 @@ class RoleAndPermissionSeeder extends Seeder
                 ] : [],
                 $roleName === 'manager' ? $managerAccountingPermissions : [],
                 // Managers and the board oversee every branch.
-                $roleName === 'manager' || str_starts_with($roleName, self::BOARD_ROLE_PREFIX)
+                $roleName === 'manager' || preg_match(self::BOARD_ROLE_PATTERN, $roleName) === 1
                     ? [BranchAccess::VIEW_ALL]
                     : [],
             ));
@@ -393,8 +394,8 @@ class RoleAndPermissionSeeder extends Seeder
         // `bod_chairwoman`) oversee every branch too, as the migration grants.
         // Additive only: their other permissions are the admins' to set.
         Role::where('guard_name', $guard)
-            ->where('name', 'like', self::BOARD_ROLE_PREFIX.'%')
             ->get()
+            ->filter(fn (Role $role) => preg_match(self::BOARD_ROLE_PATTERN, $role->name) === 1)
             ->each(fn (Role $role) => $role->givePermissionTo(BranchAccess::VIEW_ALL));
     }
 }

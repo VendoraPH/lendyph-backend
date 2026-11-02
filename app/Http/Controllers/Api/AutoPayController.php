@@ -39,6 +39,8 @@ class AutoPayController extends Controller
             dateFrom: $request->input('date_from'),
             dateTo: $request->input('date_to'),
             includeScheduleIds: $request->input('include_schedule_ids', []) ?? [],
+            // Only the caller's branches (BranchAccess; all with view_all).
+            scopeTo: $request->user(),
         );
 
         return response()->json(['data' => $data]);
@@ -77,6 +79,8 @@ class AutoPayController extends Controller
             dateTo: $request->input('date_to'),
             includeScheduleIds: $request->input('include_schedule_ids', []) ?? [],
             user: $request->user(),
+            // Only the caller's branches (BranchAccess; all with view_all).
+            scopeTo: $request->user(),
         );
 
         return response()->json(['data' => $result], 201);
