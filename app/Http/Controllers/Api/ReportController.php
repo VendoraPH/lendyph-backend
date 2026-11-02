@@ -774,13 +774,15 @@ class ReportController extends Controller
             ->with('loan.borrower');
 
         return $this->streamCsv('repayments.csv', [
-            'Receipt #', 'Borrower', 'Loan #', 'Date', 'Amount', 'Method', 'Status',
+            'Receipt #', 'Borrower', 'Loan #', 'Date', 'Amount', 'Insurance Premium', 'Method', 'Status',
         ], $query->lazy(500)->map(fn ($r) => [
             $r->receipt_number,
             $r->loan?->borrower?->full_name ?? '',
             $r->loan?->loan_account_number ?? '',
             $r->payment_date?->toDateString() ?? '',
             $r->amount_paid,
+            // The part of Amount that paid the insurance premium owed, first.
+            $r->insurance_applied,
             $r->method ?? 'cash',
             $r->status,
         ]));

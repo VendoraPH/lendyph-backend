@@ -87,6 +87,24 @@ class InsuranceOwedReportsTest extends TestCase
             ->assertJsonPath('totals.total_insurance_applied', fn ($v) => abs((float) $v - 550.00) < 0.001);
     }
 
+    public function test_the_repayments_export_breaks_out_the_premium_collected(): void
+    {
+        $loan = $this->loanOwingPremium();
+        $repayment = $this->pay($loan, 1000);
+
+        $content = $this->get('/api/reports/repayments/export?'.$this->today())->assertOk()->streamedContent();
+        $rows = array_map('str_getcsv', array_values(array_filter(preg_split('/\r?\n/', ltrim($content, "\u{FEFF}")))));
+
+        $header = $rows[0];
+        $column = array_search('Insurance Premium', $header, true);
+        $this->assertNotFalse($column, 'the export has no Insurance Premium column');
+
+        $row = collect($rows)->first(fn (array $r): bool => ($r[0] ?? null) === $repayment->receipt_number);
+        $this->assertNotNull($row, 'setup: the payment is in the export');
+        $this->assertEqualsWithDelta(self::OWED, (float) $row[$column], 0.001);
+        $this->assertEqualsWithDelta(1000.00, (float) $row[array_search('Amount', $header, true)], 0.001);
+    }
+
     public function test_the_statement_of_account_runs_the_premium_through_its_balance(): void
     {
         $loan = $this->loanOwingPremium();
