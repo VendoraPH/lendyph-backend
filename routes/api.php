@@ -40,6 +40,7 @@ use App\Http\Controllers\Api\HealthController;
 use App\Http\Controllers\Api\LoanAdjustmentController;
 use App\Http\Controllers\Api\LoanApprovalStepController;
 use App\Http\Controllers\Api\LoanController;
+use App\Http\Controllers\Api\LoanLedgerController;
 use App\Http\Controllers\Api\LoanProductController;
 use App\Http\Controllers\Api\PromissoryNoteController;
 use App\Http\Controllers\Api\RepaymentController;
@@ -245,6 +246,8 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::post('/loans/{loan}/extend', [LoanController::class, 'extend']);
     Route::post('/loans/{loan}/restructure', [LoanController::class, 'restructure']);
     Route::get('/loans/{loan}/ledger-entries', [LoanController::class, 'ledgerEntries']);
+    // The Ledger with server running balances (LoanLedgerService), `loans:view`.
+    Route::get('/loans/{loan}/ledger', [LoanLedgerController::class, 'show'])->whereNumber('loan');
     Route::patch('/loans/{loan}/auto-pay', [LoanController::class, 'toggleAutoPay']);
     Route::patch('/loans/{loan}/account-officer', [LoanController::class, 'assignAccountOfficer'])->whereNumber('loan');
     Route::get('/loans/{loan}/amortization-preview', [LoanController::class, 'amortizationPreview']);
