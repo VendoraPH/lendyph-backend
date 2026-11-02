@@ -20,11 +20,11 @@ Returns all financial terms, deductions, and amortization schedule for printing/
 
 `totals` carries `total_principal`, `total_interest`, `total_obligation`, `total_amortization` (the schedule's total amortization column), `total_deductions`, `net_proceeds`, `total_finance_charges` (interest plus the cooperative's own fees only), `total_non_finance_charges` and `unitemised_deductions` (total deductions less the itemised `deductions.items`, signed: negative when the items add up to more than the total, 0 when they agree).
 
-Before release (`released_at` null), the catalog fees the release will charge (the same fee rules GET /api/loans/{loan}/release-preview applies) are added after the stored deductions, each marked `provisional`: true, in `deductions.items` and on its finance or non-finance line. `deductions.total_deductions`, `totals.total_deductions`, the three `net_proceeds` and the amount financed include them, so the net proceeds equal the release preview's `net_proceeds` before insurance. Insurance is chosen at release, so it is not on the statement until then. Once released the fees are stored deductions, no longer provisional.
+Before release (`released_at` null, and only for an open application: draft, for review or approved; a rejected or void loan gets none), the catalog fees the release will charge (the same fee rules GET /api/loans/{loan}/release-preview applies) are added after the stored deductions, each marked `provisional`: true with `provisional_reason`: "release_fee", in `deductions.items` and on its finance or non-finance line. A catalog fee typed as insurance shows on the "Insurance Premium" line, which is then marked provisional with that reason. Fees that would take the net proceeds below zero answer the release preview's own 422 (`errors.fees`, same message) instead of a negative net. `deductions.total_deductions`, `totals.total_deductions`, the three `net_proceeds` and the amount financed include them, so the net proceeds equal the release preview's `net_proceeds` before insurance. Insurance is chosen at release, so it is not on the statement until then. Once released the fees are stored deductions, no longer provisional.
 
 Each deduction item is sorted by its type, as the release journal books it:
-- `finance_charges`: `interest`, `items` (`{name, amount}`, plus `provisional`: true on a fee the release will charge: processing and service fees, catalog fees and any other untyped deduction, then the unitemised remainder as "Other Charges" when positive or "Adjustment" when negative, then before release the provisional catalog fees) and `total`.
-- `non_finance_charges`: `items` (`{name, amount, deducted, owed}`, plus `provisional` where noted: notarial fees, taxes (a name containing "tax" or "documentary stamp", or "DST"; a tax-type catalog fee before release is `provisional`: true, all deducted, none owed), and one "Insurance Premium" line whose `amount` is the premium charged, `deducted` what was collected at release and `owed` what the release left unpaid; on a restructure that carried premium over, an "Insurance premium carried from the previous loan" line, all owed, none deducted, with `provisional`: true before release, when it is the open source loan's live premium owed, false after) and `total` (of `amount`).
+- `finance_charges`: `interest`, `items` (`{name, amount}`, plus `provisional`: true and `provisional_reason`: "release_fee" on a fee the release will charge: processing and service fees, catalog fees and any other untyped deduction, then the unitemised remainder as "Other Charges" when positive or "Adjustment" when negative, then before release the provisional catalog fees) and `total`.
+- `non_finance_charges`: `items` (`{name, amount, deducted, owed}`, plus `provisional` where noted: notarial fees, taxes (a name containing "tax" or "documentary stamp", or "DST"; a tax-type catalog fee before release is `provisional`: true with `provisional_reason`: "release_fee", all deducted, none owed), and one "Insurance Premium" line whose `amount` is the premium charged, `deducted` what was collected at release and `owed` what the release left unpaid; on a restructure that carried premium over, an "Insurance premium carried from the previous loan" line, all owed, none deducted, with `provisional`: true and `provisional_reason`: "carried_premium" before release, when it is the open source loan's live premium owed, `provisional`: false and no reason after) and `total` (of `amount`).
 - `proceeds`: `principal`, `finance_charges_deducted`, `non_finance_charges_deducted`, `share_capital` (the member's own equity, never a charge) and `net_proceeds`; principal less the three deducted parts is the net proceeds to the centavo.
 - `rates`: `contractual_rate` and `rate_frequency` as quoted, `nominal_annual_rate` (the rate times the periods in a year of its quoted period; null when that period is unknown), and `effective_rate_monthly` / `effective_rate_annual` per BSP Circular 730: the rate per period that discounts each instalment's total due to the amount financed (principal less the finance charges deducted), times the payment frequency's periods in a year (a loan paid at maturity: 12 / its months or 365 / its days), monthly being the annual over 12. Percent to 4 places; null when it cannot be solved.
 DESC,
@@ -44,6 +44,7 @@ DESC,
                                 new OA\Property(property: 'name', type: 'string'),
                                 new OA\Property(property: 'amount', type: 'number', format: 'float'),
                                 new OA\Property(property: 'provisional', type: 'boolean', description: 'Present and true on a catalog fee the release will charge (before release only).'),
+                                new OA\Property(property: 'provisional_reason', type: 'string', enum: ['release_fee', 'carried_premium'], description: 'Present on a provisional line only: "release_fee" for a catalog fee the release will charge, "carried_premium" for premium a restructure will carry from the loan it closes.'),
                             ])),
                             new OA\Property(property: 'total_deductions', type: 'number', format: 'float'),
                             new OA\Property(property: 'net_proceeds', type: 'number', format: 'float'),
@@ -61,6 +62,7 @@ DESC,
                                 new OA\Property(property: 'name', type: 'string'),
                                 new OA\Property(property: 'amount', type: 'number', format: 'float'),
                                 new OA\Property(property: 'provisional', type: 'boolean', description: 'Present and true on a catalog fee the release will charge (before release only).'),
+                                new OA\Property(property: 'provisional_reason', type: 'string', enum: ['release_fee', 'carried_premium'], description: 'Present on a provisional line only: "release_fee" for a catalog fee the release will charge, "carried_premium" for premium a restructure will carry from the loan it closes.'),
                             ])),
                             new OA\Property(property: 'total', type: 'number', format: 'float'),
                         ]),
@@ -71,6 +73,7 @@ DESC,
                                 new OA\Property(property: 'deducted', type: 'number', format: 'float'),
                                 new OA\Property(property: 'owed', type: 'number', format: 'float'),
                                 new OA\Property(property: 'provisional', type: 'boolean', description: 'Present on a line that can still change before release: a catalog fee the release will charge, or premium carried from the loan a restructure closes.'),
+                                new OA\Property(property: 'provisional_reason', type: 'string', enum: ['release_fee', 'carried_premium'], description: 'Present on a provisional line only: "release_fee" for a catalog fee the release will charge, "carried_premium" for premium a restructure will carry from the loan it closes.'),
                             ])),
                             new OA\Property(property: 'total', type: 'number', format: 'float'),
                         ]),
@@ -91,7 +94,7 @@ DESC,
                     ]),
                 ]),
             ),
-            new OA\Response(response: 422, description: 'Loan not eligible for disclosure'),
+            new OA\Response(response: 422, description: 'Loan not eligible for disclosure, or (before release) the catalog fees would take the net proceeds below zero: `errors.fees`, as the release preview answers'),
             new OA\Response(response: 404, description: 'Loan not found'),
         ],
     )]
