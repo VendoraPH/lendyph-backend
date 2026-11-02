@@ -21,7 +21,7 @@ class StoreRepaymentRequest extends FormRequest
 
         return [
             'payment_date' => ['required', 'date', 'before_or_equal:today', self::notBeforeRelease($loan instanceof Loan ? $loan : null)],
-            'amount_paid' => ['required', 'numeric', 'min:0.01'],
+            'amount_paid' => ['required', 'numeric', 'decimal:0,2', 'min:0.01'],
             'method' => ['sometimes', 'in:cash,gcash,maya,bank_transfer,online'],
             'reference_number' => ['nullable', 'string', 'max:100', 'required_unless:method,cash'],
             'remarks' => ['nullable', 'string', 'max:1000'],

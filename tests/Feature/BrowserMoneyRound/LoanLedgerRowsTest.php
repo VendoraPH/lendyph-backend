@@ -234,8 +234,7 @@ class LoanLedgerRowsTest extends TestCase
     {
         // One month at 3%, ₱61,234.57: ₱1,837.04 interest. Released, then
         // due ten days ago: a ₱1,224.69 penalty (2%) is taken first.
-        $loan = $this->releasedLoanFor(principal: self::PRINCIPAL, product: ['interest_method' => 'upon_maturity', 'term' => 1]);
-        $loan->amortizationSchedules()->update(['due_date' => now()->subDays(10)->toDateString()]);
+        $loan = $this->overdueOneMonthLoan();
         $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'pay'])->assertOk();
 
         $ledger = $this->ledger($loan);
@@ -375,10 +374,18 @@ class LoanLedgerRowsTest extends TestCase
     }
 
     /** One month at 3% on ₱61,234.57 (₱1,837.04 interest), due ten days ago: a ₱1,224.69 penalty. */
+    /**
+     * Released on 10 Jan, due 10 Feb, and on 20 Feb ten days overdue. On the
+     * fixed clock an extension moves it exactly one anchored cycle, to 10 Mar
+     * (an overdue loan moves to the first anchored date after the day it is
+     * extended).
+     */
     private function overdueOneMonthLoan(): Loan
     {
+        $this->travelTo(Carbon::parse('2026-01-10 09:00'));
         $loan = $this->releasedLoanFor(principal: self::PRINCIPAL, product: ['interest_method' => 'upon_maturity', 'term' => 1]);
-        $loan->amortizationSchedules()->update(['due_date' => now()->subDays(10)->toDateString()]);
+        $this->travelTo(Carbon::parse('2026-02-20 09:00'));
+        $this->assertSame('2026-02-10', $loan->amortizationSchedules()->sole()->due_date->toDateString(), 'setup: due ten days ago');
 
         return $loan->fresh();
     }

@@ -299,9 +299,18 @@ class RepaymentService
             ->whereIn('status', ['pending', 'partial', 'overdue'])
             ->count();
 
+        // On a build-up loan, a member's overpayment of exactly the build-up of
+        // the periods it settled is that build-up, credited to share capital
+        // below, not money paid past what was owed: the payment is exact.
+        $overpaymentIsTheBuildUp = $this->overpaymentIsTheBuildUp(
+            $loan,
+            $overpayment,
+            $schedules->whereIn('id', array_column($allocations, 'amortization_schedule_id')),
+        );
+
         if ($touchedFutureSchedule) {
             $paymentType = 'advance';
-        } elseif ($allDueSchedules === 0 && $overpayment === 0) {
+        } elseif ($allDueSchedules === 0 && ($overpayment === 0 || $overpaymentIsTheBuildUp)) {
             $paymentType = 'exact';
         } else {
             $paymentType = 'partial';
@@ -471,6 +480,12 @@ class RepaymentService
             $repayment = $this->recordRepaymentOnLockedLoan($loan, $amountPaid, $paymentDate, $user, postToBooks: false, preview: true);
             $premiumAfter = LoanService::toCentavos((float) $loan->insurance_remaining_balance);
             $allocations = $this->previewedAllocations($repayment);
+            $overpaymentCentavos = LoanService::toCentavos((float) $repayment->overpayment);
+            $buildUpOnly = $this->overpaymentIsTheBuildUp(
+                $loan,
+                $overpaymentCentavos,
+                AmortizationSchedule::whereIn('id', array_column($allocations, 'schedule_id'))->get(),
+            );
             $owedAfter = $loan->owedCentavos($loan->amortizationSchedules()->get())['total'];
             $applied = LoanService::toCentavos((float) $repayment->amount_paid) - LoanService::toCentavos((float) $repayment->overpayment);
 
@@ -509,7 +524,7 @@ class RepaymentService
                 'total_outstanding_before' => ($owedAfter + $applied) / 100,
                 'total_outstanding_after' => $owedAfter / 100,
                 'payment_type' => $repayment->payment_type,
-                'payment_badge' => $this->paymentBadge($owedIds, $allocations, LoanService::toCentavos((float) $repayment->overpayment), $loan->owesInsurancePremium()),
+                'payment_badge' => $this->paymentBadge($owedIds, $allocations, $buildUpOnly ? 0 : $overpaymentCentavos, $loan->owesInsurancePremium()),
                 'allocations' => $allocations,
                 'is_preview' => true,
             ];
@@ -661,12 +676,46 @@ class RepaymentService
     }
 
     /**
+     * Whether a payment's overpayment is exactly the share capital build-up of
+     * the periods it settled, which the allocation credits to a member's share
+     * capital (recordRepaymentOnLockedLoan()): the 1-period preset on a
+     * build-up loan, the period's amount due plus its build-up.
+     *
+     * Only on a loan with a build-up and only for a member; a non-member's
+     * extra is not credited and stays an ordinary overpayment. Compared in
+     * whole centavos, against each settled period's build-up
+     * (PersistedScheduleFigures, none on a period closed early). A positive
+     * overpayment on a build-up loan means the allocation settled every period
+     * it reached, the current one included, before it stopped.
+     *
+     * @param  iterable<AmortizationSchedule>  $settled  the periods the payment allocated to
+     */
+    private function overpaymentIsTheBuildUp(Loan $loan, int $overpaymentCentavos, iterable $settled): bool
+    {
+        if ($overpaymentCentavos <= 0
+            || (float) $loan->scb_amount <= 0
+            || in_array($loan->borrower?->status, Borrower::NON_MEMBER_STATUSES, true)) {
+            return false;
+        }
+
+        $buildUp = 0;
+
+        foreach ($settled as $period) {
+            $buildUp += PersistedScheduleFigures::shareCapitalBuildUpCentavos($loan, $period);
+        }
+
+        return $buildUp === $overpaymentCentavos;
+    }
+
+    /**
      * The payments page's badge for a previewed payment.
      *
      * Partial when what is owed (owedScheduleIds(), and any insurance premium
      * still owed on the loan) is not fully paid, advance
      * when it is and money went past it, to a later period or as an
-     * overpayment, and exact otherwise. Only the preview says this: the stored
+     * overpayment, and exact otherwise. A member's overpayment of exactly the
+     * build-up credited to share capital is passed as none
+     * (overpaymentIsTheBuildUp()). Only the preview says this: the stored
      * `payment_type` keeps its own meaning, under which anything paid before a
      * period's due date is `advance`.
      *

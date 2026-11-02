@@ -219,7 +219,10 @@ class LoanAdjustmentService
      * LoanAdjustment row (no pending → approved → applied workflow).
      */
     /**
-     * Roll an upon-maturity loan forward by one cycle.
+     * Roll an upon-maturity loan forward by one cycle, or, when it is overdue,
+     * by as many anchored cycles as it takes for the new due date to fall
+     * after today, charging one cycle of fresh interest per cycle moved
+     * (extensionFigures()).
      *
      * `$interestOption` decides what happens to interest already outstanding:
      *
@@ -296,12 +299,13 @@ class LoanAdjustmentService
             [
                 'carry_principal' => $carryPrincipal,
                 'carry_interest' => $carryInterest,
+                'cycles' => $cycles,
                 'fresh_interest' => $freshInterest,
                 'new_interest_due' => $newInterestDue,
                 'new_total_due' => $newTotalDue,
                 'new_due_date' => $newDueDate,
                 'latest_open_due_date' => $latestOpenDueDate,
-            ] = $this->extensionFigures($loan);
+            ] = $this->extensionFigures($loan, now());
 
             $maxPeriodNumber = (int) $loan->amortizationSchedules()->max('period_number');
 
@@ -321,6 +325,10 @@ class LoanAdjustmentService
                 // stood, which is what the drift backfill reads.
                 'carry_principal' => $carryPrincipal,
                 'carry_interest' => $carryInterest,
+                // The anchored cycles the due date moved, at least 1. An
+                // overdue loan moves past the day it is extended, and
+                // `fresh_interest` is this many cycles of interest.
+                'cycles' => $cycles,
                 'fresh_interest' => $freshInterest,
                 'new_due_date' => $newDueDate->toDateString(),
                 'interest_option' => $interestOption,
@@ -337,7 +345,7 @@ class LoanAdjustmentService
             $adjustment = LoanAdjustment::create([
                 'loan_id' => $loan->id,
                 'adjustment_type' => 'extension',
-                'description' => 'Loan extended by one cycle.',
+                'description' => $cycles === 1 ? 'Loan extended by one cycle.' : "Loan extended by {$cycles} cycles.",
                 'old_values' => $oldValues,
                 'new_values' => $newValues,
                 'status' => 'applied',
@@ -391,7 +399,7 @@ class LoanAdjustmentService
      * extendLoan() reads them with, so the preview and the extension cannot
      * drift.
      *
-     * @return array{interest_option: string, collect_now: array{amount: float, insurance_part: float, penalty_part: float, interest_part: float}, carry_principal: float, carry_interest: float, fresh_interest: float, new_interest_due: float, new_total_due: float, new_due_date: string}
+     * @return array{interest_option: string, collect_now: array{amount: float, insurance_part: float, penalty_part: float, interest_part: float}, carry_principal: float, carry_interest: float, cycles: int, fresh_interest: float, new_interest_due: float, new_total_due: float, new_due_date: string}
      */
     public function extensionPreview(Loan $loan, string $interestOption, User $user, Carbon $asOf): array
     {
@@ -419,13 +427,14 @@ class LoanAdjustmentService
                 ];
             }
 
-            $figures = $this->extensionFigures($loan);
+            $figures = $this->extensionFigures($loan, $asOf);
 
             return [
                 'interest_option' => $interestOption,
                 'collect_now' => $collectNow,
                 'carry_principal' => $figures['carry_principal'],
                 'carry_interest' => $figures['carry_interest'],
+                'cycles' => $figures['cycles'],
                 'fresh_interest' => $figures['fresh_interest'],
                 'new_interest_due' => $figures['new_interest_due'],
                 'new_total_due' => $figures['new_total_due'],
@@ -489,14 +498,18 @@ class LoanAdjustmentService
      * on 'defer'. The one place extendLoan() and extensionPreview() take them
      * from. Reads only.
      *
-     * The fresh interest is one month's interest at the loan's rate, whatever
-     * period the rate is quoted per: one flat cycle regardless of how many
-     * days it spans. On 'defer' the unpaid interest is still in the carry, so
-     * the fresh cycle stacks on top of it.
+     * The new due date is the first anchored date strictly after
+     * `$extensionDate` (nextCycleDueDate()), and `cycles` is how many cycles
+     * the due date moves to reach it, at least 1. The fresh interest is that
+     * many cycles of one month's interest at the loan's rate, whatever period
+     * the rate is quoted per: one flat cycle regardless of how many days it
+     * spans, rounded to the centavo once and then multiplied, so an overdue
+     * loan pays for every month it moves. On 'defer' the unpaid interest is
+     * still in the carry, so the fresh cycles stack on top of it.
      *
-     * @return array{carry_principal: float, carry_interest: float, fresh_interest: float, new_interest_due: float, new_total_due: float, new_due_date: Carbon, latest_open_due_date: Carbon}
+     * @return array{carry_principal: float, carry_interest: float, cycles: int, fresh_interest: float, new_interest_due: float, new_total_due: float, new_due_date: Carbon, latest_open_due_date: Carbon}
      */
-    private function extensionFigures(Loan $loan): array
+    private function extensionFigures(Loan $loan, Carbon $extensionDate): array
     {
         $openSchedules = $this->openSchedules($loan);
 
@@ -505,22 +518,25 @@ class LoanAdjustmentService
         ), 2);
         $carryInterest = $this->outstandingInterest($openSchedules);
 
-        $freshInterest = round($carryPrincipal * LoanTermSchedule::rateForDays(
+        $latestOpenDueDate = Carbon::parse($openSchedules->max('due_date'));
+        ['due_date' => $newDueDate, 'cycles' => $cycles] = $this->nextCycleDueDate($loan, $latestOpenDueDate, $extensionDate);
+
+        $oneCycleCentavos = LoanService::toCentavos(round($carryPrincipal * LoanTermSchedule::rateForDays(
             (float) $loan->interest_rate,
             $loan->interest_rate_frequency->value,
             LoanTermSchedule::DAYS_PER_MONTH,
-        ), 2);
-
-        $latestOpenDueDate = Carbon::parse($openSchedules->max('due_date'));
+        ), 2));
+        $freshInterest = round($cycles * $oneCycleCentavos / 100, 2);
         $newInterestDue = round($carryInterest + $freshInterest, 2);
 
         return [
             'carry_principal' => $carryPrincipal,
             'carry_interest' => $carryInterest,
+            'cycles' => $cycles,
             'fresh_interest' => $freshInterest,
             'new_interest_due' => $newInterestDue,
             'new_total_due' => round($carryPrincipal + $newInterestDue, 2),
-            'new_due_date' => $this->nextCycleDueDate($loan, $latestOpenDueDate),
+            'new_due_date' => $newDueDate,
             'latest_open_due_date' => $latestOpenDueDate,
         ];
     }
@@ -766,25 +782,33 @@ class LoanAdjustmentService
     }
 
     /**
-     * The due date one cycle after `$latestDueDate`.
+     * The first cycle date after `$latestDueDate` that falls strictly after
+     * the extension date, and how many cycles the due date moves to reach it
+     * (at least 1). A loan extended before or on its due date moves one cycle;
+     * an overdue one moves as many as it takes to land after the extension
+     * date, so its new period is never late the day it is created.
      *
-     * A monthly or upon-maturity cycle lands on the next anchored date after
-     * the row it continues from: the loan's anchor day, capped at a shorter
-     * month's end. A loan started on the 31st rolls 28 Feb -> 31 Mar -> 30 Apr
-     * instead of staying on the 28th. An open row an overflowing month step
-     * pushed into the first days of the next month (3 Mar) rolls to that
-     * month's anchored date (31 Mar); every other row rolls into the following
-     * month. See LoanTermSchedule::nthAnchoredDateAfter().
+     * A monthly or upon-maturity cycle lands on an anchored date: the loan's
+     * anchor day, capped at a shorter month's end. A loan started on the 31st
+     * rolls 28 Feb -> 31 Mar -> 30 Apr instead of staying on the 28th. An open
+     * row an overflowing month step pushed into the first days of the next
+     * month (3 Mar) rolls to that month's anchored date (31 Mar); every other
+     * row rolls into the following month. See
+     * LoanTermSchedule::firstAnchoredDateAfter().
+     *
+     * @return array{due_date: Carbon, cycles: int}
      */
-    private function nextCycleDueDate(Loan $loan, Carbon $latestDueDate): Carbon
+    private function nextCycleDueDate(Loan $loan, Carbon $latestDueDate, Carbon $extensionDate): array
     {
-        return match ($loan->frequency) {
-            'daily' => $latestDueDate->copy()->addDay(),
-            'weekly' => $latestDueDate->copy()->addWeek(),
-            'bi_weekly' => $latestDueDate->copy()->addDays(14),
-            'semi_monthly' => $latestDueDate->copy()->addDays(15),
-            'monthly', 'upon_maturity' => LoanTermSchedule::nthAnchoredDateAfter($latestDueDate, 1, $this->anchorDay($loan)),
-        };
+        if (in_array($loan->frequency, ['monthly', 'upon_maturity'], true)) {
+            return LoanTermSchedule::firstAnchoredDateAfter($latestDueDate, $extensionDate, $this->anchorDay($loan));
+        }
+
+        $periodDays = LoanTermSchedule::PERIOD_DAYS[$loan->frequency];
+        $daysPast = (int) $latestDueDate->copy()->startOfDay()->diffInDays($extensionDate->copy()->startOfDay(), false);
+        $cycles = intdiv(max(0, $daysPast), $periodDays) + 1;
+
+        return ['due_date' => $latestDueDate->copy()->addDays($cycles * $periodDays), 'cycles' => $cycles];
     }
 
     /**
