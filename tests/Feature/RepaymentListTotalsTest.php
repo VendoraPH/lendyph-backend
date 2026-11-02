@@ -84,7 +84,7 @@ class RepaymentListTotalsTest extends TestCase
 
         // ₱12,000 + ₱1,000.10 + ₱2,500.25. With the penalty added again it
         // would be ₱15,700.35.
-        $this->assertSame(['collected' => 15500.35, 'voided' => 300], $totals);
+        $this->assertSame(['collected' => 15500.35, 'voided' => 300, 'total_insurance_applied' => 0], $totals);
     }
 
     public function test_the_status_filter_narrows_the_rows_but_not_the_totals(): void
@@ -92,18 +92,18 @@ class RepaymentListTotalsTest extends TestCase
         $response = $this->getJson('/api/repayments?status=voided')->assertOk();
 
         $this->assertSame([$this->voided->id], array_column($response->json('data'), 'id'));
-        $this->assertSame(['collected' => 15500.35, 'voided' => 300], $response->json('meta.totals'));
+        $this->assertSame(['collected' => 15500.35, 'voided' => 300, 'total_insurance_applied' => 0], $response->json('meta.totals'));
     }
 
     public function test_the_totals_follow_the_loan_and_borrower_filters(): void
     {
         $this->assertSame(
-            ['collected' => 13000.1, 'voided' => 0],
+            ['collected' => 13000.1, 'voided' => 0, 'total_insurance_applied' => 0],
             $this->getJson("/api/repayments?loan_id={$this->first->id}")->assertOk()->json('meta.totals'),
         );
 
         $this->assertSame(
-            ['collected' => 2500.25, 'voided' => 300],
+            ['collected' => 2500.25, 'voided' => 300, 'total_insurance_applied' => 0],
             $this->getJson("/api/repayments?borrower_id={$this->second->borrower_id}")->assertOk()->json('meta.totals'),
         );
     }
@@ -111,12 +111,12 @@ class RepaymentListTotalsTest extends TestCase
     public function test_the_totals_follow_the_date_range(): void
     {
         $this->assertSame(
-            ['collected' => 3500.35, 'voided' => 300],
+            ['collected' => 3500.35, 'voided' => 300, 'total_insurance_applied' => 0],
             $this->getJson('/api/repayments?date_from=2026-09-01&date_to=2026-09-30')->assertOk()->json('meta.totals'),
         );
 
         $this->assertSame(
-            ['collected' => 2500.25, 'voided' => 300],
+            ['collected' => 2500.25, 'voided' => 300, 'total_insurance_applied' => 0],
             $this->getJson('/api/repayments?date_from=2026-09-02&date_to=2026-09-15')->assertOk()->json('meta.totals'),
         );
     }
@@ -124,12 +124,12 @@ class RepaymentListTotalsTest extends TestCase
     public function test_the_totals_follow_the_search(): void
     {
         $this->assertSame(
-            ['collected' => 0, 'voided' => 300],
+            ['collected' => 0, 'voided' => 300, 'total_insurance_applied' => 0],
             $this->getJson('/api/repayments?search='.urlencode($this->voided->receipt_number))->assertOk()->json('meta.totals'),
         );
 
         $this->assertSame(
-            ['collected' => 2500.25, 'voided' => 300],
+            ['collected' => 2500.25, 'voided' => 300, 'total_insurance_applied' => 0],
             $this->getJson('/api/repayments?search='.urlencode($this->second->loan_account_number))->assertOk()->json('meta.totals'),
         );
     }
@@ -150,7 +150,7 @@ class RepaymentListTotalsTest extends TestCase
     public function test_a_filter_no_payment_matches_gives_zero_totals(): void
     {
         $this->assertSame(
-            ['collected' => 0, 'voided' => 0],
+            ['collected' => 0, 'voided' => 0, 'total_insurance_applied' => 0],
             $this->getJson('/api/repayments?date_from=2020-01-01&date_to=2020-01-31')->assertOk()->json('meta.totals'),
         );
     }

@@ -42,6 +42,11 @@ use App\Services\Accounting\PostingRules;
  * charged once the member starts paying. A hand-typed "Insurance Premium" on
  * a loan with no premium columns is deducted in full and owes nothing.
  *
+ * Premium a restructure moved onto the loan from the loan it closed
+ * (`insurance_carried_over`) is a second line, "Insurance premium carried
+ * from the previous loan": all of it owed, none deducted, with `provisional`
+ * true before release, when it is the open source's live premium owed.
+ *
  * ## Rates
  *
  * The nominal annual rate is the contractual rate times the periods in a year
@@ -97,6 +102,9 @@ class DisclosureService
 
     /** The one line every insurance premium on a loan is disclosed under. */
     private const INSURANCE_LINE = 'Insurance Premium';
+
+    /** The premium a restructure carried over from the loan it closed. */
+    private const CARRIED_INSURANCE_LINE = 'Insurance premium carried from the previous loan';
 
     public function __construct(private LoanService $loanService) {}
 
@@ -197,7 +205,7 @@ class DisclosureService
                     'amount' => $item['amount'] / 100,
                     'deducted' => $item['deducted'] / 100,
                     'owed' => $item['owed'] / 100,
-                ], $charges['non_finance']),
+                ] + (array_key_exists('provisional', $item) ? ['provisional' => $item['provisional']] : []), $charges['non_finance']),
                 'total' => $nonFinanceTotal / 100,
             ],
 
@@ -235,7 +243,7 @@ class DisclosureService
      *
      * @return array{
      *     finance: list<array{name: string, amount: int}>,
-     *     non_finance: list<array{name: string, amount: int, deducted: int, owed: int}>,
+     *     non_finance: list<array{name: string, amount: int, deducted: int, owed: int, provisional?: bool}>,
      *     share_capital: int,
      * }
      */
@@ -290,6 +298,15 @@ class DisclosureService
             ];
         }
 
+        // The premium a restructure moved onto this loan from the loan it
+        // closed: owed on this loan, nothing of it deducted, so it is a line
+        // of its own rather than part of this release's premium.
+        [$carried, $provisional] = $this->carriedPremium($loan);
+
+        if ($carried > 0) {
+            $nonFinance[] = ['name' => self::CARRIED_INSURANCE_LINE, 'amount' => $carried, 'deducted' => 0, 'owed' => $carried, 'provisional' => $provisional];
+        }
+
         return ['finance' => $finance, 'non_finance' => array_values($nonFinance), 'share_capital' => $shareCapital];
     }
 
@@ -316,6 +333,33 @@ class DisclosureService
         }
 
         return self::FINANCE;
+    }
+
+    /**
+     * The premium a restructure carries onto `$loan`, in centavos, and whether
+     * the figure is provisional.
+     *
+     * Once released it is `insurance_carried_over`, set by the release. Before
+     * release (the disclosure the borrower signs while the restructure is
+     * approved) it is the premium the open source still owes, clamped at 0:
+     * what the release would carry if it ran now, provisional because a
+     * payment on the source before release still lowers it.
+     *
+     * @return array{0: int, 1: bool}
+     */
+    private function carriedPremium(Loan $loan): array
+    {
+        if ($loan->released_at === null && $loan->source_loan_id !== null) {
+            $source = $loan->sourceLoan;
+
+            if ($source !== null && in_array($source->status, ['released', 'ongoing'], true)) {
+                return [max(0, self::centavos($source->insurance_remaining_balance ?? 0)), true];
+            }
+
+            return [0, true];
+        }
+
+        return [max(0, self::centavos($loan->insurance_carried_over ?? 0)), false];
     }
 
     /**

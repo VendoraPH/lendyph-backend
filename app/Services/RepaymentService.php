@@ -13,6 +13,7 @@ use App\Models\User;
 use App\Services\Accounting\AutomaticPoster;
 use Carbon\Carbon;
 use Closure;
+use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -192,7 +193,16 @@ class RepaymentService
             $currentScheduleId = $schedules->last()?->id;
         }
 
-        $remaining = $amountPaid;
+        // The insurance premium the release left owed on the loan comes before
+        // anything else, penalty included: a separate, interest-free amount,
+        // never principal. Worked out in centavos so what the periods get is
+        // exact. The loan row is locked by the caller, so this reads what the
+        // last write left.
+        $insuranceOwed = LoanService::toCentavos((float) $loan->insurance_remaining_balance);
+        $insuranceCentavos = max(0, min($insuranceOwed, LoanService::toCentavos($amountPaid)));
+        $insuranceApplied = $insuranceCentavos / 100;
+
+        $remaining = (LoanService::toCentavos($amountPaid) - $insuranceCentavos) / 100;
         $principalApplied = 0.0;
         $interestApplied = 0.0;
         $penaltyApplied = 0.0;
@@ -300,6 +310,7 @@ class RepaymentService
             'principal_applied' => round($principalApplied, 2),
             'interest_applied' => round($interestApplied, 2),
             'penalty_applied' => round($penaltyApplied, 2),
+            'insurance_applied' => $insuranceApplied,
             'overdue_interest_applied' => round($overdueInterestApplied, 2),
             'current_interest_applied' => round($currentInterestApplied, 2),
             'current_principal_applied' => round($currentPrincipalApplied, 2),
@@ -317,13 +328,21 @@ class RepaymentService
         // What went on each period, so a void can take back exactly that.
         $repayment->allocations()->createMany($allocations);
 
+        // And what it took of the premium owed, which the void puts back from
+        // `insurance_applied`.
+        if ($insuranceCentavos > 0) {
+            $loan->update(['insurance_remaining_balance' => ($insuranceOwed - $insuranceCentavos) / 100]);
+        }
+
         // Step 6: Loan status lifecycle
         // released → ongoing on first payment, → completed when all schedules paid
         $unpaidCount = $loan->amortizationSchedules()
             ->whereIn('status', ['pending', 'partial', 'overdue'])
             ->count();
 
-        if ($unpaidCount === 0) {
+        // A loan that still owes insurance premium stays open until the
+        // premium is paid, even with every period settled.
+        if ($unpaidCount === 0 && ! $loan->owesInsurancePremium()) {
             $loan->update(['status' => 'completed']);
         } elseif ($loan->status === 'released') {
             // No CollateralPledgeGuard call here on purpose. `released` and
@@ -437,7 +456,9 @@ class RepaymentService
 
         return $this->rolledBackUnderPaymentLock($loan, function (Loan $loan) use ($amountPaid, $paymentDate, $user): array {
             $owedIds = $this->owedScheduleIds($loan, Carbon::parse($paymentDate));
+            $premiumBefore = LoanService::toCentavos((float) $loan->insurance_remaining_balance);
             $repayment = $this->recordRepaymentOnLockedLoan($loan, $amountPaid, $paymentDate, $user, postToBooks: false);
+            $premiumAfter = LoanService::toCentavos((float) $loan->insurance_remaining_balance);
             $allocations = $this->previewedAllocations($repayment);
 
             return [
@@ -448,6 +469,9 @@ class RepaymentService
                 'total_interest' => (float) $repayment->interest_applied,
                 'total_penalty' => (float) $repayment->penalty_applied,
                 'excess' => (float) $repayment->overpayment,
+                // The insurance premium owed on the loan, collected first.
+                'allocated_to_insurance' => (float) $repayment->insurance_applied,
+                'total_insurance' => (float) $repayment->insurance_applied,
                 'allocated_to_penalty' => (float) $repayment->penalty_applied,
                 'allocated_to_overdue_interest' => (float) $repayment->overdue_interest_applied,
                 'allocated_to_current_interest' => (float) $repayment->current_interest_applied,
@@ -458,14 +482,87 @@ class RepaymentService
                 'total_interest_applied' => (float) $repayment->interest_applied,
                 'total_principal_applied' => (float) $repayment->principal_applied,
                 'overpayment' => (float) $repayment->overpayment,
-                'balance_before' => (float) $repayment->balance_before,
-                'balance_after' => (float) $repayment->balance_after,
+                // The loan's outstanding balance (Loan::$outstanding_balance:
+                // principal plus the insurance premium still owed) before and
+                // after the payment. The stored repayment row keeps principal
+                // only.
+                'balance_before' => (LoanService::toCentavos((float) $repayment->balance_before) + $premiumBefore) / 100,
+                'balance_after' => (LoanService::toCentavos((float) $repayment->balance_after) + $premiumAfter) / 100,
                 'payment_type' => $repayment->payment_type,
-                'payment_badge' => $this->paymentBadge($owedIds, $allocations, (float) $repayment->overpayment),
+                'payment_badge' => $this->paymentBadge($owedIds, $allocations, (float) $repayment->overpayment, $loan->owesInsurancePremium()),
                 'allocations' => $allocations,
                 'is_preview' => true,
             ];
         });
+    }
+
+    /**
+     * What a payment must be on `$asOf` to clear the insurance premium still
+     * owed and every open period due on or before `$asOf` in full (the first
+     * open period instead when none is due yet), in the order the allocation
+     * takes money (recordRepaymentOnLockedLoan()): the premium, then period by
+     * period its penalty as the payment's penalty step will charge it
+     * (penaltyAsOf(), nothing written), interest and principal. Then the share
+     * capital build-up of those periods, which a payment credits only on an
+     * SCB-bearing loan of a member once the current period is settled, so only
+     * when the current period is among them; otherwise the money would flow
+     * into the current period instead.
+     *
+     * `period_number` and `schedule_id` are the first of those periods,
+     * `last_period_number` the last; all three are null when no period is
+     * open. Reads only.
+     *
+     * @param  EloquentCollection<int, AmortizationSchedule>  $schedules  the loan's periods
+     * @return array{amount: float, insurance: float, principal: float, interest: float, penalty: float, share_capital_build_up: float, period_number: int|null, last_period_number: int|null, schedule_id: int|null}
+     */
+    public function amountDueNow(Loan $loan, EloquentCollection $schedules, Carbon $asOf): array
+    {
+        $paymentDate = $asOf->copy()->startOfDay();
+        $centavos = fn (mixed $pesos): int => LoanService::toCentavos((float) ($pesos ?? 0));
+
+        $open = $schedules
+            ->filter(fn (AmortizationSchedule $s) => in_array($s->status, ['pending', 'partial', 'overdue'], true))
+            ->sortBy('period_number')
+            ->values();
+        $dueNow = $open->filter(fn (AmortizationSchedule $s) => $s->due_date->lte($paymentDate))->values();
+        $periods = $dueNow->isNotEmpty() ? $dueNow : $open->take(1);
+
+        $insurance = max(0, $centavos($loan->insurance_remaining_balance));
+        $principal = $interest = $penalty = $buildUp = 0;
+
+        foreach ($periods as $period) {
+            $principal += max(0, $centavos($period->principal_due) - $centavos($period->principal_paid));
+            $interest += max(0, $centavos($period->interest_due) - $centavos($period->interest_paid));
+            $charged = $this->penaltyAsOf($loan, $period, $paymentDate) ?? (float) $period->penalty_amount;
+            $penalty += max(0, $centavos($charged) - $centavos($period->penalty_paid));
+        }
+
+        // The same "current" period the allocation picks.
+        $current = $open->first(fn (AmortizationSchedule $s) => $s->due_date->gte($paymentDate)) ?? $open->last();
+
+        if ($current !== null
+            && (float) $loan->scb_amount > 0
+            && $periods->contains('id', $current->id)
+            && ! in_array($loan->borrower?->status, Borrower::NON_MEMBER_STATUSES, true)) {
+            foreach ($periods as $period) {
+                $buildUp += PersistedScheduleFigures::shareCapitalBuildUpCentavos($loan, $period);
+            }
+        }
+
+        $first = $periods->first();
+        $last = $periods->last();
+
+        return [
+            'amount' => round(($insurance + $penalty + $interest + $principal + $buildUp) / 100, 2),
+            'insurance' => round($insurance / 100, 2),
+            'principal' => round($principal / 100, 2),
+            'interest' => round($interest / 100, 2),
+            'penalty' => round($penalty / 100, 2),
+            'share_capital_build_up' => round($buildUp / 100, 2),
+            'period_number' => $first === null ? null : (int) $first->period_number,
+            'last_period_number' => $last === null ? null : (int) $last->period_number,
+            'schedule_id' => $first?->id,
+        ];
     }
 
     /**
@@ -546,7 +643,8 @@ class RepaymentService
     /**
      * The payments page's badge for a previewed payment.
      *
-     * Partial when what is owed (owedScheduleIds()) is not fully paid, advance
+     * Partial when what is owed (owedScheduleIds(), and any insurance premium
+     * still owed on the loan) is not fully paid, advance
      * when it is and money went past it, to a later period or as an
      * overpayment, and exact otherwise. Only the preview says this: the stored
      * `payment_type` keeps its own meaning, under which anything paid before a
@@ -556,9 +654,10 @@ class RepaymentService
      * @param  list<array{schedule_id: int}>  $allocations
      * @return array{type: string, label: string}
      */
-    private function paymentBadge(array $owedIds, array $allocations, float $overpayment): array
+    private function paymentBadge(array $owedIds, array $allocations, float $overpayment, bool $premiumStillOwed): array
     {
-        $owedPaid = ! AmortizationSchedule::whereIn('id', $owedIds)->where('status', '!=', 'paid')->exists();
+        $owedPaid = ! $premiumStillOwed
+            && ! AmortizationSchedule::whereIn('id', $owedIds)->where('status', '!=', 'paid')->exists();
         $wentPast = round($overpayment, 2) > 0
             || collect($allocations)->contains(fn (array $a) => ! in_array($a['schedule_id'], $owedIds, true));
 
@@ -649,6 +748,16 @@ class RepaymentService
             $this->lockVoidRows($repayment, $loan);
 
             $this->reverseAllocation($repayment);
+
+            // The insurance premium this payment collected is owed again,
+            // exactly that much, on the loan row locked above.
+            $insuranceApplied = LoanService::toCentavos((float) $repayment->insurance_applied);
+
+            if ($insuranceApplied > 0) {
+                $loan->update([
+                    'insurance_remaining_balance' => (LoanService::toCentavos((float) $loan->insurance_remaining_balance) + $insuranceApplied) / 100,
+                ]);
+            }
 
             // Reverse whatever share capital this repayment credited — a no-op
             // if it credited none. Blocks the whole void (throws, rolling back
@@ -883,7 +992,16 @@ class RepaymentService
             'outstanding_penalty' => round($outstandingPenalty, 2),
             // Frontend reads `penalty_amount` meaning the remaining penalty to collect.
             'penalty_amount' => round($outstandingPenalty, 2),
-            'outstanding_balance' => round($outstandingPrincipal + $outstandingInterest + $outstandingPenalty, 2),
+            // The insurance premium the release left owed, still owed: part of
+            // what the loan owes, as in LoanResource's `total_payable`.
+            'insurance_owed' => max(0, LoanService::toCentavos((float) $loan->insurance_remaining_balance)) / 100,
+            // The most a restructure may take as the new loan's principal
+            // (LoanService::restructurableCentavos()): the open periods' principal,
+            // interest and penalty, without the premium, which moves to the
+            // new loan as premium owed. The restructure form's starting figure.
+            'restructurable_balance' => LoanService::restructurableCentavos($schedules) / 100,
+            'outstanding_balance' => (LoanService::toCentavos($outstandingPrincipal) + LoanService::toCentavos($outstandingInterest)
+                + LoanService::toCentavos($outstandingPenalty) + max(0, LoanService::toCentavos((float) $loan->insurance_remaining_balance))) / 100,
             'overdue_amount' => round($overdueAmount, 2),
             'overdue_schedules_count' => $overdueSchedules->count(),
             'next_due_date' => $nextSchedule?->due_date->toDateString(),

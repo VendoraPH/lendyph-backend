@@ -127,6 +127,7 @@ class PrintableFiguresTest extends TestCase
             'interest' => 2700,
             'penalty' => 200,
             'amount_due' => 22900,
+            'insurance_owed' => 0,
         ], $data['demand_totals']);
     }
 

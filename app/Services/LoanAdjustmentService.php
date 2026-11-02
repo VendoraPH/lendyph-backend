@@ -259,28 +259,31 @@ class LoanAdjustmentService
             $oldMaturityDate = $loan->maturity_date->toDateString();
             $oldTerm = $loan->term;
 
-            $openBefore = $this->openSchedules($loan);
-            $interestBefore = $this->outstandingInterest($openBefore);
+            ['interest' => $interestBefore, 'amount' => $collectAmount] = $this->extensionCollection($loan);
 
-            // Settle the accrued interest first so the new period starts clean.
-            // The allocation runs penalty → interest → principal, so where a
-            // penalty is outstanding this amount is consumed by that first and
-            // some interest still carries. That matches what the UI did before
-            // this moved server-side, and the carry figures below are re-read
-            // afterwards, so the arithmetic stays correct either way.
+            // Settle the accrued interest first so the new period starts clean,
+            // in one payment that also takes the insurance premium still owed
+            // (extensionCollection()). The allocation runs premium → penalty →
+            // interest → principal, so where a penalty is outstanding the
+            // interest part is consumed by that first and some interest still
+            // carries. That matches what the UI did before this moved
+            // server-side, and the carry figures below are re-read afterwards,
+            // so the arithmetic stays correct either way.
             $interestPaid = 0.0;
+            $insurancePaid = 0.0;
             $interestRepayment = null;
 
-            if ($interestOption === 'pay' && $interestBefore > 0) {
+            if ($interestOption === 'pay' && $collectAmount > 0) {
                 $interestRepayment = $this->repaymentService->recordRepaymentOnLockedLoan(
                     $loan,
-                    $interestBefore,
+                    $collectAmount,
                     now()->toDateString(),
                     $user,
                     $remarks ?: '[EXTENSION INTEREST]',
                 );
 
                 $interestPaid = $interestBefore;
+                $insurancePaid = (float) $interestRepayment->insurance_applied;
             }
 
             // Read after the collection: on the 'pay' path the rows above have
@@ -318,6 +321,7 @@ class LoanAdjustmentService
                 'new_due_date' => $newDueDate->toDateString(),
                 'interest_option' => $interestOption,
                 'interest_paid' => $interestPaid,
+                'insurance_paid' => $insurancePaid,
             ];
 
             $adjustment = LoanAdjustment::create([
@@ -377,20 +381,20 @@ class LoanAdjustmentService
      * extendLoan() reads them with, so the preview and the extension cannot
      * drift.
      *
-     * @return array{interest_option: string, collect_now: array{amount: float, penalty_part: float, interest_part: float}, carry_principal: float, carry_interest: float, fresh_interest: float, new_interest_due: float, new_total_due: float, new_due_date: string}
+     * @return array{interest_option: string, collect_now: array{amount: float, insurance_part: float, penalty_part: float, interest_part: float}, carry_principal: float, carry_interest: float, fresh_interest: float, new_interest_due: float, new_total_due: float, new_due_date: string}
      */
     public function extensionPreview(Loan $loan, string $interestOption, User $user, Carbon $asOf): array
     {
         $this->assertExtendable($loan);
 
         return $this->repaymentService->rolledBackUnderPaymentLock($loan, function (Loan $loan) use ($interestOption, $user, $asOf): array {
-            $collectNow = ['amount' => 0.0, 'penalty_part' => 0.0, 'interest_part' => 0.0];
-            $interestBefore = $this->outstandingInterest($this->openSchedules($loan));
+            $collectNow = ['amount' => 0.0, 'insurance_part' => 0.0, 'penalty_part' => 0.0, 'interest_part' => 0.0];
+            ['amount' => $collectAmount] = $this->extensionCollection($loan);
 
-            if ($interestOption === 'pay' && $interestBefore > 0) {
+            if ($interestOption === 'pay' && $collectAmount > 0) {
                 $repayment = $this->repaymentService->recordRepaymentOnLockedLoan(
                     $loan,
-                    $interestBefore,
+                    $collectAmount,
                     $asOf->toDateString(),
                     $user,
                     postToBooks: false,
@@ -398,6 +402,7 @@ class LoanAdjustmentService
 
                 $collectNow = [
                     'amount' => round((float) $repayment->amount_paid, 2),
+                    'insurance_part' => round((float) $repayment->insurance_applied, 2),
                     'penalty_part' => round((float) $repayment->penalty_applied, 2),
                     'interest_part' => round((float) $repayment->interest_applied, 2),
                 ];
@@ -416,6 +421,25 @@ class LoanAdjustmentService
                 'new_due_date' => $figures['new_due_date']->toDateString(),
             ];
         });
+    }
+
+    /**
+     * What an extension on 'pay' collects in its one payment: the insurance
+     * premium still owed on the loan, which every payment takes first, plus
+     * the interest outstanding on the open periods. Read under the loan's
+     * lock. extendLoan() charges it and extensionPreview() quotes it, so the
+     * two cannot drift.
+     *
+     * @return array{interest: float, amount: float}
+     */
+    private function extensionCollection(Loan $loan): array
+    {
+        $interest = $this->outstandingInterest($this->openSchedules($loan));
+
+        return [
+            'interest' => $interest,
+            'amount' => (LoanService::toCentavos($interest) + max(0, LoanService::toCentavos((float) $loan->insurance_remaining_balance))) / 100,
+        ];
     }
 
     /**
@@ -1092,9 +1116,12 @@ class LoanAdjustmentService
         }
 
         // As a payment does (RepaymentService, step 6): a loan with no open
-        // period left is completed. `completed` leaves the pledging statuses,
-        // so no collateral guard applies.
-        if ($amount < 0 && ! $loan->amortizationSchedules()->whereIn('status', ['pending', 'partial', 'overdue'])->exists()) {
+        // period left and no insurance premium still owed is completed.
+        // `completed` leaves the pledging statuses, so no collateral guard
+        // applies.
+        if ($amount < 0
+            && ! $loan->owesInsurancePremium()
+            && ! $loan->amortizationSchedules()->whereIn('status', ['pending', 'partial', 'overdue'])->exists()) {
             $loan->update(['status' => 'completed']);
         }
 

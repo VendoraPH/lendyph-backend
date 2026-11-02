@@ -616,28 +616,48 @@ class LoanService
     }
 
     /**
-     * Everything the borrower still owes on a loan: unpaid principal, unpaid
-     * interest, unpaid penalty, plus any insurance premium still on the books.
+     * Everything on a loan's periods the borrower still owes: unpaid
+     * principal, unpaid interest and unpaid penalty. The most a restructure
+     * may take as the new loan's principal.
      *
-     * Deliberately WIDER than the `Loan::outstanding_balance` accessor
-     * (principal + insurance only) because a restructure normally capitalizes
-     * arrears — the borrower's whole obligation moves to the new loan, not just
-     * the principal slice of it.
+     * Deliberately WIDER than the principal in `Loan::outstanding_balance`
+     * because a restructure normally capitalizes arrears — the borrower's whole
+     * obligation on the periods moves to the new loan, not just the principal
+     * slice of it.
+     *
+     * The insurance premium still owed is NOT in it: the premium is never
+     * principal. closeRestructuredSource() moves it to the new loan as premium
+     * owed, still interest-free and collected first.
      */
     private function totalOutstanding(Loan $loan): float
     {
-        $openSchedules = $loan->amortizationSchedules()
-            ->reorder()
-            ->whereIn('status', ['pending', 'partial', 'overdue'])
-            ->get();
+        return self::restructurableCentavos($loan->amortizationSchedules()->reorder()->get()) / 100;
+    }
 
-        $unpaid = $openSchedules->sum(
-            fn (AmortizationSchedule $s): float => max(0, (float) $s->principal_due - (float) $s->principal_paid)
-                + max(0, (float) $s->interest_due - (float) $s->interest_paid)
-                + max(0, (float) ($s->penalty_amount ?? 0) - (float) ($s->penalty_paid ?? 0)),
-        );
+    /**
+     * The restructure cap over periods already in hand, in whole centavos: the
+     * unpaid principal, interest and penalty of the open periods, the premium
+     * owed left out. The one rule the restructure cap, the loan summary's and
+     * LoanResource's `restructurable_balance` read.
+     *
+     * @param  iterable<AmortizationSchedule>  $schedules  the loan's periods
+     */
+    public static function restructurableCentavos(iterable $schedules): int
+    {
+        $owed = fn (mixed $due, mixed $paid): int => max(0, self::toCentavos((float) ($due ?? 0)) - self::toCentavos((float) ($paid ?? 0)));
+        $total = 0;
 
-        return round((float) $unpaid + (float) $loan->insurance_remaining_balance, 2);
+        foreach ($schedules as $s) {
+            if (! in_array($s->status, ['pending', 'partial', 'overdue'], true)) {
+                continue;
+            }
+
+            $total += $owed($s->principal_due, $s->principal_paid)
+                + $owed($s->interest_due, $s->interest_paid)
+                + $owed($s->penalty_amount, $s->penalty_paid);
+        }
+
+        return $total;
     }
 
     /**
@@ -1363,6 +1383,23 @@ class LoanService
             ]);
         }
 
+        // Terms approved while the insurance premium owed on the source still
+        // counted as restructurable balance (before it moved to the new loan
+        // as premium owed instead) would now charge it twice: once inside the
+        // principal and again as the premium carried over, or write it off
+        // in the shortfall while carrying it too. Such terms take more than
+        // the source's periods alone owe, so they are re-approved first.
+        if ($source->owesInsurancePremium()) {
+            $periodsOwe = $this->toCentavos($this->totalOutstanding($source));
+
+            if ($this->toCentavos((float) $loan->restructure_principal) > $periodsOwe
+                || $this->toCentavos((float) $loan->restructure_outstanding) > $periodsOwe) {
+                throw ValidationException::withMessages([
+                    'principal_amount' => ['The terms changed since approval; re-approve the restructure.'],
+                ]);
+            }
+        }
+
         return $source;
     }
 
@@ -1385,6 +1422,7 @@ class LoanService
         // one. CollateralPledgeGuard is deliberately not called from here.
         $previousStatus = $source->status;
         $closingBalance = $this->totalOutstanding($source);
+        $carriedPremium = self::toCentavos((float) $source->insurance_remaining_balance);
 
         $this->clearOpenSchedules($source);
 
@@ -1402,12 +1440,40 @@ class LoanService
             'insurance_remaining_balance' => 0,
         ]);
 
+        // The insurance premium still owed moves to the new loan as premium
+        // owed: never principal, never written off. Its row is locked with the
+        // source's (lockAndGuardReleaseRows()), and applyInsuranceOnRelease()
+        // has already set whatever its own release left owed.
+        if ($carriedPremium > 0) {
+            $newOwedBefore = (float) $newLoan->insurance_remaining_balance;
+            $newOwed = (self::toCentavos($newOwedBefore) + $carriedPremium) / 100;
+
+            $newLoan->update([
+                'insurance_remaining_balance' => $newOwed,
+                'insurance_carried_over' => (self::toCentavos((float) $newLoan->insurance_carried_over) + $carriedPremium) / 100,
+            ]);
+
+            AuditLogService::log(
+                action: 'insurance_premium_carried_over',
+                auditable: $newLoan,
+                oldValues: ['insurance_remaining_balance' => $newOwedBefore],
+                newValues: [
+                    'insurance_remaining_balance' => $newOwed,
+                    'carried_from_loan_id' => $source->id,
+                    'carried_premium' => $carriedPremium / 100,
+                ],
+                description: 'Insurance premium owed of '.Money::format($carriedPremium)
+                    .' carried over from restructured loan '.($source->loan_account_number ?? $source->application_number),
+            );
+        }
+
         AuditLogService::log(
             action: 'restructure_closed',
             auditable: $source,
             oldValues: [
                 'status' => $previousStatus,
                 'outstanding_balance' => $closingBalance,
+                'insurance_remaining_balance' => $carriedPremium / 100,
             ],
             newValues: [
                 'status' => 'restructured',
@@ -1415,6 +1481,7 @@ class LoanService
                 'restructured_into_application_number' => $newLoan->application_number,
                 'restructured_into_loan_account_number' => $newLoan->loan_account_number,
                 'restructured_balance' => $closingBalance,
+                'insurance_premium_carried_over' => $carriedPremium / 100,
                 'new_principal' => (float) $newLoan->principal_amount,
                 'write_off_amount' => $writeOff,
                 // The approved figures the write-off came from, plus how far the

@@ -20,6 +20,11 @@ use Carbon\Carbon;
  * the same grace-aware test as the loan summary's `overdue_amount`. The totals
  * are therefore the summary's outstanding, paid and overdue figures
  * (RepaymentService::getLoanSummary()), which the loan screen shows beside them.
+ *
+ * The insurance premium the release left owed belongs to no period, so it is
+ * its own figure, `totals.insurance_owed`, and `totals.balance` is the
+ * periods' balance plus it: the footer equals Current Outstanding
+ * (`summary.outstanding_balance`), premium included.
  */
 class AmortizationBalanceService
 {
@@ -41,6 +46,7 @@ class AmortizationBalanceService
      *         interest: array{due: float, paid: float, balance: float},
      *         penalty: array{charged: float, paid: float, balance: float},
      *         paid: float,
+     *         insurance_owed: float,
      *         balance: float,
      *         overdue: float,
      *     },
@@ -88,6 +94,7 @@ class AmortizationBalanceService
         $principalBalance = (float) $schedules->sum(fn (AmortizationSchedule $s) => (float) $s->principal_balance);
         $interestBalance = (float) $schedules->sum(fn (AmortizationSchedule $s) => (float) $s->interest_balance);
         $penaltyBalance = (float) $schedules->sum(fn (AmortizationSchedule $s) => (float) $s->penalty_balance);
+        $insuranceOwed = max(0, LoanService::toCentavos((float) $loan->insurance_remaining_balance));
 
         return [
             'periods' => $periods,
@@ -108,7 +115,9 @@ class AmortizationBalanceService
                     'balance' => round($penaltyBalance, 2),
                 ],
                 'paid' => round($principalPaid + $interestPaid + $penaltyPaid, 2),
-                'balance' => round($principalBalance + $interestBalance + $penaltyBalance, 2),
+                'insurance_owed' => $insuranceOwed / 100,
+                'balance' => (LoanService::toCentavos($principalBalance) + LoanService::toCentavos($interestBalance)
+                    + LoanService::toCentavos($penaltyBalance) + $insuranceOwed) / 100,
                 'overdue' => round($late->sum(fn (AmortizationSchedule $s) => $this->periodBalance($s)), 2),
             ],
         ];

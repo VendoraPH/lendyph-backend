@@ -116,7 +116,7 @@ class ExtensionPreviewTest extends TestCase
         $this->assertEquals(3000, $preview['fresh_interest']);
         $this->assertEquals(6000, $preview['new_interest_due']);
         $this->assertEquals(76000, $preview['new_total_due']);
-        $this->assertEquals(['amount' => 0, 'penalty_part' => 0, 'interest_part' => 0], $preview['collect_now']);
+        $this->assertEquals(['amount' => 0, 'insurance_part' => 0, 'penalty_part' => 0, 'interest_part' => 0], $preview['collect_now']);
     }
 
     public function test_the_defer_preview_equals_what_the_extension_then_records(): void

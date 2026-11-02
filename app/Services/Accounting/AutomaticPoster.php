@@ -350,6 +350,7 @@ final class AutomaticPoster
             overpayment: $this->centavos($repayment->overpayment, 'overpayment', $repayment),
             method: SettlementMethod::fromLendingMethod((string) $repayment->method),
             map: AccountMap::resolve(),
+            insurance: $this->centavos($repayment->insurance_applied ?? 0, 'insurance applied', $repayment),
         );
     }
 

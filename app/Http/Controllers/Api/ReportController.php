@@ -160,7 +160,7 @@ class ReportController extends Controller
     #[OA\Get(
         path: '/api/reports/statement-of-account/{loan}',
         summary: 'Statement of Account',
-        description: 'All transactions, schedule, and balance for a specific loan. Each `amortization_schedule` row also carries the demand letter\'s arrears: `remaining` (`principal`, `interest`, `penalty` still owed, never below 0), `amount_due` (their sum), `days_overdue` (whole days past the due date, today in Asia/Manila; 0 when not yet due) and `is_overdue` (due before today with something still owed). `total_demanded` is every `is_overdue` row\'s `amount_due`, and `demand_totals` (`principal`, `interest`, `penalty`, `amount_due`) the columns over those rows. Totals in whole centavos.',
+        description: 'All transactions, schedule, and balance for a specific loan. Each `amortization_schedule` row also carries the demand letter\'s arrears: `remaining` (`principal`, `interest`, `penalty` still owed, never below 0), `amount_due` (their sum), `days_overdue` (whole days past the due date, today in Asia/Manila; 0 when not yet due) and `is_overdue` (due before today with something still owed). `total_demanded` is every `is_overdue` row\'s `amount_due` plus, when there are any, the insurance premium still owed (a payment takes it first), and `demand_totals` (`principal`, `interest`, `penalty`, `amount_due`) the columns over those rows, with `insurance_owed` the premium included in `total_demanded`. `summary` also carries `insurance_owed`, inside `outstanding_balance`. Totals in whole centavos.',
         tags: ['Reports'],
         security: [['sanctum' => []]],
         parameters: [
@@ -396,7 +396,7 @@ class ReportController extends Controller
             new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'date', in: 'query', required: false, description: 'Legacy single-day parameter; superseded by date_from/date_to.', schema: new OA\Schema(type: 'string', format: 'date')),
         ],
-        responses: [new OA\Response(response: 200, description: 'Daily collection summary, counted by period: `total_collected` is the principal and interest paid on the periods due in the range, capped per period (penalty never counts), so `collection_rate` never exceeds 100. Also `collected_in_full`, `partially_collected`, `counts` {collected, partial, pending}, and the cash side: `penalty_collected` and `total_received` (posted receipts in the range).')],
+        responses: [new OA\Response(response: 200, description: 'Daily collection summary, counted by period: `total_collected` is the principal and interest paid on the periods due in the range, capped per period (penalty never counts), so `collection_rate` never exceeds 100. Also `collected_in_full`, `partially_collected`, `counts` {collected, partial, pending}, and the cash side: `penalty_collected` and `total_received` (posted receipts in the range, less the insurance premium they collected first; equals Cash Flow\'s `inflows.repayments.total` less `inflows.repayments.insurance`).')],
     )]
     public function dailyCollection(): JsonResponse
     {
@@ -567,7 +567,7 @@ class ReportController extends Controller
     #[OA\Get(
         path: '/api/reports/cash-flow',
         summary: 'Cash Flow / Cash Position',
-        description: 'Cash in (posted repayments split by allocation, plus share capital paid in on its own) versus cash out (net proceeds released, plus share capital paid out on its own) for a period, with a per-branch breakdown. Deductions are reported separately as non-cash, share capital withheld at release under `non_cash.share_capital_at_release`. A payment\'s share capital build-up is already inside the repayment line (its overpayment), so its ledger credits and any void reversals are in no cash total: they are reported under `share_capital.build_up_from_payments` (net), `build_up_credit` and `build_up_debit`. The Share Capital report\'s credits for the same period and branch = `share_capital.credit` + `share_capital.build_up_credit` + `non_cash.share_capital_at_release`; its debits = `share_capital.debit` + `share_capital.build_up_debit`.',
+        description: 'Cash in (posted repayments split by allocation, the insurance premium they collected first as `inflows.repayments.insurance` and per branch `inflow_insurance`, both inside the totals, plus share capital paid in on its own) versus cash out (net proceeds released, plus share capital paid out on its own) for a period, with a per-branch breakdown. Deductions are reported separately as non-cash, share capital withheld at release under `non_cash.share_capital_at_release`. A payment\'s share capital build-up is already inside the repayment line (its overpayment), so its ledger credits and any void reversals are in no cash total: they are reported under `share_capital.build_up_from_payments` (net), `build_up_credit` and `build_up_debit`. The Share Capital report\'s credits for the same period and branch = `share_capital.credit` + `share_capital.build_up_credit` + `non_cash.share_capital_at_release`; its debits = `share_capital.debit` + `share_capital.build_up_debit`.',
         tags: ['Reports'],
         security: [['sanctum' => []]],
         parameters: [
@@ -774,13 +774,15 @@ class ReportController extends Controller
             ->with('loan.borrower');
 
         return $this->streamCsv('repayments.csv', [
-            'Receipt #', 'Borrower', 'Loan #', 'Date', 'Amount', 'Method', 'Status',
+            'Receipt #', 'Borrower', 'Loan #', 'Date', 'Amount', 'Insurance Premium', 'Method', 'Status',
         ], $query->lazy(500)->map(fn ($r) => [
             $r->receipt_number,
             $r->loan?->borrower?->full_name ?? '',
             $r->loan?->loan_account_number ?? '',
             $r->payment_date?->toDateString() ?? '',
             $r->amount_paid,
+            // The part of Amount that paid the insurance premium owed, first.
+            $r->insurance_applied,
             $r->method ?? 'cash',
             $r->status,
         ]));

@@ -162,6 +162,7 @@ class AutoPayAmountUnderLockTest extends TestCase
             'total_principal' => 10000,
             'total_interest' => 1800,
             'total_penalty' => 200,
+            'total_insurance' => 0,
             'total_amount' => 12000,
         ], $preview['loans'][0]);
         $this->assertEquals(0, $period->fresh()->penalty_amount, 'the preview must write nothing');

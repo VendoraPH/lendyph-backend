@@ -185,6 +185,7 @@ class Loan extends Model
         'insurance_payment_type',
         'insurance_partial_amount',
         'insurance_remaining_balance',
+        'insurance_carried_over',
         'restructured_at',
         'restructured_balance',
         'write_off_amount',
@@ -217,6 +218,7 @@ class Loan extends Model
             'insurance_premium_amount' => 'decimal:2',
             'insurance_partial_amount' => 'decimal:2',
             'insurance_remaining_balance' => 'decimal:2',
+            'insurance_carried_over' => 'decimal:2',
             'restructured_at' => 'datetime',
             'restructured_balance' => 'decimal:2',
             'write_off_amount' => 'decimal:2',
@@ -587,6 +589,16 @@ class Loan extends Model
 
             return round((float) $principalBalance + (float) $this->insurance_remaining_balance, 2);
         });
+    }
+
+    /**
+     * Whether insurance premium the release left unpaid is still owed on this
+     * loan (`insurance_remaining_balance`). Payments collect it first, and a
+     * loan that owes it never completes.
+     */
+    public function owesInsurancePremium(): bool
+    {
+        return (int) round((float) $this->insurance_remaining_balance * 100) > 0;
     }
 
     public function documents(): MorphMany
