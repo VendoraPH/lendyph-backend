@@ -16,7 +16,8 @@ use Tests\Traits\SetupLendyPH;
  * Item 1, decision 2(a). On a loan with a Share Capital Build-Up the payment
  * allocation stops after the current period and turns the rest into share
  * capital, so "n periods" would not prepay. GET /loans/{id}/summary sends only
- * the 1-period preset there, plus `payoff_amount`.
+ * the 1-period preset there, and `payoff_amount` is null (decision m5-2: one
+ * payment can't settle the loan, so "Pay all remaining" is hidden).
  *
  * That preset carries the period's build-up, as `amount_due_now` does and as
  * the browser's old preset (the period's `total_payment`) did, so a member
@@ -80,8 +81,10 @@ class ScbAdvancePresetsTest extends TestCase
         $this->assertEqualsWithDelta(11900.00, (float) $summary['advance_presets'][0]['amount'], 0.001);
         $this->assertEqualsWithDelta((float) $data['amortization_schedules'][0]['total_payment'], (float) $summary['advance_presets'][0]['amount'], 0.001);
         $this->assertEqualsWithDelta((float) $data['amount_due_now']['amount'], (float) $summary['advance_presets'][0]['amount'], 0.001);
-        $this->assertEqualsWithDelta(70800.00, (float) $summary['payoff_amount'], 0.001);
-        $this->assertEqualsWithDelta((float) $summary['total_outstanding'], (float) $summary['payoff_amount'], 0.001);
+        // No payoff: one payment can't settle a build-up loan, so "Pay all
+        // remaining" is hidden. What it owes is still `total_outstanding`.
+        $this->assertNull($summary['payoff_amount']);
+        $this->assertEqualsWithDelta(70800.00, (float) $summary['total_outstanding'], 0.001);
 
         // Paying it leaves period 1 paid and credits exactly the build-up.
         $repayment = $this->payLoan($loan, (float) $summary['advance_presets'][0]['amount']);

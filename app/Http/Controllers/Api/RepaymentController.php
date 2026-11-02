@@ -276,7 +276,7 @@ class RepaymentController extends Controller
         responses: [
             new OA\Response(response: 201, description: 'Repayment recorded'),
             new OA\Response(response: 409, description: 'The loan was closed (completed, restructured, voided or defaulted) since it was read, or the write deadlocked; nothing was recorded. Reload and try again'),
-            new OA\Response(response: 422, description: 'Validation error, or the loan is not released or ongoing (on `loan`)'),
+            new OA\Response(response: 422, description: 'Validation error (including a `payment_date` before the loan\'s release date, read in the app timezone), or the loan is not released or ongoing (on `loan`)'),
         ],
     )]
     public function store(StoreRepaymentRequest $request, Loan $loan): JsonResponse
@@ -385,7 +385,7 @@ class RepaymentController extends Controller
                         new OA\Property(property: 'periods', type: 'integer'),
                         new OA\Property(property: 'amount', type: 'number'),
                     ])),
-                    new OA\Property(property: 'payoff_amount', type: 'number', nullable: true, description: 'Everything owed today: `total_outstanding`, plus the penalty of any period that fell late past its grace since penalties were last stamped. On a loan without a Share Capital Build-Up it equals the last `advance_presets` amount (when a period is open), and recording it settles the loan. On a loan WITH a Share Capital Build-Up it is the amount owed to show, not an amount one Record Payment settles the loan with: recording it pays the current period (and any overdue ones) and credits the rest to a member\'s share capital (for a borrower who isn\'t a member it stays as overpayment). Null when the loan is not released or ongoing.'),
+                    new OA\Property(property: 'payoff_amount', type: 'number', nullable: true, description: 'Everything owed today: `total_outstanding`, plus the penalty of any period that fell late past its grace since penalties were last stamped. It equals the last `advance_presets` amount (when a period is open), and recording it settles the loan. Null when the loan is not released or ongoing (payments are refused there), and null on a loan with a Share Capital Build-Up (`scb_amount` above zero): there one payment can\'t settle the loan, because the allocation stops after the current period and turns the rest into share capital. The page hides "Pay all remaining" whenever this is null.'),
                 ]),
             ])),
             new OA\Response(response: 404, description: 'Loan not found'),
@@ -429,7 +429,7 @@ class RepaymentController extends Controller
                 ]),
             ])),
             new OA\Response(response: 409, description: 'The loan was closed (completed, restructured, voided or defaulted) since it was read. Reload and try again'),
-            new OA\Response(response: 422, description: 'Validation error'),
+            new OA\Response(response: 422, description: 'Validation error, including a `payment_date` before the loan\'s release date (read in the app timezone)'),
             new OA\Response(response: 404, description: 'Loan not found'),
         ],
     )]
@@ -439,7 +439,7 @@ class RepaymentController extends Controller
 
         $validated = request()->validate([
             'amount_paid' => ['required', 'numeric', 'min:0.01'],
-            'payment_date' => ['required', 'date'],
+            'payment_date' => ['required', 'date', StoreRepaymentRequest::notBeforeRelease($loan)],
         ]);
 
         $preview = $this->repaymentService->previewAllocation(

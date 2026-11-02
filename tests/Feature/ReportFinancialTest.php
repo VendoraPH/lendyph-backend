@@ -268,10 +268,11 @@ class ReportFinancialTest extends TestCase
 
     public function test_collection_efficiency_by_period_counts_each_months_own_periods_and_never_exceeds_100_percent(): void
     {
-        $loan = $this->releaseLoan();
-
         $monthOne = Carbon::today()->startOfMonth()->subMonths(2);
         $monthTwo = Carbon::today()->startOfMonth()->subMonth();
+
+        // Released before the payment below: a payment can't predate its release.
+        $loan = $this->releaseLoan(['released_at' => $monthOne->copy()]);
 
         // 11,800 billed in each of the two months...
         $this->setScheduleDueDate($loan, periodNumber: 1, dueDate: $monthOne->copy()->addDays(14));

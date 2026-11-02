@@ -457,8 +457,10 @@ class TimezoneShiftTest extends TestCase
 
         // Post through the real endpoint so the row is shaped exactly like
         // production data, then re-date it to look like the old UTC app wrote it.
+        // Posted on the release day, since a payment can't predate its release;
+        // the update below sets the calendar date the test reads.
         $id = (int) $this->postJson("/api/loans/{$loan->id}/repayments", [
-            'payment_date' => self::CALENDAR_DATE,
+            'payment_date' => $loan->released_at->toDateString(),
             'amount_paid' => 1000,
             'method' => 'cash',
         ])->assertCreated()->json('data.id');
