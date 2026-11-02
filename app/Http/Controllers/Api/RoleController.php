@@ -8,6 +8,8 @@ use App\Http\Requests\Role\UpdateRoleRequest;
 use App\Http\Resources\RoleResource;
 use App\Models\Role;
 use App\Rules\UniqueRoleDisplayName;
+use App\Services\RolePermissionAudit;
+use App\Services\RolePermissionGrants;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Support\Facades\DB;
@@ -91,7 +93,7 @@ class RoleController extends Controller
         ),
         responses: [
             new OA\Response(response: 201, description: 'Role created'),
-            new OA\Response(response: 422, description: 'Validation error'),
+            new OA\Response(response: 422, description: 'Validation error, or a permission the actor does not hold (`errors.permissions`)'),
         ],
     )]
     public function store(StoreRoleRequest $request): JsonResponse
@@ -112,6 +114,7 @@ class RoleController extends Controller
 
             if (! empty($validated['permissions'])) {
                 $role->syncPermissions($validated['permissions']);
+                RolePermissionAudit::record($role, [], RolePermissionAudit::names($role));
             }
 
             return $role;
@@ -146,23 +149,48 @@ class RoleController extends Controller
         ),
         responses: [
             new OA\Response(response: 200, description: 'Role updated'),
-            new OA\Response(response: 422, description: 'Validation error or system-role rename attempted'),
+            new OA\Response(response: 422, description: 'Validation error; system-role rename attempted; a non-super_admin changing super_admin\'s display_name (clearing included) or permissions; or adding a permission the actor does not hold (`errors.display_name` / `errors.permissions`)'),
         ],
     )]
     public function update(UpdateRoleRequest $request, Role $role): RoleResource
     {
         $validated = $request->validated();
+        $actor = $request->user();
 
-        DB::transaction(function () use ($role, $validated) {
+        // A non-super_admin's save reaches here on super_admin only once
+        // UpdateRoleRequest has proved its label and permissions unchanged.
+        // Writing them back anyway could still move them: the role editor
+        // sends `display_name: null` for the default label, which would
+        // erase a stored "Super Admin". So they are left alone.
+        $guardedSuperAdmin = $role->name === 'super_admin' && ! $actor->hasRole('super_admin');
+
+        DB::transaction(function () use ($role, $validated, $actor, $guardedSuperAdmin) {
             self::lockAndRecheckLabels($validated, $role->id);
 
-            $fields = collect($validated)->only(['name', 'display_name', 'description'])->toArray();
+            $fields = collect($validated)
+                ->only($guardedSuperAdmin ? ['name', 'description'] : ['name', 'display_name', 'description'])
+                ->toArray();
             if ($fields !== []) {
                 $role->update($fields);
             }
 
-            if (array_key_exists('permissions', $validated)) {
-                $role->syncPermissions($validated['permissions'] ?? []);
+            if (array_key_exists('permissions', $validated) && ! $guardedSuperAdmin) {
+                $before = RolePermissionAudit::names($role);
+                $sent = array_values($validated['permissions'] ?? []);
+
+                // The form request judged the grant against the list it read
+                // before the lock; judge it again against the locked list.
+                if (! $actor->hasRole('super_admin')) {
+                    $missing = RolePermissionGrants::ungrantable($actor, $sent, $before);
+                    if ($missing !== []) {
+                        throw ValidationException::withMessages([
+                            'permissions' => RolePermissionGrants::refusal($missing),
+                        ]);
+                    }
+                }
+
+                $role->syncPermissions($sent);
+                RolePermissionAudit::record($role, $before, RolePermissionAudit::names($role));
             }
         });
 
@@ -189,13 +217,14 @@ class RoleController extends Controller
     {
         $this->authorize('settings:update');
 
-        if (in_array($role->name, ['super_admin', 'admin'], true)) {
+        if (in_array($role->name, Role::PROTECTED_KEYS, true)) {
             throw ValidationException::withMessages([
                 'role' => "The {$role->name} role cannot be deactivated.",
             ]);
         }
 
-        $role->update(['is_active' => false]);
+        // The change and its audit row commit together.
+        DB::transaction(fn () => $role->update(['is_active' => false]));
         $role->load('permissions')->loadCount('users');
 
         return new RoleResource($role);
@@ -217,7 +246,7 @@ class RoleController extends Controller
     {
         $this->authorize('settings:update');
 
-        $role->update(['is_active' => true]);
+        DB::transaction(fn () => $role->update(['is_active' => true]));
         $role->load('permissions')->loadCount('users');
 
         return new RoleResource($role);
@@ -241,20 +270,32 @@ class RoleController extends Controller
     {
         $this->authorize('settings:delete');
 
-        if ($role->is_system) {
+        if ($role->is_system || in_array($role->name, Role::PROTECTED_KEYS, true)) {
             throw ValidationException::withMessages([
                 'role' => "System role '{$role->name}' cannot be deleted.",
             ]);
         }
 
-        $usersCount = $role->users()->count();
-        if ($usersCount > 0) {
-            throw ValidationException::withMessages([
-                'role' => "Role '{$role->name}' is assigned to {$usersCount} user(s). Reassign them before deleting.",
-            ]);
-        }
+        DB::transaction(function () use ($role) {
+            // Every role row first, in id order, as store() and update() take
+            // them: a delete racing a save of the same role then waits instead
+            // of deadlocking on the pivot rows Spatie's delete hook removes,
+            // and the user count and permission list below are read after any
+            // save that got there first.
+            self::lockAndRecheckLabels([]);
 
-        $role->delete();
+            $usersCount = $role->users()->count();
+            if ($usersCount > 0) {
+                throw ValidationException::withMessages([
+                    'role' => "Role '{$role->name}' is assigned to {$usersCount} user(s). Reassign them before deleting.",
+                ]);
+            }
+
+            // The trail keeps what the deleted role carried: deleting it
+            // detaches its permissions with no row of their own.
+            RolePermissionAudit::record($role, RolePermissionAudit::names($role), []);
+            $role->delete();
+        });
 
         return response()->json(['message' => 'Role deleted successfully.']);
     }

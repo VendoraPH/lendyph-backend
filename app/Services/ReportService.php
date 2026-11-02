@@ -732,26 +732,24 @@ class ReportService
 
     // ── Daily Collection ─────────────────────────────────────────────────
 
+    /**
+     * Collection against what fell due in the range, period by period, by the
+     * dashboard's daily-dues rule (DashboardService::dailyDueItem()): a period
+     * is `collected` once the principal and interest paid on it cover its
+     * `total_due`, `partial` while some of it is paid, `pending` while none is.
+     * Penalty paid never counts towards it, so a penalty-only payment leaves
+     * the period pending, and since each period's collected amount is capped
+     * at what it owes, the collection rate can never pass 100%. "Paid" is the
+     * schedule's paid columns as they stand now.
+     *
+     * The money actually taken in the range is reported beside it, never mixed
+     * in: `total_received` (every posted receipt, the figure Cash Flow's
+     * repayment inflow reconciles with) and `penalty_collected` (its penalty
+     * part).
+     */
     public function dailyCollection(array $filters): array
     {
         [$from, $to] = $this->resolveDateRange($filters);
-        $branchId = $filters['branch_id'] ?? null;
-
-        // Both sides of the ratio must be scoped identically — the guard, and
-        // why it exists, now live in releasedLoanScope() so collectionEfficiency()
-        // shares it rather than copying it.
-        $loanScope = $this->releasedLoanScope($branchId);
-
-        $totalDue = (float) AmortizationSchedule::query()
-            ->whereBetween('due_date', [$from->toDateString(), $to->toDateString()])
-            ->whereHas('loan', $loanScope)
-            ->sum('total_due');
-
-        $totalCollected = (float) Repayment::query()
-            ->where('status', 'posted')
-            ->whereBetween('payment_date', [$from->toDateString(), $to->toDateString()])
-            ->whereHas('loan', $loanScope)
-            ->sum('amount_paid');
 
         return [
             // `date` is the as-of (end) date, kept for callers that predate the
@@ -759,13 +757,81 @@ class ReportService
             'date' => $to->toDateString(),
             'date_from' => $from->toDateString(),
             'date_to' => $to->toDateString(),
-            'total_due' => round($totalDue, 2),
-            'total_collected' => round($totalCollected, 2),
-            // Whole percent, e.g. 12.5 means 12.5%.
-            'collection_rate' => $totalDue > 0 ? round($totalCollected / $totalDue * 100, 2) : 0.0,
-            'uncollected' => round(max(0, $totalDue - $totalCollected), 2),
+            ...$this->periodCollection($from->toDateString(), $to->toDateString(), $filters['branch_id'] ?? null),
             'generated_at' => now()->toDateTimeString(),
         ];
+    }
+
+    /**
+     * Daily Collection's figures, which are also Collection Efficiency's
+     * overall figures, so the two reports can never disagree.
+     *
+     * @return array<string, mixed>
+     */
+    private function periodCollection(string $fromDate, string $toDate, int|string|null $branchId): array
+    {
+        $periods = $this->periodsDueQuery($fromDate, $toDate, $branchId)
+            ->selectRaw(self::periodFiguresSql())
+            ->first();
+
+        // Scoped exactly like the periods: releasedLoanScope()'s statuses and
+        // branch.
+        $receipts = Repayment::query()
+            ->where('status', 'posted')
+            ->whereBetween('payment_date', [$fromDate, $toDate])
+            ->whereHas('loan', $this->releasedLoanScope($branchId))
+            ->toBase()
+            ->selectRaw('COALESCE(SUM(amount_paid), 0) as total_received, COALESCE(SUM(penalty_applied), 0) as penalty_collected')
+            ->first();
+
+        return [
+            ...$this->collectionEfficiencyFigures((float) $periods->total_due, (float) $periods->total_collected),
+            'collected_in_full' => round((float) $periods->collected_in_full, 2),
+            'partially_collected' => round((float) $periods->partially_collected, 2),
+            'counts' => [
+                'collected' => (int) $periods->collected_count,
+                'partial' => (int) $periods->partial_count,
+                'pending' => (int) $periods->pending_count,
+            ],
+            'penalty_collected' => round((float) $receipts->penalty_collected, 2),
+            'total_received' => round((float) $receipts->total_received, 2),
+        ];
+    }
+
+    /**
+     * The periods falling due in the range on loans in releasedLoanScope()'s
+     * statuses and branch. A period with nothing due (closed by an adjustment)
+     * is not a due and is left out.
+     */
+    private function periodsDueQuery(string $fromDate, string $toDate, int|string|null $branchId): QueryBuilder
+    {
+        return DB::table('amortization_schedules')
+            ->join('loans', 'loans.id', '=', 'amortization_schedules.loan_id')
+            ->whereIn('loans.status', Loan::EVER_RELEASED_STATUSES)
+            ->when($branchId, fn ($q, $b) => $q->where('loans.branch_id', $b))
+            ->whereBetween('amortization_schedules.due_date', [$fromDate, $toDate])
+            ->where('amortization_schedules.total_due', '>', 0);
+    }
+
+    /**
+     * The per-period rule as SUMs over periodsDueQuery(), in exact DECIMAL
+     * arithmetic: each period contributes its principal and interest paid,
+     * capped at its `total_due`.
+     */
+    private static function periodFiguresSql(): string
+    {
+        $due = 'amortization_schedules.total_due';
+        $paid = '(amortization_schedules.principal_paid + amortization_schedules.interest_paid)';
+
+        return "
+            COALESCE(SUM({$due}), 0) as total_due,
+            COALESCE(SUM(LEAST({$paid}, {$due})), 0) as total_collected,
+            COALESCE(SUM(CASE WHEN {$paid} >= {$due} THEN {$due} ELSE 0 END), 0) as collected_in_full,
+            COALESCE(SUM(CASE WHEN {$paid} > 0 AND {$paid} < {$due} THEN {$paid} ELSE 0 END), 0) as partially_collected,
+            COALESCE(SUM(CASE WHEN {$paid} >= {$due} THEN 1 ELSE 0 END), 0) as collected_count,
+            COALESCE(SUM(CASE WHEN {$paid} > 0 AND {$paid} < {$due} THEN 1 ELSE 0 END), 0) as partial_count,
+            COALESCE(SUM(CASE WHEN {$paid} <= 0 THEN 1 ELSE 0 END), 0) as pending_count
+        ";
     }
 
     /**
@@ -1203,7 +1269,7 @@ class ReportService
      *
      * Cash IN is what actually crossed the counter: posted repayments — scoped
      * through releasedLoanScope() so the figure reconciles exactly with
-     * dailyCollection()'s `total_collected` for the same period — plus share
+     * dailyCollection()'s `total_received` for the same period — plus share
      * capital paid in on its own.
      *
      * Share capital withheld from a loan at release (a ledger row carrying a
@@ -1483,9 +1549,12 @@ class ReportService
     /**
      * Amount due vs amount collected, overall and segmented by branch and month.
      *
-     * The overall figures are computed the same way dailyCollection() computes
-     * them — same range, same releasedLoanScope() on BOTH sides of the ratio —
-     * so the two reports can never disagree for the same filters.
+     * Counted by period, exactly as dailyCollection() counts: the overall
+     * figures ARE periodCollection(), so the two reports can never disagree,
+     * and each branch row and month bucket applies the same rule to its own
+     * periods (a month bucket holds the periods that fell due in it). No rate
+     * exceeds 100%: a payment that settles June's arrears in August counts
+     * towards June's periods, not August's.
      *
      * @param  array<string, mixed>  $filters
      * @return array<string, mixed>
@@ -1496,31 +1565,15 @@ class ReportService
         $fromDate = $from->toDateString();
         $toDate = $to->toDateString();
         $branchId = $filters['branch_id'] ?? null;
-        $loanScope = $this->releasedLoanScope($branchId);
-
-        $totalDue = (float) AmortizationSchedule::query()
-            ->whereBetween('due_date', [$fromDate, $toDate])
-            ->whereHas('loan', $loanScope)
-            ->sum('total_due');
-
-        $totalCollected = (float) Repayment::query()
-            ->where('status', 'posted')
-            ->whereBetween('payment_date', [$fromDate, $toDate])
-            ->whereHas('loan', $loanScope)
-            ->sum('amount_paid');
 
         return array_merge(
-            $this->collectionEfficiencyFigures($totalDue, $totalCollected),
+            $this->periodCollection($fromDate, $toDate, $branchId),
             [
                 'date_from' => $fromDate,
                 'date_to' => $toDate,
                 'by_branch' => $this->collectionEfficiencyByBranch($fromDate, $toDate, $branchId),
                 'by_period' => $this->collectionEfficiencyByPeriod($from, $to, $branchId),
-                // A by_period bucket CAN exceed 100%. That is a timing effect,
-                // not the scoping bug releasedLoanScope() guards against: a
-                // payment made in August can settle arrears that fell due in
-                // June, so August collects more than August billed.
-                'note' => 'Both sides of every ratio are scoped identically (loan status + branch). A by_period rate above 100% is a timing effect — arrears from an earlier bucket settled in a later one — not double counting.',
+                'note' => 'Counted by period: collected is the principal and interest paid on the periods due in the range (each branch, each due month), capped at what each period owes, so no rate exceeds 100%. Penalty and cash taken in are penalty_collected and total_received.',
                 'generated_at' => now()->toDateTimeString(),
             ],
         );
@@ -1550,52 +1603,18 @@ class ReportService
      */
     private function collectionEfficiencyByBranch(string $fromDate, string $toDate, int|string|null $branchId): array
     {
-        $due = DB::table('amortization_schedules')
-            ->join('loans', 'loans.id', '=', 'amortization_schedules.loan_id')
+        return $this->periodsDueQuery($fromDate, $toDate, $branchId)
             ->join('branches', 'branches.id', '=', 'loans.branch_id')
-            ->whereIn('loans.status', Loan::EVER_RELEASED_STATUSES)
-            ->when($branchId, fn ($q, $b) => $q->where('loans.branch_id', $b))
-            ->whereBetween('amortization_schedules.due_date', [$fromDate, $toDate])
             ->groupBy('branches.id', 'branches.name')
-            ->selectRaw('
-                branches.id as branch_id,
-                branches.name as branch_name,
-                COALESCE(SUM(amortization_schedules.total_due), 0) as total_due
-            ')
+            ->orderBy('branches.id')
+            ->selectRaw('branches.id as branch_id, branches.name as branch_name, '.self::periodFiguresSql())
             ->get()
-            ->keyBy(fn ($row) => (int) $row->branch_id);
-
-        // Identical loan scoping to the due side — that is the whole point.
-        $collected = DB::table('repayments')
-            ->join('loans', 'loans.id', '=', 'repayments.loan_id')
-            ->join('branches', 'branches.id', '=', 'loans.branch_id')
-            ->where('repayments.status', 'posted')
-            ->whereIn('loans.status', Loan::EVER_RELEASED_STATUSES)
-            ->when($branchId, fn ($q, $b) => $q->where('loans.branch_id', $b))
-            ->whereBetween('repayments.payment_date', [$fromDate, $toDate])
-            ->groupBy('branches.id', 'branches.name')
-            ->selectRaw('
-                branches.id as branch_id,
-                branches.name as branch_name,
-                COALESCE(SUM(repayments.amount_paid), 0) as total_collected
-            ')
-            ->get()
-            ->keyBy(fn ($row) => (int) $row->branch_id);
-
-        return $due->keys()
-            ->merge($collected->keys())
-            ->unique()
-            ->sort()
-            ->values()
-            ->map(fn (int $id) => array_merge(
+            ->map(fn ($row) => array_merge(
                 [
-                    'branch_id' => $id,
-                    'branch_name' => $due->get($id)->branch_name ?? $collected->get($id)->branch_name,
+                    'branch_id' => (int) $row->branch_id,
+                    'branch_name' => $row->branch_name,
                 ],
-                $this->collectionEfficiencyFigures(
-                    (float) ($due->get($id)->total_due ?? 0),
-                    (float) ($collected->get($id)->total_collected ?? 0),
-                ),
+                $this->collectionEfficiencyFigures((float) $row->total_due, (float) $row->total_collected),
             ))->all();
     }
 
@@ -1607,41 +1626,17 @@ class ReportService
      */
     private function collectionEfficiencyByPeriod(Carbon $from, Carbon $to, int|string|null $branchId): array
     {
-        $fromDate = $from->toDateString();
-        $toDate = $to->toDateString();
-
-        $due = DB::table('amortization_schedules')
-            ->join('loans', 'loans.id', '=', 'amortization_schedules.loan_id')
-            ->whereIn('loans.status', Loan::EVER_RELEASED_STATUSES)
-            ->when($branchId, fn ($q, $b) => $q->where('loans.branch_id', $b))
-            ->whereBetween('amortization_schedules.due_date', [$fromDate, $toDate])
+        $months = $this->periodsDueQuery($from->toDateString(), $to->toDateString(), $branchId)
             ->groupByRaw("DATE_FORMAT(amortization_schedules.due_date, '%Y-%m')")
-            ->selectRaw("
-                DATE_FORMAT(amortization_schedules.due_date, '%Y-%m') as period,
-                COALESCE(SUM(amortization_schedules.total_due), 0) as total_due
-            ")
-            ->get()
-            ->keyBy('period');
-
-        $collected = DB::table('repayments')
-            ->join('loans', 'loans.id', '=', 'repayments.loan_id')
-            ->where('repayments.status', 'posted')
-            ->whereIn('loans.status', Loan::EVER_RELEASED_STATUSES)
-            ->when($branchId, fn ($q, $b) => $q->where('loans.branch_id', $b))
-            ->whereBetween('repayments.payment_date', [$fromDate, $toDate])
-            ->groupByRaw("DATE_FORMAT(repayments.payment_date, '%Y-%m')")
-            ->selectRaw("
-                DATE_FORMAT(repayments.payment_date, '%Y-%m') as period,
-                COALESCE(SUM(repayments.amount_paid), 0) as total_collected
-            ")
+            ->selectRaw("DATE_FORMAT(amortization_schedules.due_date, '%Y-%m') as period, ".self::periodFiguresSql())
             ->get()
             ->keyBy('period');
 
         return array_map(fn (array $bucket) => array_merge(
             $bucket,
             $this->collectionEfficiencyFigures(
-                (float) ($due->get($bucket['period'])->total_due ?? 0),
-                (float) ($collected->get($bucket['period'])->total_collected ?? 0),
+                (float) ($months->get($bucket['period'])->total_due ?? 0),
+                (float) ($months->get($bucket['period'])->total_collected ?? 0),
             ),
         ), $this->monthBuckets($from, $to));
     }

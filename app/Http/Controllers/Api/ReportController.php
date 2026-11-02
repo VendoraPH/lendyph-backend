@@ -396,7 +396,7 @@ class ReportController extends Controller
             new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'date', in: 'query', required: false, description: 'Legacy single-day parameter; superseded by date_from/date_to.', schema: new OA\Schema(type: 'string', format: 'date')),
         ],
-        responses: [new OA\Response(response: 200, description: 'Daily collection summary')],
+        responses: [new OA\Response(response: 200, description: 'Daily collection summary, counted by period: `total_collected` is the principal and interest paid on the periods due in the range, capped per period (penalty never counts), so `collection_rate` never exceeds 100. Also `collected_in_full`, `partially_collected`, `counts` {collected, partial, pending}, and the cash side: `penalty_collected` and `total_received` (posted receipts in the range).')],
     )]
     public function dailyCollection(): JsonResponse
     {
@@ -597,7 +597,7 @@ class ReportController extends Controller
             new OA\Parameter(name: 'date', in: 'query', required: false, description: 'Legacy single-day parameter; superseded by date_from/date_to.', schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
         ],
-        responses: [new OA\Response(response: 200, description: 'Collection efficiency with branch and monthly breakdowns')],
+        responses: [new OA\Response(response: 200, description: 'Collection efficiency with branch and monthly breakdowns. Overall figures equal Daily Collection\'s for the same filters; each branch row and due-month bucket is counted by period the same way, so no rate exceeds 100.')],
     )]
     public function collectionEfficiency(): JsonResponse
     {
