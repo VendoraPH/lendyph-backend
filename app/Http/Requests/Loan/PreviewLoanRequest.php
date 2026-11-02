@@ -4,7 +4,12 @@ namespace App\Http\Requests\Loan;
 
 use App\Enums\LoanFrequency;
 use App\Http\Requests\Concerns\ValidatesDeductionAmounts;
+use App\Models\Collateral;
+use App\Models\Loan;
+use App\Services\CollateralValuation;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Rule;
+use Illuminate\Validation\Validator;
 
 /**
  * The loan form's figures, asked for while it is being filled in: every field
@@ -15,6 +20,19 @@ use Illuminate\Foundation\Http\FormRequest;
  * product's amount and rate ranges are not checked here: the form states them
  * beside its fields, and saving the loan enforces them. A term outside the
  * product's range simply has no schedule (LoanService::formPreview()).
+ *
+ * With `source_loan_id` it is the restructure page's preview, open to whoever
+ * can restructure, as POST /loans/{id}/restructure is, and it adds that page's
+ * `restructure` figures. With `loan_id` it is the edit page's preview, open to
+ * whoever can edit a loan, as PUT /loans/{id} is: the loan's held pledges
+ * count at the value they were pledged at. The two cannot be combined.
+ *
+ * Collateral is listed by id only. The server values each row from the
+ * borrower's register (`borrower_id`, or the edited or source loan's
+ * borrower), so a sent `snapshot_value` is ignored and a collateral on someone
+ * else's register is refused. Listing collateral needs `collaterals:view`, and
+ * a share capital collateral, valued at its member's balance, needs
+ * `share_capital:view` too (see after()).
  */
 class PreviewLoanRequest extends FormRequest
 {
@@ -22,12 +40,30 @@ class PreviewLoanRequest extends FormRequest
 
     public function authorize(): bool
     {
+        if ($this->filled('source_loan_id')) {
+            return $this->user()->can('loans:restructure');
+        }
+
+        if ($this->filled('loan_id')) {
+            return $this->user()->can('loans:update');
+        }
+
         return $this->user()->canAny(['loans:create', 'loans:update']);
     }
 
     public function rules(): array
     {
         return [
+            'source_loan_id' => ['nullable', 'integer', 'exists:loans,id'],
+            'loan_id' => ['nullable', 'integer', 'exists:loans,id', 'prohibits:source_loan_id'],
+            // Needed once collateral is listed, to find it on the register;
+            // an edit or a restructure takes its loan's borrower instead.
+            'borrower_id' => [
+                Rule::requiredIf(fn (): bool => ! $this->filled('source_loan_id') && ! $this->filled('loan_id') && ! empty($this->input('collaterals'))),
+                'nullable',
+                'integer',
+                'exists:borrowers,id',
+            ],
             'loan_product_id' => ['nullable', 'integer', 'exists:loan_products,id'],
             'principal_amount' => ['nullable', 'numeric', 'min:0'],
             // As StoreLoanRequest takes them, so the preview never shows a
@@ -38,8 +74,12 @@ class PreviewLoanRequest extends FormRequest
             'start_date' => ['nullable', 'date'],
             'scb_amount' => ['nullable', 'numeric', 'min:0'],
             'collaterals' => ['nullable', 'array'],
-            'collaterals.*.collateral_id' => ['nullable', 'integer'],
-            'collaterals.*.snapshot_value' => ['required', 'numeric', 'min:0'],
+            'collaterals.*.collateral_id' => [
+                'required',
+                'integer',
+                'distinct',
+                Rule::exists('collaterals', 'id')->where('borrower_id', $this->registerBorrowerId() ?? 0),
+            ],
             // The deduction inputs exactly as a create, an edit or a restructure
             // sends them, under the same rules, so the preview never lists a
             // deduction saving would refuse. Absent or null: the product's own
@@ -49,5 +89,122 @@ class PreviewLoanRequest extends FormRequest
             'deductions.*.amount' => $this->deductionAmountRule(),
             'deductions.*.type' => ['required_with:deductions', 'in:fixed,percentage'],
         ];
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    public function messages(): array
+    {
+        return [
+            'collaterals.*.collateral_id.exists' => 'This collateral is not registered to this borrower.',
+            'collaterals.*.collateral_id.distinct' => 'Each collateral can be listed only once.',
+        ];
+    }
+
+    /**
+     * Once the list is valid:
+     *
+     *  - Listing collateral needs `collaterals:view`: the preview values each
+     *    row, which would otherwise read the register's amounts to a caller
+     *    who may not open it.
+     *  - A share capital collateral needs `share_capital:view`: its value is
+     *    the member's balance, so the preview's total would show what the
+     *    permission hides. On a restructure that includes the source loan's
+     *    pledges, which count whether listed or not.
+     *
+     * @return array<int, \Closure(Validator): void>
+     */
+    public function after(): array
+    {
+        return [
+            function (Validator $validator): void {
+                if ($validator->errors()->hasAny(['borrower_id', 'loan_id', 'source_loan_id', 'collaterals', 'collaterals.*'])) {
+                    return;
+                }
+
+                $rows = $this->input('collaterals');
+                $rows = is_array($rows) ? array_values($rows) : [];
+
+                if ($rows !== [] && ! $this->user()->can('collaterals:view')) {
+                    $validator->errors()->add('collaterals', 'Previewing collateral needs the Collaterals: View permission.');
+
+                    return;
+                }
+
+                if ($this->user()->can('share_capital:view')) {
+                    return;
+                }
+
+                $this->refuseShareCapital($validator, $rows);
+            },
+        ];
+    }
+
+    /**
+     * Adds an error for each listed share capital collateral, and one on
+     * `source_loan_id` when the source loan holds one that is not listed.
+     *
+     * @param  list<mixed>  $rows
+     */
+    private function refuseShareCapital(Validator $validator, array $rows): void
+    {
+        $listedIds = array_map(static fn (array $row): int => (int) $row['collateral_id'], $rows);
+
+        $sourceLoanId = filter_var($this->input('source_loan_id'), FILTER_VALIDATE_INT);
+        $sourceIds = $sourceLoanId === false
+            ? []
+            : array_map('intval', Loan::find($sourceLoanId)?->collaterals()->pluck('collaterals.id')->all() ?? []);
+
+        $ids = array_values(array_unique([...$listedIds, ...$sourceIds]));
+
+        if ($ids === []) {
+            return;
+        }
+
+        $shareCapitalIds = Collateral::query()
+            ->whereKey($ids)
+            ->with('collateralType')
+            ->get()
+            ->filter(fn (Collateral $collateral): bool => CollateralValuation::isShareCapital($collateral))
+            ->modelKeys();
+
+        foreach ($listedIds as $index => $collateralId) {
+            if (in_array($collateralId, $shareCapitalIds, true)) {
+                $validator->errors()->add(
+                    "collaterals.{$index}.collateral_id",
+                    'Previewing a share capital collateral needs the Share Capital: View permission.',
+                );
+            }
+        }
+
+        if (array_diff(array_intersect($sourceIds, $shareCapitalIds), $listedIds) !== []) {
+            $validator->errors()->add(
+                'source_loan_id',
+                'This loan is secured by share capital; previewing its restructure needs the Share Capital: View permission.',
+            );
+        }
+    }
+
+    /**
+     * The borrower whose register the listed collateral must be on: the
+     * edited loan's, or the source loan's on a restructure, else
+     * `borrower_id`. Null when none names one, which matches no collateral.
+     */
+    private function registerBorrowerId(): ?int
+    {
+        foreach (['loan_id', 'source_loan_id'] as $field) {
+            $loanId = filter_var($this->input($field), FILTER_VALIDATE_INT);
+
+            if ($loanId !== false) {
+                $borrowerId = Loan::whereKey($loanId)->value('borrower_id');
+
+                return $borrowerId === null ? null : (int) $borrowerId;
+            }
+        }
+
+        $borrowerId = filter_var($this->input('borrower_id'), FILTER_VALIDATE_INT);
+
+        return $borrowerId === false ? null : $borrowerId;
     }
 }

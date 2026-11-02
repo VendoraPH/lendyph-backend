@@ -56,12 +56,22 @@ class LoanCollateralSummaryTest extends TestCase
 
     public function test_it_is_the_figure_the_form_preview_gives_for_the_same_pledges(): void
     {
-        $loan = $this->draft(60000, [12345.67, 0.01]);
+        $loan = $this->freeDraft(60000);
+        $listed = [];
+
+        // Pledged by the attach endpoint, which pledges each at the value the
+        // preview reads by id.
+        foreach ([12345.67, 0.01] as $value) {
+            $collateral = Collateral::factory()->create(['borrower_id' => $loan->borrower_id, 'amount' => $value]);
+            $this->postJson("/api/loans/{$loan->id}/collaterals", ['collateral_id' => $collateral->id])->assertCreated();
+            $listed[] = ['collateral_id' => $collateral->id];
+        }
 
         $card = $this->getJson("/api/loans/{$loan->id}")->assertOk()->json('data.collateral_summary');
         $preview = $this->postJson('/api/loans/preview', [
             'principal_amount' => 60000,
-            'collaterals' => [['snapshot_value' => 12345.67], ['snapshot_value' => 0.01]],
+            'borrower_id' => $loan->borrower_id,
+            'collaterals' => $listed,
         ])->assertOk()->json('data.collateral');
 
         $this->assertSame($preview, $card);

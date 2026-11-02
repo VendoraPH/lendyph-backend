@@ -57,10 +57,11 @@ use OpenApi\Attributes as OA;
             new OA\Property(property: 'share_capital_build_up', type: 'number', description: 'One `scb_amount` per period, none on a period an extension or adjustment closed'),
             new OA\Property(property: 'total_payment', type: 'number', description: '`total_due` plus `share_capital_build_up`; equals POST /loans/preview\'s `amortization.totals.total_payment` for the same loan'),
         ]),
-        new OA\Property(property: 'collateral_summary', type: 'object', nullable: true, description: 'GET /loans/{id} only; null where the loan\'s collaterals are not loaded (lists). The pledged `snapshot_value`s added up against the principal, by the rule POST /loans/preview\'s `collateral` uses.', properties: [
-            new OA\Property(property: 'total_value', type: 'number'),
+        new OA\Property(property: 'collateral_summary', type: 'object', nullable: true, description: 'GET /loans/{id} only; null where the loan\'s collaterals are not loaded (lists). The values the server pledged each collateral at (`snapshot_value`: its `amount`, or for share capital its member\'s balance) added up against the principal, by the rule POST /loans/preview\'s `collateral` uses. When the loan holds a share capital pledge and the caller lacks `share_capital:view`, `total_value` and `short_by` are null and `value_unknown` is true, because they would reveal the balance.', properties: [
+            new OA\Property(property: 'total_value', type: 'number', nullable: true),
             new OA\Property(property: 'security_status', type: 'string', enum: ['secured', 'partially_secured', 'unsecured']),
-            new OA\Property(property: 'short_by', type: 'number'),
+            new OA\Property(property: 'short_by', type: 'number', nullable: true),
+            new OA\Property(property: 'value_unknown', type: 'boolean', description: 'Present, and true, only when the totals are withheld'),
         ]),
         new OA\Property(property: 'borrower_name', type: 'string', nullable: true),
         new OA\Property(property: 'loan_product_name', type: 'string', nullable: true),
@@ -324,8 +325,9 @@ class LoanResource extends JsonResource
             // The collaterals card's total, security status and shortfall
             // (CollateralSecurity, the rule the loan form's preview uses). Only
             // where `collaterals` is loaded (GET /loans/{id}); null elsewhere,
-            // so a list pays nothing for it.
-            'collateral_summary' => $this->relationLoaded('collaterals') ? CollateralSecurity::ofLoan($this->resource) : null,
+            // so a list pays nothing for it. For the user asking: a share
+            // capital pledge's balance is withheld from one who cannot see it.
+            'collateral_summary' => $this->relationLoaded('collaterals') ? CollateralSecurity::ofLoan($this->resource, $request->user()) : null,
             'source_loan_id' => $this->source_loan_id,
             'is_restructure' => $this->isRestructure(),
             'restructured_at' => $this->restructured_at,

@@ -77,10 +77,64 @@ final class CollateralValuation
     }
 
     /**
-     * A collateral with no type falls through to its `amount`, as it did in
-     * the browser.
+     * What a pledge of this collateral is worth: the value the server stores as
+     * its `snapshot_value`, never one the client sends.
+     *
+     * Viewer-independent, unlike forCollaterals(): a pledge records what the
+     * collateral is worth, not what one user may see of it.
+     *
+     *  - Not `share_capital`: its `amount`.
+     *  - `share_capital`: its member's share capital balance, clamped at 0, since
+     *    a negative balance secures nothing.
+     *
+     * An attach calls it on the collateral row it has locked, and the balance
+     * is read during the attach's transaction. The collateral lock does not
+     * cover the share capital ledger, so the balance is the one that
+     * transaction reads, not one held still until it commits.
      */
-    private static function isShareCapital(Collateral $collateral): bool
+    public static function pledgeValue(Collateral $collateral): float
+    {
+        return self::pledgeValues(new EloquentCollection([$collateral]))[$collateral->id];
+    }
+
+    /**
+     * pledgeValue() for every collateral in the list, reading balances in at
+     * most one query (POST /loans/preview values its whole list this way).
+     *
+     * @param  EloquentCollection<int, Collateral>  $collaterals
+     * @return array<int, float> keyed by collateral id
+     */
+    public static function pledgeValues(EloquentCollection $collaterals): array
+    {
+        $collaterals->loadMissing('collateralType');
+
+        $shareCapital = $collaterals->filter(
+            fn (Collateral $collateral): bool => self::isShareCapital($collateral)
+        );
+
+        $balances = $shareCapital->isEmpty()
+            ? []
+            : ShareCapitalLedger::balancesFor(
+                $shareCapital->map(fn (Collateral $collateral): int => (int) $collateral->borrower_id)->all()
+            );
+
+        $values = [];
+
+        foreach ($collaterals as $collateral) {
+            $values[$collateral->id] = self::isShareCapital($collateral)
+                ? max(0.0, (float) $balances[(int) $collateral->borrower_id])
+                : round((float) $collateral->amount, 2);
+        }
+
+        return $values;
+    }
+
+    /**
+     * A collateral with no type falls through to its `amount`, as it did in
+     * the browser. Public so a request can refuse a share capital collateral to
+     * a caller who may not see balances.
+     */
+    public static function isShareCapital(Collateral $collateral): bool
     {
         return $collateral->collateralType?->source === 'share_capital';
     }

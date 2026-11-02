@@ -11,6 +11,11 @@ use Illuminate\Validation\Rules\Exists;
  * both writes that do it: POST /loans/{loan}/collaterals (AttachCollateralRequest)
  * and the `collaterals` list on PUT /loans/{loan} (UpdateLoanRequest). One rule
  * set and one message, so the two can never accept different collateral.
+ *
+ * Neither takes a `snapshot_value`. The server values every pledge
+ * (CollateralValuation::pledgeValue()), so a sent one has no rule and nothing
+ * reads it: older clients that still send it are not refused, and what they
+ * send is never stored.
  */
 trait ValidatesLoanCollaterals
 {
@@ -20,14 +25,6 @@ trait ValidatesLoanCollaterals
     protected function collateralIdRules(): array
     {
         return ['required', 'integer', $this->ownedByThisLoansBorrowerRule()];
-    }
-
-    /**
-     * @return array<int, string>
-     */
-    protected function snapshotValueRules(): array
-    {
-        return ['required', 'numeric', 'min:0', 'max:99999999.99'];
     }
 
     /**

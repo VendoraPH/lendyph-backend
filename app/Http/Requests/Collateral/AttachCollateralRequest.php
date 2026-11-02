@@ -16,13 +16,13 @@ class AttachCollateralRequest extends FormRequest
 
     /**
      * The collateral must be on this loan's borrower's register; see
-     * ValidatesLoanCollaterals::ownedByThisLoansBorrowerRule().
+     * ValidatesLoanCollaterals::ownedByThisLoansBorrowerRule(). A sent
+     * `snapshot_value` is ignored: the server values the pledge.
      */
     public function rules(): array
     {
         return [
             'collateral_id' => $this->collateralIdRules(),
-            'snapshot_value' => $this->snapshotValueRules(),
         ];
     }
 

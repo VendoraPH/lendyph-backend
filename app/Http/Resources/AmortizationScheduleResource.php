@@ -20,7 +20,7 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'principal_due', type: 'number'),
         new OA\Property(property: 'interest_due', type: 'number'),
         new OA\Property(property: 'total_due', type: 'number'),
-        new OA\Property(property: 'share_capital_build_up', type: 'number', description: 'The loan\'s `scb_amount` for this period; 0 on a period an extension or adjustment closed'),
+        new OA\Property(property: 'share_capital_build_up', type: 'number', description: 'The loan\'s `scb_amount` for this period; 0 on a period closed early (AmortizationSchedule::isClosedEarly(): by an extension, an adjustment, or a restructure into a new loan)'),
         new OA\Property(property: 'total_payment', type: 'number', description: '`total_due` plus `share_capital_build_up`, in whole centavos'),
         new OA\Property(property: 'remaining_balance', type: 'number'),
         new OA\Property(property: 'status', type: 'string', enum: ['pending', 'paid', 'partial', 'overdue']),

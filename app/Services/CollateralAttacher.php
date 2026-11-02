@@ -195,11 +195,16 @@ class CollateralAttacher
      * Attach a collateral already locked by lock(), after the same guards the
      * attach endpoint has always run, and record it.
      *
+     * The pledge's value is the server's, CollateralValuation::pledgeValue() of
+     * the locked row, never a figure the client sends: its `amount`, or its
+     * member's share capital balance (at least 0), read during the attach's
+     * transaction.
+     *
      * @param  Collateral|null  $collateral  lock()'s row for this id, null when it was not found
      *
      * @throws ValidationException on `collateral_id`
      */
-    public static function attachLocked(Loan $loan, ?Collateral $collateral, float|int|string $snapshotValue, ?User $user): void
+    public static function attachLocked(Loan $loan, ?Collateral $collateral, ?User $user): void
     {
         if (! $collateral) {
             throw ValidationException::withMessages([
@@ -238,7 +243,7 @@ class CollateralAttacher
 
         CollateralPledgeGuard::assertCollateralIsFree($collateral, $loan);
 
-        self::pledge($loan, $collateral->id, $snapshotValue, $user);
+        self::pledge($loan, $collateral->id, CollateralValuation::pledgeValue($collateral), $user);
     }
 
     /**
