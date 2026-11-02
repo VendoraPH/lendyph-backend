@@ -140,7 +140,9 @@ class DuePastDueLoanFiguresTest extends TestCase
         $summary = $this->getJson("/api/loans/{$loan->id}/summary")->json('data');
 
         $this->assertSame(0, $response->json('data.0.days_overdue'));
-        $this->assertSame(0.0, (float) $response->json('data.0.loan_past_due_amount'));
+        // A real ₱0.00, not a missing figure.
+        $this->assertNotNull($response->json('data.0.loan_past_due_amount'));
+        $this->assertEquals(0, $response->json('data.0.loan_past_due_amount'));
         $this->assertGreaterThan(0, $response->json('data.0.loan_total_outstanding'));
         $this->assertEquals($summary['total_outstanding'], $response->json('data.0.loan_total_outstanding'));
         $this->assertSame(0.0, (float) $response->json('totals.past_due_amount'));

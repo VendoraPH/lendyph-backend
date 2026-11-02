@@ -539,7 +539,7 @@ class ReportService
      *   `payment_date`; voided payments don't count. Null when there is none.
      *
      * @param  array<int, int>  $loanIds
-     * @return array<int, array{loan_total_outstanding: float, loan_past_due_amount: float, loan_last_payment_date: string|null}>
+     * @return array<int, array{loan_total_outstanding: float|null, loan_past_due_amount: float|null, loan_last_payment_date: string|null}>
      */
     public function duePastDueLoanFigures(array $loanIds): array
     {
@@ -562,8 +562,8 @@ class ReportService
             $last = $lastPaid[$loanId] ?? null;
 
             $figures[$loanId] = [
-                'loan_total_outstanding' => $owed[$loanId]['total_outstanding'] ?? 0.0,
-                'loan_past_due_amount' => $owed[$loanId]['overdue_amount'] ?? 0.0,
+                'loan_total_outstanding' => $owed[$loanId]['total_outstanding'] ?? null,
+                'loan_past_due_amount' => $owed[$loanId]['overdue_amount'] ?? null,
                 'loan_last_payment_date' => $last === null ? null : Carbon::parse($last)->toDateString(),
             ];
         }

@@ -281,8 +281,8 @@ class ReportController extends Controller
         responses: [
             new OA\Response(response: 200, description: 'Paginated due/past-due schedules', content: new OA\JsonContent(properties: [
                 new OA\Property(property: 'data', type: 'array', description: 'One row per unpaid period due by today. Besides the period\'s own figures, each row carries its loan\'s figures, the same on every row of that loan.', items: new OA\Items(properties: [
-                    new OA\Property(property: 'loan_total_outstanding', type: 'number', description: 'Everything the loan still owes: its periods\' unpaid principal, interest and penalty plus the insurance premium owed. Equals GET /loans `total_outstanding`.'),
-                    new OA\Property(property: 'loan_past_due_amount', type: 'number', description: 'The principal, interest and penalty still unpaid on the loan\'s late periods (unpaid and past the due date plus the loan\'s grace). Equals GET /loans/{id}/summary `overdue_amount`; 0 while every period is within grace.'),
+                    new OA\Property(property: 'loan_total_outstanding', type: 'number', nullable: true, description: 'Everything the loan still owes: its periods\' unpaid principal, interest and penalty plus the insurance premium owed. Equals GET /loans `total_outstanding`. Null only where the server has no figure for the loan (show a dash); 0 is a real figure.'),
+                    new OA\Property(property: 'loan_past_due_amount', type: 'number', nullable: true, description: 'The principal, interest and penalty still unpaid on the loan\'s late periods (unpaid and past the due date plus the loan\'s grace). Equals GET /loans/{id}/summary `overdue_amount`; 0 while every period is within grace. Null only where the server has no figure for the loan (show a dash).'),
                     new OA\Property(property: 'loan_last_payment_date', type: 'string', format: 'date', nullable: true, description: 'The `payment_date` of the loan\'s latest posted repayment; voided payments are ignored. Null when there is none.'),
                 ])),
                 new OA\Property(property: 'totals', type: 'object', properties: [
@@ -374,8 +374,8 @@ class ReportController extends Controller
                     'status' => $s->status,
                     // The row's loan as a whole, the same on every row of
                     // that loan. See ReportService::duePastDueLoanFigures().
-                    'loan_total_outstanding' => $loanFigures[$s->loan_id]['loan_total_outstanding'] ?? 0.0,
-                    'loan_past_due_amount' => $loanFigures[$s->loan_id]['loan_past_due_amount'] ?? 0.0,
+                    'loan_total_outstanding' => $loanFigures[$s->loan_id]['loan_total_outstanding'] ?? null,
+                    'loan_past_due_amount' => $loanFigures[$s->loan_id]['loan_past_due_amount'] ?? null,
                     'loan_last_payment_date' => $loanFigures[$s->loan_id]['loan_last_payment_date'] ?? null,
                 ];
             }),
