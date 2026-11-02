@@ -303,7 +303,7 @@ class AccountingLoanReleaseDiffCommandTest extends TestCase
         // ₱2,050 withheld; a ₱700 item it never charged, and one with no amount.
         DB::table('loans')->where('id', $over->id)->update(['deductions' => json_encode([
             ...$over->deductions,
-            ['name' => 'Documentary Stamp', 'amount' => 700, 'type' => 'fixed'],
+            ['name' => 'Inspection Fee', 'amount' => 700, 'type' => 'fixed'],
             ['name' => 'Legal Fee', 'type' => 'fixed'],
         ])]);
 

@@ -41,8 +41,11 @@ class FeeController extends Controller
                 required: ['name', 'type', 'value'],
                 properties: [
                     new OA\Property(property: 'name', type: 'string', example: 'Processing Fee'),
-                    new OA\Property(property: 'type', type: 'string', enum: ['fixed', 'percentage']),
-                    new OA\Property(property: 'value', type: 'number', example: 500),
+                    new OA\Property(property: 'type', type: 'string', enum: ['fixed', 'percentage', 'formula']),
+                    new OA\Property(property: 'value', type: 'number', example: 500, description: 'Pesos for a fixed fee; the rate (percent of principal, at most 100 for a formula) for a percentage or formula fee.'),
+                    new OA\Property(property: 'per_month', type: 'boolean', description: 'Formula only: multiply by the term in months (a days term over 30).'),
+                    new OA\Property(property: 'min_amount', type: 'number', nullable: true, example: 150, description: 'Formula only: the least it charges, in pesos.'),
+                    new OA\Property(property: 'max_amount', type: 'number', nullable: true, example: 1500, description: 'Formula only: the most it charges, in pesos; not below min_amount.'),
                     new OA\Property(property: 'applicable_product_ids', type: 'array', items: new OA\Items(type: 'integer')),
                     new OA\Property(property: 'conditions', type: 'object'),
                 ],

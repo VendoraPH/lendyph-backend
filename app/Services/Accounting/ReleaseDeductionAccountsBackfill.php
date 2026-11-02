@@ -25,6 +25,15 @@ use Illuminate\Support\Facades\DB;
  *   whatever its code, or a new 3060 Share Capital when it has none.
  * - `other_fee_income` → 4080 Other Fee Income, a new income account.
  *
+ * Then the two tax roles (decision 4b, 2026-11-02; PostingRules::taxRoleFor()):
+ *
+ * - `documentary_stamp_tax_payable` → 2230 Documentary Stamp Tax Payable, a
+ *   new liability under 2200 Taxes Payable.
+ * - `withholding_tax_payable` → the existing 2210 Withholding Tax Payable
+ *   (code and name).
+ * - `other_taxes_payable` → the existing 2220 Other Taxes Payable (code and
+ *   name).
+ *
  * A new account is looked for by its name anywhere in the chart first, so a
  * chart already carrying one under another code is mapped to it rather than
  * given a second.
@@ -39,7 +48,7 @@ use Illuminate\Support\Facades\DB;
  *   a second run changes nothing;
  * - a name carried by more than one account, or by one that cannot be posted
  *   to, and a code already taken by an account with another name;
- * - 4040 missing, unusable, or renamed;
+ * - 4040, 2210 or 2220 missing, unusable, or renamed;
  * - share capital when two equity accounts carry the name, or when equity
  *   accounts mention share capital but none is named exactly that, so it never
  *   adds a second share capital account next to the cooperative's own.
@@ -50,9 +59,13 @@ use Illuminate\Support\Facades\DB;
  * mapped gets one audit row as a system change (no user). Posted journals are
  * never touched; only releases from then on use the new roles.
  *
- * The 2026_10_03_130000 migration does the same on deploy, written out with
- * the query builder so that it depends on no application class; keep the two
- * in step (ReleaseDeductionAccountsBackfillTest compares them).
+ * The 2026_10_03_130000 migration does the same for the first five roles on
+ * deploy, and the 2026_11_02_220500 migration for the two tax roles, each
+ * written out with the query builder so that it depends on no application
+ * class; keep the three in step (ReleaseDeductionAccountsBackfillTest compares
+ * the service with both migrations run in turn). A chart missing a tax role
+ * never stops a release: the tax is booked where it went before and a warning
+ * is logged.
  * `php artisan accounting:backfill-release-deduction-accounts --dry-run`
  * shows what it will change on a database first.
  */
@@ -72,12 +85,28 @@ class ReleaseDeductionAccountsBackfill
         'insurance_premium_payable' => ['code' => '2040', 'name' => 'Insurance Premium Payable', 'type' => 'liability', 'parent' => '2000', 'cash_flow_category' => 'financing'],
         'share_capital' => ['code' => '3060', 'name' => 'Share Capital', 'type' => 'equity', 'parent' => '3000', 'cash_flow_category' => 'financing'],
         'other_fee_income' => ['code' => '4080', 'name' => 'Other Fee Income', 'type' => 'income', 'parent' => '4000', 'cash_flow_category' => 'operating'],
+        'documentary_stamp_tax_payable' => ['code' => '2230', 'name' => 'Documentary Stamp Tax Payable', 'type' => 'liability', 'parent' => '2200', 'cash_flow_category' => 'financing'],
     ];
 
     /** The existing account `service_fee_income` points at. */
     public const SERVICE_FEE_CODE = '4040';
 
-    private const ROLES = ['service_fee_income', 'notarial_fees_payable', 'insurance_premium_payable', 'share_capital', 'other_fee_income'];
+    /** The existing account `withholding_tax_payable` points at. */
+    public const WITHHOLDING_TAX_CODE = '2210';
+
+    /** The existing account `other_taxes_payable` points at. */
+    public const OTHER_TAXES_CODE = '2220';
+
+    private const ROLES = [
+        'service_fee_income',
+        'notarial_fees_payable',
+        'insurance_premium_payable',
+        'share_capital',
+        'other_fee_income',
+        'documentary_stamp_tax_payable',
+        'withholding_tax_payable',
+        'other_taxes_payable',
+    ];
 
     private const DEDUCTIONS = [
         'service_fee_income' => 'service fees',
@@ -85,6 +114,21 @@ class ReleaseDeductionAccountsBackfill
         'insurance_premium_payable' => 'insurance premiums',
         'share_capital' => 'share capital',
         'other_fee_income' => 'catalog fees',
+        'documentary_stamp_tax_payable' => 'documentary stamp taxes',
+        'withholding_tax_payable' => 'withholding taxes',
+        'other_taxes_payable' => 'other taxes',
+    ];
+
+    /** Who decided each role's account, and when, as each audit row says it. */
+    private const DECIDED = [
+        'service_fee_income' => 'as the accountant confirmed on 2026-10-03',
+        'notarial_fees_payable' => 'as the accountant confirmed on 2026-10-03',
+        'insurance_premium_payable' => 'as the accountant confirmed on 2026-10-03',
+        'share_capital' => 'as the accountant confirmed on 2026-10-03',
+        'other_fee_income' => 'as the accountant confirmed on 2026-10-03',
+        'documentary_stamp_tax_payable' => 'as approved on 2026-11-02',
+        'withholding_tax_payable' => 'as approved on 2026-11-02',
+        'other_taxes_payable' => 'as approved on 2026-11-02',
     ];
 
     /**
@@ -157,6 +201,8 @@ class ReleaseDeductionAccountsBackfill
 
         [$account, $reason] = match ($role) {
             'service_fee_income' => $this->existing(self::SERVICE_FEE_CODE, 'Service Fee Income', 'income'),
+            'withholding_tax_payable' => $this->existing(self::WITHHOLDING_TAX_CODE, 'Withholding Tax Payable', 'liability'),
+            'other_taxes_payable' => $this->existing(self::OTHER_TAXES_CODE, 'Other Taxes Payable', 'liability'),
             'share_capital' => $this->shareCapital(),
             default => $this->byCode(self::NEW_ACCOUNTS[$role]),
         };
@@ -325,7 +371,7 @@ class ReleaseDeductionAccountsBackfill
             'new_values' => json_encode(['code' => $spec['code'], 'name' => $spec['name'], 'type' => $spec['type'], 'parent_code' => $parent === null ? null : $spec['parent']]),
             'ip_address' => null,
             'user_agent' => null,
-            'description' => "System change: added account {$spec['code']} {$spec['name']} ({$spec['type']}) for ".self::DEDUCTIONS[$role].' withheld at release, as the accountant confirmed on 2026-10-03.',
+            'description' => "System change: added account {$spec['code']} {$spec['name']} ({$spec['type']}) for ".self::DEDUCTIONS[$role].' withheld at release, '.self::DECIDED[$role].'.',
             'created_at' => $now,
         ]);
 
@@ -352,7 +398,7 @@ class ReleaseDeductionAccountsBackfill
             'new_values' => json_encode(['role' => $role, 'account_code' => $account->code, 'account_name' => $account->name]),
             'ip_address' => null,
             'user_agent' => null,
-            'description' => "System change: {$this->deduction($role)} withheld at release now post to {$account->code} {$account->name} (role {$role}), as the accountant confirmed on 2026-10-03.",
+            'description' => "System change: {$this->deduction($role)} withheld at release now post to {$account->code} {$account->name} (role {$role}), ".self::DECIDED[$role].'.',
             'created_at' => $now,
         ]);
     }

@@ -40,7 +40,7 @@ class ReportFinancialTest extends TestCase
 
     // ── Cash Flow ────────────────────────────────────────────────────────
 
-    public function test_cash_flow_components_reconcile_and_by_branch_carries_loan_cash_only(): void
+    public function test_cash_flow_components_reconcile_and_by_branch_carries_share_capital_by_the_member_s_branch(): void
     {
         $satellite = Branch::factory()->create(['name' => 'Satellite Branch']);
         $product = $this->product();
@@ -116,55 +116,47 @@ class ReportFinancialTest extends TestCase
         $this->assertEqualsWithDelta(2500, $data['share_capital']['net_movement'], 0.01);
         $this->assertSame(2, $data['share_capital']['count']);
 
-        // ── by_branch is LOAN cash only. This is the assertion that matters:
-        // the branch rows reconcile with inflows.repayments.total, NOT with
-        // inflows.total, because share capital has no branch to belong to.
+        // ── by_branch is the loan cash plus the share capital paid in and out
+        // on its own, by the member's branch (decision 5c, 2026-11-02): the
+        // member is in Main, so Main's row carries the 4,000 and the 1,500,
+        // and the rows add up to the statement's totals.
         $branches = collect($data['by_branch'])->keyBy('branch_id');
         $this->assertCount(2, $branches);
 
         $mainRow = $branches[$this->branch->id];
         $this->assertEqualsWithDelta(3200, $mainRow['inflow_principal'], 0.01);
         $this->assertEqualsWithDelta(1800, $mainRow['inflow_interest'], 0.01);
-        $this->assertEqualsWithDelta(5000, $mainRow['inflow_total'], 0.01);
+        $this->assertEqualsWithDelta(5000, $mainRow['inflow_repayments'], 0.01);
+        $this->assertEqualsWithDelta(4000, $mainRow['inflow_share_capital'], 0.01);
+        $this->assertEqualsWithDelta(9000, $mainRow['inflow_total'], 0.01, '5,000 loan cash + 4,000 share capital.');
         $this->assertSame(1, $mainRow['repayment_count']);
-        $this->assertEqualsWithDelta(58200, $mainRow['outflow_total'], 0.01);
+        $this->assertEqualsWithDelta(58200, $mainRow['outflow_net_proceeds'], 0.01);
+        $this->assertEqualsWithDelta(1500, $mainRow['outflow_share_capital'], 0.01);
+        $this->assertEqualsWithDelta(59700, $mainRow['outflow_total'], 0.01, '58,200 cash out + 1,500 share capital.');
         $this->assertEqualsWithDelta(1800, $mainRow['total_deductions'], 0.01);
-        $this->assertEqualsWithDelta(-53200, $mainRow['net_movement'], 0.01);
+        $this->assertEqualsWithDelta(-50700, $mainRow['net_movement'], 0.01);
 
         $remoteRow = $branches[$satellite->id];
         $this->assertEqualsWithDelta(3000, $remoteRow['inflow_total'], 0.01);
+        $this->assertEqualsWithDelta(0, $remoteRow['inflow_share_capital'], 0.01);
         $this->assertEqualsWithDelta(29100, $remoteRow['outflow_total'], 0.01);
         $this->assertEqualsWithDelta(900, $remoteRow['total_deductions'], 0.01);
         $this->assertEqualsWithDelta(-26100, $remoteRow['net_movement'], 0.01);
 
-        $branchInflow = array_sum(array_column($data['by_branch'], 'inflow_total'));
         $this->assertEqualsWithDelta(
             $repayments['total'],
-            $branchInflow,
+            array_sum(array_column($data['by_branch'], 'inflow_repayments')),
             0.01,
-            'by_branch must sum to inflows.repayments.total — every peso of loan cash belongs to exactly one branch.',
+            'Every peso of loan cash belongs to exactly one branch.',
         );
-        $this->assertNotEqualsWithDelta(
-            $data['inflows']['total'],
-            $branchInflow,
-            0.01,
-            'by_branch must NOT sum to inflows.total: the 4,000 share capital credit is org-level and has no branch.',
-        );
-
-        $branchOutflow = array_sum(array_column($data['by_branch'], 'outflow_total'));
-        $this->assertEqualsWithDelta($data['outflows']['releases']['total'], $branchOutflow, 0.01);
-        $this->assertNotEqualsWithDelta(
-            $data['outflows']['total'],
-            $branchOutflow,
-            0.01,
-            'The 1,500 share capital debit is org-level and must stay out of by_branch.',
-        );
-
+        $this->assertEqualsWithDelta($data['inflows']['total'], array_sum(array_column($data['by_branch'], 'inflow_total')), 0.01);
+        $this->assertEqualsWithDelta($data['outflows']['releases']['total'], array_sum(array_column($data['by_branch'], 'outflow_net_proceeds')), 0.01);
+        $this->assertEqualsWithDelta($data['outflows']['total'], array_sum(array_column($data['by_branch'], 'outflow_total')), 0.01);
         $this->assertEqualsWithDelta(
-            -79300,
+            $data['net_movement'],
             array_sum(array_column($data['by_branch'], 'net_movement')),
             0.01,
-            "by_branch's net differs from the headline net by exactly the org-level share capital net of +2,500.",
+            "by_branch's net equals the headline net.",
         );
     }
 
@@ -259,11 +251,13 @@ class ReportFinancialTest extends TestCase
         $this->assertEqualsWithDelta(35900, $orgWide['total_received'], 0.01);
 
         $rows = collect($orgWide['by_branch'])->keyBy('branch_id');
-        $this->assertCount(1, $rows);
+        $this->assertCount(2, $rows);
         $this->assertEqualsWithDelta(11800, $rows[$this->branch->id]['total_due'], 0.01);
         $this->assertEqualsWithDelta(5900, $rows[$this->branch->id]['total_collected'], 0.01);
         $this->assertEqualsWithDelta(50.0, $rows[$this->branch->id]['collection_rate'], 0.01);
-        $this->assertFalse($rows->has($satellite->id), 'A branch with nothing due in the range has no row.');
+        // Every active branch has a row (decision 5c): nothing due, ₱0.00.
+        $this->assertEquals(0, $rows[$satellite->id]['total_due'], 'A branch with nothing due in the range reads ₱0.00.');
+        $this->assertEquals(0, $rows[$satellite->id]['total_collected']);
     }
 
     public function test_collection_efficiency_by_period_counts_each_months_own_periods_and_never_exceeds_100_percent(): void

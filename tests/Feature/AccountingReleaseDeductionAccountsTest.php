@@ -9,6 +9,9 @@ use App\Models\Fee;
 use App\Models\Loan;
 use App\Models\LoanProduct;
 use App\Services\LoanService;
+use Illuminate\Support\Facades\Artisan;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 use Tests\Traits\PostsJournals;
@@ -25,6 +28,13 @@ use Tests\Traits\SetupLendyPH;
  *   Insurance Premium  -> 2040 Insurance Premium Payable
  *   Share Capital      -> 3060 Share Capital
  *   catalog fees       -> 4080 Other Fee Income
+ *
+ * and each tax to its payable account (decision 4b, 2026-11-02), hand-typed
+ * or from the fee catalog:
+ *
+ *   Documentary Stamp Tax -> 2230 Documentary Stamp Tax Payable
+ *   withholding tax       -> 2210 Withholding Tax Payable
+ *   any other tax         -> 2220 Other Taxes Payable
  */
 class AccountingReleaseDeductionAccountsTest extends TestCase
 {
@@ -87,7 +97,7 @@ class AccountingReleaseDeductionAccountsTest extends TestCase
     public function test_a_deduction_with_no_account_of_its_own_and_any_unitemised_remainder_stay_on_processing_fee_income(): void
     {
         $loan = $this->draftLoan([
-            ['name' => 'Documentary Stamp', 'amount' => 1234.56, 'type' => 'fixed'],
+            ['name' => 'Inspection Fee', 'amount' => 1234.56, 'type' => 'fixed'],
         ]);
         // A total above its items: the part no item explains.
         $loan->update(['total_deductions' => 1334.56, 'net_proceeds' => 48665.44]);
@@ -96,6 +106,155 @@ class AccountingReleaseDeductionAccountsTest extends TestCase
         $journal = $this->releaseJournal($loan->fresh());
 
         $this->assertSame(1_334_56, $this->lineOn($journal, '4030', 'credit'));
+        $this->assertBalanced($journal);
+    }
+
+    public function test_a_documentary_stamp_tax_is_credited_to_2230_hand_typed_or_from_the_catalog(): void
+    {
+        Fee::create(['name' => 'Documentary Stamp Tax', 'type' => 'fixed', 'value' => 1234.56, 'applicable_product_ids' => null, 'conditions' => null]);
+
+        $loan = $this->draftLoan([['name' => 'DST', 'amount' => 500, 'type' => 'fixed']]);
+        $this->approveAndRelease($loan);
+
+        $journal = $this->releaseJournal($loan->fresh());
+
+        $this->assertSame(1_734_56, $this->lineOn($journal, '2230', 'credit'));
+        $this->assertSame(0, $this->lineOn($journal, '4030', 'credit'));
+        $this->assertSame(0, $this->lineOn($journal, '4080', 'credit'));
+        $this->assertSame(5_000_000 - 1_734_56, $this->lineOn($journal, '1010', 'credit'));
+        $this->assertBalanced($journal);
+    }
+
+    public function test_another_tax_is_credited_to_2220_hand_typed_or_from_the_catalog(): void
+    {
+        Fee::create(['name' => 'Local Business Tax', 'type' => 'fixed', 'value' => 1234.56, 'applicable_product_ids' => null, 'conditions' => null]);
+
+        $loan = $this->draftLoan([['name' => 'Other Taxes', 'amount' => 250, 'type' => 'fixed']]);
+        $this->approveAndRelease($loan);
+
+        $journal = $this->releaseJournal($loan->fresh());
+
+        $this->assertSame(1_484_56, $this->lineOn($journal, '2220', 'credit'));
+        $this->assertSame(0, $this->lineOn($journal, '2230', 'credit'));
+        $this->assertSame(0, $this->lineOn($journal, '4030', 'credit'));
+        $this->assertSame(0, $this->lineOn($journal, '4080', 'credit'));
+        $this->assertBalanced($journal);
+    }
+
+    public function test_a_withholding_tax_is_credited_to_2210(): void
+    {
+        $loan = $this->draftLoan([['name' => 'Withholding Tax', 'amount' => 750, 'type' => 'fixed']]);
+        $this->approveAndRelease($loan);
+
+        $journal = $this->releaseJournal($loan->fresh());
+
+        $this->assertSame(750_00, $this->lineOn($journal, '2210', 'credit'));
+        $this->assertSame(0, $this->lineOn($journal, '2220', 'credit'));
+        $this->assertSame(0, $this->lineOn($journal, '4030', 'credit'));
+        $this->assertBalanced($journal);
+    }
+
+    /**
+     * A chart without 2230 (an administrator removed the mapping, or the
+     * backfill skipped it) never stops a release: the DST goes to 2220 Other
+     * Taxes Payable, so it stays a liability, and a warning names the loan
+     * and the role.
+     */
+    public function test_without_2230_a_documentary_stamp_tax_goes_to_2220_and_a_warning_is_logged(): void
+    {
+        AccountingAccountMapping::query()->where('role', 'documentary_stamp_tax_payable')->delete();
+        Fee::create(['name' => 'Documentary Stamp Tax', 'type' => 'fixed', 'value' => 1234.56, 'applicable_product_ids' => null, 'conditions' => null]);
+
+        $loan = $this->draftLoan([['name' => 'DST', 'amount' => 500, 'type' => 'fixed']]);
+
+        Log::spy();
+        $this->approveAndRelease($loan);
+
+        $journal = $this->releaseJournal($loan->fresh());
+
+        $this->assertSame(1_734_56, $this->lineOn($journal, '2220', 'credit'));
+        $this->assertSame(0, $this->lineOn($journal, '4080', 'credit'));
+        $this->assertSame(0, $this->lineOn($journal, '4030', 'credit'));
+        $this->assertBalanced($journal);
+
+        Log::shouldHaveReceived('warning')->withArgs(
+            fn (string $message, array $context = []): bool => str_contains($message, 'Default Accounts')
+                && ($context['loan'] ?? null) === $loan->application_number
+                && array_column($context['fallbacks'] ?? [], 'booked_to') === ['other_taxes_payable', 'other_taxes_payable'],
+        )->once();
+    }
+
+    /**
+     * Without 2230 and 2220 the tax is booked where it went before (a catalog
+     * fee on 4080, a hand-typed one on 4030), and the release still goes
+     * ahead with a warning.
+     */
+    public function test_without_any_tax_account_the_tax_is_booked_as_before_and_a_warning_is_logged(): void
+    {
+        AccountingAccountMapping::query()->whereIn('role', ['documentary_stamp_tax_payable', 'other_taxes_payable'])->delete();
+        Fee::create(['name' => 'Documentary Stamp Tax', 'type' => 'fixed', 'value' => 1234.56, 'applicable_product_ids' => null, 'conditions' => null]);
+
+        $loan = $this->draftLoan([['name' => 'DST', 'amount' => 500, 'type' => 'fixed']]);
+
+        Log::spy();
+        $this->approveAndRelease($loan);
+
+        $journal = $this->releaseJournal($loan->fresh());
+
+        $this->assertSame(1_234_56, $this->lineOn($journal, '4080', 'credit'));
+        $this->assertSame(500_00, $this->lineOn($journal, '4030', 'credit'));
+        $this->assertSame(0, $this->lineOn($journal, '2230', 'credit'));
+        $this->assertBalanced($journal);
+
+        Log::shouldHaveReceived('warning')->withArgs(
+            fn (string $message, array $context = []): bool => ($context['loan'] ?? null) === $loan->application_number
+                && array_column($context['fallbacks'] ?? [], 'booked_to') === ['processing_fee_income', 'other_fee_income'],
+        )->once();
+    }
+
+    /**
+     * The read-only diff reads the same posting as a release but never logs
+     * the fallback warning: only a real release does.
+     */
+    public function test_the_release_diff_logs_no_tax_fallback_warning(): void
+    {
+        $loan = $this->draftLoan([['name' => 'DST', 'amount' => 500, 'type' => 'fixed']]);
+        $this->approveAndRelease($loan);
+        AccountingAccountMapping::query()->where('role', 'documentary_stamp_tax_payable')->delete();
+
+        Log::spy();
+        $this->assertSame(0, Artisan::call('accounting:loan-release-diff', ['--dry-run' => true]));
+
+        Log::shouldNotHaveReceived('warning');
+    }
+
+    /**
+     * Share capital is credited to the member from the release's own
+     * classification, which now uses the chart's mapping: a hand-typed tax
+     * whose role has no account is booked as before (part of the total), so
+     * items above the total that include it no longer refuse the release.
+     */
+    public function test_share_capital_beside_a_hand_typed_tax_without_an_account_is_not_refused(): void
+    {
+        AccountingAccountMapping::query()->whereIn('role', ['documentary_stamp_tax_payable', 'other_taxes_payable'])->delete();
+
+        $loan = $this->draftLoan([['name' => 'Share Capital', 'amount' => 1000, 'type' => 'fixed']]);
+        $service = app(LoanService::class);
+        $service->submitForReview($loan);
+        $service->approve($loan, $this->admin, 'Approved for testing');
+        // A hand-typed DST the stored total never counted (an imported or
+        // hand-edited loan): the items now add up to more than was withheld.
+        DB::table('loans')->where('id', $loan->id)->update(['deductions' => json_encode([
+            ['name' => 'Share Capital', 'amount' => 1000, 'type' => 'fixed'],
+            ['name' => 'DST', 'amount' => 300, 'type' => 'fixed'],
+        ])]);
+
+        $this->patchJson("/api/loans/{$loan->id}/release")->assertOk();
+
+        $journal = $this->releaseJournal($loan->fresh());
+
+        $this->assertSame(1_000_00, $this->lineOn($journal, '3060', 'credit'));
+        $this->assertSame(0, $this->lineOn($journal, '2230', 'credit'));
         $this->assertBalanced($journal);
     }
 

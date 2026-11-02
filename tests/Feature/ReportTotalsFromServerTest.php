@@ -119,7 +119,7 @@ class ReportTotalsFromServerTest extends TestCase
         $this->assertEquals(array_sum(array_column($data['by_branch'], 'loan_count')), $data['by_branch_totals']['loan_count']);
     }
 
-    public function test_cash_flow_totals_its_branch_rows_to_the_loan_cash_lines(): void
+    public function test_cash_flow_totals_its_branch_rows_to_the_statement_lines(): void
     {
         $north = $this->loan($this->north, 10000.10, releasedAt: '2026-09-05 10:00:00', netProceeds: 9800.05);
         $south = $this->loan($this->south, 2500.25, releasedAt: '2026-09-06 10:00:00', netProceeds: 2450.20);
@@ -128,11 +128,18 @@ class ReportTotalsFromServerTest extends TestCase
 
         $data = $this->getJson('/api/reports/cash-flow?date_from=2026-09-01&date_to=2026-09-30')->assertOk()->json('data');
 
+        // No share capital moved, so the share capital columns are ₱0.00 and
+        // the totals are the loan cash lines (decision 5c).
         $this->assertEquals([
-            'inflow_total' => $data['inflows']['repayments']['total'],
-            'outflow_total' => $data['outflows']['releases']['total'],
-            'net_movement' => round($data['inflows']['repayments']['total'] - $data['outflows']['releases']['total'], 2),
+            'inflow_repayments' => $data['inflows']['repayments']['total'],
+            'inflow_share_capital' => $data['inflows']['share_capital_credit'],
+            'inflow_total' => $data['inflows']['total'],
+            'outflow_net_proceeds' => $data['outflows']['releases']['total'],
+            'outflow_share_capital' => $data['outflows']['share_capital_debit'],
+            'outflow_total' => $data['outflows']['total'],
+            'net_movement' => $data['net_movement'],
         ], $data['by_branch_totals']);
+        $this->assertEquals(0, $data['by_branch_totals']['inflow_share_capital']);
         $this->assertEquals(1250.45, $data['by_branch_totals']['inflow_total']);
         $this->assertEquals(12250.25, $data['by_branch_totals']['outflow_total']);
     }
