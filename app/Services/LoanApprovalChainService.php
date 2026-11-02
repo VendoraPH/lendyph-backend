@@ -379,6 +379,10 @@ class LoanApprovalChainService
      * containing `|` into alternatives and treats a ULID-shaped string as a
      * role ID. `loan_approval_steps.role` is free text copied from a settings
      * blob, so neither behaviour should be reachable from it.
+     *
+     * Only active roles count: a deactivated role grants nothing, so a user
+     * holding only that role can't act on its step until it's reactivated.
+     * admin and super_admin can't be deactivated (Role::PROTECTED_KEYS).
      */
     public function canAct(LoanApprovalStep $step, ?User $user): bool
     {
@@ -386,11 +390,13 @@ class LoanApprovalChainService
             return false;
         }
 
-        if ($user->hasRole(LoanApprovalStep::BYPASS_ROLES)) {
+        $roles = $user->activeRoles();
+
+        if ($roles->contains(fn ($role) => in_array($role->name, LoanApprovalStep::BYPASS_ROLES, true))) {
             return true;
         }
 
-        return $user->roles->contains('name', $step->role);
+        return $roles->contains('name', $step->role);
     }
 
     /**

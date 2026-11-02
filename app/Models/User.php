@@ -11,7 +11,9 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
+use Illuminate\Support\Collection;
 use Laravel\Sanctum\HasApiTokens;
+use Spatie\Permission\Contracts\Permission;
 use Spatie\Permission\Traits\HasRoles;
 
 #[Hidden(['password', 'remember_token'])]
@@ -181,5 +183,63 @@ class User extends Authenticatable
     public function canManageAccount(self $target): bool
     {
         return ! $target->hasRole('super_admin') || $this->hasRole('super_admin');
+    }
+
+    /**
+     * This user's roles that are switched on.
+     *
+     * A deactivated role grants nothing, but its users keep the assignment, so
+     * reactivating the role gives them their access back with no reassigning.
+     * Every permission read goes through this: Spatie's checks (Gate, the
+     * `can`/`permission` middleware, hasPermissionTo()) reach roles through
+     * hasPermissionViaRole(), and getAllPermissions() (the signed-in user's
+     * permission list, the role and permission grant guards) through
+     * getPermissionsViaRoles().
+     *
+     * `is_active` is NOT NULL with a default of true, so only an explicit
+     * false switches a role off; a role created in this request without the
+     * column set is active, as its row is.
+     *
+     * admin and super_admin (Role::PROTECTED_KEYS) always count. They can't be
+     * deactivated through the API, and the Gate::before bypass, the approval
+     * bypass and canManageAccount() check them with hasRole(), which ignores
+     * `is_active`; a row switched off by hand mustn't make those checks and
+     * the permission checks disagree.
+     *
+     * @return Collection<int, Role>
+     */
+    public function activeRoles(): Collection
+    {
+        return $this->loadMissing('roles')->roles
+            ->filter(fn (Role $role) => $role->is_active !== false
+                || in_array($role->name, Role::PROTECTED_KEYS, true))
+            ->values();
+    }
+
+    /**
+     * Spatie asks whether the user holds any role carrying `$permission`;
+     * only active roles count.
+     */
+    protected function hasPermissionViaRole(Permission $permission): bool
+    {
+        $grantingRoleIds = $permission->roles->map(fn ($role) => (int) $role->getKey())->all();
+
+        return $this->activeRoles()->contains(
+            fn (Role $role) => in_array((int) $role->getKey(), $grantingRoleIds, true),
+        );
+    }
+
+    /**
+     * The permissions the user's active roles carry. Direct permissions are
+     * added by getAllPermissions() as before.
+     */
+    public function getPermissionsViaRoles(): Collection
+    {
+        $this->loadMissing('roles', 'roles.permissions');
+
+        return $this->activeRoles()
+            ->flatMap(fn (Role $role) => $role->permissions)
+            ->sort()
+            ->values();
     }
 }
