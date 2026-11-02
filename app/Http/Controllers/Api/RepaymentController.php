@@ -368,14 +368,26 @@ class RepaymentController extends Controller
     #[OA\Get(
         path: '/api/loans/{loan}/summary',
         summary: 'Loan balance summary',
-        description: 'Returns outstanding balance, overdue amounts, next due date, and payment totals. `outstanding_balance` is principal, interest and penalty still owed plus `insurance_owed` (the insurance premium still owed), the same figure as the loan\'s `total_payable`; `outstanding_principal` is principal only; `restructurable_balance` is the most a restructure may take as principal (open periods\' principal, interest and penalty, never the premium).',
+        description: 'Returns outstanding balance, overdue amounts, next due date, payment totals and the Record Payment presets. `total_outstanding` is principal, interest and penalty still owed plus `insurance_owed` (the insurance premium still owed), the same figure as the loan\'s `total_outstanding` and, after release, `total_payable`; `outstanding_principal` is principal only; `restructurable_balance` is the most a restructure may take as principal (open periods\' principal, interest and penalty, never the premium).',
         tags: ['Repayments'],
         security: [['sanctum' => []]],
         parameters: [
             new OA\Parameter(name: 'loan', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
         ],
         responses: [
-            new OA\Response(response: 200, description: 'Loan summary'),
+            new OA\Response(response: 200, description: 'Loan summary', content: new OA\JsonContent(properties: [
+                new OA\Property(property: 'data', type: 'object', properties: [
+                    new OA\Property(property: 'total_outstanding', type: 'number', description: 'Everything still owed: principal, interest, penalty and `insurance_owed`, in whole centavos'),
+                    new OA\Property(property: 'outstanding_principal', type: 'number', description: 'Unpaid principal only'),
+                    new OA\Property(property: 'insurance_owed', type: 'number'),
+                    new OA\Property(property: 'outstanding_balance', type: 'number', deprecated: true, description: 'Deprecated alias of `total_outstanding`, kept one release'),
+                    new OA\Property(property: 'advance_presets', type: 'array', description: 'One entry per open period, in allocation order. `amount` is what a payment today must be to leave the first `periods` open periods paid: the premium owed, then each period\'s penalty as the payment charges it, its remaining interest and principal, in whole centavos. On a loan with a Share Capital Build-Up only the 1-period entry is sent (the allocation turns money past the current period into share capital). Empty when no period is open.', items: new OA\Items(properties: [
+                        new OA\Property(property: 'periods', type: 'integer'),
+                        new OA\Property(property: 'amount', type: 'number'),
+                    ])),
+                    new OA\Property(property: 'payoff_amount', type: 'number', description: 'Everything owed today: `total_outstanding`, plus the penalty of any period that fell late past its grace since penalties were last stamped. On a loan without a Share Capital Build-Up it equals the last `advance_presets` amount (when a period is open).'),
+                ]),
+            ])),
             new OA\Response(response: 404, description: 'Loan not found'),
         ],
     )]
@@ -408,7 +420,14 @@ class RepaymentController extends Controller
             ),
         ),
         responses: [
-            new OA\Response(response: 200, description: 'Allocation preview'),
+            new OA\Response(response: 200, description: 'Allocation preview', content: new OA\JsonContent(properties: [
+                new OA\Property(property: 'data', type: 'object', properties: [
+                    new OA\Property(property: 'balance_before', type: 'number', description: 'Unpaid principal plus the premium owed, before the payment'),
+                    new OA\Property(property: 'balance_after', type: 'number', description: 'Unpaid principal plus the premium owed, after the payment'),
+                    new OA\Property(property: 'total_outstanding_before', type: 'number', description: 'Everything owed (principal, interest, penalty and premium) before the payment, including any penalty it charges as of `payment_date`'),
+                    new OA\Property(property: 'total_outstanding_after', type: 'number', description: 'Everything owed after the payment: `total_outstanding_before` less what the payment applies (an overpayment or share capital credit lowers neither)'),
+                ]),
+            ])),
             new OA\Response(response: 409, description: 'The loan was closed (completed, restructured, voided or defaulted) since it was read. Reload and try again'),
             new OA\Response(response: 422, description: 'Validation error'),
             new OA\Response(response: 404, description: 'Loan not found'),
