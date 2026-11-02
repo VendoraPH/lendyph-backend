@@ -607,7 +607,7 @@ class LoanService
             if (! $user->can('loans:write_off')) {
                 throw new AuthorizationException(
                     'Writing off part of the balance requires the loans:write_off permission. '
-                    ."Restructure the full outstanding balance of ₱{$outstanding} instead.",
+                    .'Restructure the full outstanding balance of ₱'.number_format($outstanding, 2).' instead.',
                 );
             }
         }

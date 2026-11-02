@@ -8,6 +8,7 @@ use App\Models\AuditLog;
 use App\Services\LikePattern;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
+use Illuminate\Validation\Rule;
 use OpenApi\Attributes as OA;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
@@ -24,6 +25,7 @@ class AuditLogController extends Controller
             new OA\Parameter(name: 'user_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
             new OA\Parameter(name: 'action', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
             new OA\Parameter(name: 'auditable_type', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
+            new OA\Parameter(name: 'module', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['borrowers', 'loans', 'payments', 'users', 'roles', 'collections', 'auth']), description: 'The `module` each row carries; an unknown value is a 422'),
             new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15)),
@@ -87,6 +89,7 @@ class AuditLogController extends Controller
             new OA\Parameter(name: 'user_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
             new OA\Parameter(name: 'action', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
             new OA\Parameter(name: 'auditable_type', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
+            new OA\Parameter(name: 'module', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['borrowers', 'loans', 'payments', 'users', 'roles', 'collections', 'auth']), description: 'The `module` each row carries; an unknown value is a 422'),
             new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
         ],
@@ -193,6 +196,7 @@ class AuditLogController extends Controller
             'user_id' => ['nullable', 'integer', 'min:1'],
             'action' => ['nullable', 'string'],
             'auditable_type' => ['nullable', 'string'],
+            'module' => ['nullable', 'string', Rule::in(AuditLogResource::modules())],
             'date_from' => ['nullable', 'date'],
             'date_to' => ['nullable', 'date'],
             'per_page' => ['nullable', 'integer', 'min:1'],
@@ -218,6 +222,7 @@ class AuditLogController extends Controller
         $userId = $filters['user_id'] ?? null;
         $action = $filters['action'] ?? null;
         $auditableType = $filters['auditable_type'] ?? null;
+        $module = $filters['module'] ?? null;
         $dateFrom = $filters['date_from'] ?? null;
         $dateTo = $filters['date_to'] ?? null;
 
@@ -239,6 +244,9 @@ class AuditLogController extends Controller
             ->when(filled($userId), fn ($q) => $q->where('user_id', $userId))
             ->when(filled($action), fn ($q) => $q->where('action', $action))
             ->when(filled($auditableType), fn ($q) => $q->where('auditable_type', 'like', LikePattern::contains($auditableType)))
+            ->when(filled($module), fn ($q) => $module === AuditLogResource::UNMAPPED_MODULE
+                ? $q->where(fn ($q) => $q->whereNull('auditable_type')->orWhereNotIn('auditable_type', AuditLogResource::mappedAuditableTypes()))
+                : $q->whereIn('auditable_type', AuditLogResource::auditableTypesFor($module)))
             ->when(filled($dateFrom), fn ($q) => $q->where('created_at', '>=', $dateFrom))
             ->when(filled($dateTo), fn ($q) => $q->where('created_at', '<=', "{$dateTo} 23:59:59"));
     }

@@ -955,8 +955,8 @@ DESC,
 
     #[OA\Post(
         path: '/api/loans/{id}/extend',
-        summary: 'Extend an upon-maturity loan by one cycle',
-        description: 'Rolls the maturity date forward by one frequency cycle and accrues one cycle of fresh interest at the loan\'s existing rate. `interest_option` decides what happens to interest already outstanding: "pay" collects it as a repayment first, so the new period carries only the fresh interest; "defer" leaves it unpaid so it stacks on top (₱50 outstanding + ₱50 fresh = ₱100 due). Both the repayment and the extension happen in one transaction. Records a directly-applied LoanAdjustment row of type "extension".',
+        summary: 'Extend a one-month-term loan by one month',
+        description: 'Only loans whose original term is one month (term 1 in months, paid monthly or at maturity) can be extended, as often as needed. Rolls the maturity date forward by one month and accrues one month of fresh interest at the loan\'s existing rate. `interest_option` decides what happens to interest already outstanding: "pay" collects it as a repayment first, so the new period carries only the fresh interest; "defer" leaves it unpaid so it stacks on top (₱50 outstanding + ₱50 fresh = ₱100 due). Both the repayment and the extension happen in one transaction. Records a directly-applied LoanAdjustment row of type "extension".',
         tags: ['Loans'],
         security: [['sanctum' => []]],
         parameters: [

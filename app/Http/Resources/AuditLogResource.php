@@ -23,6 +23,50 @@ class AuditLogResource extends JsonResource
         'ShareCapitalLedger' => 'collections',
     ];
 
+    /**
+     * The module a row with no mapped auditable class is filed under.
+     */
+    public const UNMAPPED_MODULE = 'auth';
+
+    /**
+     * Every module name this resource sends, which is also every value the
+     * list's `module` filter accepts.
+     *
+     * @return list<string>
+     */
+    public static function modules(): array
+    {
+        return array_values(array_unique([...array_values(self::MODULE_MAP), self::UNMAPPED_MODULE]));
+    }
+
+    /**
+     * The stored `auditable_type` values (full class names; there is no morph
+     * map) filed under a module. Empty for the unmapped module, whose rows are
+     * the ones matching none of mappedAuditableTypes().
+     *
+     * @return list<string>
+     */
+    public static function auditableTypesFor(string $module): array
+    {
+        return array_map(
+            self::auditableType(...),
+            array_keys(array_filter(self::MODULE_MAP, fn (string $mapped) => $mapped === $module)),
+        );
+    }
+
+    /**
+     * @return list<string>
+     */
+    public static function mappedAuditableTypes(): array
+    {
+        return array_map(self::auditableType(...), array_keys(self::MODULE_MAP));
+    }
+
+    private static function auditableType(string $basename): string
+    {
+        return 'App\\Models\\'.$basename;
+    }
+
     public function toArray(Request $request): array
     {
         $basename = $this->auditable_type ? class_basename($this->auditable_type) : null;

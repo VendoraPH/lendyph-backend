@@ -934,7 +934,10 @@ class LoanRestructureTest extends TestCase
         $this->postJson("/api/loans/{$another->id}/restructure", $this->payloadFor($another, [
             'principal_amount' => 50000,
             'remarks' => 'Borrower cannot service the full amount',
-        ]))->assertForbidden();
+        ]))
+            ->assertForbidden()
+            ->assertJsonPath('message', 'Writing off part of the balance requires the loans:write_off permission. '
+                .'Restructure the full outstanding balance of ₱70,800.00 instead.');
 
         $this->assertSame(0, Loan::where('source_loan_id', $another->id)->count());
     }
