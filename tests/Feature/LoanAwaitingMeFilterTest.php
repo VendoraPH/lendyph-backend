@@ -71,6 +71,28 @@ class LoanAwaitingMeFilterTest extends TestCase
         $this->assertSame([], $this->awaitingIdsFor($this->userWithRoles('viewer')));
     }
 
+    /**
+     * A deactivated role grants nothing (User::activeRoles()), so a loan
+     * waiting on its step is not counted for the user holding it, while the
+     * user's active roles still count.
+     */
+    public function test_a_loan_waiting_on_a_deactivated_role_s_step_is_not_counted(): void
+    {
+        $atManager = $this->submittedLoan();
+        $atBod = $this->submittedLoan();
+        $this->approveAs('manager', $atBod);
+
+        Role::where('name', 'manager')->update(['is_active' => false]);
+
+        $holder = $this->userWithRoles('manager', 'bod1');
+
+        $response = $this->actingAs($holder)->getJson('/api/loans?awaiting_me=1&per_page=1')->assertOk();
+
+        $this->assertSame(1, $response->json('meta.total'));
+        $this->assertSame([$atBod->id], $this->awaitingIdsFor($holder));
+        $this->assertNotContains($atManager->id, $this->awaitingIdsFor($holder));
+    }
+
     public function test_a_user_holding_several_roles_sees_each_role_s_loans(): void
     {
         $atManager = $this->submittedLoan();

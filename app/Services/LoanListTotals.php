@@ -39,25 +39,7 @@ class LoanListTotals
     {
         $asOf ??= Carbon::today();
 
-        $remainingTotal = AmortizationSchedule::remainingTotalSql();
-        $unpaid = implode(', ', array_fill(0, count(AmortizationSchedule::UNPAID_STATUSES), '?'));
-        $late = "`amortization_schedules`.`status` IN ({$unpaid}) AND ".AmortizationSchedule::pastGraceSql();
-
-        $loanIds = $this->baseOf($loans)->select('loans.id');
-
-        // One row per loan. The join puts `loans` in scope for the grace
-        // period pastGraceSql() reads.
-        $perLoan = DB::table('amortization_schedules')
-            ->join('loans', 'loans.id', '=', 'amortization_schedules.loan_id')
-            ->whereIn('amortization_schedules.loan_id', $loanIds)
-            ->groupBy('amortization_schedules.loan_id')
-            ->selectRaw(
-                'amortization_schedules.loan_id,
-                SUM('.$remainingTotal.') as owed,
-                SUM('.AmortizationSchedule::remainingPrincipalSql().') as principal,
-                SUM(CASE WHEN '.$late.' THEN '.$remainingTotal.' ELSE 0 END) as overdue',
-                [...AmortizationSchedule::UNPAID_STATUSES, $asOf->toDateString()],
-            );
+        $perLoan = $this->perLoan($this->baseOf($loans)->select('loans.id'), $asOf);
 
         $row = $this->baseOf($loans)
             ->leftJoinSub($perLoan, 'per_loan', 'per_loan.loan_id', '=', 'loans.id')
@@ -75,6 +57,65 @@ class LoanListTotals
             'overdue_amount' => round((float) ($row->overdue_amount ?? 0), 2),
             'overdue_count' => (int) ($row->overdue_count ?? 0),
         ];
+    }
+
+    /**
+     * The same figures for each loan on its own, keyed by loan id, in one
+     * grouped query: `total_outstanding` (GET /loans `total_outstanding`) and
+     * `overdue_amount` (GET /loans/{id}/summary `overdue_amount`). A list
+     * that shows a loan's figures beside each of its rows asks once per page.
+     *
+     * @param  array<int, int>  $loanIds
+     * @return array<int, array{total_outstanding: float, overdue_amount: float}>
+     */
+    public function byLoan(array $loanIds, ?Carbon $asOf = null): array
+    {
+        if ($loanIds === []) {
+            return [];
+        }
+
+        $asOf ??= Carbon::today();
+
+        return DB::table('loans')
+            ->leftJoinSub($this->perLoan($loanIds, $asOf), 'per_loan', 'per_loan.loan_id', '=', 'loans.id')
+            ->whereIn('loans.id', $loanIds)
+            ->selectRaw(
+                'loans.id,
+                COALESCE(per_loan.owed, 0) + COALESCE(GREATEST(loans.insurance_remaining_balance, 0), 0) as total_outstanding,
+                COALESCE(per_loan.overdue, 0) as overdue_amount',
+            )
+            ->get()
+            ->mapWithKeys(fn (object $row) => [(int) $row->id => [
+                'total_outstanding' => round((float) $row->total_outstanding, 2),
+                'overdue_amount' => round((float) $row->overdue_amount, 2),
+            ]])
+            ->all();
+    }
+
+    /**
+     * One row per loan: what its periods still owe (`owed`), their principal
+     * (`principal`) and the part on LATE periods (`overdue`). The join puts
+     * `loans` in scope for the grace period pastGraceSql() reads.
+     *
+     * @param  QueryBuilder|array<int, int>  $loanIds
+     */
+    private function perLoan(QueryBuilder|array $loanIds, Carbon $asOf): QueryBuilder
+    {
+        $remainingTotal = AmortizationSchedule::remainingTotalSql();
+        $unpaid = implode(', ', array_fill(0, count(AmortizationSchedule::UNPAID_STATUSES), '?'));
+        $late = "`amortization_schedules`.`status` IN ({$unpaid}) AND ".AmortizationSchedule::pastGraceSql();
+
+        return DB::table('amortization_schedules')
+            ->join('loans', 'loans.id', '=', 'amortization_schedules.loan_id')
+            ->whereIn('amortization_schedules.loan_id', $loanIds)
+            ->groupBy('amortization_schedules.loan_id')
+            ->selectRaw(
+                'amortization_schedules.loan_id,
+                SUM('.$remainingTotal.') as owed,
+                SUM('.AmortizationSchedule::remainingPrincipalSql().') as principal,
+                SUM(CASE WHEN '.$late.' THEN '.$remainingTotal.' ELSE 0 END) as overdue',
+                [...AmortizationSchedule::UNPAID_STATUSES, $asOf->toDateString()],
+            );
     }
 
     /**

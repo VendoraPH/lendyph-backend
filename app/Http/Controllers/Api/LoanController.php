@@ -173,8 +173,8 @@ not one per row.
 `awaiting_me=1` keeps only the loans waiting on the signed-in user's role:
 `for_review` loans whose current approval step (the step `current_approver`
 names, the first `pending` step of the latest round) has a `role` equal to one
-of the user's role names, compared exactly. A `pending` row left in an earlier
-round does not count. There is no admin/super_admin bypass: those roles see
+of the user's active role names (a deactivated role counts for nothing),
+compared exactly. A `pending` row left in an earlier round does not count. There is no admin/super_admin bypass: those roles see
 only steps that name `admin` or `super_admin`. For the "awaiting me" badge, read
 `meta.total` of `?awaiting_me=1&per_page=1`. `awaiting_me=0` or absent changes
 nothing.
@@ -205,7 +205,7 @@ DESC,
             new OA\Parameter(name: 'loan_product_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
             new OA\Parameter(name: 'date_from', in: 'query', required: false, description: 'Inclusive lower bound on created_at (YYYY-MM-DD).', schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'date_to', in: 'query', required: false, description: 'Inclusive upper bound on created_at, whole day (YYYY-MM-DD).', schema: new OA\Schema(type: 'string', format: 'date')),
-            new OA\Parameter(name: 'awaiting_me', in: 'query', required: false, description: 'When 1, only `for_review` loans whose current approval step (the one `current_approver` names) belongs to one of the signed-in user\'s roles, by exact role name. No admin/super_admin bypass. `meta.total` is the badge count.', schema: new OA\Schema(type: 'boolean', default: false)),
+            new OA\Parameter(name: 'awaiting_me', in: 'query', required: false, description: 'When 1, only `for_review` loans whose current approval step (the one `current_approver` names) belongs to one of the signed-in user\'s active roles, by exact role name. No admin/super_admin bypass. `meta.total` is the badge count.', schema: new OA\Schema(type: 'boolean', default: false)),
             new OA\Parameter(name: 'sort', in: 'query', required: false, schema: new OA\Schema(type: 'string', default: 'created_at', enum: self::SORT_KEYS)),
             new OA\Parameter(name: 'dir', in: 'query', required: false, schema: new OA\Schema(type: 'string', default: 'desc', enum: ['asc', 'desc'])),
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15, maximum: 100)),
@@ -288,7 +288,7 @@ DESC,
             ->when(filled($dateFrom), fn ($q) => $q->where('loans.created_at', '>=', Carbon::parse($dateFrom)->startOfDay()))
             ->when(filled($dateTo), fn ($q) => $q->where('loans.created_at', '<=', Carbon::parse($dateTo)->endOfDay()))
             ->when($awaitingMe, fn ($q) => $q->awaitingApprovalFromRoles(
-                request()->user()->roles->pluck('name')->all(),
+                request()->user()->activeRoles()->pluck('name')->all(),
             ));
 
         $query = (clone $filtered)

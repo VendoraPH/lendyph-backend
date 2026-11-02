@@ -527,6 +527,51 @@ class ReportService
     }
 
     /**
+     * The loan-level figures each Due/Past Due row carries, for the loans on
+     * one page, keyed by loan id: two grouped queries for the page, whatever
+     * its size, so a loan with several rows shows the same figures on each.
+     *
+     * - `loan_total_outstanding`: everything the loan owes, GET /loans
+     *   `total_outstanding`.
+     * - `loan_past_due_amount`: what its late periods (unpaid and past grace)
+     *   still owe, GET /loans/{id}/summary `overdue_amount`.
+     * - `loan_last_payment_date`: the latest posted repayment's
+     *   `payment_date`; voided payments don't count. Null when there is none.
+     *
+     * @param  array<int, int>  $loanIds
+     * @return array<int, array{loan_total_outstanding: float, loan_past_due_amount: float, loan_last_payment_date: string|null}>
+     */
+    public function duePastDueLoanFigures(array $loanIds): array
+    {
+        $loanIds = array_values(array_unique($loanIds));
+        if ($loanIds === []) {
+            return [];
+        }
+
+        $owed = app(LoanListTotals::class)->byLoan($loanIds);
+
+        $lastPaid = Repayment::query()
+            ->whereIn('loan_id', $loanIds)
+            ->where('status', 'posted')
+            ->groupBy('loan_id')
+            ->selectRaw('loan_id, MAX(payment_date) as last_payment_date')
+            ->pluck('last_payment_date', 'loan_id');
+
+        $figures = [];
+        foreach ($loanIds as $loanId) {
+            $last = $lastPaid[$loanId] ?? null;
+
+            $figures[$loanId] = [
+                'loan_total_outstanding' => $owed[$loanId]['total_outstanding'] ?? 0.0,
+                'loan_past_due_amount' => $owed[$loanId]['overdue_amount'] ?? 0.0,
+                'loan_last_payment_date' => $last === null ? null : Carbon::parse($last)->toDateString(),
+            ];
+        }
+
+        return $figures;
+    }
+
+    /**
      * The totals block under the Due/Past Due list.
      *
      * Membership is duePastDueQuery()'s — what is OWED, grace ignored, see the
@@ -550,6 +595,11 @@ class ReportService
      * There is no PAR figure or aging bucket in this block; those live in
      * agingReport() and loanBalanceSummary(), and both deliberately still
      * measure from the bare due date. See the comments there.
+     *
+     * `total_outstanding` and `past_due_amount` are loan-level, not per row:
+     * LoanListTotals over the distinct loans the filter matches, so a loan
+     * with three listed periods is counted once, and each equals the rows'
+     * `loan_total_outstanding` / `loan_past_due_amount` summed per loan.
      *
      * @return array<string, float|int>
      */
@@ -578,6 +628,13 @@ class ReportService
             ))
             ->count();
 
+        // Loan-level money, each loan once however many of its rows match:
+        // the rows' `loan_total_outstanding` and `loan_past_due_amount`
+        // summed over the distinct loans in the filter.
+        $loans = app(LoanListTotals::class)->for(
+            Loan::query()->whereIn('loans.id', (clone $base)->select('amortization_schedules.loan_id')),
+        );
+
         return [
             'count' => (int) ($agg->row_count ?? 0),
             'overdue_count' => $overdueCount,
@@ -590,6 +647,8 @@ class ReportService
             // in any row's figure.
             'total_paid' => round((float) ($agg->total_paid ?? 0), 2),
             'total_balance' => round((float) ($agg->total_balance ?? 0), 2),
+            'total_outstanding' => $loans['total_outstanding'],
+            'past_due_amount' => $loans['overdue_amount'],
         ];
     }
 

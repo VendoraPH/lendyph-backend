@@ -279,7 +279,26 @@ class ReportController extends Controller
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15)),
         ],
         responses: [
-            new OA\Response(response: 200, description: 'Paginated due/past-due schedules'),
+            new OA\Response(response: 200, description: 'Paginated due/past-due schedules', content: new OA\JsonContent(properties: [
+                new OA\Property(property: 'data', type: 'array', description: 'One row per unpaid period due by today. Besides the period\'s own figures, each row carries its loan\'s figures, the same on every row of that loan.', items: new OA\Items(properties: [
+                    new OA\Property(property: 'loan_total_outstanding', type: 'number', description: 'Everything the loan still owes: its periods\' unpaid principal, interest and penalty plus the insurance premium owed. Equals GET /loans `total_outstanding`.'),
+                    new OA\Property(property: 'loan_past_due_amount', type: 'number', description: 'The principal, interest and penalty still unpaid on the loan\'s late periods (unpaid and past the due date plus the loan\'s grace). Equals GET /loans/{id}/summary `overdue_amount`; 0 while every period is within grace.'),
+                    new OA\Property(property: 'loan_last_payment_date', type: 'string', format: 'date', nullable: true, description: 'The `payment_date` of the loan\'s latest posted repayment; voided payments are ignored. Null when there is none.'),
+                ])),
+                new OA\Property(property: 'totals', type: 'object', properties: [
+                    new OA\Property(property: 'count', type: 'integer'),
+                    new OA\Property(property: 'overdue_count', type: 'integer'),
+                    new OA\Property(property: 'total_principal_due', type: 'number'),
+                    new OA\Property(property: 'total_interest_due', type: 'number'),
+                    new OA\Property(property: 'total_penalty', type: 'number'),
+                    new OA\Property(property: 'total_due', type: 'number'),
+                    new OA\Property(property: 'total_paid', type: 'number'),
+                    new OA\Property(property: 'total_balance', type: 'number'),
+                    new OA\Property(property: 'total_outstanding', type: 'number', description: 'Everything owed by the distinct loans the filter matches, each loan once.'),
+                    new OA\Property(property: 'past_due_amount', type: 'number', description: 'The late-and-past-grace amount owed by the distinct loans the filter matches, each loan once.'),
+                ]),
+                new OA\Property(property: 'meta', type: 'object'),
+            ])),
         ],
     )]
     public function listOfDuePastDue(): JsonResponse
@@ -289,9 +308,12 @@ class ReportController extends Controller
         $filters = $this->reportFilters();
         $results = $this->reportService->listOfDuePastDue($filters);
         $today = Carbon::today();
+        $loanFigures = $this->reportService->duePastDueLoanFigures(
+            $results->getCollection()->pluck('loan_id')->all(),
+        );
 
         return response()->json([
-            'data' => $results->getCollection()->map(function ($s) use ($today) {
+            'data' => $results->getCollection()->map(function ($s) use ($today, $loanFigures) {
                 $dueDate = $s->due_date->copy()->startOfDay();
 
                 // `loan` is eager loaded whole by ReportService::listOfDuePastDue(),
@@ -350,6 +372,11 @@ class ReportController extends Controller
                     'amount_remaining' => $amountRemaining,
                     'balance' => $amountRemaining,
                     'status' => $s->status,
+                    // The row's loan as a whole, the same on every row of
+                    // that loan. See ReportService::duePastDueLoanFigures().
+                    'loan_total_outstanding' => $loanFigures[$s->loan_id]['loan_total_outstanding'] ?? 0.0,
+                    'loan_past_due_amount' => $loanFigures[$s->loan_id]['loan_past_due_amount'] ?? 0.0,
+                    'loan_last_payment_date' => $loanFigures[$s->loan_id]['loan_last_payment_date'] ?? null,
                 ];
             }),
             'totals' => $this->reportService->listOfDuePastDueTotals($filters),

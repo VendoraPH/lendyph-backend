@@ -38,10 +38,7 @@ class DashboardService
         $totalCollectedMtd = (float) $collectedMtd->collected;
         $insuranceCollectedMtd = (float) $collectedMtd->insurance;
 
-        $overdueLoansCount = (int) DB::table('amortization_schedules')
-            ->where('status', 'overdue')
-            ->distinct('loan_id')
-            ->count('loan_id');
+        $overdueLoansCount = $this->overdueLoansCount(Carbon::today());
 
         // Cache sparklines for 10 minutes (28 queries → 0 on cache hit)
         $sparklines = Cache::remember('dashboard:sparklines', 600, fn () => [
@@ -348,17 +345,31 @@ class DashboardService
         })->toArray();
     }
 
+    /**
+     * Each of the last seven days by the same rule as the card, with that day
+     * as the grace cutoff's date, so today's point is the card's figure.
+     * Payment state is today's: a period paid since that day no longer counts
+     * on it, as before.
+     */
     private function overdueSparkline(): array
     {
-        return collect(range(6, 0))->map(function ($daysAgo) {
-            $day = Carbon::today()->subDays($daysAgo);
-            $value = (int) DB::table('amortization_schedules')
-                ->where('status', 'overdue')
-                ->where('due_date', '<=', $day)
-                ->distinct('loan_id')
-                ->count('loan_id');
+        return collect(range(6, 0))->map(fn ($daysAgo) => [
+            'v' => $this->overdueLoansCount(Carbon::today()->subDays($daysAgo)),
+        ])->toArray();
+    }
 
-            return ['v' => $value];
-        })->toArray();
+    /**
+     * Collectible loans with an unpaid period past the due date plus the
+     * loan's grace, as of `$asOf`: LoanListTotals' `overdue_count`, the rule
+     * GET /loans `meta.totals.overdue_count` counts by. A period's stored
+     * `overdue` status is not read, as it is only stamped when a payment or
+     * the penalty run touches the loan.
+     */
+    private function overdueLoansCount(Carbon $asOf): int
+    {
+        return app(LoanListTotals::class)->for(
+            Loan::query()->whereIn('loans.status', Loan::COLLECTIBLE_STATUSES),
+            $asOf,
+        )['overdue_count'];
     }
 }
