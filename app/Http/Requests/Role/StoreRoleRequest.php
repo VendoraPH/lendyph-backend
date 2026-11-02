@@ -2,13 +2,18 @@
 
 namespace App\Http\Requests\Role;
 
+use App\Http\Requests\Concerns\GuardsRolePermissionGrants;
+use App\Models\Role;
 use App\Rules\UniqueRoleDisplayName;
 use App\Rules\ValidUtf8;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\Validator;
 
 class StoreRoleRequest extends FormRequest
 {
+    use GuardsRolePermissionGrants;
+
     public function authorize(): bool
     {
         return $this->user()->can('settings:update');
@@ -44,6 +49,9 @@ class StoreRoleRequest extends FormRequest
                 'max:100',
                 'regex:/^[a-z][a-z0-9_]*$/',
                 Rule::unique('roles', 'name'),
+                // Never a protected key, even on a database missing that row:
+                // the Gate::before bypass and every name check key off it.
+                Rule::notIn(Role::PROTECTED_KEYS),
                 // Nor may the key read as another role's display name.
                 new UniqueRoleDisplayName,
             ],
@@ -61,6 +69,18 @@ class StoreRoleRequest extends FormRequest
     {
         return [
             'name.regex' => 'The role name must be lowercase letters, numbers, and underscores (e.g., branch_manager).',
+            'name.not_in' => 'The role name :input is reserved.',
+        ];
+    }
+
+    /**
+     * A new role may not carry a permission the creator doesn't hold
+     * (GuardsRolePermissionGrants).
+     */
+    public function after(): array
+    {
+        return [
+            fn (Validator $validator) => $this->refuseUngrantablePermissions($validator, null),
         ];
     }
 }

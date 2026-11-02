@@ -2,15 +2,19 @@
 
 namespace App\Http\Requests\Role;
 
+use App\Http\Requests\Concerns\GuardsRolePermissionGrants;
 use App\Models\Role;
 use App\Rules\UniqueRoleDisplayName;
 use App\Rules\ValidUtf8;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\Validator;
 
 class UpdateRoleRequest extends FormRequest
 {
+    use GuardsRolePermissionGrants;
+
     public function authorize(): bool
     {
         return $this->user()->can('settings:update');
@@ -80,27 +84,56 @@ class UpdateRoleRequest extends FormRequest
                     return;
                 }
 
-                if ($role->is_system && $this->filled('name') && $this->input('name') !== $role->name) {
+                if (($role->is_system || in_array($role->name, Role::PROTECTED_KEYS, true))
+                    && $this->filled('name') && $this->input('name') !== $role->name) {
                     $validator->errors()->add(
                         'name',
                         "System role '{$role->name}' cannot be renamed."
                     );
                 }
 
+                // Nor may a role take a protected key, even on a database
+                // missing that row: the Gate::before bypass and every name
+                // check key off it.
+                if ($this->filled('name') && $this->input('name') !== $role->name
+                    && in_array($this->input('name'), Role::PROTECTED_KEYS, true)) {
+                    $validator->errors()->add(
+                        'name',
+                        "The role name {$this->input('name')} is reserved."
+                    );
+                }
+
                 // Only a super_admin may relabel super_admin. Otherwise a
                 // client admin could label it "Admin" (and admin something
                 // else), and a platform super_admin picking "Admin" for a user
-                // would hand out the Gate::before bypass.
+                // would hand out the Gate::before bypass. Clearing the label is
+                // a change too; sending the stored one back is not.
                 if ($role->name === 'super_admin'
-                    && $this->filled('display_name')
-                    && $this->input('display_name') !== $role->display_name
+                    && $this->has('display_name')
+                    && self::effectiveLabel($role, $this->input('display_name')) !== self::effectiveLabel($role, $role->display_name)
                     && ! $this->user()->hasRole('super_admin')) {
                     $validator->errors()->add(
                         'display_name',
                         'Only a super admin can change the super_admin role\'s display name.'
                     );
                 }
+
+                $this->refuseUngrantablePermissions($validator, $role);
             },
         ];
+    }
+
+    /**
+     * The label a role is shown by: a blank or missing label means the default,
+     * the key in headline case ("Super Admin"), which is also what the role
+     * editor shows, and sends back as `display_name: null`.
+     */
+    private static function effectiveLabel(Role $role, mixed $value): mixed
+    {
+        if ($value === null || (is_string($value) && trim($value) === '')) {
+            return Str::headline($role->name);
+        }
+
+        return is_string($value) ? trim($value) : $value;
     }
 }
