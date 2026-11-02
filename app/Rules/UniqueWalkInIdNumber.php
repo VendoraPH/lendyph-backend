@@ -21,6 +21,10 @@ use Illuminate\Contracts\Validation\ValidationRule;
  * An ID number with nothing left once normalised (only spaces or dashes, such
  * as `---`) is refused here too: it names no document, and it would otherwise
  * match every other such ID as a duplicate.
+ *
+ * The ID is optional, so the rule only sees a given ID number (the field is
+ * `nullable`). A number sent without a type fails `required_with` on the type,
+ * and is not looked up here: there is no document to compare it against.
  */
 class UniqueWalkInIdNumber implements ValidationRule
 {
@@ -51,6 +55,10 @@ class UniqueWalkInIdNumber implements ValidationRule
         if ($normalised === '') {
             $fail('The ID number must contain letters or numbers, not only dashes or spaces.');
 
+            return;
+        }
+
+        if ($this->idType === null) {
             return;
         }
 

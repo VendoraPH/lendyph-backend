@@ -38,12 +38,15 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'status', type: 'string'),
         new OA\Property(property: 'current_approver', type: 'string', nullable: true, example: 'Manager', description: 'GET /loans and GET /loans/{id} only (requires `approvalSteps` eager-loaded). Name of the approval step a `for_review` loan is waiting on: the first `pending` step of `current_steps` in GET /loans/{id}/approval-steps. Null when the loan is not `for_review`, no step is pending, or the step name is blank. Never an empty string.'),
         new OA\Property(property: 'current_status_label', type: 'string', nullable: true, example: 'Credit Review', description: 'GET /loans and GET /loans/{id} only (requires `approvalSteps` eager-loaded). The configured status label of the step `current_approver` names, snapshotted when the loan was submitted. Null whenever `current_approver` is null, and when that step has no label or a blank one. Never an empty string.'),
-        new OA\Property(property: 'outstanding_balance', type: 'number'),
+        new OA\Property(property: 'outstanding_balance', type: 'number', deprecated: true, description: 'Deprecated: read `total_outstanding` (everything owed) or `outstanding_principal` (principal only) instead; removed once the frontend has moved. Unpaid principal plus `insurance_owed` (Loan::$outstanding_balance, the reports\' figure), never interest or penalty.'),
+        new OA\Property(property: 'total_outstanding', type: 'number', nullable: true, description: 'Everything still owed: the periods\' unpaid principal, interest and penalty plus `insurance_owed`, in whole centavos. Equals GET /loans/{id}/summary `total_outstanding`. 0 before release. Null where the periods were not loaded.'),
+        new OA\Property(property: 'outstanding_principal', type: 'number', nullable: true, description: 'Unpaid principal only, in whole centavos; the premium owed is `insurance_owed`. Equals GET /loans/{id}/summary `outstanding_principal`. Null where the periods were not loaded.'),
         new OA\Property(property: 'next_due_date', type: 'string', format: 'date', nullable: true),
         new OA\Property(property: 'current_due', type: 'number'),
         new OA\Property(property: 'overdue_amount', type: 'number'),
         new OA\Property(property: 'penalty_amount', type: 'number'),
-        new OA\Property(property: 'total_payable', type: 'number', description: 'Principal, interest and penalty still owed on the periods, plus `insurance_owed`'),
+        new OA\Property(property: 'total_payable', type: 'number', nullable: true, description: 'Principal, interest and penalty still owed on the periods, plus `insurance_owed`. Never includes the Share Capital Build-Up. Null before release, when nothing is owed yet (see `contract_total`).'),
+        new OA\Property(property: 'contract_total', type: 'number', nullable: true, description: 'Principal plus interest over the whole schedule, in whole centavos, never the Share Capital Build-Up or penalty. After release: the stored schedule\'s (equals `amortization_schedule_totals.principal` + `.interest`). Before release: the schedule GET /loans/{id}/amortization-preview builds, on GET /loans/{id} only; null on lists and wherever the periods (after release) or the collaterals (before release, the single-loan view) were not loaded.'),
         new OA\Property(property: 'unitemised_deductions', type: 'number', description: '`total_deductions` less the itemised `deductions`, in whole centavos, signed: positive when the total is more than the items, negative when the items add up to more, 0 when they agree. The release voucher prints it as its own line.'),
         new OA\Property(property: 'amortization_schedule_totals', type: 'object', description: 'Only with `amortization_schedules`. Each column of the schedule added up in whole centavos.', properties: [
             new OA\Property(property: 'principal', type: 'number'),
@@ -130,8 +133,14 @@ class LoanResource extends JsonResource
         $overdueAmount = 0.0;
         $totalPenalty = 0.0;
         $totalPayable = 0.0;
+        $owed = null;
+        $scheduleTotals = null;
+        $isReleased = $this->released_at !== null;
 
         if ($this->relationLoaded('amortizationSchedules')) {
+            $owed = $this->resource->owedCentavos($this->amortizationSchedules);
+            $scheduleTotals = PersistedScheduleFigures::totals($this->resource, $this->amortizationSchedules);
+
             $today = now()->startOfDay();
             $unpaidSchedules = $this->amortizationSchedules
                 ->whereIn('status', ['pending', 'partial', 'overdue']);
@@ -241,12 +250,21 @@ class LoanResource extends JsonResource
             // caller did not eager-load `amortizationSchedules` (this used to
             // silently serialise 0 — which is why every Releases List row read
             // as fully paid).
+            //
+            // Deprecated alias, kept one release: `total_outstanding` and
+            // `outstanding_principal` below say which figure they are.
             'outstanding_balance' => $this->outstanding_balance,
+            // Loan::owedCentavos(), the rule GET /loans/{id}/summary states
+            // them by, so the list and the loan page agree to the centavo.
+            'total_outstanding' => $owed === null ? null : $owed['total'] / 100,
+            'outstanding_principal' => $owed === null ? null : $owed['principal'] / 100,
             'next_due_date' => $nextDueDate,
             'current_due' => $currentDue,
             'overdue_amount' => $overdueAmount,
             'penalty_amount' => $totalPenalty,
-            'total_payable' => $totalPayable,
+            // Nothing is owed before release, so no figure rather than 0.
+            'total_payable' => $isReleased ? $totalPayable : null,
+            'contract_total' => $this->contractTotal($isReleased, $scheduleTotals),
             // What a payment must be today to clear the insurance premium owed
             // and every open period due by today, from the server
             // (RepaymentService::amountDueNow()). Only for a loan that takes
@@ -302,7 +320,7 @@ class LoanResource extends JsonResource
             // column names AmortizationScheduleResource gives each row, so the
             // printed schedule never adds a column up itself. Only where the
             // schedule is loaded.
-            'amortization_schedule_totals' => $this->whenLoaded('amortizationSchedules', fn () => PersistedScheduleFigures::totals($this->resource, $this->amortizationSchedules)),
+            'amortization_schedule_totals' => $this->whenLoaded('amortizationSchedules', fn () => $scheduleTotals),
             // The collaterals card's total, security status and shortfall
             // (CollateralSecurity, the rule the loan form's preview uses). Only
             // where `collaterals` is loaded (GET /loans/{id}); null elsewhere,
@@ -346,5 +364,39 @@ class LoanResource extends JsonResource
             'created_at' => $this->created_at,
             'updated_at' => $this->updated_at,
         ];
+    }
+
+    /**
+     * Principal plus interest over the whole schedule, in whole centavos,
+     * never the Share Capital Build-Up (decision 7(a): SCB is not debt).
+     *
+     * After release, the stored schedule's (`$scheduleTotals`, null where the
+     * periods were not loaded). Before release, the schedule the pre-release
+     * amortization preview builds (LoanService::buildAmortizationPreview()),
+     * but only where `collaterals` is loaded: GET /loans/{id}, the same proxy
+     * `collateral_summary` uses. A list would otherwise build a schedule for
+     * every unreleased row on the page, so it gets null.
+     *
+     * @param  array<string, float|int>|null  $scheduleTotals  PersistedScheduleFigures::totals()
+     */
+    private function contractTotal(bool $isReleased, ?array $scheduleTotals): ?float
+    {
+        if ($isReleased) {
+            return $scheduleTotals === null
+                ? null
+                : (LoanService::toCentavos((float) $scheduleTotals['principal']) + LoanService::toCentavos((float) $scheduleTotals['interest'])) / 100;
+        }
+
+        if (! $this->relationLoaded('collaterals')) {
+            return null;
+        }
+
+        $centavos = 0;
+
+        foreach (app(LoanService::class)->buildAmortizationPreview($this->resource) as $row) {
+            $centavos += LoanService::toCentavos((float) $row['principal_due']) + LoanService::toCentavos((float) $row['interest_due']);
+        }
+
+        return $centavos / 100;
     }
 }

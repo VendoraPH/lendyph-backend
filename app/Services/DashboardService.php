@@ -5,11 +5,23 @@ namespace App\Services;
 use App\Models\Loan;
 use App\Models\Repayment;
 use Carbon\Carbon;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 
 class DashboardService
 {
+    /**
+     * What a posted payment collected for the loan: everything it took less
+     * the insurance premium it collected first. That premium is held for the
+     * insurer (2040 Insurance Premium Payable), not loan collection, so it is
+     * stated separately as `insurance_collected`, as Daily Collection and
+     * Collection Efficiency already leave it out.
+     */
+    private const COLLECTED_SQL = 'COALESCE(SUM(amount_paid - insurance_applied), 0)';
+
+    private const INSURANCE_COLLECTED_SQL = 'COALESCE(SUM(insurance_applied), 0)';
+
     public function stats(): array
     {
         $monthStart = Carbon::now()->startOfMonth();
@@ -19,9 +31,12 @@ class DashboardService
 
         $activeLoansCount = Loan::whereIn('status', ['released', 'ongoing'])->count();
 
-        $totalCollectedMtd = (float) Repayment::where('status', 'posted')
+        $collectedMtd = Repayment::where('status', 'posted')
             ->whereDate('payment_date', '>=', $monthStart)
-            ->sum('amount_paid');
+            ->selectRaw(self::COLLECTED_SQL.' as collected, '.self::INSURANCE_COLLECTED_SQL.' as insurance')
+            ->first();
+        $totalCollectedMtd = (float) $collectedMtd->collected;
+        $insuranceCollectedMtd = (float) $collectedMtd->insurance;
 
         $overdueLoansCount = (int) DB::table('amortization_schedules')
             ->where('status', 'overdue')
@@ -40,6 +55,7 @@ class DashboardService
             'total_portfolio' => round($totalPortfolio, 2),
             'active_loans' => $activeLoansCount,
             'total_collected' => round($totalCollectedMtd, 2),
+            'insurance_collected' => round($insuranceCollectedMtd, 2),
             'overdue_count' => $overdueLoansCount,
             // Legacy aliases kept for backward compatibility — prefer the names above.
             'active_loans_count' => $activeLoansCount,
@@ -65,9 +81,7 @@ class DashboardService
             $start = Carbon::now()->startOfWeek()->subWeeks($i);
             $end = $start->copy()->endOfWeek();
 
-            $total = (float) Repayment::where('status', 'posted')
-                ->whereBetween('payment_date', [$start, $end])
-                ->sum('amount_paid');
+            [$total, $insurance] = $this->collectedBetween($start, $end);
 
             $points->push([
                 'period' => 'week',
@@ -77,6 +91,7 @@ class DashboardService
                 'value' => round($total, 2),
                 // Legacy alias.
                 'total' => round($total, 2),
+                'insurance_collected' => round($insurance, 2),
             ]);
         }
 
@@ -90,9 +105,7 @@ class DashboardService
             $start = Carbon::now()->startOfMonth()->subMonths($i);
             $end = $start->copy()->endOfMonth();
 
-            $total = (float) Repayment::where('status', 'posted')
-                ->whereBetween('payment_date', [$start, $end])
-                ->sum('amount_paid');
+            [$total, $insurance] = $this->collectedBetween($start, $end);
 
             $points->push([
                 'period' => 'month',
@@ -101,6 +114,7 @@ class DashboardService
                 'period_label' => $start->format('M Y'),
                 'value' => round($total, 2),
                 'total' => round($total, 2),
+                'insurance_collected' => round($insurance, 2),
             ]);
         }
 
@@ -114,9 +128,7 @@ class DashboardService
             $start = Carbon::now()->startOfYear()->subYears($i);
             $end = $start->copy()->endOfYear();
 
-            $total = (float) Repayment::where('status', 'posted')
-                ->whereBetween('payment_date', [$start, $end])
-                ->sum('amount_paid');
+            [$total, $insurance] = $this->collectedBetween($start, $end);
 
             $points->push([
                 'period' => 'year',
@@ -125,10 +137,27 @@ class DashboardService
                 'period_label' => (string) $start->year,
                 'value' => round($total, 2),
                 'total' => round($total, 2),
+                'insurance_collected' => round($insurance, 2),
             ]);
         }
 
         return ['data' => $points->values()->toArray()];
+    }
+
+    /**
+     * Collected (premium left out) and the premium collected, by posted
+     * payments dated in the range.
+     *
+     * @return array{0: float, 1: float}
+     */
+    private function collectedBetween(Carbon $start, Carbon $end): array
+    {
+        $row = Repayment::where('status', 'posted')
+            ->whereBetween('payment_date', [$start, $end])
+            ->selectRaw(self::COLLECTED_SQL.' as collected, '.self::INSURANCE_COLLECTED_SQL.' as insurance')
+            ->first();
+
+        return [(float) $row->collected, (float) $row->insurance];
     }
 
     public function dailyDues(?string $date = null): array
@@ -155,7 +184,10 @@ class DashboardService
             ->orderBy('amortization_schedules.id')
             ->get();
 
-        $items = $schedules->map(fn ($s): array => $this->dailyDueItem($s));
+        // One item per loan for the date: a period an extension or
+        // restructure closed early (at what it had collected) shares its due
+        // date with the rescheduled remainder, and both are one due.
+        $items = $schedules->groupBy('loan_id')->map(fn ($rows): array => $this->dailyDueItem($rows));
 
         $centavos = fn (float $pesos): int => (int) round($pesos * 100);
         $totalDue = $items->sum(fn (array $item): int => $centavos($item['amount_due']));
@@ -182,25 +214,44 @@ class DashboardService
     }
 
     /**
-     * One daily-dues row, by the principal and interest paid against it:
-     * `collected` once they cover its `total_due`, `partial` while some but not
-     * all of it is paid, `pending` while none is. Penalty paid never counts
-     * towards the amount due: a period with only its penalty paid (₱0
-     * principal and interest) is `pending`, one with penalty and part of the
-     * principal and interest paid is `partial`, and the collection rate can
-     * never pass 100%.
+     * One daily-dues item for one loan, by the principal and interest paid
+     * against its periods due that day: `collected` once they cover the
+     * amount due, `partial` while some but not all of it is paid, `pending`
+     * while none is. Penalty paid never counts towards the amount due: a
+     * period with only its penalty paid (₱0 principal and interest) is
+     * `pending`, one with penalty and part of the principal and interest paid
+     * is `partial`, and the collection rate can never pass 100%.
+     *
+     * A loan usually has one period due on a date. When an extension or
+     * restructure closed a period early, at what it had collected, and its
+     * rescheduled remainder falls due on the same date, the periods are
+     * folded into one item: `amount_due` and `amount_collected` both include
+     * the closed part, so the item is `collected` only once the remainder's
+     * principal and interest are paid too. The fold reads no closing marker:
+     * every period of the loan due that day is part of the one due.
      *
      * `amount_collected` is the principal and interest paid towards the amount
-     * due, capped at it. `amount_paid` stays everything paid, penalty included.
+     * due, capped per period at what that period owes. `amount_paid` stays
+     * everything paid, penalty included.
      *
+     * @param  Collection<int, object>  $periods  the loan's periods due that day
      * @return array{loan_id: int, loan_account_number: string|null, borrower_name: string, amount_due: float, amount_paid: float, amount_collected: float, status: string}
      */
-    private function dailyDueItem(object $schedule): array
+    private function dailyDueItem(Collection $periods): array
     {
-        $amountDue = (int) round((float) $schedule->total_due * 100);
-        $principalAndInterest = (int) round((float) $schedule->principal_paid * 100) + (int) round((float) $schedule->interest_paid * 100);
-        $amountPaid = $principalAndInterest + (int) round((float) $schedule->penalty_paid * 100);
-        $collected = min($principalAndInterest, $amountDue);
+        $centavos = fn (mixed $pesos): int => (int) round((float) $pesos * 100);
+        $amountDue = 0;
+        $amountPaid = 0;
+        $collected = 0;
+
+        foreach ($periods as $period) {
+            $due = $centavos($period->total_due);
+            $principalAndInterest = $centavos($period->principal_paid) + $centavos($period->interest_paid);
+
+            $amountDue += $due;
+            $amountPaid += $principalAndInterest + $centavos($period->penalty_paid);
+            $collected += min($principalAndInterest, $due);
+        }
 
         $status = match (true) {
             $collected >= $amountDue => 'collected',
@@ -208,10 +259,12 @@ class DashboardService
             default => 'pending',
         };
 
+        $first = $periods->first();
+
         return [
-            'loan_id' => $schedule->loan_id,
-            'loan_account_number' => $schedule->loan_account_number,
-            'borrower_name' => $schedule->borrower_name,
+            'loan_id' => $first->loan_id,
+            'loan_account_number' => $first->loan_account_number,
+            'borrower_name' => $first->borrower_name,
             'amount_due' => $amountDue / 100,
             'amount_paid' => $amountPaid / 100,
             'amount_collected' => $collected / 100,
@@ -288,7 +341,8 @@ class DashboardService
             $day = Carbon::today()->subDays($daysAgo);
             $value = (float) Repayment::where('status', 'posted')
                 ->whereDate('payment_date', $day)
-                ->sum('amount_paid');
+                ->selectRaw(self::COLLECTED_SQL.' as collected')
+                ->value('collected');
 
             return ['v' => round($value / 1000, 0)];
         })->toArray();
