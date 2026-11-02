@@ -11,6 +11,7 @@ use App\Http\Resources\ShareCapitalPledgeResource;
 use App\Models\Borrower;
 use App\Models\ShareCapitalPledge;
 use App\Services\LikePattern;
+use App\Services\LoanService;
 use App\Services\ShareCapitalService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
@@ -76,6 +77,9 @@ excludes borrowers whose registration is still `pending` or was `rejected`.
 Members in poor standing (`inactive`, `blacklisted`) ARE included — they still
 hold share capital. `ShareCapitalPledgeResource` exposes no borrower status, so
 a client cannot reproduce this filter itself.
+
+`meta.totals.amount` is the pledged amount over every pledge the filters match,
+not just the page.
 DESC,
         tags: ['Share Capital'],
         security: [['sanctum' => []]],
@@ -112,20 +116,28 @@ DESC,
         $schedule = $filters['schedule'] ?? null;
         $search = $filters['search'] ?? null;
 
-        $pledges = ShareCapitalPledge::with('borrower')
+        $filtered = ShareCapitalPledge::query()
             ->forMembers()
-            ->withMax('borrowerLedgerEntries as last_transaction_date', 'date')
             ->when(filled($schedule), fn ($q) => $q->where('schedule', $schedule))
             ->when(request()->has('auto_credit'), fn ($q) => $q->where('auto_credit', filter_var(request('auto_credit'), FILTER_VALIDATE_BOOLEAN)))
             ->when(filled($search), function ($q) use ($search) {
                 $like = LikePattern::contains($search);
 
                 $q->whereHas('borrower', fn ($bq) => $bq->where('first_name', 'like', $like)->orWhere('last_name', 'like', $like));
-            })
+            });
+
+        $pledges = (clone $filtered)
+            ->with('borrower')
+            ->withMax('borrowerLedgerEntries as last_transaction_date', 'date')
             ->orderBy('id')
             ->paginate(min(max((int) ($filters['per_page'] ?? 15), 1), 100));
 
-        return ShareCapitalPledgeResource::collection($pledges);
+        // The pledged total over every pledge the filters match, not just the
+        // page, so the browser never adds the page up. Summed in centavos.
+        $amount = LoanService::toCentavos((float) (clone $filtered)->sum('amount')) / 100;
+
+        return ShareCapitalPledgeResource::collection($pledges)
+            ->additional(['meta' => ['totals' => ['amount' => $amount]]]);
     }
 
     #[OA\Put(

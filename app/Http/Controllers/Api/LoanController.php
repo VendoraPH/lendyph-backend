@@ -28,6 +28,7 @@ use App\Services\CollateralAttacher;
 use App\Services\CollateralWriteTransaction;
 use App\Services\LikePattern;
 use App\Services\LoanAdjustmentService;
+use App\Services\LoanListTotals;
 use App\Services\LoanReleaseFeeService;
 use App\Services\LoanService;
 use App\Services\PersistedScheduleFigures;
@@ -178,6 +179,14 @@ only steps that name `admin` or `super_admin`. For the "awaiting me" badge, read
 `meta.total` of `?awaiting_me=1&per_page=1`. `awaiting_me=0` or absent changes
 nothing.
 
+`meta.totals` adds up every loan the filters match (every filter, not just the
+page): `total_outstanding` is everything those loans still owe (the periods'
+principal, interest and penalty plus the insurance premium owed, the parts of
+`GET /api/loans/{id}/summary` `outstanding_balance`), `overdue_amount` is the
+principal, interest and penalty unpaid on periods past their due date and the
+loan's grace period (each row's `overdue_amount`, summed), and `overdue_count`
+is how many of those loans have an overdue amount. One aggregate query.
+
 `meta.stats` is always organisation-wide — narrowed by `branch_id` and
 `borrower_id` only, and never by `search`, `status`, `loan_product_id`,
 `awaiting_me` or the date range. Those counts are the KPI cards and tab badges: scoping them to the
@@ -251,21 +260,9 @@ DESC,
         $dateTo = $filters['date_to'] ?? null;
         $awaitingMe = filter_var($filters['awaiting_me'] ?? false, FILTER_VALIDATE_BOOLEAN);
 
-        $query = Loan::query()
-            // Do NOT reorder these two lines, and do not delete the select.
-            //
-            // withCount() only injects its own `loans.*` when the column list
-            // is still null, so putting it first and this second would leave
-            // `extension_count` off the select and silently reinstate a COUNT
-            // per row. Dropping the select altogether is worse: sort=borrower
-            // joins `borrowers`, whose `id`, `status` and `branch_id` would
-            // then hydrate OVER the loan's, and LoanResource would publish the
-            // borrower's id and status on every row of the list.
-            ->select('loans.*')
-            ->with('borrower', 'loanProduct', 'branch', 'createdByUser', 'amortizationSchedules', 'coMakers', 'approvalSteps')
-            // Aliased count so LoanResource's extension_count reads an
-            // already-loaded value instead of firing a COUNT query per row.
-            ->withCount(['adjustments as extension_count' => fn ($q) => $q->where('adjustment_type', 'extension')])
+        // The filters alone, shared by the page and by `meta.totals`, so the
+        // totals cover exactly the loans the page is drawn from.
+        $filtered = Loan::query()
             ->when(filled($search), function ($q) use ($search) {
                 $like = LikePattern::contains($search);
 
@@ -293,6 +290,22 @@ DESC,
             ->when($awaitingMe, fn ($q) => $q->awaitingApprovalFromRoles(
                 request()->user()->roles->pluck('name')->all(),
             ));
+
+        $query = (clone $filtered)
+            // Do NOT reorder these two lines, and do not delete the select.
+            //
+            // withCount() only injects its own `loans.*` when the column list
+            // is still null, so putting it first and this second would leave
+            // `extension_count` off the select and silently reinstate a COUNT
+            // per row. Dropping the select altogether is worse: sort=borrower
+            // joins `borrowers`, whose `id`, `status` and `branch_id` would
+            // then hydrate OVER the loan's, and LoanResource would publish the
+            // borrower's id and status on every row of the list.
+            ->select('loans.*')
+            ->with('borrower', 'loanProduct', 'branch', 'createdByUser', 'amortizationSchedules', 'coMakers', 'approvalSteps')
+            // Aliased count so LoanResource's extension_count reads an
+            // already-loaded value instead of firing a COUNT query per row.
+            ->withCount(['adjustments as extension_count' => fn ($q) => $q->where('adjustment_type', 'extension')]);
 
         $this->applySort($query, $filters['sort'] ?? 'created_at', $filters['dir'] ?? 'desc');
 
@@ -339,43 +352,58 @@ DESC,
             ->pastDue()
             ->count();
 
+        /**
+         * Money totals over every loan the filters match, not just this page:
+         * unlike `meta.stats`, they follow every filter, because they are the
+         * figures for the list on screen. One aggregate query. See
+         * LoanListTotals for what each figure counts.
+         */
+        $totals = app(LoanListTotals::class)->for($filtered);
+
         return LoanResource::collection($loans)
-            ->additional(['meta' => ['stats' => [
-                'draft' => (int) ($stats['draft'] ?? 0),
-                'for_review' => (int) ($stats['for_review'] ?? 0),
-                'approved' => (int) ($stats['approved'] ?? 0),
-                'rejected' => (int) ($stats['rejected'] ?? 0),
-                'released' => (int) ($stats['released'] ?? 0),
-                // `current` is deliberately absent and must stay absent: it
-                // is not a member of the `loans.status` enum, so the key could
-                // only ever read 0, and a permanently-zero badge invites the
-                // wrong repair — adding the enum member — rather than the
-                // right one. The Current tab reads `ongoing` below.
-                'ongoing' => (int) ($stats['ongoing'] ?? 0),
-                'completed' => (int) ($stats['completed'] ?? 0),
-                'defaulted' => (int) ($stats['defaulted'] ?? 0),
-                // Loans closed because their balance moved to a restructure.
-                // Omitting this made them vanish from the frontend's tab counts.
-                'restructured' => (int) ($stats['restructured'] ?? 0),
-                'void' => (int) ($stats['void'] ?? 0),
-                // The Active Loans KPI card: everything out the door and not
-                // yet closed. Summed from the same constant `status=active`
-                // filters on, so the card and the tab it opens cannot disagree
-                // — including when that set changes, as it just did.
-                'active' => array_sum(array_map(
-                    fn (string $status) => (int) ($stats[$status] ?? 0),
-                    Loan::ACTIVE_STATUSES,
-                )),
-                // The Past Due tab. NOT a status — `past_due` is not in the
-                // enum and must never be added to it — but a real filter: a
-                // collectible loan holding an unpaid schedule that is past both
-                // its due date and the loan's grace period. Counted through the
-                // same Loan::scopePastDue() that `?status=past_due` filters on,
-                // so this badge and the page that tab opens cannot disagree.
-                // It overlaps `released`, `ongoing` and `defaulted` by design,
-                // and is not a subset of `active`.
-                'past_due' => $pastDueCount,
-            ]]]);
+            ->additional(['meta' => [
+                'totals' => [
+                    'total_outstanding' => $totals['total_outstanding'],
+                    'overdue_amount' => $totals['overdue_amount'],
+                    'overdue_count' => $totals['overdue_count'],
+                ],
+                'stats' => [
+                    'draft' => (int) ($stats['draft'] ?? 0),
+                    'for_review' => (int) ($stats['for_review'] ?? 0),
+                    'approved' => (int) ($stats['approved'] ?? 0),
+                    'rejected' => (int) ($stats['rejected'] ?? 0),
+                    'released' => (int) ($stats['released'] ?? 0),
+                    // `current` is deliberately absent and must stay absent: it
+                    // is not a member of the `loans.status` enum, so the key could
+                    // only ever read 0, and a permanently-zero badge invites the
+                    // wrong repair — adding the enum member — rather than the
+                    // right one. The Current tab reads `ongoing` below.
+                    'ongoing' => (int) ($stats['ongoing'] ?? 0),
+                    'completed' => (int) ($stats['completed'] ?? 0),
+                    'defaulted' => (int) ($stats['defaulted'] ?? 0),
+                    // Loans closed because their balance moved to a restructure.
+                    // Omitting this made them vanish from the frontend's tab counts.
+                    'restructured' => (int) ($stats['restructured'] ?? 0),
+                    'void' => (int) ($stats['void'] ?? 0),
+                    // The Active Loans KPI card: everything out the door and not
+                    // yet closed. Summed from the same constant `status=active`
+                    // filters on, so the card and the tab it opens cannot disagree
+                    // — including when that set changes, as it just did.
+                    'active' => array_sum(array_map(
+                        fn (string $status) => (int) ($stats[$status] ?? 0),
+                        Loan::ACTIVE_STATUSES,
+                    )),
+                    // The Past Due tab. NOT a status — `past_due` is not in the
+                    // enum and must never be added to it — but a real filter: a
+                    // collectible loan holding an unpaid schedule that is past both
+                    // its due date and the loan's grace period. Counted through the
+                    // same Loan::scopePastDue() that `?status=past_due` filters on,
+                    // so this badge and the page that tab opens cannot disagree.
+                    // It overlaps `released`, `ongoing` and `defaulted` by design,
+                    // and is not a subset of `active`.
+                    'past_due' => $pastDueCount,
+                ],
+            ]]);
     }
 
     /**

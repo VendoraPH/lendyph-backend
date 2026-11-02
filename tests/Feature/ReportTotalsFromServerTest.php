@@ -154,6 +154,7 @@ class ReportTotalsFromServerTest extends TestCase
                 'released_count' => array_sum(array_column($rows, 'released_count')),
                 'released_amount' => round(array_sum(array_column($rows, 'released_amount')), 2),
                 'collected' => round(array_sum(array_column($rows, 'collected')), 2),
+                'insurance_collected' => round(array_sum(array_column($rows, 'insurance_collected')), 2),
                 'outstanding' => round(array_sum(array_column($rows, 'outstanding')), 2),
                 'overdue_amount' => round(array_sum(array_column($rows, 'overdue_amount')), 2),
             ], $data["{$table}_totals"], $table);
