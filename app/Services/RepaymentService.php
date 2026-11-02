@@ -996,7 +996,7 @@ class RepaymentService
             // what the loan owes, as in LoanResource's `total_payable`.
             'insurance_owed' => max(0, LoanService::toCentavos((float) $loan->insurance_remaining_balance)) / 100,
             // The most a restructure may take as the new loan's principal
-            // (LoanService::totalOutstanding()): the open periods' principal,
+            // (LoanService::restructurableCentavos()): the open periods' principal,
             // interest and penalty, without the premium, which moves to the
             // new loan as premium owed. The restructure form's starting figure.
             'restructurable_balance' => LoanService::restructurableCentavos($schedules) / 100,

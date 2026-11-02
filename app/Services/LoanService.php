@@ -635,7 +635,7 @@ class LoanService
     }
 
     /**
-     * totalOutstanding() over periods already in hand, in whole centavos: the
+     * The restructure cap over periods already in hand, in whole centavos: the
      * unpaid principal, interest and penalty of the open periods, the premium
      * owed left out. The one rule the restructure cap, the loan summary's and
      * LoanResource's `restructurable_balance` read.
