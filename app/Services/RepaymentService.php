@@ -460,6 +460,8 @@ class RepaymentService
             $repayment = $this->recordRepaymentOnLockedLoan($loan, $amountPaid, $paymentDate, $user, postToBooks: false);
             $premiumAfter = LoanService::toCentavos((float) $loan->insurance_remaining_balance);
             $allocations = $this->previewedAllocations($repayment);
+            $owedAfter = $loan->owedCentavos($loan->amortizationSchedules()->get())['total'];
+            $applied = LoanService::toCentavos((float) $repayment->amount_paid) - LoanService::toCentavos((float) $repayment->overpayment);
 
             return [
                 'amount_paid' => (float) $repayment->amount_paid,
@@ -488,6 +490,13 @@ class RepaymentService
                 // only.
                 'balance_before' => (LoanService::toCentavos((float) $repayment->balance_before) + $premiumBefore) / 100,
                 'balance_after' => (LoanService::toCentavos((float) $repayment->balance_after) + $premiumAfter) / 100,
+                // Everything the loan owes (the summary's `total_outstanding`:
+                // principal, interest, penalty and premium) before and after
+                // the payment. "Before" includes any penalty the payment
+                // charges as of its date, so before less what it applies is
+                // after; an overpayment or share capital credit lowers neither.
+                'total_outstanding_before' => ($owedAfter + $applied) / 100,
+                'total_outstanding_after' => $owedAfter / 100,
                 'payment_type' => $repayment->payment_type,
                 'payment_badge' => $this->paymentBadge($owedIds, $allocations, (float) $repayment->overpayment, $loan->owesInsurancePremium()),
                 'allocations' => $allocations,
@@ -954,9 +963,9 @@ class RepaymentService
         $totalPenaltyDue = $schedules->sum('penalty_amount');
         $totalPaid = $totalPrincipalPaid + $totalInterestPaid + $totalPenaltyPaid;
 
-        $outstandingPrincipal = $schedules->sum(fn ($s) => (float) $s->principal_due - (float) $s->principal_paid);
-        $outstandingInterest = $schedules->sum(fn ($s) => max(0, (float) $s->interest_due - (float) $s->interest_paid));
-        $outstandingPenalty = $schedules->sum(fn ($s) => max(0, (float) $s->penalty_amount - (float) $s->penalty_paid));
+        // Loan::owedCentavos(), the rule LoanResource states the same figures by.
+        $owed = $loan->owedCentavos($schedules);
+        $takesPayments = in_array($loan->status, Loan::ACTIVE_STATUSES, true);
 
         // Late, not merely due — same cutoff and same helper as
         // LoanResource's `overdue_amount`, so the loans list and the loan
@@ -987,11 +996,11 @@ class RepaymentService
             'principal_paid' => round((float) $totalPrincipalPaid, 2),
             'interest_paid' => round((float) $totalInterestPaid, 2),
             'penalty_paid' => round((float) $totalPenaltyPaid, 2),
-            'outstanding_principal' => round($outstandingPrincipal, 2),
-            'outstanding_interest' => round($outstandingInterest, 2),
-            'outstanding_penalty' => round($outstandingPenalty, 2),
+            'outstanding_principal' => $owed['principal'] / 100,
+            'outstanding_interest' => $owed['interest'] / 100,
+            'outstanding_penalty' => $owed['penalty'] / 100,
             // Frontend reads `penalty_amount` meaning the remaining penalty to collect.
-            'penalty_amount' => round($outstandingPenalty, 2),
+            'penalty_amount' => $owed['penalty'] / 100,
             // The insurance premium the release left owed, still owed: part of
             // what the loan owes, as in LoanResource's `total_payable`.
             'insurance_owed' => max(0, LoanService::toCentavos((float) $loan->insurance_remaining_balance)) / 100,
@@ -1000,8 +1009,15 @@ class RepaymentService
             // interest and penalty, without the premium, which moves to the
             // new loan as premium owed. The restructure form's starting figure.
             'restructurable_balance' => LoanService::restructurableCentavos($schedules) / 100,
-            'outstanding_balance' => (LoanService::toCentavos($outstandingPrincipal) + LoanService::toCentavos($outstandingInterest)
-                + LoanService::toCentavos($outstandingPenalty) + max(0, LoanService::toCentavos((float) $loan->insurance_remaining_balance))) / 100,
+            // Everything owed: principal, interest and penalty plus the premium
+            // owed. LoanResource's `total_outstanding` for the same loan.
+            'total_outstanding' => $owed['total'] / 100,
+            // Deprecated alias of `total_outstanding`, kept one release.
+            'outstanding_balance' => $owed['total'] / 100,
+            // Only for a loan that takes payments (Loan::ACTIVE_STATUSES); a
+            // payment on any other is refused, so there is nothing to preset.
+            'advance_presets' => $takesPayments ? $this->advancePresets($loan, $schedules, $today) : [],
+            'payoff_amount' => $takesPayments ? $this->payoffCentavos($loan, $schedules, $today) / 100 : null,
             'overdue_amount' => round($overdueAmount, 2),
             'overdue_schedules_count' => $overdueSchedules->count(),
             'next_due_date' => $nextSchedule?->due_date->toDateString(),
@@ -1012,6 +1028,106 @@ class RepaymentService
                 2,
             ) : null,
         ];
+    }
+
+    /**
+     * The Record Payment presets: one `{periods, amount}` per open period, in
+     * the order the allocation takes money (recordRepaymentOnLockedLoan()).
+     * Preset n is what a payment on `$asOf` must be to leave the first n open
+     * periods paid: the premium owed (taken first), then period by period its
+     * penalty as the payment will charge it (amountDueNow()'s rule), and its
+     * remaining interest and principal, in whole centavos.
+     *
+     * On a loan with a Share Capital Build-Up only the 1-period preset is
+     * sent: there the allocation stops after the current period and turns the
+     * rest into share capital, so "n periods" would not prepay. That preset
+     * also carries the period's build-up (an open period's is never credited
+     * yet), so a member keeps contributing it, by amountDueNow()'s rule: only
+     * when the period is the one the allocation treats as current, the only
+     * one after which money becomes share capital, and only for a member.
+     * Paying it leaves the period paid and credits exactly the build-up.
+     *
+     * @param  EloquentCollection<int, AmortizationSchedule>  $schedules
+     * @return list<array{periods: int, amount: float}>
+     */
+    private function advancePresets(Loan $loan, EloquentCollection $schedules, Carbon $asOf): array
+    {
+        $running = max(0, LoanService::toCentavos((float) $loan->insurance_remaining_balance));
+        $presets = [];
+
+        foreach ($this->openPeriodsOwedCentavos($loan, $schedules, $asOf) as $index => $owed) {
+            $running += $owed;
+            $presets[] = ['periods' => $index + 1, 'amount' => $running / 100];
+        }
+
+        if ((float) $loan->scb_amount <= 0 || $presets === []) {
+            return $presets;
+        }
+
+        $paymentDate = $asOf->copy()->startOfDay();
+        $open = $schedules
+            ->filter(fn (AmortizationSchedule $s) => in_array($s->status, AmortizationSchedule::UNPAID_STATUSES, true))
+            ->sortBy('period_number')
+            ->values();
+        $first = $open->first();
+        // The same "current" period the allocation picks.
+        $current = $open->first(fn (AmortizationSchedule $s) => $s->due_date->gte($paymentDate)) ?? $open->last();
+
+        if ($first->id === $current->id && ! in_array($loan->borrower?->status, Borrower::NON_MEMBER_STATUSES, true)) {
+            $running = LoanService::toCentavos($presets[0]['amount']) + PersistedScheduleFigures::shareCapitalBuildUpCentavos($loan, $first);
+
+            return [['periods' => 1, 'amount' => $running / 100]];
+        }
+
+        return array_slice($presets, 0, 1);
+    }
+
+    /**
+     * Everything the loan owes on `$asOf`, in whole centavos: the premium owed
+     * plus every open period's penalty (as the payment will charge it),
+     * interest and principal. The stored `total_outstanding` unless a period
+     * fell late past its grace since penalties were last stamped, which this
+     * counts so the figure clears a loan without a Share Capital Build-Up.
+     *
+     * On a loan WITH a Share Capital Build-Up it is the amount owed to show,
+     * not an amount one Record Payment settles the loan with: the allocation
+     * stops after the current period (recordRepaymentOnLockedLoan()), so
+     * recording it pays the current period and any overdue ones and credits
+     * the rest to the member's share capital.
+     *
+     * @param  EloquentCollection<int, AmortizationSchedule>  $schedules
+     */
+    private function payoffCentavos(Loan $loan, EloquentCollection $schedules, Carbon $asOf): int
+    {
+        return max(0, LoanService::toCentavos((float) $loan->insurance_remaining_balance))
+            + array_sum($this->openPeriodsOwedCentavos($loan, $schedules, $asOf));
+    }
+
+    /**
+     * Each open period's penalty (penaltyAsOf(), or the stored charge where it
+     * leaves the period alone), interest and principal still owed on `$asOf`,
+     * in whole centavos, in period order. Reads only.
+     *
+     * @param  EloquentCollection<int, AmortizationSchedule>  $schedules
+     * @return list<int>
+     */
+    private function openPeriodsOwedCentavos(Loan $loan, EloquentCollection $schedules, Carbon $asOf): array
+    {
+        $centavos = fn (mixed $pesos): int => LoanService::toCentavos((float) ($pesos ?? 0));
+        $paymentDate = $asOf->copy()->startOfDay();
+
+        return $schedules
+            ->filter(fn (AmortizationSchedule $s) => in_array($s->status, AmortizationSchedule::UNPAID_STATUSES, true))
+            ->sortBy('period_number')
+            ->map(function (AmortizationSchedule $period) use ($loan, $paymentDate, $centavos): int {
+                $charged = $this->penaltyAsOf($loan, $period, $paymentDate) ?? (float) $period->penalty_amount;
+
+                return max(0, $centavos($charged) - $centavos($period->penalty_paid))
+                    + max(0, $centavos($period->interest_due) - $centavos($period->interest_paid))
+                    + max(0, $centavos($period->principal_due) - $centavos($period->principal_paid));
+            })
+            ->values()
+            ->all();
     }
 
     /**
