@@ -75,7 +75,7 @@ it('detaches the unlisted, attaches the new and keeps an existing snapshot', fun
     $kept = ($this->pledge)($this->loan, 150000);
     $dropped = ($this->pledge)($this->loan, 80000);
     $keptBefore = DB::table('loan_collaterals')->where('loan_id', $this->loan->id)->where('collateral_id', $kept->id)->first();
-    $added = Collateral::factory()->create(['borrower_id' => $this->borrower->id]);
+    $added = Collateral::factory()->create(['borrower_id' => $this->borrower->id, 'amount' => 60000]);
 
     $this->travelTo(Carbon::parse('2026-09-02 10:00'));
 
@@ -84,6 +84,7 @@ it('detaches the unlisted, attaches the new and keeps an existing snapshot', fun
         'collaterals' => [
             // A different value for one it already holds is not a re-appraisal.
             ['collateral_id' => $kept->id, 'snapshot_value' => 999],
+            // A sent value for a new one is ignored: it is pledged at its amount.
             ['collateral_id' => $added->id, 'snapshot_value' => 45000.5],
         ],
     ])->assertOk();
@@ -93,7 +94,7 @@ it('detaches the unlisted, attaches the new and keeps an existing snapshot', fun
     expect($rows->keys()->all())->toBe([$kept->id, $added->id])
         ->and((float) $rows[$kept->id]->snapshot_value)->toBe(150000.0)
         ->and($rows[$kept->id]->attached_at)->toBe($keptBefore->attached_at)
-        ->and((float) $rows[$added->id]->snapshot_value)->toBe(45000.5)
+        ->and((float) $rows[$added->id]->snapshot_value)->toBe(60000.0)
         ->and($rows[$added->id]->attached_at)->toBe('2026-09-02 10:00:00')
         ->and($this->loan->fresh()->purpose)->toBe('Store expansion');
 
@@ -105,7 +106,7 @@ it('detaches the unlisted, attaches the new and keeps an existing snapshot', fun
         ->and($attached->user_id)->toBe($this->admin->id)
         // toEqual: the JSON column reorders keys and stores 80000.0 as 80000.
         ->and($attached->old_values)->toEqual(['collateral_id' => $added->id, 'snapshot_value' => null])
-        ->and($attached->new_values)->toEqual(['collateral_id' => $added->id, 'snapshot_value' => 45000.5])
+        ->and($attached->new_values)->toEqual(['collateral_id' => $added->id, 'snapshot_value' => 60000])
         ->and($detached->auditable_id)->toBe($this->loan->id)
         ->and($detached->user_id)->toBe($this->admin->id)
         ->and($detached->old_values)->toEqual(['collateral_id' => $dropped->id, 'snapshot_value' => 80000])
@@ -181,24 +182,26 @@ it('refuses the same collateral listed twice', function () {
     expect($this->loan->collaterals()->count())->toBe(0);
 });
 
-it('refuses a missing or out-of-range snapshot value with the attach endpoint\'s rules', function () {
-    $collateral = Collateral::factory()->create(['borrower_id' => $this->borrower->id]);
-    $another = Collateral::factory()->create(['borrower_id' => $this->borrower->id]);
+it('ignores a missing or out-of-range snapshot value and pledges each collateral at its value', function () {
+    $collateral = Collateral::factory()->create(['borrower_id' => $this->borrower->id, 'amount' => 30000]);
+    $another = Collateral::factory()->create(['borrower_id' => $this->borrower->id, 'amount' => 45000]);
 
     $this->putJson("/api/loans/{$this->loan->id}", [
         'collaterals' => [
             ['collateral_id' => $collateral->id],
             ['collateral_id' => $another->id, 'snapshot_value' => -1],
         ],
-    ])
-        ->assertUnprocessable()
-        ->assertJsonValidationErrors(['collaterals.0.snapshot_value', 'collaterals.1.snapshot_value']);
+    ])->assertOk();
 
     $this->putJson("/api/loans/{$this->loan->id}", [
-        'collaterals' => [['collateral_id' => $collateral->id, 'snapshot_value' => 100000000]],
-    ])
-        ->assertUnprocessable()
-        ->assertJsonValidationErrors(['collaterals.0.snapshot_value']);
+        'collaterals' => [
+            ['collateral_id' => $collateral->id],
+            ['collateral_id' => $another->id, 'snapshot_value' => 100000000],
+        ],
+    ])->assertOk();
+
+    expect(DB::table('loan_collaterals')->where('loan_id', $this->loan->id)->orderBy('collateral_id')->pluck('snapshot_value', 'collateral_id')->map(fn ($value) => (float) $value)->all())
+        ->toBe([$collateral->id => 30000.0, $another->id => 45000.0]);
 });
 
 it('refuses a collateral another active loan holds, and saves nothing from the request', function () {

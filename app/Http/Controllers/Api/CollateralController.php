@@ -443,8 +443,8 @@ class CollateralController extends Controller
      *    attached to their loan — both steps individually sanctioned — and then
      *    voiding a payment on the first loan re-activates it, which is the very
      *    transition assertNoDoublePledge() had to be added for.
-     *  - The pivot also carries `snapshot_value`: an appraisal an operator
-     *    struck against a NAMED owner and signed off on. Moving the owner
+     *  - The pivot also carries `snapshot_value`: the value the collateral was
+     *    pledged at, struck against a NAMED owner. Moving the owner
      *    underneath it falsifies that figure's provenance as well as the
      *    pledge's, and neither is recoverable from the row afterwards.
      *
@@ -538,7 +538,7 @@ class CollateralController extends Controller
     #[OA\Post(
         path: '/api/loans/{loanId}/collaterals',
         summary: 'Attach a collateral to a loan',
-        description: 'Creates a row in `loan_collaterals` with the snapshot value at attach time, recorded as `collateral_attached` in the audit log against the loan. Only while the loan is in draft or for_review status. The collateral must belong to the loan\'s own borrower. Rejects re-attaching the same collateral, and rejects a collateral already pledged to another loan in an active status.',
+        description: 'Creates a row in `loan_collaterals` whose `snapshot_value` the server sets at attach time: the collateral\'s `amount`, or for a share capital collateral its member\'s share capital balance (at least 0), read under the collateral\'s lock. A sent `snapshot_value` is ignored. Recorded as `collateral_attached` in the audit log against the loan. Only while the loan is in draft or for_review status. The collateral must belong to the loan\'s own borrower. Rejects re-attaching the same collateral, and rejects a collateral already pledged to another loan in an active status.',
         tags: ['Collaterals'],
         security: [['sanctum' => []]],
         parameters: [
@@ -547,10 +547,10 @@ class CollateralController extends Controller
         requestBody: new OA\RequestBody(
             required: true,
             content: new OA\JsonContent(
-                required: ['collateral_id', 'snapshot_value'],
+                required: ['collateral_id'],
                 properties: [
                     new OA\Property(property: 'collateral_id', type: 'integer', example: 1),
-                    new OA\Property(property: 'snapshot_value', type: 'number', example: 250000),
+                    new OA\Property(property: 'snapshot_value', type: 'number', deprecated: true, description: 'Ignored. The server values the pledge.'),
                 ],
             ),
         ),
@@ -586,7 +586,7 @@ class CollateralController extends Controller
             $locked = CollateralAttacher::lock([$collateralId]);
             $lockedLoan = CollateralAttacher::lockEditableLoan($loan);
 
-            CollateralAttacher::attachLocked($lockedLoan, $locked->get($collateralId), $validated['snapshot_value'], $request->user());
+            CollateralAttacher::attachLocked($lockedLoan, $locked->get($collateralId), $request->user());
 
             // Read back while still holding the lock, so the body describes
             // exactly the state that is about to commit — and so a concurrent

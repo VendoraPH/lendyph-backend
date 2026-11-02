@@ -505,19 +505,18 @@ class LoanService
             ->orderBy('collaterals.id')
             ->get()
             ->mapWithKeys(fn (Collateral $collateral) => [
-                // Carried forward, not re-appraised.
+                // Carried forward, not re-valued.
                 //
-                // POST /loans/{loan}/collaterals takes `snapshot_value` from
-                // the operator; this path has no such input, so deriving a
-                // fresh figure from the live `collaterals.amount` would have
-                // the server assert an appraisal nobody signed off on — the
-                // same class of error closeRestructuredSource() avoids by
-                // computing the write-off from the approved snapshot rather
-                // than the live balance. The source's row is left untouched,
-                // so what was pledged against the original loan, and when it
-                // was struck, both stay on the record. An operator who wants
-                // the collateral re-valued for the new loan detaches and
-                // re-attaches it with a stated value.
+                // The source's pledge is the server's own figure, set when it
+                // was attached (CollateralValuation::pledgeValue()), and the
+                // collateral moves with the balance it secured, so the new loan
+                // takes the value it was pledged at. The source's row is left
+                // untouched, so what was pledged against the original loan, and
+                // when it was struck, both stay on the record. An operator who
+                // wants the collateral re-valued for the new loan detaches it
+                // and attaches it again, which pledges it at today's value.
+                // formPreview() values a restructure's carried collateral the
+                // same way.
                 $collateral->id => $collateral->pivot->snapshot_value,
             ])
             ->all();
@@ -560,13 +559,68 @@ class LoanService
     /**
      * The complete rule set for restructuring a given source at a given
      * principal. Shared by creation and by any later edit of the principal, so
-     * the two can never drift apart.
+     * the two can never drift apart. Its figures are restructureFigures(), the
+     * ones POST /loans/preview shows.
      *
      * @return array{outstanding: float, shortfall: float}
      *
      * @throws AuthorizationException when a shortfall is attempted without `loans:write_off`
      */
     private function assertRestructureInvariants(Loan $sourceLoan, float $principal, ?string $remarks, User $user): array
+    {
+        $figures = $this->restructureFigures($sourceLoan, $principal);
+        $outstanding = $figures['restructurable_balance'];
+
+        if ($figures['exceeds_balance']) {
+            throw ValidationException::withMessages([
+                'principal_amount' => ["The restructured principal cannot exceed the loan's restructurable balance of ₱".number_format($outstanding, 2).'.'],
+            ]);
+        }
+
+        // A shortfall writes debt off, so it must carry a reason…
+        if ($figures['remarks_required'] && blank($remarks)) {
+            throw ValidationException::withMessages([
+                'remarks' => ['Remarks are required when the restructured principal is less than the outstanding balance.'],
+            ]);
+        }
+
+        // …and destroying debt is a separate privilege from rescheduling it.
+        // Enforced here rather than in the FormRequest because whether this
+        // is a shortfall at all depends on the computed outstanding balance,
+        // which the request cannot see.
+        if ($figures['write_off_permission_required'] && ! $user->can('loans:write_off')) {
+            throw new AuthorizationException(
+                'Writing off part of the balance requires the Loans: Write off permission. '
+                .'Restructure the full outstanding balance of ₱'.number_format($outstanding, 2).' instead.',
+            );
+        }
+
+        return ['outstanding' => $outstanding, 'shortfall' => $figures['shortfall']];
+    }
+
+    /**
+     * What restructuring this source at this principal means: the one
+     * computation behind assertRestructureInvariants() (creating a
+     * restructure, and editing its principal) and POST /loans/preview's
+     * `restructure` block, so the page states exactly what the save enforces.
+     *
+     * - `restructurable_balance`: restructurableCentavos() of the source's
+     *   periods.
+     * - `shortfall`: how far the principal falls short of it, the debt the
+     *   release writes off; 0 when it does not.
+     * - `exceeds_balance`: the principal is above it, which a save refuses.
+     * - `remarks_required` and `write_off_permission_required`: a shortfall
+     *   needs a reason and the `loans:write_off` permission. Both state what the
+     *   restructure needs, not whether the caller holds it.
+     *
+     * Compared in centavos so a 2dp float never rounds a genuine overshoot
+     * into an accepted amount, or an exact match into a rejection.
+     *
+     * @return array{restructurable_balance: float, principal: float, shortfall: float, exceeds_balance: bool, remarks_required: bool, write_off_permission_required: bool}
+     *
+     * @throws ValidationException when the source cannot be restructured at all
+     */
+    private function restructureFigures(Loan $sourceLoan, float $principal): array
     {
         if (! in_array($sourceLoan->status, ['released', 'ongoing'], true)) {
             throw ValidationException::withMessages([
@@ -582,37 +636,17 @@ class LoanService
             ]);
         }
 
-        // Compared in centavos so a 2dp float never rounds a genuine overshoot
-        // into an accepted amount, or an exact match into a rejection.
-        if ($this->toCentavos($principal) > $this->toCentavos($outstanding)) {
-            throw ValidationException::withMessages([
-                'principal_amount' => ["The restructured principal cannot exceed the loan's restructurable balance of ₱".number_format($outstanding, 2).'.'],
-            ]);
-        }
+        $principal = round($principal, 2);
+        $shortBy = $this->toCentavos($outstanding) - $this->toCentavos($principal);
 
-        $shortfall = round($outstanding - $principal, 2);
-
-        if ($this->toCentavos($shortfall) > 0) {
-            // A shortfall writes debt off, so it must carry a reason…
-            if (blank($remarks)) {
-                throw ValidationException::withMessages([
-                    'remarks' => ['Remarks are required when the restructured principal is less than the outstanding balance.'],
-                ]);
-            }
-
-            // …and destroying debt is a separate privilege from rescheduling it.
-            // Enforced here rather than in the FormRequest because whether this
-            // is a shortfall at all depends on the computed outstanding balance,
-            // which the request cannot see.
-            if (! $user->can('loans:write_off')) {
-                throw new AuthorizationException(
-                    'Writing off part of the balance requires the Loans: Write off permission. '
-                    .'Restructure the full outstanding balance of ₱'.number_format($outstanding, 2).' instead.',
-                );
-            }
-        }
-
-        return ['outstanding' => $outstanding, 'shortfall' => $shortfall];
+        return [
+            'restructurable_balance' => $outstanding,
+            'principal' => $principal,
+            'shortfall' => max(0, $shortBy) / 100,
+            'exceeds_balance' => $shortBy < 0,
+            'remarks_required' => $shortBy > 0,
+            'write_off_permission_required' => $shortBy > 0,
+        ];
     }
 
     /**
@@ -776,18 +810,19 @@ class LoanService
      *
      * Collateral the loan holds and the list leaves out is detached. Listed
      * collateral the loan does not hold yet is attached through the same
-     * guards as POST /loans/{loan}/collaterals. Collateral that is both held
-     * and listed is left exactly as it is: its `snapshot_value` and
-     * `attached_at` record the appraisal it was pledged at, and an edit that
-     * re-sends the list must not re-appraise it. An operator who wants a new
-     * value detaches and re-attaches it.
+     * guards as POST /loans/{loan}/collaterals, at the server's value
+     * (CollateralValuation::pledgeValue()); a sent `snapshot_value` is
+     * ignored. Collateral that is both held and listed is left exactly as it
+     * is: its `snapshot_value` and `attached_at` record the value it was
+     * pledged at, and an edit that re-sends the list must not re-value it. An
+     * operator who wants a new value detaches and re-attaches it.
      *
      * Each attach and detach is recorded by CollateralAttacher, one audit row
      * per collateral, exactly as the endpoints record theirs, beside the
      * `updated` row the Loan model writes for the loan's own fields. Nothing
      * is written for collateral the list leaves as it was.
      *
-     * @param  list<array{collateral_id: int|string, snapshot_value: int|float|string}>  $collaterals
+     * @param  list<array{collateral_id: int|string}>  $collaterals
      * @param  array{held: list<int>, collaterals: EloquentCollection<int, Collateral>}  $locked  as CollateralAttacher::lockForList() returns it
      *
      * @throws ValidationException on `collaterals.{index}.collateral_id`
@@ -808,7 +843,7 @@ class LoanService
             }
 
             try {
-                CollateralAttacher::attachLocked($loan, $locked['collaterals']->get($collateralId), $row['snapshot_value'], $user);
+                CollateralAttacher::attachLocked($loan, $locked['collaterals']->get($collateralId), $user);
             } catch (ValidationException $e) {
                 throw ValidationException::withMessages([
                     "collaterals.{$index}.collateral_id" => Arr::flatten($e->errors()),
@@ -1424,7 +1459,7 @@ class LoanService
         $closingBalance = $this->totalOutstanding($source);
         $carriedPremium = self::toCentavos((float) $source->insurance_remaining_balance);
 
-        $this->clearOpenSchedules($source);
+        $this->clearOpenSchedules($source, $newLoan);
 
         // From the approved snapshot, NOT from the live balance: penalties keep
         // accruing between approval and release, and charging that drift to the
@@ -1501,10 +1536,13 @@ class LoanService
     }
 
     /**
-     * Wipe what is still owed on a loan whose balance has moved elsewhere.
+     * Wipe what is still owed on a loan whose balance has moved to `$newLoan`.
      *
      * Rows with nothing collected are DELETED; partially-paid rows are shrunk to
-     * exactly what was collected and marked `paid`.
+     * exactly what was collected, marked `paid`, and marked closed by the new
+     * loan (`closed_by_loan_id`, see AmortizationSchedule::isClosedEarly()), so
+     * every rule that tells a closed period from one paid in full sees them,
+     * as it sees the periods an in-place restructure closes.
      *
      * Deleting rather than introducing a `void` schedule status is deliberate:
      * `ReportService::loanBalanceSummary()` sums `principal_due` with no status
@@ -1514,24 +1552,42 @@ class LoanService
      * the partial rows instead of deleting them is what keeps
      * `SUM(principal_paid)` — every peso the borrower actually paid —
      * reconciling across the closure.
+     *
+     * Periods are not audited models, so a `periods_closed` row against the
+     * source records what each closed period was due before and after, as
+     * LoanAdjustmentService::closeOpenSchedules() records an in-place one.
      */
-    private function clearOpenSchedules(Loan $loan): void
+    private function clearOpenSchedules(Loan $loan, Loan $newLoan): void
     {
         $openSchedules = $loan->amortizationSchedules()
             ->reorder()
             ->whereIn('status', ['pending', 'partial', 'overdue'])
             ->get();
 
+        $before = [];
+        $after = [];
+
         foreach ($openSchedules as $schedule) {
-            $collected = (float) $schedule->principal_paid
+            $collected = round((float) $schedule->principal_paid
                 + (float) $schedule->interest_paid
-                + (float) ($schedule->penalty_paid ?? 0);
+                + (float) ($schedule->penalty_paid ?? 0), 2);
 
             if ($collected <= 0) {
                 $schedule->delete();
 
                 continue;
             }
+
+            $before[] = [
+                'schedule_id' => $schedule->id,
+                'period_number' => $schedule->period_number,
+                'principal_due' => (float) $schedule->principal_due,
+                'interest_due' => (float) $schedule->interest_due,
+                'penalty_amount' => (float) $schedule->penalty_amount,
+                'principal_paid' => (float) $schedule->principal_paid,
+                'interest_paid' => (float) $schedule->interest_paid,
+                'penalty_paid' => (float) $schedule->penalty_paid,
+            ];
 
             $schedule->update([
                 'principal_due' => $schedule->principal_paid,
@@ -1541,8 +1597,38 @@ class LoanService
                 'total_due' => round((float) $schedule->principal_paid + (float) $schedule->interest_paid, 2),
                 'remaining_balance' => 0,
                 'status' => 'paid',
+                'closed_by_loan_id' => $newLoan->id,
             ]);
+
+            $after[] = [
+                'schedule_id' => $schedule->id,
+                'period_number' => $schedule->period_number,
+                'principal_due' => (float) $schedule->principal_due,
+                'interest_due' => (float) $schedule->interest_due,
+                'penalty_amount' => (float) $schedule->penalty_amount,
+                'collected' => $collected,
+            ];
         }
+
+        if ($after === []) {
+            return;
+        }
+
+        $totalCollected = round(array_sum(array_column($after, 'collected')), 2);
+
+        AuditLogService::log(
+            'periods_closed',
+            $loan,
+            ['periods' => $before],
+            ['periods' => $after, 'total_collected' => $totalCollected, 'closed_by_loan_id' => $newLoan->id],
+            sprintf(
+                'Restructure %s closed %d partly paid period(s) of loan %s at the ₱%s collected on them; the rest moved to the new loan.',
+                $newLoan->loan_account_number ?? $newLoan->application_number,
+                count($after),
+                $loan->loan_account_number ?? $loan->application_number,
+                number_format($totalCollected, 2),
+            ),
+        );
     }
 
     /**
@@ -1826,9 +1912,11 @@ class LoanService
      * filled in, computed here so the browser only displays them
      * (POST /loans/preview).
      *
-     * - `collateral`: CollateralSecurity::summary() of the stated snapshot
+     * - `collateral`: CollateralSecurity::summary() of the listed collateral's
      *   values against the principal, the rule the loan page's collaterals
-     *   card uses too.
+     *   card uses too. Each is valued by its id, on the borrower's register,
+     *   at what saving would pledge it at (previewPledgedCentavos()); a sent
+     *   `snapshot_value` is ignored.
      * - `maturity_date`: where the loan would mature, by the code a create
      *   stores it with. Null until the product, a term inside its range, the
      *   frequency and the start date are known; the principal and the rate
@@ -1842,30 +1930,115 @@ class LoanService
      *   the share capital build-up added to each period, and the column totals.
      *   Null until the maturity date is known and a principal and a rate above
      *   0 are too.
+     * - `restructure`, only with `source_loan_id` (the restructure page):
+     *   restructureFigures() of that loan at the principal, the figures and
+     *   rules POST /loans/{id}/restructure applies. The borrower is the source
+     *   loan's.
      *
      * Money is added in whole centavos, never as peso floats. Writes nothing.
      *
-     * @param  array{loan_product_id?: int|null, principal_amount?: float|int|string|null, interest_rate?: float|int|string|null, term?: int|null, frequency?: string|null, start_date?: string|null, scb_amount?: float|int|string|null, collaterals?: list<array{collateral_id?: int|null, snapshot_value: float|int|string}>|null, deductions?: list<array{name: string, amount: float|int|string, type: string}>|null}  $input
-     * @return array{collateral: array{total_value: float|int, security_status: string, short_by: float|int}, maturity_date: string|null, deductions: array<string, mixed>|null, amortization: array<string, mixed>|null}
+     * @param  array{source_loan_id?: int|null, borrower_id?: int|null, loan_product_id?: int|null, principal_amount?: float|int|string|null, interest_rate?: float|int|string|null, term?: int|null, frequency?: string|null, start_date?: string|null, scb_amount?: float|int|string|null, collaterals?: list<array{collateral_id: int}>|null, deductions?: list<array{name: string, amount: float|int|string, type: string}>|null}  $input
+     * @return array{collateral: array{total_value: float|int, security_status: string, short_by: float|int}, maturity_date: string|null, deductions: array<string, mixed>|null, amortization: array<string, mixed>|null, restructure?: array{restructurable_balance: float, principal: float, shortfall: float, remarks_required: bool, write_off_permission_required: bool}}
+     *
+     * @throws ValidationException when the source cannot be restructured, or a collateral is not on the borrower's register
      */
     public function formPreview(array $input): array
     {
         $principal = $this->toCentavos((float) ($input['principal_amount'] ?? 0));
-        $pledged = 0;
-
-        foreach ($input['collaterals'] ?? [] as $collateral) {
-            $pledged += $this->toCentavos((float) $collateral['snapshot_value']);
-        }
+        $source = isset($input['source_loan_id']) ? $this->previewSource((int) $input['source_loan_id'], $input['borrower_id'] ?? null) : null;
+        $borrowerId = $source?->borrower_id ?? ($input['borrower_id'] ?? null);
+        $pledged = $this->previewPledgedCentavos($input['collaterals'] ?? [], $borrowerId === null ? null : (int) $borrowerId, $source);
 
         $product = isset($input['loan_product_id']) ? LoanProduct::find($input['loan_product_id']) : null;
         $maturity = $this->formMaturity($product, $input);
 
-        return [
+        $preview = [
             'collateral' => CollateralSecurity::summary($principal, $pledged),
             'maturity_date' => $maturity?->toDateString(),
             'deductions' => $product === null || $principal <= 0 ? null : $this->formDeductions($product, $input, $principal, $maturity),
             'amortization' => $product === null || $maturity === null ? null : $this->formSchedule($product, $input, $principal, $maturity),
         ];
+
+        if ($source !== null) {
+            $preview['restructure'] = Arr::except($this->restructureFigures($source, $principal / 100), 'exceeds_balance');
+        }
+
+        return $preview;
+    }
+
+    /**
+     * The loan a restructure preview is for. A plain read: the preview writes
+     * nothing and decides nothing, so it takes no lock.
+     *
+     * @throws ValidationException when the loan is gone, or a different borrower is named
+     */
+    private function previewSource(int $sourceLoanId, int|string|null $borrowerId): Loan
+    {
+        $source = Loan::find($sourceLoanId);
+
+        if (! $source) {
+            throw ValidationException::withMessages([
+                'source_loan_id' => ['The loan being restructured no longer exists.'],
+            ]);
+        }
+
+        // As restructure() refuses it.
+        if ($borrowerId !== null && (int) $borrowerId !== (int) $source->borrower_id) {
+            throw ValidationException::withMessages([
+                'borrower_id' => ['A restructured loan must stay with the borrower of the loan it replaces.'],
+            ]);
+        }
+
+        return $source;
+    }
+
+    /**
+     * What the listed collateral would be pledged at, in whole centavos: each
+     * row found by its id on the borrower's register, never by a figure the
+     * client sends.
+     *
+     * The value is the one saving would store. A new pledge is
+     * CollateralValuation::pledgeValue(). On a restructure preview, collateral
+     * the source loan holds is carried over at the value it was pledged at, as
+     * inheritCollaterals() copies it; anything else the page adds is attached,
+     * so it takes pledgeValue() too.
+     *
+     * @param  list<array{collateral_id: int|string}>  $rows
+     *
+     * @throws ValidationException on `collaterals.{index}.collateral_id` when a row is not on the register
+     */
+    private function previewPledgedCentavos(array $rows, ?int $borrowerId, ?Loan $source): int
+    {
+        if ($rows === []) {
+            return 0;
+        }
+
+        $collaterals = Collateral::query()
+            ->whereKey(array_map(static fn (array $row): int => (int) $row['collateral_id'], $rows))
+            ->where('borrower_id', $borrowerId ?? 0)
+            ->get()
+            ->keyBy('id');
+
+        $values = CollateralValuation::pledgeValues($collaterals);
+        $carried = $source === null
+            ? []
+            : $source->collaterals()->pluck('loan_collaterals.snapshot_value', 'collaterals.id')->all();
+
+        $pledged = 0;
+
+        foreach ($rows as $index => $row) {
+            $collateralId = (int) $row['collateral_id'];
+
+            if (! $collaterals->has($collateralId)) {
+                throw ValidationException::withMessages([
+                    "collaterals.{$index}.collateral_id" => ['This collateral is not registered to this borrower.'],
+                ]);
+            }
+
+            $pledged += $this->toCentavos((float) ($carried[$collateralId] ?? $values[$collateralId]));
+        }
+
+        return $pledged;
     }
 
     /**

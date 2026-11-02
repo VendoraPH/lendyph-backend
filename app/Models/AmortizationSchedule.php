@@ -229,6 +229,7 @@ class AmortizationSchedule extends Model
         'penalty_paid',
         'penalty_waiver_id',
         'closed_by_adjustment_id',
+        'closed_by_loan_id',
     ];
 
     protected function casts(): array
@@ -249,5 +250,17 @@ class AmortizationSchedule extends Model
     public function loan(): BelongsTo
     {
         return $this->belongsTo(Loan::class);
+    }
+
+    /**
+     * Whether a reschedule closed this period at what was collected on it,
+     * rather than it being paid in full: an in-place restructure or an
+     * extension (`closed_by_adjustment_id`), or the release of a restructure
+     * into a new loan (`closed_by_loan_id`). Such a period is `paid`, but its
+     * unpaid remainder moved elsewhere.
+     */
+    public function isClosedEarly(): bool
+    {
+        return $this->closed_by_adjustment_id !== null || $this->closed_by_loan_id !== null;
     }
 }

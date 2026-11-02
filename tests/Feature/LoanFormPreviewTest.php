@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Models\AmortizationSchedule;
 use App\Models\AuditLog;
 use App\Models\Borrower;
+use App\Models\Collateral;
 use App\Models\Loan;
 use App\Models\LoanProduct;
 use App\Models\User;
@@ -29,13 +30,36 @@ class LoanFormPreviewTest extends TestCase
         $this->seedAndLogin();
     }
 
+    /**
+     * Collateral on a new borrower's register, one per value, as the server
+     * values them (a manual collateral is worth its `amount`).
+     *
+     * @param  list<float|int>  $values
+     * @return array{borrower_id: int, collaterals: list<array{collateral_id: int}>}
+     */
+    private function collateralWorth(array $values): array
+    {
+        $borrower = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+
+        return [
+            'borrower_id' => $borrower->id,
+            'collaterals' => array_map(fn (float|int $value): array => [
+                'collateral_id' => Collateral::factory()->create(['borrower_id' => $borrower->id, 'amount' => $value])->id,
+            ], $values),
+        ];
+    }
+
     public function test_it_totals_the_collateral_and_reports_a_partly_secured_loan_short_by_the_difference(): void
     {
+        $listed = $this->collateralWorth([25000.50, 10000.25]);
+
+        // A sent `snapshot_value` is ignored: the server values each row by its id.
         $this->postJson('/api/loans/preview', [
             'principal_amount' => 50000,
+            'borrower_id' => $listed['borrower_id'],
             'collaterals' => [
-                ['collateral_id' => 1, 'snapshot_value' => 25000.50],
-                ['collateral_id' => 2, 'snapshot_value' => '10000.25'],
+                ['collateral_id' => $listed['collaterals'][0]['collateral_id'], 'snapshot_value' => 1],
+                ['collateral_id' => $listed['collaterals'][1]['collateral_id'], 'snapshot_value' => '99999'],
             ],
         ])->assertOk()->assertExactJson(['data' => [
             'collateral' => ['total_value' => 35000.75, 'security_status' => 'partially_secured', 'short_by' => 14999.25],
@@ -69,7 +93,7 @@ class LoanFormPreviewTest extends TestCase
     {
         $collateral = $this->postJson('/api/loans/preview', array_filter([
             'principal_amount' => $principal,
-            'collaterals' => array_map(fn (float|int $value): array => ['snapshot_value' => $value], $values),
+            ...$this->collateralWorth($values),
         ], fn (mixed $value): bool => $value !== null))->assertOk()->json('data.collateral');
 
         $this->assertEquals($expected, $collateral);
@@ -247,6 +271,7 @@ class LoanFormPreviewTest extends TestCase
     public function test_it_writes_nothing(): void
     {
         $product = LoanProduct::factory()->create(['interest_rate' => 3, 'interest_method' => 'straight', 'frequency' => 'monthly', 'term' => 3, 'max_term' => 3]);
+        $listed = $this->collateralWorth([5000]);
         $before = [Loan::count(), AmortizationSchedule::count(), AuditLog::count()];
 
         $this->postJson('/api/loans/preview', [
@@ -256,7 +281,7 @@ class LoanFormPreviewTest extends TestCase
             'term' => 3,
             'frequency' => 'monthly',
             'start_date' => '2026-10-03',
-            'collaterals' => [['snapshot_value' => 5000]],
+            ...$listed,
         ])->assertOk();
 
         $this->assertSame($before, [Loan::count(), AmortizationSchedule::count(), AuditLog::count()]);
@@ -271,8 +296,8 @@ class LoanFormPreviewTest extends TestCase
             'a principal that is not a number' => [['principal_amount' => 'fifty thousand'], 'principal_amount'],
             'an unknown frequency' => [['frequency' => 'fortnightly'], 'frequency'],
             'a start date that is not a date' => [['start_date' => 'soon'], 'start_date'],
-            'a negative collateral value' => [['collaterals' => [['snapshot_value' => -1]]], 'collaterals.0.snapshot_value'],
-            'a collateral with no value' => [['collaterals' => [['collateral_id' => 3]]], 'collaterals.0.snapshot_value'],
+            'a collateral named only by a value' => [['borrower_id' => 1, 'collaterals' => [['snapshot_value' => -1]]], 'collaterals.0.collateral_id'],
+            'a collateral with no borrower' => [['collaterals' => [['collateral_id' => 3]]], 'borrower_id'],
             'an unknown product' => [['loan_product_id' => 999999], 'loan_product_id'],
             'a rate with more places than saving accepts' => [['interest_rate' => 2.12345], 'interest_rate'],
         ];

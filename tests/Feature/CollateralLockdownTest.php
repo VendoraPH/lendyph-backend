@@ -194,7 +194,8 @@ function lockdownLockedIds(array $read): array
 /**
  * A real loan, built the way an operator builds one: collateral attached while
  * it is a draft, then submitted, approved, released, and paid once, which moves
- * it to `ongoing`. Returns the loan and the collateral it holds.
+ * it to `ongoing`. Returns the loan and the collateral it holds, pledged at
+ * `$snapshotValue`: the collateral's amount, which the server pledges it at.
  *
  * @return array{0: Loan, 1: Collateral}
  */
@@ -217,10 +218,9 @@ function lockdownOngoingLoanHoldingCollateral(TestCase $test, Borrower $borrower
         'start_date' => now()->toDateString(),
     ], $admin);
 
-    $collateral = Collateral::factory()->create(['borrower_id' => $borrower->id, 'amount' => 300000]);
+    $collateral = Collateral::factory()->create(['borrower_id' => $borrower->id, 'amount' => $snapshotValue]);
     $test->postJson("/api/loans/{$loan->id}/collaterals", [
         'collateral_id' => $collateral->id,
-        'snapshot_value' => $snapshotValue,
     ])->assertCreated();
 
     $service->submitForReview($loan);
@@ -356,6 +356,7 @@ it('reads the loan status again under its lock, so a loan edit cannot change col
 it('still attaches to an editable loan and records who did it', function (string $status) {
     $loan = lockdownLoan($this->loanDefaults, $status);
 
+    // The sent value is ignored: the pledge is the collateral's ₱250,000 amount.
     $this->postJson("/api/loans/{$loan->id}/collaterals", [
         'collateral_id' => $this->collateral->id,
         'snapshot_value' => 250000.5,
@@ -368,7 +369,7 @@ it('still attaches to an editable loan and records who did it', function (string
         ->and($entry->auditable_id)->toBe($loan->id)
         ->and($entry->user_id)->toBe($this->admin->id)
         ->and($entry->old_values)->toEqual(['collateral_id' => $this->collateral->id, 'snapshot_value' => null])
-        ->and($entry->new_values)->toEqual(['collateral_id' => $this->collateral->id, 'snapshot_value' => 250000.5]);
+        ->and($entry->new_values)->toEqual(['collateral_id' => $this->collateral->id, 'snapshot_value' => 250000]);
 })->with('lockdown editable statuses');
 
 it('still detaches from an editable loan and records who did it', function (string $status) {
@@ -401,7 +402,7 @@ it('records one row per collateral a loan edit attaches or detaches, and none fo
     $loan = lockdownLoan($this->loanDefaults, $status);
     $kept = Collateral::factory()->create(['borrower_id' => $this->borrower->id]);
     $dropped = Collateral::factory()->create(['borrower_id' => $this->borrower->id]);
-    $added = Collateral::factory()->create(['borrower_id' => $this->borrower->id]);
+    $added = Collateral::factory()->create(['borrower_id' => $this->borrower->id, 'amount' => 60000]);
     lockdownPledge($loan, $kept, 150000);
     lockdownPledge($loan, $dropped, 80000);
 
@@ -419,7 +420,7 @@ it('records one row per collateral a loan edit attaches or detaches, and none fo
         ->and($attached->auditable_id)->toBe($loan->id)
         ->and($attached->user_id)->toBe($this->admin->id)
         ->and($attached->old_values)->toEqual(['collateral_id' => $added->id, 'snapshot_value' => null])
-        ->and($attached->new_values)->toEqual(['collateral_id' => $added->id, 'snapshot_value' => 45000.5])
+        ->and($attached->new_values)->toEqual(['collateral_id' => $added->id, 'snapshot_value' => 60000])
         ->and($detached->auditable_id)->toBe($loan->id)
         ->and($detached->user_id)->toBe($this->admin->id)
         ->and($detached->old_values)->toEqual(['collateral_id' => $dropped->id, 'snapshot_value' => 80000])

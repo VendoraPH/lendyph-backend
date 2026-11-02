@@ -16,8 +16,8 @@ use App\Models\Loan;
  * extension cycle (an extension's row collapses the cycles it carries and
  * still gets one), and one for an upon-maturity loan, which is one period.
  *
- * A period an extension or an adjustment closed (`closed_by_adjustment_id`)
- * gets none. It is restated to exactly what was collected on it, and its
+ * A period a reschedule closed early (AmortizationSchedule::isClosedEarly():
+ * an extension, an adjustment, or a restructure into a new loan) gets none. It is restated to exactly what was collected on it, and its
  * unpaid remainder moved into a later period that carries that instalment's
  * build-up; a build-up on both would count the instalment twice and show a
  * paid period owing more than was collected.
@@ -26,7 +26,7 @@ final class PersistedScheduleFigures
 {
     public static function shareCapitalBuildUpCentavos(Loan $loan, AmortizationSchedule $row): int
     {
-        if ($row->closed_by_adjustment_id !== null) {
+        if ($row->isClosedEarly()) {
             return 0;
         }
 

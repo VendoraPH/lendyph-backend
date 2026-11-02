@@ -105,11 +105,12 @@ it('rejects deletion when collateral is attached to a loan', function () {
 
 it('attaches a collateral to a loan with snapshot value', function () {
     $loan = ($this->draftLoan)();
-    $collateral = Collateral::factory()->create(['borrower_id' => $loan->borrower_id]);
+    $collateral = Collateral::factory()->create(['borrower_id' => $loan->borrower_id, 'amount' => 250000]);
 
+    // The sent value is ignored: the server pledges the collateral's amount.
     $response = $this->postJson("/api/loans/{$loan->id}/collaterals", [
         'collateral_id' => $collateral->id,
-        'snapshot_value' => 250000,
+        'snapshot_value' => 1,
     ])->assertCreated();
 
     expect((float) $response->json('data.pivot.snapshot_value'))->toBe(250000.0);

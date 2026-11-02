@@ -60,11 +60,11 @@ class UpdateLoanRequest extends FormRequest
             // The loan's complete collateral list. Absent: collateral is left
             // exactly as it is. A list, `[]` included, is what the loan should
             // hold afterwards; LoanService::updateLoan() detaches the rest and
-            // attaches the new ones. `null` is refused rather than read as
-            // either, because the two mean opposite things.
+            // attaches the new ones, each at the server's value (a sent
+            // `snapshot_value` is ignored). `null` is refused rather than read
+            // as either, because the two mean opposite things.
             'collaterals' => ['sometimes', 'list'],
             'collaterals.*.collateral_id' => [...$this->collateralIdRules(), 'distinct'],
-            'collaterals.*.snapshot_value' => $this->snapshotValueRules(),
         ];
     }
 

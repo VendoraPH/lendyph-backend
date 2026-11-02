@@ -200,7 +200,7 @@ it('refuses to attach a collateral belonging to a different borrower', function 
 });
 
 it('still attaches a collateral belonging to the loan\'s own borrower', function () {
-    $own = Collateral::factory()->create(['borrower_id' => $this->borrower->id]);
+    $own = Collateral::factory()->create(['borrower_id' => $this->borrower->id, 'amount' => 250000]);
     $loan = guardLoanInStatus($this->loanDefaults, 'draft');
 
     $this->postJson("/api/loans/{$loan->id}/collaterals", [
@@ -927,7 +927,7 @@ it('has no path writing an active loan status outside the ones that are accounte
         // active set. The automatic accounting posting sits immediately BEFORE
         // that assertion, so the assertion is still the transaction's last
         // statement — which is what this entry is really asserting.
-        'app/Services/LoanService.php:1183 — \'status\' => \'released\',',
+        'app/Services/LoanService.php:1218 — \'status\' => \'released\',',
         // recordRepaymentOnLockedLoan(), which records every payment: released
         // → ongoing. Deliberately UNGUARDED — both are already active, so it
         // cannot add a holder.
