@@ -655,7 +655,9 @@ class LoanRestructureTest extends TestCase
             'principal_amount' => self::SOURCE_OUTSTANDING + 0.01,
         ]))
             ->assertUnprocessable()
-            ->assertJsonValidationErrors('principal_amount');
+            ->assertJsonValidationErrors([
+                'principal_amount' => "The restructured principal cannot exceed the loan's restructurable balance of ₱70,800.00.",
+            ]);
 
         // …but the full ₱70,800 IS accepted, even though the loan's
         // `outstanding_balance` reads ₱60,000: a restructure rolls the interest
@@ -932,7 +934,10 @@ class LoanRestructureTest extends TestCase
         $this->postJson("/api/loans/{$another->id}/restructure", $this->payloadFor($another, [
             'principal_amount' => 50000,
             'remarks' => 'Borrower cannot service the full amount',
-        ]))->assertForbidden();
+        ]))
+            ->assertForbidden()
+            ->assertJsonPath('message', 'Writing off part of the balance requires the Loans: Write off permission. '
+                .'Restructure the full outstanding balance of ₱70,800.00 instead.');
 
         $this->assertSame(0, Loan::where('source_loan_id', $another->id)->count());
     }
@@ -1159,7 +1164,9 @@ class LoanRestructureTest extends TestCase
 
         $this->patchJson("/api/loans/{$newLoan->id}", ['principal_amount' => self::SOURCE_OUTSTANDING + 10000])
             ->assertUnprocessable()
-            ->assertJsonValidationErrors('principal_amount');
+            ->assertJsonValidationErrors([
+                'principal_amount' => "The restructured principal cannot exceed the loan's restructurable balance of ₱70,800.00.",
+            ]);
     }
 
     public function test_release_refuses_when_the_principal_no_longer_matches_the_approved_terms(): void

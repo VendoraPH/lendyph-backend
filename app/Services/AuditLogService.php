@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\AuditLog;
 use Illuminate\Database\Eloquent\Model;
+use LogicException;
 
 class AuditLogService
 {
@@ -102,6 +103,28 @@ class AuditLogService
      * `user_id` and `ip_address` are what identify a background write, and both
      * are already overridable.
      */
+    /**
+     * The longest header value an audit row keeps.
+     */
+    public const HEADER_MAX_LENGTH = 512;
+
+    /**
+     * A request header as an audit row may store it: valid UTF-8 and capped.
+     *
+     * Headers are whatever the client sent. `User-Agent: x\xFF` stored raw made
+     * MySQL refuse the audit insert, and callers that audit after an earlier
+     * write had committed (user role and branch changes, the account-officer
+     * change) were left with the change saved and its audit row missing.
+     */
+    public static function cleanHeader(?string $value): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        return mb_substr(mb_scrub($value, 'UTF-8'), 0, self::HEADER_MAX_LENGTH, 'UTF-8');
+    }
+
     public static function log(
         string $action,
         ?Model $auditable = null,
@@ -111,6 +134,13 @@ class AuditLogService
         ?int $userId = null,
         ?string $ipAddress = null,
     ): AuditLog {
+        if ($auditable !== null && app()->runningUnitTests() && ! AuditLogModules::isMapped($auditable->getMorphClass())) {
+            throw new LogicException(sprintf(
+                'Audit rows for %s have no Audit Trail module. Map the class in AuditLogModules::MODULE_MAP (to `system` if it belongs nowhere else).',
+                $auditable->getMorphClass(),
+            ));
+        }
+
         return AuditLog::create([
             'user_id' => $userId ?? auth()->id(),
             'action' => $action,
@@ -119,7 +149,7 @@ class AuditLogService
             'old_values' => $oldValues,
             'new_values' => $newValues,
             'ip_address' => $ipAddress ?? request()->ip(),
-            'user_agent' => request()->userAgent(),
+            'user_agent' => self::cleanHeader(request()->userAgent()),
             'description' => $description,
         ]);
     }

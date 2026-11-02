@@ -2,17 +2,32 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Http\Controllers\Api\Traits\CsvExportTrait;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\AuditLogResource;
 use App\Models\AuditLog;
+use App\Services\AuditLogModules;
 use App\Services\LikePattern;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
+use Illuminate\Validation\Rule;
 use OpenApi\Attributes as OA;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
+/**
+ * The audit trail: list, CSV export and detail.
+ *
+ * Login rows written before AuthController::login() recorded the user have
+ * no user_id. The list and detail (AuditLogResource) and the export's User
+ * column show the signed-in user as their actor (AuditLog::inferredActor()).
+ * The `user_id` filter, `search` and the action stats read the stored
+ * user_id only, so those old login rows stay outside a user's filtered view;
+ * rows written since carry the user_id and are counted normally.
+ */
 class AuditLogController extends Controller
 {
+    use CsvExportTrait;
+
     #[OA\Get(
         path: '/api/audit-logs',
         summary: 'List audit logs',
@@ -24,6 +39,7 @@ class AuditLogController extends Controller
             new OA\Parameter(name: 'user_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
             new OA\Parameter(name: 'action', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
             new OA\Parameter(name: 'auditable_type', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
+            new OA\Parameter(name: 'module', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['auth', 'borrowers', 'loans', 'payments', 'collections', 'users', 'roles', 'accounting', 'gcash', 'system']), description: 'The `module` each row carries (auth = sign-in and self-service events; system = rows of no other module); an unknown value is a 422'),
             new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15)),
@@ -69,6 +85,8 @@ class AuditLogController extends Controller
             ->pluck('count', 'action')
             ->toArray();
 
+        AuditLogResource::loadChangeUsers($logs->getCollection());
+
         return AuditLogResource::collection($logs)
             ->additional(['meta' => ['stats' => [
                 'actions' => $stats,
@@ -87,6 +105,7 @@ class AuditLogController extends Controller
             new OA\Parameter(name: 'user_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
             new OA\Parameter(name: 'action', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
             new OA\Parameter(name: 'auditable_type', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
+            new OA\Parameter(name: 'module', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['auth', 'borrowers', 'loans', 'payments', 'collections', 'users', 'roles', 'accounting', 'gcash', 'system']), description: 'The `module` each row carries (auth = sign-in and self-service events; system = rows of no other module); an unknown value is a 422'),
             new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
         ],
@@ -132,9 +151,9 @@ class AuditLogController extends Controller
                 ->orderBy('id')
                 ->chunk(500, function ($chunk) use ($handle) {
                     foreach ($chunk as $log) {
-                        fputcsv($handle, [
+                        fputcsv($handle, array_map(self::sanitizeCsvCell(...), [
                             $log->created_at?->toDateTimeString(),
-                            $log->user?->full_name ?? ($log->user_id ? "User #{$log->user_id}" : 'system'),
+                            ($log->user ?? $log->inferredActor())?->full_name ?? ($log->user_id ? "User #{$log->user_id}" : 'system'),
                             $log->action,
                             class_basename($log->auditable_type ?? ''),
                             $log->auditable_id,
@@ -142,7 +161,7 @@ class AuditLogController extends Controller
                             $log->ip_address,
                             $log->old_values ? json_encode($log->old_values) : '',
                             $log->new_values ? json_encode($log->new_values) : '',
-                        ]);
+                        ]));
                     }
                 });
 
@@ -174,6 +193,7 @@ class AuditLogController extends Controller
         $this->authorize('audit_logs:view');
 
         $auditLog->load('user', 'auditable');
+        AuditLogResource::loadChangeUsers([$auditLog]);
 
         return new AuditLogResource($auditLog);
     }
@@ -193,6 +213,7 @@ class AuditLogController extends Controller
             'user_id' => ['nullable', 'integer', 'min:1'],
             'action' => ['nullable', 'string'],
             'auditable_type' => ['nullable', 'string'],
+            'module' => ['nullable', 'string', Rule::in(AuditLogModules::all())],
             'date_from' => ['nullable', 'date'],
             'date_to' => ['nullable', 'date'],
             'per_page' => ['nullable', 'integer', 'min:1'],
@@ -218,6 +239,7 @@ class AuditLogController extends Controller
         $userId = $filters['user_id'] ?? null;
         $action = $filters['action'] ?? null;
         $auditableType = $filters['auditable_type'] ?? null;
+        $module = $filters['module'] ?? null;
         $dateFrom = $filters['date_from'] ?? null;
         $dateTo = $filters['date_to'] ?? null;
 
@@ -239,6 +261,7 @@ class AuditLogController extends Controller
             ->when(filled($userId), fn ($q) => $q->where('user_id', $userId))
             ->when(filled($action), fn ($q) => $q->where('action', $action))
             ->when(filled($auditableType), fn ($q) => $q->where('auditable_type', 'like', LikePattern::contains($auditableType)))
+            ->when(filled($module), fn ($q) => AuditLogModules::constrain($q, $module))
             ->when(filled($dateFrom), fn ($q) => $q->where('created_at', '>=', $dateFrom))
             ->when(filled($dateTo), fn ($q) => $q->where('created_at', '<=', "{$dateTo} 23:59:59"));
     }

@@ -955,8 +955,8 @@ DESC,
 
     #[OA\Post(
         path: '/api/loans/{id}/extend',
-        summary: 'Extend an upon-maturity loan by one cycle',
-        description: 'Rolls the maturity date forward by one frequency cycle and accrues one cycle of fresh interest at the loan\'s existing rate. `interest_option` decides what happens to interest already outstanding: "pay" collects it as a repayment first, so the new period carries only the fresh interest; "defer" leaves it unpaid so it stacks on top (₱50 outstanding + ₱50 fresh = ₱100 due). Both the repayment and the extension happen in one transaction. Records a directly-applied LoanAdjustment row of type "extension".',
+        summary: 'Extend a one-month-term loan by one month',
+        description: 'Only loans whose original term is one month (term 1 in months, paid monthly or at maturity) can be extended, as often as needed. Rolls the maturity date forward by one month and accrues one month of fresh interest at the loan\'s existing rate. `interest_option` decides what happens to interest already outstanding: "pay" collects it as a repayment first, so the new period carries only the fresh interest; "defer" leaves it unpaid so it stacks on top (₱50 outstanding + ₱50 fresh = ₱100 due). Both the repayment and the extension happen in one transaction. Records a directly-applied LoanAdjustment row of type "extension".',
         tags: ['Loans'],
         security: [['sanctum' => []]],
         parameters: [
@@ -976,7 +976,7 @@ DESC,
             new OA\Response(response: 403, description: 'Missing loans:extend permission'),
             new OA\Response(response: 404, description: 'Loan not found'),
             new OA\Response(response: 409, description: 'Another change to this loan (another extension, an adjustment) was saved at the same time; nothing was written. Reload and try again'),
-            new OA\Response(response: 422, description: 'Loan is not upon-maturity (neither frequency nor interest_method is upon_maturity), not in released/ongoing status, or has no open period'),
+            new OA\Response(response: 422, description: 'Loan does not have a one-month term (term 1 in months, paid monthly or at maturity; `errors.term`), is not in released/ongoing status (`errors.status`), or has no open period (`errors.loan`)'),
         ],
     )]
     public function extend(ExtendLoanRequest $request, Loan $loan): JsonResponse

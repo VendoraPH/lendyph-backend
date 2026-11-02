@@ -2,6 +2,9 @@
 
 namespace App\Models;
 
+use App\Exceptions\AuditLogIsAppendOnlyException;
+use App\Models\Builders\AuditLogBuilder;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\MorphTo;
@@ -42,6 +45,73 @@ class AuditLog extends Model
             'new_values' => 'array',
             'created_at' => 'datetime',
         ];
+    }
+
+    /**
+     * Bulk writes are refused too: see AuditLogBuilder.
+     *
+     * @param  \Illuminate\Database\Query\Builder  $query
+     */
+    public function newEloquentBuilder($query): AuditLogBuilder
+    {
+        return new AuditLogBuilder($query);
+    }
+
+    /**
+     * Audit rows are append-only: an existing row is never updated.
+     *
+     * Refused here rather than in an `updating` listener so the quiet and
+     * event-less paths (saveQuietly(), withoutEvents(), a faked dispatcher)
+     * are refused too. A save with nothing changed never reaches this.
+     *
+     * @param  Builder<static>  $query
+     */
+    protected function performUpdate(Builder $query): never
+    {
+        throw AuditLogIsAppendOnlyException::update($this->getKey());
+    }
+
+    /**
+     * increment() and decrement() write through the query builder, not
+     * performUpdate(), so they are refused separately.
+     */
+    protected function incrementOrDecrement($column, $amount, $extra, $method): never
+    {
+        throw AuditLogIsAppendOnlyException::update($this->getKey());
+    }
+
+    /**
+     * @param  array<string, float|int>  $columns
+     * @param  array<string, mixed>  $extra
+     */
+    protected function incrementOrDecrementEach(array $columns, array $extra, string $method): never
+    {
+        throw AuditLogIsAppendOnlyException::update($this->getKey());
+    }
+
+    /**
+     * Audit rows are append-only: a row is never deleted. Covers delete(),
+     * deleteQuietly(), forceDelete() and destroy().
+     */
+    protected function performDeleteOnModel(): never
+    {
+        throw AuditLogIsAppendOnlyException::delete($this->getKey());
+    }
+
+    /**
+     * The user an old login row is about, shown as its actor. A login used to
+     * be written before the user was signed in, so those rows have no
+     * user_id; AuthController::login() now records it. Only `login` rows, and
+     * only when the auditable User is loaded. Display only: the row is not
+     * changed, and the list's user filter and search still read user_id.
+     */
+    public function inferredActor(): ?User
+    {
+        if ($this->action !== 'login' || $this->user_id !== null || ! $this->relationLoaded('auditable')) {
+            return null;
+        }
+
+        return $this->auditable instanceof User ? $this->auditable : null;
     }
 
     public function user(): BelongsTo

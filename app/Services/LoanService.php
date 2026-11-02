@@ -586,7 +586,7 @@ class LoanService
         // into an accepted amount, or an exact match into a rejection.
         if ($this->toCentavos($principal) > $this->toCentavos($outstanding)) {
             throw ValidationException::withMessages([
-                'principal_amount' => ["The restructured principal cannot exceed the loan's outstanding balance of {$outstanding}."],
+                'principal_amount' => ["The restructured principal cannot exceed the loan's restructurable balance of ₱".number_format($outstanding, 2).'.'],
             ]);
         }
 
@@ -606,8 +606,8 @@ class LoanService
             // which the request cannot see.
             if (! $user->can('loans:write_off')) {
                 throw new AuthorizationException(
-                    'Writing off part of the balance requires the loans:write_off permission. '
-                    ."Restructure the full outstanding balance of ₱{$outstanding} instead.",
+                    'Writing off part of the balance requires the Loans: Write off permission. '
+                    .'Restructure the full outstanding balance of ₱'.number_format($outstanding, 2).' instead.',
                 );
             }
         }

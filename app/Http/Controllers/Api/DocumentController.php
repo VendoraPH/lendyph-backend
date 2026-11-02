@@ -15,6 +15,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Support\Facades\Storage;
 use OpenApi\Attributes as OA;
+use Throwable;
 
 class DocumentController extends Controller
 {
@@ -182,14 +183,21 @@ class DocumentController extends Controller
         $modelType = strtolower(class_basename($parent));
         $path = $file->store("documents/{$type}/{$modelType}/{$parent->id}", 'private');
 
-        $document = $parent->documents()->create([
-            'type' => $type,
-            'label' => $request->input('label'),
-            'file_path' => $path,
-            'original_filename' => $file->getClientOriginalName(),
-            'mime_type' => $file->getMimeType(),
-            'file_size' => $file->getSize(),
-        ]);
+        try {
+            $document = $parent->documents()->create([
+                'type' => $type,
+                'label' => $request->input('label'),
+                'file_path' => $path,
+                'original_filename' => Document::cleanOriginalFilename($file->getClientOriginalName()),
+                'mime_type' => $file->getMimeType(),
+                'file_size' => $file->getSize(),
+            ]);
+        } catch (Throwable $e) {
+            // No row points at the stored file, so nothing would ever remove it.
+            Storage::disk('private')->delete($path);
+
+            throw $e;
+        }
 
         AuditLogService::log('uploaded', $parent, description: "Document '{$type}' uploaded for {$modelType} #{$parent->id}");
 

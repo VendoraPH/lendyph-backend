@@ -213,7 +213,7 @@ class ValidIdService
             'id_number' => $idNumber,
             'side' => $side,
             'file_path' => $path,
-            'original_filename' => $file->getClientOriginalName(),
+            'original_filename' => Document::cleanOriginalFilename($file->getClientOriginalName()),
             'mime_type' => $file->getMimeType(),
             'file_size' => $file->getSize(),
         ]);

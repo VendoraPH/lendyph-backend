@@ -4,6 +4,7 @@ namespace App\Models;
 
 use App\Traits\Auditable;
 use Illuminate\Database\Eloquent\Relations\MorphToMany;
+use Illuminate\Support\Str;
 use Spatie\Permission\Models\Role as SpatieRole;
 
 /**
@@ -53,6 +54,42 @@ class Role extends SpatieRole
      * in this codebase). Hardcoding the model avoids that null-resolution failure
      * since we only have one user model anyway.
      */
+    /**
+     * The description on this role's automatic `updated` audit row: its
+     * auditName() and the fields that changed, e.g. `Role "Teller" (cashier)
+     * updated: display_name, description`. Other actions keep no description.
+     */
+    public function describeAuditEvent(string $action): ?string
+    {
+        if ($action !== 'updated') {
+            return null;
+        }
+
+        $fields = array_keys(array_diff_key($this->getChanges(), [self::UPDATED_AT => true]));
+
+        return sprintf('Role %s updated: %s', $this->auditName(), implode(', ', $fields));
+    }
+
+    /**
+     * How audit descriptions name this role: the editable label as a JSON
+     * string (so a quote inside it is escaped, not mistaken for the end) and
+     * the fixed key in brackets, e.g. `"Teller" (cashier)`, so a row still
+     * identifies the role after the label changes.
+     */
+    public function auditName(): string
+    {
+        return json_encode($this->auditLabel(), JSON_UNESCAPED_UNICODE).' ('.$this->name.')';
+    }
+
+    /**
+     * The label the audit trail names this role by: its display name, or the
+     * key in headline case when it has none (what the role editor shows).
+     */
+    public function auditLabel(): string
+    {
+        return filled($this->display_name) ? trim((string) $this->display_name) : Str::headline((string) $this->name);
+    }
+
     public function users(): MorphToMany
     {
         return $this->morphedByMany(
