@@ -2,6 +2,8 @@
 
 namespace App\Models;
 
+use App\Exceptions\AuditLogIsAppendOnlyException;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\MorphTo;
@@ -42,6 +44,47 @@ class AuditLog extends Model
             'new_values' => 'array',
             'created_at' => 'datetime',
         ];
+    }
+
+    /**
+     * Audit rows are append-only: an existing row is never updated.
+     *
+     * Refused here rather than in an `updating` listener so the quiet and
+     * event-less paths (saveQuietly(), withoutEvents(), a faked dispatcher)
+     * are refused too. A save with nothing changed never reaches this.
+     *
+     * @param  Builder<static>  $query
+     */
+    protected function performUpdate(Builder $query): never
+    {
+        throw AuditLogIsAppendOnlyException::update($this->getKey());
+    }
+
+    /**
+     * increment() and decrement() write through the query builder, not
+     * performUpdate(), so they are refused separately.
+     */
+    protected function incrementOrDecrement($column, $amount, $extra, $method): never
+    {
+        throw AuditLogIsAppendOnlyException::update($this->getKey());
+    }
+
+    /**
+     * @param  array<string, float|int>  $columns
+     * @param  array<string, mixed>  $extra
+     */
+    protected function incrementOrDecrementEach(array $columns, array $extra, string $method): never
+    {
+        throw AuditLogIsAppendOnlyException::update($this->getKey());
+    }
+
+    /**
+     * Audit rows are append-only: a row is never deleted. Covers delete(),
+     * deleteQuietly(), forceDelete() and destroy().
+     */
+    protected function performDeleteOnModel(): never
+    {
+        throw AuditLogIsAppendOnlyException::delete($this->getKey());
     }
 
     public function user(): BelongsTo

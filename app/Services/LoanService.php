@@ -586,7 +586,7 @@ class LoanService
         // into an accepted amount, or an exact match into a rejection.
         if ($this->toCentavos($principal) > $this->toCentavos($outstanding)) {
             throw ValidationException::withMessages([
-                'principal_amount' => ["The restructured principal cannot exceed the loan's outstanding balance of {$outstanding}."],
+                'principal_amount' => ["The restructured principal cannot exceed the loan's restructurable balance of ₱".number_format($outstanding, 2).'.'],
             ]);
         }
 

@@ -4,6 +4,7 @@ namespace App\Models;
 
 use App\Traits\Auditable;
 use Illuminate\Database\Eloquent\Relations\MorphToMany;
+use Illuminate\Support\Str;
 use Spatie\Permission\Models\Role as SpatieRole;
 
 /**
@@ -53,6 +54,24 @@ class Role extends SpatieRole
      * in this codebase). Hardcoding the model avoids that null-resolution failure
      * since we only have one user model anyway.
      */
+    /**
+     * The description on this role's automatic `updated` audit row: the label
+     * it is shown by (the display name, or the key in headline case when it
+     * has none) and the fields that changed, e.g. "Role Teller updated:
+     * display_name, description". Other actions keep no description.
+     */
+    public function describeAuditEvent(string $action): ?string
+    {
+        if ($action !== 'updated') {
+            return null;
+        }
+
+        $fields = array_keys(array_diff_key($this->getChanges(), [self::UPDATED_AT => true]));
+        $label = filled($this->display_name) ? trim((string) $this->display_name) : Str::headline((string) $this->name);
+
+        return sprintf('Role %s updated: %s', $label, implode(', ', $fields));
+    }
+
     public function users(): MorphToMany
     {
         return $this->morphedByMany(

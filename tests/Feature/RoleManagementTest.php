@@ -530,3 +530,28 @@ it('refuses a label when another role takes it as a key between validation and t
     expect($landed())->toBeTrue('the competing create never landed, so this test proved nothing')
         ->and($cashier->fresh()->display_name)->toBeNull();
 });
+
+it('refuses permission names that differ only in case with 422, not 500', function () {
+    $this->postJson('/api/roles', ['name' => 'case_probe', 'permissions' => ['LOANS:VIEW']])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['permissions.0']);
+
+    expect(Role::where('name', 'case_probe')->exists())->toBeFalse();
+
+    $role = Role::create(['name' => 'case_target', 'guard_name' => 'web', 'is_system' => false]);
+    $role->syncPermissions(['loans:view']);
+
+    $this->putJson("/api/roles/{$role->id}", ['permissions' => ['loans:view', 'Dashboard:View']])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['permissions.1']);
+
+    expect($role->fresh()->permissions->pluck('name')->all())->toBe(['loans:view']);
+});
+
+it('still accepts the exact-case permission names', function () {
+    $this->postJson('/api/roles', ['name' => 'exact_case', 'permissions' => ['loans:view', 'dashboard:view']])
+        ->assertCreated();
+
+    expect(Role::where('name', 'exact_case')->firstOrFail()->permissions->pluck('name')->sort()->values()->all())
+        ->toBe(['dashboard:view', 'loans:view']);
+});

@@ -4,6 +4,7 @@ namespace App\Http\Requests\Role;
 
 use App\Http\Requests\Concerns\GuardsRolePermissionGrants;
 use App\Models\Role;
+use App\Rules\ExactPermissionName;
 use App\Rules\UniqueRoleDisplayName;
 use App\Rules\ValidUtf8;
 use Illuminate\Foundation\Http\FormRequest;
@@ -59,7 +60,7 @@ class UpdateRoleRequest extends FormRequest
             'display_name' => ['bail', 'sometimes', 'nullable', 'string', new ValidUtf8, 'max:100', 'not_regex:'.UniqueRoleDisplayName::FORBIDDEN_CHARACTERS, new UniqueRoleDisplayName($roleId)],
             'description' => ['nullable', 'string', 'max:500'],
             'permissions' => ['nullable', 'array'],
-            'permissions.*' => ['string', Rule::exists('permissions', 'name')],
+            'permissions.*' => ['string', new ExactPermissionName],
         ];
     }
 

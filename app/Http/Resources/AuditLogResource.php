@@ -16,7 +16,7 @@ class AuditLogResource extends JsonResource
         'Repayment' => 'payments',
         'Document' => 'borrowers',
         'User' => 'users',
-        'Role' => 'users',
+        'Role' => 'roles',
         'Branch' => 'users',
         'Fee' => 'loans',
         'ShareCapitalPledge' => 'collections',

@@ -4,6 +4,7 @@ use App\Http\Middleware\AllowAuthOrSubmissionToken;
 use App\Http\Middleware\CheckTokenExpiry;
 use App\Http\Middleware\EnsureUserIsActive;
 use App\Http\Middleware\OptionalSanctumAuth;
+use App\Http\Middleware\RejectInvalidUtf8;
 use App\Http\Middleware\RequirePasswordChange;
 use App\Http\Middleware\SecurityHeaders;
 use Illuminate\Auth\AuthenticationException;
@@ -155,6 +156,10 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->redirectGuestsTo(
             fn (Request $request) => $request->is('api/*') ? null : route('login'),
         );
+
+        // Invalid UTF-8 in any input answers 422, on every route, before a
+        // controller, a /u pattern or MySQL can turn it into a 500.
+        $middleware->append(RejectInvalidUtf8::class);
 
         $middleware->alias([
             'role' => RoleMiddleware::class,

@@ -976,7 +976,7 @@ DESC,
             new OA\Response(response: 403, description: 'Missing loans:extend permission'),
             new OA\Response(response: 404, description: 'Loan not found'),
             new OA\Response(response: 409, description: 'Another change to this loan (another extension, an adjustment) was saved at the same time; nothing was written. Reload and try again'),
-            new OA\Response(response: 422, description: 'Loan is not upon-maturity (neither frequency nor interest_method is upon_maturity), not in released/ongoing status, or has no open period'),
+            new OA\Response(response: 422, description: 'Loan does not have a one-month term (term 1 in months, paid monthly or at maturity; `errors.term`), is not in released/ongoing status (`errors.status`), or has no open period (`errors.loan`)'),
         ],
     )]
     public function extend(ExtendLoanRequest $request, Loan $loan): JsonResponse
