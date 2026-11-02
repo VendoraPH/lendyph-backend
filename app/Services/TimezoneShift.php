@@ -183,6 +183,11 @@ class TimezoneShift
         'loan_approval_steps' => ['acted_at', 'created_at', 'updated_at'],
         'password_reset_tokens' => ['created_at'],
         'personal_access_tokens' => ['created_at', 'expires_at', 'last_used_at', 'updated_at'],
+        // Added 2026-11-02 for the daily portfolio snapshot, well after the
+        // cutover completed (2026-08-06 on every deployment), so this table
+        // cannot hold a row written by the old UTC application. Same reasoning
+        // as the csv_import_* tables above.
+        'portfolio_daily_snapshots' => ['created_at'],
         // Added 2026-10-01, well after the cutover completed (2026-08-06 on
         // every deployment), so this table cannot hold a row written by the old
         // UTC application. Same reasoning as the csv_import_* tables above.
