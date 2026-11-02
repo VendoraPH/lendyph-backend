@@ -10,6 +10,8 @@ use Illuminate\Validation\Validator;
 /**
  * The ID document is optional (Kevin's request, approved by Arvin on
  * 2026-11-02), but both or neither: a type without a number names no document.
+ * Both keys are sent together or not at all (`present_with`), so an update that
+ * sends one of them can't leave the row half-filled.
  * A walk-in saved without an ID is checked against the others by name and
  * mobile number instead, as a soft warning the teller can acknowledge.
  */
@@ -25,8 +27,8 @@ class StoreGCashNonMemberRequest extends FormRequest
         return [
             'full_name' => ['required', 'string', 'max:255'],
             'mobile_number' => ['required', 'string', 'max:32'],
-            'id_type' => ['nullable', 'required_with:id_number', 'string', 'max:64'],
-            'id_number' => ['nullable', 'required_with:id_type', 'string', 'max:64', $this->uniqueIdRule()],
+            'id_type' => ['nullable', 'required_with:id_number', 'present_with:id_number', 'string', 'max:64'],
+            'id_number' => ['nullable', 'required_with:id_type', 'present_with:id_type', 'string', 'max:64', $this->uniqueIdRule()],
             'remarks' => ['nullable', 'string', 'max:2000'],
             'acknowledge_possible_duplicate' => ['sometimes', 'boolean'],
         ];
@@ -37,6 +39,8 @@ class StoreGCashNonMemberRequest extends FormRequest
         return [
             'id_type.required_with' => 'Enter the ID type too, or leave both ID fields blank.',
             'id_number.required_with' => 'Enter the ID number too, or leave both ID fields blank.',
+            'id_type.present_with' => 'Send both ID fields, or neither.',
+            'id_number.present_with' => 'Send both ID fields, or neither.',
         ];
     }
 
@@ -54,8 +58,9 @@ class StoreGCashNonMemberRequest extends FormRequest
         return [
             function (Validator $validator): void {
                 if ($validator->errors()->isNotEmpty()
-                    || $this->filled('id_number')
-                    || $this->boolean('acknowledge_possible_duplicate')) {
+                    || $this->hasIdAfterSave()
+                    || $this->boolean('acknowledge_possible_duplicate')
+                    || ! $this->shouldCheckNameAndMobile()) {
                     return;
                 }
 
@@ -83,6 +88,18 @@ class StoreGCashNonMemberRequest extends FormRequest
     public function walkInAttributes(): array
     {
         return $this->safe()->except('acknowledge_possible_duplicate');
+    }
+
+    /** Whether the saved walk-in will carry an ID; on store, only what was sent counts. */
+    protected function hasIdAfterSave(): bool
+    {
+        return $this->filled('id_number');
+    }
+
+    /** Every new walk-in without an ID is checked; an update narrows this. */
+    protected function shouldCheckNameAndMobile(): bool
+    {
+        return true;
     }
 
     /** The walk-in being edited, which never counts as its own duplicate; none on store. */
