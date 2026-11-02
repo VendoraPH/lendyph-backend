@@ -14,6 +14,11 @@ Schedule::command('loans:check-defaulted')->dailyAt('06:00');
 // Apply penalties on overdue schedules daily at 6:05 AM
 Schedule::command('loans:apply-penalties')->dailyAt('06:05');
 
+// Record the day's portfolio arrears (overdue count and amount, total
+// outstanding, PAR 1/30/90) at the end of the Manila day. The dashboard's
+// overdue sparkline reads its past days from these rows.
+Schedule::command('portfolio:snapshot')->dailyAt('23:55')->timezone('Asia/Manila');
+
 // Database backup daily at 2 AM, keep last 7
 Schedule::command('db:backup --keep=7')->dailyAt('02:00');
 

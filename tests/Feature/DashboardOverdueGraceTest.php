@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Models\AmortizationSchedule;
 use App\Models\Loan;
+use App\Models\PortfolioDailySnapshot;
 use Carbon\Carbon;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
@@ -74,14 +75,15 @@ class DashboardOverdueGraceTest extends TestCase
         $this->assertCount(7, $points);
         $this->assertSame(1, $stats['overdue_count']);
         $this->assertSame($stats['overdue_count'], end($points), 'Today is the last point.');
-        // Five days ago with three days' grace, it first became late two days ago.
-        $this->assertSame([0, 0, 0, 0, 0, 1, 1], $points);
+        // The past days come from the daily snapshots (decision 2d), and
+        // there are none here: null, not a figure.
+        $this->assertSame([null, null, null, null, null, null, 1], $points);
     }
 
     /**
-     * The past points read TODAY's payment state, as the old sparkline did: a
-     * loan that was late four days ago and has since been paid counts on no
-     * point, past ones included. A true history would need daily snapshots.
+     * The past points are the daily snapshots (decision 2d), never today's
+     * payment state replayed against an old date: with no snapshot recorded
+     * they are null, and paying a loan moves only today's point.
      */
     public function test_a_loan_paid_since_leaves_the_past_points(): void
     {
@@ -96,7 +98,7 @@ class DashboardOverdueGraceTest extends TestCase
         $stats = $this->getJson('/api/dashboard/stats')->assertOk()->json('data');
 
         $this->assertSame(0, $stats['overdue_count']);
-        $this->assertSame([0, 0, 0, 0, 0, 0, 0], array_column($stats['sparklines']['overdue'], 'v'));
+        $this->assertSame([null, null, null, null, null, null, 0], array_column($stats['sparklines']['overdue'], 'v'));
     }
 
     /**
@@ -109,12 +111,22 @@ class DashboardOverdueGraceTest extends TestCase
 
         $loan = $this->loan(grace: 0);
         $this->moveSchedule($loan, 1, 3);
+        // Recorded after the points were cached: not served until they expire.
+        PortfolioDailySnapshot::query()->create([
+            'snapshot_date' => Carbon::yesterday()->toDateString(),
+            'overdue_loans_count' => 4,
+            'overdue_amount' => 0,
+            'total_outstanding' => 0,
+            'par_1_amount' => 0,
+            'par_30_amount' => 0,
+            'par_90_amount' => 0,
+        ]);
 
         $stats = $this->getJson('/api/dashboard/stats')->assertOk()->json('data');
         $points = array_column($stats['sparklines']['overdue'], 'v');
 
         $this->assertSame(1, $stats['overdue_count']);
-        $this->assertSame([0, 0, 0, 0, 0, 0, 1], $points, 'Past points come from the cache; today is live.');
+        $this->assertSame([null, null, null, null, null, null, 1], $points, 'Past points come from the cache; today is live.');
     }
 
     private function loan(int $grace): Loan
