@@ -1037,7 +1037,12 @@ class RepaymentService
      *
      * On a loan with a Share Capital Build-Up only the 1-period preset is
      * sent: there the allocation stops after the current period and turns the
-     * rest into share capital, so "n periods" would not prepay.
+     * rest into share capital, so "n periods" would not prepay. That preset
+     * also carries the period's build-up (an open period's is never credited
+     * yet), so a member keeps contributing it, by amountDueNow()'s rule: only
+     * when the period is the one the allocation treats as current, the only
+     * one after which money becomes share capital, and only for a member.
+     * Paying it leaves the period paid and credits exactly the build-up.
      *
      * @param  EloquentCollection<int, AmortizationSchedule>  $schedules
      * @return list<array{periods: int, amount: float}>
@@ -1052,7 +1057,26 @@ class RepaymentService
             $presets[] = ['periods' => $index + 1, 'amount' => $running / 100];
         }
 
-        return (float) $loan->scb_amount > 0 ? array_slice($presets, 0, 1) : $presets;
+        if ((float) $loan->scb_amount <= 0 || $presets === []) {
+            return $presets;
+        }
+
+        $paymentDate = $asOf->copy()->startOfDay();
+        $open = $schedules
+            ->filter(fn (AmortizationSchedule $s) => in_array($s->status, AmortizationSchedule::UNPAID_STATUSES, true))
+            ->sortBy('period_number')
+            ->values();
+        $first = $open->first();
+        // The same "current" period the allocation picks.
+        $current = $open->first(fn (AmortizationSchedule $s) => $s->due_date->gte($paymentDate)) ?? $open->last();
+
+        if ($first->id === $current->id && ! in_array($loan->borrower?->status, Borrower::NON_MEMBER_STATUSES, true)) {
+            $running = LoanService::toCentavos($presets[0]['amount']) + PersistedScheduleFigures::shareCapitalBuildUpCentavos($loan, $first);
+
+            return [['periods' => 1, 'amount' => $running / 100]];
+        }
+
+        return array_slice($presets, 0, 1);
     }
 
     /**
