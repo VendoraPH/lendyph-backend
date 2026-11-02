@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\AmortizationSchedule;
 use App\Models\Borrower;
 use App\Models\Loan;
+use App\Models\LoanAdjustment;
 use App\Models\LoanLedgerEntry;
 use App\Models\Repayment;
 use App\Models\RepaymentAllocation;
@@ -71,7 +72,7 @@ class RepaymentService
             $this->lockLoanForPayment($loan);
 
             return $this->recordRepaymentOnLockedLoan($loan, $amountPaid, $paymentDate, $user, $remarks, $method, $referenceNumber);
-        });
+        }, racedUniqueIndex: Repayment::RECEIPT_NUMBER_INDEX);
     }
 
     /**
@@ -119,7 +120,7 @@ class RepaymentService
             }
 
             return $this->recordRepaymentOnLockedLoan($loan, $amount, $paymentDate, $user, $remarks, $method, $referenceNumber);
-        });
+        }, racedUniqueIndex: Repayment::RECEIPT_NUMBER_INDEX);
     }
 
     /**
@@ -166,6 +167,7 @@ class RepaymentService
         string $method = 'cash',
         ?string $referenceNumber = null,
         bool $postToBooks = true,
+        bool $preview = false,
     ): Repayment {
         $paymentDate = Carbon::parse($paymentDate);
 
@@ -323,6 +325,9 @@ class RepaymentService
             'status' => 'posted',
             'received_by' => $user->id,
             'remarks' => $remarks,
+            // A preview numbers its rolled-back row with a placeholder and
+            // takes no lock on the newest receipt (Repayment::booted()).
+            'receipt_number' => $preview ? Repayment::previewReceiptNumber() : null,
         ]);
 
         // What went on each period, so a void can take back exactly that.
@@ -457,7 +462,7 @@ class RepaymentService
         return $this->rolledBackUnderPaymentLock($loan, function (Loan $loan) use ($amountPaid, $paymentDate, $user): array {
             $owedIds = $this->owedScheduleIds($loan, Carbon::parse($paymentDate));
             $premiumBefore = LoanService::toCentavos((float) $loan->insurance_remaining_balance);
-            $repayment = $this->recordRepaymentOnLockedLoan($loan, $amountPaid, $paymentDate, $user, postToBooks: false);
+            $repayment = $this->recordRepaymentOnLockedLoan($loan, $amountPaid, $paymentDate, $user, postToBooks: false, preview: true);
             $premiumAfter = LoanService::toCentavos((float) $loan->insurance_remaining_balance);
             $allocations = $this->previewedAllocations($repayment);
             $owedAfter = $loan->owedCentavos($loan->amortizationSchedules()->get())['total'];
@@ -1093,7 +1098,8 @@ class RepaymentService
      * not an amount one Record Payment settles the loan with: the allocation
      * stops after the current period (recordRepaymentOnLockedLoan()), so
      * recording it pays the current period and any overdue ones and credits
-     * the rest to the member's share capital.
+     * the rest to a member's share capital (for a borrower who isn't a member
+     * it stays as overpayment).
      *
      * @param  EloquentCollection<int, AmortizationSchedule>  $schedules
      */
@@ -1333,27 +1339,46 @@ class RepaymentService
     }
 
     /**
-     * Refuse a void of the payment an extension collected its interest with.
+     * Refuse a void of the payment an extension collected with.
      *
-     * The extension wrote a ledger credit for that payment, and a void takes
-     * nothing out of the loan ledger, so voiding it would leave the ledger
-     * recording a payment that no longer exists.
+     * The extension closed the period that payment paid, at what it paid, and
+     * carried the rest forward; voiding it would refund the money, re-open the
+     * closed period as overdue and charge its penalty again, and a closed
+     * period is never recalculated. When the payment reached interest, the
+     * extension's ledger credit records it too, and a void takes nothing out
+     * of the loan ledger.
      *
      * @throws ValidationException on `repayment`
      */
     private function assertNotAnExtensionCollection(Repayment $repayment): void
     {
-        $extension = LoanLedgerEntry::where('repayment_id', $repayment->id)
+        $credited = LoanLedgerEntry::where('repayment_id', $repayment->id)
             ->where('type', 'credit')
             ->whereNotNull('loan_adjustment_id')
             ->with('loanAdjustment:id,adjustment_number')
             ->first()
             ?->loanAdjustment;
 
-        if ($extension) {
+        if ($credited) {
             throw ValidationException::withMessages([
-                'repayment' => "This payment collected the interest when the loan was extended ({$extension->adjustment_number}), "
+                'repayment' => "This payment collected the interest when the loan was extended ({$credited->adjustment_number}), "
                     .'and that extension\'s ledger credit records it, so it cannot be voided. '
+                    .'Use a balance adjustment to correct the loan instead.',
+            ]);
+        }
+
+        // The link the extension records (`new_values.repayment_id`), which
+        // holds whatever the collection went to: one taken wholly by penalty,
+        // or only by the premium, writes no interest credit.
+        $linked = LoanAdjustment::where('loan_id', $repayment->loan_id)
+            ->where('adjustment_type', 'extension')
+            ->where('new_values->repayment_id', $repayment->id)
+            ->first(['id', 'adjustment_number']);
+
+        if ($linked) {
+            throw ValidationException::withMessages([
+                'repayment' => "This payment was collected when the loan was extended ({$linked->adjustment_number}), "
+                    .'and the extension closed the period it paid, so it cannot be voided. '
                     .'Use a balance adjustment to correct the loan instead.',
             ]);
         }
