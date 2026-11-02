@@ -72,7 +72,7 @@ class DisclosureMatchesReleaseTest extends TestCase
         $this->assertEquals(9800, $disclosure['proceeds']['net_proceeds']);
         $this->assertEquals(9800, $disclosure['totals']['net_proceeds']);
         $this->assertEquals(9800, $disclosure['deductions']['net_proceeds']);
-        $this->assertContains(['name' => 'Release Fee', 'amount' => 200], $disclosure['finance_charges']['items']);
+        $this->assertContains(['name' => 'Release Fee', 'amount' => 200, 'provisional' => true], $disclosure['finance_charges']['items']);
     }
 
     public function test_after_a_release_with_partial_insurance_the_disclosure_matches_the_release(): void
