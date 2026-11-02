@@ -204,15 +204,19 @@ class RepaymentService
         $insuranceCentavos = max(0, min($insuranceOwed, LoanService::toCentavos($amountPaid)));
         $insuranceApplied = $insuranceCentavos / 100;
 
-        $remaining = (LoanService::toCentavos($amountPaid) - $insuranceCentavos) / 100;
-        $principalApplied = 0.0;
-        $interestApplied = 0.0;
-        $penaltyApplied = 0.0;
-        $overdueInterestApplied = 0.0;
-        $currentInterestApplied = 0.0;
-        $currentPrincipalApplied = 0.0;
-        $nextInterestApplied = 0.0;
-        $nextPrincipalApplied = 0.0;
+        // Everything below is whole centavos: each step takes the smaller of
+        // what a part owes and what is left, so a payment of exactly what the
+        // periods owe leaves exactly nothing, never float dust that reaches
+        // the next period.
+        $remaining = LoanService::toCentavos($amountPaid) - $insuranceCentavos;
+        $principalApplied = 0;
+        $interestApplied = 0;
+        $penaltyApplied = 0;
+        $overdueInterestApplied = 0;
+        $currentInterestApplied = 0;
+        $currentPrincipalApplied = 0;
+        $nextInterestApplied = 0;
+        $nextPrincipalApplied = 0;
         $touchedFutureSchedule = false;
         $allocations = [];
 
@@ -238,10 +242,6 @@ class RepaymentService
                 break;
             }
 
-            if ($isFuture && ! $hasScb) {
-                $touchedFutureSchedule = true;
-            }
-
             // Allocate: penalty → interest → principal
             [$remaining, $pPaid, $iPaid, $penPaid] = $this->allocateToSchedule(
                 $schedule,
@@ -252,14 +252,21 @@ class RepaymentService
             $interestApplied += $iPaid;
             $penaltyApplied += $penPaid;
 
+            // Only a period that actually took money gets an allocation row,
+            // and only money reaching a future period makes the payment an
+            // advance.
             if ($pPaid > 0 || $iPaid > 0 || $penPaid > 0) {
                 $allocations[] = [
                     'amortization_schedule_id' => $schedule->id,
                     'period_number' => $schedule->period_number,
-                    'penalty' => round($penPaid, 2),
-                    'interest' => round($iPaid, 2),
-                    'principal' => round($pPaid, 2),
+                    'penalty' => $penPaid / 100,
+                    'interest' => $iPaid / 100,
+                    'principal' => $pPaid / 100,
                 ];
+
+                if ($isFuture && ! $hasScb) {
+                    $touchedFutureSchedule = true;
+                }
             }
 
             // Categorize into 6-tier breakdown for frontend display:
@@ -294,14 +301,15 @@ class RepaymentService
 
         if ($touchedFutureSchedule) {
             $paymentType = 'advance';
-        } elseif ($allDueSchedules === 0 && $overpayment == 0) {
+        } elseif ($allDueSchedules === 0 && $overpayment === 0) {
             $paymentType = 'exact';
         } else {
             $paymentType = 'partial';
         }
 
         // Step 5: Persist repayment
-        $balanceAfter = max(0, $balanceBefore - round($principalApplied, 2));
+        $balanceBeforeCentavos = LoanService::toCentavos($balanceBefore);
+        $balanceAfterCentavos = max(0, $balanceBeforeCentavos - $principalApplied);
 
         $repayment = Repayment::create([
             'loan_id' => $loan->id,
@@ -309,18 +317,18 @@ class RepaymentService
             'method' => $method,
             'reference_number' => $referenceNumber,
             'amount_paid' => $amountPaid,
-            'principal_applied' => round($principalApplied, 2),
-            'interest_applied' => round($interestApplied, 2),
-            'penalty_applied' => round($penaltyApplied, 2),
+            'principal_applied' => $principalApplied / 100,
+            'interest_applied' => $interestApplied / 100,
+            'penalty_applied' => $penaltyApplied / 100,
             'insurance_applied' => $insuranceApplied,
-            'overdue_interest_applied' => round($overdueInterestApplied, 2),
-            'current_interest_applied' => round($currentInterestApplied, 2),
-            'current_principal_applied' => round($currentPrincipalApplied, 2),
-            'next_interest_applied' => round($nextInterestApplied, 2),
-            'next_principal_applied' => round($nextPrincipalApplied, 2),
-            'overpayment' => round($overpayment, 2),
-            'balance_before' => round($balanceBefore, 2),
-            'balance_after' => round($balanceAfter, 2),
+            'overdue_interest_applied' => $overdueInterestApplied / 100,
+            'current_interest_applied' => $currentInterestApplied / 100,
+            'current_principal_applied' => $currentPrincipalApplied / 100,
+            'next_interest_applied' => $nextInterestApplied / 100,
+            'next_principal_applied' => $nextPrincipalApplied / 100,
+            'overpayment' => $overpayment / 100,
+            'balance_before' => $balanceBeforeCentavos / 100,
+            'balance_after' => $balanceAfterCentavos / 100,
             'payment_type' => $paymentType,
             'status' => 'posted',
             'received_by' => $user->id,
@@ -373,14 +381,12 @@ class RepaymentService
         // the standalone endpoint this replaces — a `pending` or `rejected`
         // borrower is not a member yet and cannot hold share capital.
         //
-        // Rounded BEFORE the `> 0` check, not after: gating on the raw
-        // float would let sub-centavo residue from the allocation loop's
-        // arithmetic (e.g. 1.0E-13) through as "an overpayment", writing a
-        // credited $0.00 row that reverseShareCapitalCredit()'s `credit >
-        // 0` lookup would then never find to clean up on a later void.
-        $scbCredit = round($overpayment, 2);
+        // Gated on whole centavos, so a credited ₱0.00 row, which
+        // reverseShareCapitalCredit()'s `credit > 0` lookup would never find
+        // to clean up on a later void, is never written.
+        $scbCredit = $overpayment / 100;
 
-        if ($hasScb && $scbCredit > 0 && ! in_array($loan->borrower->status, Borrower::NON_MEMBER_STATUSES, true)) {
+        if ($hasScb && $overpayment > 0 && ! in_array($loan->borrower->status, Borrower::NON_MEMBER_STATUSES, true)) {
             ShareCapitalLedger::create([
                 'borrower_id' => $loan->borrower_id,
                 'repayment_id' => $repayment->id,
@@ -503,7 +509,7 @@ class RepaymentService
                 'total_outstanding_before' => ($owedAfter + $applied) / 100,
                 'total_outstanding_after' => $owedAfter / 100,
                 'payment_type' => $repayment->payment_type,
-                'payment_badge' => $this->paymentBadge($owedIds, $allocations, (float) $repayment->overpayment, $loan->owesInsurancePremium()),
+                'payment_badge' => $this->paymentBadge($owedIds, $allocations, LoanService::toCentavos((float) $repayment->overpayment), $loan->owesInsurancePremium()),
                 'allocations' => $allocations,
                 'is_preview' => true,
             ];
@@ -668,11 +674,11 @@ class RepaymentService
      * @param  list<array{schedule_id: int}>  $allocations
      * @return array{type: string, label: string}
      */
-    private function paymentBadge(array $owedIds, array $allocations, float $overpayment, bool $premiumStillOwed): array
+    private function paymentBadge(array $owedIds, array $allocations, int $overpaymentCentavos, bool $premiumStillOwed): array
     {
         $owedPaid = ! $premiumStillOwed
             && ! AmortizationSchedule::whereIn('id', $owedIds)->where('status', '!=', 'paid')->exists();
-        $wentPast = round($overpayment, 2) > 0
+        $wentPast = $overpaymentCentavos > 0
             || collect($allocations)->contains(fn (array $a) => ! in_array($a['schedule_id'], $owedIds, true));
 
         $type = match (true) {
@@ -1022,7 +1028,12 @@ class RepaymentService
             // Only for a loan that takes payments (Loan::ACTIVE_STATUSES); a
             // payment on any other is refused, so there is nothing to preset.
             'advance_presets' => $takesPayments ? $this->advancePresets($loan, $schedules, $today) : [],
-            'payoff_amount' => $takesPayments ? $this->payoffCentavos($loan, $schedules, $today) / 100 : null,
+            // Null, too, on a loan with a Share Capital Build-Up: one payment
+            // can't settle it there (the allocation stops after the current
+            // period), so the page hides "Pay all remaining".
+            'payoff_amount' => $takesPayments && (float) $loan->scb_amount <= 0
+                ? $this->payoffCentavos($loan, $schedules, $today) / 100
+                : null,
             'overdue_amount' => round($overdueAmount, 2),
             'overdue_schedules_count' => $overdueSchedules->count(),
             'next_due_date' => $nextSchedule?->due_date->toDateString(),
@@ -1092,14 +1103,13 @@ class RepaymentService
      * plus every open period's penalty (as the payment will charge it),
      * interest and principal. The stored `total_outstanding` unless a period
      * fell late past its grace since penalties were last stamped, which this
-     * counts so the figure clears a loan without a Share Capital Build-Up.
+     * counts so the figure clears the loan in one payment.
      *
-     * On a loan WITH a Share Capital Build-Up it is the amount owed to show,
-     * not an amount one Record Payment settles the loan with: the allocation
-     * stops after the current period (recordRepaymentOnLockedLoan()), so
-     * recording it pays the current period and any overdue ones and credits
-     * the rest to a member's share capital (for a borrower who isn't a member
-     * it stays as overpayment).
+     * Only for a loan without a Share Capital Build-Up (getLoanSummary() sends
+     * null otherwise): with one, the allocation stops after the current period
+     * (recordRepaymentOnLockedLoan()), so recording this amount would pay the
+     * current period and any overdue ones and credit the rest to a member's
+     * share capital instead of settling the loan.
      *
      * @param  EloquentCollection<int, AmortizationSchedule>  $schedules
      */
@@ -1253,49 +1263,54 @@ class RepaymentService
 
     /**
      * Allocate remaining cash to a single schedule: penalty → interest → principal.
-     * Returns [remaining, principalPaid, interestPaid, penaltyPaid].
+     *
+     * In whole centavos: each part takes min(what it still owes, what is left),
+     * and its `*_paid` is written back exactly, so a period paid in full owes
+     * exactly nothing and the money left is exactly what the period did not
+     * take.
+     *
+     * @return array{0: int, 1: int, 2: int, 3: int} [remaining, principalPaid, interestPaid, penaltyPaid], in centavos
      */
-    private function allocateToSchedule(AmortizationSchedule $schedule, float $remaining): array
+    private function allocateToSchedule(AmortizationSchedule $schedule, int $remaining): array
     {
-        $principalPaid = 0.0;
-        $interestPaid = 0.0;
-        $penaltyPaid = 0.0;
+        $centavos = fn (mixed $pesos): int => LoanService::toCentavos((float) ($pesos ?? 0));
 
-        // Pay penalty first
-        $penaltyOwed = max(0, (float) $schedule->penalty_amount - (float) $schedule->penalty_paid);
-        if ($penaltyOwed > 0 && $remaining > 0) {
-            $penPay = min($penaltyOwed, $remaining);
-            $schedule->penalty_paid = round((float) $schedule->penalty_paid + $penPay, 2);
-            $penaltyPaid += $penPay;
-            $remaining -= $penPay;
+        $penaltyDue = $centavos($schedule->penalty_amount);
+        $interestDue = $centavos($schedule->interest_due);
+        $principalDue = $centavos($schedule->principal_due);
+        $penaltyPaidBefore = $centavos($schedule->penalty_paid);
+        $interestPaidBefore = $centavos($schedule->interest_paid);
+        $principalPaidBefore = $centavos($schedule->principal_paid);
+
+        $penaltyPaid = min(max(0, $penaltyDue - $penaltyPaidBefore), max(0, $remaining));
+        $remaining -= $penaltyPaid;
+
+        $interestPaid = min(max(0, $interestDue - $interestPaidBefore), max(0, $remaining));
+        $remaining -= $interestPaid;
+
+        $principalPaid = min(max(0, $principalDue - $principalPaidBefore), max(0, $remaining));
+        $remaining -= $principalPaid;
+
+        if ($penaltyPaid > 0) {
+            $schedule->penalty_paid = ($penaltyPaidBefore + $penaltyPaid) / 100;
         }
 
-        // Pay interest
-        $interestOwed = max(0, (float) $schedule->interest_due - (float) $schedule->interest_paid);
-        if ($interestOwed > 0 && $remaining > 0) {
-            $iPay = min($interestOwed, $remaining);
-            $schedule->interest_paid = round((float) $schedule->interest_paid + $iPay, 2);
-            $interestPaid += $iPay;
-            $remaining -= $iPay;
+        if ($interestPaid > 0) {
+            $schedule->interest_paid = ($interestPaidBefore + $interestPaid) / 100;
         }
 
-        // Pay principal
-        $principalOwed = max(0, (float) $schedule->principal_due - (float) $schedule->principal_paid);
-        if ($principalOwed > 0 && $remaining > 0) {
-            $pPay = min($principalOwed, $remaining);
-            $schedule->principal_paid = round((float) $schedule->principal_paid + $pPay, 2);
-            $principalPaid += $pPay;
-            $remaining -= $pPay;
+        if ($principalPaid > 0) {
+            $schedule->principal_paid = ($principalPaidBefore + $principalPaid) / 100;
         }
 
         // Determine schedule status
-        $principalFullyPaid = (float) $schedule->principal_paid >= (float) $schedule->principal_due;
-        $interestFullyPaid = (float) $schedule->interest_paid >= (float) $schedule->interest_due;
-        $penaltyFullyPaid = $schedule->penalty_amount == 0 || (float) $schedule->penalty_paid >= (float) $schedule->penalty_amount;
+        $principalFullyPaid = $principalPaidBefore + $principalPaid >= $principalDue;
+        $interestFullyPaid = $interestPaidBefore + $interestPaid >= $interestDue;
+        $penaltyFullyPaid = $penaltyDue === 0 || $penaltyPaidBefore + $penaltyPaid >= $penaltyDue;
 
         if ($principalFullyPaid && $interestFullyPaid && $penaltyFullyPaid) {
             $schedule->status = 'paid';
-        } elseif ($schedule->principal_paid > 0 || $schedule->interest_paid > 0) {
+        } elseif ($principalPaidBefore + $principalPaid > 0 || $interestPaidBefore + $interestPaid > 0) {
             $schedule->status = 'partial';
         }
 

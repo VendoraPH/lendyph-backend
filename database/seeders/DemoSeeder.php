@@ -11,7 +11,9 @@ use App\Models\ShareCapitalLedger;
 use App\Models\User;
 use App\Services\LoanService;
 use App\Services\RepaymentService;
+use Closure;
 use Illuminate\Database\Seeder;
+use Illuminate\Support\Carbon;
 use RuntimeException;
 
 class DemoSeeder extends Seeder
@@ -211,18 +213,25 @@ class DemoSeeder extends Seeder
         }
 
         // ── Loans in various statuses ──
-        // Loan 1: Released + ongoing (Rosario, salary loan, 3 months ago)
-        $loan1 = $loanService->createLoan([
-            'borrower_id' => $borrowers[0]->id,
-            'loan_product_id' => $salaryLoan->id,
-            'principal_amount' => 50000,
-            'interest_rate' => 3.0,
-            'start_date' => now()->subMonths(3)->toDateString(),
-            'purpose' => 'Business expansion',
-        ], $admin);
-        $loanService->submitForReview($loan1);
-        $loanService->approve($loan1, $admin, 'Good track record');
-        $loanService->release($loan1, $admin);
+        // Loan 1: Released + ongoing (Rosario, salary loan, 3 months ago).
+        // Released on its start date, so its two payments below come after
+        // the release, as the API requires of a real payment.
+        $loan1Start = now()->subMonths(3);
+        $loan1 = $this->onDate($loan1Start, function () use ($loanService, $borrowers, $salaryLoan, $loan1Start, $admin) {
+            $loan = $loanService->createLoan([
+                'borrower_id' => $borrowers[0]->id,
+                'loan_product_id' => $salaryLoan->id,
+                'principal_amount' => 50000,
+                'interest_rate' => 3.0,
+                'start_date' => $loan1Start->toDateString(),
+                'purpose' => 'Business expansion',
+            ], $admin);
+            $loanService->submitForReview($loan);
+            $loanService->approve($loan, $admin, 'Good track record');
+            $loanService->release($loan, $admin);
+
+            return $loan;
+        });
 
         // Make 2 payments to transition to ongoing
         $repaymentService = app(RepaymentService::class);
@@ -303,5 +312,27 @@ class DemoSeeder extends Seeder
         }
 
         $this->command->info('Demo data seeded: 3 users, 2 products, 2 fees, 8 borrowers, 5 loans, 6 pledges, 8 ledger entries.');
+    }
+
+    /**
+     * Run `$callback` with the clock set to `$date`, then put the clock back
+     * as it was, so a demo loan can be created and released on its own start
+     * date rather than today.
+     *
+     * @template TResult
+     *
+     * @param  Closure(): TResult  $callback
+     * @return TResult
+     */
+    private function onDate(Carbon $date, Closure $callback): mixed
+    {
+        $previous = Carbon::getTestNow();
+        Carbon::setTestNow($date);
+
+        try {
+            return $callback();
+        } finally {
+            Carbon::setTestNow($previous);
+        }
     }
 }

@@ -82,6 +82,8 @@ class ReportAccuracyTest extends TestCase
     public function test_repayments_report_excludes_payments_outside_the_date_range(): void
     {
         $loan = $this->createReleasedLoan();
+        // Released before the older payment: a payment can't predate its release.
+        $loan->forceFill(['released_at' => Carbon::today()->subDays(10)])->save();
 
         $today = Carbon::today()->toDateString();
         $tenDaysAgo = Carbon::today()->subDays(10)->toDateString();
@@ -503,6 +505,8 @@ class ReportAccuracyTest extends TestCase
     public function test_daily_collection_honours_the_requested_date_range(): void
     {
         $loan = $this->createReleasedLoan();
+        // Released before the payment five days ago: a payment can't predate its release.
+        $loan->forceFill(['released_at' => Carbon::today()->subDays(5)])->save();
         // 11,800 falls due today.
         $this->moveScheduleDaysAgo($loan, periodNumber: 1, daysAgo: 0);
 
@@ -654,6 +658,8 @@ class ReportAccuracyTest extends TestCase
     public function test_collection_efficiency_matches_daily_collection_for_identical_filters(): void
     {
         $loan = $this->createReleasedLoan();
+        // Released before the payment five days ago: a payment can't predate its release.
+        $loan->forceFill(['released_at' => Carbon::today()->subDays(5)])->save();
         // 11,800 falls due today.
         $this->moveScheduleDaysAgo($loan, periodNumber: 1, daysAgo: 0);
 
