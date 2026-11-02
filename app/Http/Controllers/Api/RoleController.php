@@ -218,6 +218,7 @@ class RoleController extends Controller
         ],
         responses: [
             new OA\Response(response: 200, description: 'Role deactivated'),
+            new OA\Response(response: 409, description: 'The role was deleted by another request while this one waited; nothing was written. Reload and try again'),
             new OA\Response(response: 422, description: 'Cannot deactivate admin role'),
         ],
     )]
@@ -234,9 +235,16 @@ class RoleController extends Controller
         // The change and its audit row commit together. A deactivated role
         // grants nothing (User::getPermissionsViaRoles()), so the permission
         // cache is cleared once the change is visible to other requests.
-        DB::transaction(function () use ($role) {
+        //
+        // Re-read under the role locks, as update() and destroy() do: a role
+        // deleted while this request waited answers 409 and writes nothing.
+        $role = DB::transaction(function () use ($role) {
+            self::lockAndRecheckLabels([]);
+            $role = self::relockedOrConflict($role);
             self::forgetPermissionCacheAfterCommit();
             $role->update(['is_active' => false]);
+
+            return $role;
         });
         $role->load('permissions')->loadCount('users');
 
@@ -253,15 +261,21 @@ class RoleController extends Controller
         ],
         responses: [
             new OA\Response(response: 200, description: 'Role reactivated'),
+            new OA\Response(response: 409, description: 'The role was deleted by another request while this one waited; nothing was written. Reload and try again'),
         ],
     )]
     public function reactivate(Role $role): RoleResource
     {
         $this->authorize('settings:update');
 
-        DB::transaction(function () use ($role) {
+        // Re-read under the role locks, as deactivate() does.
+        $role = DB::transaction(function () use ($role) {
+            self::lockAndRecheckLabels([]);
+            $role = self::relockedOrConflict($role);
             self::forgetPermissionCacheAfterCommit();
             $role->update(['is_active' => true]);
+
+            return $role;
         });
         $role->load('permissions')->loadCount('users');
 

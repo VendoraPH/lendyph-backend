@@ -5,7 +5,7 @@ namespace Tests\Feature\IntegrityRound;
 use App\Models\AuditLog;
 use App\Models\Role;
 use App\Models\User;
-use Illuminate\Cache\Events\KeyForgotten;
+use Illuminate\Cache\Events\ForgettingKey;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Tests\TestCase;
@@ -116,7 +116,7 @@ class RoleWriteRaceTest extends TestCase
 
         $levels = [];
         $key = config('permission.cache.key');
-        Event::listen(KeyForgotten::class, function (KeyForgotten $event) use ($key, &$levels): void {
+        Event::listen(ForgettingKey::class, function (ForgettingKey $event) use ($key, &$levels): void {
             if ($event->key === $key) {
                 $levels[] = DB::transactionLevel();
             }
@@ -136,7 +136,7 @@ class RoleWriteRaceTest extends TestCase
 
         $levels = [];
         $key = config('permission.cache.key');
-        Event::listen(KeyForgotten::class, function (KeyForgotten $event) use ($key, &$levels): void {
+        Event::listen(ForgettingKey::class, function (ForgettingKey $event) use ($key, &$levels): void {
             if ($event->key === $key) {
                 $levels[] = DB::transactionLevel();
             }
