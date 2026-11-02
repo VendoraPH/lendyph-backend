@@ -144,12 +144,12 @@ class BuildUpExactPaymentTest extends TestCase
         $preview = $this->preview($loan, 6150.00);
 
         $this->assertSame(['type' => 'advance', 'label' => 'Advance Payment'], $preview['payment_badge']);
-        $this->assertSame('partial', $preview['payment_type']);
+        $this->assertSame('advance', $preview['payment_type']);
         $this->assertEqualsWithDelta(250.00, (float) $preview['excess'], 0.001);
 
         $repayment = $this->pay($loan, 6150.00);
 
-        $this->assertSame('partial', $repayment->payment_type);
+        $this->assertSame('advance', $repayment->payment_type);
         $this->assertEqualsWithDelta(250.00, (float) $repayment->overpayment, 0.001);
         $this->assertSame(0, ShareCapitalLedger::where('repayment_id', $repayment->id)->count());
     }
@@ -161,11 +161,11 @@ class BuildUpExactPaymentTest extends TestCase
         $preview = $this->preview($loan, 6150.01);
 
         $this->assertSame(['type' => 'advance', 'label' => 'Advance Payment'], $preview['payment_badge']);
-        $this->assertNotSame('exact', $preview['payment_type']);
+        $this->assertSame('advance', $preview['payment_type']);
 
         $repayment = $this->pay($loan, 6150.01);
 
-        $this->assertNotSame('exact', $repayment->payment_type);
+        $this->assertSame('advance', $repayment->payment_type);
         $this->assertEqualsWithDelta(250.01, (float) ShareCapitalLedger::where('repayment_id', $repayment->id)->sum('credit'), 0.001);
     }
 
@@ -176,7 +176,7 @@ class BuildUpExactPaymentTest extends TestCase
         $preview = $this->preview($loan, 6149.99);
 
         $this->assertSame(['type' => 'advance', 'label' => 'Advance Payment'], $preview['payment_badge']);
-        $this->assertNotSame('exact', $preview['payment_type']);
+        $this->assertSame('advance', $preview['payment_type']);
     }
 
     public function test_a_payment_reaching_a_period_not_yet_due_is_advance_whatever_the_build_up(): void
@@ -221,7 +221,7 @@ class BuildUpExactPaymentTest extends TestCase
         $preview = $this->preview($loan, $amount);
 
         $this->assertSame('advance', $preview['payment_badge']['type']);
-        $this->assertNotSame('exact', $preview['payment_type']);
+        $this->assertSame('advance', $preview['payment_type']);
     }
 
     public function test_paying_the_period_plus_its_build_up_on_its_due_date_is_exact(): void

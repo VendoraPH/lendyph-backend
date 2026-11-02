@@ -695,7 +695,7 @@ class RepaymentService
     /**
      * The stored `payment_type` of a payment on a loan with a Share Capital
      * Build-Up, decided exactly as the preview's badge (paymentBadge()) is, so
-     * the two agree on exact and advance.
+     * the two always agree.
      *
      * - Advance when the payment reaches any period past what is owed
      *   (owedAmong(): the periods due on or before the payment date, or the
@@ -703,8 +703,10 @@ class RepaymentService
      * - Exact when every owed period is settled, no insurance premium is left
      *   owed, and the overpayment is nothing or exactly the build-up of those
      *   periods (overpaymentIsTheBuildUp()), the figure amountDueNow() adds.
-     * - Partial otherwise, as before: an owed period left unpaid, or an extra
-     *   that is not the build-up (the badge says advance there).
+     * - Advance when every owed period is settled and no premium is left owed
+     *   but the overpayment is not exactly that build-up: more or less than
+     *   it, or a non-member's extra, which is never credited to share capital.
+     * - Partial otherwise: an owed period or the premium left unpaid.
      *
      * `$schedules` are the open periods the allocation just wrote to, so their
      * status is what it left.
@@ -722,11 +724,15 @@ class RepaymentService
         $owed = $schedules->whereIn('id', $owedIds);
         $owedPaid = ! $premiumStillOwed && $owed->every(fn (AmortizationSchedule $s) => $s->status === 'paid');
 
-        if ($owedPaid && ($overpaymentCentavos === 0 || $this->overpaymentIsTheBuildUp($loan, $overpaymentCentavos, $owed))) {
+        if (! $owedPaid) {
+            return 'partial';
+        }
+
+        if ($overpaymentCentavos === 0 || $this->overpaymentIsTheBuildUp($loan, $overpaymentCentavos, $owed)) {
             return 'exact';
         }
 
-        return 'partial';
+        return 'advance';
     }
 
     /**
