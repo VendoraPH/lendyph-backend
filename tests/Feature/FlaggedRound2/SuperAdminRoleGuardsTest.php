@@ -1,7 +1,9 @@
 <?php
 
+use App\Models\AuditLog;
 use App\Models\Role;
 use App\Models\User;
+use Illuminate\Support\Facades\DB;
 use Spatie\Permission\PermissionRegistrar;
 use Tests\TestCase;
 
@@ -130,4 +132,142 @@ it('lets a client admin edit the admin role\'s own permissions', function () {
         ->assertSuccessful();
 
     expect($adminRole->fresh()->permissions->pluck('name')->contains('reports:export'))->toBeFalse();
+});
+
+function flaggedRoleAuditCount(): int
+{
+    return AuditLog::where('auditable_type', (new Role)->getMorphClass())->count();
+}
+
+it('refuses renaming the super_admin or admin key even when is_system is not set', function (string $key) {
+    $role = Role::where('name', $key)->firstOrFail();
+    DB::table('roles')->where('id', $role->id)->update(['is_system' => false]);
+
+    $this->actingAs(flaggedClientAdmin())
+        ->putJson("/api/roles/{$role->id}", ['name' => 'platform_owner'])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['name']);
+
+    expect($role->fresh()->name)->toBe($key);
+})->with(['super_admin', 'admin']);
+
+it('refuses deleting the super_admin or admin role even when is_system is not set', function (string $key) {
+    $role = Role::where('name', $key)->firstOrFail();
+    DB::table('roles')->where('id', $role->id)->update(['is_system' => false]);
+
+    $this->actingAs(flaggedClientAdmin())
+        ->deleteJson("/api/roles/{$role->id}")
+        ->assertStatus(422)
+        ->assertJsonPath('errors.role.0', "System role '{$key}' cannot be deleted.");
+
+    expect(Role::where('name', $key)->exists())->toBeTrue();
+})->with(['super_admin', 'admin']);
+
+it('accepts a client admin\'s description-only save of super_admin when its stored label is the default', function () {
+    $superAdmin = Role::where('name', 'super_admin')->firstOrFail();
+    DB::table('roles')->where('id', $superAdmin->id)->update(['display_name' => 'Super Admin']);
+    $stored = $superAdmin->permissions->pluck('name')->all();
+    $before = flaggedRoleAuditCount();
+
+    // What the role editor sends: the default label as null, the full list.
+    $this->actingAs(flaggedClientAdmin())
+        ->putJson("/api/roles/{$superAdmin->id}", [
+            'display_name' => null,
+            'description' => 'Platform team',
+            'permissions' => $stored,
+        ])
+        ->assertSuccessful();
+
+    $fresh = $superAdmin->fresh();
+    expect($fresh->display_name)->toBe('Super Admin');
+    expect($fresh->description)->toBe('Platform team');
+
+    $rows = AuditLog::where('auditable_type', (new Role)->getMorphClass())->where('auditable_id', $superAdmin->id)->orderBy('id')->get();
+    expect(flaggedRoleAuditCount())->toBe($before + 1);
+    expect($rows->last()->action)->toBe('updated');
+    expect($rows->last()->new_values)->toHaveKey('description');
+    expect($rows->last()->new_values)->not->toHaveKey('display_name');
+});
+
+it('writes no audit row for a refused save', function () {
+    $superAdmin = Role::where('name', 'super_admin')->firstOrFail();
+    $target = Role::create(['name' => 'front_desk', 'guard_name' => 'web', 'is_system' => false]);
+    $target->syncPermissions(['dashboard:view']);
+    $clerkRole = Role::create(['name' => 'settings_clerk', 'guard_name' => 'web', 'is_system' => false]);
+    $clerkRole->syncPermissions(['settings:view', 'settings:update', 'dashboard:view']);
+    $clerk = User::factory()->create();
+    $clerk->assignRole($clerkRole);
+    app(PermissionRegistrar::class)->forgetCachedPermissions();
+    $before = flaggedRoleAuditCount();
+
+    $this->actingAs(flaggedClientAdmin())
+        ->putJson("/api/roles/{$superAdmin->id}", ['description' => 'Changed', 'permissions' => ['dashboard:view']])
+        ->assertStatus(422);
+
+    $this->actingAs($clerk)
+        ->putJson("/api/roles/{$target->id}", ['description' => 'Changed', 'permissions' => ['dashboard:view', 'loans:approve']])
+        ->assertStatus(422);
+
+    expect(flaggedRoleAuditCount())->toBe($before);
+    expect($superAdmin->fresh()->description)->not->toBe('Changed');
+    expect($target->fresh()->description)->not->toBe('Changed');
+});
+
+it('accepts super_admin\'s unchanged list in another order and with duplicates', function () {
+    $superAdmin = Role::where('name', 'super_admin')->firstOrFail();
+    $stored = $superAdmin->permissions->pluck('name')->sort()->values()->all();
+    $reordered = [$stored[0], ...array_reverse($stored)];
+    $before = flaggedRoleAuditCount();
+
+    $this->actingAs(flaggedClientAdmin())
+        ->putJson("/api/roles/{$superAdmin->id}", ['permissions' => $reordered])
+        ->assertSuccessful();
+
+    expect($superAdmin->fresh()->permissions->pluck('name')->sort()->values()->all())->toBe($stored);
+    expect(flaggedRoleAuditCount())->toBe($before);
+});
+
+it('refuses a client admin sending super_admin an empty or null permission list, which would revoke them all', function (?array $permissions) {
+    $superAdmin = Role::where('name', 'super_admin')->firstOrFail();
+    $stored = $superAdmin->permissions->pluck('name')->sort()->values()->all();
+
+    $this->actingAs(flaggedClientAdmin())
+        ->putJson("/api/roles/{$superAdmin->id}", ['permissions' => $permissions])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['permissions']);
+
+    expect($superAdmin->fresh()->permissions->pluck('name')->sort()->values()->all())->toBe($stored);
+})->with([
+    'null' => [null],
+    'empty list' => [[]],
+]);
+
+it('judges a grant again against the role\'s permissions under the lock', function () {
+    $clerkRole = Role::create(['name' => 'settings_clerk', 'guard_name' => 'web', 'is_system' => false]);
+    $clerkRole->syncPermissions(['settings:view', 'settings:update', 'dashboard:view']);
+    $clerk = User::factory()->create();
+    $clerk->assignRole($clerkRole);
+
+    // At validation the role already carries loans:approve, so sending it
+    // back is no grant.
+    $target = Role::create(['name' => 'approver_desk', 'guard_name' => 'web', 'is_system' => false]);
+    $target->syncPermissions(['dashboard:view', 'loans:approve']);
+    app(PermissionRegistrar::class)->forgetCachedPermissions();
+
+    // Another save takes it off between validation and this write.
+    Role::updated(function (Role $role) use ($target) {
+        if ($role->id === $target->id) {
+            DB::table('role_has_permissions')
+                ->where('role_id', $target->id)
+                ->where('permission_id', DB::table('permissions')->where('name', 'loans:approve')->value('id'))
+                ->delete();
+        }
+    });
+
+    $this->actingAs($clerk)
+        ->putJson("/api/roles/{$target->id}", ['description' => 'Desk', 'permissions' => ['dashboard:view', 'loans:approve']])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['permissions']);
+
+    expect($target->fresh()->description)->not->toBe('Desk');
 });

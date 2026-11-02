@@ -3,6 +3,7 @@
 namespace App\Http\Requests\Concerns;
 
 use App\Models\Role;
+use App\Services\RolePermissionGrants;
 use Illuminate\Support\Collection;
 use Illuminate\Validation\Validator;
 
@@ -52,16 +53,10 @@ trait GuardsRolePermissionGrants
             return;
         }
 
-        $missing = collect($sent)
-            ->diff($stored)
-            ->diff($actor->getAllPermissions()->pluck('name'))
-            ->values();
+        $missing = RolePermissionGrants::ungrantable($actor, $sent, $stored);
 
-        if ($missing->isNotEmpty()) {
-            $validator->errors()->add('permissions', sprintf(
-                'You can\'t grant permissions you do not hold yourself (%s).',
-                $missing->take(3)->implode(', ').($missing->count() > 3 ? ', …' : ''),
-            ));
+        if ($missing !== []) {
+            $validator->errors()->add('permissions', RolePermissionGrants::refusal($missing));
         }
     }
 

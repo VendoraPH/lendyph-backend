@@ -156,3 +156,21 @@ it('writes one system row, with no user, when a migration changes a role\'s perm
     expect($rows->first()->old_values['permissions'])->not->toContain('settings:delete');
     expect($rows->first()->new_values['permissions'])->toContain('settings:delete');
 });
+
+it('records the permissions a deleted role carried', function () {
+    $role = Role::create(['name' => 'temp_auditor', 'guard_name' => 'web', 'is_system' => false]);
+    $role->syncPermissions(['loans:view', 'dashboard:view']);
+
+    $this->deleteJson("/api/roles/{$role->id}")->assertSuccessful();
+
+    $rows = AuditLog::query()
+        ->where('action', 'role_permissions_changed')
+        ->where('auditable_type', $role->getMorphClass())
+        ->where('auditable_id', $role->id)
+        ->get();
+
+    expect($rows)->toHaveCount(1);
+    expect($rows->first()->user_id)->toBe($this->actor->id);
+    expect($rows->first()->old_values)->toBe(['permissions' => ['dashboard:view', 'loans:view']]);
+    expect($rows->first()->new_values)->toBe(['permissions' => []]);
+});

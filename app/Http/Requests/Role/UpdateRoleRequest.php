@@ -7,6 +7,7 @@ use App\Models\Role;
 use App\Rules\UniqueRoleDisplayName;
 use App\Rules\ValidUtf8;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\Validator;
 
@@ -83,7 +84,8 @@ class UpdateRoleRequest extends FormRequest
                     return;
                 }
 
-                if ($role->is_system && $this->filled('name') && $this->input('name') !== $role->name) {
+                if (($role->is_system || in_array($role->name, Role::PROTECTED_KEYS, true))
+                    && $this->filled('name') && $this->input('name') !== $role->name) {
                     $validator->errors()->add(
                         'name',
                         "System role '{$role->name}' cannot be renamed."
@@ -97,7 +99,7 @@ class UpdateRoleRequest extends FormRequest
                 // a change too; sending the stored one back is not.
                 if ($role->name === 'super_admin'
                     && $this->has('display_name')
-                    && self::blankToNull($this->input('display_name')) !== self::blankToNull($role->display_name)
+                    && self::effectiveLabel($role, $this->input('display_name')) !== self::effectiveLabel($role, $role->display_name)
                     && ! $this->user()->hasRole('super_admin')) {
                     $validator->errors()->add(
                         'display_name',
@@ -111,10 +113,16 @@ class UpdateRoleRequest extends FormRequest
     }
 
     /**
-     * A blank label and no label are the same stored value.
+     * The label a role is shown by: a blank or missing label means the default,
+     * the key in headline case ("Super Admin"), which is also what the role
+     * editor shows, and sends back as `display_name: null`.
      */
-    private static function blankToNull(mixed $value): mixed
+    private static function effectiveLabel(Role $role, mixed $value): mixed
     {
-        return is_string($value) && trim($value) === '' ? null : $value;
+        if ($value === null || (is_string($value) && trim($value) === '')) {
+            return Str::headline($role->name);
+        }
+
+        return is_string($value) ? trim($value) : $value;
     }
 }

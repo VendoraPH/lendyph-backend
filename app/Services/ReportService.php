@@ -1269,7 +1269,7 @@ class ReportService
      *
      * Cash IN is what actually crossed the counter: posted repayments — scoped
      * through releasedLoanScope() so the figure reconciles exactly with
-     * dailyCollection()'s `total_collected` for the same period — plus share
+     * dailyCollection()'s `total_received` for the same period — plus share
      * capital paid in on its own.
      *
      * Share capital withheld from a loan at release (a ledger row carrying a

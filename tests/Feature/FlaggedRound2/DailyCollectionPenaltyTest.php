@@ -1,8 +1,10 @@
 <?php
 
+use App\Models\Branch;
 use App\Models\Loan;
 use App\Models\Repayment;
 use Carbon\Carbon;
+use Illuminate\Support\Facades\DB;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
@@ -161,4 +163,109 @@ it('gives Collection Efficiency the same overall figures, and caps every branch 
         expect((float) $row['collection_rate'])->toBeLessThanOrEqual(100.0);
     }
     expect((float) $efficiency['by_branch'][0]['total_collected'])->toBe(11800.0);
+});
+
+it('narrows penalty collected and cash received to the branch filter', function () {
+    $satellite = Branch::factory()->create(['name' => 'Satellite Branch']);
+
+    $main = $this->createReleasedLoan();
+    flaggedMovePeriod($main, 1, 40);
+    flaggedPostPayment($this, $main, 100);
+
+    $other = $this->createReleasedLoan();
+    DB::table('loans')->where('id', $other->id)->update(['branch_id' => $satellite->id]);
+    flaggedMovePeriod($other, 1, 40);
+    $payment = flaggedPostPayment($this, $other, 150);
+    expect((float) $payment->penalty_applied)->toBe(150.0);
+
+    $from = Carbon::today()->subDays(40)->toDateString();
+    $to = Carbon::today()->toDateString();
+    $figures = fn (string $extra) => $this->getJson("/api/reports/daily-collection?date_from={$from}&date_to={$to}{$extra}")->assertOk()->json('data');
+
+    $mainOnly = $figures("&branch_id={$this->branch->id}");
+    expect((float) $mainOnly['penalty_collected'])->toBe(100.0);
+    expect((float) $mainOnly['total_received'])->toBe(100.0);
+    expect((float) $mainOnly['total_due'])->toBe(11800.0);
+
+    $satelliteOnly = $figures("&branch_id={$satellite->id}");
+    expect((float) $satelliteOnly['penalty_collected'])->toBe(150.0);
+    expect((float) $satelliteOnly['total_received'])->toBe(150.0);
+
+    $all = $figures('');
+    expect((float) $all['penalty_collected'])->toBe(250.0);
+    expect((float) $all['total_received'])->toBe(250.0);
+    expect((float) $all['total_collected'])->toBe(0.0);
+});
+
+it('takes a voided payment back out of both reports', function () {
+    $loan = $this->createReleasedLoan();
+    flaggedMovePeriod($loan, 1, 0);
+    $payment = flaggedPostPayment($this, $loan, 5900);
+
+    $this->patchJson("/api/repayments/{$payment->id}/void", [
+        'void_reason' => 'Duplicate receipt captured at the counter.',
+    ])->assertOk();
+
+    $today = Carbon::today()->toDateString();
+    foreach (['daily-collection', 'collection-efficiency'] as $report) {
+        $data = $this->getJson("/api/reports/{$report}?date_from={$today}&date_to={$today}")->assertOk()->json('data');
+
+        expect((float) $data['total_due'])->toBe(11800.0, $report);
+        expect((float) $data['total_collected'])->toBe(0.0, $report);
+        expect((float) $data['collection_rate'])->toBe(0.0, $report);
+        expect((float) $data['total_received'])->toBe(0.0, $report);
+        expect($data['counts'])->toBe(['collected' => 0, 'partial' => 0, 'pending' => 1], $report);
+    }
+});
+
+it('has branch rows and month rows that add up to the overall figures', function () {
+    $satellite = Branch::factory()->create(['name' => 'Satellite Branch']);
+    $monthOne = Carbon::today()->startOfMonth()->subMonths(2)->addDays(14);
+    $monthTwo = Carbon::today()->startOfMonth()->subMonth()->addDays(14);
+
+    $setPeriod = function (Loan $loan, int $period, Carbon $due, float $principalPaid, float $interestPaid, float $penaltyPaid = 0): void {
+        $loan->amortizationSchedules()->where('period_number', $period)->update([
+            'due_date' => $due->toDateString(),
+            'principal_paid' => $principalPaid,
+            'interest_paid' => $interestPaid,
+            'penalty_paid' => $penaltyPaid,
+        ]);
+    };
+
+    // Main: month one paid in full, month two 5,000 paid.
+    $main = $this->createReleasedLoan();
+    $setPeriod($main, 1, $monthOne, 10000, 1800);
+    $setPeriod($main, 2, $monthTwo, 3200, 1800);
+
+    // Satellite: month one unpaid, month two paid in full plus penalty (never counted).
+    $other = $this->createReleasedLoan();
+    DB::table('loans')->where('id', $other->id)->update(['branch_id' => $satellite->id]);
+    $setPeriod($other, 1, $monthOne, 0, 0);
+    $setPeriod($other, 2, $monthTwo, 10000, 1800, 300);
+
+    $from = Carbon::today()->startOfMonth()->subMonths(2)->toDateString();
+    $to = Carbon::today()->startOfMonth()->subMonth()->endOfMonth()->toDateString();
+    $data = $this->getJson("/api/reports/collection-efficiency?date_from={$from}&date_to={$to}")->assertOk()->json('data');
+
+    expect((float) $data['total_due'])->toBe(47200.0);
+    expect((float) $data['total_collected'])->toBe(28600.0);
+    expect((float) $data['uncollected'])->toBe(18600.0);
+    expect((float) $data['collection_rate'])->toBe(60.59);
+
+    $branches = collect($data['by_branch'])->keyBy('branch_id');
+    expect($branches)->toHaveCount(2);
+    expect((float) $branches[$this->branch->id]['total_collected'])->toBe(16800.0);
+    expect((float) $branches[$satellite->id]['total_collected'])->toBe(11800.0);
+
+    $months = collect($data['by_period'])->keyBy('period');
+    expect($months)->toHaveCount(2);
+    expect((float) $months[$monthOne->format('Y-m')]['total_collected'])->toBe(11800.0);
+    expect((float) $months[$monthTwo->format('Y-m')]['total_collected'])->toBe(16800.0);
+
+    foreach (['by_branch', 'by_period'] as $rows) {
+        foreach (['total_due', 'total_collected', 'uncollected'] as $figure) {
+            expect(round(collect($data[$rows])->sum(fn (array $row) => (float) $row[$figure]), 2))
+                ->toBe((float) $data[$figure], "{$rows} {$figure}");
+        }
+    }
 });

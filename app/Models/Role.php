@@ -20,6 +20,13 @@ class Role extends SpatieRole
 {
     use Auditable;
 
+    /**
+     * Keys that can't be renamed, deleted or deactivated, whatever `is_system`
+     * says: no migration sets `is_system` on them (only the seeder does), and
+     * permission checks and the Gate::before bypass key off these names.
+     */
+    public const PROTECTED_KEYS = ['super_admin', 'admin'];
+
     protected $fillable = [
         'name',
         'display_name',
