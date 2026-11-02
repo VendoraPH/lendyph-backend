@@ -147,6 +147,9 @@ class ReportService
         // premium a restructure carried over is in it too), and each payment
         // takes off its principal and its premium, so that after the last
         // payment the running balance lands exactly on Loan::$outstanding_balance.
+        // Not on a restructured source: its ledger has no row for what moved to
+        // the new loan, so it closes at the balance that moved (principal and
+        // the premium carried out), not at its zero outstanding balance.
         //
         // A restructured loan's premium owed was zeroed when the restructure
         // carried it to the new loan, so what it carried out is added back
@@ -225,7 +228,11 @@ class ReportService
             'interest' => self::sumOfFigures(array_column(array_column($arrears, 'remaining'), 'interest')),
             'penalty' => self::sumOfFigures(array_column(array_column($arrears, 'remaining'), 'penalty')),
             'amount_due' => self::sumOfFigures(array_column($arrears, 'amount_due')),
+            // The insurance premium still owed, beside the table: a payment
+            // takes it before any period, so the demand includes it.
+            'insurance_owed' => $arrears === [] ? 0 : max(0, $centavosOf($loan->insurance_remaining_balance)) / 100,
         ];
+        $totalDemanded = ($centavosOf($demandTotals['amount_due']) + $centavosOf($demandTotals['insurance_owed'])) / 100;
 
         return [
             'loan' => [
@@ -257,9 +264,11 @@ class ReportService
                 'total_due' => 'money',
                 'amount_paid' => 'money',
             ]),
-            // Everything in arrears today, the demand letter's total, and its
-            // table's column totals over the rows with `is_overdue`.
-            'total_demanded' => $demandTotals['amount_due'],
+            // Everything in arrears today plus, when there are arrears, the
+            // insurance premium still owed (payments take it first): the
+            // demand letter's total. Then its table's column totals over the
+            // rows with `is_overdue`, and the premium as its own figure.
+            'total_demanded' => $totalDemanded,
             'demand_totals' => $demandTotals,
             'summary' => [
                 'total_paid' => round($totalPaid, 2),

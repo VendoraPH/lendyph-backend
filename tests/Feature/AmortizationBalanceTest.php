@@ -256,7 +256,46 @@ class AmortizationBalanceTest extends TestCase
         $this->assertMoney($summary['total_paid'], $totals['paid']);
         $this->assertMoney($summary['overdue_amount'], $totals['overdue']);
 
-        $this->assertMoney(array_sum(array_column($data['periods'], 'balance')), $totals['balance']);
+        // The periods plus the insurance premium still owed, its own figure.
+        $this->assertMoney(array_sum(array_column($data['periods'], 'balance')) + $totals['insurance_owed'], $totals['balance']);
+    }
+
+    public function test_the_footer_carries_the_premium_owed_so_it_equals_current_outstanding(): void
+    {
+        $product = LoanProduct::factory()->create([
+            'interest_rate' => 3.0, 'interest_method' => 'straight', 'term' => 6, 'frequency' => 'monthly',
+            'penalty_rate' => 2.0, 'grace_period_days' => 3,
+        ]);
+        $borrower = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+        $loans = app(LoanService::class);
+        $loan = $loans->createLoan([
+            'borrower_id' => $borrower->id,
+            'loan_product_id' => $product->id,
+            'principal_amount' => 60000,
+            'start_date' => now()->toDateString(),
+        ], $this->admin);
+        $loans->submitForReview($loan);
+        $loans->approve($loan, $this->admin, 'Approved for testing');
+        // 1% premium ₱600, ₱200 collected at release, ₱400 owed.
+        $loans->release($loan, $this->admin, [
+            'insurance_premium_percentage' => 1.0,
+            'insurance_payment_type' => 'partial',
+            'insurance_partial_amount' => 200,
+        ]);
+        $loan->refresh();
+
+        $data = $this->balances($loan);
+
+        $this->assertMoney(400, $data['totals']['insurance_owed'] ?? -1);
+        $this->assertMoney(71200, $data['totals']['balance']);
+        $this->assertTotalsMatchSummary($loan, $data);
+
+        // A payment takes the premium first: ₱150 leaves ₱250 owed.
+        $this->pay($loan, 150);
+        $data = $this->balances($loan);
+        $this->assertMoney(250, $data['totals']['insurance_owed']);
+        $this->assertMoney(71050, $data['totals']['balance']);
+        $this->assertTotalsMatchSummary($loan, $data);
     }
 
     private function assertMoney(float|int $expected, float|int $actual): void

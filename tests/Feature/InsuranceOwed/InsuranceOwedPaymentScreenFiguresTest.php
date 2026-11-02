@@ -274,6 +274,33 @@ class InsuranceOwedPaymentScreenFiguresTest extends TestCase
         $this->assertEquals(self::SCHEDULE_TOTAL + 250, $summary['outstanding_balance']);
     }
 
+    public function test_the_restructurable_balance_is_the_restructure_cap_without_the_premium(): void
+    {
+        $loan = $this->loanOwingPremium();
+
+        $summary = $this->getJson("/api/loans/{$loan->id}/summary")->assertOk()->json('data');
+        $this->assertEquals(self::SCHEDULE_TOTAL, $summary['restructurable_balance'] ?? null);
+        $this->assertEquals(self::SCHEDULE_TOTAL + self::OWED, $summary['outstanding_balance']);
+        $this->assertEquals(
+            self::SCHEDULE_TOTAL,
+            $this->getJson("/api/loans/{$loan->id}")->assertOk()->json('data.restructurable_balance'),
+        );
+
+        $payload = fn (float $principal): array => [
+            'borrower_id' => $loan->borrower_id,
+            'loan_product_id' => $loan->loan_product_id,
+            'principal_amount' => $principal,
+            'start_date' => now()->toDateString(),
+        ];
+
+        // A centavo over the cap is refused; the cap itself needs no remarks
+        // (no shortfall).
+        $this->postJson("/api/loans/{$loan->id}/restructure", $payload($summary['restructurable_balance'] + 0.01))
+            ->assertStatus(422)->assertJsonValidationErrors('principal_amount');
+        $this->postJson("/api/loans/{$loan->id}/restructure", $payload($summary['restructurable_balance']))
+            ->assertCreated();
+    }
+
     public function test_the_repayments_list_totals_the_premium_collected_by_posted_payments(): void
     {
         $first = $this->loanOwingPremium();

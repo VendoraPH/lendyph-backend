@@ -160,7 +160,7 @@ class ReportController extends Controller
     #[OA\Get(
         path: '/api/reports/statement-of-account/{loan}',
         summary: 'Statement of Account',
-        description: 'All transactions, schedule, and balance for a specific loan. Each `amortization_schedule` row also carries the demand letter\'s arrears: `remaining` (`principal`, `interest`, `penalty` still owed, never below 0), `amount_due` (their sum), `days_overdue` (whole days past the due date, today in Asia/Manila; 0 when not yet due) and `is_overdue` (due before today with something still owed). `total_demanded` is every `is_overdue` row\'s `amount_due`, and `demand_totals` (`principal`, `interest`, `penalty`, `amount_due`) the columns over those rows. Totals in whole centavos.',
+        description: 'All transactions, schedule, and balance for a specific loan. Each `amortization_schedule` row also carries the demand letter\'s arrears: `remaining` (`principal`, `interest`, `penalty` still owed, never below 0), `amount_due` (their sum), `days_overdue` (whole days past the due date, today in Asia/Manila; 0 when not yet due) and `is_overdue` (due before today with something still owed). `total_demanded` is every `is_overdue` row\'s `amount_due` plus, when there are any, the insurance premium still owed (a payment takes it first), and `demand_totals` (`principal`, `interest`, `penalty`, `amount_due`) the columns over those rows, with `insurance_owed` the premium included in `total_demanded`. `summary` also carries `insurance_owed`, inside `outstanding_balance`. Totals in whole centavos.',
         tags: ['Reports'],
         security: [['sanctum' => []]],
         parameters: [

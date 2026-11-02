@@ -995,6 +995,11 @@ class RepaymentService
             // The insurance premium the release left owed, still owed: part of
             // what the loan owes, as in LoanResource's `total_payable`.
             'insurance_owed' => max(0, LoanService::toCentavos((float) $loan->insurance_remaining_balance)) / 100,
+            // The most a restructure may take as the new loan's principal
+            // (LoanService::totalOutstanding()): the open periods' principal,
+            // interest and penalty, without the premium, which moves to the
+            // new loan as premium owed. The restructure form's starting figure.
+            'restructurable_balance' => LoanService::restructurableCentavos($schedules) / 100,
             'outstanding_balance' => (LoanService::toCentavos($outstandingPrincipal) + LoanService::toCentavos($outstandingInterest)
                 + LoanService::toCentavos($outstandingPenalty) + max(0, LoanService::toCentavos((float) $loan->insurance_remaining_balance))) / 100,
             'overdue_amount' => round($overdueAmount, 2),

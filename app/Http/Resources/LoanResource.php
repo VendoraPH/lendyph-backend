@@ -5,6 +5,7 @@ namespace App\Http\Resources;
 use App\Models\AmortizationSchedule;
 use App\Models\Loan;
 use App\Services\CollateralSecurity;
+use App\Services\LoanService;
 use App\Services\PersistedScheduleFigures;
 use App\Services\RepaymentService;
 use Illuminate\Http\Request;
@@ -79,6 +80,7 @@ use OpenApi\Attributes as OA;
             new OA\Property(property: 'last_period_number', type: 'integer', nullable: true),
             new OA\Property(property: 'schedule_id', type: 'integer', nullable: true),
         ]),
+        new OA\Property(property: 'restructurable_balance', type: 'number', nullable: true, description: 'The most a restructure may take as the new loan\'s principal: the open periods\' unpaid principal, interest and penalty, never the insurance premium owed (that moves to the new loan as premium owed). Null where the periods were not loaded.'),
         new OA\Property(property: 'insurance_owed', type: 'number', description: 'Insurance premium the release left unpaid and still owed: interest-free, never principal, collected first from each payment (same figure as `insurance_remaining_balance`)'),
         new OA\Property(property: 'source_loan_id', type: 'integer', nullable: true, description: 'The loan this one was restructured out of'),
         new OA\Property(property: 'is_restructure', type: 'boolean', description: 'True when source_loan_id is set'),
@@ -249,6 +251,11 @@ class LoanResource extends JsonResource
             // and every open period due by today, from the server
             // (RepaymentService::amountDueNow()). Only for a loan that takes
             // payments, and only where the periods were loaded.
+            // The restructure cap (LoanService::restructurableCentavos()),
+            // where the periods were loaded.
+            'restructurable_balance' => $this->relationLoaded('amortizationSchedules')
+                ? LoanService::restructurableCentavos($this->amortizationSchedules) / 100
+                : null,
             'amount_due_now' => $this->relationLoaded('amortizationSchedules') && in_array($this->status, Loan::ACTIVE_STATUSES, true)
                 ? app(RepaymentService::class)->amountDueNow($this->resource, $this->amortizationSchedules, now())
                 : null,

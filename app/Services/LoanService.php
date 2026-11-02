@@ -631,18 +631,33 @@ class LoanService
      */
     private function totalOutstanding(Loan $loan): float
     {
-        $openSchedules = $loan->amortizationSchedules()
-            ->reorder()
-            ->whereIn('status', ['pending', 'partial', 'overdue'])
-            ->get();
+        return self::restructurableCentavos($loan->amortizationSchedules()->reorder()->get()) / 100;
+    }
 
-        $unpaid = $openSchedules->sum(
-            fn (AmortizationSchedule $s): float => max(0, (float) $s->principal_due - (float) $s->principal_paid)
-                + max(0, (float) $s->interest_due - (float) $s->interest_paid)
-                + max(0, (float) ($s->penalty_amount ?? 0) - (float) ($s->penalty_paid ?? 0)),
-        );
+    /**
+     * totalOutstanding() over periods already in hand, in whole centavos: the
+     * unpaid principal, interest and penalty of the open periods, the premium
+     * owed left out. The one rule the restructure cap, the loan summary's and
+     * LoanResource's `restructurable_balance` read.
+     *
+     * @param  iterable<AmortizationSchedule>  $schedules  the loan's periods
+     */
+    public static function restructurableCentavos(iterable $schedules): int
+    {
+        $owed = fn (mixed $due, mixed $paid): int => max(0, self::toCentavos((float) ($due ?? 0)) - self::toCentavos((float) ($paid ?? 0)));
+        $total = 0;
 
-        return round((float) $unpaid, 2);
+        foreach ($schedules as $s) {
+            if (! in_array($s->status, ['pending', 'partial', 'overdue'], true)) {
+                continue;
+            }
+
+            $total += $owed($s->principal_due, $s->principal_paid)
+                + $owed($s->interest_due, $s->interest_paid)
+                + $owed($s->penalty_amount, $s->penalty_paid);
+        }
+
+        return $total;
     }
 
     /**

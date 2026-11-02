@@ -279,6 +279,27 @@ class InsuranceOwedReportsTest extends TestCase
         $this->assertEqualsWithDelta((float) $loan->fresh()->outstanding_balance, (float) $summary['principal_balance'], 0.001);
     }
 
+    public function test_the_demand_letter_total_includes_the_premium_owed_so_paying_it_clears_the_arrears(): void
+    {
+        // Period 1 fell due ten days ago, past grace.
+        $loan = $this->loanOwingPremium(startDate: now()->subMonth()->subDays(10)->toDateString());
+        app(RepaymentService::class)->applyPenalties($loan->fresh(), now());
+
+        $data = $this->statement($loan);
+        $arrears = (float) $data['demand_totals']['amount_due'];
+
+        $this->assertGreaterThan(self::PERIOD_DUE, $arrears, 'setup: period 1 is in arrears with a penalty');
+        $this->assertEqualsWithDelta(self::OWED, (float) ($data['demand_totals']['insurance_owed'] ?? -1), 0.001);
+        $this->assertEqualsWithDelta($arrears + self::OWED, (float) $data['total_demanded'], 0.001);
+
+        $this->pay($loan, (float) $data['total_demanded']);
+
+        $after = $this->statement($loan);
+        $this->assertEqualsWithDelta(0.00, (float) $after['total_demanded'], 0.001);
+        $this->assertEqualsWithDelta(0.00, $this->owed($loan), 0.001);
+        $this->assertSame('paid', AmortizationSchedule::where('loan_id', $loan->id)->where('period_number', 1)->value('status'));
+    }
+
     public function test_the_income_report_never_counts_the_premium_as_interest(): void
     {
         $loan = $this->loanOwingPremium();
