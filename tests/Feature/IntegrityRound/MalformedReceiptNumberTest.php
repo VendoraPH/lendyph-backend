@@ -52,6 +52,18 @@ class MalformedReceiptNumberTest extends TestCase
         $this->assertSame('RCP-1000005', $this->pay($loan)->receipt_number);
     }
 
+    public function test_lowercase_or_trailing_characters_never_count_as_well_formed(): void
+    {
+        $loan = $this->createReleasedLoan();
+        $this->renumber($this->pay($loan), 'RCP-000070');
+        // Higher by number, but not RCP- followed by digits only.
+        $this->renumber($this->pay($loan), 'rcp-2000000');
+        $this->renumber($this->pay($loan), 'RCP-3000000x');
+        $this->renumber($this->pay($loan), 'Rcp-4000000');
+
+        $this->assertSame('RCP-000071', $this->pay($loan)->receipt_number);
+    }
+
     public function test_with_no_well_formed_receipt_the_first_number_is_used(): void
     {
         $loan = $this->createReleasedLoan();

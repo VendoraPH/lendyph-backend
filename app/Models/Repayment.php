@@ -89,8 +89,9 @@ class Repayment extends Model
      * still lands on RECEIPT_NUMBER_INDEX, which the callers turn into a 409.
      *
      * A preview's repayment (previewReceiptNumber()) keeps its placeholder and
-     * takes no lock, so a preview never waits on, or collides with, a real
-     * payment's number.
+     * takes no lock on the newest repayment, so it never collides with a real
+     * payment's number. Its insert can still wait briefly behind a payment
+     * that holds that lock, until the payment commits.
      */
     protected static function booted(): void
     {
@@ -141,7 +142,9 @@ class Repayment extends Model
             ]);
 
             $highest = static::query()
-                ->whereRaw('receipt_number REGEXP ?', ['^'.self::RECEIPT_PREFIX.'-[0-9]+$'])
+                // Case-sensitive ('c'), as SequenceCode is: an `rcp-…` here
+                // would be picked and then refused.
+                ->whereRaw("REGEXP_LIKE(receipt_number, ?, 'c')", ['^'.self::RECEIPT_PREFIX.'-[0-9]+$'])
                 ->orderByRaw('CAST(SUBSTRING(receipt_number, ?) AS UNSIGNED) DESC', [strlen(self::RECEIPT_PREFIX) + 2])
                 ->value('receipt_number');
 

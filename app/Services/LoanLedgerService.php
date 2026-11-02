@@ -12,6 +12,7 @@ use App\Models\ShareCapitalLedger;
 use Carbon\CarbonInterface;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Log;
 
 /**
  * The loan page's Ledger (GET /loans/{id}/ledger): every event that moved
@@ -23,47 +24,61 @@ use Illuminate\Support\Carbon;
  *  - `release`: the principal, the original schedule's interest and its share
  *    capital build-up;
  *  - `repayment` / `extension_payment`: a payment's own parts, from the
- *    repayment's `*_applied` columns (an extension's collection is the
- *    repayment its credit ledger entry points at; the credit entry itself is
- *    not counted again), and the share capital it credited;
+ *    repayment's `*_applied` columns, and the share capital it credited. An
+ *    extension's collection is the repayment the extension names
+ *    (`new_values.repayment_id`, or for older ones its credit entry); the
+ *    credit entry itself is not counted again;
  *  - `void`: a voided payment put back, on the day it was voided;
  *  - `extension_charge`: the fresh interest an extension charged (its debit
  *    ledger entry);
  *  - `penalty_charge`: the late penalty charged on a period, on the first day
- *    past its grace;
- *  - `adjustment`: a penalty waiver, a balance adjustment, a restructure or
- *    term extension of the schedule, a balance moved to a restructured loan,
- *    and, on an imported loan, what was paid before the import.
+ *    past its grace (never before the release);
+ *  - `adjustment`: a penalty waiver, the penalty a closure wrote off with a
+ *    period, a balance adjustment, a restructure or term extension of the
+ *    schedule, a balance moved to a restructured loan, what an imported loan
+ *    was paid before the import, and a balance restated to the schedule.
  *
  * Every figure is whole centavos. Payment, void and charge rows state their
  * figures as positive amounts and `kind` says which way they move the
  * balances; an `adjustment` row's figures are the signed change it made
- * (negative lowers the balance).
+ * (negative lowers the balance). The balances leave out the insurance premium
+ * owed, which payment rows show in their own `insurance` column.
  *
  * The last row's balances are the summary's outstanding principal, interest
- * and penalty (Loan::owedCentavos()). Most rows' figures are recorded facts;
- * a restructure or term extension of the schedule records no interest figure,
- * so the row of the last such change (or of a move to a restructured loan)
- * carries what the schedule changed by. With none, a difference left by data
- * from before the rows recorded what they did (an extension that deleted
- * partly paid periods, say) is stated on an `adjustment` row of its own,
- * dated today, rather than spread over earlier balances.
+ * and penalty (Loan::owedCentavos()). Every row but two is a recorded fact:
+ *  - a restructure or term extension of the schedule records no interest
+ *    figure, so the row of the last such rebuild carries the interest the
+ *    schedule changed by (only interest: a rebuild carries the principal it
+ *    moves, and the penalty it closes is its own row). With two or more
+ *    rebuilds the earlier ones show none: no record says what each changed,
+ *    since the periods a rebuild deletes leave no trace;
+ *  - a balance moved to a restructured loan clears whatever was left, so its
+ *    row takes every column.
+ * Anything else left between the recorded rows and the schedule (data from
+ * before the rows recorded what they did, such as an extension that deleted
+ * partly paid periods) is stated on an `adjustment` row of its own, "Balance
+ * restated to the schedule", dated today, and logged, rather than spread over
+ * earlier balances.
  */
 final class LoanLedgerService
 {
     private const RANKS = [
         'release' => 0,
-        'imported' => 1,
-        'penalty_charge' => 2,
+        'penalty_charge' => 1,
+        'imported' => 2,
         'repayment' => 3,
         'extension_payment' => 3,
-        'extension_charge' => 4,
-        'adjustment' => 5,
+        // An extension closes its periods (a write-off row) before it charges
+        // the fresh interest, and both carry the same posting time.
+        'adjustment' => 4,
+        'extension_charge' => 5,
         'void' => 6,
     ];
 
     /** Adjustments that rebuild the schedule and record no interest figure. */
-    private const RESCHEDULING_TYPES = ['restructure', 'term_extension'];
+    private const REBUILD_TYPES = ['restructure', 'term_extension'];
+
+    public const RESTATED = 'Balance restated to the schedule';
 
     public function __construct(private LoanService $loanService) {}
 
@@ -83,23 +98,23 @@ final class LoanLedgerService
         }
 
         $adjustments = $loan->adjustments()->where('status', 'applied')->orderBy('applied_at')->orderBy('id')->get();
-        $debits = LoanLedgerEntry::where('loan_id', $loan->id)->where('type', 'debit')->orderBy('id')->get();
-        $waived = $this->waivedCentavos($adjustments);
+        $entries = LoanLedgerEntry::where('loan_id', $loan->id)->orderBy('id')->get();
+        $repayments = $loan->repayments()->orderBy('id')->get();
+        $closures = $this->closures($adjustments);
+        $debits = $entries->where('type', 'debit')->values();
 
         $events = [
             $this->releaseEvent($loan, $schedules, $adjustments, $debits),
-            ...$this->importedEvents($loan, $schedules),
-            ...$this->penaltyEvents($loan, $schedules, $waived),
-            ...$this->paymentEvents($loan),
+            ...$this->importedEvents($loan, $schedules, $repayments),
+            ...$this->penaltyEvents($loan, $schedules, $adjustments, $closures),
+            ...$this->paymentEvents($repayments, $adjustments, $entries),
             ...$this->extensionChargeEvents($debits),
-            ...$this->adjustmentEvents($loan, $adjustments, $waived),
+            ...$this->adjustmentEvents($loan, $adjustments, $closures),
         ];
 
         usort($events, fn (array $a, array $b): int => [$a['date'], $a['at'], $a['rank'], $a['seq']] <=> [$b['date'], $b['at'], $b['rank'], $b['seq']]);
 
-        $events = $this->landOnTheSchedule($events, $owed);
-
-        return $this->walk($events, $owed);
+        return $this->walk($this->landOnTheSchedule($loan, $events, $owed), $owed);
     }
 
     /**
@@ -113,12 +128,7 @@ final class LoanLedgerService
      */
     private function releaseEvent(Loan $loan, EloquentCollection $schedules, EloquentCollection $adjustments, EloquentCollection $debits): array
     {
-        $scb = 0;
-
-        foreach ($schedules as $schedule) {
-            $scb += PersistedScheduleFigures::shareCapitalBuildUpCentavos($loan, $schedule);
-        }
-
+        $scb = $schedules->sum(fn (AmortizationSchedule $s): int => PersistedScheduleFigures::shareCapitalBuildUpCentavos($loan, $s));
         $principal = $this->centavos($loan->principal_amount);
         $interest = $this->originalInterestCentavos($loan, $schedules, $adjustments, $debits);
 
@@ -141,8 +151,11 @@ final class LoanLedgerService
      * unpaid interest moves into the period that carries it, and an extension
      * adds only its fresh interest (its debit entry, taken off here). After a
      * rebuild the original schedule is built again by the engine that built
-     * it, from the loan as it stood before the first rebuild (that
-     * adjustment's `old_values`).
+     * it, from the loan as it stood before the first rebuild: that
+     * adjustment's `old_values` (rate, term, its unit, frequency, method). A
+     * rebuild recorded before `old_values` carried the term's unit takes the
+     * unit the loan was created with, its product's (a rebuild to a weekly or
+     * shorter frequency turns a months term into days).
      *
      * @param  EloquentCollection<int, AmortizationSchedule>  $schedules
      * @param  EloquentCollection<int, LoanAdjustment>  $adjustments
@@ -150,7 +163,7 @@ final class LoanLedgerService
      */
     private function originalInterestCentavos(Loan $loan, EloquentCollection $schedules, EloquentCollection $adjustments, EloquentCollection $debits): int
     {
-        $firstRebuild = $adjustments->first(fn (LoanAdjustment $a) => in_array($a->adjustment_type, self::RESCHEDULING_TYPES, true));
+        $firstRebuild = $adjustments->first(fn (LoanAdjustment $a) => in_array($a->adjustment_type, self::REBUILD_TYPES, true));
 
         if ($firstRebuild === null && $loan->restructured_at === null) {
             return $schedules->sum(fn (AmortizationSchedule $s): int => $this->centavos($s->interest_due))
@@ -160,10 +173,14 @@ final class LoanLedgerService
         $original = $loan->replicate();
         $before = $firstRebuild?->old_values ?? [];
 
-        foreach (['interest_rate', 'term', 'frequency'] as $field) {
-            if (array_key_exists($field, $before) && $before[$field] !== null) {
+        foreach (['interest_rate', 'term', 'frequency', 'interest_method', 'term_unit'] as $field) {
+            if (($before[$field] ?? null) !== null) {
                 $original->{$field} = $before[$field];
             }
+        }
+
+        if ($firstRebuild !== null && ($before['term_unit'] ?? null) === null && $loan->loanProduct?->term_unit !== null) {
+            $original->term_unit = $loan->loanProduct->term_unit;
         }
 
         return collect($this->loanService->buildAmortizationPreview($original))
@@ -175,26 +192,26 @@ final class LoanLedgerService
      * before the import, which no repayment here records.
      *
      * @param  EloquentCollection<int, AmortizationSchedule>  $schedules
+     * @param  EloquentCollection<int, Repayment>  $repayments
      * @return list<array<string, mixed>>
      */
-    private function importedEvents(Loan $loan, EloquentCollection $schedules): array
+    private function importedEvents(Loan $loan, EloquentCollection $schedules, EloquentCollection $repayments): array
     {
         if (! $loan->isImported()) {
             return [];
         }
 
-        $posted = $loan->repayments()->where('status', 'posted')->get();
-        $before = [
-            'principal' => $schedules->sum(fn ($s): int => $this->centavos($s->principal_paid)) - $posted->sum(fn ($r): int => $this->centavos($r->principal_applied)),
-            'interest' => $schedules->sum(fn ($s): int => $this->centavos($s->interest_paid)) - $posted->sum(fn ($r): int => $this->centavos($r->interest_applied)),
-            'penalty' => $schedules->sum(fn ($s): int => $this->centavos($s->penalty_paid)) - $posted->sum(fn ($r): int => $this->centavos($r->penalty_applied)),
-        ];
+        $posted = $repayments->where('status', 'posted');
+        $effect = [];
 
-        if ($before === ['principal' => 0, 'interest' => 0, 'penalty' => 0]) {
-            return [];
+        foreach (['principal', 'interest', 'penalty'] as $column) {
+            $effect[$column] = $posted->sum(fn (Repayment $r): int => $this->centavos($r->{"{$column}_applied"}))
+                - $schedules->sum(fn (AmortizationSchedule $s): int => $this->centavos($s->{"{$column}_paid"}));
         }
 
-        $effect = array_map(fn (int $paid): int => -$paid, $before);
+        if ($effect === ['principal' => 0, 'interest' => 0, 'penalty' => 0]) {
+            return [];
+        }
 
         return [$this->event($loan->released_at, $loan->released_at, 'imported', $loan->id, [
             'kind' => 'adjustment',
@@ -205,23 +222,43 @@ final class LoanLedgerService
 
     /**
      * The late penalty on each period, on the first day past its grace (never
-     * before the release, for a loan released after its periods fell late): what
-     * the period is charged now (its stamp is recalculated, never below what
-     * was paid on it), plus what a waiver later forgave on it, which the
-     * waiver's own row takes off again.
+     * before the release, for a loan released after its periods fell late).
+     *
+     * The charge is what the period carries now (its stamp is recalculated,
+     * never below what was paid on it), plus what a waiver later forgave on it
+     * and what a closure wrote off with it, which their own rows take off
+     * again. A period a later extension or rebuild deleted is charged what its
+     * waiver or closure recorded, on that adjustment's day.
      *
      * @param  EloquentCollection<int, AmortizationSchedule>  $schedules
-     * @param  array<int, int>  $waived  centavos waived per schedule id
+     * @param  EloquentCollection<int, LoanAdjustment>  $adjustments
+     * @param  array<int, array{waived: array<int, int>, written_off: array<int, int>, periods: array<int, int>}>  $closures
      * @return list<array<string, mixed>>
      */
-    private function penaltyEvents(Loan $loan, EloquentCollection $schedules, array $waived): array
+    private function penaltyEvents(Loan $loan, EloquentCollection $schedules, EloquentCollection $adjustments, array $closures): array
     {
+        $recorded = [];
+        $periodNumbers = [];
+        $firstRecordedOn = [];
+
+        foreach ($adjustments as $adjustment) {
+            foreach (['waived', 'written_off'] as $part) {
+                foreach ($closures[$adjustment->id][$part] ?? [] as $scheduleId => $centavos) {
+                    $recorded[$scheduleId] = ($recorded[$scheduleId] ?? 0) + $centavos;
+                    $firstRecordedOn[$scheduleId] ??= $adjustment->applied_at;
+                }
+            }
+
+            $periodNumbers += $closures[$adjustment->id]['periods'] ?? [];
+        }
+
         $events = [];
         $today = Carbon::today();
         $releasedAt = Carbon::parse($loan->released_at);
 
         foreach ($schedules->sortBy('period_number') as $schedule) {
-            $charged = $this->centavos($schedule->penalty_amount) + ($waived[$schedule->id] ?? 0);
+            $charged = $this->centavos($schedule->penalty_amount) + ($recorded[$schedule->id] ?? 0);
+            unset($recorded[$schedule->id]);
 
             if ($charged <= 0) {
                 continue;
@@ -231,34 +268,54 @@ final class LoanLedgerService
             $date = $lateFrom->gt($today) ? $today : $lateFrom;
             $postedAt = $date->lt($releasedAt) ? $releasedAt : $date;
 
-            $events[] = $this->event($postedAt, $postedAt, 'penalty_charge', $schedule->id, [
-                'kind' => 'penalty_charge',
-                'description' => "Late penalty, period {$schedule->period_number}",
-                'penalty' => $charged,
-            ], ['penalty' => $charged]);
+            $events[] = $this->penaltyCharge($postedAt, $schedule->id, (int) $schedule->period_number, $charged);
+        }
+
+        // Periods gone since: charged on the day their waiver or closure ran.
+        foreach ($recorded as $scheduleId => $charged) {
+            if ($charged > 0) {
+                $day = Carbon::parse($firstRecordedOn[$scheduleId])->startOfDay();
+                $events[] = $this->penaltyCharge($day->lt($releasedAt) ? $releasedAt : $day, $scheduleId, $periodNumbers[$scheduleId] ?? null, $charged);
+            }
         }
 
         return $events;
+    }
+
+    /** @return array<string, mixed> */
+    private function penaltyCharge(CarbonInterface $postedAt, int $scheduleId, ?int $periodNumber, int $charged): array
+    {
+        return $this->event($postedAt, $postedAt, 'penalty_charge', $scheduleId, [
+            'kind' => 'penalty_charge',
+            'description' => $periodNumber === null ? 'Late penalty' : "Late penalty, period {$periodNumber}",
+            'penalty' => $charged,
+        ], ['penalty' => $charged]);
     }
 
     /**
      * Each payment from its own `*_applied` columns, and each voided one put
      * back on the day it was voided.
      *
+     * @param  EloquentCollection<int, Repayment>  $repayments
+     * @param  EloquentCollection<int, LoanAdjustment>  $adjustments
+     * @param  EloquentCollection<int, LoanLedgerEntry>  $entries
      * @return list<array<string, mixed>>
      */
-    private function paymentEvents(Loan $loan): array
+    private function paymentEvents(EloquentCollection $repayments, EloquentCollection $adjustments, EloquentCollection $entries): array
     {
-        $repayments = $loan->repayments()->orderBy('id')->get();
-        $ids = $repayments->pluck('id');
+        // An extension's collection: the repayment the extension names, or for
+        // one recorded before that link, the repayment its credit entry names.
+        $extensionOf = $entries->where('type', 'credit')->whereNotNull('repayment_id')
+            ->mapWithKeys(fn (LoanLedgerEntry $e): array => [(int) $e->repayment_id => $e->loan_adjustment_id])
+            ->all();
 
-        // An extension's collection: the repayment its credit entry names.
-        $extensionCredits = LoanLedgerEntry::where('loan_id', $loan->id)
-            ->where('type', 'credit')
-            ->whereNotNull('repayment_id')
-            ->pluck('loan_adjustment_id', 'repayment_id');
+        foreach ($adjustments->where('adjustment_type', 'extension') as $extension) {
+            if (($extension->new_values['repayment_id'] ?? null) !== null) {
+                $extensionOf[(int) $extension->new_values['repayment_id']] = $extension->id;
+            }
+        }
 
-        $scbCredited = ShareCapitalLedger::whereIn('repayment_id', $ids)
+        $scbCredited = ShareCapitalLedger::whereIn('repayment_id', $repayments->pluck('id'))
             ->where('credit', '>', 0)
             ->get()
             ->groupBy('repayment_id')
@@ -275,13 +332,13 @@ final class LoanLedgerService
                 'scb' => (int) ($scbCredited[$repayment->id] ?? 0),
             ];
             $lowers = ['principal' => -$parts['principal'], 'interest' => -$parts['interest'], 'penalty' => -$parts['penalty'], 'scb' => -$parts['scb']];
-            $isExtension = $extensionCredits->has($repayment->id);
+            $isExtension = array_key_exists($repayment->id, $extensionOf);
             $kind = $isExtension ? 'extension_payment' : 'repayment';
 
             $events[] = $this->event($repayment->payment_date, $repayment->created_at, $kind, $repayment->id, [
                 'kind' => $kind,
                 'repayment_id' => $repayment->id,
-                'loan_adjustment_id' => $isExtension ? $extensionCredits[$repayment->id] : null,
+                'loan_adjustment_id' => $isExtension ? $extensionOf[$repayment->id] : null,
                 'description' => ($isExtension ? 'Extension payment ' : 'Payment ').$repayment->receipt_number
                     .($repayment->status === 'voided' ? ' (voided)' : ''),
                 ...$parts,
@@ -319,23 +376,34 @@ final class LoanLedgerService
     }
 
     /**
-     * Penalty waivers (what each forgave, from its audit row), balance
-     * adjustments (their signed principal change), schedule rebuilds, and the
-     * balance moved to a restructured loan. A rebuild and a move record no
-     * interest figure; landOnTheSchedule() gives them theirs.
+     * Penalty waivers (what each forgave, from its audit row), the penalty a
+     * closure wrote off with its periods (from its `periods_closed` audit
+     * row), balance adjustments (their signed principal change), schedule
+     * rebuilds, and the balance moved to a restructured loan. A rebuild and a
+     * move record no interest figure; landOnTheSchedule() gives them theirs.
      *
      * @param  EloquentCollection<int, LoanAdjustment>  $adjustments
-     * @param  array<int, int>  $waived
+     * @param  array<int, array{waived: array<int, int>, written_off: array<int, int>, periods: array<int, int>}>  $closures
      * @return list<array<string, mixed>>
      */
-    private function adjustmentEvents(Loan $loan, EloquentCollection $adjustments, array $waived): array
+    private function adjustmentEvents(Loan $loan, EloquentCollection $adjustments, array $closures): array
     {
         $events = [];
-        $waivedBy = $this->waivedByAdjustment($adjustments);
 
         foreach ($adjustments as $adjustment) {
+            $writtenOff = array_sum($closures[$adjustment->id]['written_off'] ?? []);
+
+            if ($writtenOff > 0) {
+                $events[] = $this->event($adjustment->applied_at, $adjustment->applied_at, 'adjustment', $adjustment->id, [
+                    'kind' => 'adjustment',
+                    'loan_adjustment_id' => $adjustment->id,
+                    'description' => trim("Penalty closed with the period {$adjustment->adjustment_number}"),
+                    'penalty' => -$writtenOff,
+                ], ['penalty' => -$writtenOff]);
+            }
+
             $effect = match ($adjustment->adjustment_type) {
-                'penalty_waiver' => ['penalty' => -($waivedBy[$adjustment->id] ?? 0)],
+                'penalty_waiver' => ['penalty' => -array_sum($closures[$adjustment->id]['waived'] ?? [])],
                 'balance_adjustment' => ['principal' => $this->centavos($adjustment->new_values['adjustment_amount'] ?? 0)],
                 'restructure', 'term_extension' => [],
                 default => null,
@@ -350,14 +418,14 @@ final class LoanLedgerService
                 'loan_adjustment_id' => $adjustment->id,
                 'description' => $this->adjustmentDescription($adjustment),
                 ...$effect,
-            ], $effect, rescheduling: in_array($adjustment->adjustment_type, self::RESCHEDULING_TYPES, true));
+            ], $effect, landing: in_array($adjustment->adjustment_type, self::REBUILD_TYPES, true) ? 'rebuild' : null);
         }
 
         if ($loan->restructured_at !== null) {
             $events[] = $this->event($loan->restructured_at, $loan->restructured_at, 'adjustment', $loan->id, [
                 'kind' => 'adjustment',
                 'description' => 'Balance moved to a restructured loan',
-            ], [], rescheduling: true);
+            ], [], landing: 'move');
         }
 
         return $events;
@@ -377,55 +445,67 @@ final class LoanLedgerService
     }
 
     /**
-     * Gives the last schedule rebuild (or move to a restructured loan) what
-     * the recorded rows leave between them and what the schedule says is
-     * owed now; with none, states any such difference on a row of its own.
+     * Lands the last row on what the schedule says is owed now.
+     *
+     * A move to a restructured loan takes every column of what is left. A
+     * rebuild takes only interest, the last rebuild all of it. Anything else
+     * goes on a "Balance restated to the schedule" row dated today, and is
+     * logged, since the recorded rows should account for it.
      *
      * @param  list<array<string, mixed>>  $events
      * @param  array{principal: int, interest: int, penalty: int}  $owed
      * @return list<array<string, mixed>>
      */
-    private function landOnTheSchedule(array $events, array $owed): array
+    private function landOnTheSchedule(Loan $loan, array $events, array $owed): array
     {
-        $walked = ['principal' => 0, 'interest' => 0, 'penalty' => 0];
+        $difference = ['principal' => $owed['principal'], 'interest' => $owed['interest'], 'penalty' => $owed['penalty']];
 
         foreach ($events as $event) {
-            foreach ($walked as $column => $sum) {
-                $walked[$column] = $sum + $event['effect'][$column];
+            foreach ($difference as $column => $centavos) {
+                $difference[$column] = $centavos - $event['effect'][$column];
             }
         }
 
-        $difference = [
-            'principal' => $owed['principal'] - $walked['principal'],
-            'interest' => $owed['interest'] - $walked['interest'],
-            'penalty' => $owed['penalty'] - $walked['penalty'],
-        ];
+        $move = $rebuild = null;
+
+        foreach ($events as $index => $event) {
+            if ($event['landing'] === 'move') {
+                $move = $index;
+            } elseif ($event['landing'] === 'rebuild') {
+                $rebuild = $index;
+            }
+        }
+
+        $carry = function (int $index, array $columns) use (&$events, &$difference): void {
+            foreach ($columns as $column) {
+                $events[$index]['effect'][$column] += $difference[$column];
+                $events[$index]['row'][$column] += $difference[$column];
+                $difference[$column] = 0;
+            }
+        };
+
+        if ($move !== null) {
+            $carry($move, ['principal', 'interest', 'penalty']);
+        } elseif ($rebuild !== null) {
+            $carry($rebuild, ['interest']);
+        }
 
         if ($difference === ['principal' => 0, 'interest' => 0, 'penalty' => 0]) {
             return $events;
         }
 
-        $target = null;
+        Log::warning('Loan ledger: recorded rows do not reach the schedule; stating the difference as a restated balance.', [
+            'loan_id' => $loan->id,
+            'principal' => $difference['principal'] / 100,
+            'interest' => $difference['interest'] / 100,
+            'penalty' => $difference['penalty'] / 100,
+        ]);
 
-        foreach ($events as $index => $event) {
-            if ($event['rescheduling']) {
-                $target = $index;
-            }
-        }
-
-        if ($target === null) {
-            $today = Carbon::today();
-            $events[] = $this->event($today, Carbon::now(), 'adjustment', PHP_INT_MAX, [
-                'kind' => 'adjustment',
-                'description' => 'Balance restated to the schedule',
-            ], []);
-            $target = array_key_last($events);
-        }
-
-        foreach ($difference as $column => $centavos) {
-            $events[$target]['effect'][$column] += $centavos;
-            $events[$target]['row'][$column] += $centavos;
-        }
+        $events[] = $this->event(Carbon::today(), Carbon::now(), 'adjustment', PHP_INT_MAX, [
+            'kind' => 'adjustment',
+            'description' => self::RESTATED,
+        ], []);
+        $carry(array_key_last($events), ['principal', 'interest', 'penalty']);
 
         return $events;
     }
@@ -483,63 +563,62 @@ final class LoanLedgerService
     }
 
     /**
-     * What each penalty waiver forgave on each period, in centavos, from the
-     * audit row it wrote (the period keeps only what is left).
+     * What each adjustment recorded about the periods it touched, from its
+     * audit rows, read in one query: per schedule, the penalty a waiver
+     * forgave (`penalty_waived`) and the unpaid penalty a closure wrote off
+     * (`periods_closed`: charged less paid, before it), and each period's
+     * number.
      *
      * @param  EloquentCollection<int, LoanAdjustment>  $adjustments
-     * @return array<int, int> centavos per schedule id
+     * @return array<int, array{waived: array<int, int>, written_off: array<int, int>, periods: array<int, int>}> by adjustment id, centavos by schedule id
      */
-    private function waivedCentavos(EloquentCollection $adjustments): array
+    private function closures(EloquentCollection $adjustments): array
     {
-        $perSchedule = [];
+        if ($adjustments->isEmpty()) {
+            return [];
+        }
 
-        foreach ($this->waiverAudits($adjustments) as $audit) {
-            foreach ($audit->new_values['periods'] ?? [] as $period) {
-                $id = (int) ($period['schedule_id'] ?? 0);
-                $perSchedule[$id] = ($perSchedule[$id] ?? 0) + $this->centavos($period['waived'] ?? 0);
+        $audits = AuditLog::whereIn('action', ['penalty_waived', 'periods_closed'])
+            ->where('auditable_type', (new LoanAdjustment)->getMorphClass())
+            ->whereIn('auditable_id', $adjustments->pluck('id'))
+            ->orderBy('id')
+            ->get();
+
+        $closures = [];
+
+        foreach ($audits as $audit) {
+            $id = (int) $audit->auditable_id;
+            $closures[$id] ??= ['waived' => [], 'written_off' => [], 'periods' => []];
+
+            if ($audit->action === 'penalty_waived') {
+                foreach ($audit->new_values['periods'] ?? [] as $period) {
+                    $scheduleId = (int) ($period['schedule_id'] ?? 0);
+                    $closures[$id]['waived'][$scheduleId] = ($closures[$id]['waived'][$scheduleId] ?? 0) + $this->centavos($period['waived'] ?? 0);
+                    $closures[$id]['periods'][$scheduleId] = (int) ($period['period_number'] ?? 0);
+                }
+
+                continue;
+            }
+
+            foreach ($audit->old_values['periods'] ?? [] as $period) {
+                $scheduleId = (int) ($period['schedule_id'] ?? 0);
+                $unpaid = $this->centavos($period['penalty_amount'] ?? 0) - $this->centavos($period['penalty_paid'] ?? 0);
+
+                if ($unpaid > 0) {
+                    $closures[$id]['written_off'][$scheduleId] = ($closures[$id]['written_off'][$scheduleId] ?? 0) + $unpaid;
+                }
+
+                $closures[$id]['periods'][$scheduleId] = (int) ($period['period_number'] ?? 0);
             }
         }
 
-        return $perSchedule;
-    }
-
-    /**
-     * @param  EloquentCollection<int, LoanAdjustment>  $adjustments
-     * @return array<int, int> centavos per adjustment id
-     */
-    private function waivedByAdjustment(EloquentCollection $adjustments): array
-    {
-        $perAdjustment = [];
-
-        foreach ($this->waiverAudits($adjustments) as $audit) {
-            $perAdjustment[(int) $audit->auditable_id] = ($perAdjustment[(int) $audit->auditable_id] ?? 0)
-                + collect($audit->new_values['periods'] ?? [])->sum(fn (array $p): int => $this->centavos($p['waived'] ?? 0));
-        }
-
-        return $perAdjustment;
-    }
-
-    /**
-     * @param  EloquentCollection<int, LoanAdjustment>  $adjustments
-     * @return EloquentCollection<int, AuditLog>
-     */
-    private function waiverAudits(EloquentCollection $adjustments): EloquentCollection
-    {
-        $ids = $adjustments->where('adjustment_type', 'penalty_waiver')->pluck('id');
-
-        if ($ids->isEmpty()) {
-            return new EloquentCollection;
-        }
-
-        return AuditLog::where('action', 'penalty_waived')
-            ->where('auditable_type', (new LoanAdjustment)->getMorphClass())
-            ->whereIn('auditable_id', $ids)
-            ->get();
+        return $closures;
     }
 
     /**
      * @param  array<string, mixed>  $row  the row's own fields; money in centavos
      * @param  array<string, int>  $effect  what it moves each balance by, in centavos
+     * @param  'rebuild'|'move'|null  $landing  which difference landOnTheSchedule() may give it
      * @return array<string, mixed>
      */
     private function event(
@@ -549,7 +628,7 @@ final class LoanLedgerService
         int $sequence,
         array $row,
         array $effect,
-        bool $rescheduling = false,
+        ?string $landing = null,
     ): array {
         $day = Carbon::parse($date)->toDateString();
 
@@ -558,7 +637,7 @@ final class LoanLedgerService
             'at' => $postedAt === null ? $day.' 00:00:00' : Carbon::parse($postedAt)->toDateTimeString(),
             'rank' => self::RANKS[$rank],
             'seq' => $sequence,
-            'rescheduling' => $rescheduling,
+            'landing' => $landing,
             'row' => array_merge([
                 'date' => $day,
                 'repayment_id' => null,

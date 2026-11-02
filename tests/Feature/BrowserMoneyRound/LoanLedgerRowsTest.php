@@ -4,12 +4,16 @@ namespace Tests\Feature\BrowserMoneyRound;
 
 use App\Models\Borrower;
 use App\Models\Loan;
+use App\Models\LoanAdjustment;
 use App\Models\LoanProduct;
 use App\Models\Repayment;
 use App\Models\User;
+use App\Services\LoanLedgerService;
 use App\Services\LoanService;
 use App\Services\RepaymentService;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Tests\Feature\BrowserMoneyRound\Concerns\BuildsReleasedLoans;
 use Tests\Feature\InsuranceOwed\Concerns\OwesInsurancePremium;
 use Tests\TestCase;
@@ -251,6 +255,116 @@ class LoanLedgerRowsTest extends TestCase
         $this->assertClosingIsTheSummary($loan, $ledger);
     }
 
+    public function test_a_waived_period_an_extension_then_deleted_is_still_charged_and_waived(): void
+    {
+        $loan = $this->overdueOneMonthLoan();
+        app(RepaymentService::class)->applyPenalties($loan, now());
+        $this->applyAdjustment($loan, 'penalty_waiver', ['waive_all' => true]);
+        // Nothing was collected on the period, so the extension deletes it.
+        $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'defer'])->assertOk();
+        $this->assertSame(1, $loan->amortizationSchedules()->count(), 'setup: only the new period is left');
+
+        $ledger = $this->ledger($loan);
+
+        $this->assertSame(['release', 'penalty_charge', 'adjustment', 'extension_charge'], array_column($ledger['rows'], 'kind'));
+        $this->assertMoney(1224.69, $ledger['rows'][1]['penalty']);
+        $this->assertMoney(-1224.69, $ledger['rows'][2]['penalty']);
+        $this->assertBalances([self::PRINCIPAL, 1837.04, 0], $ledger['rows'][2]);
+        $this->assertClosingIsTheSummary($loan, $ledger);
+    }
+
+    public function test_the_penalty_a_closure_wrote_off_is_its_own_row(): void
+    {
+        $loan = $this->overdueOneMonthLoan();
+        // ₱500.37 goes to the ₱1,224.69 penalty; the extension closes the
+        // period at what was paid and writes off the other ₱724.32.
+        $this->payLoan($loan, 500.37);
+        $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'defer'])->assertOk();
+
+        $ledger = $this->ledger($loan);
+
+        $this->assertSame(['release', 'penalty_charge', 'repayment', 'adjustment', 'extension_charge'], array_column($ledger['rows'], 'kind'));
+        $this->assertMoney(1224.69, $ledger['rows'][1]['penalty']);
+        $this->assertMoney(500.37, $ledger['rows'][2]['penalty']);
+        $closure = $ledger['rows'][3];
+        $this->assertStringStartsWith('Penalty closed with the period', $closure['description']);
+        $this->assertMoney(-724.32, $closure['penalty']);
+        $this->assertNotNull($closure['loan_adjustment_id']);
+        $this->assertBalances([self::PRINCIPAL, 1837.04, 0], $closure);
+        $this->assertClosingIsTheSummary($loan, $ledger);
+    }
+
+    public function test_a_restructure_to_a_weekly_frequency_opens_on_the_real_original_schedule(): void
+    {
+        $this->travelTo(Carbon::parse('2026-01-15 09:00'));
+        $loan = $this->releasedLoanFor(principal: self::PRINCIPAL, startDate: '2026-01-15');
+        $this->travelTo(Carbon::parse('2026-02-10 09:00'));
+        $this->payLoan($loan, 12042.80);
+        $this->applyAdjustment($loan, 'restructure', ['frequency' => 'weekly', 'term' => 8]);
+
+        $restructure = LoanAdjustment::where('loan_id', $loan->id)->where('adjustment_type', 'restructure')->sole();
+        $this->assertSame('months', $restructure->old_values['term_unit']);
+        $this->assertSame('straight', $restructure->old_values['interest_method']);
+        $this->assertSame('days', $loan->fresh()->term_unit->value, 'setup: the restructure turned the term into days');
+
+        $ledger = $this->ledger($loan);
+
+        $this->assertSame(['release', 'repayment', 'adjustment'], array_column($ledger['rows'], 'kind'));
+        $this->assertMoney(self::SCHEDULE_INTEREST, $ledger['rows'][0]['interest']);
+        $this->assertClosingIsTheSummary($loan, $ledger);
+
+        // A restructure recorded before `old_values` carried the unit: the
+        // product's (the unit the loan was created with).
+        $old = $restructure->old_values;
+        unset($old['term_unit'], $old['interest_method']);
+        DB::table('loan_adjustments')->where('id', $restructure->id)->update(['old_values' => json_encode($old)]);
+
+        $this->assertMoney(self::SCHEDULE_INTEREST, $this->ledger($loan)['rows'][0]['interest']);
+    }
+
+    public function test_with_two_rebuilds_the_last_one_carries_the_interest_change(): void
+    {
+        $this->travelTo(Carbon::parse('2026-01-15 09:00'));
+        $loan = $this->releasedLoanFor(principal: self::PRINCIPAL, startDate: '2026-01-15');
+        $this->travelTo(Carbon::parse('2026-02-10 09:00'));
+        $this->payLoan($loan, 12042.80);
+        $this->applyAdjustment($loan, 'restructure', ['term' => 4]);
+        $this->applyAdjustment($loan, 'term_extension', ['additional_terms' => 2]);
+
+        $ledger = $this->ledger($loan);
+
+        $this->assertSame(['release', 'repayment', 'adjustment', 'adjustment'], array_column($ledger['rows'], 'kind'));
+        [, , $first, $second] = $ledger['rows'];
+        $this->assertStringStartsWith('Schedule restructured', $first['description']);
+        $this->assertStringStartsWith('Term extended', $second['description']);
+        // No record says what each rebuild changed, so the first shows none
+        // and the last carries the whole change.
+        $this->assertMoney(0, $first['interest']);
+        $this->assertBalances([51028.81, 9185.20, 0], $first);
+        $this->assertMoney($this->summaryOf($loan)['outstanding_interest'] - 9185.20, $second['interest']);
+        $this->assertMoney(0, $second['principal']);
+        $this->assertClosingIsTheSummary($loan, $ledger);
+    }
+
+    public function test_a_difference_the_rows_do_not_record_is_restated_and_logged(): void
+    {
+        $loan = $this->releasedLoanFor(principal: self::PRINCIPAL);
+        // Older data: principal paid on a period with no repayment behind it.
+        $loan->amortizationSchedules()->where('period_number', 1)->update(['principal_paid' => 100.37]);
+        Log::spy();
+
+        $ledger = $this->getJson("/api/loans/{$loan->id}/ledger")->assertOk()->json('data');
+
+        $last = end($ledger['rows']);
+        $this->assertSame('adjustment', $last['kind']);
+        $this->assertSame(LoanLedgerService::RESTATED, $last['description']);
+        $this->assertMoney(-100.37, $last['principal']);
+        $this->assertMoney(0, $last['interest']);
+        $this->assertClosingIsTheSummary($loan, $ledger);
+        Log::shouldHaveReceived('warning')->withArgs(fn (string $message, array $context): bool => $context['loan_id'] === $loan->id
+            && abs($context['principal'] + 100.37) < 0.001)->once();
+    }
+
     public function test_it_needs_loans_view(): void
     {
         $loan = $this->releasedLoanFor();
@@ -260,13 +374,22 @@ class LoanLedgerRowsTest extends TestCase
         $this->getJson("/api/loans/{$loan->id}/ledger")->assertForbidden();
     }
 
+    /** One month at 3% on ₱61,234.57 (₱1,837.04 interest), due ten days ago: a ₱1,224.69 penalty. */
+    private function overdueOneMonthLoan(): Loan
+    {
+        $loan = $this->releasedLoanFor(principal: self::PRINCIPAL, product: ['interest_method' => 'upon_maturity', 'term' => 1]);
+        $loan->amortizationSchedules()->update(['due_date' => now()->subDays(10)->toDateString()]);
+
+        return $loan->fresh();
+    }
+
     /** @return array<string, mixed> */
     private function ledger(Loan $loan): array
     {
         $ledger = $this->getJson("/api/loans/{$loan->id}/ledger")->assertOk()->json('data');
 
         $this->assertNotContains(
-            'Balance restated to the schedule',
+            LoanLedgerService::RESTATED,
             array_column($ledger['rows'], 'description'),
             'ordinary flows need no restated balance',
         );

@@ -326,6 +326,12 @@ class LoanAdjustmentService
                 'interest_option' => $interestOption,
                 'interest_paid' => $interestPaid,
                 'insurance_paid' => $insurancePaid,
+                // The payment that collected it, whatever it went to (all of
+                // it to penalty, or only to the premium, writes no interest
+                // credit). Its void is refused on this link
+                // (RepaymentService::assertNotAnExtensionCollection()), and
+                // GET /loans/{id}/ledger shows it as the extension's payment.
+                'repayment_id' => $interestRepayment?->id,
             ];
 
             $adjustment = LoanAdjustment::create([
@@ -1298,7 +1304,12 @@ class LoanAdjustmentService
                     ->sum(fn ($s) => (float) $s->principal_due - (float) $s->principal_paid),
                 'interest_rate' => (float) $loan->interest_rate,
                 'term' => $loan->term,
+                // With `term`, `frequency` and the method, enough to build the
+                // schedule as it stood again (GET /loans/{id}/ledger's opening):
+                // a restructure can turn a months term into days.
+                'term_unit' => $loan->term_unit->value,
                 'frequency' => $loan->frequency,
+                'interest_method' => $loan->interest_method,
                 'maturity_date' => $loan->maturity_date->toDateString(),
             ],
             // What the waiver would forgive, period by period, as of the
@@ -1320,6 +1331,9 @@ class LoanAdjustmentService
             ],
             'term_extension' => [
                 'term' => $loan->term,
+                'term_unit' => $loan->term_unit->value,
+                'frequency' => $loan->frequency,
+                'interest_method' => $loan->interest_method,
                 'maturity_date' => $loan->maturity_date->toDateString(),
                 'remaining_schedules' => $loan->amortizationSchedules()
                     ->whereIn('status', ['pending', 'partial', 'overdue'])
