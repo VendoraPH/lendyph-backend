@@ -8,6 +8,7 @@ use App\Models\Collateral;
 use App\Models\CollateralType;
 use App\Models\Loan;
 use App\Models\LoanProduct;
+use App\Models\Role;
 use App\Models\ShareCapitalLedger;
 use App\Models\User;
 use App\Services\CollateralSecurity;
@@ -184,6 +185,48 @@ class CollateralServerValueTest extends TestCase
             ['total_value' => 40000, 'security_status' => 'partially_secured', 'short_by' => 60000],
             CollateralSecurity::ofLoan($loan->fresh('collaterals'), $this->userWith('loans:view')),
         );
+    }
+
+    /**
+     * GET /loans/{id}'s `collateral_summary` for a draft secured by one share
+     * capital pledge of ₱7,250.50 against ₱100,000.
+     *
+     * @return array<string, mixed>
+     */
+    private function shownSummaryOfShareCapitalLoan(User $viewer): array
+    {
+        $loan = $this->draftLoan();
+        $collateral = $this->shareCapitalCollateral($loan->borrower_id, 7250.5);
+        $this->postJson("/api/loans/{$loan->id}/collaterals", ['collateral_id' => $collateral->id])->assertCreated();
+
+        return $this->actingAs($viewer)->getJson("/api/loans/{$loan->id}")->assertOk()->json('data.collateral_summary');
+    }
+
+    public function test_the_loan_page_withholds_a_share_capital_balance_from_a_viewer_who_cannot_see_it(): void
+    {
+        $this->assertSame(
+            ['total_value' => null, 'security_status' => 'partially_secured', 'short_by' => null, 'value_unknown' => true],
+            $this->shownSummaryOfShareCapitalLoan($this->userWith('loans:view')),
+        );
+    }
+
+    public function test_the_loan_page_shows_a_share_capital_balance_to_a_viewer_who_can_see_it(): void
+    {
+        $this->assertEquals(
+            ['total_value' => 7250.5, 'security_status' => 'partially_secured', 'short_by' => 92749.5],
+            $this->shownSummaryOfShareCapitalLoan($this->userWith('loans:view', 'share_capital:view')),
+        );
+    }
+
+    public function test_the_loan_page_shows_a_share_capital_balance_to_an_admin_and_a_super_admin(): void
+    {
+        $admin = User::factory()->create();
+        $admin->assignRole(Role::where('name', 'admin')->firstOrFail());
+        $expected = ['total_value' => 7250.5, 'security_status' => 'partially_secured', 'short_by' => 92749.5];
+
+        $this->assertEquals($expected, $this->shownSummaryOfShareCapitalLoan($admin));
+        $this->actingAs($this->admin);
+        $this->assertEquals($expected, $this->shownSummaryOfShareCapitalLoan($this->admin));
     }
 
     // ── POST /loans/preview with loan_id (the edit page) ─────────────────
