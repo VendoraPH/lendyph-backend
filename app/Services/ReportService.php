@@ -142,14 +142,19 @@ class ReportService
         $outstandingPenalty = $schedules->sum(fn ($s) => max(0, (float) $s->penalty_amount - (float) $s->penalty_paid));
 
         // Build transaction ledger with running balance. The ledger opens at
-        // principal + any insurance premium that was not collected at release,
-        // so that after the last payment the running balance lands exactly on
-        // Loan::$outstanding_balance instead of a figure short by the insurance.
-        $openingBalance = round((float) $loan->principal_amount + (float) $loan->insurance_remaining_balance, 2);
-        $runningBalance = $openingBalance;
+        // principal + the insurance premium owed before any payment collected
+        // it (what is still owed plus what the posted payments collected, so
+        // premium a restructure carried over is in it too), and each payment
+        // takes off its principal and its premium, so that after the last
+        // payment the running balance lands exactly on Loan::$outstanding_balance.
+        $centavosOf = fn (mixed $pesos): int => (int) round((float) $pesos * 100);
+        $premiumCollected = $repayments->sum(fn ($r) => $centavosOf($r->insurance_applied));
+        $openingCentavos = $centavosOf($loan->principal_amount) + $centavosOf($loan->insurance_remaining_balance) + $premiumCollected;
+        $openingBalance = $openingCentavos / 100;
+        $runningCentavos = $openingCentavos;
 
-        $transactions = $repayments->map(function ($r) use (&$runningBalance) {
-            $runningBalance -= (float) $r->principal_applied;
+        $transactions = $repayments->map(function ($r) use (&$runningCentavos, $centavosOf) {
+            $runningCentavos -= $centavosOf($r->principal_applied) + $centavosOf($r->insurance_applied);
 
             return [
                 'date' => $r->payment_date->toDateString(),
@@ -158,10 +163,11 @@ class ReportService
                 // The statement's two-column form: a payment credits the loan.
                 'debit' => null,
                 'credit' => (float) $r->amount_paid,
+                'insurance_applied' => (float) $r->insurance_applied,
                 'principal_applied' => (float) $r->principal_applied,
                 'interest_applied' => (float) $r->interest_applied,
                 'penalty_applied' => (float) $r->penalty_applied,
-                'running_balance' => round(max(0, $runningBalance), 2),
+                'running_balance' => max(0, $runningCentavos) / 100,
             ];
         })->values()->toArray();
 
@@ -429,7 +435,8 @@ class ReportService
             COALESCE(SUM(amount_paid), 0) as total_amount_paid,
             COALESCE(SUM(principal_applied), 0) as total_principal_applied,
             COALESCE(SUM(interest_applied), 0) as total_interest_applied,
-            COALESCE(SUM(penalty_applied), 0) as total_penalty_applied
+            COALESCE(SUM(penalty_applied), 0) as total_penalty_applied,
+            COALESCE(SUM(insurance_applied), 0) as total_insurance_applied
         ')->first();
 
         return [
@@ -438,6 +445,7 @@ class ReportService
             'total_principal_applied' => round((float) ($agg->total_principal_applied ?? 0), 2),
             'total_interest_applied' => round((float) ($agg->total_interest_applied ?? 0), 2),
             'total_penalty_applied' => round((float) ($agg->total_penalty_applied ?? 0), 2),
+            'total_insurance_applied' => round((float) ($agg->total_insurance_applied ?? 0), 2),
         ];
     }
 
@@ -743,8 +751,9 @@ class ReportService
      * schedule's paid columns as they stand now.
      *
      * The money actually taken in the range is reported beside it, never mixed
-     * in: `total_received` (every posted receipt, the figure Cash Flow's
-     * repayment inflow reconciles with) and `penalty_collected` (its penalty
+     * in: `total_received` (every posted receipt less the insurance premium
+     * it collected, the figure Cash Flow's repayment inflow less its
+     * `insurance` line reconciles with) and `penalty_collected` (its penalty
      * part).
      */
     public function dailyCollection(array $filters): array
@@ -781,7 +790,9 @@ class ReportService
             ->whereBetween('payment_date', [$fromDate, $toDate])
             ->whereHas('loan', $this->releasedLoanScope($branchId))
             ->toBase()
-            ->selectRaw('COALESCE(SUM(amount_paid), 0) as total_received, COALESCE(SUM(penalty_applied), 0) as penalty_collected')
+            // The insurance premium a payment collected first is not loan
+            // collection: it is left out of the money taken in.
+            ->selectRaw('COALESCE(SUM(amount_paid - insurance_applied), 0) as total_received, COALESCE(SUM(penalty_applied), 0) as penalty_collected')
             ->first();
 
         return [
@@ -1334,6 +1345,7 @@ class ReportService
                 COALESCE(SUM(principal_applied), 0) as principal_applied,
                 COALESCE(SUM(interest_applied), 0) as interest_applied,
                 COALESCE(SUM(penalty_applied), 0) as penalty_applied,
+                COALESCE(SUM(insurance_applied), 0) as insurance_applied,
                 COALESCE(SUM(overpayment), 0) as overpayment
             ')
             ->first();
@@ -1377,9 +1389,12 @@ class ReportService
         $interestIn = round((float) ($inflow->interest_applied ?? 0), 2);
         $penaltyIn = round((float) ($inflow->penalty_applied ?? 0), 2);
         $overpaymentIn = round((float) ($inflow->overpayment ?? 0), 2);
+        // The insurance premium payments collected first: cash in, held for
+        // the insurer, never income.
+        $insuranceIn = round((float) ($inflow->insurance_applied ?? 0), 2);
         // Sum the ALREADY-ROUNDED components so "the parts add up to the whole"
         // holds exactly at two decimals instead of to within a rounding error.
-        $repaymentsIn = round($principalIn + $interestIn + $penaltyIn + $overpaymentIn, 2);
+        $repaymentsIn = round($principalIn + $interestIn + $penaltyIn + $insuranceIn + $overpaymentIn, 2);
 
         $shareScope = $branchId ? 'borrower_branch' : 'organisation';
         $shareCredit = round((float) ($share->credit ?? 0), 2);
@@ -1401,6 +1416,7 @@ class ReportService
                     'principal' => $principalIn,
                     'interest' => $interestIn,
                     'penalty' => $penaltyIn,
+                    'insurance' => $insuranceIn,
                     'overpayment' => $overpaymentIn,
                     'total' => $repaymentsIn,
                     'count' => (int) ($inflow->entry_count ?? 0),
@@ -1488,6 +1504,7 @@ class ReportService
                 COALESCE(SUM(repayments.principal_applied), 0) as principal_applied,
                 COALESCE(SUM(repayments.interest_applied), 0) as interest_applied,
                 COALESCE(SUM(repayments.penalty_applied), 0) as penalty_applied,
+                COALESCE(SUM(repayments.insurance_applied), 0) as insurance_applied,
                 COALESCE(SUM(repayments.overpayment), 0) as overpayment
             ')
             ->get()
@@ -1522,8 +1539,9 @@ class ReportService
                 $principal = round((float) ($in->principal_applied ?? 0), 2);
                 $interest = round((float) ($in->interest_applied ?? 0), 2);
                 $penalty = round((float) ($in->penalty_applied ?? 0), 2);
+                $insurance = round((float) ($in->insurance_applied ?? 0), 2);
                 $overpayment = round((float) ($in->overpayment ?? 0), 2);
-                $inflowTotal = round($principal + $interest + $penalty + $overpayment, 2);
+                $inflowTotal = round($principal + $interest + $penalty + $insurance + $overpayment, 2);
                 $outflowTotal = round((float) ($out->net_proceeds ?? 0), 2);
 
                 return [
@@ -1532,6 +1550,7 @@ class ReportService
                     'inflow_principal' => $principal,
                     'inflow_interest' => $interest,
                     'inflow_penalty' => $penalty,
+                    'inflow_insurance' => $insurance,
                     'inflow_overpayment' => $overpayment,
                     'inflow_total' => $inflowTotal,
                     'repayment_count' => (int) ($in->entry_count ?? 0),

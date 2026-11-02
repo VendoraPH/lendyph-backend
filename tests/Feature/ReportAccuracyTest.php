@@ -633,9 +633,11 @@ class ReportAccuracyTest extends TestCase
         $cashFlow = $this->getJson("/api/reports/cash-flow?date_from={$today}&date_to={$today}")->assertOk();
 
         $this->assertEqualsWithDelta(5900, $daily->json('data.total_received'), 0.01);
+        // Daily Collection leaves out the insurance premium payments collected
+        // first; Cash Flow shows it as its own line inside the total.
         $this->assertEqualsWithDelta(
             $daily->json('data.total_received'),
-            $cashFlow->json('data.inflows.repayments.total'),
+            $cashFlow->json('data.inflows.repayments.total') - $cashFlow->json('data.inflows.repayments.insurance'),
             0.01,
             'The two reports count the same posted repayments over the same day and must never disagree.',
         );
