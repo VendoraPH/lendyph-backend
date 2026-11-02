@@ -1,0 +1,122 @@
+<?php
+
+namespace App\Services;
+
+use App\Models\AuditLog;
+use Illuminate\Database\Eloquent\Builder;
+
+/**
+ * Which Audit Trail module an audit row belongs to, in one place, so the
+ * `module` each row carries (AuditLogResource) and the list's `module` filter
+ * (AuditLogController) can never disagree.
+ *
+ * - Self-service auth events (login, logout, profile and password changes)
+ *   are `auth`, whatever their auditable type: a login row carries the User.
+ * - Otherwise the auditable class decides (MODULE_MAP).
+ * - A row whose class is not mapped, or that has none, is `system`.
+ */
+class AuditLogModules
+{
+    public const AUTH = 'auth';
+
+    public const UNMAPPED = 'system';
+
+    /**
+     * The actions AuthController writes for the signed-in user's own session
+     * and profile.
+     */
+    public const AUTH_ACTIONS = ['login', 'logout', 'password_changed', 'profile_updated'];
+
+    /**
+     * Auditable class basename => module. Stored types are full class names
+     * under App\Models (there is no morph map).
+     */
+    private const MODULE_MAP = [
+        'Borrower' => 'borrowers',
+        'CoMaker' => 'borrowers',
+        'Document' => 'borrowers',
+        'Loan' => 'loans',
+        'LoanProduct' => 'loans',
+        'LoanAdjustment' => 'loans',
+        'LoanApprovalStep' => 'loans',
+        'ApprovalWorkflowSetting' => 'loans',
+        'AmortizationSchedule' => 'loans',
+        'LoanLedgerEntry' => 'loans',
+        'Collateral' => 'loans',
+        'CollateralType' => 'loans',
+        'Fee' => 'loans',
+        'Repayment' => 'payments',
+        'RepaymentAllocation' => 'payments',
+        'User' => 'users',
+        'Branch' => 'users',
+        'Role' => 'roles',
+        'ShareCapitalPledge' => 'collections',
+        'ShareCapitalLedger' => 'collections',
+    ];
+
+    /**
+     * Every module a row can carry, which is also every value the `module`
+     * filter accepts.
+     *
+     * @return list<string>
+     */
+    public static function all(): array
+    {
+        return array_values(array_unique([...array_values(self::MODULE_MAP), self::AUTH, self::UNMAPPED]));
+    }
+
+    public static function for(?string $action, ?string $auditableType): string
+    {
+        if (in_array($action, self::AUTH_ACTIONS, true)) {
+            return self::AUTH;
+        }
+
+        $basename = $auditableType ? class_basename($auditableType) : null;
+
+        return $basename !== null && isset(self::MODULE_MAP[$basename])
+            ? self::MODULE_MAP[$basename]
+            : self::UNMAPPED;
+    }
+
+    public static function isAuthAction(?string $action): bool
+    {
+        return in_array($action, self::AUTH_ACTIONS, true);
+    }
+
+    /**
+     * Narrow an audit_logs query to one module, by the same rules as for().
+     *
+     * @param  Builder<AuditLog>  $query
+     */
+    public static function constrain(Builder $query, string $module): void
+    {
+        if ($module === self::AUTH) {
+            $query->whereIn('action', self::AUTH_ACTIONS);
+
+            return;
+        }
+
+        $query->whereNotIn('action', self::AUTH_ACTIONS);
+
+        if ($module === self::UNMAPPED) {
+            $query->where(fn (Builder $q) => $q
+                ->whereNull('auditable_type')
+                ->orWhereNotIn('auditable_type', self::types(array_keys(self::MODULE_MAP))));
+
+            return;
+        }
+
+        $query->whereIn('auditable_type', self::types(array_keys(
+            array_filter(self::MODULE_MAP, fn (string $mapped) => $mapped === $module),
+        )));
+    }
+
+    /**
+     * @param  list<string>  $basenames
+     * @return list<string>
+     */
+    private static function types(array $basenames): array
+    {
+        return array_map(fn (string $basename) => 'App\\Models\\'.$basename, $basenames);
+    }
+}

@@ -44,7 +44,7 @@ it('returns only user rows for module=users', function () {
         ->and(collect($rows)->pluck('auditable_type')->unique()->all())->toBe(['User']);
 });
 
-it('returns rows with no mapped class for module=auth', function () {
+it('returns auth events for module=auth', function () {
     $rows = $this->getJson('/api/audit-logs?module=auth&per_page=100')->assertOk()->json('data');
 
     expect(collect($rows)->pluck('action')->all())->toBe(['login'])

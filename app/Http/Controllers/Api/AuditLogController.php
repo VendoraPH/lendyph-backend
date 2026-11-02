@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\AuditLogResource;
 use App\Models\AuditLog;
+use App\Services\AuditLogModules;
 use App\Services\LikePattern;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
@@ -25,7 +26,7 @@ class AuditLogController extends Controller
             new OA\Parameter(name: 'user_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
             new OA\Parameter(name: 'action', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
             new OA\Parameter(name: 'auditable_type', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
-            new OA\Parameter(name: 'module', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['borrowers', 'loans', 'payments', 'users', 'roles', 'collections', 'auth']), description: 'The `module` each row carries; an unknown value is a 422'),
+            new OA\Parameter(name: 'module', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['borrowers', 'loans', 'payments', 'users', 'roles', 'collections', 'auth', 'system']), description: 'The `module` each row carries (auth = sign-in and self-service events; system = rows of no other module); an unknown value is a 422'),
             new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15)),
@@ -71,6 +72,8 @@ class AuditLogController extends Controller
             ->pluck('count', 'action')
             ->toArray();
 
+        AuditLogResource::loadChangeUsers($logs->getCollection());
+
         return AuditLogResource::collection($logs)
             ->additional(['meta' => ['stats' => [
                 'actions' => $stats,
@@ -89,7 +92,7 @@ class AuditLogController extends Controller
             new OA\Parameter(name: 'user_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
             new OA\Parameter(name: 'action', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
             new OA\Parameter(name: 'auditable_type', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
-            new OA\Parameter(name: 'module', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['borrowers', 'loans', 'payments', 'users', 'roles', 'collections', 'auth']), description: 'The `module` each row carries; an unknown value is a 422'),
+            new OA\Parameter(name: 'module', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['borrowers', 'loans', 'payments', 'users', 'roles', 'collections', 'auth', 'system']), description: 'The `module` each row carries (auth = sign-in and self-service events; system = rows of no other module); an unknown value is a 422'),
             new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
         ],
@@ -177,6 +180,7 @@ class AuditLogController extends Controller
         $this->authorize('audit_logs:view');
 
         $auditLog->load('user', 'auditable');
+        AuditLogResource::loadChangeUsers([$auditLog]);
 
         return new AuditLogResource($auditLog);
     }
@@ -196,7 +200,7 @@ class AuditLogController extends Controller
             'user_id' => ['nullable', 'integer', 'min:1'],
             'action' => ['nullable', 'string'],
             'auditable_type' => ['nullable', 'string'],
-            'module' => ['nullable', 'string', Rule::in(AuditLogResource::modules())],
+            'module' => ['nullable', 'string', Rule::in(AuditLogModules::all())],
             'date_from' => ['nullable', 'date'],
             'date_to' => ['nullable', 'date'],
             'per_page' => ['nullable', 'integer', 'min:1'],
@@ -244,9 +248,7 @@ class AuditLogController extends Controller
             ->when(filled($userId), fn ($q) => $q->where('user_id', $userId))
             ->when(filled($action), fn ($q) => $q->where('action', $action))
             ->when(filled($auditableType), fn ($q) => $q->where('auditable_type', 'like', LikePattern::contains($auditableType)))
-            ->when(filled($module), fn ($q) => $module === AuditLogResource::UNMAPPED_MODULE
-                ? $q->where(fn ($q) => $q->whereNull('auditable_type')->orWhereNotIn('auditable_type', AuditLogResource::mappedAuditableTypes()))
-                : $q->whereIn('auditable_type', AuditLogResource::auditableTypesFor($module)))
+            ->when(filled($module), fn ($q) => AuditLogModules::constrain($q, $module))
             ->when(filled($dateFrom), fn ($q) => $q->where('created_at', '>=', $dateFrom))
             ->when(filled($dateTo), fn ($q) => $q->where('created_at', '<=', "{$dateTo} 23:59:59"));
     }

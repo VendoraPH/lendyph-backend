@@ -55,9 +55,8 @@ class Role extends SpatieRole
      * since we only have one user model anyway.
      */
     /**
-     * The description on this role's automatic `updated` audit row: the label
-     * it is shown by (the display name, or the key in headline case when it
-     * has none) and the fields that changed, e.g. "Role Teller updated:
+     * The description on this role's automatic `updated` audit row: its
+     * auditLabel() and the fields that changed, e.g. "Role Teller updated:
      * display_name, description". Other actions keep no description.
      */
     public function describeAuditEvent(string $action): ?string
@@ -67,9 +66,17 @@ class Role extends SpatieRole
         }
 
         $fields = array_keys(array_diff_key($this->getChanges(), [self::UPDATED_AT => true]));
-        $label = filled($this->display_name) ? trim((string) $this->display_name) : Str::headline((string) $this->name);
 
-        return sprintf('Role %s updated: %s', $label, implode(', ', $fields));
+        return sprintf('Role %s updated: %s', $this->auditLabel(), implode(', ', $fields));
+    }
+
+    /**
+     * The label the audit trail names this role by: its display name, or the
+     * key in headline case when it has none (what the role editor shows).
+     */
+    public function auditLabel(): string
+    {
+        return filled($this->display_name) ? trim((string) $this->display_name) : Str::headline((string) $this->name);
     }
 
     public function users(): MorphToMany
