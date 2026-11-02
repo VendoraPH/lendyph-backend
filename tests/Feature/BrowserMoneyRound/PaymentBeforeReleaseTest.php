@@ -102,4 +102,36 @@ class PaymentBeforeReleaseTest extends TestCase
         $this->postJson("/api/loans/{$loan->id}/repayments/preview", ['amount_paid' => 1000, 'payment_date' => '2026-02-01'])
             ->assertOk();
     }
+
+    /**
+     * The repayment is stored with the input's own calendar date, offset
+     * included, so that is the date the rule compares. 16:30 UTC on the 28th
+     * is already the 1st in Manila, but it would be stored as the 28th, before
+     * the release on the 1st.
+     */
+    public function test_an_offset_timestamp_that_would_be_stored_before_release_is_refused(): void
+    {
+        $this->travelTo(Carbon::parse('2026-03-01 09:00'));
+        $loan = $this->releasedLoanFor(startDate: '2026-02-20');
+        $this->travelTo(Carbon::parse('2026-03-10 09:00'));
+
+        $message = "The payment date can't be before the loan's release date (2026-03-01).";
+
+        foreach (['2026-02-28T16:30:00Z', '2026-02-28T20:00:00-05:00'] as $paymentDate) {
+            $this->postJson("/api/loans/{$loan->id}/repayments", ['amount_paid' => 1000, 'payment_date' => $paymentDate])
+                ->assertStatus(422)
+                ->assertJsonValidationErrors(['payment_date' => $message]);
+            $this->postJson("/api/loans/{$loan->id}/repayments/preview", ['amount_paid' => 1000, 'payment_date' => $paymentDate])
+                ->assertStatus(422)
+                ->assertJsonValidationErrors(['payment_date' => $message]);
+        }
+
+        $this->assertSame(0, Repayment::where('loan_id', $loan->id)->count());
+
+        // An offset timestamp whose own date is the release day is accepted
+        // and stored with that date.
+        $this->postJson("/api/loans/{$loan->id}/repayments", ['amount_paid' => 1000, 'payment_date' => '2026-03-01T01:00:00+08:00'])
+            ->assertCreated()
+            ->assertJsonPath('data.payment_date', '2026-03-01');
+    }
 }

@@ -29,8 +29,14 @@ class StoreRepaymentRequest extends FormRequest
     }
 
     /**
-     * Refuse a `payment_date` before the day the loan was released, both dates
-     * read in the app timezone (released_at is a Manila time).
+     * Refuse a `payment_date` before the day the loan was released.
+     *
+     * The payment's day is the date the repayment will be stored with:
+     * RepaymentService parses the input as it is (Carbon::parse(), a bare date
+     * read in the app timezone) and the `payment_date` column keeps that
+     * Carbon's own calendar date, so an input with an offset keeps its own
+     * date, never the Manila one. The release day is `released_at` (a Manila
+     * time) read in the app timezone.
      *
      * For the requests that take a payment date from the client: recording a
      * repayment and its preview (RepaymentController::preview()). Server-dated
@@ -47,15 +53,13 @@ class StoreRepaymentRequest extends FormRequest
                 return;
             }
 
-            $timezone = config('app.timezone');
-
             try {
-                $paymentDay = Carbon::parse($value, $timezone)->setTimezone($timezone)->toDateString();
+                $paymentDay = Carbon::parse($value)->toDateString();
             } catch (InvalidFormatException) {
                 return;
             }
 
-            $releaseDay = $loan->released_at->copy()->setTimezone($timezone)->toDateString();
+            $releaseDay = $loan->released_at->copy()->setTimezone(config('app.timezone'))->toDateString();
 
             if ($paymentDay < $releaseDay) {
                 $fail("The payment date can't be before the loan's release date ({$releaseDay}).");

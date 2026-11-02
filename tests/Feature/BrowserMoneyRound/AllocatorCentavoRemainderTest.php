@@ -11,15 +11,16 @@ use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
 /**
- * The allocator works in floats. RepaymentService::allocateToSchedule()
- * subtracts each period's interest and principal from the money left as
+ * The allocator worked in floats. RepaymentService::allocateToSchedule()
+ * subtracted each period's interest and principal from the money left as
  * floats, so a payment of exactly what the periods owe, in whole centavos,
- * can leave about 1e-12 behind. The loop then carries that dust on to the
- * next period: it writes a 0.00 / 0.00 / 0.00 allocation row there and marks
+ * could leave about 1e-12 behind. The loop then carried that dust on to the
+ * next period: it wrote a 0.00 / 0.00 / 0.00 allocation row there and marked
  * the payment as reaching a future period ('advance' instead of 'exact').
+ * It now works in whole centavos (decision m5-1).
  *
  * ₱45,678.91 over 6 monthly periods at 3% straight: ₱7,613.15 principal and
- * ₱1,370.37 interest a period. 8,983.52 − 1,370.37 − 7,613.15 leaves
+ * ₱1,370.37 interest a period. 8,983.52 − 1,370.37 − 7,613.15 left
  * 9.09e-13 in floats.
  *
  * Paying preset n must leave periods 1..n paid and period n+1 untouched,
