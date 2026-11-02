@@ -99,7 +99,7 @@ class AuthController extends Controller
         // bcrypt hash into audit_logs.old_values.
         $user->forceFill(['last_login_at' => now()])->saveQuietly();
 
-        AuditLogService::log('login', $user, description: "User {$user->username} logged in");
+        AuditLogService::log('login', $user, description: "User {$user->username} logged in", userId: $user->id);
 
         $user->load('branch', 'branches', 'roles', 'permissions');
 

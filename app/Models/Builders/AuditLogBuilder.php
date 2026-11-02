@@ -15,9 +15,12 @@ use Illuminate\Database\Eloquent\Builder;
  * `$loan->auditLogs()->delete()`, `AuditLog::truncate()`, an upsert that would
  * overwrite a row). Each throws before any SQL runs.
  *
- * Raw `DB::table('audit_logs')` writes bypass Eloquent entirely; the only one
- * that updates is TimezoneShift, the one-shot UTC to Asia/Manila command that
- * has already run on every deployment.
+ * What this does not stop, by design (no database triggers):
+ * - the underlying query builder, reached through `toBase()`, `getQuery()`
+ *   or `getBaseQuery()`, whose update and delete run unguarded;
+ * - raw `DB::table('audit_logs')` writes, which bypass Eloquent entirely. The
+ *   only one that updates is TimezoneShift, the one-shot UTC to Asia/Manila
+ *   command that has already run on every deployment.
  *
  * @extends Builder<AuditLog>
  */

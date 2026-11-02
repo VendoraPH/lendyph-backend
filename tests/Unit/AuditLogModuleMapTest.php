@@ -82,3 +82,9 @@ it('lists the module values', function () {
         'auth', 'borrowers', 'loans', 'payments', 'collections', 'users', 'roles', 'accounting', 'gcash', 'system',
     ]);
 });
+
+it('compares full class names, so a same-named class elsewhere is not mapped', function () {
+    expect(AuditLogModules::for('updated', Role::class))->toBe('roles')
+        ->and(AuditLogModules::for('updated', 'Spatie\\Permission\\Models\\Role'))->toBe('system')
+        ->and(AuditLogModules::isMapped('Spatie\\Permission\\Models\\Role'))->toBeFalse();
+});

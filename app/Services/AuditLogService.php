@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\AuditLog;
 use Illuminate\Database\Eloquent\Model;
+use LogicException;
 
 class AuditLogService
 {
@@ -133,6 +134,13 @@ class AuditLogService
         ?int $userId = null,
         ?string $ipAddress = null,
     ): AuditLog {
+        if ($auditable !== null && app()->runningUnitTests() && ! AuditLogModules::isMapped($auditable->getMorphClass())) {
+            throw new LogicException(sprintf(
+                'Audit rows for %s have no Audit Trail module. Map the class in AuditLogModules::MODULE_MAP (to `system` if it belongs nowhere else).',
+                $auditable->getMorphClass(),
+            ));
+        }
+
         return AuditLog::create([
             'user_id' => $userId ?? auth()->id(),
             'action' => $action,

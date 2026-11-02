@@ -7,7 +7,6 @@ use App\Services\RolePermissionAudit;
 use Database\Seeders\RoleAndPermissionSeeder;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
-use Spatie\Permission\Models\Role as SpatieRole;
 use Tests\TestCase;
 
 uses(TestCase::class);
@@ -140,8 +139,8 @@ it('writes no audit rows when the role seeder runs', function () {
 it('writes one system row, with no user, when a migration changes a role\'s permissions', function () {
     Auth::forgetGuards();
 
-    // A migration holds Spatie's own Role class, as the permission migrations do.
-    $viewer = SpatieRole::findByName('viewer', 'web');
+    // A migration loads the app's Role, the class config('permission.models.role') names.
+    $viewer = Role::findByName('viewer', 'web');
     $before = RolePermissionAudit::names($viewer);
     $viewer->givePermissionTo('settings:delete');
     RolePermissionAudit::record($viewer, $before, RolePermissionAudit::names($viewer), 'System change: test migration grants settings:delete to viewer');

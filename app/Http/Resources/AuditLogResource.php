@@ -59,11 +59,14 @@ class AuditLogResource extends JsonResource
 
         return [
             'id' => $this->id,
-            'user' => new UserResource($this->actor()),
+            'user' => new UserResource($this->resource->inferredActor() ?? $this->whenLoaded('user')),
+            // True when `user` is the signed-in user of an old login row that
+            // recorded no user_id, rather than the row's own actor.
+            'actor_inferred' => $this->resource->inferredActor() !== null,
             'action' => $this->action,
             // Frontend-canonical module slug; the list's `module` filter uses
             // the same rules (AuditLogModules).
-            'module' => AuditLogModules::for($this->action, $this->auditable_type),
+            'module' => AuditLogModules::for($this->action, $this->auditable_type, $this->description),
             // Target summary (frontend renders as "type #id — label")
             'target' => $this->auditable_id ? [
                 'id' => $this->auditable_id,
@@ -81,25 +84,6 @@ class AuditLogResource extends JsonResource
             'description' => $this->description,
             'created_at' => $this->created_at,
         ];
-    }
-
-    /**
-     * Who the row shows as having acted. A login row is written before the
-     * user is signed in, so it has no user_id; for auth events the user the
-     * row is about is the one who acted. Display only.
-     */
-    private function actor(): mixed
-    {
-        $user = $this->whenLoaded('user');
-
-        if ($this->user_id === null
-            && AuditLogModules::isAuthAction($this->action)
-            && $this->relationLoaded('auditable')
-            && $this->auditable instanceof User) {
-            return $this->auditable;
-        }
-
-        return $user;
     }
 
     private function resolveAuditableLabel(): string

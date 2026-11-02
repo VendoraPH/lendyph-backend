@@ -71,13 +71,14 @@ class Role extends SpatieRole
     }
 
     /**
-     * How audit descriptions name this role: the editable label in quotes and
+     * How audit descriptions name this role: the editable label as a JSON
+     * string (so a quote inside it is escaped, not mistaken for the end) and
      * the fixed key in brackets, e.g. `"Teller" (cashier)`, so a row still
      * identifies the role after the label changes.
      */
     public function auditName(): string
     {
-        return sprintf('"%s" (%s)', $this->auditLabel(), $this->name);
+        return json_encode($this->auditLabel(), JSON_UNESCAPED_UNICODE).' ('.$this->name.')';
     }
 
     /**

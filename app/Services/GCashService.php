@@ -175,7 +175,7 @@ class GCashService
                 action: 'updated',
                 auditable: null,
                 newValues: ['tiers' => $fresh->toArray()],
-                description: 'GCash tiers replaced ('.$fresh->count().' rows)',
+                description: AuditLogModules::GCASH_TIERS_REPLACED.' ('.$fresh->count().' rows)',
             );
 
             return $fresh;

@@ -3,7 +3,6 @@
 namespace App\Services;
 
 use App\Models\Role;
-use Spatie\Permission\Models\Role as SpatieRole;
 
 /**
  * The audit row for a change to a role's permissions.
@@ -16,16 +15,17 @@ use Spatie\Permission\Models\Role as SpatieRole;
  * editor sends the whole list on every save).
  *
  * RoleController calls it for API changes. A migration that grants or
- * revokes a permission calls it too, with a description naming the
- * migration: outside a request it has no user, so the row reads as a system
- * change (`user_id` null).
+ * revokes a permission calls it too, with an App\Models\Role (the class
+ * config('permission.models.role') names, e.g. Role::findByName()) and a
+ * description naming the migration: outside a request it has no user, so the
+ * row reads as a system change (`user_id` null).
  */
 class RolePermissionAudit
 {
     /**
      * @return list<string>
      */
-    public static function names(SpatieRole $role): array
+    public static function names(Role $role): array
     {
         return $role->permissions()->pluck('name')->unique()->sort()->values()->all();
     }
@@ -34,7 +34,7 @@ class RolePermissionAudit
      * @param  list<string>  $before
      * @param  list<string>  $after
      */
-    public static function record(SpatieRole $role, array $before, array $after, ?string $description = null): void
+    public static function record(Role $role, array $before, array $after, ?string $description = null): void
     {
         sort($before);
         sort($after);
@@ -44,8 +44,6 @@ class RolePermissionAudit
         if ($before === $after) {
             return;
         }
-
-        $role = $role instanceof Role ? $role : Role::query()->findOrFail($role->getKey());
 
         $added = array_values(array_diff($after, $before));
         $removed = array_values(array_diff($before, $after));

@@ -1,10 +1,12 @@
 <?php
 
 use App\Models\AuditLog;
+use App\Models\BrandingSetting;
 use App\Models\CsvImportRun;
 use App\Models\LoanApprovalStep;
 use App\Models\Role;
 use App\Models\User;
+use App\Services\AuditLogService;
 use Illuminate\Support\Facades\DB;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
@@ -51,12 +53,12 @@ it('never lists timestamps in the change list, even when the update lands in a l
         ->assertJsonPath('data.changes', [['field' => 'display_name', 'old' => null, 'new' => 'Stamp']]);
 });
 
-it('files a login row under auth, not users, and shows the signed-in user as the actor', function () {
+it('files a login row under auth, not users, and records the signed-in user as its actor', function () {
     $this->app['auth']->forgetGuards();
     $this->postJson('/api/auth/login', ['login' => 'super_admin', 'password' => 'password'])->assertOk();
 
     $row = latestAuditRow('login', $this->admin->getMorphClass(), $this->admin->id);
-    expect($row->user_id)->toBeNull();
+    expect($row->user_id)->toBe($this->admin->id);
 
     $this->actingAs($this->admin);
 
@@ -64,7 +66,8 @@ it('files a login row under auth, not users, and shows the signed-in user as the
         ->assertOk()
         ->assertJsonPath('data.module', 'auth')
         ->assertJsonPath('data.user.id', $this->admin->id)
-        ->assertJsonPath('data.user.full_name', $this->admin->full_name);
+        ->assertJsonPath('data.user.full_name', $this->admin->full_name)
+        ->assertJsonPath('data.actor_inferred', false);
 
     expect(collect($this->getJson('/api/audit-logs?module=auth&per_page=100')->json('data'))->pluck('id'))
         ->toContain($row->id);
@@ -157,4 +160,80 @@ it('loads the change-list user names in one query, whatever the page size', func
     };
 
     expect($userQueries(40))->toBe($userQueries(2));
+});
+
+it('infers the actor of an old login row that has no user_id, and says so', function () {
+    $row = AuditLog::create([
+        'action' => 'login',
+        'user_id' => null,
+        'auditable_type' => $this->admin->getMorphClass(),
+        'auditable_id' => $this->admin->id,
+        'description' => 'User super_admin logged in',
+    ]);
+
+    $this->getJson("/api/audit-logs/{$row->id}")
+        ->assertOk()
+        ->assertJsonPath('data.user.id', $this->admin->id)
+        ->assertJsonPath('data.actor_inferred', true);
+});
+
+it('does not infer an actor for a logout with no user_id', function () {
+    $row = AuditLog::create([
+        'action' => 'logout',
+        'user_id' => null,
+        'auditable_type' => $this->admin->getMorphClass(),
+        'auditable_id' => $this->admin->id,
+        'description' => 'User super_admin logged out',
+    ]);
+
+    $this->getJson("/api/audit-logs/{$row->id}")
+        ->assertOk()
+        ->assertJsonPath('data.user.id', null)
+        ->assertJsonPath('data.actor_inferred', false);
+});
+
+it('shows the user in the CSV export for an old login row', function () {
+    AuditLog::create([
+        'action' => 'login',
+        'user_id' => null,
+        'auditable_type' => $this->admin->getMorphClass(),
+        'auditable_id' => $this->admin->id,
+        'description' => 'old-login-probe',
+    ]);
+
+    $csv = $this->get('/api/audit-logs/export?search=old-login-probe', ['Accept' => 'application/json'])
+        ->assertOk()
+        ->streamedContent();
+
+    $rows = collect(explode("\n", trim($csv)))->slice(1)->map(fn (string $line) => str_getcsv($line, escape: ''))->values();
+
+    expect($rows)->toHaveCount(1)
+        ->and($rows[0][1])->toBe($this->admin->full_name);
+});
+
+it('files the GCash tiers-replaced row under gcash, for the label and the filter', function () {
+    $this->putJson('/api/gcash/tiers', ['tiers' => [
+        ['min_amount' => 1, 'max_amount' => 1000, 'cash_in_rate' => 20, 'cash_out_rate' => 20, 'display_order' => 1],
+    ]])->assertOk();
+
+    $row = AuditLog::query()->whereNull('auditable_type')->where('description', 'like', 'GCash tiers replaced%')->latest('id')->firstOrFail();
+
+    $this->getJson("/api/audit-logs/{$row->id}")->assertOk()->assertJsonPath('data.module', 'gcash');
+
+    $ids = fn (string $module) => collect($this->getJson("/api/audit-logs?module={$module}&per_page=100")->assertOk()->json('data'))->pluck('id');
+
+    expect($ids('gcash'))->toContain($row->id)
+        ->and($ids('system'))->not->toContain($row->id);
+});
+
+it('quotes the role label as a JSON string in descriptions', function () {
+    $role = Role::create(['name' => 'quote_probe', 'guard_name' => 'web', 'is_system' => false]);
+    $role->update(['display_name' => "Front \"Desk\" Jos\u{00E9}"]);
+
+    expect(latestAuditRow('updated', $role->getMorphClass(), $role->id)->description)
+        ->toBe("Role \"Front \\\"Desk\\\" Jos\u{00E9}\" (quote_probe) updated: display_name");
+});
+
+it('refuses, in tests, an audit row for a class with no module', function () {
+    expect(fn () => AuditLogService::log('probe', new BrandingSetting))->toThrow(LogicException::class);
 });

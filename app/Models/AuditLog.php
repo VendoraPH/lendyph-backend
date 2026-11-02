@@ -98,6 +98,22 @@ class AuditLog extends Model
         throw AuditLogIsAppendOnlyException::delete($this->getKey());
     }
 
+    /**
+     * The user an old login row is about, shown as its actor. A login used to
+     * be written before the user was signed in, so those rows have no
+     * user_id; AuthController::login() now records it. Only `login` rows, and
+     * only when the auditable User is loaded. Display only: the row is not
+     * changed, and the list's user filter and search still read user_id.
+     */
+    public function inferredActor(): ?User
+    {
+        if ($this->action !== 'login' || $this->user_id !== null || ! $this->relationLoaded('auditable')) {
+            return null;
+        }
+
+        return $this->auditable instanceof User ? $this->auditable : null;
+    }
+
     public function user(): BelongsTo
     {
         return $this->belongsTo(User::class);

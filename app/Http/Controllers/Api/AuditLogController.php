@@ -14,6 +14,16 @@ use Illuminate\Validation\Rule;
 use OpenApi\Attributes as OA;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
+/**
+ * The audit trail: list, CSV export and detail.
+ *
+ * Login rows written before AuthController::login() recorded the user have
+ * no user_id. The list and detail (AuditLogResource) and the export's User
+ * column show the signed-in user as their actor (AuditLog::inferredActor()).
+ * The `user_id` filter, `search` and the action stats read the stored
+ * user_id only, so those old login rows stay outside a user's filtered view;
+ * rows written since carry the user_id and are counted normally.
+ */
 class AuditLogController extends Controller
 {
     use CsvExportTrait;
@@ -143,7 +153,7 @@ class AuditLogController extends Controller
                     foreach ($chunk as $log) {
                         fputcsv($handle, array_map(self::sanitizeCsvCell(...), [
                             $log->created_at?->toDateTimeString(),
-                            $log->user?->full_name ?? ($log->user_id ? "User #{$log->user_id}" : 'system'),
+                            ($log->user ?? $log->inferredActor())?->full_name ?? ($log->user_id ? "User #{$log->user_id}" : 'system'),
                             $log->action,
                             class_basename($log->auditable_type ?? ''),
                             $log->auditable_id,
