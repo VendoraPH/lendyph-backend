@@ -8,6 +8,7 @@ use App\Http\Requests\Repayment\VoidRepaymentRequest;
 use App\Http\Resources\RepaymentResource;
 use App\Models\Loan;
 use App\Models\Repayment;
+use App\Services\BranchAccess;
 use App\Services\LikePattern;
 use App\Services\RepaymentService;
 use Illuminate\Http\JsonResponse;
@@ -22,6 +23,7 @@ class RepaymentController extends Controller
     #[OA\Get(
         path: '/api/repayments',
         summary: 'List all repayments (global)',
+        description: 'Payments on loans in the caller\'s branches; `branches:view_all` sees every branch. `meta.stats` and `meta.totals` cover the same payments.',
         tags: ['Repayments'],
         security: [['sanctum' => []]],
         parameters: [
@@ -110,12 +112,24 @@ class RepaymentController extends Controller
         $dateTo = $filters['date_to'] ?? null;
 
         /**
+         * Only payments on loans in the caller's branches (BranchAccess, by the
+         * loan's branch): the rows, `meta.stats` and `meta.totals` alike. Null
+         * for `branches:view_all`, which sees every payment.
+         */
+        $branchIds = app(BranchAccess::class)->for(request()->user());
+        $inBranches = fn ($q) => $q->when($branchIds !== null, fn ($q) => $q->whereIn(
+            'repayments.loan_id',
+            Loan::query()->whereIn('loans.branch_id', $branchIds)->select('loans.id'),
+        ));
+
+        /**
          * Every filter but `status`, built fresh on each call: the page's rows
          * add `status` and their relations on top, and `meta.totals` sums the
          * same payments split by status. One copy of the filters, so the totals
          * can never describe a different set of payments than the list does.
          */
         $filtered = fn () => Repayment::query()
+            ->tap($inBranches)
             ->when(filled($search), function ($q) use ($search) {
                 $like = LikePattern::contains($search);
 
@@ -151,7 +165,9 @@ class RepaymentController extends Controller
         // render status tabs without a second request. Borrower-scoped on the same
         // filled() gate as the list above — the two must agree, or the tabs report
         // the whole organisation while the rows report one member.
-        $stats = Repayment::when(filled($borrowerId), fn ($q) => $q->whereHas('loan', fn ($lq) => $lq->where('borrower_id', $borrowerId)))
+        $stats = Repayment::query()
+            ->tap($inBranches)
+            ->when(filled($borrowerId), fn ($q) => $q->whereHas('loan', fn ($lq) => $lq->where('borrower_id', $borrowerId)))
             ->selectRaw('status, COUNT(*) as count')
             ->groupBy('status')
             ->pluck('count', 'status')

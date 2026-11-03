@@ -7,6 +7,7 @@ use App\Http\Controllers\Controller;
 use App\Http\Resources\AuditLogResource;
 use App\Models\AuditLog;
 use App\Services\AuditLogModules;
+use App\Services\BranchAccess;
 use App\Services\LikePattern;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
@@ -23,6 +24,10 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
  * The `user_id` filter, `search` and the action stats read the stored
  * user_id only, so those old login rows stay outside a user's filtered view;
  * rows written since carry the user_id and are counted normally.
+ *
+ * The audit trail is a head-office control and records no branch, so every
+ * endpoint here also requires `branches:view_all` (decision B2): a branch
+ * user holding `audit_logs:view` or `audit_logs:export` gets 403.
  */
 class AuditLogController extends Controller
 {
@@ -47,12 +52,13 @@ class AuditLogController extends Controller
         responses: [
             new OA\Response(response: 200, description: 'Paginated audit log list'),
             new OA\Response(response: 401, description: 'Unauthenticated'),
-            new OA\Response(response: 403, description: 'Forbidden'),
+            new OA\Response(response: 403, description: 'Forbidden (also without branches:view_all)'),
         ],
     )]
     public function index(): AnonymousResourceCollection
     {
         $this->authorize('audit_logs:view');
+        $this->authorize(BranchAccess::VIEW_ALL);
 
         $filters = $this->validatedFilters();
 
@@ -112,12 +118,13 @@ class AuditLogController extends Controller
         responses: [
             new OA\Response(response: 200, description: 'CSV file stream', content: new OA\MediaType(mediaType: 'text/csv')),
             new OA\Response(response: 401, description: 'Unauthenticated'),
-            new OA\Response(response: 403, description: 'Forbidden'),
+            new OA\Response(response: 403, description: 'Forbidden (also without branches:view_all)'),
         ],
     )]
     public function export(): StreamedResponse
     {
         $this->authorize('audit_logs:export');
+        $this->authorize(BranchAccess::VIEW_ALL);
 
         // Validated here, not inside the closure below. The closure runs after
         // the response has begun streaming, so a ValidationException thrown from
@@ -184,13 +191,14 @@ class AuditLogController extends Controller
         responses: [
             new OA\Response(response: 200, description: 'Audit log details'),
             new OA\Response(response: 401, description: 'Unauthenticated'),
-            new OA\Response(response: 403, description: 'Forbidden'),
+            new OA\Response(response: 403, description: 'Forbidden (also without branches:view_all)'),
             new OA\Response(response: 404, description: 'Not found'),
         ],
     )]
     public function show(AuditLog $auditLog): AuditLogResource
     {
         $this->authorize('audit_logs:view');
+        $this->authorize(BranchAccess::VIEW_ALL);
 
         $auditLog->load('user', 'auditable');
         AuditLogResource::loadChangeUsers([$auditLog]);

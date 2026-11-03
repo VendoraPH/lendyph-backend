@@ -8,6 +8,7 @@ use App\Http\Requests\Branch\UpdateBranchRequest;
 use App\Http\Resources\BranchResource;
 use App\Http\Resources\PublicBranchResource;
 use App\Models\Branch;
+use App\Services\BranchAccess;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use OpenApi\Attributes as OA;
@@ -17,7 +18,7 @@ class BranchController extends Controller
     #[OA\Get(
         path: '/api/branches',
         summary: 'List branches',
-        description: 'Get all branches',
+        description: 'Every branch for a caller holding branches:view_all; otherwise only the caller\'s own branches.',
         tags: ['Branches'],
         security: [['sanctum' => []]],
         parameters: [
@@ -30,7 +31,12 @@ class BranchController extends Controller
     )]
     public function index(): AnonymousResourceCollection
     {
+        // Decision B2: a caller without `branches:view_all` lists only their
+        // own branches (none when they have no branch).
+        $branchIds = app(BranchAccess::class)->for(request()->user());
+
         $branches = Branch::withCount('users')
+            ->when($branchIds !== null, fn ($q) => $q->whereIn('branches.id', $branchIds))
             ->when(request()->boolean('active_only'), fn ($q) => $q->where('is_active', true))
             ->orderBy('name')
             ->get();

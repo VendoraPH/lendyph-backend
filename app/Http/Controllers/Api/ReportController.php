@@ -11,6 +11,7 @@ use App\Http\Resources\RepaymentResource;
 use App\Models\AmortizationSchedule;
 use App\Models\Borrower;
 use App\Models\Loan;
+use App\Services\BranchAccess;
 use App\Services\ReportService;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
@@ -85,6 +86,16 @@ class ReportController extends Controller
         ], $extra));
 
         $this->assertSpanWithinCap($filters);
+
+        // Decision B2 (least privilege): a caller without `branches:view_all`
+        // reports on their own branches only. A `branch_id` outside them is
+        // refused (403); without one, every branch they hold is included
+        // (`branch_ids`, read by ReportService::branchScope()). Set here, so
+        // every report, its row details, its totals and its CSV export share
+        // one scope. Null for `branches:view_all`: the whole organisation.
+        $access = app(BranchAccess::class);
+        $access->authorizeBranchFilter(request()->user(), $filters['branch_id'] ?? null);
+        $filters['branch_ids'] = $access->for(request()->user());
 
         return $filters;
     }

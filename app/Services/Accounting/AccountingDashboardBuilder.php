@@ -34,7 +34,7 @@ final class AccountingDashboardBuilder
     public function __construct(private TrialBalanceBuilder $trialBalance) {}
 
     /** @return array<string, mixed> */
-    public function build(string $asOf, ?int $branchId = null): array
+    public function build(string $asOf, int|array|null $branchId = null): array
     {
         $trialBalance = $this->trialBalance->build($asOf, $branchId);
 
@@ -245,11 +245,11 @@ final class AccountingDashboardBuilder
      * sitting on someone's desk, and it is precisely the one an as-of filter
      * would hide.
      */
-    private function draftCount(?int $branchId): int
+    private function draftCount(int|array|null $branchId): int
     {
         return AccountingJournal::query()
             ->where('status', 'draft')
-            ->when($branchId !== null, fn ($q) => $q->where('branch_id', $branchId))
+            ->when($branchId !== null, fn ($q) => $q->whereIn('branch_id', (array) $branchId))
             ->count();
     }
 }

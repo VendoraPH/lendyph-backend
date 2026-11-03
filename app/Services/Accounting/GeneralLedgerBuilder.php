@@ -52,7 +52,7 @@ final class GeneralLedgerBuilder
         AccountingAccount $account,
         ?string $from,
         ?string $to,
-        ?int $branchId,
+        int|array|null $branchId,
         int $page,
         int $perPage,
     ): LengthAwarePaginator {
@@ -109,7 +109,7 @@ final class GeneralLedgerBuilder
      * first day of the range or drops it, and both look like a plausible
      * balance.
      */
-    public function openingBalance(AccountingAccount $account, ?string $from, ?int $branchId): int
+    public function openingBalance(AccountingAccount $account, ?string $from, int|array|null $branchId): int
     {
         if ($from === null || trim($from) === '') {
             return 0;
@@ -122,7 +122,7 @@ final class GeneralLedgerBuilder
             ->where('l.accounting_account_id', $account->id)
             ->whereIn('j.status', AccountingJournal::HISTORICAL_STATUSES)
             ->where('j.date', '<=', $dayBefore)
-            ->when($branchId !== null, fn ($q) => $q->where('j.branch_id', $branchId))
+            ->when($branchId !== null, fn ($q) => $q->whereIn('j.branch_id', (array) $branchId))
             ->selectRaw('coalesce(sum(l.debit), 0) as debit, coalesce(sum(l.credit), 0) as credit')
             ->first();
 
@@ -176,7 +176,7 @@ final class GeneralLedgerBuilder
      *
      * @return Collection<int, object>
      */
-    private function movements(int $accountId, ?string $from, ?string $to, ?int $branchId)
+    private function movements(int $accountId, ?string $from, ?string $to, int|array|null $branchId)
     {
         return DB::table('accounting_journal_lines as l')
             ->join('accounting_journals as j', 'j.id', '=', 'l.accounting_journal_id')
@@ -184,7 +184,7 @@ final class GeneralLedgerBuilder
             ->whereIn('j.status', AccountingJournal::HISTORICAL_STATUSES)
             ->when($from !== null, fn ($q) => $q->where('j.date', '>=', $from))
             ->when($to !== null, fn ($q) => $q->where('j.date', '<=', $to))
-            ->when($branchId !== null, fn ($q) => $q->where('j.branch_id', $branchId))
+            ->when($branchId !== null, fn ($q) => $q->whereIn('j.branch_id', (array) $branchId))
             ->orderBy('j.date')
             ->orderBy('j.journal_no')
             ->orderBy('l.line_no')

@@ -37,7 +37,7 @@ final class TrialBalanceBuilder
      *
      * @return array{as_of: string, rows: list<array<string, mixed>>, total_debit: int, total_credit: int, difference: int, is_balanced: bool}
      */
-    public function build(string $asOf, ?int $branchId = null): array
+    public function build(string $asOf, int|array|null $branchId = null): array
     {
         return self::fromBalances($this->movements($asOf, $branchId)->all(), $asOf);
     }
@@ -66,7 +66,7 @@ final class TrialBalanceBuilder
      * @param  list<int>|null  $accountIds
      * @return array<int, int> account id => signed centavos
      */
-    public function signedBalances(?string $asOf = null, ?int $branchId = null, ?array $accountIds = null): array
+    public function signedBalances(?string $asOf = null, int|array|null $branchId = null, ?array $accountIds = null): array
     {
         $balances = [];
 
@@ -178,7 +178,7 @@ final class TrialBalanceBuilder
      * @param  list<int>|null  $accountIds
      * @return Collection<int, array<string, mixed>>
      */
-    private function movements(?string $asOf, ?int $branchId, ?array $accountIds = null): Collection
+    private function movements(?string $asOf, int|array|null $branchId, ?array $accountIds = null): Collection
     {
         return DB::table('accounting_journal_lines as l')
             ->join('accounting_journals as j', 'j.id', '=', 'l.accounting_journal_id')
@@ -187,7 +187,7 @@ final class TrialBalanceBuilder
             // A plain comparison, not whereDate(): `j.date` is a DATE column, so
             // wrapping it in a function would make the index on it unusable.
             ->when($asOf !== null, fn ($q) => $q->where('j.date', '<=', $asOf))
-            ->when($branchId !== null, fn ($q) => $q->where('j.branch_id', $branchId))
+            ->when($branchId !== null, fn ($q) => $q->whereIn('j.branch_id', (array) $branchId))
             ->when($accountIds !== null, fn ($q) => $q->whereIn('l.accounting_account_id', $accountIds))
             ->where('a.is_group', false)
             ->groupBy('a.id', 'a.code', 'a.name', 'a.type', 'a.normal_balance')

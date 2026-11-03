@@ -7,6 +7,7 @@ use App\Models\Branch;
 use App\Models\Role;
 use App\Models\ShareCapitalLedger;
 use App\Models\User;
+use App\Services\BranchAccess;
 use Carbon\Carbon;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
@@ -266,7 +267,12 @@ class ReportScopingAndAccessTest extends TestCase
 
         $withExport = $this->getJson($url)->assertOk()->json('data');
 
-        $this->actingAs($this->userWithRole('viewer'));
+        // Organisation-wide like the super_admin above (decision B2: without
+        // `branches:view_all` the report would cover the viewer's branch), so
+        // the roster gate is the only difference between the two callers.
+        $viewer = $this->userWithRole('viewer');
+        $viewer->givePermissionTo(BranchAccess::VIEW_ALL);
+        $this->actingAs($viewer);
         $withoutExport = $this->getJson($url)->assertOk()->json('data');
 
         foreach ([

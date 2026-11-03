@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Services\BranchAccess;
 use App\Services\DashboardService;
 use Illuminate\Http\JsonResponse;
 use OpenApi\Attributes as OA;
@@ -11,10 +12,21 @@ class DashboardController extends Controller
 {
     public function __construct(private DashboardService $dashboardService) {}
 
+    /**
+     * The caller's branches (decision B2): every dashboard figure counts only
+     * their branches' loans and payments. Null for `branches:view_all`.
+     *
+     * @return list<int>|null
+     */
+    private function branchIds(): ?array
+    {
+        return app(BranchAccess::class)->for(request()->user());
+    }
+
     #[OA\Get(
         path: '/api/dashboard/stats',
         summary: 'Dashboard KPI stats',
-        description: '`total_collected` (month to date, and the `collected` sparkline) counts what posted payments collected for the loans, leaving out the insurance premium a payment collected first; that premium is `insurance_collected`, held for the insurer.',
+        description: '`total_collected` (month to date, and the `collected` sparkline) counts what posted payments collected for the loans, leaving out the insurance premium a payment collected first; that premium is `insurance_collected`, held for the insurer. Every figure covers the caller\'s branches only (`branches:view_all`: every branch). The `active_loans` sparkline counts released and ongoing loans, like the card. The `overdue` sparkline\'s past points come from the organisation-wide daily snapshots, so they are null for a caller without `branches:view_all`; its last point is always the caller\'s live `overdue_count`.',
         tags: ['Dashboard'],
         security: [['sanctum' => []]],
         responses: [
@@ -26,7 +38,7 @@ class DashboardController extends Controller
     {
         $this->authorize('dashboard:view');
 
-        return response()->json(['data' => $this->dashboardService->stats()]);
+        return response()->json(['data' => $this->dashboardService->stats($this->branchIds())]);
     }
 
     #[OA\Get(
@@ -51,7 +63,7 @@ class DashboardController extends Controller
             $period = 'week';
         }
 
-        return response()->json($this->dashboardService->collectionsTrend($period));
+        return response()->json($this->dashboardService->collectionsTrend($period, $this->branchIds()));
     }
 
     #[OA\Get(
@@ -70,7 +82,7 @@ class DashboardController extends Controller
     {
         $this->authorize('dashboard:view');
 
-        return response()->json($this->dashboardService->dailyDues(request('date')));
+        return response()->json($this->dashboardService->dailyDues(request('date'), $this->branchIds()));
     }
 
     #[OA\Get(
@@ -91,6 +103,6 @@ class DashboardController extends Controller
 
         $limit = max(1, min((int) request('limit', 10), 100));
 
-        return response()->json($this->dashboardService->recentTransactions($limit));
+        return response()->json($this->dashboardService->recentTransactions($limit, $this->branchIds()));
     }
 }
