@@ -7,15 +7,15 @@ use App\Services\FeeAmount;
 use Illuminate\Contracts\Validation\Validator;
 
 /**
- * The fields of fee type "formula" (decision 5e), on a catalog fee and on a
- * product's custom fees: `value` is the rate (a percentage of the principal,
- * at most 100, as the frontend caps it), `per_month` multiplies it by the
- * term in months, and `min_amount` / `max_amount` are optional peso bounds, to
- * the centavo, with the minimum no larger than the maximum. See
- * {@see FeeAmount}.
+ * The fields of fee type "formula" (decision 5e) on a catalog fee: `value`
+ * is the rate (a percentage of the principal, at most 100, as the frontend
+ * caps it), `per_month` multiplies it by the term in months, and
+ * `min_amount` / `max_amount` are optional peso bounds, to the centavo, with
+ * the minimum no larger than the maximum. See {@see FeeAmount}.
  *
- * Shared by `StoreFeeRequest`, `UpdateFeeRequest` and the two loan product
- * requests.
+ * Shared by `StoreFeeRequest` and `UpdateFeeRequest`. A loan product's own
+ * custom fees are retired and no longer validated here (see
+ * `UpdateLoanProductRequest::CUSTOM_FEES_RETIRED`).
  */
 trait ValidatesFormulaFields
 {
@@ -68,38 +68,6 @@ trait ValidatesFormulaFields
     }
 
     /**
-     * The same rule for each of a product's custom fees.
-     */
-    protected function guardCustomFeeFormulaBounds(Validator $validator): void
-    {
-        $validator->after(function (Validator $v): void {
-            $fees = $this->input('custom_fees');
-
-            if (! is_array($fees)) {
-                return;
-            }
-
-            foreach ($fees as $index => $fee) {
-                if (! is_array($fee)) {
-                    continue;
-                }
-
-                if (($fee['type'] ?? null) === 'formula' && ! $v->errors()->has("custom_fees.{$index}.value") && $this->rateIsAboveCap($fee['value'] ?? null)) {
-                    $v->errors()->add("custom_fees.{$index}.value", self::RATE_CAP_MESSAGE);
-                }
-
-                if ($v->errors()->hasAny(["custom_fees.{$index}.min_amount", "custom_fees.{$index}.max_amount"])) {
-                    continue;
-                }
-
-                if ($this->boundsAreInverted($fee['min_amount'] ?? null, $fee['max_amount'] ?? null)) {
-                    $v->errors()->add("custom_fees.{$index}.max_amount", 'The maximum must be at least the minimum.');
-                }
-            }
-        });
-    }
-
-    /**
      * The validated data, with the formula fields cleared on a fee whose type
      * (sent, or stored when not sent) isn't formula, so a fee switched to fixed
      * or percentage keeps no bounds it no longer uses.
@@ -121,30 +89,6 @@ trait ValidatesFormulaFields
         }
 
         return array_merge($validated, ['per_month' => false, 'min_amount' => null, 'max_amount' => null]);
-    }
-
-    /**
-     * The validated data with each product custom fee that isn't a formula
-     * stripped of the formula fields, as a catalog fee is
-     * ({@see self::withFormulaFieldsNormalised()}).
-     *
-     * @param  array<string, mixed>  $validated
-     * @return array<string, mixed>
-     */
-    protected function withCustomFeeFormulaFieldsNormalised(array $validated): array
-    {
-        if (! isset($validated['custom_fees']) || ! is_array($validated['custom_fees'])) {
-            return $validated;
-        }
-
-        $validated['custom_fees'] = array_map(
-            static fn (mixed $fee): mixed => is_array($fee) && ($fee['type'] ?? null) !== 'formula'
-                ? array_diff_key($fee, array_flip(['per_month', 'min_amount', 'max_amount']))
-                : $fee,
-            $validated['custom_fees'],
-        );
-
-        return $validated;
     }
 
     private function rateIsAboveCap(mixed $rate): bool

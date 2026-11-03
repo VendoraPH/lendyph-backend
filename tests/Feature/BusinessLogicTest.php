@@ -438,9 +438,8 @@ class BusinessLogicTest extends TestCase
             'min_processing_fee' => 1.0,
             'max_processing_fee' => 3.0,
             'notarial_fee' => 500,
-            'custom_fees' => [
-                ['name' => 'Insurance', 'type' => 'percentage', 'value' => 1.5],
-            ],
+            // Additional fees are retired: only an empty list is accepted.
+            'custom_fees' => [],
             'min_amount' => 5000,
             'max_amount' => 500000,
         ]);
@@ -456,8 +455,7 @@ class BusinessLogicTest extends TestCase
         $this->assertEquals(1.0, (float) $data['min_processing_fee']);
         $this->assertEquals(3.0, (float) $data['max_processing_fee']);
         $this->assertEquals(500, (float) $data['notarial_fee']);
-        $this->assertCount(1, $data['custom_fees']);
-        $this->assertEquals('Insurance', $data['custom_fees'][0]['name']);
+        $this->assertSame([], $data['custom_fees']);
     }
 
     // ── 12. LoanResource computed fields ──────────────────────────────────

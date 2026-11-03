@@ -5,14 +5,13 @@ namespace App\Http\Requests\LoanProduct;
 use App\Enums\InterestRateFrequency;
 use App\Enums\LoanFrequency;
 use App\Enums\TermUnit;
-use App\Http\Requests\Fee\Concerns\ValidatesFormulaFields;
 use App\Http\Requests\LoanProduct\Concerns\GuardsAgainstFeeCatalogOverlap;
 use Illuminate\Contracts\Validation\Validator;
 use Illuminate\Foundation\Http\FormRequest;
 
 class StoreLoanProductRequest extends FormRequest
 {
-    use GuardsAgainstFeeCatalogOverlap, ValidatesFormulaFields;
+    use GuardsAgainstFeeCatalogOverlap;
 
     public function authorize(): bool
     {
@@ -43,11 +42,6 @@ class StoreLoanProductRequest extends FormRequest
             'max_service_fee' => ['nullable', 'numeric', 'min:0', 'max:100', 'decimal:0,4'],
             'notarial_fee' => ['nullable', 'numeric', 'min:0', 'decimal:0,4'],
             'custom_fees' => ['nullable', 'array'],
-            'custom_fees.*.name' => ['required_with:custom_fees', 'string', 'max:255'],
-            'custom_fees.*.type' => ['required_with:custom_fees', $this->feeTypeRule()],
-            'custom_fees.*.value' => ['required_with:custom_fees', 'numeric', 'min:0', 'decimal:0,4'],
-            ...$this->formulaFieldRules('custom_fees.*.'),
-            'custom_fees.*.conditions' => ['nullable', 'array'],
             'penalty_rate' => ['nullable', 'numeric', 'min:0', 'max:100', 'decimal:0,4'],
             'grace_period_days' => ['nullable', 'integer', 'min:0'],
             'scb_required' => ['nullable', 'boolean'],
@@ -85,15 +79,13 @@ class StoreLoanProductRequest extends FormRequest
     public function withValidator(Validator $validator): void
     {
         $this->guardAgainstFeeCatalogOverlap($validator);
-        $this->guardCustomFeeFormulaBounds($validator);
-    }
 
-    /**
-     * @param  string|null  $key
-     * @param  mixed  $default
-     */
-    public function validated($key = null, $default = null): mixed
-    {
-        return data_get($this->withCustomFeeFormulaFieldsNormalised(parent::validated()), $key, $default);
+        // Additional fees are retired (see UpdateLoanProductRequest): a new
+        // product starts with none, so only an absent, null or empty list passes.
+        $validator->after(function (Validator $v): void {
+            if (! $v->errors()->has('custom_fees') && ! empty($this->input('custom_fees'))) {
+                $v->errors()->add('custom_fees', UpdateLoanProductRequest::CUSTOM_FEES_RETIRED);
+            }
+        });
     }
 }

@@ -81,9 +81,14 @@ class RebuildExtensionPeriodsTest extends TestCase
         $this->assertTotalPaid($loan, 10000);
         $this->assertSame([[2, $period->id, 10000.0]], $this->allocations($payment));
 
-        // Voidable now: the period it paid exists again and owes it back.
-        $this->patchJson("/api/repayments/{$payment->id}/void", ['void_reason' => 'Keyed in error'])->assertOk();
-        $this->assertEqualsWithDelta(0, (float) $period->fresh()->interest_paid, 0.001);
+        // The period it paid exists again, but the payment was made before the
+        // later extensions, so it still can't be voided, and nothing changes.
+        $this->patchJson("/api/repayments/{$payment->id}/void", ['void_reason' => 'Keyed in error'])
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.repayment.0', 'This payment was made before the loan was extended or restructured, so it cannot be voided. Use a balance adjustment to correct the loan instead.');
+        $this->assertSame('posted', $payment->fresh()->status);
+        $this->assertEqualsWithDelta(3600, (float) $period->fresh()->interest_paid, 0.001);
+        $this->assertTotalPaid($loan, 10000);
     }
 
     public function test_a_loan_a_restructure_closed_into_a_new_loan_is_rebuilt_from_its_original_schedule(): void
