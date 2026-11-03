@@ -20,7 +20,11 @@ use PDOException;
  * - approving, rejecting and applying an adjustment
  *   (LoanAdjustmentService::approveAdjustment(), rejectAdjustment(),
  *   applyAdjustment());
- * - extending a loan (LoanAdjustmentService::extendLoan()).
+ * - extending a loan (LoanAdjustmentService::extendLoan());
+ * - approving and rejecting a loan in review (LoanService::approve(),
+ *   reject());
+ * - signing off an approval-chain step and sending a loan back
+ *   (LoanApprovalChainService::approve(), sendBack()).
  *
  * ── The lock order ───────────────────────────────────────────────────────
  *
@@ -33,9 +37,11 @@ use PDOException;
  *      read, for CollateralPledgeGuard's snapshot rule). A release and a void
  *      can move a loan into Loan::PLEDGING_STATUSES, so they take it; a
  *      create pledges nothing, a payment only moves a loan within that set or
- *      out of it, and an adjustment or an extension neither changes what a
- *      loan pledges nor moves it into or out of that set, so those four have
- *      no collateral rows to lock;
+ *      out of it, an adjustment or an extension neither changes what a
+ *      loan pledges nor moves it into or out of that set, and an approval
+ *      decision moves a loan out of review into a status that pledges
+ *      nothing (approved or rejected), so none of those has collateral rows
+ *      to lock;
  *   2. the loan rows, in ONE id-ordered statement (a release also locks the
  *      loan it restructures; a create locks the newest loan, for the next
  *      application number, in Loan::booted()). With no collateral to lock,
@@ -47,15 +53,16 @@ use PDOException;
  *      the loan rows. A preview numbers its rolled-back payment with a
  *      placeholder and takes no such lock;
  *   4. the operation's own row: the payment being voided, the adjustment
- *      being approved, rejected or applied. A void locks only the repayment
+ *      being approved, rejected or applied, the approval-chain step being
+ *      signed off or sent back (a direct approve or reject has none). A void locks only the repayment
  *      it voids and never the newest one, so it holds no receipt lock a
  *      payment could be waiting on while it waits for that payment's loan.
  *
  * Under those locks each path reads again what it decided on before the
  * transaction opened, and answers conflict() when another write got there
  * first: a payment already voided, an adjustment already decided or applied,
- * a loan already released or extended, or one closed before a payment or an
- * adjustment reached it. A request that was wrong from the start is
+ * a loan already released or extended, one closed before a payment or an
+ * adjustment reached it, or a loan or chain step already decided. A request that was wrong from the start is
  * still the 422 it always was, checked before the transaction opens.
  *
  * ── What ordering cannot rule out ────────────────────────────────────────
