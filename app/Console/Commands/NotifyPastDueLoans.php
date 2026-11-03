@@ -13,6 +13,8 @@ use Illuminate\Console\Attributes\Signature;
 use Illuminate\Console\Command;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use Throwable;
 
 /**
  * Tells each past-due loan's assigned officer, once per past-due episode, that
@@ -30,6 +32,11 @@ use Illuminate\Support\Facades\DB;
  * of loans no longer past due (paid up, closed, restructured), so a loan that
  * falls behind again later is a new episode and is announced again. Safe to
  * re-run on the same day.
+ *
+ * Each loan's marker and notification are written in one transaction, and
+ * the notification is sent inside it rather than after commit, so a failed
+ * send rolls the marker back. The failure is logged and the run moves on to
+ * the next loan; the next run tries that loan again.
  */
 #[Signature('notifications:past-due')]
 #[Description('Notify assigned officers of loans that have just passed their grace period (once per past-due episode)')]
@@ -41,11 +48,15 @@ class NotifyPastDueLoans extends Command
     {
         $today = Carbon::today()->toDateString();
 
-        $closed = DB::table(self::TABLE)
-            ->whereNotIn('loan_id', Loan::query()->pastDue()->select('loans.id'))
-            ->delete();
+        // Read first, then delete by key: a DELETE with the past-due subquery
+        // inside it would hold shared locks on the loans and their schedules
+        // for the length of the delete.
+        $pastDueIds = Loan::query()->pastDue()->pluck('loans.id')->map(fn ($id) => (int) $id)->all();
+        $staleLoanIds = DB::table(self::TABLE)->pluck('loan_id')->map(fn ($id) => (int) $id)->diff($pastDueIds)->values()->all();
+        $closed = $staleLoanIds === [] ? 0 : DB::table(self::TABLE)->whereIn('loan_id', $staleLoanIds)->delete();
 
         $announced = 0;
+        $failed = 0;
 
         Loan::query()
             ->pastDue()
@@ -55,30 +66,41 @@ class NotifyPastDueLoans extends Command
                 ->whereIn('amortization_schedules.status', AmortizationSchedule::UNPAID_STATUSES)
                 ->whereRaw(AmortizationSchedule::pastGraceSql(), [$today]),
             ], 'due_date')
-            ->chunkById(200, function (Collection $loans) use ($notifications, &$announced): void {
+            ->chunkById(200, function (Collection $loans) use ($notifications, &$announced, &$failed): void {
                 foreach ($loans as $loan) {
-                    // The marker and the notification commit together; the
-                    // unique loan_id makes a concurrent run insert nothing and
-                    // so notify nobody twice.
-                    DB::transaction(function () use ($loan, $notifications, &$announced): void {
-                        $inserted = DB::table(self::TABLE)->insertOrIgnore([
+                    try {
+                        // The marker and the notification commit together, or
+                        // neither does; the unique loan_id makes a concurrent
+                        // run insert nothing and so notify nobody twice.
+                        $sent = DB::transaction(function () use ($loan, $notifications): bool {
+                            $inserted = DB::table(self::TABLE)->insertOrIgnore([
+                                'loan_id' => $loan->id,
+                                'notified_at' => now(),
+                            ]);
+
+                            if ($inserted === 0) {
+                                return false;
+                            }
+
+                            $notifications->loanPastDue($loan, $this->dateLabel($loan->oldest_late_due_date));
+
+                            return true;
+                        });
+
+                        $announced += $sent ? 1 : 0;
+                    } catch (Throwable $e) {
+                        $failed++;
+                        Log::error('notifications:past-due could not notify a loan; it will be retried on the next run.', [
                             'loan_id' => $loan->id,
-                            'notified_at' => now(),
+                            'exception' => $e,
                         ]);
-
-                        if ($inserted === 0) {
-                            return;
-                        }
-
-                        $notifications->loanPastDue($loan, $this->dateLabel($loan->oldest_late_due_date));
-                        $announced++;
-                    });
+                    }
                 }
             }, 'loans.id', 'id');
 
-        $this->info("Past-due loans announced: {$announced}. Episodes closed: {$closed}.");
+        $this->info("Past-due loans announced: {$announced}. Episodes closed: {$closed}. Failed (retried next run): {$failed}.");
 
-        return self::SUCCESS;
+        return $failed === 0 ? self::SUCCESS : self::FAILURE;
     }
 
     private function dateLabel(mixed $date): ?string

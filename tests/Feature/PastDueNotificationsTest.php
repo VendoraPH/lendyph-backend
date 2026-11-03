@@ -9,9 +9,13 @@ use App\Models\User;
 use App\Notifications\StaffNotification;
 use Illuminate\Console\Scheduling\Event;
 use Illuminate\Console\Scheduling\Schedule;
+use Illuminate\Notifications\ChannelManager;
 use Illuminate\Notifications\DatabaseNotification;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Notification;
+use RuntimeException;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
@@ -78,6 +82,28 @@ class PastDueNotificationsTest extends TestCase
         $this->assertSame(0, $this->pastDueCount($noOfficer));
         $this->assertSame(0, $this->pastDueCount($outOfBranch));
         $this->assertSame(2, DB::table('loan_past_due_notices')->whereIn('loan_id', [$noOfficer->id, $outOfBranch->id])->count());
+    }
+
+    public function test_a_failed_send_keeps_no_marker_and_the_next_run_retries(): void
+    {
+        $officer = $this->officer();
+        $loan = $this->lateLoan($officer);
+        Log::spy();
+        Notification::shouldReceive('send')->once()->andThrow(new RuntimeException('database channel down'));
+
+        $this->artisan('notifications:past-due')->assertFailed();
+
+        $this->assertFalse(DB::table('loan_past_due_notices')->where('loan_id', $loan->id)->exists());
+        $this->assertSame(0, $this->pastDueCount($loan));
+        Log::shouldHaveReceived('error')
+            ->withArgs(fn (string $message, array $context) => str_contains($message, 'retried on the next run') && $context['loan_id'] === $loan->id)
+            ->once();
+
+        Notification::swap(new ChannelManager($this->app));
+        $this->artisan('notifications:past-due')->assertSuccessful();
+
+        $this->assertTrue(DB::table('loan_past_due_notices')->where('loan_id', $loan->id)->exists());
+        $this->assertSame(1, $this->pastDueCount($loan));
     }
 
     public function test_the_overnight_jobs_run_just_after_midnight_manila_in_order(): void

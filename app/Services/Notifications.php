@@ -22,10 +22,14 @@ use Throwable;
  * Staff in-app notifications (decision N, Arvin, 2026-11-02): the one place
  * that decides who hears about a loan event and what it says.
  *
- * Every recipient list goes through the same three filters, whoever the event
- * names: the user is active, can see the loan's branch (BranchAccess::canSee,
- * so a loan with no branch reaches only `branches:view_all`), and is not the
- * person who just did the thing. Each user gets one notification per event.
+ * Every recipient list goes through the same four filters, whoever the event
+ * names: the user is active, holds `loans:view` (through an active role or
+ * directly; super_admin always), can see the loan's branch
+ * (BranchAccess::canSee, so a loan with no branch reaches only
+ * `branches:view_all`), and is not the person who just did the thing. Each
+ * user gets one notification per event. The checks run when the notification
+ * is sent, so a role switched off or a permission taken away since the loan
+ * was created counts.
  *
  * Delivery runs after the surrounding transaction commits (DB::afterCommit),
  * so a release, void or approval that rolls back notifies nobody; outside a
@@ -33,7 +37,8 @@ use Throwable;
  * that callback too, so the recipient queries run after the caller's locks
  * are released. A failure while notifying is logged and swallowed: the business
  * action has already committed and must never answer an error because a bell
- * could not be rung.
+ * could not be rung. The one exception is loanPastDue(), which the daily
+ * command calls inside its own per-loan transaction (see there).
  *
  * Staff only. Nothing here reaches a borrower: the database channel is the
  * only channel, and there is no mail or SMS.
@@ -122,8 +127,19 @@ final class Notifications
         ]));
     }
 
+    /**
+     * A loan was released. A restructure's release is the moment the
+     * restructure takes effect, so it is announced once, as
+     * `restructure_applied`, and not also as `loan_released`.
+     */
     public function loanReleased(Loan $loan, ?User $actor = null): void
     {
+        if ($loan->source_loan_id !== null) {
+            $this->restructuredIntoNewLoan($loan, (int) $loan->source_loan_id, $actor);
+
+            return;
+        }
+
         $this->deliver(
             $loan,
             $actor,
@@ -140,21 +156,27 @@ final class Notifications
 
     /**
      * A restructure into a new loan took effect: the new loan was released and
-     * its source closed. Told to the new loan's assigned officer.
+     * its source closed. Told to the new loan's assigned officer. The source is
+     * read by id inside the deferred send, so a failing read after the release
+     * has committed is logged, never answered as an error.
      */
-    public function restructuredIntoNewLoan(Loan $newLoan, Loan $sourceLoan, ?User $actor = null): void
+    private function restructuredIntoNewLoan(Loan $newLoan, int $sourceLoanId, ?User $actor): void
     {
         $this->deliver(
             $newLoan,
             $actor,
             fn (): Collection => $this->usersById([$newLoan->account_officer_id]),
-            fn (): StaffNotification => new StaffNotification(
-                StaffNotification::RESTRUCTURE_APPLIED,
-                'Loan restructured',
-                sprintf('%s for %s was restructured into %s (%s)%s.', $this->loanLabel($sourceLoan), $this->borrowerName($newLoan), $this->loanLabel($newLoan), $this->peso($newLoan->principal_amount), $this->byActor($actor)),
-                $this->loanUrl($newLoan),
-                ['loan_id' => (int) $newLoan->getKey(), 'source_loan_id' => (int) $sourceLoan->getKey()],
-            ),
+            function () use ($newLoan, $sourceLoanId, $actor): StaffNotification {
+                $source = Loan::query()->find($sourceLoanId);
+
+                return new StaffNotification(
+                    StaffNotification::RESTRUCTURE_APPLIED,
+                    'Loan restructured',
+                    sprintf('%s for %s was restructured into %s (%s)%s.', $source === null ? 'The source loan' : $this->loanLabel($source), $this->borrowerName($newLoan), $this->loanLabel($newLoan), $this->peso($newLoan->principal_amount), $this->byActor($actor)),
+                    $this->loanUrl($newLoan),
+                    ['loan_id' => (int) $newLoan->getKey(), 'source_loan_id' => $sourceLoanId],
+                );
+            },
         );
     }
 
@@ -232,10 +254,15 @@ final class Notifications
     /**
      * A loan has just passed its grace period. Sent by `notifications:past-due`,
      * which has no actor and owns the once-per-episode rule.
+     *
+     * Unlike every other event this sends AT ONCE and lets a failure through:
+     * the command writes its once-per-episode marker and calls this inside
+     * one transaction per loan, so a failed send rolls the marker back and the
+     * next run tries the loan again instead of losing its notice.
      */
     public function loanPastDue(Loan $loan, ?string $oldestLateDueDate = null): void
     {
-        $this->deliver(
+        $this->send(
             $loan,
             null,
             fn (): Collection => $this->usersById([$loan->account_officer_id]),
@@ -276,22 +303,32 @@ final class Notifications
      */
     private function deliver(Loan $loan, ?User $actor, Closure $candidates, Closure $notification): void
     {
-        $actorId = ($actor ?? auth()->user())?->getKey();
-
         try {
-            DB::afterCommit(function () use ($loan, $actorId, $candidates, $notification): void {
+            DB::afterCommit(function () use ($loan, $actor, $candidates, $notification): void {
                 try {
-                    $recipients = $this->eligible($loan, $actorId === null ? null : (int) $actorId, $candidates());
-
-                    if ($recipients->isNotEmpty()) {
-                        Notification::send($recipients, $notification());
-                    }
+                    $this->send($loan, $actor, $candidates, $notification);
                 } catch (Throwable $e) {
                     $this->logFailure($loan, $e);
                 }
             });
         } catch (Throwable $e) {
             $this->logFailure($loan, $e);
+        }
+    }
+
+    /**
+     * Send now, to the candidates who pass the four filters. Throws on failure.
+     *
+     * @param  Closure(): Collection<int, User>  $candidates
+     * @param  Closure(): StaffNotification  $notification
+     */
+    private function send(Loan $loan, ?User $actor, Closure $candidates, Closure $notification): void
+    {
+        $actorId = ($actor ?? auth()->user())?->getKey();
+        $recipients = $this->eligible($loan, $actorId === null ? null : (int) $actorId, $candidates());
+
+        if ($recipients->isNotEmpty()) {
+            Notification::send($recipients, $notification());
         }
     }
 
@@ -307,6 +344,9 @@ final class Notifications
             ->filter(fn ($user) => $user instanceof User && $user->status === 'active')
             ->unique(fn (User $user) => (int) $user->getKey())
             ->reject(fn (User $user) => $actorId !== null && (int) $user->getKey() === $actorId)
+            // Through the Gate: super_admin passes (Gate::before), and a role
+            // switched off grants nothing (User::hasPermissionViaRole()).
+            ->filter(fn (User $user) => $user->can('loans:view'))
             ->filter(fn (User $user) => $this->branchAccess->canSee($user, $branchId))
             ->values();
     }
@@ -327,7 +367,7 @@ final class Notifications
     {
         $ids = array_values(array_unique(array_map('intval', array_filter($ids, fn ($id) => $id !== null))));
 
-        return $ids === [] ? collect() : User::query()->active()->whereKey($ids)->get()->toBase();
+        return $ids === [] ? collect() : $this->recipientQuery()->whereKey($ids)->get()->toBase();
     }
 
     /**
@@ -340,8 +380,7 @@ final class Notifications
      */
     private function roleHolders(string $roleName): Collection
     {
-        return User::query()
-            ->active()
+        return $this->recipientQuery()
             ->whereHas('roles', fn (Builder $roles) => $this->activeRole($roles)->where('name', $roleName))
             ->get()
             ->toBase();
@@ -354,14 +393,23 @@ final class Notifications
      */
     private function permissionHolders(string $permission): Collection
     {
-        return User::query()
-            ->active()
+        return $this->recipientQuery()
             ->where(fn (Builder $users) => $users
                 ->whereHas('roles', fn (Builder $roles) => $this->activeRole($roles)
                     ->whereHas('permissions', fn (Builder $permissions) => $permissions->where('name', $permission)))
                 ->orWhereHas('permissions', fn (Builder $permissions) => $permissions->where('name', $permission)))
             ->get()
             ->toBase();
+    }
+
+    /**
+     * Active users with what the four filters read loaded up front: their
+     * roles and those roles' permissions, their direct permissions and their
+     * branches, so a list of recipients is not one query per user each.
+     */
+    private function recipientQuery(): Builder
+    {
+        return User::query()->active()->with(['roles.permissions', 'permissions', 'branches']);
     }
 
     private function activeRole(Builder $roles): Builder

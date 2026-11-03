@@ -59,7 +59,7 @@ class InAppNotificationsTest extends TestCase
         $this->assertSame([$manager->id], $this->recipients(StaffNotification::APPROVAL_NEEDED, $loan));
         $this->assertNotContains($inactiveManager->id, $this->recipients(StaffNotification::APPROVAL_NEEDED, $loan));
 
-        $row = $this->latestFor($manager);
+        $row = $this->latestOfType($manager, StaffNotification::APPROVAL_NEEDED);
         $this->assertSame('approval_needed', $row->type);
         $this->assertSame('Loan awaiting your approval', $row->data['title']);
         $this->assertStringContainsString('₱60,000.00', $row->data['body']);
@@ -104,7 +104,7 @@ class InAppNotificationsTest extends TestCase
         );
         // The release step is announced as the approval, not as approval_needed.
         $this->assertSame([], $this->recipients(StaffNotification::APPROVAL_NEEDED, $loan, round: 1, stepOrder: 3));
-        $this->assertStringContainsString('approved by '.$chair->full_name, $this->latestFor($officer)->data['body']);
+        $this->assertStringContainsString('approved by '.$chair->full_name, $this->latestOfType($officer, StaffNotification::LOAN_APPROVED)->data['body']);
     }
 
     public function test_a_rejection_tells_the_creator_and_officer_with_the_reason(): void
@@ -117,7 +117,7 @@ class InAppNotificationsTest extends TestCase
         app(LoanService::class)->reject($loan, $this->admin, 'Income not verified');
 
         $this->assertSame($this->ids($creator, $officer), $this->recipients(StaffNotification::LOAN_REJECTED, $loan));
-        $this->assertStringContainsString('Reason: Income not verified', $this->latestFor($creator)->data['body']);
+        $this->assertStringContainsString('Reason: Income not verified', $this->latestOfType($creator, StaffNotification::LOAN_REJECTED)->data['body']);
     }
 
     public function test_a_send_back_tells_the_creator_and_officer_and_the_target_roles_other_holders(): void
@@ -134,8 +134,8 @@ class InAppNotificationsTest extends TestCase
         $this->assertSame($this->ids($creator, $officer), $this->recipients(StaffNotification::LOAN_SENT_BACK, $loan));
         // The creator holds the target role too, but has just been told.
         $this->assertSame([$otherProcessor->id], $this->recipients(StaffNotification::APPROVAL_NEEDED, $loan, round: 2));
-        $this->assertStringContainsString('"Loan Processor" step', $this->latestFor($creator)->data['body']);
-        $this->assertStringContainsString('Reason: Missing payslip', $this->latestFor($creator)->data['body']);
+        $this->assertStringContainsString('"Loan Processor" step', $this->latestOfType($creator, StaffNotification::LOAN_SENT_BACK)->data['body']);
+        $this->assertStringContainsString('Reason: Missing payslip', $this->latestOfType($creator, StaffNotification::LOAN_SENT_BACK)->data['body']);
     }
 
     // -----------------------------------------------------------------
@@ -151,7 +151,7 @@ class InAppNotificationsTest extends TestCase
         app(LoanService::class)->release($loan, $creator);
 
         $this->assertSame([$officer->id], $this->recipients(StaffNotification::LOAN_RELEASED, $loan));
-        $body = $this->latestFor($officer)->data['body'];
+        $body = $this->latestOfType($officer, StaffNotification::LOAN_RELEASED)->data['body'];
         $this->assertStringContainsString('₱60,000.00 released by '.$creator->full_name, $body);
         $this->assertStringContainsString($loan->fresh()->loan_account_number, $body);
     }
@@ -183,6 +183,33 @@ class InAppNotificationsTest extends TestCase
         $this->assertContains($farManager->id, $this->recipients(StaffNotification::APPROVAL_NEEDED, $draft));
     }
 
+    public function test_a_creator_whose_only_role_was_deactivated_is_not_told(): void
+    {
+        $role = Role::create(['name' => 'branch_processor', 'guard_name' => 'web', 'is_active' => true, 'is_system' => false]);
+        $role->syncPermissions(['loans:view', 'loans:create', 'loans:update']);
+        $creator = tap($this->staff(null), fn (User $u) => $u->assignRole($role));
+        $officer = $this->staff('loan_officer');
+        $loan = $this->approvedLoan($creator, $officer);
+
+        $role->update(['is_active' => false]);
+        app(LoanService::class)->release($loan, $this->admin);
+
+        $this->assertSame([$officer->id], $this->recipients(StaffNotification::LOAN_RELEASED, $loan));
+    }
+
+    public function test_an_officer_whose_role_lacks_loans_view_is_not_told(): void
+    {
+        $role = Role::create(['name' => 'field_agent', 'guard_name' => 'web', 'is_active' => true, 'is_system' => false]);
+        $role->syncPermissions(['borrowers:view']);
+        $officer = tap($this->staff(null), fn (User $u) => $u->assignRole($role));
+        $creator = $this->staff('loan_processor');
+        $loan = $this->approvedLoan($creator, $officer);
+
+        app(LoanService::class)->release($loan, $this->admin);
+
+        $this->assertSame([$creator->id], $this->recipients(StaffNotification::LOAN_RELEASED, $loan));
+    }
+
     public function test_releasing_a_restructure_tells_the_new_loans_officer(): void
     {
         $officer = $this->staff('loan_officer');
@@ -200,6 +227,8 @@ class InAppNotificationsTest extends TestCase
         app(LoanService::class)->release($newLoan->fresh(), $this->admin);
 
         $this->assertSame('restructured', $source->fresh()->status);
+        // One notice per event: the restructure, not also a release.
+        $this->assertSame([], $this->recipients(StaffNotification::LOAN_RELEASED, $newLoan));
         $this->assertSame([$officer->id], $this->recipients(StaffNotification::RESTRUCTURE_APPLIED, $newLoan));
         $row = $this->latestOfType($officer, StaffNotification::RESTRUCTURE_APPLIED);
         $this->assertSame($source->id, $row->data['data']['source_loan_id']);
@@ -218,7 +247,7 @@ class InAppNotificationsTest extends TestCase
         app(RepaymentService::class)->voidRepayment($repayment, 'Keyed twice', $this->admin);
 
         $this->assertSame($this->ids($officer, $cashier), $this->recipients(StaffNotification::PAYMENT_VOIDED, $loan));
-        $row = $this->latestFor($cashier);
+        $row = $this->latestOfType($cashier, StaffNotification::PAYMENT_VOIDED);
         $this->assertSame("/payments/{$repayment->id}", $row->data['url']);
         $this->assertSame($repayment->id, $row->data['data']['repayment_id']);
         $this->assertStringContainsString("Payment {$repayment->receipt_number} of ₱1,000.00", $row->data['body']);
@@ -253,7 +282,7 @@ class InAppNotificationsTest extends TestCase
         $this->assertNotContains($officer->id, $recipients);
 
         $adjustment = LoanAdjustment::where('loan_id', $loan->id)->latest('id')->first();
-        $row = $this->latestFor($approver);
+        $row = $this->latestOfType($approver, StaffNotification::ADJUSTMENT_PENDING);
         $this->assertSame($adjustment->id, $row->data['data']['adjustment_id']);
         $this->assertStringContainsString("{$adjustment->adjustment_number}: a penalty waiver on", $row->data['body']);
     }
@@ -410,11 +439,6 @@ class InAppNotificationsTest extends TestCase
     private function ids(User ...$users): array
     {
         return collect($users)->pluck('id')->map(fn ($id) => (int) $id)->unique()->sort()->values()->all();
-    }
-
-    private function latestFor(User $user): DatabaseNotification
-    {
-        return $user->notifications()->firstOrFail();
     }
 
     private function latestOfType(User $user, string $type): DatabaseNotification

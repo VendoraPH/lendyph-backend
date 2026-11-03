@@ -1339,14 +1339,10 @@ class LoanService
             return $loan;
         });
 
-        // Staff notifications, once the release has committed. Outside the
-        // transaction so nothing is added after the pledge assertion above.
-        $notifications = app(Notifications::class);
-        $notifications->loanReleased($released, $releaser);
-
-        if ($released->source_loan_id !== null && $released->sourceLoan !== null) {
-            $notifications->restructuredIntoNewLoan($released, $released->sourceLoan, $releaser);
-        }
+        // Staff notifications, once the release has committed (a restructure's
+        // release is announced as restructure_applied). Outside the transaction
+        // so nothing is added after the pledge assertion above.
+        app(Notifications::class)->loanReleased($released, $releaser);
 
         return $released;
     }
