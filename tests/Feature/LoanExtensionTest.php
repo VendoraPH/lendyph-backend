@@ -134,11 +134,9 @@ class LoanExtensionTest extends TestCase
     {
         $loan = $this->makeUponMaturityLoan();
 
-        // Keep the period current. processRepayment applies penalties to
-        // overdue schedules before allocating, and allocation runs
-        // penalty → interest → principal, so an overdue loan would spend part
-        // of this payment on the penalty and leave interest behind. That case
-        // is covered separately below; here we want the clean path.
+        // Keep the period current, so no late penalty is owed and the
+        // collection is the interest alone. The overdue case, where "pay"
+        // also collects the penalty, is covered separately below.
         $loan->amortizationSchedules()->update([
             'due_date' => now()->addWeek()->toDateString(),
             'status' => 'pending',
@@ -161,17 +159,14 @@ class LoanExtensionTest extends TestCase
         $this->assertEqualsWithDelta(1800.00, (float) $adj->new_values['interest_paid'], 0.01);
     }
 
-    public function test_pay_on_an_overdue_loan_settles_the_penalty_first_so_some_interest_carries(): void
+    public function test_pay_on_an_overdue_loan_collects_the_penalty_and_all_the_interest(): void
     {
-        // Documented, inherited behaviour rather than a bug introduced here:
-        // "Pay Outstanding Interest" collects the interest figure the dialog
-        // shows, but processRepayment applies penalties to overdue schedules
-        // and allocates penalty → interest → principal. On an overdue loan the
-        // penalty is taken out of that amount first, so interest is only
-        // partly settled and the remainder carries into the new period.
-        //
-        // The client-side version behaved identically. Pinning it here so a
-        // future change to the allocation order is visible rather than silent.
+        // "Pay" collects the late penalty owed as well as the interest
+        // outstanding (Arvin, 2026-11-03). The allocation still takes the
+        // penalty first, but the amount covers both, so none of the interest
+        // carries: the new period owes only the fresh cycle. Before, "pay"
+        // collected the interest figure alone, the penalty took its share,
+        // and the rest of the interest carried as if deferred.
         $loan = $this->makeUponMaturityLoan();   // fixture is already overdue
 
         $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'pay'])
@@ -179,13 +174,14 @@ class LoanExtensionTest extends TestCase
 
         // The period the interest was collected on stays, closed; the new one comes after it.
         $newSchedule = $loan->fresh()->amortizationSchedules()->reorder('period_number', 'desc')->first();
+        $repayment = Repayment::where('loan_id', $loan->id)->sole();
 
-        $this->assertNotNull(Repayment::where('loan_id', $loan->id)->first());
-        $this->assertGreaterThan(
-            1800.00,
-            (float) $newSchedule->interest_due,
-            'an overdue loan should carry the interest the penalty consumed',
-        );
+        // ₱1,200 penalty (2% of ₱60,000) + ₱1,800 interest.
+        $this->assertEqualsWithDelta(3000.00, (float) $repayment->amount_paid, 0.01);
+        $this->assertEqualsWithDelta(1200.00, (float) $repayment->penalty_applied, 0.01);
+        $this->assertEqualsWithDelta(1800.00, (float) $repayment->interest_applied, 0.01);
+        $this->assertEqualsWithDelta(1800.00, (float) $newSchedule->interest_due, 0.01);
+        $this->assertEqualsWithDelta(60000.00, (float) $newSchedule->principal_due, 0.01);
     }
 
     public function test_defer_records_only_an_interest_debit_in_the_ledger(): void

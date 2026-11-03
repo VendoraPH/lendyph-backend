@@ -226,8 +226,12 @@ class LoanAdjustmentService
      *
      * `$interestOption` decides what happens to interest already outstanding:
      *
-     *   'pay'   — collect it as a repayment first, so the new period carries
-     *             only the freshly accrued interest.
+     *   'pay'   — collect, in one repayment first, everything the open
+     *             period owes except its principal: the insurance premium
+     *             owed, the late penalty owed and the interest outstanding
+     *             (extensionCollection()). The old period is then settled in
+     *             full, and the new period carries the principal and only
+     *             the freshly accrued interest.
      *   'defer' — leave it unpaid; it carries into the new period and stacks
      *             on top of the fresh interest (₱50 outstanding + ₱50 fresh
      *             becomes ₱50 + ₱50 = ₱100 due).
@@ -262,18 +266,19 @@ class LoanAdjustmentService
             $oldMaturityDate = $loan->maturity_date->toDateString();
             $oldTerm = $loan->term;
 
-            ['interest' => $interestBefore, 'amount' => $collectAmount] = $this->extensionCollection($loan);
+            ['interest' => $interestBefore, 'amount' => $collectAmount] = $this->extensionCollection($loan, now());
 
-            // Settle the accrued interest first so the new period starts clean,
-            // in one payment that also takes the insurance premium still owed
-            // (extensionCollection()). The allocation runs premium → penalty →
-            // interest → principal, so where a penalty is outstanding the
-            // interest part is consumed by that first and some interest still
-            // carries. That matches what the UI did before this moved
-            // server-side, and the carry figures below are re-read afterwards,
-            // so the arithmetic stays correct either way.
+            // Settle everything the open period owes except its principal, so
+            // the new period starts clean: one payment of the premium owed, the
+            // late penalty owed and the interest outstanding
+            // (extensionCollection()). The allocation takes them in that order
+            // and the amount covers all three, so none of the interest carries.
+            // The carry figures below are re-read after the allocation all the
+            // same, so they record what genuinely remains.
             $interestPaid = 0.0;
             $insurancePaid = 0.0;
+            $penaltyPaid = 0.0;
+            $amountCollected = 0.0;
             $interestRepayment = null;
 
             if ($interestOption === 'pay' && $collectAmount > 0) {
@@ -285,12 +290,14 @@ class LoanAdjustmentService
                     $remarks ?: '[EXTENSION INTEREST]',
                 );
 
-                // What the payment applied to interest, not the interest
-                // outstanding before it: a penalty owed takes its share first,
-                // and the credit entry and `interest_paid` must say what went
-                // to interest (GET /loans/{id}/ledger reads the repayment).
+                // What the payment applied to each part, as the repayment
+                // records it: the credit entry and `interest_paid` must say
+                // what went to interest (GET /loans/{id}/ledger reads the
+                // repayment).
                 $interestPaid = (float) $interestRepayment->interest_applied;
                 $insurancePaid = (float) $interestRepayment->insurance_applied;
+                $penaltyPaid = (float) $interestRepayment->penalty_applied;
+                $amountCollected = (float) $interestRepayment->amount_paid;
             }
 
             // Read after the collection: on the 'pay' path the rows above have
@@ -332,8 +339,13 @@ class LoanAdjustmentService
                 'fresh_interest' => $freshInterest,
                 'new_due_date' => $newDueDate->toDateString(),
                 'interest_option' => $interestOption,
+                // What the 'pay' collection took, by part (all 0 on 'defer'):
+                // the whole amount, the premium, the late penalty and the
+                // interest. The same figures as the preview's `collect_now`.
+                'amount_collected' => $amountCollected,
                 'interest_paid' => $interestPaid,
                 'insurance_paid' => $insurancePaid,
+                'penalty_paid' => $penaltyPaid,
                 // The payment that collected it, whatever it went to (all of
                 // it to penalty, or only to the premium, writes no interest
                 // credit). Its void is refused on this link
@@ -393,8 +405,9 @@ class LoanAdjustmentService
      * Refuses, with the same 422s, a loan the extension would refuse. The rest
      * runs as extendLoan() does, under the loan's lock
      * (RepaymentService::rolledBackUnderPaymentLock()) in a transaction that is
-     * then rolled back: it reads the outstanding interest under the lock, on
-     * 'pay' collects it through the real allocation (penalty first), and reads
+     * then rolled back: it reads what 'pay' collects under the lock
+     * (extensionCollection(): premium owed, late penalty owed and interest
+     * outstanding), on 'pay' collects it through the real allocation, and reads
      * the carry figures after it through extensionFigures(), the method
      * extendLoan() reads them with, so the preview and the extension cannot
      * drift.
@@ -407,7 +420,7 @@ class LoanAdjustmentService
 
         return $this->repaymentService->rolledBackUnderPaymentLock($loan, function (Loan $loan) use ($interestOption, $user, $asOf): array {
             $collectNow = ['amount' => 0.0, 'insurance_part' => 0.0, 'penalty_part' => 0.0, 'interest_part' => 0.0];
-            ['amount' => $collectAmount] = $this->extensionCollection($loan);
+            ['amount' => $collectAmount] = $this->extensionCollection($loan, $asOf);
 
             if ($interestOption === 'pay' && $collectAmount > 0) {
                 $repayment = $this->repaymentService->recordRepaymentOnLockedLoan(
@@ -444,21 +457,42 @@ class LoanAdjustmentService
     }
 
     /**
-     * What an extension on 'pay' collects in its one payment: the insurance
-     * premium still owed on the loan, which every payment takes first, plus
-     * the interest outstanding on the open periods. Read under the loan's
-     * lock. extendLoan() charges it and extensionPreview() quotes it, so the
-     * two cannot drift.
+     * What an extension on 'pay' collects in its one payment: everything the
+     * open period owes except its principal, so the old period is settled in
+     * full and only principal moves to the new one. That is the insurance
+     * premium still owed on the loan, the late penalty owed on the open
+     * periods and the interest outstanding on them, which the allocation
+     * takes in that order (RepaymentService::recordRepaymentOnLockedLoan()).
      *
-     * @return array{interest: float, amount: float}
+     * The penalty is what the payment's own penalty step will charge on
+     * `$asOf` (RepaymentService::penaltyAsOf(), which writes nothing), less
+     * what is already paid toward it; a period it leaves alone owes its
+     * stamped penalty. A one-month loan has one open period, so the amount
+     * reaches no principal. Read under the loan's lock, in whole centavos.
+     * extendLoan() charges it and extensionPreview() quotes it, so the two
+     * cannot drift.
+     *
+     * @return array{insurance: float, penalty: float, interest: float, amount: float}
      */
-    private function extensionCollection(Loan $loan): array
+    private function extensionCollection(Loan $loan, Carbon $asOf): array
     {
-        $interest = $this->outstandingInterest($this->openSchedules($loan));
+        $paymentDate = $asOf->copy()->startOfDay();
+        $openSchedules = $this->openSchedules($loan);
+
+        $insurance = max(0, LoanService::toCentavos((float) $loan->insurance_remaining_balance));
+        $interest = LoanService::toCentavos($this->outstandingInterest($openSchedules));
+        $penalty = 0;
+
+        foreach ($openSchedules as $schedule) {
+            $charged = $this->repaymentService->penaltyAsOf($loan, $schedule, $paymentDate) ?? (float) $schedule->penalty_amount;
+            $penalty += max(0, LoanService::toCentavos($charged) - LoanService::toCentavos((float) $schedule->penalty_paid));
+        }
 
         return [
-            'interest' => $interest,
-            'amount' => (LoanService::toCentavos($interest) + max(0, LoanService::toCentavos((float) $loan->insurance_remaining_balance))) / 100,
+            'insurance' => $insurance / 100,
+            'penalty' => $penalty / 100,
+            'interest' => $interest / 100,
+            'amount' => ($insurance + $penalty + $interest) / 100,
         ];
     }
 

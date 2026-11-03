@@ -233,7 +233,8 @@ class LoanLedgerRowsTest extends TestCase
     public function test_an_extension_on_pay_is_one_payment_row_then_its_fresh_interest(): void
     {
         // One month at 3%, ₱61,234.57: ₱1,837.04 interest. Released, then
-        // due ten days ago: a ₱1,224.69 penalty (2%) is taken first.
+        // due ten days ago: a ₱1,224.69 penalty (2%) is taken first, and the
+        // collection covers it and all the interest, so none carries.
         $loan = $this->overdueOneMonthLoan();
         $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'pay'])->assertOk();
 
@@ -247,10 +248,10 @@ class LoanLedgerRowsTest extends TestCase
         $this->assertSame($repayment->id, $payment['repayment_id']);
         $this->assertNotNull($payment['loan_adjustment_id']);
         $this->assertMoney(1224.69, $payment['penalty']);
-        $this->assertMoney(612.35, $payment['interest']);
-        $this->assertBalances([self::PRINCIPAL, 1224.69, 0], $payment);
+        $this->assertMoney(1837.04, $payment['interest']);
+        $this->assertBalances([self::PRINCIPAL, 0, 0], $payment);
         $this->assertMoney(1837.04, $fresh['interest']);
-        $this->assertBalances([self::PRINCIPAL, 3061.73, 0], $fresh);
+        $this->assertBalances([self::PRINCIPAL, 1837.04, 0], $fresh);
         $this->assertClosingIsTheSummary($loan, $ledger);
     }
 
