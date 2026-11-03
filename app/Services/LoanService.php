@@ -935,12 +935,23 @@ class LoanService
      * existing callers — the controller, DemoSeeder and a dozen tests — keep
      * working unchanged; the chain's submit step is recorded against whoever
      * it resolves to.
+     *
+     * A loan that was not a draft when it was read is the 422 it always was,
+     * checked before the transaction. The transaction (LoanWriteTransaction::run(),
+     * the outermost) then locks the loan row as its first statement and reads
+     * the status again under it: a loan another request submitted (and, on a
+     * submit -> release chain, already approved) since this one read it is a
+     * 409, as is a deadlock or a lock wait timeout. So a double submit never
+     * seeds a second chain over the first or approves the loan twice. seed()
+     * runs under that lock and approves through approveLocked().
      */
     public function submitForReview(Loan $loan, ?User $submitter = null): Loan
     {
         $this->guardStatus($loan, 'draft', 'submit for review');
 
-        return DB::transaction(function () use ($loan, $submitter) {
+        return LoanWriteTransaction::run(function () use ($loan, $submitter): Loan {
+            $this->lockLoanInStatus($loan, 'draft');
+
             $loan->update(['status' => 'for_review']);
 
             // Resolved here rather than constructor-injected: LoanApprovalChainService
@@ -958,7 +969,7 @@ class LoanService
      *
      * The checks before the transaction refuse, with the 422 or 403 they
      * always were, an approval that was wrong from the start. The transaction
-     * then locks the loan row (lockLoanInReview()) and reads its status again
+     * then locks the loan row (lockLoanInStatus()) and reads its status again
      * under that lock: a loan another request approved, rejected or otherwise
      * moved since this one read it is a 409 and is left exactly as that
      * request left it, as is a deadlock or a lock wait timeout. So an approve
@@ -977,7 +988,7 @@ class LoanService
         $this->guardApproval($loan, $approver);
 
         return LoanWriteTransaction::run(function () use ($loan, $approver, $remarks): Loan {
-            $this->lockLoanInReview($loan);
+            $this->lockLoanInStatus($loan, 'for_review');
 
             return $this->approveLocked($loan, $approver, $remarks);
         });
@@ -985,9 +996,11 @@ class LoanService
 
     /**
      * The approval itself, for a caller inside a LoanWriteTransaction that
-     * already holds the loan's row lock and has read the loan under it
-     * (LoanApprovalChainService::seed() and approve()). Runs every guard
-     * approve() runs, against that locked state.
+     * already holds the loan's row lock and has read the loan under it:
+     * LoanApprovalChainService::seed(), inside submitForReview(), which locks
+     * the loan before it moves it to for_review, and the chain's step
+     * sign-off, through lockAndGuard(). Opens no transaction of its own. Runs
+     * every guard approve() runs, against that locked state.
      */
     public function approveLocked(Loan $loan, User $approver, ?string $remarks): Loan
     {
@@ -1048,19 +1061,20 @@ class LoanService
 
     /**
      * Lock the loan row, as the first statement of the transaction, and
-     * refuse with a 409 unless it is still in review: approve() and reject()
-     * checked that before the transaction opened, so a loan that has left
-     * review since was moved by another request. The route-bound model is
-     * refreshed from the locked row, so the decision works from what is
-     * committed rather than from what the request read before the lock.
+     * refuse with a 409 unless it is still in `$expectedStatus`: draft for a
+     * submit, for_review for an approve or a reject. The caller checked that
+     * before the transaction opened, so a loan that has moved since was moved
+     * by another request. The route-bound model is refreshed from the locked
+     * row, so the write works from what is committed rather than from what
+     * the request read before the lock.
      *
-     * @throws HttpResponseException 409 when the loan was decided or otherwise moved since it was read
+     * @throws HttpResponseException 409 when the loan was submitted, decided or otherwise moved since it was read
      */
-    private function lockLoanInReview(Loan $loan): void
+    private function lockLoanInStatus(Loan $loan, string $expectedStatus): void
     {
         $locked = Loan::whereKey($loan->getKey())->lockForUpdate()->first();
 
-        if ($locked === null || $locked->status !== 'for_review') {
+        if ($locked === null || $locked->status !== $expectedStatus) {
             throw LoanWriteTransaction::conflict();
         }
 
@@ -1138,7 +1152,7 @@ class LoanService
         $this->guardStatus($loan, 'for_review', 'reject');
 
         return LoanWriteTransaction::run(function () use ($loan, $approver, $remarks): Loan {
-            $this->lockLoanInReview($loan);
+            $this->lockLoanInStatus($loan, 'for_review');
 
             $loan->update([
                 'status' => 'rejected',

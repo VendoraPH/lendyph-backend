@@ -98,8 +98,8 @@ class LoanApprovalChainService
         $pending = $steps->firstWhere('status', LoanApprovalStep::STATUS_PENDING);
 
         // approveLocked(), not approve(): this runs inside submitForReview's
-        // transaction, which already holds the loan's row through its status
-        // update, and LoanWriteTransaction::run() must be the outermost.
+        // transaction, which locked the loan's row as its first statement, and
+        // LoanWriteTransaction::run() must be the outermost.
         if ($pending?->kind === LoanApprovalStep::KIND_RELEASE && $submitter !== null) {
             $this->loanService->approveLocked($loan, $submitter, null);
         }

@@ -21,6 +21,8 @@ use PDOException;
  *   (LoanAdjustmentService::approveAdjustment(), rejectAdjustment(),
  *   applyAdjustment());
  * - extending a loan (LoanAdjustmentService::extendLoan());
+ * - submitting a loan for review (LoanService::submitForReview()), which
+ *   seeds its approval chain and, on a submit -> release chain, approves it;
  * - approving and rejecting a loan in review (LoanService::approve(),
  *   reject());
  * - signing off an approval-chain step and sending a loan back
@@ -38,10 +40,10 @@ use PDOException;
  *      can move a loan into Loan::PLEDGING_STATUSES, so they take it; a
  *      create pledges nothing, a payment only moves a loan within that set or
  *      out of it, an adjustment or an extension neither changes what a
- *      loan pledges nor moves it into or out of that set, and an approval
- *      decision moves a loan out of review into a status that pledges
- *      nothing (approved or rejected), so none of those has collateral rows
- *      to lock;
+ *      loan pledges nor moves it into or out of that set, and a submit or
+ *      an approval decision only moves a loan between statuses that pledge
+ *      nothing (draft, for_review, approved, rejected), so none of those has
+ *      collateral rows to lock;
  *   2. the loan rows, in ONE id-ordered statement (a release also locks the
  *      loan it restructures; a create locks the newest loan, for the next
  *      application number, in Loan::booted()). With no collateral to lock,
@@ -62,7 +64,8 @@ use PDOException;
  * transaction opened, and answers conflict() when another write got there
  * first: a payment already voided, an adjustment already decided or applied,
  * a loan already released or extended, one closed before a payment or an
- * adjustment reached it, or a loan or chain step already decided. A request that was wrong from the start is
+ * adjustment reached it, a loan already submitted, or a loan or chain step
+ * already decided. A request that was wrong from the start is
  * still the 422 it always was, checked before the transaction opens.
  *
  * ── What ordering cannot rule out ────────────────────────────────────────

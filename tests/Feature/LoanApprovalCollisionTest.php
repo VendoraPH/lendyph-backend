@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Models\ApprovalWorkflowSetting;
 use App\Models\AuditLog;
 use App\Models\Borrower;
 use App\Models\Loan;
@@ -330,6 +331,78 @@ class LoanApprovalCollisionTest extends TestCase
         $this->assertSame($before, $this->state());
     }
 
+    // ── submitting for review ────────────────────────────────────────────
+
+    public function test_submitting_on_a_submit_then_release_chain_approves_once_in_one_transaction(): void
+    {
+        $this->submitThenReleaseChain();
+        $loan = $this->draftLoan();
+        $began = 0;
+        Event::listen(TransactionBeginning::class, function () use (&$began): void {
+            $began++;
+        });
+
+        $this->actingAs($this->creator)->patchJson("/api/loans/{$loan->id}/submit")->assertOk();
+
+        $this->assertSame(1, $began, 'submitting opened a nested transaction');
+        $this->assertSame('approved', $loan->fresh()->status);
+        $this->assertSame($this->ids($this->officer), $this->recipients(StaffNotification::LOAN_APPROVED, $loan));
+        $this->assertSame(
+            [[LoanApprovalStep::KIND_SUBMIT, LoanApprovalStep::STATUS_APPROVED], [LoanApprovalStep::KIND_RELEASE, LoanApprovalStep::STATUS_PENDING]],
+            $loan->approvalSteps()->orderBy('step_order')->get()->map(fn (LoanApprovalStep $step) => [$step->kind, $step->status])->all(),
+        );
+    }
+
+    public function test_a_second_submit_from_the_same_reading_answers_409_and_approves_once(): void
+    {
+        $this->submitThenReleaseChain();
+        $loan = $this->draftLoan();
+        $service = app(LoanService::class);
+
+        $secondRequestsCopy = Loan::findOrFail($loan->id);
+        $service->submitForReview(Loan::findOrFail($loan->id), $this->creator);
+        $afterFirst = $this->state();
+
+        $this->assertConflict(fn () => $service->submitForReview($secondRequestsCopy, $this->creator));
+
+        $this->assertSame($afterFirst, $this->state());
+        $this->assertSame('approved', $loan->fresh()->status);
+        $this->assertSame(2, $loan->approvalSteps()->count());
+        $this->assertSame($this->ids($this->officer), $this->recipients(StaffNotification::LOAN_APPROVED, $loan));
+    }
+
+    public function test_a_submit_locks_the_loan_first(): void
+    {
+        $loan = $this->draftLoan();
+
+        $reads = $this->lockingReads(fn () => $this->patchJson("/api/loans/{$loan->id}/submit")->assertOk());
+
+        $this->assertStringContainsString('from `loans`', $reads[0]['sql']);
+        $this->assertSame([$loan->id], $this->lockedIds($reads[0]));
+    }
+
+    public function test_a_submit_that_deadlocks_answers_409_and_writes_nothing(): void
+    {
+        $this->submitThenReleaseChain();
+        $loan = $this->draftLoan();
+        $before = $this->state();
+        $this->failOn(fn (string $sql, array $bindings): bool => str_starts_with($sql, 'update `loans`') && in_array('approved', $bindings, true), self::DEADLOCK);
+
+        $this->actingAs($this->creator)->patchJson("/api/loans/{$loan->id}/submit")->assertStatus(409)->assertExactJson(['message' => self::CONFLICT]);
+
+        $this->assertSame($before, $this->state());
+    }
+
+    public function test_submitting_a_loan_that_was_not_a_draft_when_read_is_still_a_422(): void
+    {
+        $loan = $this->loanInReview();
+        $before = $this->state();
+
+        $this->patchJson("/api/loans/{$loan->id}/submit")->assertStatus(422)->assertJsonValidationErrors('status');
+
+        $this->assertSame($before, $this->state());
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────
 
     /** An active staff member in the main branch holding `$role`. */
@@ -345,6 +418,16 @@ class LoanApprovalCollisionTest extends TestCase
      */
     private function loanInReview(): Loan
     {
+        $loan = $this->draftLoan();
+
+        app(LoanService::class)->submitForReview($loan, $this->creator);
+
+        return $loan->fresh();
+    }
+
+    /** A draft loan by the creator, with an officer. */
+    private function draftLoan(): Loan
+    {
         $product = LoanProduct::factory()->create([
             'interest_rate' => 3.0,
             'interest_method' => 'straight',
@@ -352,17 +435,28 @@ class LoanApprovalCollisionTest extends TestCase
             'frequency' => 'monthly',
         ]);
 
-        $loan = app(LoanService::class)->createLoan([
+        return app(LoanService::class)->createLoan([
             'borrower_id' => Borrower::factory()->create(['branch_id' => $this->branch->id])->id,
             'loan_product_id' => $product->id,
             'principal_amount' => 60000,
             'start_date' => now()->toDateString(),
             'account_officer_id' => $this->officer->id,
         ], $this->creator);
+    }
 
-        app(LoanService::class)->submitForReview($loan, $this->creator);
-
-        return $loan->fresh();
+    /**
+     * The shortest chain ApprovalWorkflowController accepts: submit, then
+     * release. Submitting approves the loan on the spot (seed()).
+     */
+    private function submitThenReleaseChain(): void
+    {
+        ApprovalWorkflowSetting::create([
+            'type' => ApprovalWorkflowSetting::TYPE_NORMAL,
+            'steps' => [
+                ['id' => 'lp', 'name' => 'Loan Processor', 'role' => 'loan_processor', 'kind' => 'submit'],
+                ['id' => 'cash', 'name' => 'Cashier', 'role' => 'cashier', 'kind' => 'release'],
+            ],
+        ]);
     }
 
     private function pendingStep(Loan $loan): LoanApprovalStep
