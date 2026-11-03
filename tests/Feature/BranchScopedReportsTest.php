@@ -363,6 +363,7 @@ class BranchScopedReportsTest extends TestCase
     public function test_report_filters_without_a_branch_scope_fail_closed(): void
     {
         $this->expectException(LogicException::class);
+        $this->expectExceptionMessage('branch_ids');
 
         app(ReportService::class)->listOfReleasesTotals([]);
     }
@@ -448,15 +449,90 @@ class BranchScopedReportsTest extends TestCase
         $this->assertContains($this->far->id, $all);
     }
 
-    public function test_another_branch_answers_404_on_show(): void
+    public function test_another_branch_answers_404_on_show_exactly_like_a_missing_one(): void
     {
+        $missingId = Branch::max('id') + 1000;
+
         $this->actingAs($this->branchUser());
 
-        $this->getJson("/api/branches/{$this->far->id}")->assertNotFound();
+        $this->assertNotFoundLikeMissing(
+            $this->getJson("/api/branches/{$this->far->id}"),
+            $this->getJson("/api/branches/{$missingId}"),
+            $this->far->id,
+            $missingId,
+        );
         $this->getJson("/api/branches/{$this->branch->id}")->assertOk()->assertJsonPath('data.id', $this->branch->id);
 
         $this->actingAs($this->admin);
         $this->getJson("/api/branches/{$this->far->id}")->assertOk()->assertJsonPath('data.id', $this->far->id);
+    }
+
+    public function test_another_branch_answers_404_on_update_before_permission_and_validation(): void
+    {
+        $missingId = Branch::max('id') + 1000;
+        $editor = $this->branchUser();
+        $editor->givePermissionTo('settings:update');
+
+        $this->actingAs($editor);
+
+        // A valid edit, an invalid one, and one from a caller without
+        // settings:update all answer like a missing branch.
+        $this->assertNotFoundLikeMissing(
+            $this->putJson("/api/branches/{$this->far->id}", ['name' => 'Renamed']),
+            $this->putJson("/api/branches/{$missingId}", ['name' => 'Renamed']),
+            $this->far->id,
+            $missingId,
+        );
+        $this->putJson("/api/branches/{$this->far->id}", ['code' => str_repeat('X', 50)])->assertNotFound();
+        $this->actingAs($this->branchUser());
+        $this->putJson("/api/branches/{$this->far->id}", ['name' => 'Renamed'])->assertNotFound();
+
+        $this->assertSame('Far Branch', $this->far->fresh()->name);
+
+        $this->actingAs($editor);
+        $this->putJson("/api/branches/{$this->branch->id}", ['address' => 'New address'])->assertOk();
+
+        $this->actingAs($this->admin);
+        $this->putJson("/api/branches/{$this->far->id}", ['name' => 'Far Branch (HQ edit)'])->assertOk();
+        $this->assertSame('Far Branch (HQ edit)', $this->far->fresh()->name);
+    }
+
+    public function test_reconciliation_needs_view_all(): void
+    {
+        $this->seedChartOfAccounts();
+        $payload = [
+            'account_id' => $this->account('1040'),
+            'start_date' => '2026-09-01',
+            'end_date' => '2026-09-30',
+            'statement_balance' => 5000050,
+        ];
+
+        $id = $this->postJson('/api/accounting/reconciliations', $payload)->assertCreated()->json('data.id');
+
+        $reconciler = $this->branchUser();
+        $reconciler->givePermissionTo('accounting:reconcile');
+        $this->actingAs($reconciler);
+
+        $this->getJson('/api/accounting/reconciliations')->assertForbidden();
+        $this->getJson("/api/accounting/reconciliations/{$id}")->assertForbidden();
+        $this->postJson('/api/accounting/reconciliations', [...$payload, 'start_date' => '2026-10-01', 'end_date' => '2026-10-31'])->assertForbidden();
+        $this->postJson("/api/accounting/reconciliations/{$id}/match", ['accept_suggestions' => true])->assertForbidden();
+
+        $reconciler->givePermissionTo(BranchAccess::VIEW_ALL);
+        $this->actingAs($reconciler->fresh());
+
+        $this->getJson('/api/accounting/reconciliations')->assertOk();
+        $this->getJson("/api/accounting/reconciliations/{$id}")->assertOk();
+    }
+
+    public function test_every_seeded_role_that_can_reconcile_holds_view_all(): void
+    {
+        $roles = Role::query()->whereHas('permissions', fn ($q) => $q->where('name', 'accounting:reconcile'))->get();
+
+        $this->assertNotEmpty($roles);
+        foreach ($roles as $role) {
+            $this->assertTrue($role->hasPermissionTo(BranchAccess::VIEW_ALL), "{$role->name} can reconcile but lacks branches:view_all");
+        }
     }
 
     // -----------------------------------------------------------------
@@ -513,6 +589,23 @@ class BranchScopedReportsTest extends TestCase
             'transactor_user_id' => $this->admin->id,
             'transaction_date' => now(),
         ], $attributes));
+    }
+
+    /**
+     * A hidden branch's 404 reads exactly like a missing one's: the binding's
+     * "No query results" message, differing only in the id.
+     */
+    private function assertNotFoundLikeMissing(TestResponse $hidden, TestResponse $missing, int $hiddenId, int $missingId): void
+    {
+        $hidden->assertNotFound();
+        $missing->assertNotFound();
+
+        $this->assertStringContainsString('No query results', $hidden->json('message'));
+        $this->assertSame(
+            str_replace((string) $missingId, '{id}', $missing->json('message')),
+            str_replace((string) $hiddenId, '{id}', $hidden->json('message')),
+        );
+        $this->assertSame(array_keys($missing->json()), array_keys($hidden->json()));
     }
 
     /**

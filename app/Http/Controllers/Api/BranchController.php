@@ -9,6 +9,7 @@ use App\Http\Resources\BranchResource;
 use App\Http\Resources\PublicBranchResource;
 use App\Models\Branch;
 use App\Services\BranchAccess;
+use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use OpenApi\Attributes as OA;
@@ -95,9 +96,7 @@ class BranchController extends Controller
     )]
     public function show(Branch $branch): BranchResource
     {
-        // Decision B2: a branch the caller can't see answers 404, as a
-        // missing one does, so its existence is not revealed.
-        abort_unless(app(BranchAccess::class)->canSee(request()->user(), $branch->id), 404);
+        $this->denyHiddenBranch($branch);
 
         $branch->loadCount('users');
 
@@ -107,7 +106,7 @@ class BranchController extends Controller
     #[OA\Put(
         path: '/api/branches/{id}',
         summary: 'Update branch',
-        description: 'Update a branch',
+        description: 'Update a branch. A branch outside the caller\'s branches answers 404 (before permission and validation checks) unless they hold branches:view_all.',
         tags: ['Branches'],
         security: [['sanctum' => []]],
         parameters: [
@@ -173,5 +172,17 @@ class BranchController extends Controller
             ->get(['id', 'name', 'address']);
 
         return PublicBranchResource::collection($branches);
+    }
+
+    /**
+     * Decision B2: a branch the caller can't see answers exactly like a
+     * missing one (the route binding's 404 and message), so its existence is
+     * not revealed. `branches:view_all` sees every branch.
+     */
+    private function denyHiddenBranch(Branch $branch): void
+    {
+        if (! app(BranchAccess::class)->canSee(request()->user(), $branch->id)) {
+            throw (new ModelNotFoundException)->setModel(Branch::class, [$branch->id]);
+        }
     }
 }

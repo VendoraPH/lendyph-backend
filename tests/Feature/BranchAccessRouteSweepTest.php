@@ -84,8 +84,8 @@ class BranchAccessRouteSweepTest extends TestCase
     /**
      * Decision B2: every report, accounting report, chart of accounts
      * balance and audit log route answers 403 to a branch user naming a
-     * branch outside theirs (and the audit trail to any caller without
-     * `branches:view_all`), whatever other
+     * branch outside theirs (and the audit trail and reconciliations to any
+     * caller without `branches:view_all`), whatever other
      * permissions they hold. Built from the live route list, so a report
      * added later is swept by default.
      */
@@ -114,7 +114,7 @@ class BranchAccessRouteSweepTest extends TestCase
 
         foreach (Router::getRoutes()->getRoutes() as $route) {
             $uri = $route->uri();
-            $isReport = preg_match('#^api/(reports|accounting/(general-ledger|trial-balance|dashboard|books|statements|loans/aging|accounts|cash-accounts)|audit-logs)(/|$)#', $uri) === 1;
+            $isReport = preg_match('#^api/(reports|accounting/(general-ledger|trial-balance|dashboard|books|statements|loans/aging|accounts|cash-accounts|reconciliations)|audit-logs)(/|$)#', $uri) === 1;
 
             if (! $isReport || ! in_array('GET', $route->methods(), true) || $route->parameterNames() !== []) {
                 continue;
