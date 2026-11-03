@@ -209,6 +209,10 @@ class ReportService
             return [
                 'period_number' => $s->period_number,
                 'due_date' => $s->due_date->toDateString(),
+                // The statement's Beginning Balance column, built as
+                // AmortizationScheduleResource builds it: the period's
+                // remaining balance plus its principal due, to the centavo.
+                'beginning_balance' => round((float) $s->remaining_balance + (float) $s->principal_due, 2),
                 'principal_due' => (float) $s->principal_due,
                 'interest_due' => (float) $s->interest_due,
                 'total_due' => (float) $s->total_due,

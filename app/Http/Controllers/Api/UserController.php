@@ -14,6 +14,7 @@ use App\Models\User;
 use App\Services\AuditLogService;
 use App\Services\BranchAccess;
 use App\Services\LikePattern;
+use App\Services\UserReach;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Support\Facades\DB;
@@ -37,7 +38,7 @@ class UserController extends Controller
     #[OA\Get(
         path: '/api/users',
         summary: 'List users',
-        description: 'Get a paginated list of all users',
+        description: 'Get a paginated list of all users. Each row carries `can_manage`: false when edit, reset password, deactivate and reactivate would answer 404 for the caller (the target is a super_admin and the caller is not, or, for a caller without `branches:view_all`, the target holds a permission the caller lacks or works in a branch outside the caller\'s). Only this list carries it.',
         tags: ['Users'],
         security: [['sanctum' => []]],
         parameters: [
@@ -89,7 +90,9 @@ class UserController extends Controller
         // Only users sharing one of the caller's branches, unless the caller
         // holds `branches:view_all`. The list and `meta.stats` take the same
         // scope, so the tabs count the rows the caller can see.
-        $users = User::with('branch', 'branches', 'roles')
+        // `roles.permissions` and `permissions` are for each row's
+        // `can_manage` (UserReach), loaded here so it asks nothing per row.
+        $users = User::with('branch', 'branches', 'roles.permissions', 'permissions')
             ->visibleTo($viewer)
             ->when(filled($search), function ($query) use ($search) {
                 $like = LikePattern::contains($search);
@@ -122,7 +125,21 @@ class UserController extends Controller
             ->pluck('count', 'status')
             ->toArray();
 
-        return UserResource::collection($users)
+        $reach = UserReach::of($viewer);
+        $canManage = $users->getCollection()
+            ->mapWithKeys(fn (User $user) => [$user->getKey() => $reach->canManage($user)]);
+
+        // The direct permissions were loaded for `can_manage` only. Dropped
+        // again so the rows keep their shape: UserResource lists a user's
+        // permissions whenever that relation is loaded.
+        $users->getCollection()->each->unsetRelation('permissions');
+
+        $collection = UserResource::collection($users);
+        $collection->collection->each(
+            fn (UserResource $row) => $row->withCanManage($canManage[$row->resource->getKey()]),
+        );
+
+        return $collection
             ->additional(['meta' => ['stats' => [
                 'active' => (int) ($stats['active'] ?? 0),
                 'inactive' => (int) ($stats['inactive'] ?? 0),
