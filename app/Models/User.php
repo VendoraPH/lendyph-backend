@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Services\BranchAccess;
 use App\Traits\Auditable;
 use Database\Factories\UserFactory;
 use Illuminate\Database\Eloquent\Attributes\Hidden;
@@ -126,11 +127,13 @@ class User extends Authenticatable
      * Always a superset of `branch()` — `users.branch_id` is maintained as one
      * member of this set, never as something outside it.
      *
-     * Assignment is DISPLAY-ONLY. Nothing reads it to decide what a user may
-     * see or do, there are no policies and no global scopes, and that is a
-     * deliberate property rather than an oversight:
-     * tests/Feature/BranchAssignmentIsDisplayOnlyTest.php fails loudly if
-     * anyone starts scoping on it without designing that first.
+     * Assignment decides which branches' data the user sees unless they hold
+     * `branches:view_all` (decision 5b). App\Services\BranchAccess reads it,
+     * falling back to `users.branch_id` when this set is empty, and the HTTP
+     * layer applies it through local `visibleTo()` scopes, route-model
+     * bindings and visibility-aware `exists` rules. Never a global scope, so
+     * jobs and commands see every branch. Covered by
+     * tests/Feature/BranchAccessTest.php and BranchAccessRouteSweepTest.php.
      *
      * @return BelongsToMany<Branch, $this>
      */
@@ -163,6 +166,53 @@ class User extends Authenticatable
     public function scopeForBranch($query, int $branchId)
     {
         return $query->whereHas('branches', fn ($q) => $q->where('branches.id', $branchId));
+    }
+
+    /**
+     * Users who share at least one branch with $viewer (BranchAccess), for the
+     * users and staff lists. `branches:view_all` sees everyone; a viewer with
+     * no branch sees no one.
+     *
+     * A listed user's branches are read the way BranchAccess reads the
+     * viewer's: the pivot, or the legacy `users.branch_id` column. Local scope
+     * only, never global.
+     */
+    public function scopeVisibleTo($query, self $viewer)
+    {
+        $branchIds = app(BranchAccess::class)->for($viewer);
+
+        if ($branchIds === null) {
+            return $query;
+        }
+
+        return $query->where(function ($q) use ($branchIds) {
+            $q->whereHas('branches', fn ($b) => $b->whereIn('branches.id', $branchIds))
+                ->orWhereIn('users.branch_id', $branchIds);
+        });
+    }
+
+    /**
+     * Every `{user}` route parameter resolves only to a user the signed-in
+     * caller may see (scopeVisibleTo), or to the caller themselves, so another
+     * branch's account answers 404 on show, update and every action, the same
+     * answer as an id that does not exist. Without a signed-in user the
+     * binding is unscoped.
+     */
+    public function resolveRouteBindingQuery($query, $value, $field = null)
+    {
+        $query = parent::resolveRouteBindingQuery($query, $value, $field);
+        $viewer = request()->user();
+
+        // `branches:view_all` sees everyone. Checked here rather than left to
+        // scopeVisibleTo(), whose unrestricted case adds no condition and
+        // would leave only the "is the caller" half of the OR below.
+        if (! $viewer instanceof self || app(BranchAccess::class)->for($viewer) === null) {
+            return $query;
+        }
+
+        return $query->where(fn ($q) => $q
+            ->whereKey($viewer->getKey())
+            ->orWhere(fn ($visible) => $visible->visibleTo($viewer)));
     }
 
     /**

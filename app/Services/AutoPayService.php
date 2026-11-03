@@ -59,12 +59,12 @@ class AutoPayService
      *
      * @param  list<int|string>  $includeScheduleIds
      */
-    public function preview(array $productIds, string $dateFrom, string $dateTo, array $includeScheduleIds = []): array
+    public function preview(array $productIds, string $dateFrom, string $dateTo, array $includeScheduleIds = [], ?User $scopeTo = null): array
     {
         [$from, $to] = $this->parseRange($dateFrom, $dateTo);
         $asOf = $this->runDate();
 
-        $loans = $this->eligibleLoansQuery($productIds)
+        $loans = $this->eligibleLoansQuery($productIds, $scopeTo)
             ->with(['borrower:id,first_name,middle_name,last_name,suffix'])
             ->get();
 
@@ -230,11 +230,11 @@ class AutoPayService
      *   one in `failures`.
      * - Per-loan failures are isolated; the run continues and reports skipped/failed.
      */
-    public function process(array $productIds, string $dateFrom, string $dateTo, array $includeScheduleIds, User $user): array
+    public function process(array $productIds, string $dateFrom, string $dateTo, array $includeScheduleIds, User $user, ?User $scopeTo = null): array
     {
         [$from, $to] = $this->parseRange($dateFrom, $dateTo);
 
-        $loans = $this->eligibleLoansQuery($productIds)->get();
+        $loans = $this->eligibleLoansQuery($productIds, $scopeTo)->get();
 
         $processed = 0;
         $skipped = 0;
@@ -400,9 +400,14 @@ class AutoPayService
         return $loan->refresh();
     }
 
-    private function eligibleLoansQuery(array $productIds)
+    /**
+     * With `$scopeTo`, only loans in that user's branches (Loan::visibleTo):
+     * a run started from the API acts on the caller's loans only.
+     */
+    private function eligibleLoansQuery(array $productIds, ?User $scopeTo = null)
     {
         return Loan::query()
+            ->when($scopeTo !== null, fn ($q) => $q->visibleTo($scopeTo))
             ->where('auto_pay', true)
             // Same set as toggle() enforces. `past_due` used to be listed here
             // too and matched nothing — it is not a member of the enum.

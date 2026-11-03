@@ -9,6 +9,8 @@ use App\Http\Requests\Accounting\UpdateJournalRequest;
 use App\Http\Resources\JournalEntryResource;
 use App\Models\AccountingJournal;
 use App\Services\Accounting\JournalPoster;
+use App\Services\BranchAccess;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Validation\Rule;
@@ -97,7 +99,9 @@ class AccountingJournalController extends Controller
 
         $perPage = min((int) ($filters['per_page'] ?? 15), 100);
 
-        $journals = AccountingJournal::query()
+        app(BranchAccess::class)->authorizeBranchFilter(request()->user(), $filters['branch_id'] ?? null);
+
+        $journals = $this->visibleToCaller(AccountingJournal::query())
             ->withRegisterRelations()
             ->when(isset($filters['from']), fn ($q) => $q->where('date', '>=', $filters['from']))
             ->when(isset($filters['to']), fn ($q) => $q->where('date', '<=', $filters['to']))
@@ -290,5 +294,19 @@ class AccountingJournalController extends Controller
         $journal->loadPostable();
 
         return (new JournalEntryResource($journal))->response()->setStatusCode($status);
+    }
+
+    /**
+     * Rows in the caller's branches (BranchAccess). A row with no branch is
+     * visible only to `branches:view_all`.
+     *
+     * @param  Builder<AccountingJournal>  $query
+     * @return Builder<AccountingJournal>
+     */
+    private function visibleToCaller(Builder $query): Builder
+    {
+        $branchIds = app(BranchAccess::class)->for(request()->user());
+
+        return $branchIds === null ? $query : $query->whereIn('branch_id', $branchIds);
     }
 }

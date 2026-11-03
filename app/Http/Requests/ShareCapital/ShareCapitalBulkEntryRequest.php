@@ -2,7 +2,11 @@
 
 namespace App\Http\Requests\ShareCapital;
 
+use App\Models\Borrower;
+use App\Services\BranchAccess;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Rule;
+use Illuminate\Validation\Rules\Exists;
 
 class ShareCapitalBulkEntryRequest extends FormRequest
 {
@@ -21,11 +25,28 @@ class ShareCapitalBulkEntryRequest extends FormRequest
     {
         return [
             'entries' => ['required', 'array', 'min:1'],
-            'entries.*.pledge_id' => ['required', 'integer', 'exists:share_capital_pledges,id'],
+            'entries.*.pledge_id' => ['required', 'integer', $this->visiblePledgeRule()],
             'entries.*.amount' => ['required', 'numeric', 'min:0.01', 'decimal:0,2'],
             'entries.*.type' => ['required', 'in:credit,debit'],
             'entries.*.date' => ['required', 'date'],
             'entries.*.description' => ['nullable', 'string', 'max:255'],
         ];
+    }
+
+    /**
+     * A pledge of a member in the caller's branches (BranchAccess): another
+     * branch's pledge fails like a missing one.
+     */
+    private function visiblePledgeRule(): Exists
+    {
+        $rule = Rule::exists('share_capital_pledges', 'id');
+        $branchIds = app(BranchAccess::class)->for($this->user());
+
+        return $branchIds === null
+            ? $rule
+            : $rule->where(fn ($query) => $query->whereIn(
+                'borrower_id',
+                Borrower::query()->whereIn('branch_id', $branchIds)->select('id'),
+            ));
     }
 }

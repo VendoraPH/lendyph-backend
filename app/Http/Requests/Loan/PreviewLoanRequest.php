@@ -6,9 +6,11 @@ use App\Enums\LoanFrequency;
 use App\Http\Requests\Concerns\ValidatesDeductionAmounts;
 use App\Models\Collateral;
 use App\Models\Loan;
+use App\Services\BranchAccess;
 use App\Services\CollateralValuation;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\Rules\Exists;
 use Illuminate\Validation\Validator;
 
 /**
@@ -54,15 +56,17 @@ class PreviewLoanRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'source_loan_id' => ['nullable', 'integer', 'exists:loans,id'],
-            'loan_id' => ['nullable', 'integer', 'exists:loans,id', 'prohibits:source_loan_id'],
+            // Loans and members in the caller's branches only (BranchAccess);
+            // another branch's id fails like a missing one.
+            'source_loan_id' => ['nullable', 'integer', $this->visibleExists('loans')],
+            'loan_id' => ['nullable', 'integer', $this->visibleExists('loans'), 'prohibits:source_loan_id'],
             // Needed once collateral is listed, to find it on the register;
             // an edit or a restructure takes its loan's borrower instead.
             'borrower_id' => [
                 Rule::requiredIf(fn (): bool => ! $this->filled('source_loan_id') && ! $this->filled('loan_id') && ! empty($this->input('collaterals'))),
                 'nullable',
                 'integer',
-                'exists:borrowers,id',
+                $this->visibleExists('borrowers'),
             ],
             'loan_product_id' => ['nullable', 'integer', 'exists:loan_products,id'],
             'principal_amount' => ['nullable', 'numeric', 'min:0'],
@@ -154,7 +158,7 @@ class PreviewLoanRequest extends FormRequest
         $sourceLoanId = filter_var($this->input('source_loan_id'), FILTER_VALIDATE_INT);
         $sourceIds = $sourceLoanId === false
             ? []
-            : array_map('intval', Loan::find($sourceLoanId)?->collaterals()->pluck('collaterals.id')->all() ?? []);
+            : array_map('intval', Loan::visibleTo($this->user())->find($sourceLoanId)?->collaterals()->pluck('collaterals.id')->all() ?? []);
 
         $ids = array_values(array_unique([...$listedIds, ...$sourceIds]));
 
@@ -197,7 +201,10 @@ class PreviewLoanRequest extends FormRequest
             $loanId = filter_var($this->input($field), FILTER_VALIDATE_INT);
 
             if ($loanId !== false) {
-                $borrowerId = Loan::whereKey($loanId)->value('borrower_id');
+                // Only a loan the caller can see (BranchAccess): another
+                // branch's loan names no register, so its collateral matches
+                // nothing.
+                $borrowerId = Loan::visibleTo($this->user())->whereKey($loanId)->value('borrower_id');
 
                 return $borrowerId === null ? null : (int) $borrowerId;
             }
@@ -206,5 +213,10 @@ class PreviewLoanRequest extends FormRequest
         $borrowerId = filter_var($this->input('borrower_id'), FILTER_VALIDATE_INT);
 
         return $borrowerId === false ? null : $borrowerId;
+    }
+
+    private function visibleExists(string $table): Exists
+    {
+        return app(BranchAccess::class)->constrainExists(Rule::exists($table, 'id'), $this->user());
     }
 }

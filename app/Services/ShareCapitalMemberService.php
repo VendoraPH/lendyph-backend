@@ -27,11 +27,15 @@ class ShareCapitalMemberService
      * the whole book (`totals`) and of the members matching `$search`
      * (`matching_totals`).
      *
+     * `$branchIds` limits every figure to members of those branches (the
+     * caller's, from BranchAccess); null covers every branch.
+     *
+     * @param  list<int>|null  $branchIds
      * @return array{members: LengthAwarePaginator, totals: array<string, float|int>, matching_totals: array<string, float|int>}
      */
-    public function members(?string $search, string $sort, string $direction, int $perPage): array
+    public function members(?string $search, string $sort, string $direction, int $perPage, ?array $branchIds = null): array
     {
-        $matching = $this->ledgerWithBorrowers($search);
+        $matching = $this->ledgerWithBorrowers($search, $branchIds);
 
         $query = (clone $matching)
             ->groupBy('borrowers.id', 'borrowers.borrower_code', 'borrowers.last_name', 'borrowers.first_name')
@@ -68,7 +72,7 @@ class ShareCapitalMemberService
 
         return [
             'members' => $members,
-            'totals' => $this->totals($this->ledgerWithBorrowers(null)),
+            'totals' => $this->totals($this->ledgerWithBorrowers(null, $branchIds)),
             'matching_totals' => $this->totals($matching),
         ];
     }
@@ -133,10 +137,14 @@ class ShareCapitalMemberService
         ];
     }
 
-    private function ledgerWithBorrowers(?string $search): Builder
+    /**
+     * @param  list<int>|null  $branchIds
+     */
+    private function ledgerWithBorrowers(?string $search, ?array $branchIds): Builder
     {
         return DB::table('share_capital_ledger')
             ->join('borrowers', 'borrowers.id', '=', 'share_capital_ledger.borrower_id')
+            ->when($branchIds !== null, fn (Builder $q) => $q->whereIn('borrowers.branch_id', $branchIds))
             ->when(filled($search), function (Builder $q) use ($search): void {
                 $like = LikePattern::contains($search);
 

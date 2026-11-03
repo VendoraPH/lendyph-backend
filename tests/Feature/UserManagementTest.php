@@ -31,6 +31,19 @@ class UserManagementTest extends TestCase
         );
     }
 
+    /**
+     * A user in Main Branch holding only `loans:view`, so an operator without
+     * `branches:view_all` can manage them: their permissions and branches sit
+     * inside the operator's (MasksUserExistence::callerReachesTarget()).
+     */
+    private function userWithinReachOf(): User
+    {
+        $starting = Role::create(['name' => 'starting_desk', 'guard_name' => 'web', 'is_system' => false]);
+        $starting->syncPermissions(['loans:view']);
+
+        return $this->userWithRole('starting_desk');
+    }
+
     public function test_list_users(): void
     {
         $response = $this->getJson('/api/users');
@@ -371,14 +384,14 @@ class UserManagementTest extends TestCase
             User::factory()->create(['branch_id' => $this->branch->id]),
             fn (User $user) => $user->assignRole($branchAdmin),
         );
-        $target = $this->userWithRole('viewer');
+        $target = $this->userWithinReachOf();
 
         $this->actingAs($operator)
             ->putJson("/api/users/{$target->id}", ['role' => 'loan_officer'])
             ->assertUnprocessable()
             ->assertJsonValidationErrors(['role']);
 
-        $this->assertSame('viewer', $target->fresh()->getRoleNames()->first());
+        $this->assertSame('starting_desk', $target->fresh()->getRoleNames()->first());
     }
 
     public function test_an_operator_can_grant_a_role_within_their_own_permissions(): void
@@ -394,7 +407,7 @@ class UserManagementTest extends TestCase
             User::factory()->create(['branch_id' => $this->branch->id]),
             fn (User $user) => $user->assignRole($branchAdmin),
         );
-        $target = $this->userWithRole('viewer');
+        $target = $this->userWithinReachOf();
 
         $this->actingAs($operator)
             ->putJson("/api/users/{$target->id}", ['role' => 'read_only_desk'])

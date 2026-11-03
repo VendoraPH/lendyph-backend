@@ -3,6 +3,9 @@
 namespace App\Http\Requests\Concerns;
 
 use App\Models\User;
+use App\Services\BranchAccess;
+use Illuminate\Validation\Rule;
+use Illuminate\Validation\Rules\Exists;
 
 /**
  * Reconcile the two branch-assignment shapes this API accepts for one release.
@@ -122,5 +125,15 @@ trait ResolvesBranchAssignment
         return $current !== null && in_array($current, $ids, true)
             ? $current
             : $ids[0];
+    }
+
+    /**
+     * `exists` on branches, narrowed to the caller's own branches unless they
+     * hold `branches:view_all` (BranchAccess). A caller can only hand out
+     * access they have.
+     */
+    protected function assignableBranchRule(): Exists
+    {
+        return app(BranchAccess::class)->constrainBranchExists(Rule::exists('branches', 'id'), $this->user());
     }
 }

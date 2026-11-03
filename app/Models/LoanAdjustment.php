@@ -102,4 +102,20 @@ class LoanAdjustment extends Model
     {
         return $this->belongsTo(User::class, 'approved_by');
     }
+
+    /**
+     * Every `{loanAdjustment}` route parameter resolves only to a row whose loan the
+     * signed-in user may see (Loan::visibleTo), so another branch's loan adjustment
+     * answers 404 on every route. Without a signed-in user (console) the
+     * binding is unscoped.
+     */
+    public function resolveRouteBindingQuery($query, $value, $field = null)
+    {
+        $query = parent::resolveRouteBindingQuery($query, $value, $field);
+        $user = request()->user();
+
+        return $user instanceof User
+            ? $query->whereIn('loan_id', Loan::visibleTo($user)->select('loans.id'))
+            : $query;
+    }
 }

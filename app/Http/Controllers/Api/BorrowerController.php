@@ -12,6 +12,7 @@ use App\Models\Borrower;
 use App\Services\BorrowerLoanSummaryService;
 use App\Services\BorrowerPurgeService;
 use App\Services\BorrowerSubmissionTokenService;
+use App\Services\BranchAccess;
 use App\Services\Diagnostics\ErrorDigest;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Http\JsonResponse;
@@ -20,6 +21,7 @@ use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 use OpenApi\Attributes as OA;
 
@@ -40,6 +42,10 @@ status except `pending` and `rejected`. Use it for the Members screen instead
 of `status`, which only takes one exact value at a time. `inactive` and
 `blacklisted` members are included: they are members in poor standing, not
 non-members.
+
+The list and `meta.stats` cover only borrowers in the caller's branches (all
+branches with `branches:view_all`; a borrower with no branch only with it). A
+`branch_id` outside the caller's branches answers 403.
 
 `meta.stats` follows `branch_id` and `search`, and deliberately ignores
 `status` and `members_only`.
@@ -118,10 +124,16 @@ DESC,
         $branchId = $filters['branch_id'] ?? null;
         $membersOnly = filter_var(request('members_only'), FILTER_VALIDATE_BOOLEAN);
 
+        $viewer = request()->user();
+        app(BranchAccess::class)->authorizeBranchFilter($viewer, $branchId);
+
         // Eager loaded, never lazily: the reviewer relations cost two queries
         // for the whole page rather than two per row. Both point at `users`, so
         // a page of rows all reviewed by the same admin still costs exactly two.
         $borrowers = Borrower::with('branch', 'approvedBy', 'rejectedBy')
+            // Only the caller's branches (BranchAccess); `meta.stats` below
+            // takes the same scope.
+            ->visibleTo($viewer)
             /*
              * One aggregate subquery for the page, not a documents relation per
              * row. It answers BorrowerResource's `has_valid_id`, which pairs
@@ -170,7 +182,7 @@ DESC,
          * `members_only=1` the tabs do not sum to `meta.total`, because stats
          * still counts the pending and rejected rows the page excludes.
          */
-        $stats = Borrower::query()
+        $stats = Borrower::visibleTo($viewer)
             ->when(filled($search), fn ($q) => $q->search($search))
             ->when(filled($branchId), fn ($q) => $q->forBranch($branchId))
             ->selectRaw('status, COUNT(*) as count')
@@ -679,7 +691,7 @@ DESC,
 
         $validated = request()->validate([
             'ids' => ['required', 'array', 'min:1', 'max:500'],
-            'ids.*' => ['integer', 'exists:borrowers,id'],
+            'ids.*' => ['integer', app(BranchAccess::class)->constrainExists(Rule::exists('borrowers', 'id'), request()->user())],
         ]);
 
         $deactivated = [];
@@ -688,7 +700,7 @@ DESC,
         foreach ($validated['ids'] as $id) {
             try {
                 /** @var Borrower $borrower */
-                $borrower = Borrower::findOrFail($id);
+                $borrower = Borrower::visibleTo(request()->user())->findOrFail($id);
                 $borrower->update(['status' => 'inactive']);
                 $deactivated[] = $id;
             } catch (\Throwable $e) {
@@ -754,7 +766,7 @@ DESC,
 
         $validated = request()->validate([
             'ids' => ['required', 'array', 'min:1', 'max:500'],
-            'ids.*' => ['integer', 'exists:borrowers,id'],
+            'ids.*' => ['integer', app(BranchAccess::class)->constrainExists(Rule::exists('borrowers', 'id'), request()->user())],
         ]);
 
         $deleted = [];
@@ -762,7 +774,7 @@ DESC,
 
         foreach ($validated['ids'] as $id) {
             try {
-                $purge->purge(Borrower::findOrFail($id));
+                $purge->purge(Borrower::visibleTo(request()->user())->findOrFail($id));
 
                 $deleted[] = $id;
             } catch (\Throwable $e) {

@@ -2,7 +2,9 @@
 
 namespace App\Rules;
 
+use App\Models\User;
 use App\Services\BorrowerDuplicateDetector;
+use App\Services\BranchAccess;
 use Closure;
 use Illuminate\Contracts\Validation\DataAwareRule;
 use Illuminate\Contracts\Validation\ValidationRule;
@@ -37,6 +39,7 @@ class NoDuplicateBorrower implements DataAwareRule, ValidationRule
     public function __construct(
         private readonly ?int $ignoreId = null,
         private readonly bool $revealDetails = false,
+        private readonly ?User $viewer = null,
     ) {}
 
     public function setData(array $data): static
@@ -69,7 +72,14 @@ class NoDuplicateBorrower implements DataAwareRule, ValidationRule
             return;
         }
 
-        if (! $this->revealDetails) {
+        // The match's name, code and birthdate only go to a caller who may see
+        // that member's branch (BranchAccess). Anyone else learns only that a
+        // similar member exists, as an anonymous applicant does.
+        $mayReveal = $this->revealDetails
+            && $this->viewer !== null
+            && app(BranchAccess::class)->canSee($this->viewer, $duplicate->branch_id);
+
+        if (! $mayReveal) {
             $fail('A similar borrower already exists. Please contact your branch to continue.');
 
             return;

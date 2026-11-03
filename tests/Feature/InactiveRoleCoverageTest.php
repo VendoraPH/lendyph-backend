@@ -182,7 +182,10 @@ class InactiveRoleCoverageTest extends TestCase
         $this->assertTrue($passes('loan_reader'));
         $this->assertFalse($passes('payment_reader'));
 
-        $target = $this->userWithRoles('viewer');
+        // A target inside the actor's reach (only `loans:view`, same branch),
+        // so the role rule is what answers; see
+        // MasksUserExistence::callerReachesTarget().
+        $target = $this->userWithRoles($this->role('desk_target', ['loans:view']));
         $this->actingAs($actor)
             ->putJson("/api/users/{$target->id}", ['role' => 'payment_reader'])
             ->assertStatus(422)

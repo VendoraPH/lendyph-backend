@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests\Accounting;
 
+use App\Http\Requests\Concerns\AssignsCallerBranch;
 use Illuminate\Contracts\Validation\Validator;
 use Illuminate\Foundation\Http\FormRequest;
 
@@ -29,6 +30,7 @@ use Illuminate\Foundation\Http\FormRequest;
  */
 class StoreJournalRequest extends FormRequest
 {
+    use AssignsCallerBranch;
     use ValidatesJournalLines;
 
     public function authorize(): bool
@@ -42,7 +44,7 @@ class StoreJournalRequest extends FormRequest
             'date' => ['required', 'date'],
             'reference' => ['nullable', 'string', 'max:64'],
             'description' => ['required', 'string', 'max:500'],
-            'branch_id' => ['nullable', 'integer', 'exists:branches,id'],
+            'branch_id' => ['nullable', 'integer', $this->callerBranchRule()],
             // Accepted so a complete payload is not refused; never read.
             'total_debit' => ['sometimes', 'nullable', 'integer', 'min:0'],
             'total_credit' => ['sometimes', 'nullable', 'integer', 'min:0'],
@@ -70,6 +72,11 @@ class StoreJournalRequest extends FormRequest
             'description' => trim((string) $validated['description']),
             'branch_id' => $validated['branch_id'] ?? null,
         ];
+    }
+
+    protected function prepareForValidation(): void
+    {
+        $this->defaultToCallerBranch();
     }
 
     private function nullIfBlank(?string $value): ?string

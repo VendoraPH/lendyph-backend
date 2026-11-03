@@ -54,6 +54,14 @@ final class CollateralRegister
 
     private readonly bool $balancesVisible;
 
+    /**
+     * The branches whose members the viewer may see; null for every branch
+     * (BranchAccess).
+     *
+     * @var list<int>|null
+     */
+    private readonly ?array $branchIds;
+
     public function __construct(
         User $viewer,
         private readonly ?string $search = null,
@@ -61,6 +69,7 @@ final class CollateralRegister
     ) {
         $this->namesVisible = $viewer->can('borrowers:view');
         $this->balancesVisible = $viewer->can('share_capital:view');
+        $this->branchIds = app(BranchAccess::class)->for($viewer);
     }
 
     public function namesHidden(): bool
@@ -125,7 +134,7 @@ final class CollateralRegister
      * The register's headline figures.
      *
      * `total_collaterals` and `tagged_to_active_loans` describe the WHOLE book
-     * and ignore search and type, as the screen's cards always have. The rest
+     * the viewer may see (their branches' members) and ignore search and type, as the screen's cards always have. The rest
      * follow the filter: the known value of the filtered rows, how many of
      * them are unknown, and how many members they belong to, which is the
      * paginator's group count.
@@ -135,6 +144,9 @@ final class CollateralRegister
     public function totals(): array
     {
         $book = DB::table('collaterals')
+            ->when($this->branchIds !== null, fn (QueryBuilder $query) => $query
+                ->join('borrowers', 'borrowers.id', '=', 'collaterals.borrower_id')
+                ->whereIn('borrowers.branch_id', $this->branchIds))
             ->selectRaw('COUNT(*) as total_collaterals')
             ->selectRaw('COALESCE(SUM('.$this->taggedSql().'), 0) as tagged_to_active_loans', Loan::PLEDGING_STATUSES)
             ->first();
@@ -168,6 +180,8 @@ final class CollateralRegister
         return Collateral::query()
             ->join('borrowers', 'borrowers.id', '=', 'collaterals.borrower_id')
             ->join('collateral_types', 'collateral_types.id', '=', 'collaterals.collateral_type_id')
+            ->when($this->branchIds !== null, fn (Builder $query) => $query
+                ->whereIn('borrowers.branch_id', $this->branchIds))
             ->when(filled($this->collateralTypeId), fn (Builder $query) => $query
                 ->where('collaterals.collateral_type_id', $this->collateralTypeId))
             ->when(filled($this->search), function (Builder $query) {

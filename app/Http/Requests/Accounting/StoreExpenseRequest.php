@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests\Accounting;
 
+use App\Http\Requests\Concerns\AssignsCallerBranch;
 use App\Services\Accounting\Money;
 use Illuminate\Foundation\Http\FormRequest;
 
@@ -22,6 +23,8 @@ use Illuminate\Foundation\Http\FormRequest;
  */
 class StoreExpenseRequest extends FormRequest
 {
+    use AssignsCallerBranch;
+
     public function authorize(): bool
     {
         return $this->user()->can('expenses:create');
@@ -52,7 +55,7 @@ class StoreExpenseRequest extends FormRequest
             // Null means "not paid yet" — the accrual path. Absent means the
             // same thing, which is why this is `nullable` and not `sometimes`.
             'payment_account_id' => ['nullable', 'integer', 'exists:accounting_accounts,id'],
-            'branch_id' => ['nullable', 'integer', 'exists:branches,id'],
+            'branch_id' => ['nullable', 'integer', $this->callerBranchRule()],
             'reference' => ['nullable', 'string', 'max:64'],
             'description' => ['nullable', 'string', 'max:500'],
             // Only meaningful on an accrual; the recorder drops it on a cash
@@ -63,6 +66,8 @@ class StoreExpenseRequest extends FormRequest
 
     protected function prepareForValidation(): void
     {
+        $this->defaultToCallerBranch();
+
         if ($this->has('payee')) {
             $this->merge(['payee' => trim((string) $this->input('payee'))]);
         }

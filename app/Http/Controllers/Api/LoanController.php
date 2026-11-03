@@ -24,6 +24,7 @@ use App\Http\Resources\LoanResource;
 use App\Models\Loan;
 use App\Services\AmortizationBalanceService;
 use App\Services\AutoPayService;
+use App\Services\BranchAccess;
 use App\Services\CollateralAttacher;
 use App\Services\CollateralWriteTransaction;
 use App\Services\LikePattern;
@@ -188,7 +189,11 @@ principal, interest and penalty unpaid on periods past their due date and the
 loan's grace period (each row's `overdue_amount`, summed), and `overdue_count`
 is how many of those loans have an overdue amount. One aggregate query.
 
-`meta.stats` is always organisation-wide — narrowed by `branch_id` and
+Every figure covers only the loans in the caller's branches (all branches with
+`branches:view_all`; none for a user with no branch). A `branch_id` outside the
+caller's branches answers 403.
+
+`meta.stats` covers every loan the caller can see, narrowed by `branch_id` and
 `borrower_id` only, and never by `search`, `status`, `loan_product_id`,
 `awaiting_me` or the date range. Those counts are the KPI cards and tab badges: scoping them to the
 current filter would make every tab read the number of rows already on screen.
@@ -214,6 +219,7 @@ DESC,
         responses: [
             new OA\Response(response: 200, description: 'Paginated loan list'),
             new OA\Response(response: 401, description: 'Unauthenticated'),
+            new OA\Response(response: 403, description: 'A `branch_id` outside the caller\'s branches'),
             new OA\Response(response: 422, description: 'Unknown sort key, bad direction or malformed date'),
         ],
     )]
@@ -261,9 +267,14 @@ DESC,
         $dateTo = $filters['date_to'] ?? null;
         $awaitingMe = filter_var($filters['awaiting_me'] ?? false, FILTER_VALIDATE_BOOLEAN);
 
+        $viewer = request()->user();
+        app(BranchAccess::class)->authorizeBranchFilter($viewer, $branchId);
+
         // The filters alone, shared by the page and by `meta.totals`, so the
-        // totals cover exactly the loans the page is drawn from.
-        $filtered = Loan::query()
+        // totals cover exactly the loans the page is drawn from. Every query
+        // below starts from the caller's visible branches (BranchAccess), so
+        // the page, `meta.stats` and `meta.totals` all follow the same scope.
+        $filtered = Loan::visibleTo($viewer)
             ->when(filled($search), function ($q) use ($search) {
                 $like = LikePattern::contains($search);
 
@@ -325,7 +336,8 @@ DESC,
          * reason the page is, and the two must agree: fixing one alone would
          * sit a borrower-filtered page underneath whole-book counts.
          */
-        $stats = Loan::when(filled($branchId), fn ($q) => $q->forBranch($branchId))
+        $stats = Loan::visibleTo($viewer)
+            ->when(filled($branchId), fn ($q) => $q->forBranch($branchId))
             ->when(filled($borrowerId), fn ($q) => $q->where('loans.borrower_id', $borrowerId))
             ->selectRaw('status, COUNT(*) as count')
             ->groupBy('status')
@@ -348,7 +360,8 @@ DESC,
          * meta.stats: branch and borrower only, never `search`, `status`,
          * `loan_product_id` or the date range.
          */
-        $pastDueCount = Loan::when(filled($branchId), fn ($q) => $q->forBranch($branchId))
+        $pastDueCount = Loan::visibleTo($viewer)
+            ->when(filled($branchId), fn ($q) => $q->forBranch($branchId))
             ->when(filled($borrowerId), fn ($q) => $q->where('loans.borrower_id', $borrowerId))
             ->pastDue()
             ->count();

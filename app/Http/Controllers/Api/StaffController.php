@@ -74,6 +74,9 @@ class StaffController extends Controller
 
         $staff = User::query()
             ->active()
+            // Staff sharing one of the caller's branches (all of them with
+            // `branches:view_all`).
+            ->visibleTo($request->user())
             // Only what StaffResource emits (full_name is built from the two
             // name columns), so nothing else is even read into memory.
             ->select(['id', 'first_name', 'last_name'])

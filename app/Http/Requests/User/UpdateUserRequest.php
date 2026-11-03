@@ -6,6 +6,7 @@ use App\Http\Requests\Concerns\MasksUserExistence;
 use App\Http\Requests\Concerns\ResolvesBranchAssignment;
 use App\Models\User;
 use App\Rules\AssignableRole;
+use App\Services\BranchAccess;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\Validator;
@@ -74,7 +75,9 @@ class UpdateUserRequest extends FormRequest
             'username' => ['sometimes', 'string', 'alpha_dash', 'max:50', Rule::unique('users')->ignore($userId)],
             'email' => ['sometimes', 'email', 'max:255', Rule::unique('users')->ignore($userId)],
             'mobile_number' => ['nullable', 'string', 'max:20'],
-            'branch_id' => ['sometimes', 'exists:branches,id'],
+            // Within the caller's own branches unless they hold
+            // `branches:view_all` (BranchAccess).
+            'branch_id' => ['sometimes', $this->assignableBranchRule()],
             /**
              * `min:1` rather than allowing `[]`. Clearing every branch is not
              * an edit this endpoint has ever offered — `branch_id` is
@@ -84,7 +87,7 @@ class UpdateUserRequest extends FormRequest
              * later; it is not a side effect of adding a second branch.
              */
             'branch_ids' => ['sometimes', 'array', 'min:1'],
-            'branch_ids.*' => ['integer', 'exists:branches,id'],
+            'branch_ids.*' => ['integer', $this->assignableBranchRule()],
             'role' => ['sometimes', 'string', 'exists:roles,name', new AssignableRole($this->user())],
         ];
     }
@@ -122,9 +125,11 @@ class UpdateUserRequest extends FormRequest
                     return;
                 }
 
-                if (! $actor->canManageAccount($target)) {
+                if (! $actor->canManageAccount($target) || ! $this->callerReachesTarget($actor, $target)) {
                     $this->denyAsMissingUser();
                 }
+
+                $this->guardBranchChange($validator, $actor, $target);
 
                 // Compares against the FIRST role only, which is exact for every
                 // user this application can produce — `store` assigns one and
@@ -236,5 +241,27 @@ class UpdateUserRequest extends FormRequest
         sort($current);
 
         return $incoming !== $current;
+    }
+
+    /**
+     * A caller without `branches:view_all` never changes their own branches,
+     * which would let them widen what they see (BranchAccess). Which branches
+     * they may hand out at all is `assignableBranchRule()`; a target working
+     * in a branch they don't hold is already refused by callerReachesTarget().
+     */
+    private function guardBranchChange(Validator $validator, User $actor, User $target): void
+    {
+        $callerBranches = app(BranchAccess::class)->for($actor);
+
+        if ($callerBranches === null || ! $this->changesBranchAssignment($target)) {
+            return;
+        }
+
+        if ((int) $target->id === (int) $actor->id) {
+            $validator->errors()->add(
+                'branch_ids',
+                'You cannot change your own branches. Another administrator has to do it for you.',
+            );
+        }
     }
 }

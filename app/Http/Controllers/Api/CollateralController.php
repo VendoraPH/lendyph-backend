@@ -9,10 +9,12 @@ use App\Http\Requests\Collateral\StoreCollateralRequest;
 use App\Http\Requests\Collateral\UpdateCollateralRequest;
 use App\Http\Resources\CollateralRegisterGroupResource;
 use App\Http\Resources\CollateralResource;
+use App\Models\Borrower;
 use App\Models\Collateral;
 use App\Models\Loan;
 use App\Models\User;
 use App\Services\AuditLogService;
+use App\Services\BranchAccess;
 use App\Services\CollateralAttacher;
 use App\Services\CollateralRegister;
 use App\Services\CollateralWriteTransaction;
@@ -89,7 +91,9 @@ class CollateralController extends Controller
         $borrowerId = $filters['borrower_id'] ?? null;
         $typeId = $filters['collateral_type_id'] ?? $filters['type'] ?? null;
 
+        // Only collateral of members in the caller's branches (BranchAccess).
         $collaterals = Collateral::with(['collateralType', 'activeLoans'])
+            ->whereHas('borrower', fn ($q) => $q->visibleTo(request()->user()))
             ->when(filled($borrowerId), fn ($q) => $q->where('borrower_id', $borrowerId))
             ->when(filled($typeId), fn ($q) => $q->where('collateral_type_id', $typeId))
             ->latest()

@@ -3,8 +3,13 @@
 namespace App\Http\Requests\Borrower;
 
 use App\Http\Requests\Borrower\Concerns\HasBorrowerRules;
+use App\Models\Borrower;
+use App\Models\Loan;
 use App\Rules\NoDuplicateBorrower;
+use App\Services\BranchAccess;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Rule;
+use Illuminate\Validation\Validator;
 
 class UpdateBorrowerRequest extends FormRequest
 {
@@ -22,7 +27,7 @@ class UpdateBorrowerRequest extends FormRequest
         $firstNameRules = ['sometimes', 'string', 'max:255'];
 
         if (! $this->boolean('force')) {
-            $firstNameRules[] = new NoDuplicateBorrower($borrowerId, revealDetails: true);
+            $firstNameRules[] = new NoDuplicateBorrower($borrowerId, revealDetails: true, viewer: $this->user());
         }
 
         return array_merge(
@@ -30,9 +35,53 @@ class UpdateBorrowerRequest extends FormRequest
             [
                 'first_name' => $firstNameRules,
                 'last_name' => ['sometimes', 'string', 'max:255'],
-                'branch_id' => ['sometimes', 'exists:branches,id'],
+                // One of the caller's own branches (BranchAccess; any with
+                // `branches:view_all`).
+                'branch_id' => [
+                    'sometimes',
+                    app(BranchAccess::class)->constrainBranchExists(Rule::exists('branches', 'id'), $this->user()),
+                ],
             ],
         );
+    }
+
+    /**
+     * Loan statuses that pin a member to their branch: every loan still in
+     * progress, from application to collection. Closed loans (completed,
+     * rejected, void, restructured) don't.
+     */
+    private const BRANCH_BOUND_LOAN_STATUSES = [
+        'draft', 'for_review', 'approved',
+        ...Loan::COLLECTIBLE_STATUSES,
+    ];
+
+    /**
+     * A member with a loan in progress keeps their branch. Loans keep the
+     * branch they were opened in, so moving the member alone would split the
+     * member from their open loans and applications across two branches'
+     * staff.
+     */
+    public function after(): array
+    {
+        return [
+            function (Validator $validator): void {
+                $borrower = $this->route('borrower');
+
+                if (! $borrower instanceof Borrower || ! $this->filled('branch_id')
+                    || $validator->errors()->has('branch_id')
+                    || (int) $this->input('branch_id') === (int) $borrower->branch_id) {
+                    return;
+                }
+
+                $hasOpenLoans = $borrower->loans()
+                    ->whereIn('status', self::BRANCH_BOUND_LOAN_STATUSES)
+                    ->exists();
+
+                if ($hasOpenLoans) {
+                    $validator->errors()->add('branch_id', "Close or move this member's open loans first.");
+                }
+            },
+        ];
     }
 
     public function messages(): array

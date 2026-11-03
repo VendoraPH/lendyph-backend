@@ -10,6 +10,7 @@ use App\Http\Resources\ShareCapitalLedgerResource;
 use App\Http\Resources\ShareCapitalPledgeResource;
 use App\Models\Borrower;
 use App\Models\ShareCapitalPledge;
+use App\Services\BranchAccess;
 use App\Services\LikePattern;
 use App\Services\LoanService;
 use App\Services\ShareCapitalService;
@@ -118,6 +119,9 @@ DESC,
 
         $filtered = ShareCapitalPledge::query()
             ->forMembers()
+            // Only pledges of members in the caller's branches (BranchAccess);
+            // `meta.totals` follows, since it sums the same query.
+            ->whereHas('borrower', fn ($q) => $q->visibleTo(request()->user()))
             ->when(filled($schedule), fn ($q) => $q->where('schedule', $schedule))
             ->when(request()->has('auto_credit'), fn ($q) => $q->where('auto_credit', filter_var(request('auto_credit'), FILTER_VALIDATE_BOOLEAN)))
             ->when(filled($search), function ($q) use ($search) {

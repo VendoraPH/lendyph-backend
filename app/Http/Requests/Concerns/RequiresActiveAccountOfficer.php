@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests\Concerns;
 
+use App\Services\BranchAccess;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\Rules\Exists;
 
@@ -19,7 +20,12 @@ trait RequiresActiveAccountOfficer
 {
     protected function activeAccountOfficerRule(): Exists
     {
-        return Rule::exists('users', 'id')->where('status', 'active');
+        // And a user the caller may see (BranchAccess): someone sharing one of
+        // their branches, anyone with `branches:view_all`.
+        return app(BranchAccess::class)->constrainUserExists(
+            Rule::exists('users', 'id')->where('status', 'active'),
+            $this->user(),
+        );
     }
 
     protected function activeAccountOfficerMessage(): string

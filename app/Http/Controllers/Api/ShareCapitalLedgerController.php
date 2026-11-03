@@ -5,7 +5,9 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\ShareCapital\StoreShareCapitalLedgerRequest;
 use App\Http\Resources\ShareCapitalLedgerResource;
+use App\Models\Borrower;
 use App\Models\ShareCapitalLedger;
+use App\Services\BranchAccess;
 use App\Services\LikePattern;
 use App\Services\ShareCapitalMemberService;
 use Illuminate\Http\JsonResponse;
@@ -63,8 +65,12 @@ class ShareCapitalLedgerController extends Controller
         $dateTo = $filters['date_to'] ?? null;
         $search = $filters['search'] ?? null;
 
+        // Only entries of members in the caller's branches (BranchAccess).
+        // A member's entries all share the member's branch, so the running
+        // balance over them is unchanged.
         $entries = $members->withRunningBalance(ShareCapitalLedger::query())
             ->with('borrower', 'createdByUser')
+            ->whereHas('borrower', fn ($q) => $q->visibleTo(request()->user()))
             ->when(filled($borrowerId), fn ($q) => $q->where('borrower_id', $borrowerId))
             ->when(filled($dateFrom), fn ($q) => $q->whereDate('date', '>=', $dateFrom))
             ->when(filled($dateTo), fn ($q) => $q->whereDate('date', '<=', $dateTo))
@@ -84,7 +90,7 @@ class ShareCapitalLedgerController extends Controller
 
         $collection = ShareCapitalLedgerResource::collection($entries);
 
-        if (filled($borrowerId)) {
+        if (filled($borrowerId) && Borrower::visibleTo(request()->user())->whereKey($borrowerId)->exists()) {
             $collection->additional(['meta' => [
                 'summary' => $members->memberPeriod((int) $borrowerId, $dateFrom, $dateTo),
             ]]);
@@ -126,6 +132,7 @@ class ShareCapitalLedgerController extends Controller
             $filters['sort'] ?? 'name',
             $filters['direction'] ?? 'asc',
             min((int) ($filters['per_page'] ?? 25), 100),
+            app(BranchAccess::class)->for(request()->user()),
         );
 
         return JsonResource::collection($result['members'])->additional(['meta' => [

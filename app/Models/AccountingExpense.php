@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Services\BranchAccess;
 use App\Traits\Auditable;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Builder;
@@ -221,5 +222,21 @@ class AccountingExpense extends Model
             // label that says otherwise.
             default => $query->whereRaw('1 = 0'),
         };
+    }
+
+    /**
+     * Every `{expense}` route parameter resolves only to a row in a branch the
+     * signed-in user may see (BranchAccess); a row with no branch only for
+     * `branches:view_all`. Another branch's row answers 404 before any
+     * validation runs. Without a signed-in user the binding is unscoped.
+     */
+    public function resolveRouteBindingQuery($query, $value, $field = null)
+    {
+        $query = parent::resolveRouteBindingQuery($query, $value, $field);
+        $user = request()->user();
+
+        return $user instanceof User
+            ? app(BranchAccess::class)->constrain($query, $user, $this->qualifyColumn('branch_id'))
+            : $query;
     }
 }
