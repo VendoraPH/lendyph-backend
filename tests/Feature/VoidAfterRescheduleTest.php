@@ -95,6 +95,35 @@ class VoidAfterRescheduleTest extends TestCase
         $this->assertPaymentsReconcile();
     }
 
+    public function test_a_payment_on_a_period_opened_by_an_in_place_restructure_can_be_voided(): void
+    {
+        $this->payTwoPeriodsAndPartOfTheThird();
+        $this->travelTo(Carbon::parse('2026-04-11 09:00'));
+        $this->applyAdjustment('restructure', ['term' => 6]);
+        $this->assertSame('ongoing', $this->loan->fresh()->status, 'the restructure was not in place, so this test proves nothing');
+
+        $later = $this->payOn('2026-04-12', 1000);
+        $this->assertSame([4], $later->allocations()->pluck('period_number')->unique()->values()->all());
+
+        $this->void($later);
+        $this->assertEqualsWithDelta(0, (float) $this->schedule(4)->principal_paid + (float) $this->schedule(4)->interest_paid, 0.001);
+        $this->assertPaymentsReconcile();
+    }
+
+    public function test_a_payment_on_a_period_opened_by_an_extension_can_be_voided(): void
+    {
+        $this->loan = $this->oneMonthLoan();
+        $this->postJson("/api/loans/{$this->loan->id}/extend", ['interest_option' => 'defer'])->assertOk();
+
+        $this->travelTo(now()->addDay());
+        $later = $this->payOn(now()->toDateString(), 900);
+        $this->assertSame([2], $later->allocations()->pluck('period_number')->unique()->values()->all());
+
+        $this->void($later);
+        $this->assertEqualsWithDelta(0, (float) $this->schedule(2)->interest_paid, 0.001);
+        $this->assertPaymentsReconcile();
+    }
+
     public function test_a_payment_made_before_a_penalty_waiver_can_be_voided(): void
     {
         $this->travelTo(Carbon::parse('2026-01-15 09:00'));
