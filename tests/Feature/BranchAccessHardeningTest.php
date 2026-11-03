@@ -232,7 +232,7 @@ class BranchAccessHardeningTest extends TestCase
             ->assertJsonValidationErrors(['branch_ids' => 'You cannot change your own branches']);
     }
 
-    public function test_m1_a_caller_cannot_rewrite_the_branches_of_a_user_who_also_works_elsewhere(): void
+    public function test_m1_a_user_who_also_works_in_another_branch_is_out_of_reach(): void
     {
         $second = Branch::factory()->create(['code' => 'SEC']);
         $bridging = User::factory()->inBranches($this->branch, $this->far)->create();
@@ -240,9 +240,39 @@ class BranchAccessHardeningTest extends TestCase
 
         $this->actingAs($this->branchManager([$this->branch, $second]));
 
-        $this->putJson("/api/users/{$bridging->id}", ['branch_ids' => [$this->branch->id, $second->id]])
-            ->assertUnprocessable()
-            ->assertJsonValidationErrors(['branch_ids' => 'also works in a branch you do not manage']);
+        // Visible (they share Main Branch), but not manageable: their reach
+        // goes beyond the caller's.
+        $this->getJson("/api/users/{$bridging->id}")->assertOk();
+        $this->putJson("/api/users/{$bridging->id}", ['branch_ids' => [$this->branch->id, $second->id]])->assertNotFound();
+        $this->postJson("/api/users/{$bridging->id}/reset-password", ['password' => 'newpassword1', 'password_confirmation' => 'newpassword1'])
+            ->assertNotFound();
+
+        $this->assertEqualsCanonicalizing([$this->branch->id, $this->far->id], $bridging->branches()->pluck('branches.id')->all());
+    }
+
+    public function test_m1_a_user_holding_a_permission_the_caller_lacks_is_out_of_reach(): void
+    {
+        $officer = User::factory()->inBranches($this->branch)->create();
+        $officer->assignRole('loan_officer');
+        $overseer = User::factory()->inBranches($this->branch)->create();
+        $overseer->assignRole('manager');
+        $peer = User::factory()->inBranches($this->branch)->create();
+        $peer->assignRole('viewer');
+
+        $this->actingAs($this->branchManager());
+
+        $reset = ['password' => 'newpassword1', 'password_confirmation' => 'newpassword1'];
+
+        foreach ([$officer, $overseer] as $target) {
+            $this->postJson("/api/users/{$target->id}/reset-password", $reset)->assertNotFound();
+            $this->putJson("/api/users/{$target->id}", ['first_name' => 'Probe'])->assertNotFound();
+            $this->assertNotSame('Probe', $target->fresh()->first_name);
+        }
+
+        // A peer whose permissions and branches sit inside the caller's is
+        // still manageable.
+        $this->putJson("/api/users/{$peer->id}", ['first_name' => 'Renamed'])->assertOk();
+        $this->postJson("/api/users/{$peer->id}/reset-password", $reset)->assertSuccessful();
     }
 
     // M2 ---------------------------------------------------------------
@@ -265,6 +295,42 @@ class BranchAccessHardeningTest extends TestCase
 
         $this->assertSame(1, ShareCapitalLedger::where('borrower_id', $here->id)->count());
         $this->assertSame(0, ShareCapitalLedger::where('borrower_id', $there->id)->count());
+    }
+
+    public function test_m2_the_last_auto_credit_runs_totals_are_hidden_from_callers_without_view_all(): void
+    {
+        $member = Borrower::factory()->create(['branch_id' => $this->far->id, 'status' => 'active']);
+        ShareCapitalPledge::where('borrower_id', $member->id)->update(['auto_credit' => true, 'amount' => 750]);
+        $this->postJson('/api/auto-credit/process')->assertCreated();
+
+        $whole = $this->getJson('/api/auto-credit/status')->assertOk()->json('data.last_run');
+        $this->assertNotNull($whole['total_amount']);
+        $this->assertNotNull($whole['member_count']);
+
+        $this->actingAs($this->branchUser());
+        $scoped = $this->getJson('/api/auto-credit/status')->assertOk()->json('data.last_run');
+
+        $this->assertSame($whole['processed_at'], $scoped['processed_at']);
+        $this->assertNull($scoped['total_amount']);
+        $this->assertNull($scoped['member_count']);
+    }
+
+    public function test_m2_bulk_writes_refuse_another_branchs_pledges_and_members(): void
+    {
+        $there = Borrower::factory()->create(['branch_id' => $this->far->id, 'status' => 'active']);
+        $pledge = ShareCapitalPledge::where('borrower_id', $there->id)->firstOrFail();
+
+        $this->actingAs($this->branchUser(['borrowers:update']));
+
+        $this->postJson('/api/pledges/bulk-entries', [
+            'entries' => [['pledge_id' => $pledge->id, 'amount' => 100, 'type' => 'credit', 'date' => now()->toDateString()]],
+        ])->assertUnprocessable()->assertJsonValidationErrors('entries.0.pledge_id');
+
+        $this->patchJson('/api/borrowers/bulk-deactivate', ['ids' => [$there->id]])
+            ->assertUnprocessable()->assertJsonValidationErrors('ids.0');
+
+        $this->assertSame(0, ShareCapitalLedger::where('borrower_id', $there->id)->count());
+        $this->assertSame('active', $there->fresh()->status);
     }
 
     public function test_m2_auto_pay_preview_and_run_cover_only_the_callers_loans(): void
@@ -371,6 +437,24 @@ class BranchAccessHardeningTest extends TestCase
             ->assertUnprocessable()->assertJsonValidationErrors('branch_id');
 
         $this->assertSame($this->branch->id, (int) $member->fresh()->branch_id);
+    }
+
+    public function test_m4_a_member_with_a_loan_application_in_progress_cannot_change_branch(): void
+    {
+        $second = Branch::factory()->create(['code' => 'SEC']);
+
+        foreach (['draft', 'for_review', 'approved'] as $status) {
+            $member = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+            $this->loanIn($this->branch, ['borrower_id' => $member->id, 'status' => $status]);
+
+            $this->putJson("/api/borrowers/{$member->id}", ['branch_id' => $second->id])
+                ->assertUnprocessable()
+                ->assertJsonValidationErrors(['branch_id' => "Close or move this member's open loans first."]);
+        }
+
+        $closed = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+        $this->loanIn($this->branch, ['borrower_id' => $closed->id, 'status' => 'rejected']);
+        $this->putJson("/api/borrowers/{$closed->id}", ['branch_id' => $second->id])->assertOk();
     }
 
     public function test_m4_a_member_with_collectible_loans_cannot_change_branch(): void

@@ -82,6 +82,11 @@ class ShareCapitalService
 
         $lastRun = AutoCreditRun::latest('processed_at')->first();
 
+        // A run records no branches, so its totals cover whatever its caller
+        // could see, often the whole organisation. A caller limited to some
+        // branches gets the run's date and status but not those totals.
+        $runTotalsVisible = $scopeTo === null || app(BranchAccess::class)->for($scopeTo) === null;
+
         return [
             'active_count' => $activeMembers->count(),
             'total_to_credit' => round($activeMembers->sum(fn ($p) => (float) $p->amount), 2),
@@ -89,8 +94,8 @@ class ShareCapitalService
             'no_pledge_count' => $noPledgeMembers->count(),
             'last_run' => $lastRun ? [
                 'id' => $lastRun->id,
-                'total_amount' => (float) $lastRun->total_amount,
-                'member_count' => $lastRun->member_count,
+                'total_amount' => $runTotalsVisible ? (float) $lastRun->total_amount : null,
+                'member_count' => $runTotalsVisible ? $lastRun->member_count : null,
                 'processed_at' => $lastRun->processed_at?->toDateTimeString(),
                 'status' => $lastRun->status,
             ] : null,

@@ -158,7 +158,7 @@ class PreviewLoanRequest extends FormRequest
         $sourceLoanId = filter_var($this->input('source_loan_id'), FILTER_VALIDATE_INT);
         $sourceIds = $sourceLoanId === false
             ? []
-            : array_map('intval', Loan::find($sourceLoanId)?->collaterals()->pluck('collaterals.id')->all() ?? []);
+            : array_map('intval', Loan::visibleTo($this->user())->find($sourceLoanId)?->collaterals()->pluck('collaterals.id')->all() ?? []);
 
         $ids = array_values(array_unique([...$listedIds, ...$sourceIds]));
 
@@ -201,7 +201,10 @@ class PreviewLoanRequest extends FormRequest
             $loanId = filter_var($this->input($field), FILTER_VALIDATE_INT);
 
             if ($loanId !== false) {
-                $borrowerId = Loan::whereKey($loanId)->value('borrower_id');
+                // Only a loan the caller can see (BranchAccess): another
+                // branch's loan names no register, so its collateral matches
+                // nothing.
+                $borrowerId = Loan::visibleTo($this->user())->whereKey($loanId)->value('borrower_id');
 
                 return $borrowerId === null ? null : (int) $borrowerId;
             }

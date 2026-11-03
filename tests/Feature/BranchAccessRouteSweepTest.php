@@ -8,6 +8,7 @@ use App\Models\Branch;
 use App\Models\Collateral;
 use App\Models\CoMaker;
 use App\Models\Document;
+use App\Models\GCashTransaction;
 use App\Models\Loan;
 use App\Models\LoanAdjustment;
 use App\Models\LoanProduct;
@@ -40,7 +41,7 @@ class BranchAccessRouteSweepTest extends TestCase
 
     private const BOUND_PARAMETERS = [
         'loan', 'borrower', 'repayment', 'loanAdjustment', 'coMaker', 'document',
-        'collateral', 'pledge', 'journal', 'expense', 'user',
+        'collateral', 'pledge', 'journal', 'expense', 'user', 'transaction',
     ];
 
     public function test_every_route_bound_to_a_branch_owned_record_answers_404_to_another_branch(): void
@@ -136,6 +137,11 @@ class BranchAccessRouteSweepTest extends TestCase
             ], ['branch_id' => $far->id])->id,
             'expense' => AccountingExpense::factory()->create(['branch_id' => $far->id])->id,
             'user' => $farUser->id,
+            'transaction' => GCashTransaction::factory()->create([
+                'borrower_id' => $borrower->id,
+                'transactor_user_id' => $this->admin->id,
+                'status' => 'pending',
+            ])->id,
         ];
     }
 

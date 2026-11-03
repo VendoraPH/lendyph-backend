@@ -249,20 +249,10 @@ DESC,
          * batch and checked before any work starts, so the caller gets a single
          * 422 naming the problem rather than a rolled-back transaction.
          */
-        $pledges = ShareCapitalPledge::with('borrower')
+        ShareCapitalPledge::with('borrower')
             ->whereIn('id', array_column($request->entries, 'pledge_id'))
-            ->get();
-
-        // A pledge of a member outside the caller's branches is refused as if
-        // it did not exist, and nothing is written.
-        $access = app(BranchAccess::class);
-        if ($pledges->contains(fn (ShareCapitalPledge $pledge) => ! $access->canSee($request->user(), $pledge->borrower?->branch_id))) {
-            throw ValidationException::withMessages([
-                'entries' => __('validation.exists', ['attribute' => 'pledge id']),
-            ]);
-        }
-
-        $pledges->each(fn (ShareCapitalPledge $pledge) => $this->assertBorrowerIsMember($pledge));
+            ->get()
+            ->each(fn (ShareCapitalPledge $pledge) => $this->assertBorrowerIsMember($pledge));
 
         $entries = $this->shareCapitalService->bulkManualEntries(
             $request->entries,

@@ -46,9 +46,20 @@ class UpdateBorrowerRequest extends FormRequest
     }
 
     /**
-     * A member with collectible loans keeps their branch. Loans keep the
-     * branch they were opened in, so moving the member alone would split
-     * the member from their open loans across two branches' staff.
+     * Loan statuses that pin a member to their branch: every loan still in
+     * progress, from application to collection. Closed loans (completed,
+     * rejected, void, restructured) don't.
+     */
+    private const BRANCH_BOUND_LOAN_STATUSES = [
+        'draft', 'for_review', 'approved',
+        ...Loan::COLLECTIBLE_STATUSES,
+    ];
+
+    /**
+     * A member with a loan in progress keeps their branch. Loans keep the
+     * branch they were opened in, so moving the member alone would split the
+     * member from their open loans and applications across two branches'
+     * staff.
      */
     public function after(): array
     {
@@ -63,7 +74,7 @@ class UpdateBorrowerRequest extends FormRequest
                 }
 
                 $hasOpenLoans = $borrower->loans()
-                    ->whereIn('status', Loan::COLLECTIBLE_STATUSES)
+                    ->whereIn('status', self::BRANCH_BOUND_LOAN_STATUSES)
                     ->exists();
 
                 if ($hasOpenLoans) {

@@ -21,6 +21,7 @@ use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 use OpenApi\Attributes as OA;
 
@@ -690,7 +691,7 @@ DESC,
 
         $validated = request()->validate([
             'ids' => ['required', 'array', 'min:1', 'max:500'],
-            'ids.*' => ['integer', 'exists:borrowers,id'],
+            'ids.*' => ['integer', app(BranchAccess::class)->constrainExists(Rule::exists('borrowers', 'id'), request()->user())],
         ]);
 
         $deactivated = [];
@@ -765,7 +766,7 @@ DESC,
 
         $validated = request()->validate([
             'ids' => ['required', 'array', 'min:1', 'max:500'],
-            'ids.*' => ['integer', 'exists:borrowers,id'],
+            'ids.*' => ['integer', app(BranchAccess::class)->constrainExists(Rule::exists('borrowers', 'id'), request()->user())],
         ]);
 
         $deleted = [];

@@ -4,6 +4,7 @@ namespace App\Http\Requests\Concerns;
 
 use App\Models\User;
 use App\Services\AuditLogService;
+use App\Services\BranchAccess;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Throwable;
 
@@ -148,6 +149,36 @@ trait MasksUserExistence
      * this fix. The routes also carry `whereNumber('user')` now, which is worth
      * having but is NOT the fix on its own: `007` is still `[0-9]+`.
      */
+    /**
+     * Whether a caller without `branches:view_all` may manage $target at all.
+     *
+     * Mirrors AssignableRole: a caller can't act on an account that holds a
+     * permission they lack (so never on a `view_all` account), or one whose
+     * branches aren't all inside their own. Otherwise resetting that account's
+     * password, or editing it, is a way to borrow its reach. Callers with
+     * `view_all` are unaffected here; their boundary is canManageAccount().
+     */
+    protected function callerReachesTarget(User $actor, User $target): bool
+    {
+        $access = app(BranchAccess::class);
+        $callerBranches = $access->for($actor);
+
+        if ($callerBranches === null || (int) $actor->getKey() === (int) $target->getKey()) {
+            return true;
+        }
+
+        $missing = $target->getAllPermissions()->pluck('name')
+            ->diff($actor->getAllPermissions()->pluck('name'));
+
+        if ($missing->isNotEmpty()) {
+            return false;
+        }
+
+        $targetBranches = $access->for($target) ?? [];
+
+        return array_diff($targetBranches, $callerBranches) === [];
+    }
+
     private function refuseAsMissingUser(): never
     {
         // `originalParameters` is snapshotted in Route::bind() at match time,

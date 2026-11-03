@@ -3,6 +3,7 @@
 namespace App\Http\Requests\ShareCapital;
 
 use App\Models\Borrower;
+use App\Services\BranchAccess;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\Rules\Exists;
@@ -62,7 +63,11 @@ class StoreShareCapitalLedgerRequest extends FormRequest
      */
     private function memberBorrowerRule(): Exists
     {
-        return Rule::exists('borrowers', 'id')
-            ->whereNotIn('status', Borrower::NON_MEMBER_STATUSES);
+        // And in the caller's branches (BranchAccess): another branch's
+        // member fails like a missing one.
+        return app(BranchAccess::class)->constrainExists(
+            Rule::exists('borrowers', 'id')->whereNotIn('status', Borrower::NON_MEMBER_STATUSES),
+            $this->user(),
+        );
     }
 }

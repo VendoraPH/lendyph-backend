@@ -125,7 +125,7 @@ class UpdateUserRequest extends FormRequest
                     return;
                 }
 
-                if (! $actor->canManageAccount($target)) {
+                if (! $actor->canManageAccount($target) || ! $this->callerReachesTarget($actor, $target)) {
                     $this->denyAsMissingUser();
                 }
 
@@ -244,14 +244,10 @@ class UpdateUserRequest extends FormRequest
     }
 
     /**
-     * Branch changes by a caller without `branches:view_all` (BranchAccess):
-     *
-     * - never their own branches, which would let them widen what they see;
-     * - never for a user who also works in a branch the caller doesn't hold:
-     *   `branch_ids` replaces the whole set, so the change would silently drop
-     *   a branch the caller has no say over.
-     *
-     * Which branches they may hand out at all is `assignableBranchRule()`.
+     * A caller without `branches:view_all` never changes their own branches,
+     * which would let them widen what they see (BranchAccess). Which branches
+     * they may hand out at all is `assignableBranchRule()`; a target working
+     * in a branch they don't hold is already refused by callerReachesTarget().
      */
     private function guardBranchChange(Validator $validator, User $actor, User $target): void
     {
@@ -265,19 +261,6 @@ class UpdateUserRequest extends FormRequest
             $validator->errors()->add(
                 'branch_ids',
                 'You cannot change your own branches. Another administrator has to do it for you.',
-            );
-
-            return;
-        }
-
-        $targetBranches = $target->branches()->pluck('branches.id')
-            ->map(static fn (mixed $id): int => (int) $id)
-            ->all();
-
-        if (array_diff($targetBranches, $callerBranches) !== []) {
-            $validator->errors()->add(
-                'branch_ids',
-                'This user also works in a branch you do not manage. An administrator with access to every branch has to change their branches.',
             );
         }
     }

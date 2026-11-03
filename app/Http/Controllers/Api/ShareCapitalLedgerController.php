@@ -13,7 +13,6 @@ use App\Services\ShareCapitalMemberService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Http\Resources\Json\JsonResource;
-use Illuminate\Validation\ValidationException;
 use OpenApi\Attributes as OA;
 
 class ShareCapitalLedgerController extends Controller
@@ -167,14 +166,6 @@ class ShareCapitalLedgerController extends Controller
     )]
     public function store(StoreShareCapitalLedgerRequest $request): JsonResponse
     {
-        // A member outside the caller's branches is refused as if it did not
-        // exist.
-        if (! Borrower::visibleTo($request->user())->whereKey($request->borrower_id)->exists()) {
-            throw ValidationException::withMessages([
-                'borrower_id' => __('validation.exists', ['attribute' => 'borrower id']),
-            ]);
-        }
-
         $entry = ShareCapitalLedger::create([
             'borrower_id' => $request->borrower_id,
             'date' => $request->date,
