@@ -64,7 +64,7 @@ final class BookBuilder
      * @param  'general_journal'|'general_ledger'|'cash_receipts'|'cash_disbursements'  $kind
      * @return array{kind: string, from: string, to: string, rows: list<array<string, mixed>>, total_debit: int, total_credit: int}
      */
-    public function build(string $kind, string $from, string $to, ?int $branchId = null): array
+    public function build(string $kind, string $from, string $to, int|array|null $branchId = null): array
     {
         $rows = $this->postings($kind, $from, $to, $branchId)
             ->map(static fn (object $row): array => [
@@ -112,7 +112,7 @@ final class BookBuilder
      *
      * @return Collection<int, object>
      */
-    private function postings(string $kind, string $from, string $to, ?int $branchId): Collection
+    private function postings(string $kind, string $from, string $to, int|array|null $branchId): Collection
     {
         $query = DB::table('accounting_journal_lines as l')
             ->join('accounting_journals as j', 'j.id', '=', 'l.accounting_journal_id')
@@ -123,7 +123,7 @@ final class BookBuilder
             // range bound. Same reasoning as TrialBalanceBuilder::movements().
             ->where('j.date', '>=', $from)
             ->where('j.date', '<=', $to)
-            ->when($branchId !== null, fn ($q) => $q->where('j.branch_id', $branchId));
+            ->when($branchId !== null, fn ($q) => $q->whereIn('j.branch_id', (array) $branchId));
 
         if ($kind === 'cash_receipts' || $kind === 'cash_disbursements') {
             $query->whereIn('j.id', $this->movedMoney($kind === 'cash_receipts' ? 'in' : 'out', $from, $to));

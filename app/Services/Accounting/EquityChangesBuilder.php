@@ -43,7 +43,7 @@ class EquityChangesBuilder
     /**
      * @return array<string, mixed> `EquityChanges` in src/types/accounting.ts
      */
-    public function build(string $from, string $to, ?int $branchId = null): array
+    public function build(string $from, string $to, int|array|null $branchId = null): array
     {
         // Opening is the close of the day BEFORE. Using the first day of the
         // period would fold that day's movements into the opening balance and
@@ -132,7 +132,7 @@ class EquityChangesBuilder
      *
      * @return array<int, array{debits: int, credits: int, net: int}>
      */
-    private function contributions(?string $from, string $to, ?int $branchId): array
+    private function contributions(?string $from, string $to, int|array|null $branchId): array
     {
         $rows = DB::table('accounting_journal_lines as l')
             ->join('accounting_journals as j', 'j.id', '=', 'l.accounting_journal_id')
@@ -142,7 +142,7 @@ class EquityChangesBuilder
             ->whereIn('j.status', AccountingJournal::HISTORICAL_STATUSES)
             ->when($from !== null, fn ($q) => $q->where('j.date', '>=', $from))
             ->where('j.date', '<=', $to)
-            ->when($branchId !== null, fn ($q) => $q->where('j.branch_id', $branchId))
+            ->when($branchId !== null, fn ($q) => $q->whereIn('j.branch_id', (array) $branchId))
             ->groupBy('a.id')
             ->select([
                 'a.id as account_id',

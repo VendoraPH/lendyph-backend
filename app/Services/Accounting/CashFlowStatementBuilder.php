@@ -50,7 +50,7 @@ class CashFlowStatementBuilder
     /**
      * @return array<string, mixed> `CashFlowStatement` in src/types/accounting.ts
      */
-    public function build(string $from, string $to, ?int $branchId = null): array
+    public function build(string $from, string $to, int|array|null $branchId = null): array
     {
         $cashAccountIds = $this->cashAccountIds();
 
@@ -128,7 +128,7 @@ class CashFlowStatementBuilder
      *
      * @param  list<int>  $cashAccountIds
      */
-    private function cashTotal(array $cashAccountIds, string $asOf, ?int $branchId): int
+    private function cashTotal(array $cashAccountIds, string $asOf, int|array|null $branchId): int
     {
         if ($cashAccountIds === []) {
             return 0;
@@ -155,7 +155,7 @@ class CashFlowStatementBuilder
      * @param  list<int>  $cashAccountIds
      * @return list<array<string, mixed>>
      */
-    private function explanations(array $cashAccountIds, string $from, string $to, ?int $branchId): array
+    private function explanations(array $cashAccountIds, string $from, string $to, int|array|null $branchId): array
     {
         if ($cashAccountIds === []) {
             return [];
@@ -172,7 +172,7 @@ class CashFlowStatementBuilder
             // Plain comparisons on a DATE column so its index stays usable.
             ->where('j.date', '>=', $from)
             ->where('j.date', '<=', $to)
-            ->when($branchId !== null, fn ($q) => $q->where('j.branch_id', $branchId))
+            ->when($branchId !== null, fn ($q) => $q->whereIn('j.branch_id', (array) $branchId))
             ->whereIn('l.accounting_journal_id', $touchedCash)
             // The cash lines are the movement, not the explanation of it.
             ->whereNotIn('l.accounting_account_id', $cashAccountIds)

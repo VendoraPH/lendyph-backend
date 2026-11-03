@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Http\Controllers\Api\Traits\ScopesBranchFilter;
 use App\Http\Controllers\Controller;
 use App\Services\Accounting\CashFlowStatementBuilder;
 use App\Services\Accounting\EquityChangesBuilder;
@@ -26,6 +27,8 @@ use OpenApi\Attributes as OA;
  */
 class AccountingStatementController extends Controller
 {
+    use ScopesBranchFilter;
+
     public function __construct(
         private CashFlowStatementBuilder $cashFlow,
         private EquityChangesBuilder $equityChanges,
@@ -40,7 +43,7 @@ class AccountingStatementController extends Controller
         parameters: [
             new OA\Parameter(name: 'from', in: 'query', required: true, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'to', in: 'query', required: true, schema: new OA\Schema(type: 'string', format: 'date')),
-            new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, description: 'One of the caller\'s branches (another answers 403). Without it, every branch the caller holds; journals with no branch only for branches:view_all.', schema: new OA\Schema(type: 'integer')),
         ],
         responses: [
             new OA\Response(response: 200, description: 'Cash flow statement'),
@@ -72,7 +75,7 @@ class AccountingStatementController extends Controller
         parameters: [
             new OA\Parameter(name: 'from', in: 'query', required: true, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'to', in: 'query', required: true, schema: new OA\Schema(type: 'string', format: 'date')),
-            new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, description: 'One of the caller\'s branches (another answers 403). Without it, every branch the caller holds; journals with no branch only for branches:view_all.', schema: new OA\Schema(type: 'integer')),
         ],
         responses: [
             new OA\Response(response: 200, description: 'Statement of changes in equity'),
@@ -104,7 +107,7 @@ class AccountingStatementController extends Controller
      * ledger for the range, and a report endpoint that tried to page it would
      * be reporting a fragment.
      *
-     * @return array{from: string, to: string, branch_id: int|null}
+     * @return array{from: string, to: string, branch_id: int|list<int>|null}
      */
     private function range(): array
     {
@@ -119,7 +122,7 @@ class AccountingStatementController extends Controller
         return [
             'from' => $validated['from'],
             'to' => $validated['to'],
-            'branch_id' => isset($validated['branch_id']) ? (int) $validated['branch_id'] : null,
+            'branch_id' => $this->branchScope($validated['branch_id'] ?? null),
         ];
     }
 }

@@ -9,6 +9,7 @@ use App\Models\AccountingReconciliation;
 use App\Models\AccountingReconciliationLine;
 use App\Services\Accounting\ReconciliationMatcher;
 use App\Services\Accounting\ResolvesPostingAccounts;
+use App\Services\BranchAccess;
 use Carbon\CarbonImmutable;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\DB;
@@ -23,6 +24,11 @@ use OpenApi\Attributes as OA;
  * will not close, the remedy is a journal entry someone posts deliberately on
  * the Journals screen — not a correcting line this module slips in to make a
  * number look tidy.
+ *
+ * Every endpoint also requires `branches:view_all` (decision B2, interim
+ * least privilege): a book balance is read from every branch's journals, and
+ * whether a bank account belongs to a branch is not decided yet. Every seeded
+ * role holding `accounting:reconcile` already holds `branches:view_all`.
  */
 class AccountingReconciliationController extends Controller
 {
@@ -43,12 +49,13 @@ class AccountingReconciliationController extends Controller
         ],
         responses: [
             new OA\Response(response: 200, description: 'Paginated reconciliations'),
-            new OA\Response(response: 403, description: 'Missing accounting:reconcile'),
+            new OA\Response(response: 403, description: 'Missing accounting:reconcile or branches:view_all'),
         ],
     )]
     public function index(): JsonResponse
     {
         $this->authorize('accounting:reconcile');
+        $this->authorize(BranchAccess::VIEW_ALL);
 
         $filters = request()->validate([
             'page' => ['nullable', 'integer', 'min:1'],
@@ -128,12 +135,14 @@ class AccountingReconciliationController extends Controller
         ),
         responses: [
             new OA\Response(response: 201, description: 'Reconciliation created, with its worksheet'),
-            new OA\Response(response: 403, description: 'Missing accounting:reconcile'),
+            new OA\Response(response: 403, description: 'Missing accounting:reconcile or branches:view_all'),
             new OA\Response(response: 422, description: 'Not a money account, or this account already has this period'),
         ],
     )]
     public function store(StoreReconciliationRequest $request): JsonResponse
     {
+        $this->authorize(BranchAccess::VIEW_ALL);
+
         $data = $request->validated();
 
         // An account with no `cash_kind` has no statement to be proved against.
@@ -219,13 +228,14 @@ class AccountingReconciliationController extends Controller
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
         responses: [
             new OA\Response(response: 200, description: 'Reconciliation with its lines'),
-            new OA\Response(response: 403, description: 'Missing accounting:reconcile'),
+            new OA\Response(response: 403, description: 'Missing accounting:reconcile or branches:view_all'),
             new OA\Response(response: 404, description: 'Not found'),
         ],
     )]
     public function show(AccountingReconciliation $reconciliation): JsonResponse
     {
         $this->authorize('accounting:reconcile');
+        $this->authorize(BranchAccess::VIEW_ALL);
 
         return response()->json(['data' => $this->matcher->present($reconciliation)]);
     }
@@ -240,7 +250,7 @@ class AccountingReconciliationController extends Controller
         requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent),
         responses: [
             new OA\Response(response: 200, description: 'Updated reconciliation'),
-            new OA\Response(response: 403, description: 'Missing accounting:reconcile'),
+            new OA\Response(response: 403, description: 'Missing accounting:reconcile or branches:view_all'),
             new OA\Response(response: 422, description: 'A line belongs elsewhere, is outside the period, or is already claimed'),
         ],
     )]
@@ -248,6 +258,8 @@ class AccountingReconciliationController extends Controller
         MatchReconciliationRequest $request,
         AccountingReconciliation $reconciliation,
     ): JsonResponse {
+        $this->authorize(BranchAccess::VIEW_ALL);
+
         $pairings = $request->boolean('accept_suggestions')
             // Re-derived here rather than taken from the request. What gets
             // written is then exactly what the books support at this instant,

@@ -6,6 +6,7 @@ use App\Models\Loan;
 use App\Models\PortfolioDailySnapshot;
 use App\Models\Repayment;
 use Carbon\Carbon;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
@@ -23,34 +24,53 @@ class DashboardService
 
     private const INSURANCE_COLLECTED_SQL = 'COALESCE(SUM(insurance_applied), 0)';
 
-    public function stats(): array
+    /**
+     * The statuses the Active Loans card and its sparkline count.
+     */
+    private const ACTIVE_STATUSES = ['released', 'ongoing'];
+
+    /**
+     * Every figure below takes `$branchIds` (decision B2, least privilege):
+     * the caller's branches as BranchAccess::for() answers them, null for
+     * `branches:view_all` (the whole organisation). Loans count by their
+     * branch, payments by their loan's branch. An empty list matches nothing.
+     * The scope has no default, so no caller can forget it and read the
+     * whole organisation by accident.
+     *
+     * @param  list<int>|null  $branchIds
+     */
+    public function stats(?array $branchIds): array
     {
         $monthStart = Carbon::now()->startOfMonth();
 
-        $totalPortfolio = (float) Loan::whereIn('status', ['released', 'ongoing', 'completed'])
+        $totalPortfolio = (float) $this->loans($branchIds)
+            ->whereIn('status', ['released', 'ongoing', 'completed'])
             ->sum('principal_amount');
 
-        $activeLoansCount = Loan::whereIn('status', ['released', 'ongoing'])->count();
+        $activeLoansCount = $this->loans($branchIds)->whereIn('status', self::ACTIVE_STATUSES)->count();
 
-        $collectedMtd = Repayment::where('status', 'posted')
+        $collectedMtd = $this->repayments($branchIds)
+            ->where('status', 'posted')
             ->whereDate('payment_date', '>=', $monthStart)
             ->selectRaw(self::COLLECTED_SQL.' as collected, '.self::INSURANCE_COLLECTED_SQL.' as insurance')
             ->first();
         $totalCollectedMtd = (float) $collectedMtd->collected;
         $insuranceCollectedMtd = (float) $collectedMtd->insurance;
 
-        $overdueLoansCount = $this->overdueLoansCount(Carbon::today());
+        $overdueLoansCount = $this->overdueLoansCount(Carbon::today(), $branchIds);
 
-        // Cache sparklines for 10 minutes (22 queries → 0 on cache hit). v3:
-        // the overdue points moved to the daily snapshots, so points cached
-        // under the old key's rule are not served after a deploy. The day is
-        // in the key so points cached before midnight are not served as the
-        // next day's.
-        $sparklines = Cache::remember('dashboard:sparklines:v3:'.Carbon::today()->toDateString(), 600, fn () => [
-            'portfolio' => $this->portfolioSparkline(),
-            'active_loans' => $this->activeLoansSparkline(),
-            'collected' => $this->collectionsSparkline(),
-            'overdue' => $this->pastOverdueSparkline(),
+        // Cache sparklines for 10 minutes (22 queries → 0 on cache hit). v4:
+        // the active loans points count released and ongoing loans, and the
+        // points are per branch scope, so points cached under the old key's
+        // rule are not served after a deploy. The day is in the key so points
+        // cached before midnight are not served as the next day's; the scope
+        // is in it so one branch's points are never served to another.
+        $cacheKey = 'dashboard:sparklines:v4:'.Carbon::today()->toDateString().':'.self::scopeKey($branchIds);
+        $sparklines = Cache::remember($cacheKey, 600, fn () => [
+            'portfolio' => $this->portfolioSparkline($branchIds),
+            'active_loans' => $this->activeLoansSparkline($branchIds),
+            'collected' => $this->collectionsSparkline($branchIds),
+            'overdue' => $this->pastOverdueSparkline($branchIds),
         ]);
 
         // Today's point is the card's live figure, never a cached one, so the
@@ -71,23 +91,29 @@ class DashboardService
         ];
     }
 
-    public function collectionsTrend(string $period = 'week'): array
+    /**
+     * @param  list<int>|null  $branchIds
+     */
+    public function collectionsTrend(?array $branchIds, string $period = 'week'): array
     {
         return match ($period) {
-            'month' => $this->monthlyTrend(),
-            'year' => $this->yearlyTrend(),
-            default => $this->weeklyTrend(),
+            'month' => $this->monthlyTrend($branchIds),
+            'year' => $this->yearlyTrend($branchIds),
+            default => $this->weeklyTrend($branchIds),
         };
     }
 
-    private function weeklyTrend(): array
+    /**
+     * @param  list<int>|null  $branchIds
+     */
+    private function weeklyTrend(?array $branchIds): array
     {
         $points = collect();
         for ($i = 11; $i >= 0; $i--) {
             $start = Carbon::now()->startOfWeek()->subWeeks($i);
             $end = $start->copy()->endOfWeek();
 
-            [$total, $insurance] = $this->collectedBetween($start, $end);
+            [$total, $insurance] = $this->collectedBetween($start, $end, $branchIds);
 
             $points->push([
                 'period' => 'week',
@@ -104,14 +130,17 @@ class DashboardService
         return ['data' => $points->values()->toArray()];
     }
 
-    private function monthlyTrend(): array
+    /**
+     * @param  list<int>|null  $branchIds
+     */
+    private function monthlyTrend(?array $branchIds): array
     {
         $points = collect();
         for ($i = 11; $i >= 0; $i--) {
             $start = Carbon::now()->startOfMonth()->subMonths($i);
             $end = $start->copy()->endOfMonth();
 
-            [$total, $insurance] = $this->collectedBetween($start, $end);
+            [$total, $insurance] = $this->collectedBetween($start, $end, $branchIds);
 
             $points->push([
                 'period' => 'month',
@@ -127,14 +156,17 @@ class DashboardService
         return ['data' => $points->values()->toArray()];
     }
 
-    private function yearlyTrend(): array
+    /**
+     * @param  list<int>|null  $branchIds
+     */
+    private function yearlyTrend(?array $branchIds): array
     {
         $points = collect();
         for ($i = 4; $i >= 0; $i--) {
             $start = Carbon::now()->startOfYear()->subYears($i);
             $end = $start->copy()->endOfYear();
 
-            [$total, $insurance] = $this->collectedBetween($start, $end);
+            [$total, $insurance] = $this->collectedBetween($start, $end, $branchIds);
 
             $points->push([
                 'period' => 'year',
@@ -154,11 +186,13 @@ class DashboardService
      * Collected (premium left out) and the premium collected, by posted
      * payments dated in the range.
      *
+     * @param  list<int>|null  $branchIds
      * @return array{0: float, 1: float}
      */
-    private function collectedBetween(Carbon $start, Carbon $end): array
+    private function collectedBetween(Carbon $start, Carbon $end, ?array $branchIds): array
     {
-        $row = Repayment::where('status', 'posted')
+        $row = $this->repayments($branchIds)
+            ->where('status', 'posted')
             ->whereBetween('payment_date', [$start, $end])
             ->selectRaw(self::COLLECTED_SQL.' as collected, '.self::INSURANCE_COLLECTED_SQL.' as insurance')
             ->first();
@@ -166,7 +200,10 @@ class DashboardService
         return [(float) $row->collected, (float) $row->insurance];
     }
 
-    public function dailyDues(?string $date = null): array
+    /**
+     * @param  list<int>|null  $branchIds
+     */
+    public function dailyDues(?array $branchIds, ?string $date = null): array
     {
         $targetDate = $date ? Carbon::parse($date) : Carbon::today();
 
@@ -175,6 +212,7 @@ class DashboardService
             ->join('borrowers', 'loans.borrower_id', '=', 'borrowers.id')
             ->whereDate('amortization_schedules.due_date', $targetDate)
             ->whereIn('loans.status', ['released', 'ongoing'])
+            ->when($branchIds !== null, fn ($q) => $q->whereIn('loans.branch_id', $branchIds))
             // A period with nothing due (closed by an adjustment) is not a due.
             ->where('amortization_schedules.total_due', '>', 0)
             ->select(
@@ -278,9 +316,13 @@ class DashboardService
         ];
     }
 
-    public function recentTransactions(int $limit = 10): array
+    /**
+     * @param  list<int>|null  $branchIds
+     */
+    public function recentTransactions(?array $branchIds, int $limit = 10): array
     {
-        $payments = Repayment::with('loan.borrower')
+        $payments = $this->repayments($branchIds)
+            ->with('loan.borrower')
             ->where('status', 'posted')
             ->latest('payment_date')
             ->take($limit)
@@ -294,7 +336,8 @@ class DashboardService
                 'created_at' => $r->created_at,
             ]);
 
-        $releases = Loan::with('borrower')
+        $releases = $this->loans($branchIds)
+            ->with('borrower')
             ->whereNotNull('released_at')
             ->latest('released_at')
             ->take($limit)
@@ -317,11 +360,15 @@ class DashboardService
         return ['data' => $merged->toArray()];
     }
 
-    private function portfolioSparkline(): array
+    /**
+     * @param  list<int>|null  $branchIds
+     */
+    private function portfolioSparkline(?array $branchIds): array
     {
-        return collect(range(6, 0))->map(function ($weeksAgo) {
+        return collect(range(6, 0))->map(function ($weeksAgo) use ($branchIds) {
             $end = Carbon::now()->startOfWeek()->subWeeks($weeksAgo)->endOfWeek();
-            $value = (float) Loan::whereIn('status', ['released', 'ongoing', 'completed'])
+            $value = (float) $this->loans($branchIds)
+                ->whereIn('status', ['released', 'ongoing', 'completed'])
                 ->where('released_at', '<=', $end)
                 ->sum('principal_amount');
 
@@ -329,11 +376,20 @@ class DashboardService
         })->toArray();
     }
 
-    private function activeLoansSparkline(): array
+    /**
+     * Active loans (released and ongoing, the card's statuses) released by
+     * the end of each of the last seven weeks; this week's point equals the
+     * card. It used to count `released` only, so it read low beside the card
+     * as soon as a loan took its first payment and became `ongoing`.
+     *
+     * @param  list<int>|null  $branchIds
+     */
+    private function activeLoansSparkline(?array $branchIds): array
     {
-        return collect(range(6, 0))->map(function ($weeksAgo) {
+        return collect(range(6, 0))->map(function ($weeksAgo) use ($branchIds) {
             $end = Carbon::now()->startOfWeek()->subWeeks($weeksAgo)->endOfWeek();
-            $value = Loan::where('status', 'released')
+            $value = $this->loans($branchIds)
+                ->whereIn('status', self::ACTIVE_STATUSES)
                 ->where('released_at', '<=', $end)
                 ->count();
 
@@ -341,11 +397,15 @@ class DashboardService
         })->toArray();
     }
 
-    private function collectionsSparkline(): array
+    /**
+     * @param  list<int>|null  $branchIds
+     */
+    private function collectionsSparkline(?array $branchIds): array
     {
-        return collect(range(6, 0))->map(function ($daysAgo) {
+        return collect(range(6, 0))->map(function ($daysAgo) use ($branchIds) {
             $day = Carbon::today()->subDays($daysAgo);
-            $value = (float) Repayment::where('status', 'posted')
+            $value = (float) $this->repayments($branchIds)
+                ->where('status', 'posted')
                 ->whereDate('payment_date', $day)
                 ->selectRaw(self::COLLECTED_SQL.' as collected')
                 ->value('collected');
@@ -360,11 +420,21 @@ class DashboardService
      * `overdue_loans_count`, or null when no snapshot was recorded for it (no
      * backfill). stats() adds today's point from the live card.
      *
+     * The snapshots are organisation-wide (they record no branch), so a
+     * caller without `branches:view_all` gets null for every past point and
+     * only their own live today point (decision B2): a branch user never
+     * reads another branch's count through the sparkline.
+     *
+     * @param  list<int>|null  $branchIds
      * @return array<int, array{v: int|null}>
      */
-    private function pastOverdueSparkline(): array
+    private function pastOverdueSparkline(?array $branchIds): array
     {
         $today = Carbon::today();
+
+        if ($branchIds !== null) {
+            return array_fill(0, 6, ['v' => null]);
+        }
 
         $counts = PortfolioDailySnapshot::query()
             ->whereBetween('snapshot_date', [$today->copy()->subDays(6)->toDateString(), $today->copy()->subDay()->toDateString()])
@@ -382,12 +452,56 @@ class DashboardService
      * GET /loans `meta.totals.overdue_count` counts by. A period's stored
      * `overdue` status is not read, as it is only stamped when a payment or
      * the penalty run touches the loan.
+     *
+     * @param  list<int>|null  $branchIds
      */
-    private function overdueLoansCount(Carbon $asOf): int
+    private function overdueLoansCount(Carbon $asOf, ?array $branchIds): int
     {
         return app(LoanListTotals::class)->for(
-            Loan::query()->whereIn('loans.status', Loan::COLLECTIBLE_STATUSES),
+            $this->loans($branchIds)->whereIn('loans.status', Loan::COLLECTIBLE_STATUSES),
             $asOf,
         )['overdue_count'];
+    }
+
+    /**
+     * Loans in $branchIds (every loan when null).
+     *
+     * @param  list<int>|null  $branchIds
+     * @return Builder<Loan>
+     */
+    private function loans(?array $branchIds): Builder
+    {
+        return Loan::query()->when($branchIds !== null, fn ($q) => $q->whereIn('loans.branch_id', $branchIds));
+    }
+
+    /**
+     * Repayments on loans in $branchIds (every repayment when null).
+     *
+     * @param  list<int>|null  $branchIds
+     * @return Builder<Repayment>
+     */
+    private function repayments(?array $branchIds): Builder
+    {
+        return Repayment::query()->when($branchIds !== null, fn ($q) => $q->whereIn(
+            'repayments.loan_id',
+            Loan::query()->whereIn('loans.branch_id', $branchIds)->select('loans.id'),
+        ));
+    }
+
+    /**
+     * The sparkline cache key's scope part: `all`, or a hash of the sorted
+     * branch ids, so a user in many branches never builds an unbounded key.
+     *
+     * @param  list<int>|null  $branchIds
+     */
+    private static function scopeKey(?array $branchIds): string
+    {
+        if ($branchIds === null) {
+            return 'all';
+        }
+
+        sort($branchIds);
+
+        return 'branches-'.sha1(implode(',', $branchIds));
     }
 }

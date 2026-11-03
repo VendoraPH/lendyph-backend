@@ -67,7 +67,7 @@ final class ReceivableAgingBuilder
      *
      * @return array{as_of: string, rows: list<array{bucket: string, amount: int, count: int}>, total: int, past_due_total: int}
      */
-    public function build(string $asOf, ?int $branchId = null): array
+    public function build(string $asOf, int|array|null $branchId = null): array
     {
         $totals = $this->bucketTotals($asOf, $branchId);
 
@@ -102,7 +102,7 @@ final class ReceivableAgingBuilder
      *
      * @return array<string, array{amount: int, count: int}>
      */
-    private function bucketTotals(string $asOf, ?int $branchId): array
+    private function bucketTotals(string $asOf, int|array|null $branchId): array
     {
         $remaining = AmortizationSchedule::remainingTotalSql();
 
@@ -113,7 +113,7 @@ final class ReceivableAgingBuilder
             // owes, and an aging report that dropped it would understate exactly
             // the receivables a provisioning policy cares most about.
             ->whereIn('loans.status', Loan::COLLECTIBLE_STATUSES)
-            ->when($branchId !== null, fn ($q) => $q->where('loans.branch_id', $branchId))
+            ->when($branchId !== null, fn ($q) => $q->whereIn('loans.branch_id', (array) $branchId))
             // A zero-balance row is not a receivable. Skipped rather than
             // bucketed at zero, so it cannot inflate `count` with finished
             // business — `buildAging` skips the same rows for the same reason,

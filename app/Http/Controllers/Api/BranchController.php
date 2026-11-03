@@ -8,6 +8,8 @@ use App\Http\Requests\Branch\UpdateBranchRequest;
 use App\Http\Resources\BranchResource;
 use App\Http\Resources\PublicBranchResource;
 use App\Models\Branch;
+use App\Services\BranchAccess;
+use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use OpenApi\Attributes as OA;
@@ -17,7 +19,7 @@ class BranchController extends Controller
     #[OA\Get(
         path: '/api/branches',
         summary: 'List branches',
-        description: 'Get all branches',
+        description: 'Every branch for a caller holding branches:view_all; otherwise only the caller\'s own branches.',
         tags: ['Branches'],
         security: [['sanctum' => []]],
         parameters: [
@@ -30,7 +32,12 @@ class BranchController extends Controller
     )]
     public function index(): AnonymousResourceCollection
     {
+        // Decision B2: a caller without `branches:view_all` lists only their
+        // own branches (none when they have no branch).
+        $branchIds = app(BranchAccess::class)->for(request()->user());
+
         $branches = Branch::withCount('users')
+            ->when($branchIds !== null, fn ($q) => $q->whereIn('branches.id', $branchIds))
             ->when(request()->boolean('active_only'), fn ($q) => $q->where('is_active', true))
             ->orderBy('name')
             ->get();
@@ -75,7 +82,7 @@ class BranchController extends Controller
     #[OA\Get(
         path: '/api/branches/{id}',
         summary: 'Show branch',
-        description: 'Get a specific branch',
+        description: 'Get a specific branch. A branch outside the caller\'s branches answers 404 unless they hold branches:view_all.',
         tags: ['Branches'],
         security: [['sanctum' => []]],
         parameters: [
@@ -89,6 +96,8 @@ class BranchController extends Controller
     )]
     public function show(Branch $branch): BranchResource
     {
+        $this->denyHiddenBranch($branch);
+
         $branch->loadCount('users');
 
         return new BranchResource($branch);
@@ -97,7 +106,7 @@ class BranchController extends Controller
     #[OA\Put(
         path: '/api/branches/{id}',
         summary: 'Update branch',
-        description: 'Update a branch',
+        description: 'Update a branch. A branch outside the caller\'s branches answers 404 (before permission and validation checks) unless they hold branches:view_all.',
         tags: ['Branches'],
         security: [['sanctum' => []]],
         parameters: [
@@ -163,5 +172,17 @@ class BranchController extends Controller
             ->get(['id', 'name', 'address']);
 
         return PublicBranchResource::collection($branches);
+    }
+
+    /**
+     * Decision B2: a branch the caller can't see answers exactly like a
+     * missing one (the route binding's 404 and message), so its existence is
+     * not revealed. `branches:view_all` sees every branch.
+     */
+    private function denyHiddenBranch(Branch $branch): void
+    {
+        if (! app(BranchAccess::class)->canSee(request()->user(), $branch->id)) {
+            throw (new ModelNotFoundException)->setModel(Branch::class, [$branch->id]);
+        }
     }
 }

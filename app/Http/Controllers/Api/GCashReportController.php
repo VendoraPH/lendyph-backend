@@ -4,7 +4,10 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Http\Resources\GCashTransactionResource;
+use App\Models\GCashTransaction;
+use App\Services\BranchAccess;
 use App\Services\GCashService;
+use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
@@ -17,7 +20,7 @@ class GCashReportController extends Controller
     #[OA\Get(
         path: '/api/gcash/reports/income',
         summary: 'Sum of GCash charge income in a date range',
-        description: 'Sums charge_amount across non-pending transactions whose transaction_date falls within [start_date, end_date]. Pending Cash Ins are deferred income and excluded.',
+        description: 'Sums charge_amount across non-pending transactions whose transaction_date falls within [start_date, end_date]. Pending Cash Ins are deferred income and excluded. A caller without branches:view_all sees only their branches\' member transactions plus every walk-in transaction, and the total covers those rows.',
         tags: ['GCash'],
         security: [['sanctum' => []]],
         parameters: [
@@ -40,15 +43,19 @@ class GCashReportController extends Controller
         ]);
 
         $report = $this->gcash->incomeReport($validated['start_date'], $validated['end_date']);
+        $branchIds = app(BranchAccess::class)->for($request->user());
+        $transactions = $this->visible($report['transactions']->load(['borrower', 'nonMember', 'transactor']), $branchIds);
 
         return response()->json([
             'data' => [
-                'total_income' => $report['total_income'],
+                // A scoped caller's total is the charges on the rows they can
+                // see, added in whole centavos.
+                'total_income' => $branchIds === null
+                    ? $report['total_income']
+                    : $transactions->sum(fn (GCashTransaction $t): int => (int) round((float) $t->charge_amount * 100)) / 100,
                 'start_date' => $report['start_date'],
                 'end_date' => $report['end_date'],
-                'transactions' => GCashTransactionResource::collection(
-                    $report['transactions']->load(['borrower', 'nonMember', 'transactor']),
-                ),
+                'transactions' => GCashTransactionResource::collection($transactions),
             ],
         ]);
     }
@@ -67,8 +74,31 @@ class GCashReportController extends Controller
     {
         $this->authorize('gcash:view');
 
-        return GCashTransactionResource::collection(
+        return GCashTransactionResource::collection($this->visible(
             $this->gcash->pendingReport()->load(['borrower', 'nonMember', 'transactor']),
-        );
+            app(BranchAccess::class)->for(request()->user()),
+        ));
+    }
+
+    /**
+     * The rows a caller may see (decision B2), as GET /gcash/transactions
+     * lists them: a member's transaction follows the member's branch, and a
+     * walk-in's (no member) belongs to no branch and stays visible. Every row
+     * for `branches:view_all` ($branchIds null).
+     *
+     * @param  Collection<int, GCashTransaction>  $transactions  with `borrower` loaded
+     * @param  list<int>|null  $branchIds
+     * @return Collection<int, GCashTransaction>
+     */
+    private function visible(Collection $transactions, ?array $branchIds): Collection
+    {
+        if ($branchIds === null) {
+            return $transactions;
+        }
+
+        return $transactions
+            ->filter(fn (GCashTransaction $t): bool => $t->borrower_id === null
+                || ($t->borrower !== null && in_array((int) $t->borrower->branch_id, $branchIds, true)))
+            ->values();
     }
 }

@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Http\Controllers\Api\Traits\ScopesBranchFilter;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\LedgerEntryResource;
 use App\Models\AccountingAccount;
@@ -40,6 +41,8 @@ use OpenApi\Attributes as OA;
  */
 class AccountingReportController extends Controller
 {
+    use ScopesBranchFilter;
+
     public function __construct(
         private TrialBalanceBuilder $trialBalance,
         private GeneralLedgerBuilder $generalLedger,
@@ -57,7 +60,7 @@ class AccountingReportController extends Controller
             new OA\Parameter(name: 'account_id', in: 'query', required: true, schema: new OA\Schema(type: 'integer')),
             new OA\Parameter(name: 'from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
-            new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, description: 'One of the caller\'s branches (another answers 403). Without it, every branch the caller holds; journals with no branch only for branches:view_all.', schema: new OA\Schema(type: 'integer')),
             new OA\Parameter(name: 'page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 1)),
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15, maximum: 100)),
         ],
@@ -102,7 +105,7 @@ class AccountingReportController extends Controller
             $account,
             $filters['from'] ?? null,
             $filters['to'] ?? null,
-            $filters['branch_id'] ?? null,
+            $this->branchScope($filters['branch_id'] ?? null),
             $page,
             $perPage,
         );
@@ -118,7 +121,7 @@ class AccountingReportController extends Controller
         security: [['sanctum' => []]],
         parameters: [
             new OA\Parameter(name: 'as_of', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date'), description: 'Defaults to today.'),
-            new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, description: 'One of the caller\'s branches (another answers 403). Without it, every branch the caller holds; journals with no branch only for branches:view_all.', schema: new OA\Schema(type: 'integer')),
         ],
         responses: [
             new OA\Response(response: 200, description: 'The trial balance'),
@@ -137,7 +140,7 @@ class AccountingReportController extends Controller
         return response()->json([
             'data' => $this->trialBalance->build(
                 $this->asOf($filters),
-                $filters['branch_id'] ?? null,
+                $this->branchScope($filters['branch_id'] ?? null),
             ),
         ]);
     }
@@ -150,7 +153,7 @@ class AccountingReportController extends Controller
         security: [['sanctum' => []]],
         parameters: [
             new OA\Parameter(name: 'as_of', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date'), description: 'Defaults to today.'),
-            new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, description: 'One of the caller\'s branches (another answers 403). Without it, every branch the caller holds; journals with no branch only for branches:view_all.', schema: new OA\Schema(type: 'integer')),
         ],
         responses: [
             new OA\Response(response: 200, description: 'Dashboard figures'),
@@ -169,7 +172,7 @@ class AccountingReportController extends Controller
         return response()->json([
             'data' => $this->dashboard->build(
                 $this->asOf($filters),
-                $filters['branch_id'] ?? null,
+                $this->branchScope($filters['branch_id'] ?? null),
             ),
         ]);
     }
@@ -182,7 +185,7 @@ class AccountingReportController extends Controller
         security: [['sanctum' => []]],
         parameters: [
             new OA\Parameter(name: 'as_of', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date'), description: 'Defaults to today.'),
-            new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, description: 'One of the caller\'s branches (another answers 403). Without it, the loans of every branch the caller holds.', schema: new OA\Schema(type: 'integer')),
         ],
         responses: [
             new OA\Response(response: 200, description: 'The aged receivables report'),
@@ -201,7 +204,7 @@ class AccountingReportController extends Controller
         return response()->json([
             'data' => $this->receivableAging->build(
                 $this->asOf($filters),
-                $filters['branch_id'] ?? null,
+                $this->branchScope($filters['branch_id'] ?? null),
             ),
         ]);
     }

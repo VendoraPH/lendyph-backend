@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Http\Controllers\Api\Traits\ScopesBranchFilter;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Accounting\StoreAccountingAccountRequest;
 use App\Http\Requests\Accounting\UpdateAccountingAccountRequest;
@@ -26,17 +27,20 @@ use OpenApi\Attributes as OA;
  */
 class AccountingAccountController extends Controller
 {
+    use ScopesBranchFilter;
+
     public function __construct(private TrialBalanceBuilder $trialBalance) {}
 
     #[OA\Get(
         path: '/api/accounting/accounts',
         summary: 'List chart of accounts',
-        description: 'One page of the chart, in code order — which is statement order, because codes are fixed-width numeric strings. Returns the raw Laravel paginator envelope ({data, links, meta}); clients drain it by following `meta.last_page`.',
+        description: 'One page of the chart, in code order — which is statement order, because codes are fixed-width numeric strings. Returns the raw Laravel paginator envelope ({data, links, meta}); clients drain it by following `meta.last_page`. `balance` covers the caller\'s branches only (every branch, unbranched journals included, for branches:view_all).',
         tags: ['Accounting'],
         security: [['sanctum' => []]],
         parameters: [
             new OA\Parameter(name: 'page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 1)),
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15, maximum: 100)),
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, description: 'Balances of one of the caller\'s branches (another answers 403). Without it, every branch the caller holds.', schema: new OA\Schema(type: 'integer')),
         ],
         responses: [
             new OA\Response(response: 200, description: 'Paginated account list'),
@@ -54,6 +58,7 @@ class AccountingAccountController extends Controller
             // `$perPage ?: $model->getPerPage()` and silently becomes 15, while
             // a negative value reaches the database as a negative LIMIT.
             'per_page' => ['nullable', 'integer', 'min:1'],
+            'branch_id' => ['nullable', 'integer', 'min:1'],
         ]);
 
         $perPage = min((int) ($filters['per_page'] ?? 15), 100);
@@ -66,7 +71,7 @@ class AccountingAccountController extends Controller
             ->inCodeOrder()
             ->paginate($perPage);
 
-        $this->attachBalances($accounts->getCollection());
+        $this->attachBalances($accounts->getCollection(), $filters['branch_id'] ?? null);
 
         return AccountingAccountResource::collection($accounts);
     }
@@ -117,12 +122,13 @@ class AccountingAccountController extends Controller
     #[OA\Get(
         path: '/api/accounting/cash-accounts',
         summary: 'The money accounts, with their balances',
-        description: "Cash on hand, bank accounts, GCash and Maya — every account carrying a `cash_kind` — in code order, with `balance` in integer CENTAVOS. Returns the raw Laravel paginator envelope ({data, links, meta}); the Cash & Bank screen drains it by following `meta.last_page`, because it sums the balances into one headline figure and a short page would understate the co-op's cash position. Balances come from the SAME TrialBalanceBuilder aggregate the trial balance and the chart of accounts read, so this screen cannot drift from them. INACTIVE money accounts are included — see the method.",
+        description: "Cash on hand, bank accounts, GCash and Maya — every account carrying a `cash_kind` — in code order, with `balance` in integer CENTAVOS. Returns the raw Laravel paginator envelope ({data, links, meta}); the Cash & Bank screen drains it by following `meta.last_page`, because it sums the balances into one headline figure and a short page would understate the co-op's cash position. Balances come from the SAME TrialBalanceBuilder aggregate the trial balance and the chart of accounts read, so this screen cannot drift from them. INACTIVE money accounts are included — see the method. `balance` covers the caller's branches only (every branch, unbranched journals included, for branches:view_all).",
         tags: ['Accounting'],
         security: [['sanctum' => []]],
         parameters: [
             new OA\Parameter(name: 'page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 1)),
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15, maximum: 100)),
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, description: 'Balances of one of the caller\'s branches (another answers 403). Without it, every branch the caller holds.', schema: new OA\Schema(type: 'integer')),
         ],
         responses: [
             new OA\Response(response: 200, description: 'Paginated money accounts'),
@@ -145,6 +151,7 @@ class AccountingAccountController extends Controller
             // `per_page` of 0 reaches Builder::paginate() as
             // `$perPage ?: $model->getPerPage()` and silently becomes 15.
             'per_page' => ['nullable', 'integer', 'min:1'],
+            'branch_id' => ['nullable', 'integer', 'min:1'],
         ]);
 
         $perPage = min((int) ($filters['per_page'] ?? 15), 100);
@@ -183,7 +190,7 @@ class AccountingAccountController extends Controller
             ->inCodeOrder()
             ->paginate($perPage);
 
-        $this->attachBalances($accounts->getCollection());
+        $this->attachBalances($accounts->getCollection(), $filters['branch_id'] ?? null);
 
         return AccountingAccountResource::collection($accounts);
     }
@@ -223,6 +230,7 @@ class AccountingAccountController extends Controller
         security: [['sanctum' => []]],
         parameters: [
             new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, description: 'Balances of one of the caller\'s branches (another answers 403). Without it, every branch the caller holds.', schema: new OA\Schema(type: 'integer')),
         ],
         responses: [
             new OA\Response(response: 200, description: 'Account details'),
@@ -233,8 +241,12 @@ class AccountingAccountController extends Controller
     {
         $this->authorize('chart_of_accounts:view');
 
+        $filters = request()->validate([
+            'branch_id' => ['nullable', 'integer', 'min:1'],
+        ]);
+
         $account->loadCount('journalLines');
-        $this->attachBalances(new Collection([$account]));
+        $this->attachBalances(new Collection([$account]), $filters['branch_id'] ?? null);
 
         return new AccountingAccountResource($account);
     }
@@ -334,8 +346,12 @@ class AccountingAccountController extends Controller
      * and both figures would be plausible.
      *
      * Balances are ALL-TIME rather than as of a date — a money account's
-     * balance is what it holds, not what it held at some cut-off — and cover
-     * every branch, because the chart is organisation-wide.
+     * balance is what it holds, not what it held at some cut-off. The chart
+     * itself is organisation-wide, but the balances follow the caller's
+     * branches (decision B2): a caller without `branches:view_all` sees what
+     * their branches' journals posted, and journals with no branch count only
+     * for `branches:view_all`. A `branch_id` filter outside the caller's
+     * branches answers 403 (ScopesBranchFilter).
      *
      * Accounts with no movement are absent from the aggregate and are set to 0
      * here, not left null: "never posted to" and "posted to and netted out" are
@@ -343,16 +359,19 @@ class AccountingAccountController extends Controller
      * "not asked for".
      *
      * @param  Collection<int, AccountingAccount>  $accounts
+     * @param  mixed  $branchId  the request's `branch_id` filter, if any
      */
-    private function attachBalances(Collection $accounts): void
+    private function attachBalances(Collection $accounts, mixed $branchId): void
     {
+        $branchScope = $this->branchScope($branchId);
+
         if ($accounts->isEmpty()) {
             return;
         }
 
         $balances = $this->trialBalance->signedBalances(
             null,
-            null,
+            $branchScope,
             $accounts->pluck('id')->map(static fn ($id): int => (int) $id)->all(),
         );
 

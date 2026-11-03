@@ -15,6 +15,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Query\Builder as QueryBuilder;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
+use LogicException;
 
 class ReportService
 {
@@ -171,6 +172,9 @@ class ReportService
             return [
                 'date' => $r->payment_date->toDateString(),
                 'receipt_number' => $r->receipt_number,
+                // The statement's Method and Particulars columns.
+                'payment_method' => self::paymentMethodLabel($r->method),
+                'particulars' => trim('Payment '.($r->receipt_number ?? '')),
                 'amount_paid' => (float) $r->amount_paid,
                 // The statement's two-column form: a payment credits the loan.
                 'debit' => null,
@@ -307,11 +311,34 @@ class ReportService
         ];
     }
 
+    /**
+     * A repayment's `method` as the statement prints it.
+     */
+    private static function paymentMethodLabel(?string $method): ?string
+    {
+        if ($method === null || $method === '') {
+            return null;
+        }
+
+        return match ($method) {
+            'cash' => 'Cash',
+            'gcash' => 'GCash',
+            'maya' => 'Maya',
+            'bank_transfer' => 'Bank Transfer',
+            'online' => 'Online',
+            'auto_pay' => 'Auto-pay',
+            default => ucwords(str_replace('_', ' ', $method)),
+        };
+    }
+
     public function subsidiaryLedger(Borrower $borrower, array $filters = []): array
     {
         $loans = $borrower->loans()
             ->with('loanProduct', 'amortizationSchedules', 'repayments')
             ->whereIn('status', Loan::EVER_RELEASED_STATUSES)
+            // A member's loan booked in a branch the caller can't see is left
+            // out, as GET /loans/{id} answers 404 for it.
+            ->tap(self::inBranches(self::branchScope($filters), 'loans.branch_id'))
             ->get();
 
         $loanSummaries = $loans->map(function ($loan) use ($filters) {
@@ -381,7 +408,7 @@ class ReportService
             ->whereIn('status', Loan::EVER_RELEASED_STATUSES)
             ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->where('released_at', '>=', self::dayStart($d)))
             ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->where('released_at', '<', self::nextDayStart($d)))
-            ->when($filters['branch_id'] ?? null, fn ($q, $b) => $q->where('branch_id', $b))
+            ->tap(self::inBranches(self::branchScope($filters), 'branch_id'))
             ->when($filters['status'] ?? null, fn ($q, $s) => $q->where('status', $s))
             ->latest('released_at')
             // Tiebreaker: loans released in the same batch share a timestamp,
@@ -449,7 +476,7 @@ class ReportService
             ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->where('payment_date', '>=', self::filterDay($d)))
             ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->where('payment_date', '<=', self::filterDay($d)))
             ->when($filters['loan_id'] ?? null, fn ($q, $l) => $q->where('loan_id', $l))
-            ->when($filters['branch_id'] ?? null, fn ($q, $b) => $q->whereHas('loan', fn ($lq) => $lq->where('branch_id', $b)))
+            ->tap(self::loanInBranches(self::branchScope($filters)))
             ->latest('payment_date')
             // `payment_date` is a DATE, so same-day receipts all tie — see the
             // note on releasesQuery().
@@ -543,7 +570,7 @@ class ReportService
             ->where('due_date', '<=', $today)
             ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->where('due_date', '>=', $d))
             ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->where('due_date', '<=', $d))
-            ->when($filters['branch_id'] ?? null, fn ($q, $b) => $q->whereHas('loan', fn ($lq) => $lq->where('branch_id', $b)))
+            ->tap(self::loanInBranches(self::branchScope($filters)))
             ->orderBy('due_date')
             ->orderBy('id');
     }
@@ -690,7 +717,7 @@ class ReportService
 
         $query = Loan::query()
             ->whereIn('status', Loan::EVER_RELEASED_STATUSES)
-            ->when($filters['branch_id'] ?? null, fn ($q, $b) => $q->where('branch_id', $b))
+            ->tap(self::inBranches(self::branchScope($filters), 'branch_id'))
             ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->where('released_at', '>=', self::dayStart($d)))
             ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->where('released_at', '<', self::nextDayStart($d)));
 
@@ -824,12 +851,12 @@ class ReportService
             ->groupBy('loan_id')
             ->selectRaw('loan_id, SUM('.AmortizationSchedule::remainingPrincipalSql().') as remaining_principal');
 
-        $branchId = $filters['branch_id'] ?? null;
+        $branchIds = self::branchScope($filters);
 
         $rows = DB::table('loans')
             ->leftJoinSub($scheduleTotals, 'schedule_totals', 'schedule_totals.loan_id', '=', 'loans.id')
             ->whereIn('loans.status', Loan::EVER_RELEASED_STATUSES)
-            ->when($branchId, fn ($q, $b) => $q->where('loans.branch_id', $b))
+            ->tap(self::inBranches($branchIds, 'loans.branch_id'))
             ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->where('loans.released_at', '>=', self::dayStart($d)))
             ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->where('loans.released_at', '<', self::nextDayStart($d)))
             ->groupBy('loans.branch_id')
@@ -843,7 +870,7 @@ class ReportService
             ->get()
             ->keyBy(fn ($row) => (int) $row->branch_id);
 
-        return $this->breakdownBranches($branchId, $rows->keys()->all())
+        return $this->breakdownBranches($branchIds, $rows->keys()->all())
             ->map(function (object $branch) use ($rows) {
                 $row = $rows->get($branch->id);
 
@@ -862,17 +889,19 @@ class ReportService
      * 2026-11-02): every active branch, so a branch with no activity reads
      * ₱0.00 instead of vanishing, plus any inactive branch that does have
      * activity in the report, so the rows still add up to the report's
-     * totals. With a `branch_id` filter, only that branch.
+     * totals. Scoped to branches (a `branch_id` filter, or a caller without
+     * `branches:view_all`), only those branches.
      *
+     * @param  list<int>|null  $branchIds  self::branchScope()
      * @param  array<int, int>  $withActivity  ids of the branches the report found figures for
      * @return Collection<int, object{id: int, name: string}>
      */
-    private function breakdownBranches(int|string|null $branchId, array $withActivity): Collection
+    private function breakdownBranches(?array $branchIds, array $withActivity): Collection
     {
         return DB::table('branches')
             ->when(
-                $branchId,
-                fn ($q, $b) => $q->where('id', $b),
+                $branchIds !== null,
+                fn ($q) => $q->whereIn('id', $branchIds),
                 fn ($q) => $q->where(fn ($w) => $w->where('is_active', true)->orWhereIn('id', $withActivity)),
             )
             ->orderBy('id')
@@ -909,7 +938,7 @@ class ReportService
             'date' => $to->toDateString(),
             'date_from' => $from->toDateString(),
             'date_to' => $to->toDateString(),
-            ...$this->periodCollection($from->toDateString(), $to->toDateString(), $filters['branch_id'] ?? null),
+            ...$this->periodCollection($from->toDateString(), $to->toDateString(), self::branchScope($filters)),
             'generated_at' => now()->toDateTimeString(),
         ];
     }
@@ -920,9 +949,9 @@ class ReportService
      *
      * @return array<string, mixed>
      */
-    private function periodCollection(string $fromDate, string $toDate, int|string|null $branchId): array
+    private function periodCollection(string $fromDate, string $toDate, ?array $branchIds): array
     {
-        $periods = $this->periodsDueQuery($fromDate, $toDate, $branchId)
+        $periods = $this->periodsDueQuery($fromDate, $toDate, $branchIds)
             ->selectRaw(self::periodFiguresSql())
             ->first();
 
@@ -931,7 +960,7 @@ class ReportService
         $receipts = Repayment::query()
             ->where('status', 'posted')
             ->whereBetween('payment_date', [$fromDate, $toDate])
-            ->whereHas('loan', $this->releasedLoanScope($branchId))
+            ->whereHas('loan', $this->releasedLoanScope($branchIds))
             ->toBase()
             // The insurance premium a payment collected first is not loan
             // collection: it is left out of the money taken in.
@@ -957,12 +986,12 @@ class ReportService
      * statuses and branch. A period with nothing due (closed by an adjustment)
      * is not a due and is left out.
      */
-    private function periodsDueQuery(string $fromDate, string $toDate, int|string|null $branchId): QueryBuilder
+    private function periodsDueQuery(string $fromDate, string $toDate, ?array $branchIds): QueryBuilder
     {
         return DB::table('amortization_schedules')
             ->join('loans', 'loans.id', '=', 'amortization_schedules.loan_id')
             ->whereIn('loans.status', Loan::EVER_RELEASED_STATUSES)
-            ->when($branchId, fn ($q, $b) => $q->where('loans.branch_id', $b))
+            ->tap(self::inBranches($branchIds, 'loans.branch_id'))
             ->whereBetween('amortization_schedules.due_date', [$fromDate, $toDate])
             ->where('amortization_schedules.total_due', '>', 0);
     }
@@ -1051,7 +1080,7 @@ class ReportService
     {
         $releasedLoans = DB::table('loans')
             ->whereIn('loans.status', Loan::EVER_RELEASED_STATUSES)
-            ->when($filters['branch_id'] ?? null, fn ($q, $b) => $q->where('loans.branch_id', $b))
+            ->tap(self::inBranches(self::branchScope($filters), 'loans.branch_id'))
             ->when($filters['loan_id'] ?? null, fn ($q, $l) => $q->where('loans.id', $l))
             ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->where('loans.released_at', '>=', self::dayStart($d)))
             ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->where('loans.released_at', '<', self::nextDayStart($d)));
@@ -1248,7 +1277,7 @@ class ReportService
         return AmortizationSchedule::query()
             ->whereIn('status', AmortizationSchedule::UNPAID_STATUSES)
             ->whereHas('loan', fn ($q) => $q->whereIn('status', Loan::COLLECTIBLE_STATUSES))
-            ->when($filters['branch_id'] ?? null, fn ($q, $b) => $q->whereHas('loan', fn ($lq) => $lq->where('branch_id', $b)))
+            ->tap(self::loanInBranches(self::branchScope($filters)))
             // Nothing that is not yet late may enter an aging bucket, whatever
             // the bucket boundaries do.
             //
@@ -1275,21 +1304,21 @@ class ReportService
 
     public function borrowerReport(array $filters): array
     {
-        $branchId = $filters['branch_id'] ?? null;
+        $branchIds = self::branchScope($filters);
         $releasedLoans = fn ($q) => $q
             ->whereIn('status', Loan::EVER_RELEASED_STATUSES)
-            ->when($branchId, fn ($lq, $b) => $lq->where('branch_id', $b));
+            ->tap(self::inBranches($branchIds, 'branch_id'));
 
         $totalActive = Borrower::whereHas('loans', $releasedLoans)->count();
 
         $newBorrowers = Borrower::query()
-            ->when($branchId, fn ($q, $b) => $q->where('branch_id', $b))
+            ->tap(self::inBranches($branchIds, 'branch_id'))
             ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->where('created_at', '>=', self::dayStart($d)))
             ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->where('created_at', '<', self::nextDayStart($d)))
             ->count();
 
         $avgLoanSize = (float) Loan::whereIn('status', Loan::EVER_RELEASED_STATUSES)
-            ->when($branchId, fn ($q, $b) => $q->where('branch_id', $b))
+            ->tap(self::inBranches($branchIds, 'branch_id'))
             ->avg('principal_amount') ?? 0;
 
         $repeatBorrowers = Borrower::whereHas('loans', $releasedLoans, '>=', 2)->count();
@@ -1397,14 +1426,14 @@ class ReportService
         $query = Loan::whereIn('status', Loan::EVER_RELEASED_STATUSES)
             ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->where('released_at', '>=', self::dayStart($d)))
             ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->where('released_at', '<', self::nextDayStart($d)))
-            ->when($filters['branch_id'] ?? null, fn ($q, $b) => $q->where('branch_id', $b));
+            ->tap(self::inBranches(self::branchScope($filters), 'branch_id'));
 
         $loansReleased = (clone $query)->count();
         $totalDisbursed = (float) (clone $query)->sum('net_proceeds');
         $avgDisbursement = $loansReleased > 0 ? round($totalDisbursed / $loansReleased, 2) : 0;
 
         $pendingRelease = Loan::where('status', 'approved')
-            ->when($filters['branch_id'] ?? null, fn ($q, $b) => $q->where('branch_id', $b))
+            ->tap(self::inBranches(self::branchScope($filters), 'branch_id'))
             ->count();
 
         return [
@@ -1477,12 +1506,12 @@ class ReportService
         [$from, $to] = $this->resolveDateRange($filters);
         $fromDate = $from->toDateString();
         $toDate = $to->toDateString();
-        $branchId = $filters['branch_id'] ?? null;
+        $branchIds = self::branchScope($filters);
 
         $inflow = Repayment::query()
             ->where('status', 'posted')
             ->whereBetween('payment_date', [$fromDate, $toDate])
-            ->whereHas('loan', $this->releasedLoanScope($branchId))
+            ->whereHas('loan', $this->releasedLoanScope($branchIds))
             ->selectRaw('
                 COUNT(*) as entry_count,
                 COALESCE(SUM(principal_applied), 0) as principal_applied,
@@ -1497,7 +1526,7 @@ class ReportService
             ->whereIn('status', Loan::EVER_RELEASED_STATUSES)
             ->where('released_at', '>=', self::dayStart($fromDate))
             ->where('released_at', '<', self::nextDayStart($toDate))
-            ->when($branchId, fn ($q, $b) => $q->where('branch_id', $b))
+            ->tap(self::inBranches($branchIds, 'branch_id'))
             ->selectRaw('
                 COUNT(*) as loan_count,
                 COALESCE(SUM(principal_amount), 0) as principal_amount,
@@ -1513,9 +1542,9 @@ class ReportService
         // apart and kept out of every cash figure; only the rows with neither
         // are share capital paid in or out on its own.
         $share = DB::table('share_capital_ledger')
-            ->when($branchId, fn ($q, $b) => $q->whereIn(
+            ->when($branchIds !== null, fn ($q) => $q->whereIn(
                 'share_capital_ledger.borrower_id',
-                DB::table('borrowers')->where('branch_id', $b)->select('id'),
+                DB::table('borrowers')->whereIn('branch_id', $branchIds)->select('id'),
             ))
             ->whereBetween('date', [$fromDate, $toDate])
             ->selectRaw('
@@ -1539,7 +1568,7 @@ class ReportService
         // holds exactly at two decimals instead of to within a rounding error.
         $repaymentsIn = round($principalIn + $interestIn + $penaltyIn + $insuranceIn + $overpaymentIn, 2);
 
-        $shareScope = $branchId ? 'borrower_branch' : 'organisation';
+        $shareScope = $branchIds !== null ? 'borrower_branch' : 'organisation';
         $shareCredit = round((float) ($share->credit ?? 0), 2);
         $shareDebit = round((float) ($share->debit ?? 0), 2);
         $shareAtRelease = round((float) ($share->at_release ?? 0), 2);
@@ -1549,7 +1578,7 @@ class ReportService
 
         $totalIn = round($repaymentsIn + $shareCredit, 2);
         $totalOut = round($netProceedsOut + $shareDebit, 2);
-        $byBranch = $this->cashFlowByBranch($fromDate, $toDate, $branchId);
+        $byBranch = $this->cashFlowByBranch($fromDate, $toDate, $branchIds);
 
         return [
             'date_from' => $fromDate,
@@ -1604,7 +1633,7 @@ class ReportService
                 'build_up_from_payments' => round($buildUpCredit - $buildUpDebit, 2),
                 'build_up_credit' => $buildUpCredit,
                 'build_up_debit' => $buildUpDebit,
-                'note' => ($branchId
+                'note' => ($branchIds !== null
                     ? 'share_capital_ledger has no branch column, so branch_id is honoured through the member\'s branch, matching the Share Capital report.'
                     : 'No branch filter applied, so these figures are organisation-wide.')
                     .' In by_branch, share capital paid in and out on its own is in the row of the branch each member belongs to (inflow_share_capital, outflow_share_capital, inside inflow_total and outflow_total), so the rows add up to the statement totals; a member with no branch is in an Unassigned row.'
@@ -1641,13 +1670,13 @@ class ReportService
      *
      * @return array<int, array<string, mixed>>
      */
-    private function cashFlowByBranch(string $fromDate, string $toDate, int|string|null $branchId): array
+    private function cashFlowByBranch(string $fromDate, string $toDate, ?array $branchIds): array
     {
         $inflows = DB::table('repayments')
             ->join('loans', 'loans.id', '=', 'repayments.loan_id')
             ->where('repayments.status', 'posted')
             ->whereIn('loans.status', Loan::EVER_RELEASED_STATUSES)
-            ->when($branchId, fn ($q, $b) => $q->where('loans.branch_id', $b))
+            ->tap(self::inBranches($branchIds, 'loans.branch_id'))
             ->whereBetween('repayments.payment_date', [$fromDate, $toDate])
             ->groupBy('loans.branch_id')
             ->selectRaw('
@@ -1664,7 +1693,7 @@ class ReportService
 
         $outflows = DB::table('loans')
             ->whereIn('loans.status', Loan::EVER_RELEASED_STATUSES)
-            ->when($branchId, fn ($q, $b) => $q->where('loans.branch_id', $b))
+            ->tap(self::inBranches($branchIds, 'loans.branch_id'))
             ->where('loans.released_at', '>=', self::dayStart($fromDate))
             ->where('loans.released_at', '<', self::nextDayStart($toDate))
             ->groupBy('loans.branch_id')
@@ -1683,7 +1712,7 @@ class ReportService
             ->leftJoin('borrowers', 'borrowers.id', '=', 'share_capital_ledger.borrower_id')
             ->whereNull('share_capital_ledger.loan_id')
             ->whereNull('share_capital_ledger.repayment_id')
-            ->when($branchId, fn ($q, $b) => $q->where('borrowers.branch_id', $b))
+            ->tap(self::inBranches($branchIds, 'borrowers.branch_id'))
             ->whereBetween('share_capital_ledger.date', [$fromDate, $toDate])
             ->groupBy('borrowers.branch_id')
             ->selectRaw('
@@ -1703,7 +1732,7 @@ class ReportService
             ->values()
             ->all();
 
-        $branches = $this->breakdownBranches($branchId, $withActivity);
+        $branches = $this->breakdownBranches($branchIds, $withActivity);
         if ($share->has(0)) {
             $branches->push((object) ['id' => null, 'name' => 'Unassigned']);
         }
@@ -1768,11 +1797,11 @@ class ReportService
         [$from, $to] = $this->resolveDateRange($filters);
         $fromDate = $from->toDateString();
         $toDate = $to->toDateString();
-        $branchId = $filters['branch_id'] ?? null;
-        $byBranch = $this->collectionEfficiencyByBranch($fromDate, $toDate, $branchId);
+        $branchIds = self::branchScope($filters);
+        $byBranch = $this->collectionEfficiencyByBranch($fromDate, $toDate, $branchIds);
 
         return array_merge(
-            $this->periodCollection($fromDate, $toDate, $branchId),
+            $this->periodCollection($fromDate, $toDate, $branchIds),
             [
                 'date_from' => $fromDate,
                 'date_to' => $toDate,
@@ -1784,7 +1813,7 @@ class ReportService
                     'total_collected' => 'money',
                     'uncollected' => 'money',
                 ]),
-                'by_period' => $this->collectionEfficiencyByPeriod($from, $to, $branchId),
+                'by_period' => $this->collectionEfficiencyByPeriod($from, $to, $branchIds),
                 'note' => 'Counted by period: collected is the principal and interest paid on the periods due in the range (each branch, each due month), capped at what each period owes, so no rate exceeds 100%. Penalty and cash taken in are penalty_collected and total_received.',
                 'generated_at' => now()->toDateTimeString(),
             ],
@@ -1813,16 +1842,16 @@ class ReportService
     /**
      * @return array<int, array<string, mixed>>
      */
-    private function collectionEfficiencyByBranch(string $fromDate, string $toDate, int|string|null $branchId): array
+    private function collectionEfficiencyByBranch(string $fromDate, string $toDate, ?array $branchIds): array
     {
-        $rows = $this->periodsDueQuery($fromDate, $toDate, $branchId)
+        $rows = $this->periodsDueQuery($fromDate, $toDate, $branchIds)
             ->groupBy('loans.branch_id')
             ->selectRaw('loans.branch_id, '.self::periodFiguresSql())
             ->get()
             ->keyBy(fn ($row) => (int) $row->branch_id);
 
         // Every active branch, ₱0.00 when nothing fell due there (decision 5c).
-        return $this->breakdownBranches($branchId, $rows->keys()->all())
+        return $this->breakdownBranches($branchIds, $rows->keys()->all())
             ->map(fn (object $branch) => array_merge(
                 [
                     'branch_id' => $branch->id,
@@ -1841,9 +1870,9 @@ class ReportService
      *
      * @return array<int, array<string, mixed>>
      */
-    private function collectionEfficiencyByPeriod(Carbon $from, Carbon $to, int|string|null $branchId): array
+    private function collectionEfficiencyByPeriod(Carbon $from, Carbon $to, ?array $branchIds): array
     {
-        $months = $this->periodsDueQuery($from->toDateString(), $to->toDateString(), $branchId)
+        $months = $this->periodsDueQuery($from->toDateString(), $to->toDateString(), $branchIds)
             ->groupByRaw("DATE_FORMAT(amortization_schedules.due_date, '%Y-%m')")
             ->selectRaw("DATE_FORMAT(amortization_schedules.due_date, '%Y-%m') as period, ".self::periodFiguresSql())
             ->get()
@@ -1888,7 +1917,7 @@ class ReportService
                 'loans.id',
             )
             ->whereIn('loans.status', Loan::EVER_RELEASED_STATUSES)
-            ->when($filters['branch_id'] ?? null, fn ($q, $b) => $q->where('loans.branch_id', $b))
+            ->tap(self::inBranches(self::branchScope($filters), 'loans.branch_id'))
             ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->where('loans.released_at', '>=', self::dayStart($d)))
             ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->where('loans.released_at', '<', self::nextDayStart($d)))
             ->groupBy('loan_products.id', 'loan_products.name')
@@ -2022,7 +2051,7 @@ class ReportService
     {
         $today = Carbon::today();
         $parCutoff = $today->copy()->subDays(self::PAR_THRESHOLD_DAYS);
-        $branchId = $filters['branch_id'] ?? null;
+        $branchIds = self::branchScope($filters);
         $dateFrom = $filters['date_from'] ?? null;
         $dateTo = $filters['date_to'] ?? null;
 
@@ -2071,7 +2100,7 @@ class ReportService
             )
             ->leftJoinSub($collectedInPeriod, 'repayment_totals', 'repayment_totals.loan_id', '=', 'loans.id')
             ->whereIn('loans.status', Loan::EVER_RELEASED_STATUSES)
-            ->when($branchId, fn ($q, $b) => $q->where('loans.branch_id', $b));
+            ->tap(self::inBranches($branchIds, 'loans.branch_id'));
 
         if ($dimension === 'officer') {
             $query->leftJoin('users', 'users.id', '=', 'loans.account_officer_id')
@@ -2100,7 +2129,7 @@ class ReportService
             ->get();
 
         if ($dimension === 'branch') {
-            $rows = $this->withEveryBranch($rows, $branchId);
+            $rows = $this->withEveryBranch($rows, $branchIds);
         }
 
         return $rows->map(function ($row) use ($dimension) {
@@ -2145,11 +2174,11 @@ class ReportService
      * @param  Collection<int, object>  $rows
      * @return Collection<int, object>
      */
-    private function withEveryBranch(Collection $rows, int|string|null $branchId): Collection
+    private function withEveryBranch(Collection $rows, ?array $branchIds): Collection
     {
         $listed = $rows->map(fn (object $row) => (int) $row->dimension_id)->all();
 
-        $zeroRows = $this->breakdownBranches($branchId, $listed)
+        $zeroRows = $this->breakdownBranches($branchIds, $listed)
             ->reject(fn (object $branch) => in_array($branch->id, $listed, true))
             ->map(fn (object $branch) => (object) [
                 'dimension_id' => $branch->id,
@@ -2263,12 +2292,12 @@ class ReportService
         [$from, $to] = $this->resolveOpenEndedRange($filters);
         $fromDate = $from?->toDateString();
         $toDate = $to->toDateString();
-        $branchId = $filters['branch_id'] ?? null;
+        $branchIds = self::branchScope($filters);
 
         $ledger = fn () => DB::table('share_capital_ledger')
-            ->when($branchId, fn ($q, $b) => $q->whereIn(
+            ->when($branchIds !== null, fn ($q) => $q->whereIn(
                 'share_capital_ledger.borrower_id',
-                DB::table('borrowers')->where('branch_id', $b)->select('id'),
+                DB::table('borrowers')->whereIn('branch_id', $branchIds)->select('id'),
             ));
 
         $opening = $fromDate === null ? 0.0 : round((float) $ledger()
@@ -2291,13 +2320,13 @@ class ReportService
         $debits = round((float) ($period->debits ?? 0), 2);
         $closing = round($opening + $credits - $debits, 2);
 
-        $members = $this->shareCapitalByMember($fromDate, $toDate, $branchId);
-        $byMonth = $this->shareCapitalByMonth($fromDate, $toDate, $branchId, $opening);
+        $members = $this->shareCapitalByMember($fromDate, $toDate, $branchIds);
+        $byMonth = $this->shareCapitalByMonth($fromDate, $toDate, $branchIds, $opening);
 
         return [
             'date_from' => $fromDate,
             'date_to' => $toDate,
-            'branch_scope' => $branchId ? 'borrower_branch' : 'organisation',
+            'branch_scope' => $branchIds !== null ? 'borrower_branch' : 'organisation',
             'opening_balance' => $opening,
             'credits' => $credits,
             'debits' => $debits,
@@ -2308,7 +2337,7 @@ class ReportService
             // during the period — those are `members_with_activity`.
             'member_count' => count(array_filter($members, fn ($m) => $m['closing_balance'] != 0.0)),
             'members_with_activity' => (int) ($period->members_with_activity ?? 0),
-            'subscription' => $this->shareCapitalSubscription($branchId, $closing),
+            'subscription' => $this->shareCapitalSubscription($branchIds, $closing),
             'by_month' => $byMonth,
             'by_month_totals' => self::columnTotals($byMonth, [
                 'credits' => 'money',
@@ -2350,14 +2379,14 @@ class ReportService
      *
      * @return array<string, mixed>
      */
-    private function shareCapitalSubscription(int|string|null $branchId, float $paidIn): array
+    private function shareCapitalSubscription(?array $branchIds, float $paidIn): array
     {
         $pledges = fn () => DB::table('share_capital_pledges')
             ->whereIn(
                 'share_capital_pledges.borrower_id',
                 DB::table('borrowers')
                     ->whereNotIn('status', Borrower::NON_MEMBER_STATUSES)
-                    ->when($branchId, fn ($q, $b) => $q->where('branch_id', $b))
+                    ->tap(self::inBranches($branchIds, 'branch_id'))
                     ->select('id'),
             );
 
@@ -2406,7 +2435,7 @@ class ReportService
      *
      * @return array<int, array<string, mixed>>
      */
-    private function shareCapitalByMember(?string $fromDate, string $toDate, int|string|null $branchId): array
+    private function shareCapitalByMember(?string $fromDate, string $toDate, ?array $branchIds): array
     {
         $beforePeriod = $fromDate === null ? '1 = 0' : 'share_capital_ledger.date < ?';
         $inPeriod = $fromDate === null ? '1 = 1' : 'share_capital_ledger.date >= ?';
@@ -2414,7 +2443,7 @@ class ReportService
 
         return DB::table('share_capital_ledger')
             ->join('borrowers', 'borrowers.id', '=', 'share_capital_ledger.borrower_id')
-            ->when($branchId, fn ($q, $b) => $q->where('borrowers.branch_id', $b))
+            ->tap(self::inBranches($branchIds, 'borrowers.branch_id'))
             ->where('share_capital_ledger.date', '<=', $toDate)
             ->groupBy(
                 'borrowers.id',
@@ -2464,12 +2493,12 @@ class ReportService
      *
      * @return array<int, array<string, mixed>>
      */
-    private function shareCapitalByMonth(?string $fromDate, string $toDate, int|string|null $branchId, float $opening): array
+    private function shareCapitalByMonth(?string $fromDate, string $toDate, ?array $branchIds, float $opening): array
     {
         $monthly = DB::table('share_capital_ledger')
-            ->when($branchId, fn ($q, $b) => $q->whereIn(
+            ->when($branchIds !== null, fn ($q) => $q->whereIn(
                 'share_capital_ledger.borrower_id',
-                DB::table('borrowers')->where('branch_id', $b)->select('id'),
+                DB::table('borrowers')->whereIn('branch_id', $branchIds)->select('id'),
             ))
             ->when($fromDate, fn ($q, $d) => $q->where('date', '>=', self::filterDay($d)))
             ->where('date', '<=', $toDate)
@@ -2600,6 +2629,65 @@ class ReportService
     // ── Shared query fragments ───────────────────────────────────────────
 
     /**
+     * The branches a report covers (decision B2, least privilege): the one
+     * `branch_id` filter when given (ReportController has already refused a
+     * branch the caller can't see), else `branch_ids`, the caller's own
+     * branches as BranchAccess::for() answers them. Null means every branch,
+     * and only a caller holding `branches:view_all` gets it. An empty list
+     * matches no rows.
+     *
+     * Fails closed: `branch_ids` must always be present (null included), so a
+     * future caller that forgets to scope gets an exception, never the whole
+     * organisation.
+     *
+     * @param  array<string, mixed>  $filters
+     * @return list<int>|null
+     *
+     * @throws LogicException when `branch_ids` is missing
+     */
+    private static function branchScope(array $filters): ?array
+    {
+        if (! array_key_exists('branch_ids', $filters)) {
+            throw new LogicException('Report filters must carry branch_ids (null only for branches:view_all).');
+        }
+
+        if (filled($filters['branch_id'] ?? null)) {
+            return [(int) $filters['branch_id']];
+        }
+
+        if ($filters['branch_ids'] === null) {
+            return null;
+        }
+
+        return array_values(array_map('intval', (array) $filters['branch_ids']));
+    }
+
+    /**
+     * Narrow a query to rows whose $column is one of $branchIds, as a closure
+     * for `tap()`. Unchanged when $branchIds is null (every branch).
+     *
+     * @param  list<int>|null  $branchIds
+     */
+    private static function inBranches(?array $branchIds, string $column): Closure
+    {
+        return fn ($query) => $branchIds === null ? $query : $query->whereIn($column, $branchIds);
+    }
+
+    /**
+     * Narrow a query on a table with a `loan` relation to rows whose loan is
+     * in one of $branchIds, as a closure for `tap()`. Unchanged when
+     * $branchIds is null.
+     *
+     * @param  list<int>|null  $branchIds
+     */
+    private static function loanInBranches(?array $branchIds): Closure
+    {
+        return fn ($query) => $branchIds === null
+            ? $query
+            : $query->whereHas('loan', fn ($lq) => $lq->whereIn('branch_id', $branchIds));
+    }
+
+    /**
      * Constraint for loans that have ever been released, honouring `branch_id`.
      *
      * Extracted so BOTH sides of a collection ratio can be scoped through the
@@ -2607,11 +2695,11 @@ class ReportService
      * how the collection rate ends up above 100%: payments counted against
      * amounts that were never in the total due.
      */
-    private function releasedLoanScope(int|string|null $branchId): Closure
+    private function releasedLoanScope(?array $branchIds): Closure
     {
         return fn ($q) => $q
             ->whereIn('status', Loan::EVER_RELEASED_STATUSES)
-            ->when($branchId, fn ($lq, $b) => $lq->where('branch_id', $b));
+            ->tap(self::inBranches($branchIds, 'branch_id'));
     }
 
     /**
