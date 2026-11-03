@@ -794,10 +794,15 @@ class LoanAdjustmentService
      * Close the open periods money was collected on, and delete the rest.
      *
      * A closed period is due exactly what was collected on it and is `paid`,
-     * so what the borrower paid stays on the period it paid, in Total Paid,
-     * and in reach of a void; only the unpaid remainder moves into the
-     * rescheduled periods. Deleting partly paid periods, as this used to, took
-     * collected money off the loan and left its payments unvoidable.
+     * so what the borrower paid stays on the period it paid and in Total Paid;
+     * only the unpaid remainder moves into the rescheduled periods. Deleting
+     * partly paid periods, as this used to, took collected money off the loan.
+     *
+     * A payment made before this adjustment can no longer be voided
+     * (RepaymentService::assertNotRescheduledSincePaid()): the new periods were
+     * worked out from the balance it left, so reversing it would reopen a
+     * closed period under terms built on money it collected. Staff correct the
+     * loan with a balance adjustment instead.
      *
      * `closed_by_adjustment_id` marks the period, because a closed period is
      * not paid in full and must not be the one the next restructure starts
