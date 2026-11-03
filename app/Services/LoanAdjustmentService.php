@@ -397,6 +397,9 @@ class LoanAdjustmentService
                 $interestRepayment,
             );
 
+            // Sent once the extension commits; one that rolls back tells nobody.
+            app(Notifications::class)->extensionApplied($loan, $adjustment, $user);
+
             return $adjustment;
         }, racedUniqueIndex: Repayment::RECEIPT_NUMBER_INDEX);
     }
@@ -1042,6 +1045,14 @@ class LoanAdjustmentService
                 'status' => 'applied',
                 'applied_at' => now(),
             ]);
+
+            // One notice per extension or restructure, however it is applied;
+            // sent once this commits. The actor is the signed-in user.
+            match ($adjustment->adjustment_type) {
+                'restructure' => app(Notifications::class)->restructureApplied($loan, $adjustment),
+                'term_extension' => app(Notifications::class)->extensionApplied($loan, $adjustment),
+                default => null,
+            };
 
             return $adjustment;
         });

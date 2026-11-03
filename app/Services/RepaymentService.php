@@ -953,6 +953,9 @@ class RepaymentService
                 $loan->update(['status' => $remainingPayments > 0 ? 'ongoing' : 'released']);
             }
 
+            // Sent once the void commits; a void that rolls back tells nobody.
+            app(Notifications::class)->paymentVoided($repayment, $user, $reason);
+
             return $repayment;
         });
     }
