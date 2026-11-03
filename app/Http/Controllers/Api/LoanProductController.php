@@ -87,12 +87,13 @@ class LoanProductController extends Controller
                     new OA\Property(property: 'grace_period_days', type: 'integer', example: 3),
                     new OA\Property(property: 'min_amount', type: 'number', example: 5000),
                     new OA\Property(property: 'max_amount', type: 'number', example: 500000),
+                    new OA\Property(property: 'custom_fees', type: 'array', items: new OA\Items(type: 'object'), description: 'Retired ("Additional fees"). Omit it, or send []; any other value answers 422. Set fees up in Settings → Fees, scoped to the product'),
                 ],
             ),
         ),
         responses: [
             new OA\Response(response: 201, description: 'Loan product created'),
-            new OA\Response(response: 422, description: 'Validation error'),
+            new OA\Response(response: 422, description: 'Validation error, or `custom_fees` sent with any fee: "Additional fees are retired. Set fees up in Settings → Fees, scoped to this product."'),
         ],
     )]
     public function store(StoreLoanProductRequest $request): JsonResponse
@@ -132,10 +133,14 @@ class LoanProductController extends Controller
         parameters: [
             new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
         ],
-        requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent),
+        requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent(
+            properties: [
+                new OA\Property(property: 'custom_fees', type: 'array', items: new OA\Items(type: 'object'), description: 'Retired ("Additional fees"). Omit it (the stored list is kept), send the stored list unchanged (kept as it is), or send [] (clears it); any other value answers 422. The product still returns the stored list'),
+            ],
+        )),
         responses: [
             new OA\Response(response: 200, description: 'Loan product updated'),
-            new OA\Response(response: 422, description: 'Validation error'),
+            new OA\Response(response: 422, description: 'Validation error, or `custom_fees` that differs from the stored list: "Additional fees are retired. Set fees up in Settings → Fees, scoped to this product."'),
         ],
     )]
     public function update(UpdateLoanProductRequest $request, LoanProduct $loanProduct): LoanProductResource

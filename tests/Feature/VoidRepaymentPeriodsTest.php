@@ -96,7 +96,7 @@ class VoidRepaymentPeriodsTest extends TestCase
         $this->assertEqualsWithDelta(200, (float) $this->schedule(3)->penalty_amount, 0.001);
     }
 
-    public function test_a_payment_on_a_period_a_term_extension_closed_can_be_voided(): void
+    public function test_a_payment_on_a_period_a_term_extension_closed_cannot_be_voided(): void
     {
         $partial = $this->payOn('2026-02-10', 5000);
 
@@ -107,12 +107,15 @@ class VoidRepaymentPeriodsTest extends TestCase
         $this->patchJson("/api/loan-adjustments/{$id}/approve")->assertOk();
         $this->patchJson("/api/loan-adjustments/{$id}/apply")->assertOk();
 
-        // Period 1 was closed at the ₱5,000 paid, not deleted, so the void
-        // finds it and period 1 owes that ₱5,000 again.
-        $this->void($partial);
+        // Period 1 was closed at the ₱5,000 paid. The payment was made before
+        // the term extension, so it can't be voided and period 1 stays closed.
+        $this->patchJson("/api/repayments/{$partial->id}/void", ['void_reason' => 'Keyed in error'])
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.repayment.0', 'This payment was made before the loan was extended or restructured, so it cannot be voided. Use a balance adjustment to correct the loan instead.');
 
-        $this->assertPeriod(1, interest: 0, principal: 0, status: 'pending');
-        $this->assertEqualsWithDelta(3200, (float) $this->schedule(1)->principal_due, 0.001);
+        $this->assertSame('posted', $partial->fresh()->status);
+        $this->assertPeriod(1, interest: 1800, principal: 3200, status: 'paid');
+        $this->assertNotNull($this->schedule(1)->closed_by_adjustment_id);
         $this->assertPaymentsReconcile();
     }
 

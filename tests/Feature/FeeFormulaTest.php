@@ -26,6 +26,8 @@ class FeeFormulaTest extends TestCase
 {
     use SetupLendyPH;
 
+    private const CUSTOM_FEES_RETIRED = 'Additional fees are retired. Set fees up in Settings → Fees, scoped to this product.';
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -300,37 +302,39 @@ class FeeFormulaTest extends TestCase
         ];
     }
 
-    public function test_a_product_custom_formula_fee_is_saved_and_computes_like_a_catalog_one(): void
+    public function test_a_product_custom_formula_fee_is_refused_and_a_formula_item_computes_like_a_catalog_one(): void
     {
         $customFee = ['name' => 'Handling', 'type' => 'formula', 'value' => 0.5, 'per_month' => true, 'min_amount' => 100, 'max_amount' => 250];
 
-        $id = $this->postJson('/api/loan-products', $this->productPayload($customFee))->assertCreated()->json('data.id');
-
-        $stored = $this->getJson("/api/loan-products/{$id}")->assertOk()->json('data.custom_fees.0');
-        $this->assertEquals($customFee, $stored);
+        // Additional fees are retired: a product can't be given one.
+        $this->postJson('/api/loan-products', $this->productPayload($customFee))
+            ->assertUnprocessable()->assertJsonPath('errors.custom_fees.0', self::CUSTOM_FEES_RETIRED);
 
         $months = FeeAmount::termMonths(6, 'months');
         // 0.5% × 6 months: ₱300.00 on ₱10,000.00 held to ₱250.00; ₱30.00 on
         // ₱1,000.00 raised to ₱100.00; ₱150.00 on ₱5,000.00.
-        $this->assertSame(250.0, FeeAmount::forCustomFee($stored, 10000, $months));
-        $this->assertSame(100.0, FeeAmount::forCustomFee($stored, 1000, $months));
-        $this->assertSame(150.0, FeeAmount::forCustomFee($stored, 5000, $months));
+        $this->assertSame(250.0, FeeAmount::forCustomFee($customFee, 10000, $months));
+        $this->assertSame(100.0, FeeAmount::forCustomFee($customFee, 1000, $months));
+        $this->assertSame(150.0, FeeAmount::forCustomFee($customFee, 5000, $months));
 
-        $this->putJson("/api/loan-products/{$id}", ['custom_fees' => [['name' => 'Handling', 'type' => 'formula', 'value' => 1, 'max_amount' => 400]]])
-            ->assertOk()->assertJsonPath('data.custom_fees.0.max_amount', 400);
+        $product = $this->freeProduct();
+        $this->putJson("/api/loan-products/{$product->id}", ['custom_fees' => [['name' => 'Handling', 'type' => 'formula', 'value' => 1, 'max_amount' => 400]]])
+            ->assertUnprocessable()->assertJsonPath('errors.custom_fees.0', self::CUSTOM_FEES_RETIRED);
+        $this->assertNull($product->fresh()->custom_fees);
     }
 
     public function test_a_product_custom_formula_fee_with_a_minimum_above_its_maximum_is_refused(): void
     {
+        // Refused as retired, before any of its fields are looked at.
         $this->postJson('/api/loan-products', $this->productPayload(['name' => 'Handling', 'type' => 'formula', 'value' => 0.5, 'min_amount' => 300, 'max_amount' => 100]))
-            ->assertUnprocessable()->assertJsonValidationErrors('custom_fees.0.max_amount');
+            ->assertUnprocessable()->assertJsonValidationErrors(['custom_fees' => self::CUSTOM_FEES_RETIRED]);
 
         $this->postJson('/api/loan-products', $this->productPayload(['name' => 'Handling', 'type' => 'formula', 'value' => 0.5, 'min_amount' => 1.234]))
-            ->assertUnprocessable()->assertJsonValidationErrors('custom_fees.0.min_amount');
+            ->assertUnprocessable()->assertJsonValidationErrors(['custom_fees' => self::CUSTOM_FEES_RETIRED]);
 
         $product = $this->freeProduct();
         $this->putJson("/api/loan-products/{$product->id}", ['custom_fees' => [['name' => 'Handling', 'type' => 'formula', 'value' => 0.5, 'min_amount' => 300, 'max_amount' => 100]]])
-            ->assertUnprocessable()->assertJsonValidationErrors('custom_fees.0.max_amount');
+            ->assertUnprocessable()->assertJsonValidationErrors(['custom_fees' => self::CUSTOM_FEES_RETIRED]);
     }
 
     // ── Review follow-ups ────────────────────────────────────────────────
@@ -419,26 +423,26 @@ class FeeFormulaTest extends TestCase
         // A fixed fee is pesos, never capped at 100.
         $this->postJson('/api/fees', ['name' => 'Big Fixed', 'type' => 'fixed', 'value' => 500])->assertCreated();
 
+        // A product custom fee is refused whatever its rate: additional fees are retired.
         $this->postJson('/api/loan-products', $this->productPayload(['name' => 'Handling', 'type' => 'formula', 'value' => 150]))
-            ->assertUnprocessable()->assertJsonValidationErrors('custom_fees.0.value');
+            ->assertUnprocessable()->assertJsonValidationErrors(['custom_fees' => self::CUSTOM_FEES_RETIRED]);
     }
 
-    public function test_a_product_custom_fee_that_is_not_a_formula_drops_the_formula_fields(): void
+    public function test_a_product_custom_fee_that_is_not_a_formula_is_refused_and_the_stored_list_is_kept(): void
     {
-        $id = $this->postJson('/api/loan-products', array_merge($this->productPayload(['name' => 'Flat', 'type' => 'fixed', 'value' => 50, 'per_month' => true, 'min_amount' => 10, 'max_amount' => 20]), [
+        $this->postJson('/api/loan-products', array_merge($this->productPayload(['name' => 'Flat', 'type' => 'fixed', 'value' => 50, 'per_month' => true, 'min_amount' => 10, 'max_amount' => 20]), [
             'custom_fees' => [
                 ['name' => 'Flat', 'type' => 'fixed', 'value' => 50, 'per_month' => true, 'min_amount' => 10, 'max_amount' => 20],
                 ['name' => 'Handling', 'type' => 'formula', 'value' => 0.5, 'per_month' => true, 'min_amount' => 10],
             ],
-        ]))->assertCreated()->json('data.id');
+        ]))->assertUnprocessable()->assertJsonPath('errors.custom_fees.0', self::CUSTOM_FEES_RETIRED);
 
-        $this->assertSame(
-            [['name' => 'Flat', 'type' => 'fixed', 'value' => 50], ['name' => 'Handling', 'type' => 'formula', 'value' => 0.5, 'per_month' => true, 'min_amount' => 10]],
-            LoanProduct::find($id)->custom_fees,
-        );
+        $stored = [['name' => 'Flat', 'type' => 'fixed', 'value' => 50], ['name' => 'Handling', 'type' => 'formula', 'value' => 0.5, 'per_month' => true, 'min_amount' => 10]];
+        $product = $this->freeProduct(['custom_fees' => $stored]);
 
-        $this->putJson("/api/loan-products/{$id}", ['custom_fees' => [['name' => 'Handling', 'type' => 'percentage', 'value' => 0.5, 'per_month' => true, 'max_amount' => 20]]])->assertOk();
-        $this->assertSame([['name' => 'Handling', 'type' => 'percentage', 'value' => 0.5]], LoanProduct::find($id)->custom_fees);
+        $this->putJson("/api/loan-products/{$product->id}", ['custom_fees' => [['name' => 'Handling', 'type' => 'percentage', 'value' => 0.5, 'per_month' => true, 'max_amount' => 20]]])
+            ->assertUnprocessable()->assertJsonPath('errors.custom_fees.0', self::CUSTOM_FEES_RETIRED);
+        $this->assertSame($stored, $product->fresh()->custom_fees);
     }
 
     public function test_a_per_month_formula_deduction_with_no_known_term_is_left_out(): void
