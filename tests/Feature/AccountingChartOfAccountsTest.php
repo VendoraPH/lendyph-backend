@@ -69,6 +69,7 @@ class AccountingChartOfAccountsTest extends TestCase
         '2200' => ['Taxes Payable', 'liability', '2000', true, false, null],
         '2210' => ['Withholding Tax Payable', 'liability', '2200', false, false, null],
         '2220' => ['Other Taxes Payable', 'liability', '2200', false, false, null],
+        '2230' => ['Documentary Stamp Tax Payable', 'liability', '2200', false, false, null],
         '2300' => ['Other Liabilities', 'liability', '2000', false, false, null],
         '3000' => ['Equity', 'equity', null, true, false, null],
         '3010' => ['Capital', 'equity', '3000', false, false, null],

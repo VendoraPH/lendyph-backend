@@ -25,10 +25,16 @@ class LoanLedgerTest extends TestCase
 {
     use BuildsReleasedLoans, SetupLendyPH;
 
+    /**
+     * A fixed clock: a loan made due ten days ago (the 10th) is still within
+     * one anchored cycle of its due date, so an extension moves it exactly
+     * one cycle whatever the real date.
+     */
     protected function setUp(): void
     {
         parent::setUp();
         $this->seedAndLogin();
+        $this->travelTo('2026-11-20 09:00:00');
     }
 
     /** @return array<string, mixed> */

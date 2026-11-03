@@ -382,6 +382,9 @@ class LoanTermUnitRateFrequencyTest extends TestCase
 
     public function test_an_extension_charges_a_month_at_the_converted_rate(): void
     {
+        // Within the first cycle after the 27 May due date, so the extension
+        // moves one cycle and charges one month.
+        $this->travelTo('2026-05-20 09:00:00');
         $loan = $this->createReleasedLoan([
             'product' => [
                 'interest_method' => 'upon_maturity',
@@ -398,6 +401,7 @@ class LoanTermUnitRateFrequencyTest extends TestCase
 
         // One 30-day month at 1% a week: 70,000 × 1% × 30/7.
         $adjustment = LoanAdjustment::where('loan_id', $loan->id)->firstOrFail();
+        $this->assertSame(1, $adjustment->new_values['cycles']);
         $this->assertEquals(3000, $adjustment->new_values['fresh_interest']);
     }
 

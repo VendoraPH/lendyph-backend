@@ -95,6 +95,32 @@ final class LoanTermSchedule
     }
 
     /**
+     * The first anchored date after the row dated `$from` that falls strictly
+     * after the day `$after`, and how many anchored cycles past `$from` it is.
+     *
+     * At least one cycle: a row due on or after `$after` still moves to its
+     * next anchored date. A row long past `$after` moves as many cycles as it
+     * takes to land after it, so an overdue loan extended today is never left
+     * due on a date already gone: a loan anchored on the 27th, due 27 May and
+     * extended on 2 Nov, moves six cycles to 27 Nov.
+     *
+     * @return array{due_date: Carbon, cycles: int}
+     */
+    public static function firstAnchoredDateAfter(Carbon $from, Carbon $after, int $anchorDay): array
+    {
+        $afterDay = $after->toDateString();
+        $cycles = 1;
+        $dueDate = self::nthAnchoredDateAfter($from, $cycles, $anchorDay);
+
+        while ($dueDate->toDateString() <= $afterDay) {
+            $cycles++;
+            $dueDate = self::nthAnchoredDateAfter($from, $cycles, $anchorDay);
+        }
+
+        return ['due_date' => $dueDate, 'cycles' => $cycles];
+    }
+
+    /**
      * Each instalment's due date and the number of days it covers.
      *
      * An upon-maturity loan outside the calendar-month case is one instalment

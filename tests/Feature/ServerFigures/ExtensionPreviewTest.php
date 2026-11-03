@@ -104,7 +104,9 @@ class ExtensionPreviewTest extends TestCase
     public function test_it_quotes_a_month_at_the_converted_rate_not_the_raw_rate(): void
     {
         // 70,000 at 1% a week: one 30-day month is 70,000 × 1% × 30/7 = 3,000,
-        // not the 700 the browser's `principal × rate / 100` showed.
+        // not the 700 the browser's `principal × rate / 100` showed. Before
+        // the 27 May due date, so the extension moves one cycle.
+        $this->travelTo('2026-05-20 10:00:00');
         $loan = $this->uponMaturityLoan(['interest_rate' => 1.0, 'interest_rate_frequency' => 'weekly'], 70000);
 
         $preview = $this->getJson("/api/loans/{$loan->id}/extension-preview?interest_option=defer")
@@ -113,6 +115,7 @@ class ExtensionPreviewTest extends TestCase
 
         $this->assertEquals(70000, $preview['carry_principal']);
         $this->assertEquals(3000, $preview['carry_interest']);
+        $this->assertSame(1, $preview['cycles']);
         $this->assertEquals(3000, $preview['fresh_interest']);
         $this->assertEquals(6000, $preview['new_interest_due']);
         $this->assertEquals(76000, $preview['new_total_due']);

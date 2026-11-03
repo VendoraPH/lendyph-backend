@@ -78,6 +78,9 @@ class AccountingAccountMapping extends Model
         'insurance_premium_payable',
         'share_capital',
         'other_fee_income',
+        'documentary_stamp_tax_payable',
+        'withholding_tax_payable',
+        'other_taxes_payable',
     ];
 
     /**
@@ -174,6 +177,15 @@ class AccountingAccountMapping extends Model
         'insurance_premium_payable' => ['type' => 'liability'],
         'share_capital' => ['type' => 'equity'],
         'other_fee_income' => ['type' => 'income'],
+
+        /*
+         * Taxes withheld at release (decision 4b, 2026-11-02; see
+         * PostingRules::taxRoleFor()). A tax is a government levy the
+         * cooperative collects and remits, never its own income: liabilities.
+         */
+        'documentary_stamp_tax_payable' => ['type' => 'liability'],
+        'withholding_tax_payable' => ['type' => 'liability'],
+        'other_taxes_payable' => ['type' => 'liability'],
     ];
 
     protected $fillable = [

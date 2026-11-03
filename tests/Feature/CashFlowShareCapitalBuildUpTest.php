@@ -86,14 +86,15 @@ class CashFlowShareCapitalBuildUpTest extends TestCase
         $this->assertEquals(750, $share['build_up_credit']);
         $this->assertEquals(0, $share['build_up_debit']);
 
-        // by_branch carries loan cash only and is unaffected.
+        // by_branch carries the loan cash, the build-up inside it once, plus
+        // the share capital paid in on its own by the member's branch
+        // (decision 5c), so its totals equal the statement's.
         $this->assertCount(1, $data['by_branch']);
-        $this->assertEquals(12550, $data['by_branch'][0]['inflow_total']);
+        $this->assertEquals(12550, $data['by_branch'][0]['inflow_repayments']);
+        $this->assertEquals(4000, $data['by_branch'][0]['inflow_share_capital']);
+        $this->assertEquals(16550, $data['by_branch'][0]['inflow_total']);
         $this->assertEquals(750, $data['by_branch'][0]['inflow_overpayment']);
-        $this->assertEquals(
-            $data['inflows']['total'],
-            $data['by_branch_totals']['inflow_total'] + $data['inflows']['share_capital_credit'],
-        );
+        $this->assertEquals($data['inflows']['total'], $data['by_branch_totals']['inflow_total']);
     }
 
     public function test_the_share_capital_report_reconciles_to_the_cash_flow_figures(): void
@@ -131,7 +132,8 @@ class CashFlowShareCapitalBuildUpTest extends TestCase
         $this->assertEquals(750, $share['build_up_credit']);
         $this->assertEquals(750, $share['build_up_debit']);
 
-        $this->assertEquals(0, $data['by_branch'][0]['inflow_total']);
+        $this->assertEquals(0, $data['by_branch'][0]['inflow_repayments']);
+        $this->assertEquals(4000, $data['by_branch'][0]['inflow_total'], 'Only the share capital paid in on its own.');
         $this->assertSame(0, $data['by_branch'][0]['repayment_count']);
     }
 }

@@ -8,12 +8,13 @@ use Illuminate\Console\Attributes\Signature;
 use Illuminate\Console\Command;
 
 #[Signature('accounting:backfill-release-deduction-accounts {--dry-run : Show what would be added and mapped without writing}')]
-#[Description('Add the release deduction accounts and posting roles (accountant-confirmed 2026-10-03) to a chart seeded before them')]
+#[Description('Add the release deduction accounts and posting roles (accountant-confirmed 2026-10-03) and the tax payable roles (2026-11-02) to a chart seeded before them')]
 class BackfillReleaseDeductionAccounts extends Command
 {
     /**
-     * The same logic the 2026_10_03_130000 migration runs on deploy, so a dry
-     * run on a database shows what that migration will change there.
+     * The same logic the 2026_10_03_130000 and 2026_11_02_220500 migrations
+     * run on deploy, so a dry run on a database shows what those migrations
+     * will change there.
      */
     public function handle(ReleaseDeductionAccountsBackfill $backfill): int
     {
