@@ -287,6 +287,64 @@ class InAppNotificationsTest extends TestCase
         $this->assertStringContainsString("{$adjustment->adjustment_number}: a penalty waiver on", $row->data['body']);
     }
 
+    public function test_extending_a_loan_tells_its_officer_once(): void
+    {
+        $officer = $this->staff('loan_officer');
+        $loan = $this->createReleasedLoan([
+            'product' => ['interest_method' => 'upon_maturity', 'term' => 1, 'frequency' => 'monthly', 'interest_rate' => 3.0],
+            'principal_amount' => 60000,
+            'start_date' => now()->subDays(10)->toDateString(),
+        ]);
+        $loan->update(['account_officer_id' => $officer->id]);
+
+        $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'defer'])->assertOk();
+
+        $this->assertSame([$officer->id], $this->recipients(StaffNotification::EXTENSION_APPLIED, $loan));
+        $row = $this->latestOfType($officer, StaffNotification::EXTENSION_APPLIED);
+        $adjustment = LoanAdjustment::where('loan_id', $loan->id)->latest('id')->firstOrFail();
+        $this->assertSame($adjustment->id, $row->data['data']['adjustment_id']);
+        $this->assertStringContainsString("{$adjustment->adjustment_number} extended", $row->data['body']);
+    }
+
+    public function test_applying_an_in_place_restructure_tells_its_officer(): void
+    {
+        $officer = $this->staff('loan_officer');
+        $loan = $this->createReleasedLoan();
+        $loan->update(['account_officer_id' => $officer->id]);
+
+        $adjustmentId = $this->postJson("/api/loans/{$loan->id}/adjustments", [
+            'adjustment_type' => 'restructure',
+            'new_values' => ['term' => 12, 'interest_rate' => 2.0],
+            'description' => 'Reschedule the outstanding balance',
+        ])->assertCreated()->json('data.id');
+        $this->patchJson("/api/loan-adjustments/{$adjustmentId}/approve")->assertOk();
+        $this->assertSame([], $this->recipients(StaffNotification::RESTRUCTURE_APPLIED, $loan));
+
+        $this->patchJson("/api/loan-adjustments/{$adjustmentId}/apply")->assertOk();
+
+        $this->assertSame([$officer->id], $this->recipients(StaffNotification::RESTRUCTURE_APPLIED, $loan));
+        $this->assertSame([], $this->recipients(StaffNotification::EXTENSION_APPLIED, $loan));
+        $this->assertSame($adjustmentId, $this->latestOfType($officer, StaffNotification::RESTRUCTURE_APPLIED)->data['data']['adjustment_id']);
+    }
+
+    public function test_applying_a_term_extension_adjustment_tells_its_officer_once(): void
+    {
+        $officer = $this->staff('loan_officer');
+        $loan = $this->createReleasedLoan();
+        $loan->update(['account_officer_id' => $officer->id]);
+
+        $adjustmentId = $this->postJson("/api/loans/{$loan->id}/adjustments", [
+            'adjustment_type' => 'term_extension',
+            'new_values' => ['additional_terms' => 3],
+        ])->assertCreated()->json('data.id');
+        $this->patchJson("/api/loan-adjustments/{$adjustmentId}/approve")->assertOk();
+        $this->patchJson("/api/loan-adjustments/{$adjustmentId}/apply")->assertOk();
+
+        $this->assertSame([$officer->id], $this->recipients(StaffNotification::EXTENSION_APPLIED, $loan));
+        $this->assertCount(1, $this->rowsOfType($officer, StaffNotification::EXTENSION_APPLIED));
+        $this->assertSame([], $this->recipients(StaffNotification::RESTRUCTURE_APPLIED, $loan));
+    }
+
     public function test_extension_and_in_place_restructure_notifications_reach_the_officer(): void
     {
         $officer = $this->staff('loan_officer');
