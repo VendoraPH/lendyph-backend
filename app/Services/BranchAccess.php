@@ -172,8 +172,22 @@ final class BranchAccess
             return null;
         }
 
-        $ids = $user->branches()
-            ->pluck('branches.id')
+        return self::assignedBranchIds($user, $user->branches()->pluck('branches.id'));
+    }
+
+    /**
+     * A restricted user's branches from their `branch_user` ids: those ids,
+     * or the legacy `users.branch_id` when there are none. The one reading of
+     * an assignment, shared by resolve() (which queries the pivot) and
+     * UserReach (which reads the loaded `branches` relation), so the two
+     * can't drift.
+     *
+     * @param  iterable<int|string>  $pivotBranchIds
+     * @return list<int>
+     */
+    public static function assignedBranchIds(User $user, iterable $pivotBranchIds): array
+    {
+        $ids = collect($pivotBranchIds)
             ->map(fn ($id) => (int) $id)
             ->unique()
             ->values()

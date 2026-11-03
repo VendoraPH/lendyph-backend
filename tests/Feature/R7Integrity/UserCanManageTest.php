@@ -3,6 +3,7 @@
 namespace Tests\Feature\R7Integrity;
 
 use App\Models\Branch;
+use App\Models\Role;
 use App\Models\User;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Testing\TestResponse;
@@ -56,6 +57,54 @@ class UserCanManageTest extends TestCase
         $this->assertTrue($rows[$caller->id], 'The caller always reaches themselves.');
 
         $this->assertParity($rows, $caller);
+    }
+
+    public function test_a_caller_s_deactivated_role_grants_them_no_reach(): void
+    {
+        $approvals = Role::create(['name' => 'r7_approvals', 'guard_name' => 'web', 'is_system' => false, 'is_active' => true]);
+        $approvals->syncPermissions(['loans:approve']);
+        $switchedOff = Role::create(['name' => 'r7_switched_off', 'guard_name' => 'web', 'is_system' => false, 'is_active' => false]);
+        $switchedOff->syncPermissions(['loans:approve']);
+
+        $approver = $this->userIn([$this->branch], 'viewer');
+        $approver->assignRole($approvals);
+        $holdsOnlyTheOffRole = $this->userIn([$this->branch], 'viewer');
+        $holdsOnlyTheOffRole->assignRole($switchedOff);
+
+        $caller = $this->branchManager();
+        $caller->assignRole($switchedOff);
+        $this->actingAs($caller);
+
+        $rows = $this->canManageById();
+
+        $this->assertFalse($rows[$approver->id], 'loans:approve comes only from the caller\'s deactivated role.');
+        $this->assertTrue($rows[$holdsOnlyTheOffRole->id], 'A deactivated role grants the target nothing either.');
+
+        $this->assertParity($rows, $caller);
+    }
+
+    public function test_a_user_with_only_the_legacy_branch_column_is_read_by_that_column(): void
+    {
+        $legacyPeer = $this->legacyUserIn($this->branch, 'viewer');
+        $bridging = $this->userIn([$this->branch, $this->far], 'viewer');
+        $peer = $this->userIn([$this->branch], 'viewer');
+
+        $caller = $this->branchManager();
+        $this->actingAs($caller);
+        $rows = $this->canManageById();
+
+        $this->assertTrue($rows[$legacyPeer->id], 'Only users.branch_id, inside the caller\'s branch.');
+        $this->assertParity($rows, $caller);
+
+        $legacyCaller = $this->legacyUserIn($this->branch, 'viewer');
+        $legacyCaller->givePermissionTo(['users:view', 'users:update', 'users:reset_password', 'users:delete']);
+        $this->app['auth']->forgetGuards();
+        $this->actingAs($legacyCaller);
+        $rows = $this->canManageById();
+
+        $this->assertTrue($rows[$peer->id], 'A caller with only users.branch_id reaches that branch.');
+        $this->assertFalse($rows[$bridging->id]);
+        $this->assertParity($rows, $legacyCaller);
     }
 
     public function test_a_view_all_caller_manages_everyone_but_the_super_admin(): void
@@ -113,10 +162,22 @@ class UserCanManageTest extends TestCase
 
     public function test_the_query_count_stays_the_same_as_rows_grow(): void
     {
-        $caller = $this->branchManager();
+        $this->assertQueryCountIsConstant($this->branchManager());
+    }
+
+    public function test_the_query_count_stays_the_same_for_a_view_all_caller(): void
+    {
+        $this->assertQueryCountIsConstant($this->userIn([$this->branch], 'admin'));
+    }
+
+    private function assertQueryCountIsConstant(User $caller): void
+    {
         $this->userIn([$this->branch], 'viewer');
         $this->userIn([$this->branch], 'loan_officer');
 
+        // Spatie loads its permission cache on the first check of a run (two
+        // queries, once); warm it so only per-row queries could differ.
+        $this->countQueries($caller);
         $small = $this->countQueries($caller);
 
         foreach (range(1, 8) as $i) {
@@ -202,6 +263,17 @@ class UserCanManageTest extends TestCase
         $user->assignRole($role);
 
         return $user;
+    }
+
+    /**
+     * A user with no `branch_user` rows, only the legacy `users.branch_id`.
+     */
+    private function legacyUserIn(Branch $branch, string $role): User
+    {
+        $user = $this->userIn([$branch], $role);
+        $user->branches()->detach();
+
+        return $user->refresh();
     }
 
     /**

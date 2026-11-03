@@ -79,7 +79,7 @@ final class UserReach
     /**
      * $target's branches as BranchAccess::for() reads them, from the loaded
      * relations: none to compare for `branches:view_all` (or a super_admin),
-     * else the assigned branches, falling back to the legacy `users.branch_id`.
+     * else BranchAccess::assignedBranchIds() over the loaded `branches`.
      *
      * @param  Collection<int, string>  $permissions
      * @return list<int>
@@ -90,16 +90,6 @@ final class UserReach
             return [];
         }
 
-        $ids = $target->branches
-            ->map(fn ($branch) => (int) $branch->getKey())
-            ->unique()
-            ->values()
-            ->all();
-
-        if ($ids === [] && $target->branch_id !== null) {
-            $ids = [(int) $target->branch_id];
-        }
-
-        return $ids;
+        return BranchAccess::assignedBranchIds($target, $target->branches->modelKeys());
     }
 }

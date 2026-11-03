@@ -15,8 +15,10 @@ class UserResource extends JsonResource
     private ?bool $canManage = null;
 
     /**
-     * Whether the caller may edit, reset, deactivate and reactivate this
-     * user: false exactly when those requests would answer the masked 404.
+     * Whether the caller can reach this user (UserReach): false exactly when
+     * edit, reset password, deactivate and reactivate would answer the masked
+     * 404 for this target. Each action still needs its own permission
+     * (users:update, users:delete, users:reset_password).
      */
     public function withCanManage(bool $canManage): static
     {

@@ -38,7 +38,7 @@ class UserController extends Controller
     #[OA\Get(
         path: '/api/users',
         summary: 'List users',
-        description: 'Get a paginated list of all users. Each row carries `can_manage`: false when edit, reset password, deactivate and reactivate would answer 404 for the caller (the target is a super_admin and the caller is not, or, for a caller without `branches:view_all`, the target holds a permission the caller lacks or works in a branch outside the caller\'s). Only this list carries it.',
+        description: 'Get a paginated list of all users. Each row carries `can_manage`: the caller can reach this user; each action still needs its own permission (users:update, users:delete, users:reset_password). It is false when edit, reset password, deactivate and reactivate would answer 404 for this target (the target is a super_admin and the caller is not, or, for a caller without `branches:view_all`, the target holds a permission the caller lacks or works in a branch outside the caller\'s). Only this list carries it.',
         tags: ['Users'],
         security: [['sanctum' => []]],
         parameters: [
@@ -90,9 +90,15 @@ class UserController extends Controller
         // Only users sharing one of the caller's branches, unless the caller
         // holds `branches:view_all`. The list and `meta.stats` take the same
         // scope, so the tabs count the rows the caller can see.
-        // `roles.permissions` and `permissions` are for each row's
-        // `can_manage` (UserReach), loaded here so it asks nothing per row.
-        $users = User::with('branch', 'branches', 'roles.permissions', 'permissions')
+        // A scoped caller's `can_manage` (UserReach) compares each row's
+        // permissions, so they're loaded here and it asks nothing per row. A
+        // `branches:view_all` caller reaches everyone; only the roles count.
+        $relations = ['branch', 'branches', 'roles'];
+        if (app(BranchAccess::class)->for($viewer) !== null) {
+            $relations = [...$relations, 'roles.permissions', 'permissions'];
+        }
+
+        $users = User::with($relations)
             ->visibleTo($viewer)
             ->when(filled($search), function ($query) use ($search) {
                 $like = LikePattern::contains($search);
@@ -129,7 +135,7 @@ class UserController extends Controller
         $canManage = $users->getCollection()
             ->mapWithKeys(fn (User $user) => [$user->getKey() => $reach->canManage($user)]);
 
-        // The direct permissions were loaded for `can_manage` only. Dropped
+        // Any direct permissions were loaded for `can_manage` only. Dropped
         // again so the rows keep their shape: UserResource lists a user's
         // permissions whenever that relation is loaded.
         $users->getCollection()->each->unsetRelation('permissions');

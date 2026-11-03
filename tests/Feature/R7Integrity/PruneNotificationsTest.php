@@ -108,6 +108,21 @@ class PruneNotificationsTest extends TestCase
         $this->assertSame(1, DatabaseNotification::count());
     }
 
+    public function test_a_window_above_ten_years_is_refused(): void
+    {
+        $this->notification('read, 1 day', daysAgo: 1, read: true);
+
+        $this->artisan('notifications:prune --days=3651')
+            ->expectsOutputToContain('--days must be a whole number of days, from 1 to 3650.')
+            ->assertFailed();
+        $this->artisan('notifications:prune --read-days=3651')
+            ->expectsOutputToContain('--read-days must be a whole number of days, from 1 to 3650.')
+            ->assertFailed();
+        $this->artisan('notifications:prune --days=3650 --read-days=3650')->assertSuccessful();
+
+        $this->assertSame(1, DatabaseNotification::count());
+    }
+
     public function test_created_at_is_indexed(): void
     {
         $indexed = collect(Schema::getIndexes('notifications'))

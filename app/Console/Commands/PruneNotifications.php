@@ -23,13 +23,18 @@ use Illuminate\Notifications\DatabaseNotification;
  * 2026_11_03_120000 migration indexes.
  */
 #[Signature('notifications:prune
-    {--read-days=90 : Days after which a read notification is deleted}
-    {--days=365 : Days after which any notification is deleted, read or not}
+    {--read-days=90 : Days after which a read notification is deleted (1 to 3650)}
+    {--days=365 : Days after which any notification is deleted, read or not (1 to 3650)}
     {--dry-run : Count what would be deleted without touching anything}')]
 #[Description('Delete read notifications past the read window and any notification past the outer window')]
 class PruneNotifications extends Command
 {
     private const CHUNK = 1000;
+
+    /**
+     * Ten years: the longest window either option accepts.
+     */
+    private const MAX_DAYS = 3650;
 
     public function handle(): int
     {
@@ -84,15 +89,16 @@ class PruneNotifications extends Command
     }
 
     /**
-     * A window option as whole days, at least 1. Anything else is refused, so
-     * a typo can't turn into "delete everything".
+     * A window option as whole days, from 1 to MAX_DAYS. Anything else is
+     * refused, so a typo (a 0, a stray letter, an extra digit) is reported
+     * instead of quietly deleting everything or nothing.
      */
     private function days(string $option): ?int
     {
         $value = (string) $this->option($option);
 
-        if (! ctype_digit($value) || (int) $value < 1) {
-            $this->error("--{$option} must be a whole number of days, at least 1.");
+        if (! ctype_digit($value) || (int) $value < 1 || (int) $value > self::MAX_DAYS) {
+            $this->error("--{$option} must be a whole number of days, from 1 to ".self::MAX_DAYS.'.');
 
             return null;
         }
