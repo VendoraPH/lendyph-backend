@@ -8,7 +8,9 @@ use App\Models\LoanAdjustment;
 use App\Models\Repayment;
 use App\Models\User;
 use App\Services\RepaymentService;
+use Closure;
 use Illuminate\Support\Facades\Log;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\Feature\InsuranceOwed\Concerns\OwesInsurancePremium;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
@@ -121,10 +123,11 @@ class ExtensionPayCollectsOwedTest extends TestCase
         $this->patchJson("/api/loan-adjustments/{$id}/apply")->assertOk();
     }
 
-    /** Nothing written: no payment, no adjustment, the periods as they were. */
+    /** Nothing written: no payment, no adjustment, the periods and the premium owed as they were. */
     private function assertExtensionRefused(Loan $loan, string $option, string $message): void
     {
         $periodsBefore = $loan->amortizationSchedules()->orderBy('id')->get()->toArray();
+        $premiumOwedBefore = (string) $loan->fresh()->insurance_remaining_balance;
 
         $this->getJson("/api/loans/{$loan->id}/extension-preview?interest_option={$option}")
             ->assertUnprocessable()
@@ -136,6 +139,7 @@ class ExtensionPayCollectsOwedTest extends TestCase
         $this->assertSame(0, Repayment::where('loan_id', $loan->id)->count());
         $this->assertSame(0, LoanAdjustment::where('loan_id', $loan->id)->where('adjustment_type', 'extension')->count());
         $this->assertSame($periodsBefore, $loan->amortizationSchedules()->orderBy('id')->get()->toArray());
+        $this->assertSame($premiumOwedBefore, (string) $loan->fresh()->insurance_remaining_balance);
     }
 
     private function newPeriod(Loan $loan): AmortizationSchedule
@@ -406,11 +410,39 @@ class ExtensionPayCollectsOwedTest extends TestCase
         $this->assertSame('released', $loan->fresh()->status);
     }
 
-    public function test_a_collection_applied_differently_from_its_quote_is_logged_and_refused(): void
+    /**
+     * How the swapped-in service misreports the allocation: ₱0.01 moved
+     * from penalty to interest (the total unchanged), or ₱0.01 reported on
+     * principal, which an extension's collection never reaches.
+     *
+     * @return array<string, array{Closure(Repayment): void}>
+     */
+    public static function offQuoteApplications(): array
     {
-        $loan = $this->oneMonthLoan('2026-07-30');
-        $this->app->instance(RepaymentService::class, new class extends RepaymentService
+        return [
+            'penalty to interest' => [function (Repayment $repayment): void {
+                $repayment->penalty_applied = (float) $repayment->penalty_applied - 0.01;
+                $repayment->interest_applied = (float) $repayment->interest_applied + 0.01;
+            }],
+            'a centavo on principal' => [function (Repayment $repayment): void {
+                $repayment->principal_applied = (float) $repayment->principal_applied + 0.01;
+            }],
+        ];
+    }
+
+    /**
+     * @param  Closure(Repayment): void  $misreport
+     */
+    #[DataProvider('offQuoteApplications')]
+    public function test_a_collection_applied_differently_from_its_quote_is_logged_and_refused(Closure $misreport): void
+    {
+        $this->travelTo('2026-11-20 09:00:00');
+        // Owes the ₱400.00 premium, a penalty and the interest.
+        $loan = $this->oneMonthLoanOwingPremium(now()->subDays(10)->toDateString());
+        $this->app->instance(RepaymentService::class, new class($misreport) extends RepaymentService
         {
+            public function __construct(private Closure $misreport) {}
+
             public function recordRepaymentOnLockedLoan(
                 Loan $loan,
                 float $amountPaid,
@@ -423,27 +455,20 @@ class ExtensionPayCollectsOwedTest extends TestCase
                 bool $preview = false,
             ): Repayment {
                 $repayment = parent::recordRepaymentOnLockedLoan($loan, $amountPaid, $paymentDate, $user, $remarks, $method, $referenceNumber, $postToBooks, $preview);
-                $repayment->penalty_applied = (float) $repayment->penalty_applied - 0.01;
-                $repayment->interest_applied = (float) $repayment->interest_applied + 0.01;
+                ($this->misreport)($repayment);
 
                 return $repayment;
             }
         });
         Log::spy();
-        $message = 'The amount to collect could not be applied as quoted, so nothing was charged. Refresh and try again.';
+        $maturityBefore = $loan->maturity_date->toDateString();
 
-        $this->getJson("/api/loans/{$loan->id}/extension-preview?interest_option=pay")
-            ->assertUnprocessable()
-            ->assertJsonPath('errors.loan.0', $message);
-        $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'pay'])
-            ->assertUnprocessable()
-            ->assertJsonPath('errors.loan.0', $message);
+        $this->assertExtensionRefused($loan, 'pay', 'The amount to collect could not be applied as quoted, so nothing was charged. Refresh and try again.');
 
         Log::shouldHaveReceived('error')
             ->with('Loan extension: the collection did not apply what was quoted; extension refused.', \Mockery::type('array'))
             ->twice();
-        $this->assertSame(0, Repayment::where('loan_id', $loan->id)->count());
-        $this->assertSame(0, LoanAdjustment::where('loan_id', $loan->id)->where('adjustment_type', 'extension')->count());
-        $this->assertSame('2026-05-27', $loan->fresh()->maturity_date->toDateString());
+        $this->assertEqualsWithDelta(self::OWED, $this->owed($loan), 0.001);
+        $this->assertSame($maturityBefore, $loan->fresh()->maturity_date->toDateString());
     }
 }

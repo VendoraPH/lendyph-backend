@@ -422,6 +422,9 @@ class LoanAdjustmentService
         $this->assertExtendable($loan);
 
         return $this->repaymentService->rolledBackUnderPaymentLock($loan, function (Loan $loan) use ($interestOption, $user, $asOf): array {
+            // Again under the lock, as extendLoan() does in lockLoanForExtension().
+            $this->assertSingleOpenPeriod($this->openSchedules($loan));
+
             $collectNow = ['amount' => 0.0, 'insurance_part' => 0.0, 'penalty_part' => 0.0, 'interest_part' => 0.0];
             $quoted = $this->extensionCollection($loan, $asOf);
             $collectAmount = $quoted['amount'];
@@ -472,10 +475,11 @@ class LoanAdjustmentService
      * The penalty is what the payment's own penalty step will charge on
      * `$asOf` (RepaymentService::penaltyAsOf(), which writes nothing), less
      * what is already paid toward it; a period it leaves alone owes its
-     * stamped penalty. assertExtendable() allows only one open period, so the
-     * amount reaches no principal; assertCollectedAsQuoted() checks it. Read under the loan's lock, in whole centavos.
-     * extendLoan() charges it and extensionPreview() quotes it, so the two
-     * cannot drift.
+     * stamped penalty. Only one open period is allowed
+     * (assertSingleOpenPeriod(), checked again under the lock), so the amount
+     * reaches no principal; assertCollectedAsQuoted() checks it. Read under
+     * the loan's lock, in whole centavos. extendLoan() charges it and
+     * extensionPreview() quotes it, so the two cannot drift.
      *
      * @return array{insurance: float, penalty: float, interest: float, amount: float}
      */
@@ -552,7 +556,7 @@ class LoanAdjustmentService
      *
      * @param  \Illuminate\Database\Eloquent\Collection<int, AmortizationSchedule>  $openSchedules
      */
-    private function assertPrincipalLeftToExtend($openSchedules): void
+    private function assertPrincipalLeftToExtend(\Illuminate\Database\Eloquent\Collection $openSchedules): void
     {
         $carryCentavos = $openSchedules->sum(
             fn (AmortizationSchedule $s) => LoanService::toCentavos((float) $s->principal_due) - LoanService::toCentavos((float) $s->principal_paid),
@@ -598,17 +602,29 @@ class LoanAdjustmentService
             ]);
         }
 
-        // The collection (extensionCollection()) and the carry assume the one
-        // open period a one-month loan has, which every extension leaves; with
-        // more, the allocation would pay one period's principal before the
-        // next one's interest.
+        $this->assertSingleOpenPeriod($openSchedules);
+        $this->assertPrincipalLeftToExtend($openSchedules);
+    }
+
+    /**
+     * Refuse, with a 422, a loan with more than one open period. The
+     * collection (extensionCollection()) and the carry assume the one open
+     * period a one-month loan has, which every extension leaves; with more,
+     * the allocation would pay one period's principal before the next one's
+     * interest. Checked before the lock (assertExtendable()) and again under
+     * it, in extendLoan() (lockLoanForExtension()) and extensionPreview(), so
+     * a write committed in between (a void reopening a closed period) cannot
+     * slip a second open period in.
+     *
+     * @param  \Illuminate\Database\Eloquent\Collection<int, AmortizationSchedule>  $openSchedules
+     */
+    private function assertSingleOpenPeriod(\Illuminate\Database\Eloquent\Collection $openSchedules): void
+    {
         if ($openSchedules->count() > 1) {
             throw ValidationException::withMessages([
                 'loan' => 'This loan has more than one open period, so it cannot be extended.',
             ]);
         }
-
-        $this->assertPrincipalLeftToExtend($openSchedules);
     }
 
     /**
@@ -677,9 +693,12 @@ class LoanAdjustmentService
      * first; extending again would roll the loan forward twice and collect the
      * interest twice. A loan no longer released or ongoing, or left with no
      * open period, has likewise moved under the request. `$loan` is then
-     * refreshed from its locked row.
+     * refreshed from its locked row. One left with more than one open period
+     * (a void committed since reopened one) is refused with the same 422 as
+     * assertExtendable() (assertSingleOpenPeriod()).
      *
      * @throws HttpResponseException 409 when the loan changed since it was read
+     * @throws ValidationException 422 when it has more than one open period
      */
     private function lockLoanForExtension(Loan $loan): void
     {
@@ -695,9 +714,13 @@ class LoanAdjustmentService
 
         $loan->setRawAttributes($locked->getAttributes(), true);
 
-        if (! $loan->amortizationSchedules()->whereIn('status', ['pending', 'partial', 'overdue'])->exists()) {
+        $openSchedules = $this->openSchedules($loan);
+
+        if ($openSchedules->isEmpty()) {
             throw LoanWriteTransaction::conflict();
         }
+
+        $this->assertSingleOpenPeriod($openSchedules);
     }
 
     /**
