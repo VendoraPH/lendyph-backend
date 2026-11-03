@@ -1000,6 +1000,8 @@ class LoanService
         // on this one.
         app(LoanApprovalChainService::class)->markApprovedOutOfBand($loan, $approver);
 
+        app(Notifications::class)->loanApproved($loan, $approver);
+
         return $loan;
     }
 
@@ -1066,6 +1068,8 @@ class LoanService
             'rejected_by' => $approver->id,
             'rejected_at' => now(),
         ]);
+
+        app(Notifications::class)->loanRejected($loan, $approver, $remarks);
 
         return $loan;
     }
@@ -1176,7 +1180,7 @@ class LoanService
         // A deadlock or lock wait timeout is a 409, not a 500. This is the
         // outermost transaction: LoanController::release() and the test
         // helpers are the only callers.
-        return LoanWriteTransaction::run(function () use ($loan, $releaser, $insurance, $feeFingerprint, $heldBefore) {
+        $released = LoanWriteTransaction::run(function () use ($loan, $releaser, $insurance, $feeFingerprint, $heldBefore) {
             // THE FIRST STATEMENT IN THIS TRANSACTION, and it has to stay that
             // way. Under REPEATABLE READ the consistent snapshot is fixed by the
             // first plain SELECT, and neither a locking read nor DML moves it —
@@ -1334,6 +1338,17 @@ class LoanService
 
             return $loan;
         });
+
+        // Staff notifications, once the release has committed. Outside the
+        // transaction so nothing is added after the pledge assertion above.
+        $notifications = app(Notifications::class);
+        $notifications->loanReleased($released, $releaser);
+
+        if ($released->source_loan_id !== null && $released->sourceLoan !== null) {
+            $notifications->restructuredIntoNewLoan($released, $released->sourceLoan, $releaser);
+        }
+
+        return $released;
     }
 
     /**

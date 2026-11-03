@@ -10,13 +10,17 @@ use App\Http\Resources\LoanAdjustmentResource;
 use App\Models\Loan;
 use App\Models\LoanAdjustment;
 use App\Services\LoanAdjustmentService;
+use App\Services\Notifications;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use OpenApi\Attributes as OA;
 
 class LoanAdjustmentController extends Controller
 {
-    public function __construct(private LoanAdjustmentService $adjustmentService) {}
+    public function __construct(
+        private LoanAdjustmentService $adjustmentService,
+        private Notifications $notifications,
+    ) {}
 
     #[OA\Get(
         path: '/api/loans/{loan}/adjustments',
@@ -87,6 +91,9 @@ class LoanAdjustmentController extends Controller
         );
 
         $adjustment->load('adjustedByUser', 'loan');
+
+        // The request is the moment an adjustment starts waiting for approval.
+        $this->notifications->adjustmentPending($adjustment, $request->user());
 
         return (new LoanAdjustmentResource($adjustment))
             ->response()

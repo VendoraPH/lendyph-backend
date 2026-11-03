@@ -29,7 +29,10 @@ use Illuminate\Validation\ValidationException;
  */
 class LoanApprovalChainService
 {
-    public function __construct(private LoanService $loanService) {}
+    public function __construct(
+        private LoanService $loanService,
+        private Notifications $notifications,
+    ) {}
 
     /**
      * Snapshot the configured chain onto the loan as round 1.
@@ -98,6 +101,8 @@ class LoanApprovalChainService
             $this->loanService->approve($loan, $submitter, null);
         }
 
+        $this->notifyApprovalNeeded($loan, $pending, $submitter);
+
         return $steps;
     }
 
@@ -138,6 +143,8 @@ class LoanApprovalChainService
             if ($next === null || $next->kind === LoanApprovalStep::KIND_RELEASE) {
                 $this->loanService->approve($loan, $user, $remarks);
             }
+
+            $this->notifyApprovalNeeded($loan, $next, $user);
 
             AuditLogService::log(
                 action: 'loan_step_approved',
@@ -255,7 +262,16 @@ class LoanApprovalChainService
                 userId: $user->id,
             );
 
-            return $loan->approvalSteps()->where('round', $nextRound)->orderBy('step_order')->get();
+            $newRound = $loan->approvalSteps()->where('round', $nextRound)->orderBy('step_order')->get();
+
+            // The creator and the officer hear that it came back; the target
+            // step's role hears that it is theirs to act on, unless they were
+            // just told by the first notification.
+            $target = $newRound->firstWhere('step_order', $targetStepOrder);
+            $toldSentBack = $this->notifications->loanSentBack($loan, $target, $user, $remarks);
+            $this->notifyApprovalNeeded($loan, $target, $user, $toldSentBack);
+
+            return $newRound;
         });
     }
 
@@ -397,6 +413,23 @@ class LoanApprovalChainService
         }
 
         return $roles->contains('name', $step->role);
+    }
+
+    /**
+     * Tell the holders of the step that just became pending that it is theirs.
+     * Only for a step that is still part of review (submit or approve): a
+     * pending release step means the loan is approved, which
+     * LoanService::approve() announces as `loan_approved`.
+     *
+     * @param  list<int>  $skipUserIds
+     */
+    private function notifyApprovalNeeded(Loan $loan, ?LoanApprovalStep $step, ?User $actor, array $skipUserIds = []): void
+    {
+        if ($step === null || $step->kind === LoanApprovalStep::KIND_RELEASE) {
+            return;
+        }
+
+        $this->notifications->approvalNeeded($loan, $step, $actor, $skipUserIds);
     }
 
     /**
