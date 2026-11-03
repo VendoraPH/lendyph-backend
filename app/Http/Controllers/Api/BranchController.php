@@ -81,7 +81,7 @@ class BranchController extends Controller
     #[OA\Get(
         path: '/api/branches/{id}',
         summary: 'Show branch',
-        description: 'Get a specific branch',
+        description: 'Get a specific branch. A branch outside the caller\'s branches answers 404 unless they hold branches:view_all.',
         tags: ['Branches'],
         security: [['sanctum' => []]],
         parameters: [
@@ -95,6 +95,10 @@ class BranchController extends Controller
     )]
     public function show(Branch $branch): BranchResource
     {
+        // Decision B2: a branch the caller can't see answers 404, as a
+        // missing one does, so its existence is not revealed.
+        abort_unless(app(BranchAccess::class)->canSee(request()->user(), $branch->id), 404);
+
         $branch->loadCount('users');
 
         return new BranchResource($branch);

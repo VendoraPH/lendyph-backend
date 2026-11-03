@@ -15,6 +15,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Query\Builder as QueryBuilder;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
+use LogicException;
 
 class ReportService
 {
@@ -2631,20 +2632,30 @@ class ReportService
      * The branches a report covers (decision B2, least privilege): the one
      * `branch_id` filter when given (ReportController has already refused a
      * branch the caller can't see), else `branch_ids`, the caller's own
-     * branches as BranchAccess::for() answers them. Null means every branch:
-     * a caller holding `branches:view_all`, or a caller that sets neither.
-     * An empty list matches no rows.
+     * branches as BranchAccess::for() answers them. Null means every branch,
+     * and only a caller holding `branches:view_all` gets it. An empty list
+     * matches no rows.
+     *
+     * Fails closed: `branch_ids` must always be present (null included), so a
+     * future caller that forgets to scope gets an exception, never the whole
+     * organisation.
      *
      * @param  array<string, mixed>  $filters
      * @return list<int>|null
+     *
+     * @throws LogicException when `branch_ids` is missing
      */
     private static function branchScope(array $filters): ?array
     {
+        if (! array_key_exists('branch_ids', $filters)) {
+            throw new LogicException('Report filters must carry branch_ids (null only for branches:view_all).');
+        }
+
         if (filled($filters['branch_id'] ?? null)) {
             return [(int) $filters['branch_id']];
         }
 
-        if (! isset($filters['branch_ids'])) {
+        if ($filters['branch_ids'] === null) {
             return null;
         }
 

@@ -63,7 +63,7 @@ class DashboardController extends Controller
             $period = 'week';
         }
 
-        return response()->json($this->dashboardService->collectionsTrend($period, $this->branchIds()));
+        return response()->json($this->dashboardService->collectionsTrend($this->branchIds(), $period));
     }
 
     #[OA\Get(
@@ -82,7 +82,7 @@ class DashboardController extends Controller
     {
         $this->authorize('dashboard:view');
 
-        return response()->json($this->dashboardService->dailyDues(request('date'), $this->branchIds()));
+        return response()->json($this->dashboardService->dailyDues($this->branchIds(), request('date')));
     }
 
     #[OA\Get(
@@ -103,6 +103,6 @@ class DashboardController extends Controller
 
         $limit = max(1, min((int) request('limit', 10), 100));
 
-        return response()->json($this->dashboardService->recentTransactions($limit, $this->branchIds()));
+        return response()->json($this->dashboardService->recentTransactions($this->branchIds(), $limit));
     }
 }

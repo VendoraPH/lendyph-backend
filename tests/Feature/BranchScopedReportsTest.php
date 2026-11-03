@@ -11,9 +11,13 @@ use App\Models\PortfolioDailySnapshot;
 use App\Models\Role;
 use App\Models\User;
 use App\Services\BranchAccess;
+use App\Services\DashboardService;
+use App\Services\ReportService;
 use Illuminate\Routing\Middleware\ThrottleRequests;
 use Illuminate\Support\Carbon;
 use Illuminate\Testing\TestResponse;
+use LogicException;
+use ReflectionMethod;
 use Tests\TestCase;
 use Tests\Traits\PostsJournals;
 use Tests\Traits\SetupLendyPH;
@@ -315,6 +319,64 @@ class BranchScopedReportsTest extends TestCase
         $this->assertSame(70000, $expense($this->getJson("/api/accounting/trial-balance?as_of={$to}")));
     }
 
+    public function test_chart_of_accounts_and_cash_account_balances_follow_the_callers_branches(): void
+    {
+        $this->seedChartOfAccounts();
+        $lines = fn (int $centavos) => [
+            ['account_id' => $this->account('5030'), 'debit' => $centavos, 'credit' => 0],
+            ['account_id' => $this->account('1010'), 'debit' => 0, 'credit' => $centavos],
+        ];
+        $this->postJournal($lines(10000), ['branch_id' => $this->branch->id]);
+        $this->postJournal($lines(20000), ['branch_id' => $this->far->id]);
+        $this->postJournal($lines(40000), ['branch_id' => null]);
+
+        $cash = $this->account('1010');
+        $expense = $this->account('5030');
+        $balanceIn = fn (TestResponse $page, int $id) => collect($page->json('data'))->firstWhere('id', $id)['balance'];
+
+        $this->actingAs($this->branchUser());
+
+        $this->assertSame(10000, $balanceIn($this->getJson('/api/accounting/accounts?per_page=100')->assertOk(), $expense));
+        $this->assertSame(10000, $this->getJson("/api/accounting/accounts/{$expense}")->assertOk()->json('data.balance'));
+        $branchCash = $balanceIn($this->getJson('/api/accounting/cash-accounts?per_page=100')->assertOk(), $cash);
+        $this->assertSame(
+            $this->getJson("/api/accounting/accounts/{$cash}")->json('data.balance'),
+            $branchCash,
+        );
+
+        foreach (['/api/accounting/accounts', '/api/accounting/cash-accounts', "/api/accounting/accounts/{$expense}"] as $endpoint) {
+            $this->getJson("{$endpoint}?branch_id={$this->far->id}")->assertForbidden();
+            $this->getJson("{$endpoint}?branch_id={$this->branch->id}")->assertOk();
+        }
+
+        // view_all: every branch, unbranched journals included; a branch
+        // filter narrows to that branch alone.
+        $this->actingAs($this->admin);
+        $this->assertSame(70000, $balanceIn($this->getJson('/api/accounting/accounts?per_page=100')->assertOk(), $expense));
+        $this->assertSame(20000, $this->getJson("/api/accounting/accounts/{$expense}?branch_id={$this->far->id}")->json('data.balance'));
+        $this->assertSame(
+            $branchCash,
+            $balanceIn($this->getJson("/api/accounting/cash-accounts?per_page=100&branch_id={$this->branch->id}")->assertOk(), $cash),
+        );
+    }
+
+    public function test_report_filters_without_a_branch_scope_fail_closed(): void
+    {
+        $this->expectException(LogicException::class);
+
+        app(ReportService::class)->listOfReleasesTotals([]);
+    }
+
+    public function test_dashboard_figures_need_an_explicit_branch_scope(): void
+    {
+        foreach (['stats', 'collectionsTrend', 'dailyDues', 'recentTransactions'] as $method) {
+            $parameter = (new ReflectionMethod(DashboardService::class, $method))->getParameters()[0];
+
+            $this->assertSame('branchIds', $parameter->getName(), "{$method}() takes the scope first");
+            $this->assertFalse($parameter->isOptional(), "{$method}() must not default the scope to the whole organisation");
+        }
+    }
+
     // -----------------------------------------------------------------
     // Audit logs
     // -----------------------------------------------------------------
@@ -386,6 +448,17 @@ class BranchScopedReportsTest extends TestCase
         $this->assertContains($this->far->id, $all);
     }
 
+    public function test_another_branch_answers_404_on_show(): void
+    {
+        $this->actingAs($this->branchUser());
+
+        $this->getJson("/api/branches/{$this->far->id}")->assertNotFound();
+        $this->getJson("/api/branches/{$this->branch->id}")->assertOk()->assertJsonPath('data.id', $this->branch->id);
+
+        $this->actingAs($this->admin);
+        $this->getJson("/api/branches/{$this->far->id}")->assertOk()->assertJsonPath('data.id', $this->far->id);
+    }
+
     // -----------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------
@@ -399,7 +472,7 @@ class BranchScopedReportsTest extends TestCase
         $role->syncPermissions([
             'reports:view', 'reports:export', 'dashboard:view', 'payments:view',
             'accounting:view', 'audit_logs:view', 'audit_logs:export', 'gcash:view',
-            'loans:view', 'borrowers:view',
+            'loans:view', 'borrowers:view', 'chart_of_accounts:view', 'cash_accounts:view',
         ]);
 
         return $role;

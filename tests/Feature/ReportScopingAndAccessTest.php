@@ -293,6 +293,51 @@ class ReportScopingAndAccessTest extends TestCase
     }
 
     /**
+     * Decision B2: a viewer without `branches:view_all` and without
+     * `reports:export` gets exactly the aggregates super_admin sees for the
+     * viewer's own branch, so neither the branch scope nor the roster gate
+     * moves a number, and the other branch's member never counts.
+     */
+    public function test_a_scoped_viewer_gets_super_admins_figures_for_their_own_branch(): void
+    {
+        $today = Carbon::today()->toDateString();
+        $satellite = Branch::factory()->create(['name' => 'Satellite Branch']);
+
+        $first = $this->memberOf($this->branch);
+        $second = $this->memberOf($this->branch);
+        $this->ledgerEntry($first, $today, credit: 4000);
+        $this->ledgerEntry($second, $today, credit: 1500);
+        $this->ledgerEntry($second, $today, debit: 500);
+        $this->ledgerEntry($this->memberOf($satellite), $today, credit: 9000);
+
+        $url = "/api/reports/share-capital?date_from={$today}&date_to={$today}";
+
+        $superAdmin = $this->getJson("{$url}&branch_id={$this->branch->id}")->assertOk()->json('data');
+
+        $viewer = $this->userWithRole('viewer');
+        $this->assertFalse($viewer->can(BranchAccess::VIEW_ALL));
+        $this->assertFalse($viewer->can('reports:export'));
+        $this->actingAs($viewer);
+        $scoped = $this->getJson($url)->assertOk()->json('data');
+
+        foreach ([
+            'opening_balance', 'credits', 'debits', 'net_movement', 'closing_balance',
+            'entry_count', 'member_count', 'members_with_activity', 'branch_scope',
+            'subscription', 'by_month',
+        ] as $key) {
+            $this->assertEquals(
+                $superAdmin[$key],
+                $scoped[$key],
+                "`{$key}` must equal super_admin's figure for the viewer's branch.",
+            );
+        }
+
+        $this->assertSame(2, $scoped['member_count']);
+        $this->assertNull($scoped['by_member']);
+        $this->getJson("{$url}&branch_id={$satellite->id}")->assertForbidden();
+    }
+
+    /**
      * The gate is server-side. A caller cannot ask for the roster back.
      */
     public function test_a_client_cannot_re_enable_by_member_through_the_query_string(): void

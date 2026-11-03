@@ -34,10 +34,12 @@ class DashboardService
      * the caller's branches as BranchAccess::for() answers them, null for
      * `branches:view_all` (the whole organisation). Loans count by their
      * branch, payments by their loan's branch. An empty list matches nothing.
+     * The scope has no default, so no caller can forget it and read the
+     * whole organisation by accident.
      *
      * @param  list<int>|null  $branchIds
      */
-    public function stats(?array $branchIds = null): array
+    public function stats(?array $branchIds): array
     {
         $monthStart = Carbon::now()->startOfMonth();
 
@@ -92,7 +94,7 @@ class DashboardService
     /**
      * @param  list<int>|null  $branchIds
      */
-    public function collectionsTrend(string $period = 'week', ?array $branchIds = null): array
+    public function collectionsTrend(?array $branchIds, string $period = 'week'): array
     {
         return match ($period) {
             'month' => $this->monthlyTrend($branchIds),
@@ -201,7 +203,7 @@ class DashboardService
     /**
      * @param  list<int>|null  $branchIds
      */
-    public function dailyDues(?string $date = null, ?array $branchIds = null): array
+    public function dailyDues(?array $branchIds, ?string $date = null): array
     {
         $targetDate = $date ? Carbon::parse($date) : Carbon::today();
 
@@ -317,7 +319,7 @@ class DashboardService
     /**
      * @param  list<int>|null  $branchIds
      */
-    public function recentTransactions(int $limit = 10, ?array $branchIds = null): array
+    public function recentTransactions(?array $branchIds, int $limit = 10): array
     {
         $payments = $this->repayments($branchIds)
             ->with('loan.borrower')
@@ -487,7 +489,8 @@ class DashboardService
     }
 
     /**
-     * The sparkline cache key's scope part: `all`, or the sorted branch ids.
+     * The sparkline cache key's scope part: `all`, or a hash of the sorted
+     * branch ids, so a user in many branches never builds an unbounded key.
      *
      * @param  list<int>|null  $branchIds
      */
@@ -499,6 +502,6 @@ class DashboardService
 
         sort($branchIds);
 
-        return 'branches-'.implode('-', $branchIds);
+        return 'branches-'.sha1(implode(',', $branchIds));
     }
 }
