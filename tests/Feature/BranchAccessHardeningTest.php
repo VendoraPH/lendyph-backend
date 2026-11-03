@@ -275,6 +275,36 @@ class BranchAccessHardeningTest extends TestCase
         $this->postJson("/api/users/{$peer->id}/reset-password", $reset)->assertSuccessful();
     }
 
+    public function test_m1_deactivate_and_reactivate_refuse_a_user_beyond_the_callers_reach(): void
+    {
+        $overseer = User::factory()->inBranches($this->branch)->create();
+        $overseer->assignRole('manager');
+        $inactiveOverseer = User::factory()->inBranches($this->branch)->create(['status' => 'inactive']);
+        $inactiveOverseer->assignRole('manager');
+        $bridging = User::factory()->inBranches($this->branch, $this->far)->create();
+        $bridging->assignRole('viewer');
+        $peer = User::factory()->inBranches($this->branch)->create();
+        $peer->assignRole('viewer');
+
+        $caller = $this->branchManager();
+        $caller->givePermissionTo('users:delete');
+        $this->actingAs($caller);
+
+        $this->patchJson("/api/users/{$overseer->id}/deactivate")->assertNotFound();
+        $this->patchJson("/api/users/{$bridging->id}/deactivate")->assertNotFound();
+        $this->patchJson("/api/users/{$inactiveOverseer->id}/reactivate")->assertNotFound();
+
+        $this->assertSame('active', $overseer->fresh()->status);
+        $this->assertSame('active', $bridging->fresh()->status);
+        $this->assertSame('inactive', $inactiveOverseer->fresh()->status);
+
+        // A peer inside the caller's reach is still managed as before.
+        $this->patchJson("/api/users/{$peer->id}/deactivate")->assertOk();
+        $this->assertSame('inactive', $peer->fresh()->status);
+        $this->patchJson("/api/users/{$peer->id}/reactivate")->assertOk();
+        $this->assertSame('active', $peer->fresh()->status);
+    }
+
     // M2 ---------------------------------------------------------------
 
     public function test_m2_auto_credit_status_and_run_cover_only_the_callers_members(): void
