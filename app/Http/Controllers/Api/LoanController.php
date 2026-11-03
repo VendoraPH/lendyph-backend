@@ -701,6 +701,7 @@ DESC,
         ),
         responses: [
             new OA\Response(response: 200, description: 'Loan approved'),
+            new OA\Response(response: 409, description: 'Another decision on this loan (an approve, a reject or an approval-chain step) was saved at the same time, or the write deadlocked; nothing was written and nobody was notified. Message: "Another change to this loan was saved at the same time. Reload and try again."'),
             new OA\Response(response: 422, description: 'Invalid status transition'),
         ],
     )]
@@ -731,6 +732,7 @@ DESC,
         ),
         responses: [
             new OA\Response(response: 200, description: 'Loan rejected'),
+            new OA\Response(response: 409, description: 'Another decision on this loan (an approve, a reject or an approval-chain step) was saved at the same time, or the write deadlocked; nothing was written and nobody was notified. Message: "Another change to this loan was saved at the same time. Reload and try again."'),
             new OA\Response(response: 422, description: 'Invalid status transition'),
         ],
     )]

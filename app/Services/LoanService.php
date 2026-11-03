@@ -953,7 +953,67 @@ class LoanService
         });
     }
 
+    /**
+     * Approve a loan in review: PATCH /loans/{id}/approve.
+     *
+     * The checks before the transaction refuse, with the 422 or 403 they
+     * always were, an approval that was wrong from the start. The transaction
+     * then locks the loan row (lockLoanInReview()) and reads its status again
+     * under that lock: a loan another request approved, rejected or otherwise
+     * moved since this one read it is a 409 and is left exactly as that
+     * request left it, as is a deadlock or a lock wait timeout. So an approve
+     * and a reject (or two of either) that collide never both succeed, and
+     * only the one that commits notifies: the notice waits for the commit.
+     *
+     * No collateral lock: `approved` is not one of Loan::PLEDGING_STATUSES, so
+     * an approval changes nothing a collateral write guards.
+     *
+     * This is the outermost transaction (LoanWriteTransaction::run()). A caller
+     * already inside one that holds the loan's row lock, the approval chain's
+     * seed() and step sign-off, calls approveLocked() instead.
+     */
     public function approve(Loan $loan, User $approver, ?string $remarks): Loan
+    {
+        $this->guardApproval($loan, $approver);
+
+        return LoanWriteTransaction::run(function () use ($loan, $approver, $remarks): Loan {
+            $this->lockLoanInReview($loan);
+
+            return $this->approveLocked($loan, $approver, $remarks);
+        });
+    }
+
+    /**
+     * The approval itself, for a caller inside a LoanWriteTransaction that
+     * already holds the loan's row lock and has read the loan under it
+     * (LoanApprovalChainService::seed() and approve()). Runs every guard
+     * approve() runs, against that locked state.
+     */
+    public function approveLocked(Loan $loan, User $approver, ?string $remarks): Loan
+    {
+        $this->guardApproval($loan, $approver);
+
+        $loan->update([
+            'status' => 'approved',
+            'approved_by' => $approver->id,
+            'approved_at' => now(),
+            'approval_remarks' => $remarks,
+        ]);
+
+        // Keep the chain agreeing with the loan. Only reachable via the
+        // admin/super_admin exemption below or a chainless loan; a chain left
+        // mid-flight against an `approved` loan is actionable by nobody and
+        // strands the release step out of reach of the UI. Resolved from the
+        // container for the same reason `seed()` is: the chain service depends
+        // on this one.
+        app(LoanApprovalChainService::class)->markApprovedOutOfBand($loan, $approver);
+
+        app(Notifications::class)->loanApproved($loan, $approver);
+
+        return $loan;
+    }
+
+    private function guardApproval(Loan $loan, User $approver): void
     {
         $this->guardStatus($loan, 'for_review', 'approve');
 
@@ -984,25 +1044,27 @@ class LoanService
         }
 
         $this->guardApprovalChainIsClear($loan, $approver);
+    }
 
-        $loan->update([
-            'status' => 'approved',
-            'approved_by' => $approver->id,
-            'approved_at' => now(),
-            'approval_remarks' => $remarks,
-        ]);
+    /**
+     * Lock the loan row, as the first statement of the transaction, and
+     * refuse with a 409 unless it is still in review: approve() and reject()
+     * checked that before the transaction opened, so a loan that has left
+     * review since was moved by another request. The route-bound model is
+     * refreshed from the locked row, so the decision works from what is
+     * committed rather than from what the request read before the lock.
+     *
+     * @throws HttpResponseException 409 when the loan was decided or otherwise moved since it was read
+     */
+    private function lockLoanInReview(Loan $loan): void
+    {
+        $locked = Loan::whereKey($loan->getKey())->lockForUpdate()->first();
 
-        // Keep the chain agreeing with the loan. Only reachable via the
-        // admin/super_admin exemption above or a chainless loan; a chain left
-        // mid-flight against an `approved` loan is actionable by nobody and
-        // strands the release step out of reach of the UI. Resolved from the
-        // container for the same reason `seed()` is: the chain service depends
-        // on this one.
-        app(LoanApprovalChainService::class)->markApprovedOutOfBand($loan, $approver);
+        if ($locked === null || $locked->status !== 'for_review') {
+            throw LoanWriteTransaction::conflict();
+        }
 
-        app(Notifications::class)->loanApproved($loan, $approver);
-
-        return $loan;
+        $loan->setRawAttributes($locked->getAttributes(), true);
     }
 
     /**
@@ -1059,19 +1121,36 @@ class LoanService
         }
     }
 
+    /**
+     * Reject a loan in review: PATCH /loans/{id}/reject.
+     *
+     * Under the same lock and re-read as approve(): a reject that read the loan
+     * as in review, when it has since been approved or rejected, is a 409 and
+     * never turns that decision into this one. A loan that was not in review
+     * when it was read is still the 422 it always was. The notice waits for
+     * the commit, so a refused or rolled-back reject tells nobody.
+     *
+     * This is the outermost transaction (LoanWriteTransaction::run());
+     * LoanController::reject() is the only caller.
+     */
     public function reject(Loan $loan, User $approver, ?string $remarks): Loan
     {
         $this->guardStatus($loan, 'for_review', 'reject');
-        $loan->update([
-            'status' => 'rejected',
-            'rejection_remarks' => $remarks,
-            'rejected_by' => $approver->id,
-            'rejected_at' => now(),
-        ]);
 
-        app(Notifications::class)->loanRejected($loan, $approver, $remarks);
+        return LoanWriteTransaction::run(function () use ($loan, $approver, $remarks): Loan {
+            $this->lockLoanInReview($loan);
 
-        return $loan;
+            $loan->update([
+                'status' => 'rejected',
+                'rejection_remarks' => $remarks,
+                'rejected_by' => $approver->id,
+                'rejected_at' => now(),
+            ]);
+
+            app(Notifications::class)->loanRejected($loan, $approver, $remarks);
+
+            return $loan;
+        });
     }
 
     /**
