@@ -8,11 +8,16 @@ Artisan::command('inspire', function () {
     $this->comment(Inspiring::quote());
 })->purpose('Display an inspiring quote');
 
-// Check for defaulted loans daily at 6 AM
-Schedule::command('loans:check-defaulted')->dailyAt('06:00');
+// The overnight loan jobs run just after midnight Manila, so the day's
+// defaulted flags and stamped penalties match "today" from the start of the
+// working day rather than from 6 AM. In order: defaults, penalties, then the
+// past-due notifications, which read the state the first two leave.
+Schedule::command('loans:check-defaulted')->dailyAt('00:05')->timezone('Asia/Manila');
 
-// Apply penalties on overdue schedules daily at 6:05 AM
-Schedule::command('loans:apply-penalties')->dailyAt('06:05');
+Schedule::command('loans:apply-penalties')->dailyAt('00:10')->timezone('Asia/Manila');
+
+// Tell each newly past-due loan's officer, once per past-due episode.
+Schedule::command('notifications:past-due')->dailyAt('00:20')->timezone('Asia/Manila');
 
 // Record the day's portfolio arrears (overdue count and amount, total
 // outstanding, PAR 1/30/90) at the end of the Manila day. The dashboard's

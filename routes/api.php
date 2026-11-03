@@ -42,6 +42,7 @@ use App\Http\Controllers\Api\LoanApprovalStepController;
 use App\Http\Controllers\Api\LoanController;
 use App\Http\Controllers\Api\LoanLedgerController;
 use App\Http\Controllers\Api\LoanProductController;
+use App\Http\Controllers\Api\NotificationController;
 use App\Http\Controllers\Api\PromissoryNoteController;
 use App\Http\Controllers\Api\RepaymentController;
 use App\Http\Controllers\Api\ReportController;
@@ -136,6 +137,13 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::patch('/auth/me', [AuthController::class, 'updateMe']);
     Route::post('/auth/change-password', [AuthController::class, 'changePassword']);
     Route::post('/auth/refresh', [AuthController::class, 'refresh']);
+
+    // In-app notifications: the signed-in user's own, staff only. Literal
+    // segments before `{id}`; ids are UUIDs.
+    Route::get('/notifications', [NotificationController::class, 'index']);
+    Route::get('/notifications/unread-count', [NotificationController::class, 'unreadCount']);
+    Route::post('/notifications/read-all', [NotificationController::class, 'markAllRead']);
+    Route::post('/notifications/{id}/read', [NotificationController::class, 'markRead'])->whereUuid('id');
 
     // Users
     // Two constraints, both load-bearing, from different changes.

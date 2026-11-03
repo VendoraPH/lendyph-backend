@@ -13,7 +13,8 @@ use Tests\Traits\SetupLendyPH;
  * date to the first anchored date strictly after the extension date, and
  * charges one cycle of fresh interest per anchored cycle the due date moves
  * (at least 1). The preview quotes `cycles`, the extension records it in
- * `new_values`, and on "pay" the late penalty is still taken first.
+ * `new_values`, and on "pay" the late penalty is still taken first, and
+ * collected on top of the interest (Arvin, 2026-11-03).
  *
  * The loan: ₱60,000 for one month at 3% upon maturity, started 27 Apr 2026
  * and due 27 May (₱1,800 interest a cycle).
@@ -69,7 +70,7 @@ class OverdueExtensionCyclesTest extends TestCase
         $this->assertEqualsWithDelta(72600.00, (float) $openRow->total_due, 0.001);
     }
 
-    public function test_on_pay_the_late_penalty_is_still_taken_first(): void
+    public function test_on_pay_the_late_penalty_is_taken_first_and_collected_on_top_of_the_interest(): void
     {
         $loan = $this->oneMonthLoan();
         $this->travelTo('2026-11-02 10:00:00');
@@ -80,14 +81,15 @@ class OverdueExtensionCyclesTest extends TestCase
 
         $this->assertSame(6, $preview['cycles']);
         $this->assertGreaterThan(0, (float) $preview['collect_now']['penalty_part'], 'setup: the overdue loan owes a late penalty');
-        // ₱1,800 collected; the penalty takes its share first, so less than
-        // the whole ₱1,800 reaches interest.
-        $this->assertEqualsWithDelta(1800.00, (float) $preview['collect_now']['amount'], 0.001);
+        // The penalty and the whole ₱1,800 interest are collected, so no
+        // interest carries.
         $this->assertEqualsWithDelta(
-            1800.00 - (float) $preview['collect_now']['penalty_part'],
-            (float) $preview['collect_now']['interest_part'],
+            1800.00 + (float) $preview['collect_now']['penalty_part'],
+            (float) $preview['collect_now']['amount'],
             0.001,
         );
+        $this->assertEqualsWithDelta(1800.00, (float) $preview['collect_now']['interest_part'], 0.001);
+        $this->assertEqualsWithDelta(0.00, (float) $preview['carry_interest'], 0.001);
 
         $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'pay'])->assertOk();
 

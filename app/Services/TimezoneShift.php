@@ -181,6 +181,12 @@ class TimezoneShift
         // browser-local localStorage until now and never had a server row at
         // all. Same reasoning as the csv_import_* tables above.
         'loan_approval_steps' => ['acted_at', 'created_at', 'updated_at'],
+        // Added 2026-11-03 with the staff in-app notifications, well after the
+        // cutover completed (2026-08-06 on every deployment), so neither table
+        // can hold a row written by the old UTC application. Same reasoning as
+        // the csv_import_* tables above.
+        'loan_past_due_notices' => ['notified_at'],
+        'notifications' => ['created_at', 'read_at', 'updated_at'],
         'password_reset_tokens' => ['created_at'],
         'personal_access_tokens' => ['created_at', 'expires_at', 'last_used_at', 'updated_at'],
         // Added 2026-11-02 for the daily portfolio snapshot, well after the
