@@ -9,7 +9,7 @@ use App\Models\User;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
-use Illuminate\Support\Facades\DB;
+use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Validation\ValidationException;
 
 /**
@@ -97,8 +97,11 @@ class LoanApprovalChainService
         // Loan::isReleasable refuses to release and nothing can move.
         $pending = $steps->firstWhere('status', LoanApprovalStep::STATUS_PENDING);
 
+        // approveLocked(), not approve(): this runs inside submitForReview's
+        // transaction, which locked the loan's row as its first statement, and
+        // LoanWriteTransaction::run() must be the outermost.
         if ($pending?->kind === LoanApprovalStep::KIND_RELEASE && $submitter !== null) {
-            $this->loanService->approve($loan, $submitter, null);
+            $this->loanService->approveLocked($loan, $submitter, null);
         }
 
         $this->notifyApprovalNeeded($loan, $pending, $submitter);
@@ -113,10 +116,20 @@ class LoanApprovalChainService
      * send-back that targeted the submit step, re-submitting IS an approve on
      * that step. There is deliberately no separate re-submit verb, and no guard
      * on `kind` here.
+     *
+     * A sign-off that was wrong from the start is refused before the
+     * transaction opens (assertActionable()), with the 404, 422 or 403 it
+     * always was. Inside LoanWriteTransaction::run(), lockAndGuard() reads the
+     * loan and the step again under their locks: one another request signed,
+     * sent back or decided since this one read it is a 409, as is a deadlock
+     * or a lock wait timeout, and the chain is left exactly as that request
+     * left it.
      */
     public function approve(Loan $loan, LoanApprovalStep $step, User $user, ?string $remarks = null): LoanApprovalStep
     {
-        return DB::transaction(function () use ($loan, $step, $user, $remarks) {
+        $this->assertActionable($loan, $step, $user);
+
+        return LoanWriteTransaction::run(function () use ($loan, $step, $user, $remarks) {
             [$loan, $step] = $this->lockAndGuard($loan, $step, $user);
 
             $step->update([
@@ -140,8 +153,10 @@ class LoanApprovalChainService
             // `loans.status`, not this table, remains what the rest of the
             // system reads. Without the null branch a chain whose last step is
             // not a `release` would dead-end: no pending step, no way forward.
+            //
+            // approveLocked(): this transaction already holds the loan's row.
             if ($next === null || $next->kind === LoanApprovalStep::KIND_RELEASE) {
-                $this->loanService->approve($loan, $user, $remarks);
+                $this->loanService->approveLocked($loan, $user, $remarks);
             }
 
             $this->notifyApprovalNeeded($loan, $next, $user);
@@ -175,6 +190,9 @@ class LoanApprovalChainService
      * a different action (PATCH /loans/{id}/reject) and voiding is the escape
      * hatch for drafts.
      *
+     * Checked before the transaction and again under the locks, as approve()
+     * is: a step signed, sent back or decided since it was read is a 409.
+     *
      * @return Collection<int, LoanApprovalStep> the new round
      */
     public function sendBack(
@@ -184,7 +202,9 @@ class LoanApprovalChainService
         User $user,
         string $remarks,
     ): Collection {
-        return DB::transaction(function () use ($loan, $step, $targetStepOrder, $user, $remarks) {
+        $this->assertActionable($loan, $step, $user);
+
+        return LoanWriteTransaction::run(function () use ($loan, $step, $targetStepOrder, $user, $remarks) {
             [$loan, $step] = $this->lockAndGuard($loan, $step, $user);
 
             if ($targetStepOrder >= $step->step_order) {
@@ -443,30 +463,41 @@ class LoanApprovalChainService
     /**
      * Take the row locks, then run every guard against the LOCKED state.
      *
-     * The guards have to be inside the transaction and behind a lock, not in
-     * front of it. Without the lock two requests on the same pending step both
-     * read `pending` and both commit; the damaging pair is approve + send-back,
-     * which leaves a pending step in the old round AND a pending step in the
-     * new one, so the chain forks and the abandoned branch can still be walked
-     * all the way to `approved` while the UI shows the loan back in revision.
+     * The guards have to be inside the transaction and behind a lock, not only
+     * in front of it. Without the lock two requests on the same pending step
+     * both read `pending` and both commit; the damaging pair is approve +
+     * send-back, which leaves a pending step in the old round AND a pending
+     * step in the new one, so the chain forks and the abandoned branch can
+     * still be walked all the way to `approved` while the UI shows the loan
+     * back in revision.
      *
-     * The loan is locked before the step, always in that order, so two chain
-     * actions on one loan queue up instead of deadlocking.
+     * The loan is locked before the step, always in that order and as the
+     * first statements of the transaction (the order LoanWriteTransaction
+     * describes: the loan row, then the operation's own row), so two chain
+     * actions on one loan, or one and a direct approve or reject, queue up
+     * instead of deadlocking.
+     *
+     * The caller ran assertActionable() on what it read before the lock, so a
+     * loan that is no longer in review, or a step that is no longer the pending
+     * step of the current round, was moved by another request since: a 409,
+     * never the 422 a request that was wrong from the start gets.
      *
      * @return array{0: Loan, 1: LoanApprovalStep}
+     *
+     * @throws HttpResponseException 409 when the loan or the step changed since it was read
      */
     private function lockAndGuard(Loan $loan, LoanApprovalStep $step, User $user): array
     {
         $lockedLoan = Loan::whereKey($loan->getKey())->lockForUpdate()->first();
-
-        if ($lockedLoan === null) {
-            throw (new ModelNotFoundException)->setModel(Loan::class, [$loan->getKey()]);
-        }
-
         $lockedStep = LoanApprovalStep::whereKey($step->getKey())->lockForUpdate()->first();
 
-        if ($lockedStep === null) {
-            throw (new ModelNotFoundException)->setModel(LoanApprovalStep::class, [$step->getKey()]);
+        if ($lockedLoan === null
+            || $lockedStep === null
+            || $lockedLoan->status !== 'for_review'
+            || $lockedStep->status !== LoanApprovalStep::STATUS_PENDING
+            || $lockedStep->round !== $this->currentRound($lockedLoan)
+        ) {
+            throw LoanWriteTransaction::conflict();
         }
 
         $this->assertActionable($lockedLoan, $lockedStep, $user);

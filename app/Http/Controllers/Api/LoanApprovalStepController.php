@@ -97,6 +97,7 @@ class LoanApprovalStepController extends Controller
             new OA\Response(response: 401, description: 'Unauthenticated'),
             new OA\Response(response: 403, description: "Requesting user does not hold the step's role"),
             new OA\Response(response: 404, description: 'Step does not belong to this loan'),
+            new OA\Response(response: 409, description: 'Another decision on this loan (a step sign-off, a send-back, or a direct approve or reject) was saved at the same time, or the write deadlocked; nothing was written and nobody was notified. Message: "Another change to this loan was saved at the same time. Reload and try again."'),
             new OA\Response(response: 422, description: 'Step is not pending, or loan is not in for_review'),
         ],
     )]
@@ -141,6 +142,7 @@ class LoanApprovalStepController extends Controller
             new OA\Response(response: 401, description: 'Unauthenticated'),
             new OA\Response(response: 403, description: "Requesting user does not hold the step's role"),
             new OA\Response(response: 404, description: 'Step does not belong to this loan'),
+            new OA\Response(response: 409, description: 'Another decision on this loan (a step sign-off, a send-back, or a direct approve or reject) was saved at the same time, or the write deadlocked; nothing was written and nobody was notified. Message: "Another change to this loan was saved at the same time. Reload and try again."'),
             new OA\Response(response: 422, description: 'Missing remarks, bad target, non-pending step, or loan not in for_review'),
         ],
     )]
