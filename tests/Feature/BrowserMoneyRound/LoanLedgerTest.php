@@ -100,8 +100,8 @@ class LoanLedgerTest extends TestCase
         $repayment = Repayment::where('loan_id', $loan->id)->sole();
         $credit = LoanLedgerEntry::where('loan_id', $loan->id)->where('type', 'credit')->sole();
 
-        // The penalty took part of the collection first, so less than the
-        // ₱1,800 outstanding went to interest; the credit must say what did.
+        // The penalty took its part of the collection first; the credit must
+        // say what went to interest.
         $this->assertEqualsWithDelta((float) $repayment->interest_applied, (float) $credit->amount, 0.001);
     }
 }
