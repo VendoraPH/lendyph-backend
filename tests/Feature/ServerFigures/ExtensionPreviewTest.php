@@ -146,8 +146,8 @@ class ExtensionPreviewTest extends TestCase
     public function test_the_pay_preview_on_an_overdue_loan_takes_the_penalty_first_exactly_as_the_extension_does(): void
     {
         // Due 2026-05-27 and still unpaid on 2026-11-02, so a penalty is owed.
-        // The 'pay' collection is the outstanding interest; allocation takes
-        // the penalty out of it first and the rest of the interest carries.
+        // The 'pay' collection is the penalty owed plus the outstanding
+        // interest; allocation takes the penalty first, then all the interest.
         $loan = $this->uponMaturityLoan();
 
         $preview = $this->getJson("/api/loans/{$loan->id}/extension-preview?interest_option=pay")

@@ -39,15 +39,17 @@ class ExtensionCollectionVoidTest extends TestCase
 
     public function test_a_collection_taken_wholly_by_penalty_cannot_be_voided(): void
     {
-        // One month at 3% on ₱61,234.57: ₱1,837.04 interest. A 5% penalty is
-        // ₱3,061.73, so the ₱1,837.04 collection goes wholly to penalty.
+        // One month at 3% on ₱61,234.57: ₱1,837.04 interest, already paid. A
+        // 5% penalty is ₱3,061.73, so the collection ("pay" takes the penalty
+        // owed and the interest outstanding) goes wholly to penalty.
         $loan = $this->releasedLoanFor(principal: 61234.57, product: ['interest_method' => 'upon_maturity', 'term' => 1, 'penalty_rate' => 5.0]);
-        $loan->amortizationSchedules()->update(['due_date' => now()->subDays(10)->toDateString()]);
+        $loan->amortizationSchedules()->update(['due_date' => now()->subDays(10)->toDateString(), 'interest_paid' => 1837.04, 'status' => 'partial']);
         $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'pay'])->assertOk();
 
         $collection = Repayment::where('loan_id', $loan->id)->sole();
         $extension = LoanAdjustment::where('loan_id', $loan->id)->where('adjustment_type', 'extension')->sole();
-        $this->assertEqualsWithDelta(1837.04, (float) $collection->penalty_applied, 0.001, 'setup: all of it to penalty');
+        $this->assertEqualsWithDelta(3061.73, (float) $collection->amount_paid, 0.001);
+        $this->assertEqualsWithDelta(3061.73, (float) $collection->penalty_applied, 0.001, 'setup: all of it to penalty');
         $this->assertEqualsWithDelta(0.0, (float) $collection->interest_applied, 0.001);
         $this->assertSame(0, LoanLedgerEntry::where('loan_id', $loan->id)->where('type', 'credit')->count(), 'setup: no interest credit');
         $this->assertSame($collection->id, $extension->new_values['repayment_id']);
