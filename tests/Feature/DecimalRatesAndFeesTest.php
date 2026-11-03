@@ -75,7 +75,6 @@ class DecimalRatesAndFeesTest extends TestCase
             'max_service_fee' => 0.75,
             'notarial_fee' => 0.1234,
             'penalty_rate' => 2.75,
-            'custom_fees' => [['name' => 'Handling', 'type' => 'percentage', 'value' => 0.3333]],
         ], $overrides);
     }
 
@@ -425,7 +424,7 @@ class DecimalRatesAndFeesTest extends TestCase
             ->assertJsonPath('data.max_service_fee', '0.7500')
             ->assertJsonPath('data.notarial_fee', '0.1234')
             ->assertJsonPath('data.penalty_rate', '2.7500')
-            ->assertJsonPath('data.custom_fees.0.value', 0.3333);
+            ->assertJsonPath('data.custom_fees', []);
 
         $this->putJson("/api/loan-products/{$id}", ['interest_rate' => 2.0625, 'processing_fee' => 1.9999])
             ->assertOk()
@@ -466,7 +465,6 @@ class DecimalRatesAndFeesTest extends TestCase
             'max_service_fee' => 1,
             'notarial_fee' => 0,
             'penalty_rate' => 2,
-            'custom_fees' => [['name' => 'Handling', 'type' => 'fixed', 'value' => 100]],
         ]))->assertCreated()->json('data.id');
 
         $this->getJson("/api/loan-products/{$id}")
@@ -478,7 +476,7 @@ class DecimalRatesAndFeesTest extends TestCase
             ->assertJsonPath('data.service_fee', '1.0000')
             ->assertJsonPath('data.notarial_fee', '0.0000')
             ->assertJsonPath('data.penalty_rate', '2.0000')
-            ->assertJsonPath('data.custom_fees.0.value', 100);
+            ->assertJsonPath('data.custom_fees', []);
     }
 
     /**
@@ -504,7 +502,7 @@ class DecimalRatesAndFeesTest extends TestCase
 
         $this->postJson('/api/loan-products', $payload)
             ->assertUnprocessable()
-            ->assertJsonValidationErrors([$field => 'must have 0-4 decimal places']);
+            ->assertJsonValidationErrors($this->expectedRefusal($field));
 
         $this->assertSame(0, LoanProduct::where('name', 'Fractional Product')->count());
     }
@@ -513,14 +511,28 @@ class DecimalRatesAndFeesTest extends TestCase
     public function test_editing_a_product_refuses_a_rate_or_fee_with_more_than_four_decimal_places(string $field): void
     {
         $product = $this->product();
-        $payload = ['custom_fees' => [['name' => 'Handling', 'type' => 'percentage', 'value' => 0.5]]];
+        $payload = [];
         data_set($payload, $field, 1.23456);
 
         $this->putJson("/api/loan-products/{$product->id}", $payload)
             ->assertUnprocessable()
-            ->assertJsonValidationErrors([$field => 'must have 0-4 decimal places']);
+            ->assertJsonValidationErrors($this->expectedRefusal($field));
 
         $this->assertSame('2.5000', $product->fresh()->interest_rate);
+    }
+
+    /**
+     * A rate or fee with a fifth decimal is refused on its own field. A
+     * product custom fee is refused whatever its value: additional fees are
+     * retired, so sending one answers on `custom_fees`.
+     *
+     * @return array<string, string>
+     */
+    private function expectedRefusal(string $field): array
+    {
+        return str_starts_with($field, 'custom_fees')
+            ? ['custom_fees' => 'Additional fees are retired. Set fees up in Settings → Fees, scoped to this product.']
+            : [$field => 'must have 0-4 decimal places'];
     }
 
     // ── Fee catalog ──────────────────────────────────────────────────────

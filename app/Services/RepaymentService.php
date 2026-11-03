@@ -978,7 +978,11 @@ class RepaymentService
      * restructure or an extension replaced in between has lost its schedule,
      * and reversing onto it is the same conflict.
      *
+     * Then, with every lock held, a payment made before the loan was
+     * rescheduled is refused (assertNotRescheduledSincePaid()).
+     *
      * @throws HttpResponseException 409 when the payment or its loan changed since it was read
+     * @throws ValidationException 422 on `repayment` when the loan was rescheduled after the payment
      */
     private function lockVoidRows(Repayment $repayment, Loan $loan): void
     {
@@ -996,6 +1000,49 @@ class RepaymentService
 
         if ($repayment->allocations->contains(fn (RepaymentAllocation $allocation) => $allocation->amortization_schedule_id === null)) {
             throw LoanWriteTransaction::conflict();
+        }
+
+        $this->assertNotRescheduledSincePaid($repayment, $loan);
+    }
+
+    /**
+     * Refuse to void a payment made before the loan was extended, restructured
+     * or given more terms.
+     *
+     * A reschedule closes the open periods money was collected on at what was
+     * collected, and works out the new periods, their interest and the
+     * principal it carries from the balance the earlier payments left.
+     * Reversing one of those payments afterwards would reopen a period the
+     * reschedule closed and leave the new terms resting on money that was
+     * never collected. So a payment that paid a period an adjustment closed
+     * (`closed_by_adjustment_id`), or any payment made before an applied
+     * extension, restructure or term extension, stays; staff correct the loan
+     * with a balance adjustment.
+     *
+     * Penalty waivers and balance adjustments close no periods, so they don't
+     * count. A reschedule applied in the same second as the payment counts,
+     * because the two can't be ordered. Read under the loan lock every
+     * adjustment takes, so one applied concurrently has either committed
+     * before this read or waits for the void to finish.
+     *
+     * @throws ValidationException on `repayment`
+     */
+    private function assertNotRescheduledSincePaid(Repayment $repayment, Loan $loan): void
+    {
+        $paidAClosedPeriod = AmortizationSchedule::whereKey($repayment->allocations->pluck('amortization_schedule_id')->unique()->all())
+            ->whereNotNull('closed_by_adjustment_id')
+            ->exists();
+
+        $rescheduledSince = $paidAClosedPeriod || LoanAdjustment::where('loan_id', $loan->id)
+            ->where('status', 'applied')
+            ->whereIn('adjustment_type', ['extension', 'restructure', 'term_extension'])
+            ->where('applied_at', '>=', $repayment->created_at)
+            ->exists();
+
+        if ($rescheduledSince) {
+            throw ValidationException::withMessages([
+                'repayment' => 'This payment was made before the loan was extended or restructured, so it cannot be voided. Use a balance adjustment to correct the loan instead.',
+            ]);
         }
     }
 

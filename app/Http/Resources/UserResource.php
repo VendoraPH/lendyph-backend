@@ -7,6 +7,26 @@ use Illuminate\Http\Resources\Json\JsonResource;
 
 class UserResource extends JsonResource
 {
+    /**
+     * Set only by `GET /users` (UserController::index), from UserReach. Null
+     * everywhere else, so /auth/me, login, GET /users/{id} and the nested
+     * actors carry no `can_manage` key.
+     */
+    private ?bool $canManage = null;
+
+    /**
+     * Whether the caller can reach this user (UserReach): false exactly when
+     * edit, reset password, deactivate and reactivate would answer the masked
+     * 404 for this target. Each action still needs its own permission
+     * (users:update, users:delete, users:reset_password).
+     */
+    public function withCanManage(bool $canManage): static
+    {
+        $this->canManage = $canManage;
+
+        return $this;
+    }
+
     public function toArray(Request $request): array
     {
         return [
@@ -62,6 +82,7 @@ class UserResource extends JsonResource
                 $this->relationLoaded('permissions'),
                 fn () => $this->getAllPermissions()->pluck('name'),
             ),
+            'can_manage' => $this->when($this->canManage !== null, fn () => $this->canManage),
             'created_at' => $this->created_at,
             'updated_at' => $this->updated_at,
         ];

@@ -67,3 +67,8 @@ Schedule::command('imports:process')->everyMinute()->withoutOverlapping(10);
 // admin abandoned holds its rows until `imports:process` writes it off at
 // --prune-days=14, and only then starts the 30. Worst case is ~44 days, not 30.
 Schedule::command('imports:redact-rows')->dailyAt('03:45');
+
+// Notification retention: read notifications after 90 days, any notification
+// after 365, in chunks. After the registration prune and the import redaction,
+// so the retention jobs never overlap.
+Schedule::command('notifications:prune')->dailyAt('04:00')->timezone('Asia/Manila');

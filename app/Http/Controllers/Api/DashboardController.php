@@ -72,17 +72,22 @@ class DashboardController extends Controller
         tags: ['Dashboard'],
         security: [['sanctum' => []]],
         parameters: [
-            new OA\Parameter(name: 'date', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'date', in: 'query', required: false, description: 'The day to list, as Y-m-d. Defaults to today.', schema: new OA\Schema(type: 'string', format: 'date')),
         ],
         responses: [
             new OA\Response(response: 200, description: 'Daily dues list with summary. One item per loan: a period an extension or restructure closed early and its rescheduled remainder due the same day are one item, whose `amount_due` and `amount_collected` both include the closed part. A row is `collected` only once the principal and interest paid cover its `total_due` (penalty paid never counts towards it); `amount_collected` is that principal and interest, capped at the amount due. `summary` carries the dashboard pie: `collected_in_full`, `partially_collected`, `uncollected`, `total_collected`, `collection_rate` (never above 100) and `counts` per status.'),
+            new OA\Response(response: 422, description: '`date` is not a Y-m-d date (for example `?date=foo` or `?date[]=x`).'),
         ],
     )]
     public function dailyDues(): JsonResponse
     {
         $this->authorize('dashboard:view');
 
-        return response()->json($this->dashboardService->dailyDues($this->branchIds(), request('date')));
+        $filters = request()->validate([
+            'date' => ['nullable', 'date_format:Y-m-d'],
+        ]);
+
+        return response()->json($this->dashboardService->dailyDues($this->branchIds(), $filters['date'] ?? null));
     }
 
     #[OA\Get(

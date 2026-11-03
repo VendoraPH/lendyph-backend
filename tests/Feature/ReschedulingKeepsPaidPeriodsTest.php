@@ -56,8 +56,10 @@ class ReschedulingKeepsPaidPeriodsTest extends TestCase
         // Two instalments behind it and six ahead: eight months, as before.
         $this->assertSame(8, $this->loan->fresh()->term);
 
-        $this->void($partial);
-        $this->assertOwed(3, interest: 1800, principal: 3200);
+        // A payment made before the reschedule can't be voided, and the
+        // refused void leaves the closed period as it was.
+        $this->assertVoidRefused($partial);
+        $this->assertClosedAt(3, interest: 1800, principal: 3200);
         $this->assertPaymentsReconcile();
     }
 
@@ -79,8 +81,10 @@ class ReschedulingKeepsPaidPeriodsTest extends TestCase
         $this->assertSame('2026-04-15', $new->first()->due_date->toDateString());
         $this->assertSame(8, $this->loan->fresh()->term);
 
-        $this->void($partial);
-        $this->assertOwed(3, interest: 1800, principal: 3200);
+        // A payment made before the reschedule can't be voided, and the
+        // refused void leaves the closed period as it was.
+        $this->assertVoidRefused($partial);
+        $this->assertClosedAt(3, interest: 1800, principal: 3200);
         $this->assertPaymentsReconcile();
     }
 
@@ -183,8 +187,8 @@ class ReschedulingKeepsPaidPeriodsTest extends TestCase
         $next = $this->periodsAfter(1)->sole();
         $this->assertEqualsWithDelta(2700, (float) $next->interest_due, 0.001);
 
-        $this->void($payment);
-        $this->assertOwed(1, interest: 900, principal: 0);
+        $this->assertVoidRefused($payment);
+        $this->assertClosedAt(1, interest: 900, principal: 0);
         $this->assertPaymentsReconcile();
     }
 
@@ -240,11 +244,19 @@ class ReschedulingKeepsPaidPeriodsTest extends TestCase
         return Repayment::findOrFail($id);
     }
 
-    private function void(Repayment $repayment): void
+    /**
+     * Refused with a 422 on `repayment`, and nothing of the void is written.
+     */
+    private function assertVoidRefused(Repayment $repayment): void
     {
+        $schedules = AmortizationSchedule::where('loan_id', $this->loan->id)->orderBy('id')->get()->toArray();
+
         $this->patchJson("/api/repayments/{$repayment->id}/void", ['void_reason' => 'Keyed in error'])
-            ->assertOk()
-            ->assertJsonPath('data.status', 'voided');
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.repayment.0', 'This payment was made before the loan was extended or restructured, so it cannot be voided. Use a balance adjustment to correct the loan instead.');
+
+        $this->assertSame('posted', $repayment->fresh()->status);
+        $this->assertSame($schedules, AmortizationSchedule::where('loan_id', $this->loan->id)->orderBy('id')->get()->toArray());
     }
 
     /**
@@ -275,18 +287,6 @@ class ReschedulingKeepsPaidPeriodsTest extends TestCase
         $this->assertEqualsWithDelta($interest, (float) $schedule->interest_due, 0.001, "period {$period} interest due");
         $this->assertEqualsWithDelta($principal, (float) $schedule->principal_due, 0.001, "period {$period} principal due");
         $this->assertSame('paid', $schedule->status, "period {$period} status");
-    }
-
-    /**
-     * After a void, the closed period owes again exactly what the payment had covered.
-     */
-    private function assertOwed(int $period, float $interest, float $principal): void
-    {
-        $schedule = $this->schedule($period);
-
-        $this->assertEqualsWithDelta($interest, (float) $schedule->interest_due - (float) $schedule->interest_paid, 0.001, "period {$period} interest owed");
-        $this->assertEqualsWithDelta($principal, (float) $schedule->principal_due - (float) $schedule->principal_paid, 0.001, "period {$period} principal owed");
-        $this->assertContains($schedule->status, AmortizationSchedule::UNPAID_STATUSES, "period {$period} status");
     }
 
     private function assertTotalPaid(float $expected): void
