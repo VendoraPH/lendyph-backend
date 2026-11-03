@@ -6,6 +6,9 @@ use App\Models\AmortizationSchedule;
 use App\Models\Loan;
 use App\Models\LoanAdjustment;
 use App\Models\Repayment;
+use App\Models\User;
+use App\Services\RepaymentService;
+use Illuminate\Support\Facades\Log;
 use Tests\Feature\InsuranceOwed\Concerns\OwesInsurancePremium;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
@@ -40,13 +43,13 @@ class ExtensionPayCollectsOwedTest extends TestCase
     }
 
     /** Released on 27 Apr 2026, then the clock moves to `$extendOn`. */
-    private function oneMonthLoan(string $extendOn): Loan
+    private function oneMonthLoan(string $extendOn, float $principal = 60000): Loan
     {
         $this->travelTo('2026-04-27 09:00:00');
 
         $loan = $this->createReleasedLoan([
             'product' => ['interest_method' => 'upon_maturity', 'term' => 1, 'frequency' => 'monthly', 'interest_rate' => 3.0],
-            'principal_amount' => 60000,
+            'principal_amount' => $principal,
             'start_date' => '2026-04-27',
         ]);
 
@@ -77,6 +80,62 @@ class ExtensionPayCollectsOwedTest extends TestCase
         $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => $option])->assertOk();
 
         return LoanAdjustment::where('loan_id', $loan->id)->where('adjustment_type', 'extension')->sole();
+    }
+
+    /**
+     * The preview's `collect_now` equals what the extension recorded, part by
+     * part, to the centavo, and neither carries any interest.
+     *
+     * @param  array<string, mixed>  $preview
+     * @param  array{amount: float, insurance: float, penalty: float, interest: float}  $expected
+     */
+    private function assertPreviewEqualsRecorded(array $preview, LoanAdjustment $adjustment, array $expected): void
+    {
+        $centavos = fn (mixed $pesos): int => (int) round((float) $pesos * 100);
+        $values = $adjustment->new_values;
+
+        $this->assertSame(array_map($centavos, $expected), [
+            'amount' => $centavos($preview['collect_now']['amount']),
+            'insurance' => $centavos($preview['collect_now']['insurance_part']),
+            'penalty' => $centavos($preview['collect_now']['penalty_part']),
+            'interest' => $centavos($preview['collect_now']['interest_part']),
+        ], 'the preview quotes the expected parts');
+        $this->assertSame(array_map($centavos, $expected), [
+            'amount' => $centavos($values['amount_collected']),
+            'insurance' => $centavos($values['insurance_paid']),
+            'penalty' => $centavos($values['penalty_paid']),
+            'interest' => $centavos($values['interest_paid']),
+        ], 'the extension records the parts the preview quoted');
+        $this->assertSame(0, $centavos($preview['carry_interest']));
+        $this->assertSame(0, $centavos($values['carry_interest']));
+    }
+
+    private function applyAdjustment(Loan $loan, string $type, array $newValues): void
+    {
+        $id = $this->postJson("/api/loans/{$loan->id}/adjustments", [
+            'adjustment_type' => $type,
+            'new_values' => $newValues,
+        ])->assertCreated()->json('data.id');
+
+        $this->patchJson("/api/loan-adjustments/{$id}/approve")->assertOk();
+        $this->patchJson("/api/loan-adjustments/{$id}/apply")->assertOk();
+    }
+
+    /** Nothing written: no payment, no adjustment, the periods as they were. */
+    private function assertExtensionRefused(Loan $loan, string $option, string $message): void
+    {
+        $periodsBefore = $loan->amortizationSchedules()->orderBy('id')->get()->toArray();
+
+        $this->getJson("/api/loans/{$loan->id}/extension-preview?interest_option={$option}")
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.loan.0', $message);
+        $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => $option])
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.loan.0', $message);
+
+        $this->assertSame(0, Repayment::where('loan_id', $loan->id)->count());
+        $this->assertSame(0, LoanAdjustment::where('loan_id', $loan->id)->where('adjustment_type', 'extension')->count());
+        $this->assertSame($periodsBefore, $loan->amortizationSchedules()->orderBy('id')->get()->toArray());
     }
 
     private function newPeriod(Loan $loan): AmortizationSchedule
@@ -261,5 +320,130 @@ class ExtensionPayCollectsOwedTest extends TestCase
             ->assertJsonValidationErrors('repayment');
 
         $this->assertNull($repayment->fresh()->voided_at);
+    }
+
+    public function test_a_waived_penalty_is_not_collected(): void
+    {
+        $loan = $this->oneMonthLoan('2026-07-30');
+        app(RepaymentService::class)->applyPenalties($loan, now());
+        $this->applyAdjustment($loan, 'penalty_waiver', ['waive_all' => true]);
+
+        $preview = $this->preview($loan->fresh(), 'pay');
+        $adjustment = $this->extend($loan->fresh(), 'pay');
+
+        $this->assertPreviewEqualsRecorded($preview, $adjustment, ['amount' => 1800.00, 'insurance' => 0.00, 'penalty' => 0.00, 'interest' => 1800.00]);
+    }
+
+    public function test_a_partly_paid_penalty_collects_only_what_is_left_of_it(): void
+    {
+        // ₱1,200.00 charged, ₱500.00 paid today: ₱700.00 + ₱1,800.00.
+        $loan = $this->oneMonthLoan('2026-07-30');
+        $first = $this->pay($loan, 500.00);
+        $this->assertEqualsWithDelta(500.00, (float) $first->penalty_applied, 0.001, 'setup: the ₱500.00 went to penalty');
+
+        $preview = $this->preview($loan->fresh(), 'pay');
+        $adjustment = $this->extend($loan->fresh(), 'pay');
+
+        $this->assertPreviewEqualsRecorded($preview, $adjustment, ['amount' => 2500.00, 'insurance' => 0.00, 'penalty' => 700.00, 'interest' => 1800.00]);
+    }
+
+    public function test_an_overdue_loan_inside_its_grace_collects_no_penalty(): void
+    {
+        // Due 27 May, 3-day grace: on 29 May nothing is charged yet.
+        $loan = $this->oneMonthLoan('2026-05-29');
+
+        $preview = $this->preview($loan, 'pay');
+        $adjustment = $this->extend($loan, 'pay');
+
+        $this->assertPreviewEqualsRecorded($preview, $adjustment, ['amount' => 1800.00, 'insurance' => 0.00, 'penalty' => 0.00, 'interest' => 1800.00]);
+        $this->assertSame(1, $adjustment->new_values['cycles']);
+        $this->assertSame('2026-06-27', $adjustment->new_values['new_due_date']);
+    }
+
+    public function test_odd_centavos_are_collected_exactly(): void
+    {
+        // ₱61,234.57 at 3%: ₱1,837.04 interest; 2% penalty: ₱1,224.69.
+        $loan = $this->oneMonthLoan('2026-07-30', 61234.57);
+
+        $preview = $this->preview($loan, 'pay');
+        $adjustment = $this->extend($loan, 'pay');
+
+        $this->assertPreviewEqualsRecorded($preview, $adjustment, ['amount' => 3061.73, 'insurance' => 0.00, 'penalty' => 1224.69, 'interest' => 1837.04]);
+        $this->assertEqualsWithDelta(61234.57, (float) $this->newPeriod($loan)->principal_due, 0.001);
+    }
+
+    public function test_a_loan_with_more_than_one_open_period_cannot_be_extended(): void
+    {
+        $loan = $this->oneMonthLoan('2026-05-20');
+        $only = $loan->amortizationSchedules()->sole();
+        AmortizationSchedule::create([
+            'loan_id' => $loan->id,
+            'period_number' => 2,
+            'due_date' => '2026-06-27',
+            'principal_due' => 1000,
+            'interest_due' => 30,
+            'total_due' => 1030,
+            'remaining_balance' => 0,
+            'status' => 'pending',
+        ]);
+        $only->update(['principal_due' => 59000, 'total_due' => 60800]);
+
+        foreach (['pay', 'defer'] as $option) {
+            $this->assertExtensionRefused($loan, $option, 'This loan has more than one open period, so it cannot be extended.');
+        }
+    }
+
+    public function test_a_loan_whose_principal_is_paid_cannot_be_extended(): void
+    {
+        // The principal paid, the interest still owed: "pay" would settle the
+        // period and leave nothing to carry, "defer" would carry ₱0.00.
+        $loan = $this->oneMonthLoan('2026-05-20');
+        $loan->amortizationSchedules()->update(['principal_paid' => 60000, 'status' => 'partial']);
+
+        foreach (['pay', 'defer'] as $option) {
+            $this->assertExtensionRefused($loan, $option, 'Nothing is left to extend: the principal is already paid.');
+        }
+        $this->assertSame('released', $loan->fresh()->status);
+    }
+
+    public function test_a_collection_applied_differently_from_its_quote_is_logged_and_refused(): void
+    {
+        $loan = $this->oneMonthLoan('2026-07-30');
+        $this->app->instance(RepaymentService::class, new class extends RepaymentService
+        {
+            public function recordRepaymentOnLockedLoan(
+                Loan $loan,
+                float $amountPaid,
+                string $paymentDate,
+                User $user,
+                ?string $remarks = null,
+                string $method = 'cash',
+                ?string $referenceNumber = null,
+                bool $postToBooks = true,
+                bool $preview = false,
+            ): Repayment {
+                $repayment = parent::recordRepaymentOnLockedLoan($loan, $amountPaid, $paymentDate, $user, $remarks, $method, $referenceNumber, $postToBooks, $preview);
+                $repayment->penalty_applied = (float) $repayment->penalty_applied - 0.01;
+                $repayment->interest_applied = (float) $repayment->interest_applied + 0.01;
+
+                return $repayment;
+            }
+        });
+        Log::spy();
+        $message = 'The amount to collect could not be applied as quoted, so nothing was charged. Refresh and try again.';
+
+        $this->getJson("/api/loans/{$loan->id}/extension-preview?interest_option=pay")
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.loan.0', $message);
+        $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'pay'])
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.loan.0', $message);
+
+        Log::shouldHaveReceived('error')
+            ->with('Loan extension: the collection did not apply what was quoted; extension refused.', \Mockery::type('array'))
+            ->twice();
+        $this->assertSame(0, Repayment::where('loan_id', $loan->id)->count());
+        $this->assertSame(0, LoanAdjustment::where('loan_id', $loan->id)->where('adjustment_type', 'extension')->count());
+        $this->assertSame('2026-05-27', $loan->fresh()->maturity_date->toDateString());
     }
 }

@@ -13,6 +13,7 @@ use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
 
 class LoanAdjustmentService
@@ -266,7 +267,8 @@ class LoanAdjustmentService
             $oldMaturityDate = $loan->maturity_date->toDateString();
             $oldTerm = $loan->term;
 
-            ['interest' => $interestBefore, 'amount' => $collectAmount] = $this->extensionCollection($loan, now());
+            $quoted = $this->extensionCollection($loan, now());
+            ['interest' => $interestBefore, 'amount' => $collectAmount] = $quoted;
 
             // Settle everything the open period owes except its principal, so
             // the new period starts clean: one payment of the premium owed, the
@@ -289,6 +291,7 @@ class LoanAdjustmentService
                     $user,
                     $remarks ?: '[EXTENSION INTEREST]',
                 );
+                $this->assertCollectedAsQuoted($loan, $quoted, $interestRepayment);
 
                 // What the payment applied to each part, as the repayment
                 // records it: the credit entry and `interest_paid` must say
@@ -420,7 +423,8 @@ class LoanAdjustmentService
 
         return $this->repaymentService->rolledBackUnderPaymentLock($loan, function (Loan $loan) use ($interestOption, $user, $asOf): array {
             $collectNow = ['amount' => 0.0, 'insurance_part' => 0.0, 'penalty_part' => 0.0, 'interest_part' => 0.0];
-            ['amount' => $collectAmount] = $this->extensionCollection($loan, $asOf);
+            $quoted = $this->extensionCollection($loan, $asOf);
+            $collectAmount = $quoted['amount'];
 
             if ($interestOption === 'pay' && $collectAmount > 0) {
                 $repayment = $this->repaymentService->recordRepaymentOnLockedLoan(
@@ -431,6 +435,7 @@ class LoanAdjustmentService
                     postToBooks: false,
                     preview: true,
                 );
+                $this->assertCollectedAsQuoted($loan, $quoted, $repayment);
 
                 $collectNow = [
                     'amount' => round((float) $repayment->amount_paid, 2),
@@ -467,8 +472,8 @@ class LoanAdjustmentService
      * The penalty is what the payment's own penalty step will charge on
      * `$asOf` (RepaymentService::penaltyAsOf(), which writes nothing), less
      * what is already paid toward it; a period it leaves alone owes its
-     * stamped penalty. A one-month loan has one open period, so the amount
-     * reaches no principal. Read under the loan's lock, in whole centavos.
+     * stamped penalty. assertExtendable() allows only one open period, so the
+     * amount reaches no principal; assertCollectedAsQuoted() checks it. Read under the loan's lock, in whole centavos.
      * extendLoan() charges it and extensionPreview() quotes it, so the two
      * cannot drift.
      *
@@ -497,7 +502,73 @@ class LoanAdjustmentService
     }
 
     /**
-     * Refuse, with a 422, a loan that cannot be extended.
+     * Refuse, with a 422, a collection the allocation applied differently
+     * from what extensionCollection() quoted: each part (premium, penalty,
+     * interest), nothing to principal, and nothing left over. The quote and
+     * the allocation read the same rows under the same lock, so a mismatch is
+     * a defect, not a race; it is logged, and the caller's transaction rolls
+     * the payment back, so nothing is charged.
+     *
+     * @param  array{insurance: float, penalty: float, interest: float, amount: float}  $quoted
+     */
+    private function assertCollectedAsQuoted(Loan $loan, array $quoted, Repayment $repayment): void
+    {
+        $quotedCentavos = [
+            'amount' => LoanService::toCentavos($quoted['amount']),
+            'insurance' => LoanService::toCentavos($quoted['insurance']),
+            'penalty' => LoanService::toCentavos($quoted['penalty']),
+            'interest' => LoanService::toCentavos($quoted['interest']),
+            'principal' => 0,
+            'overpayment' => 0,
+        ];
+        $appliedCentavos = [
+            'amount' => LoanService::toCentavos((float) $repayment->amount_paid),
+            'insurance' => LoanService::toCentavos((float) $repayment->insurance_applied),
+            'penalty' => LoanService::toCentavos((float) $repayment->penalty_applied),
+            'interest' => LoanService::toCentavos((float) $repayment->interest_applied),
+            'principal' => LoanService::toCentavos((float) $repayment->principal_applied),
+            'overpayment' => LoanService::toCentavos((float) $repayment->overpayment),
+        ];
+
+        if ($quotedCentavos === $appliedCentavos) {
+            return;
+        }
+
+        Log::error('Loan extension: the collection did not apply what was quoted; extension refused.', [
+            'loan_id' => $loan->id,
+            'quoted_centavos' => $quotedCentavos,
+            'applied_centavos' => $appliedCentavos,
+        ]);
+
+        throw ValidationException::withMessages([
+            'loan' => 'The amount to collect could not be applied as quoted, so nothing was charged. Refresh and try again.',
+        ]);
+    }
+
+    /**
+     * Refuse, with a 422, an extension that would carry no principal: with
+     * nothing open, or the principal already paid, the new period would owe
+     * ₱0.00 principal (and, on a completed loan, reopen it).
+     *
+     * @param  \Illuminate\Database\Eloquent\Collection<int, AmortizationSchedule>  $openSchedules
+     */
+    private function assertPrincipalLeftToExtend($openSchedules): void
+    {
+        $carryCentavos = $openSchedules->sum(
+            fn (AmortizationSchedule $s) => LoanService::toCentavos((float) $s->principal_due) - LoanService::toCentavos((float) $s->principal_paid),
+        );
+
+        if ($openSchedules->isEmpty() || $carryCentavos <= 0) {
+            throw ValidationException::withMessages([
+                'loan' => 'Nothing is left to extend: the principal is already paid.',
+            ]);
+        }
+    }
+
+    /**
+     * Refuse, with a 422, a loan that cannot be extended: not a one-month
+     * term, not released or ongoing, no open period, more than one open
+     * period, or no principal left to carry.
      *
      * Extension is limited to one-month-term loans, whatever the product.
      * Loan::isOneMonthTerm() reads the ORIGINAL term rather than the current
@@ -519,11 +590,25 @@ class LoanAdjustmentService
             ]);
         }
 
-        if (! $loan->amortizationSchedules()->whereIn('status', ['pending', 'partial', 'overdue'])->exists()) {
+        $openSchedules = $this->openSchedules($loan);
+
+        if ($openSchedules->isEmpty()) {
             throw ValidationException::withMessages([
                 'loan' => 'Loan has no open period to extend.',
             ]);
         }
+
+        // The collection (extensionCollection()) and the carry assume the one
+        // open period a one-month loan has, which every extension leaves; with
+        // more, the allocation would pay one period's principal before the
+        // next one's interest.
+        if ($openSchedules->count() > 1) {
+            throw ValidationException::withMessages([
+                'loan' => 'This loan has more than one open period, so it cannot be extended.',
+            ]);
+        }
+
+        $this->assertPrincipalLeftToExtend($openSchedules);
     }
 
     /**
@@ -549,6 +634,10 @@ class LoanAdjustmentService
     private function extensionFigures(Loan $loan, Carbon $extensionDate): array
     {
         $openSchedules = $this->openSchedules($loan);
+
+        // After the 'pay' collection too: a period it settled in full leaves
+        // nothing to carry, and no ₱0.00 period is created.
+        $this->assertPrincipalLeftToExtend($openSchedules);
 
         $carryPrincipal = round($openSchedules->sum(
             fn ($s) => (float) $s->principal_due - (float) $s->principal_paid,

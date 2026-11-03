@@ -981,7 +981,7 @@ DESC,
             new OA\Response(response: 403, description: 'Missing loans:extend permission'),
             new OA\Response(response: 404, description: 'Loan not found'),
             new OA\Response(response: 409, description: 'Another change to this loan was being saved at the same time. Try again'),
-            new OA\Response(response: 422, description: 'interest_option missing or invalid, or the loan cannot be extended: not a one-month term, not released/ongoing, or no open period'),
+            new OA\Response(response: 422, description: 'interest_option missing or invalid, or the loan cannot be extended: not a one-month term, not released/ongoing, no open period, more than one open period, or no principal left to carry ("Nothing is left to extend: the principal is already paid"); also when the collection could not be applied as quoted (nothing is charged)'),
         ],
     )]
     public function extensionPreview(ExtensionPreviewRequest $request, Loan $loan): JsonResponse
@@ -1019,7 +1019,7 @@ DESC,
             new OA\Response(response: 403, description: 'Missing loans:extend permission'),
             new OA\Response(response: 404, description: 'Loan not found'),
             new OA\Response(response: 409, description: 'Another change to this loan (another extension, an adjustment) was saved at the same time; nothing was written. Reload and try again'),
-            new OA\Response(response: 422, description: 'Loan does not have a one-month term (term 1 in months, paid monthly or at maturity; `errors.term`), is not in released/ongoing status (`errors.status`), or has no open period (`errors.loan`)'),
+            new OA\Response(response: 422, description: 'Loan does not have a one-month term (term 1 in months, paid monthly or at maturity; `errors.term`), is not in released/ongoing status (`errors.status`), or has no open period, more than one open period, or no principal left to carry ("Nothing is left to extend: the principal is already paid") (`errors.loan`); also when the collection could not be applied as quoted, with nothing charged (`errors.loan`)'),
         ],
     )]
     public function extend(ExtendLoanRequest $request, Loan $loan): JsonResponse
