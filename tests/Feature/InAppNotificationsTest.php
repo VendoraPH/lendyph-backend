@@ -210,18 +210,14 @@ class InAppNotificationsTest extends TestCase
         $this->assertSame([$creator->id], $this->recipients(StaffNotification::LOAN_RELEASED, $loan));
     }
 
-    public function test_releasing_a_restructure_tells_the_new_loans_officer(): void
+    public function test_releasing_a_restructure_tells_the_new_loans_creator_and_officer_once_each(): void
     {
+        $creator = $this->staff('loan_processor');
         $officer = $this->staff('loan_officer');
         $source = $this->createReleasedLoan();
-        $newLoan = app(LoanService::class)->restructure($source, [
-            'borrower_id' => $source->borrower_id,
-            'loan_product_id' => $source->loan_product_id,
-            'principal_amount' => 70800,
-            'start_date' => now()->toDateString(),
-        ], $this->admin);
+        $newLoan = $this->restructuredDraft($source, $creator);
         $newLoan->update(['account_officer_id' => $officer->id]);
-        app(LoanService::class)->submitForReview($newLoan);
+        app(LoanService::class)->submitForReview($newLoan, $creator);
         app(LoanService::class)->approve($newLoan, $this->admin, 'ok');
 
         app(LoanService::class)->release($newLoan->fresh(), $this->admin);
@@ -229,11 +225,39 @@ class InAppNotificationsTest extends TestCase
         $this->assertSame('restructured', $source->fresh()->status);
         // One notice per event: the restructure, not also a release.
         $this->assertSame([], $this->recipients(StaffNotification::LOAN_RELEASED, $newLoan));
-        $this->assertSame([$officer->id], $this->recipients(StaffNotification::RESTRUCTURE_APPLIED, $newLoan));
+        $this->assertSame($this->ids($creator, $officer), $this->recipients(StaffNotification::RESTRUCTURE_APPLIED, $newLoan));
+        $this->assertCount(1, $this->rowsOfType($officer, StaffNotification::RESTRUCTURE_APPLIED));
         $row = $this->latestOfType($officer, StaffNotification::RESTRUCTURE_APPLIED);
         $this->assertSame($source->id, $row->data['data']['source_loan_id']);
         $this->assertStringContainsString('restructured into', $row->data['body']);
         $this->assertStringContainsString('₱70,800.00', $row->data['body']);
+    }
+
+    public function test_a_restructure_with_no_officer_still_tells_its_creator(): void
+    {
+        $creator = $this->staff('loan_processor');
+        $source = $this->createReleasedLoan();
+        $newLoan = $this->restructuredDraft($source, $creator);
+        app(LoanService::class)->submitForReview($newLoan, $creator);
+        app(LoanService::class)->approve($newLoan, $this->admin, 'ok');
+
+        app(LoanService::class)->release($newLoan->fresh(), $this->admin);
+
+        $this->assertNull($newLoan->fresh()->account_officer_id);
+        $this->assertSame([$creator->id], $this->recipients(StaffNotification::RESTRUCTURE_APPLIED, $newLoan));
+    }
+
+    public function test_a_recipient_with_only_a_direct_loans_view_grant_is_told(): void
+    {
+        $role = Role::create(['name' => 'field_agent', 'guard_name' => 'web', 'is_active' => true, 'is_system' => false]);
+        $role->syncPermissions(['borrowers:view']);
+        $officer = tap($this->staff(null), fn (User $u) => $u->assignRole($role));
+        $officer->givePermissionTo('loans:view');
+        $loan = $this->approvedLoan($this->staff('loan_processor'), $officer);
+
+        app(LoanService::class)->release($loan, $this->admin);
+
+        $this->assertContains($officer->id, $this->recipients(StaffNotification::LOAN_RELEASED, $loan));
     }
 
     public function test_a_void_tells_the_officer_and_whoever_recorded_the_payment_but_not_the_voider(): void
@@ -290,12 +314,7 @@ class InAppNotificationsTest extends TestCase
     public function test_extending_a_loan_tells_its_officer_once(): void
     {
         $officer = $this->staff('loan_officer');
-        $loan = $this->createReleasedLoan([
-            'product' => ['interest_method' => 'upon_maturity', 'term' => 1, 'frequency' => 'monthly', 'interest_rate' => 3.0],
-            'principal_amount' => 60000,
-            'start_date' => now()->subDays(10)->toDateString(),
-        ]);
-        $loan->update(['account_officer_id' => $officer->id]);
+        $loan = $this->extendableLoan($officer);
 
         $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'defer'])->assertOk();
 
@@ -304,6 +323,45 @@ class InAppNotificationsTest extends TestCase
         $adjustment = LoanAdjustment::where('loan_id', $loan->id)->latest('id')->firstOrFail();
         $this->assertSame($adjustment->id, $row->data['data']['adjustment_id']);
         $this->assertStringContainsString("{$adjustment->adjustment_number} extended", $row->data['body']);
+    }
+
+    public function test_extending_on_pay_tells_the_officer_once(): void
+    {
+        $officer = $this->staff('loan_officer');
+        $loan = $this->extendableLoan($officer);
+
+        $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'pay'])->assertOk();
+
+        $this->assertSame([$officer->id], $this->recipients(StaffNotification::EXTENSION_APPLIED, $loan));
+        $this->assertCount(1, $this->rowsOfType($officer, StaffNotification::EXTENSION_APPLIED));
+    }
+
+    public function test_the_extension_preview_notifies_nobody(): void
+    {
+        $loan = $this->extendableLoan($this->staff('loan_officer'));
+        $before = DatabaseNotification::count();
+
+        $this->getJson("/api/loans/{$loan->id}/extension-preview?interest_option=pay")->assertOk();
+        $this->getJson("/api/loans/{$loan->id}/extension-preview?interest_option=defer")->assertOk();
+
+        $this->assertSame($before, DatabaseNotification::count());
+    }
+
+    public function test_a_failing_send_during_an_extension_still_extends_and_is_logged(): void
+    {
+        $loan = $this->extendableLoan($this->staff('loan_officer'));
+        Log::spy();
+        Notification::shouldReceive('send')->andThrow(new RuntimeException('deadlock while sending'));
+
+        $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'defer'])
+            ->assertOk();
+
+        $this->assertTrue(LoanAdjustment::where('loan_id', $loan->id)->where('adjustment_type', 'extension')->where('status', 'applied')->exists());
+        $this->assertSame([], $this->recipients(StaffNotification::EXTENSION_APPLIED, $loan));
+        Log::shouldHaveReceived('error')
+            ->withArgs(fn (string $message, array $context) => str_contains($message, 'in-app notification could not be sent')
+                && $context['loan_id'] === $loan->id)
+            ->atLeast()->once();
     }
 
     public function test_applying_an_in_place_restructure_tells_its_officer(): void
@@ -451,6 +509,31 @@ class InAppNotificationsTest extends TestCase
             'start_date' => now()->toDateString(),
             'account_officer_id' => $officer?->id,
         ], $creator);
+    }
+
+    private function restructuredDraft(Loan $source, User $creator): Loan
+    {
+        return app(LoanService::class)->restructure($source, [
+            'borrower_id' => $source->borrower_id,
+            'loan_product_id' => $source->loan_product_id,
+            'principal_amount' => 70800,
+            'start_date' => now()->toDateString(),
+        ], $creator);
+    }
+
+    /**
+     * A released one-month upon-maturity loan, which POST /extend accepts.
+     */
+    private function extendableLoan(User $officer): Loan
+    {
+        $loan = $this->createReleasedLoan([
+            'product' => ['interest_method' => 'upon_maturity', 'term' => 1, 'frequency' => 'monthly', 'interest_rate' => 3.0],
+            'principal_amount' => 60000,
+            'start_date' => now()->subDays(10)->toDateString(),
+        ]);
+        $loan->update(['account_officer_id' => $officer->id]);
+
+        return $loan;
     }
 
     private function approvedLoan(User $creator, ?User $officer): Loan

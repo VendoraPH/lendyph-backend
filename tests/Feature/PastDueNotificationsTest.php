@@ -106,6 +106,31 @@ class PastDueNotificationsTest extends TestCase
         $this->assertSame(1, $this->pastDueCount($loan));
     }
 
+    public function test_one_loans_failed_send_does_not_stop_the_next_loan(): void
+    {
+        $officer = $this->officer();
+        $first = $this->lateLoan($officer);
+        $second = $this->lateLoan($officer);
+        $this->assertLessThan($second->id, $first->id);
+        Log::spy();
+        $real = new ChannelManager($this->app);
+        $calls = 0;
+        Notification::shouldReceive('send')->andReturnUsing(function ($recipients, $notification) use ($real, &$calls) {
+            if (++$calls === 1) {
+                throw new RuntimeException('database channel down');
+            }
+
+            $real->send($recipients, $notification);
+        });
+
+        $this->artisan('notifications:past-due')->assertFailed();
+
+        $this->assertFalse(DB::table('loan_past_due_notices')->where('loan_id', $first->id)->exists());
+        $this->assertSame(0, $this->pastDueCount($first));
+        $this->assertTrue(DB::table('loan_past_due_notices')->where('loan_id', $second->id)->exists());
+        $this->assertSame(1, $this->pastDueCount($second));
+    }
+
     public function test_the_overnight_jobs_run_just_after_midnight_manila_in_order(): void
     {
         Artisan::all();

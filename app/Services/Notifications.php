@@ -156,16 +156,18 @@ final class Notifications
 
     /**
      * A restructure into a new loan took effect: the new loan was released and
-     * its source closed. Told to the new loan's assigned officer. The source is
-     * read by id inside the deferred send, so a failing read after the release
-     * has committed is logged, never answered as an error.
+     * its source closed. Told to the new loan's creator and assigned officer,
+     * the people loan_released reaches, so a loan with no officer still
+     * reaches someone. The source is read by id inside the deferred send, so a
+     * failing read after the release has committed is logged, never answered
+     * as an error.
      */
     private function restructuredIntoNewLoan(Loan $newLoan, int $sourceLoanId, ?User $actor): void
     {
         $this->deliver(
             $newLoan,
             $actor,
-            fn (): Collection => $this->usersById([$newLoan->account_officer_id]),
+            fn (): Collection => $this->creatorAndOfficer($newLoan),
             function () use ($newLoan, $sourceLoanId, $actor): StaffNotification {
                 $source = Loan::query()->find($sourceLoanId);
 
@@ -295,7 +297,7 @@ final class Notifications
     }
 
     /**
-     * Send after commit, to the candidates who pass the three filters, and
+     * Send after commit, to the candidates who pass the four filters, and
      * never let a failure reach the caller.
      *
      * @param  Closure(): Collection<int, User>  $candidates
@@ -305,6 +307,12 @@ final class Notifications
     {
         try {
             DB::afterCommit(function () use ($loan, $actor, $candidates, $notification): void {
+                // Load-bearing. This runs after the caller's transaction has
+                // committed but still inside its LoanWriteTransaction::run()
+                // call, which turns a deadlock or lock wait timeout into a 409.
+                // Without this catch, a deadlock while sending would answer 409
+                // for an extension or payment that already committed, and the
+                // client's retry could collect the money twice.
                 try {
                     $this->send($loan, $actor, $candidates, $notification);
                 } catch (Throwable $e) {
@@ -403,13 +411,15 @@ final class Notifications
     }
 
     /**
-     * Active users with what the four filters read loaded up front: their
-     * roles and those roles' permissions, their direct permissions and their
-     * branches, so a list of recipients is not one query per user each.
+     * Active users with their roles and direct permissions loaded up front,
+     * the two relations the `loans:view` check reads (User::activeRoles() and
+     * the direct grant), so that check is not two queries per recipient.
+     * BranchAccess::canSee() still reads each recipient's branches with a
+     * query of its own: it does not use a loaded `branches` relation.
      */
     private function recipientQuery(): Builder
     {
-        return User::query()->active()->with(['roles.permissions', 'permissions', 'branches']);
+        return User::query()->active()->with(['roles', 'permissions']);
     }
 
     private function activeRole(Builder $roles): Builder
