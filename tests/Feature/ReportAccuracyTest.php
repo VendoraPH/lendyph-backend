@@ -390,7 +390,7 @@ class ReportAccuracyTest extends TestCase
         $csv = $this->parseCsv($export->streamedContent());
 
         $this->assertSame([
-            'Borrower', 'Loan #', 'Due Date', 'Days Overdue', 'Principal Due', 'Interest Due', 'Penalty', 'Total Due', 'Status',
+            'Member', 'Loan #', 'Due Date', 'Days Overdue', 'Principal Due', 'Interest Due', 'Penalty', 'Total Due', 'Status',
         ], $csv[0]);
 
         $body = array_slice($csv, 1);

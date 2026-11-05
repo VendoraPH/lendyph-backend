@@ -962,11 +962,11 @@ class GCashNonMemberTest extends TestCase
         ])->assertStatus(422);
 
         $this->assertSame(
-            ['The borrower id field is required when walk-in is not present.'],
+            ['The member field is required when walk-in is not present.'],
             $missing->json('errors.borrower_id'),
         );
         $this->assertSame(
-            ['The walk-in field is required when borrower id is not present.'],
+            ['The walk-in field is required when member is not present.'],
             $missing->json('errors.gcash_non_member_id'),
         );
 

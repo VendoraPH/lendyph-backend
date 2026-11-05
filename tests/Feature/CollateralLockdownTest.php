@@ -266,7 +266,7 @@ it('refuses an attach to a loan that is no longer editable, and writes nothing',
         'snapshot_value' => 250000,
     ])->assertUnprocessable()
         ->assertJsonValidationErrors([
-            'status' => 'Collateral can only be attached or detached while the loan is in draft or for_review status.',
+            'status' => 'Collateral can only be attached or detached while the loan is a draft or under approval.',
         ]);
 
     expect(($this->state)())->toBe($before);
@@ -280,7 +280,7 @@ it('refuses a detach from a loan that is no longer editable, and writes nothing'
     $this->deleteJson("/api/loans/{$loan->id}/collaterals/{$this->collateral->id}")
         ->assertUnprocessable()
         ->assertJsonValidationErrors([
-            'status' => 'Collateral can only be attached or detached while the loan is in draft or for_review status.',
+            'status' => 'Collateral can only be attached or detached while the loan is a draft or under approval.',
         ]);
 
     expect(($this->state)())->toBe($before);
@@ -310,7 +310,7 @@ it('reads the loan status again under its lock, so an attach cannot slip past a 
         'snapshot_value' => 250000,
     ])->assertUnprocessable()
         ->assertJsonValidationErrors([
-            'status' => 'Collateral can only be attached or detached while the loan is in draft or for_review status.',
+            'status' => 'Collateral can only be attached or detached while the loan is a draft or under approval.',
         ]);
 
     expect($loan->collaterals()->count())->toBe(0)
@@ -344,7 +344,7 @@ it('reads the loan status again under its lock, so a loan edit cannot change col
         'collaterals' => [['collateral_id' => $added->id, 'snapshot_value' => 1000]],
     ])->assertUnprocessable()
         ->assertJsonValidationErrors([
-            'status' => 'Collateral can only be attached or detached while the loan is in draft or for_review status.',
+            'status' => 'Collateral can only be attached or detached while the loan is a draft or under approval.',
         ]);
 
     expect($loan->collaterals()->pluck('collaterals.id')->all())->toBe([$this->collateral->id])

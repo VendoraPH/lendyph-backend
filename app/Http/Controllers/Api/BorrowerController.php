@@ -288,7 +288,7 @@ DESC,
                         'message' => 'The first name field has duplicate match.',
                         'errors' => [
                             'first_name' => [
-                                'A similar borrower already exists: Juan Dela Cruz (BRW-000042, born 1990-01-15). Pass force=true to create anyway.',
+                                'A similar member already exists: Juan Dela Cruz (BRW-000042, born 1990-01-15). Pass force=true to create anyway.',
                             ],
                         ],
                     ],
@@ -504,7 +504,7 @@ DESC,
 
         $purge->purge($borrower);
 
-        return response()->json(['message' => 'Borrower deleted successfully.']);
+        return response()->json(['message' => 'Member deleted successfully.']);
     }
 
     #[OA\Patch(
@@ -527,7 +527,7 @@ DESC,
 
         $borrower->update(['status' => 'inactive']);
 
-        return response()->json(['message' => 'Borrower deactivated successfully.']);
+        return response()->json(['message' => 'Member deactivated successfully.']);
     }
 
     #[OA\Patch(
@@ -550,7 +550,7 @@ DESC,
 
         $borrower->update(['status' => 'active']);
 
-        return response()->json(['message' => 'Borrower reactivated successfully.']);
+        return response()->json(['message' => 'Member reactivated successfully.']);
     }
 
     #[OA\Patch(
@@ -584,7 +584,7 @@ DESC,
 
         if ($borrower->status !== 'pending') {
             throw ValidationException::withMessages([
-                'status' => 'Only borrowers with a pending registration can be approved.',
+                'status' => 'Only members with a pending registration can be approved.',
             ]);
         }
 
@@ -645,7 +645,7 @@ DESC,
     {
         if ($borrower->status !== 'pending') {
             throw ValidationException::withMessages([
-                'status' => 'Only borrowers with a pending registration can be rejected.',
+                'status' => 'Only members with a pending registration can be rejected.',
             ]);
         }
 
@@ -718,7 +718,7 @@ DESC,
                 $failed[] = [
                     'id' => $id,
                     'reason' => ErrorDigest::forSubject(
-                        $e, "Borrower {$id}", 'deactivated', 'See the application log.'
+                        $e, "Member {$id}", 'deactivated', 'See the application log.'
                     ),
                 ];
 
@@ -798,7 +798,7 @@ DESC,
                 $failed[] = [
                     'id' => $id,
                     'reason' => ErrorDigest::forSubject(
-                        $e, "Borrower {$id}", 'deleted', 'See the application log.'
+                        $e, "Member {$id}", 'deleted', 'See the application log.'
                     ),
                 ];
 

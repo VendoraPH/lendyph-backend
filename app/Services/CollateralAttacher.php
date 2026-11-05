@@ -184,7 +184,7 @@ class CollateralAttacher
 
         if (! $locked?->is_editable) {
             throw ValidationException::withMessages([
-                'status' => ['Collateral can only be attached or detached while the loan is in draft or for_review status.'],
+                'status' => ['Collateral can only be attached or detached while the loan is a draft or under approval.'],
             ]);
         }
 
@@ -231,7 +231,7 @@ class CollateralAttacher
         // two failure modes are not told apart.
         if ((int) $collateral->borrower_id !== (int) $loan->borrower_id) {
             throw ValidationException::withMessages([
-                'collateral_id' => 'This collateral is not registered to this loan\'s borrower.',
+                'collateral_id' => 'This collateral is not registered to this loan\'s member.',
             ]);
         }
 

@@ -446,7 +446,7 @@ final class Notifications
     {
         $name = trim((string) $loan->borrower?->full_name);
 
-        return $name === '' ? 'the borrower' : $name;
+        return $name === '' ? 'the member' : $name;
     }
 
     private function loanUrl(Loan $loan): string

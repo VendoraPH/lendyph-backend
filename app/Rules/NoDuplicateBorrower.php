@@ -80,14 +80,14 @@ class NoDuplicateBorrower implements DataAwareRule, ValidationRule
             && app(BranchAccess::class)->canSee($this->viewer, $duplicate->branch_id);
 
         if (! $mayReveal) {
-            $fail('A similar borrower already exists. Please contact your branch to continue.');
+            $fail('A similar member already exists. Please contact your branch to continue.');
 
             return;
         }
 
         $dob = $duplicate->birthdate?->toDateString() ?? 'unknown DOB';
         $fail(sprintf(
-            'A similar borrower already exists: %s (%s, born %s). Pass force=true to create anyway.',
+            'A similar member already exists: %s (%s, born %s). Pass force=true to create anyway.',
             $duplicate->full_name,
             $duplicate->borrower_code,
             $dob,

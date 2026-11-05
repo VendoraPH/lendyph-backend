@@ -162,7 +162,7 @@ it('refuses another borrower\'s collateral', function () {
         ],
     ])
         ->assertUnprocessable()
-        ->assertJsonValidationErrors(['collaterals.1.collateral_id' => 'This collateral is not registered to this loan\'s borrower.']);
+        ->assertJsonValidationErrors(['collaterals.1.collateral_id' => 'This collateral is not registered to this loan\'s member.']);
 
     expect($this->loan->collaterals()->pluck('collaterals.id')->all())->toBe([$held->id]);
 });

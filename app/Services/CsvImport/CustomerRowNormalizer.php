@@ -168,7 +168,7 @@ class CustomerRowNormalizer
         }
 
         if ($date->gt(Carbon::today()->subYears(18))) {
-            $notes->warn('birthdate', 'birthdate_under_18', "\"{$value}\" makes this member under 18. The record was imported as-is because it is a fact on the coop's books, but the borrower form requires 18+, so this member cannot be saved in the app until the birthdate is corrected.");
+            $notes->warn('birthdate', 'birthdate_under_18', "\"{$value}\" makes this member under 18. The record was imported as-is because it is a fact on the coop's books, but the member form requires 18+, so this member cannot be saved in the app until the birthdate is corrected.");
         }
 
         return $value;
@@ -182,7 +182,7 @@ class CustomerRowNormalizer
             return $value;
         }
 
-        $notes->warn($field, 'amount_above_app_maximum', "This amount is above the {$maxLabel} the borrower form allows, so it was imported as blank rather than leaving a member who cannot be saved.");
+        $notes->warn($field, 'amount_above_app_maximum', "This amount is above the {$maxLabel} the member form allows, so it was imported as blank rather than leaving a member who cannot be saved.");
 
         return null;
     }

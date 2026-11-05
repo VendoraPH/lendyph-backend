@@ -80,7 +80,7 @@ trait HasBorrowerRules
             // anyone enumerate who borrows here. Operators still get the direct
             // message, since they need it to resolve the collision.
             'email.unique' => $this->user()
-                ? 'A borrower with this email already exists.'
+                ? 'A member with this email already exists.'
                 : 'This email cannot be used. Please contact your branch to continue.',
             'pledge_amount.max' => 'The pledge amount may not exceed 9,999,999.99.',
             'birthdate.after' => 'The birthdate must be after January 1, 1900.',

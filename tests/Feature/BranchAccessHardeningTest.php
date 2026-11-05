@@ -432,7 +432,7 @@ class BranchAccessHardeningTest extends TestCase
             'first_name' => 'Rosalinda', 'last_name' => 'Magbanua', 'birthdate' => '1980-05-05',
             'branch_id' => $this->branch->id,
         ])->assertUnprocessable()
-            ->assertJsonValidationErrors(['first_name' => 'A similar borrower already exists. Please contact your branch']);
+            ->assertJsonValidationErrors(['first_name' => 'A similar member already exists. Please contact your branch']);
 
         $this->assertStringNotContainsString('BRW-', json_encode($response->json('errors.first_name')));
     }
