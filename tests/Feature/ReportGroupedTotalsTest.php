@@ -364,8 +364,8 @@ class ReportGroupedTotalsTest extends TestCase
             'payments' => 2,
             'interest_income' => 300,
             'penalty_income' => 3,
-            'total_income' => 303,
             'processing_fee' => 0,
+            'total_income' => 303,
         ]], $response->json('data'));
         $this->assertSame(['count' => 1, 'payments' => 2, 'interest_income' => 300, 'penalty_income' => 3, 'processing_fee' => 0, 'total_income' => 303], $response->json('totals'));
 

@@ -469,7 +469,7 @@ class ReportController extends Controller
         summary: 'Income by loan account',
         description: 'What GET /api/reports/income adds up, by loan: one row per loan with a posted repayment or a processing '
             .'fee in the period, ordered by `total_income` desc then `loan_id` asc, paginated over loans (`meta.total` counts '
-            .'loans). Rows are IncomeByLoanRow plus `processing_fee`, and their `total_income` is interest, penalty and fee. '
+            .'loans). Each row\'s `total_income` is its interest, penalty and fee. '
             .'`meta.totals` (also sent as `totals`) covers the whole filtered set: its `interest_income`, `penalty_income`, '
             .'`processing_fee` and `total_income` equal the Income report\'s `interest_income`, `penalty_income`, '
             .'`processing_fees` and `total`, and `payments` equals the List of Repayments `totals.count`, for the same '
@@ -506,14 +506,8 @@ class ReportController extends Controller
         $this->authorize('reports:view');
 
         $report = $this->reportService->incomeByLoanReport($this->reportFilters());
-        $request = request();
 
-        $rows = $report['page']->through(fn (Loan $loan): array => [
-            ...(new IncomeByLoanResource($loan))->toArray($request),
-            'processing_fee' => $loan->getAttribute('processing_fee'),
-        ]);
-
-        return JsonResource::collection($rows)->additional([
+        return IncomeByLoanResource::collection($report['page'])->additional([
             'totals' => $report['totals'],
             'meta' => ['totals' => $report['totals']],
         ]);
