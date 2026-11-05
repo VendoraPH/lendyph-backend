@@ -135,6 +135,8 @@ class LoanProductController extends Controller
         ],
         requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent(
             properties: [
+                new OA\Property(property: 'description', type: 'string', nullable: true, description: 'Absent: the stored description is kept. null clears it'),
+                new OA\Property(property: 'term', type: 'integer', description: 'The default term. Absent: the stored value is kept, whatever max_term is sent'),
                 new OA\Property(property: 'custom_fees', type: 'array', items: new OA\Items(type: 'object'), description: 'Retired ("Additional fees"). Omit it (the stored list is kept), send the stored list unchanged (kept as it is), or send [] (clears it); any other value answers 422. The product still returns the stored list'),
             ],
         )),

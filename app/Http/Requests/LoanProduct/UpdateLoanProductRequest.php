@@ -68,9 +68,9 @@ class UpdateLoanProductRequest extends FormRequest
         if (! $this->has('interest_rate') && $this->has('max_interest_rate')) {
             $this->merge(['interest_rate' => $this->max_interest_rate]);
         }
-        if (! $this->has('term') && $this->has('max_term')) {
-            $this->merge(['term' => $this->max_term]);
-        }
+        // `term` is the product's default term, not the top of the range. An edit
+        // that doesn't send one keeps the stored value, so it isn't copied from
+        // `max_term` here.
         if (! $this->has('frequency') && $this->has('frequencies')) {
             $frequencies = $this->input('frequencies');
             if (is_array($frequencies) && count($frequencies) > 0) {
