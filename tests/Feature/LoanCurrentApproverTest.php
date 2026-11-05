@@ -201,6 +201,90 @@ class LoanCurrentApproverTest extends TestCase
         $this->assertSame('Credit Review', $this->detailStatusLabel($loan));
     }
 
+    public function test_an_approved_loan_reads_its_release_steps_label(): void
+    {
+        $this->chainWithReleaseLabel('Ready for Release');
+
+        $loan = $this->submittedLoan();
+        $this->approveAs('manager', $loan);
+        $this->assertSame('approved', $loan->fresh()->status);
+        $this->assertSame('Teller', $this->pendingStep($loan)->name);
+
+        $this->assertSame('Ready for Release', $this->listedStatusLabel($loan));
+        $this->assertSame('Ready for Release', $this->detailStatusLabel($loan));
+
+        // The label answers for the status; the approver still does not.
+        $this->assertNull($this->listedApprover($loan));
+        $this->assertNull($this->detailApprover($loan));
+    }
+
+    public function test_an_approved_loan_with_no_release_label_reads_null(): void
+    {
+        $loan = $this->submittedLoan();
+        $this->approveAs('manager', $loan);
+        $this->approveAs('bod1', $loan);
+        $this->assertSame('approved', $loan->fresh()->status);
+
+        $this->assertNull($this->listedStatusLabel($loan));
+        $this->assertNull($this->detailStatusLabel($loan));
+    }
+
+    public function test_a_blank_release_label_reads_null_never_an_empty_string(): void
+    {
+        $this->chainWithReleaseLabel('   ');
+
+        $loan = $this->submittedLoan();
+        $this->approveAs('manager', $loan);
+
+        $this->assertNull($this->listedStatusLabel($loan));
+    }
+
+    public function test_a_directly_approved_loan_reads_the_release_label(): void
+    {
+        $this->chainWithReleaseLabel('Ready for Release');
+
+        $loan = $this->submittedLoan();
+        app(LoanService::class)->approve($loan, $this->admin, 'direct');
+        $this->assertSame('approved', $loan->fresh()->status);
+
+        $this->assertSame('Ready for Release', $this->listedStatusLabel($loan));
+    }
+
+    public function test_a_chain_left_mid_flight_reads_the_release_label_not_the_step_left_pending(): void
+    {
+        $this->chainWithReleaseLabel('Ready for Release');
+
+        $loan = $this->submittedLoan();
+        $loan->forceFill(['status' => 'approved'])->save();
+        $this->assertSame('Manager', $this->pendingStep($loan)->name);
+
+        $this->assertSame('Ready for Release', $this->listedStatusLabel($loan));
+    }
+
+    public function test_a_released_loan_reads_no_label(): void
+    {
+        $this->chainWithReleaseLabel('Ready for Release');
+
+        $loan = $this->submittedLoan();
+        $this->approveAs('manager', $loan);
+        app(LoanService::class)->release($loan->fresh(), $this->admin);
+        $this->assertSame('released', $loan->fresh()->status);
+
+        $this->assertNull($this->listedStatusLabel($loan));
+    }
+
+    private function chainWithReleaseLabel(string $label): void
+    {
+        ApprovalWorkflowSetting::updateOrCreate(
+            ['type' => ApprovalWorkflowSetting::TYPE_NORMAL],
+            ['steps' => [
+                ['id' => 'processor', 'name' => 'Loan Processor', 'role' => 'loan_processor', 'kind' => 'submit'],
+                ['id' => 'manager', 'name' => 'Manager', 'role' => 'manager', 'kind' => 'approve', 'status' => 'Credit Review'],
+                ['id' => 'teller', 'name' => 'Teller', 'role' => 'cashier', 'kind' => 'release', 'status' => $label],
+            ]],
+        );
+    }
+
     private function assertAgreesWithApprovalSteps(Loan $loan, string $expected): void
     {
         $fromChain = collect($this->getJson("/api/loans/{$loan->id}/approval-steps")->assertOk()->json('data.current_steps'))
