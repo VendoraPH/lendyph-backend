@@ -309,6 +309,7 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
         Route::get('/income/by-loan', [ReportController::class, 'incomeByLoan']);
         Route::get('/aging', [ReportController::class, 'agingReport']);
         Route::get('/borrowers', [ReportController::class, 'borrowerReport']);
+        Route::get('/borrowers/list', [ReportController::class, 'borrowerList']);
         Route::get('/borrowers/released', [ReportController::class, 'borrowersReleased']);
         Route::get('/disbursements', [ReportController::class, 'disbursementReport']);
 

@@ -46,6 +46,7 @@ class BranchScopedReportsTest extends TestCase
         '/api/reports/income/by-loan',
         '/api/reports/aging',
         '/api/reports/borrowers',
+        '/api/reports/borrowers/list',
         '/api/reports/borrowers/released',
         '/api/reports/disbursements',
         '/api/reports/cash-flow',
