@@ -101,7 +101,7 @@ class PreviewLoanRequest extends FormRequest
     public function messages(): array
     {
         return [
-            'collaterals.*.collateral_id.exists' => 'This collateral is not registered to this borrower.',
+            'collaterals.*.collateral_id.exists' => 'This collateral is not registered to this member.',
             'collaterals.*.collateral_id.distinct' => 'Each collateral can be listed only once.',
         ];
     }

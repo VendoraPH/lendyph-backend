@@ -2290,7 +2290,7 @@ class ReportService
                     'uncollected' => 'money',
                 ]),
                 'by_period' => $this->collectionEfficiencyByPeriod($from, $to, $branchIds),
-                'note' => 'Counted by period: collected is the principal and interest paid on the periods due in the range (each branch, each due month), capped at what each period owes, so no rate exceeds 100%. Penalty and cash taken in are penalty_collected and total_received.',
+                'note' => 'Counted by period: collected is the principal and interest paid on the periods due in the selected dates (each branch, each due month), capped at what each period owes, so no rate exceeds 100%. Penalty collected and total cash received are separate figures.',
                 'generated_at' => now()->toDateTimeString(),
             ],
         );
@@ -2511,7 +2511,7 @@ class ReportService
             'by_officer_totals' => $officerTotals,
             'by_branch' => $byBranch,
             'by_branch_totals' => self::columnTotals($byBranch, $columns),
-            'note' => 'released_*, collected and insurance_collected cover date_from..date_to (collected leaves out the insurance premium, which is insurance_collected); outstanding, overdue, at_risk and active_borrowers are as_of_date figures over the whole book.',
+            'note' => 'Released and collected figures cover the selected dates, and collected leaves out the insurance premium, which is counted separately. Outstanding, overdue, at-risk and active member figures are as of today, over the whole book.',
             'generated_at' => now()->toDateTimeString(),
         ];
     }
@@ -2892,7 +2892,7 @@ class ReportService
             'total_subscribed_per_period' => round((float) ($totals->total_subscribed_per_period ?? 0), 2),
             'total_paid_in' => $paidIn,
             'by_schedule' => $bySchedule,
-            'note' => 'total_subscribed_per_period is the sum of PER-SCHEDULE pledges (15th / 30th / both), not a lump-sum subscription, so it is not directly comparable to total_paid_in.',
+            'note' => 'Total subscribed per period is the sum of per-schedule pledges (15th / 30th / both), not a lump-sum subscription, so it is not directly comparable to total paid in.',
         ];
     }
 

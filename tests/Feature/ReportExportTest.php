@@ -27,7 +27,7 @@ class ReportExportTest extends TestCase
 
         $content = $response->streamedContent();
         $this->assertStringContainsString('Loan #', $content);
-        $this->assertStringContainsString('Borrower', $content);
+        $this->assertStringContainsString('Member', $content);
     }
 
     public function test_export_repayments_returns_csv(): void

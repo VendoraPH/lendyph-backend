@@ -85,7 +85,7 @@ class AddLoanCoMakerRequest extends FormRequest
     public function messages(): array
     {
         return [
-            'co_maker_id.exists' => "The selected co-maker is not one of this borrower's co-makers.",
+            'co_maker_id.exists' => "The selected co-maker is not one of this member's co-makers.",
             'co_maker_id.prohibits' => "Send either co_maker_id or a new co-maker's details, not both.",
             'first_name.required_without' => 'The first name is required when adding a new co-maker.',
             'last_name.required_without' => 'The last name is required when adding a new co-maker.',

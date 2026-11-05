@@ -843,7 +843,7 @@ class ReportController extends Controller
             ->with('borrower', 'loanProduct');
 
         return $this->streamCsv('releases.csv', [
-            'Loan #', 'Borrower', 'Product', 'Principal', 'Interest Rate', 'Term', 'Released', 'Status',
+            'Loan #', 'Member', 'Product', 'Principal', 'Interest Rate', 'Term', 'Released', 'Status',
         ], $query->lazy(500)->map(fn ($l) => [
             $l->loan_account_number ?? $l->application_number,
             $l->borrower?->full_name ?? '',
@@ -876,7 +876,7 @@ class ReportController extends Controller
             ->with('loan.borrower');
 
         return $this->streamCsv('repayments.csv', [
-            'Receipt #', 'Borrower', 'Loan #', 'Date', 'Amount', 'Insurance Premium', 'Method', 'Status',
+            'Receipt #', 'Member', 'Loan #', 'Date', 'Amount', 'Insurance Premium', 'Method', 'Status',
         ], $query->lazy(500)->map(fn ($r) => [
             $r->receipt_number,
             $r->loan?->borrower?->full_name ?? '',
@@ -946,7 +946,7 @@ class ReportController extends Controller
         $today = Carbon::today();
 
         return $this->streamCsv('due-past-due.csv', [
-            'Borrower', 'Loan #', 'Due Date', 'Days Overdue', 'Principal Due', 'Interest Due', 'Penalty', 'Total Due', 'Status',
+            'Member', 'Loan #', 'Due Date', 'Days Overdue', 'Principal Due', 'Interest Due', 'Penalty', 'Total Due', 'Status',
         ], $query->lazy(500)->map(function ($s) use ($today) {
             $dueDate = $s->due_date?->copy()->startOfDay();
 

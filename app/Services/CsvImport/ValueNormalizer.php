@@ -412,7 +412,7 @@ class ValueNormalizer
             return $this->boundedText($candidate, $field, 20, $notes);
         }
 
-        $notes->warn($field, 'contact_number_invalid', "\"{$original}\" is not a contact number this system accepts, so it was imported as blank. A member carrying a value the borrower form rejects can never be saved again — fix it in the app after the import.");
+        $notes->warn($field, 'contact_number_invalid', "\"{$original}\" is not a contact number this system accepts, so it was imported as blank. A member carrying a value the member form rejects can never be saved again — fix it in the app after the import.");
 
         return null;
     }
@@ -435,7 +435,7 @@ class ValueNormalizer
         $failed = Validator::make(['email' => $value], ['email' => ['email', 'max:255']])->fails();
 
         if ($failed) {
-            $notes->warn($field, 'email_invalid', "\"{$value}\" is not an email address this system accepts, so it was imported as blank. A member carrying a value the borrower form rejects can never be saved again — fix it in the app after the import.");
+            $notes->warn($field, 'email_invalid', "\"{$value}\" is not an email address this system accepts, so it was imported as blank. A member carrying a value the member form rejects can never be saved again — fix it in the app after the import.");
 
             return null;
         }

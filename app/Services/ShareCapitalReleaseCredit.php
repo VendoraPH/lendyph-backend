@@ -94,7 +94,7 @@ final class ShareCapitalReleaseCredit
         if (in_array($status, Borrower::NON_MEMBER_STATUSES, true)) {
             throw ValidationException::withMessages([
                 'deductions' => [
-                    'This loan withholds '.Money::format($centavos).' of share capital, but the borrower is not a '
+                    'This loan withholds '.Money::format($centavos).' of share capital, but this person is not a '
                     .'member yet, and only members can hold share capital. Remove the Share Capital deduction or '
                     .'approve the membership before releasing.',
                 ],

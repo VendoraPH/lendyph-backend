@@ -46,7 +46,7 @@ it('rejects exact first+middle+last duplicate', function () {
 
     $this->postJson('/api/borrowers', registerPayload())
         ->assertStatus(422)
-        ->assertJsonPath('errors.first_name.0', fn ($msg) => str_contains($msg, 'similar borrower already exists')
+        ->assertJsonPath('errors.first_name.0', fn ($msg) => str_contains($msg, 'similar member already exists')
             && str_contains($msg, 'BRW-'));
 });
 

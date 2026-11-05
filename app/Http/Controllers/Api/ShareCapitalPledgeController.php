@@ -61,8 +61,8 @@ class ShareCapitalPledgeController extends Controller
 
         throw ValidationException::withMessages([
             'borrower_id' => $status === null
-                ? 'This pledge is not attached to a borrower, so share capital cannot be recorded against it.'
-                : "This borrower's registration is {$status}, so they are not a member yet. "
+                ? 'This pledge is not attached to a member, so share capital cannot be recorded against it.'
+                : "This person's registration is {$status}, so they are not a member yet. "
                     .'Share capital can only be recorded once the registration is approved.',
         ]);
     }

@@ -279,7 +279,7 @@ class LoanCoMakerAtReleaseTest extends TestCase
             ->assertJsonValidationErrors(['co_maker_id'])
             ->assertJsonPath(
                 'errors.co_maker_id.0',
-                "This co-maker is inactive. Reactivate them on the borrower's Co-makers tab before adding them to a loan.",
+                "This co-maker is inactive. Reactivate them on the member's Co-makers tab before adding them to a loan.",
             );
 
         $this->assertSame(0, $loan->coMakers()->count());

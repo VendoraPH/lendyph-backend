@@ -76,6 +76,6 @@ trait ValidatesLoanCollaterals
      */
     protected function notThisLoansBorrowerMessage(): string
     {
-        return 'This collateral is not registered to this loan\'s borrower.';
+        return 'This collateral is not registered to this loan\'s member.';
     }
 }

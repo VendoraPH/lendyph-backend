@@ -352,7 +352,7 @@ class LoanService
     {
         if ((int) $validated['borrower_id'] !== (int) $sourceLoan->borrower_id) {
             throw ValidationException::withMessages([
-                'borrower_id' => ['A restructured loan must stay with the borrower of the loan it replaces.'],
+                'borrower_id' => ['A restructured loan must stay with the member of the loan it replaces.'],
             ]);
         }
 
@@ -1211,7 +1211,7 @@ class LoanService
 
                 if (! $coMaker) {
                     throw ValidationException::withMessages([
-                        'co_maker_id' => ["The selected co-maker is not one of this borrower's co-makers."],
+                        'co_maker_id' => ["The selected co-maker is not one of this member's co-makers."],
                     ]);
                 }
 
@@ -1227,7 +1227,7 @@ class LoanService
                 // concurrent deactivation cannot slip in before the attach.
                 if ($coMaker->status !== 'active') {
                     throw ValidationException::withMessages([
-                        'co_maker_id' => ["This co-maker is inactive. Reactivate them on the borrower's Co-makers tab before adding them to a loan."],
+                        'co_maker_id' => ["This co-maker is inactive. Reactivate them on the member's Co-makers tab before adding them to a loan."],
                     ]);
                 }
             } else {
@@ -2121,7 +2121,7 @@ class LoanService
         // The member is fixed after creation.
         if ($borrowerId !== null && (int) $borrowerId !== (int) $loan->borrower_id) {
             throw ValidationException::withMessages([
-                'borrower_id' => ['A loan\'s borrower cannot be changed.'],
+                'borrower_id' => ['A loan\'s member cannot be changed.'],
             ]);
         }
 
@@ -2147,7 +2147,7 @@ class LoanService
         // As restructure() refuses it.
         if ($borrowerId !== null && (int) $borrowerId !== (int) $source->borrower_id) {
             throw ValidationException::withMessages([
-                'borrower_id' => ['A restructured loan must stay with the borrower of the loan it replaces.'],
+                'borrower_id' => ['A restructured loan must stay with the member of the loan it replaces.'],
             ]);
         }
 
@@ -2198,7 +2198,7 @@ class LoanService
 
             if (! $collaterals->has($collateralId)) {
                 throw ValidationException::withMessages([
-                    "collaterals.{$index}.collateral_id" => ['This collateral is not registered to this borrower.'],
+                    "collaterals.{$index}.collateral_id" => ['This collateral is not registered to this member.'],
                 ]);
             }
 

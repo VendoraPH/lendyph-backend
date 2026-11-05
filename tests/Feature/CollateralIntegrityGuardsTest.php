@@ -193,7 +193,7 @@ it('refuses to attach a collateral belonging to a different borrower', function 
     ])->assertStatus(422)
         ->assertJsonValidationErrors('collateral_id')
         ->assertJsonFragment([
-            'collateral_id' => ['This collateral is not registered to this loan\'s borrower.'],
+            'collateral_id' => ['This collateral is not registered to this loan\'s member.'],
         ]);
 
     $this->assertDatabaseCount('loan_collaterals', 0);
@@ -238,7 +238,7 @@ it('answers a collateral id that resolves to nothing the same way it answers a s
         'snapshot_value' => 250000,
     ])->assertStatus(422)
         ->assertJsonFragment([
-            'collateral_id' => ['This collateral is not registered to this loan\'s borrower.'],
+            'collateral_id' => ['This collateral is not registered to this loan\'s member.'],
         ]);
 });
 
@@ -814,7 +814,7 @@ it('refuses an attach whose collateral is reassigned between validation and the 
     ])->assertStatus(422)
         ->assertJsonValidationErrors('collateral_id')
         ->assertJsonFragment([
-            'collateral_id' => ['This collateral is not registered to this loan\'s borrower.'],
+            'collateral_id' => ['This collateral is not registered to this loan\'s member.'],
         ]);
 
     expect($reassigned)->toBeTrue('the reassignment never landed, so this test proved nothing');
