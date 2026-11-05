@@ -75,11 +75,12 @@ class ReportTotalsFromServerTest extends TestCase
             'build_up_due' => 0,
             'total_payment' => 10320.20,
             'amount_paid' => 6384.67,
+            'total_paid' => 6404.67,
         ], $data['schedule_totals']);
 
         $this->assertEquals([5170.10, 1234.57], array_column($data['transactions'], 'credit'));
         $this->assertSame([null, null], array_column($data['transactions'], 'debit'));
-        $this->assertEquals(['debit' => 0, 'credit' => 6404.67], $data['transaction_totals']);
+        $this->assertEquals(['debit' => 0, 'credit' => 6404.67, 'overpayment_applied' => 0], $data['transaction_totals']);
         $this->assertEquals($data['summary']['total_paid'], $data['transaction_totals']['credit']);
     }
 

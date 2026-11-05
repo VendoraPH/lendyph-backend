@@ -80,7 +80,7 @@ class StatementOfAccountHighFindingsTest extends TestCase
         $this->pay($loan, 11800);
         $this->applyBalanceAdjustment($loan, -600);
 
-        $this->assertEquals(['debit' => 0, 'credit' => 12400], $this->statement($loan)['transaction_totals']);
+        $this->assertEquals(['debit' => 0, 'credit' => 12400, 'overpayment_applied' => 0], $this->statement($loan)['transaction_totals']);
     }
 
     public function test_the_schedule_carries_a_note_only_once_an_adjustment_restated_it(): void
@@ -176,6 +176,60 @@ class StatementOfAccountHighFindingsTest extends TestCase
         $this->assertEquals(11900, $line['credit']);
     }
 
+    public function test_a_payoff_with_an_excess_adds_up_with_the_excess_on_its_own_figure(): void
+    {
+        $loan = $this->createReleasedLoan();
+
+        $this->pay($loan, 70850);
+
+        $data = $this->statement($loan);
+        $line = $data['transactions'][0];
+
+        $this->assertEquals(70850, $line['credit']);
+        $this->assertEquals(50, $line['overpayment_applied']);
+        $this->assertEquals(0, $line['build_up_applied']);
+        $this->assertEquals(70850, $this->sumOfParts($line));
+        $this->assertEquals(0, $line['principal_balance'], 'The excess is not principal.');
+        $this->assertEquals(50, $data['transaction_totals']['overpayment_applied']);
+    }
+
+    public function test_an_excess_credited_to_build_up_is_not_counted_twice(): void
+    {
+        $loan = $this->buildUpLoan();
+
+        $this->pay($loan, 11950);
+
+        $data = $this->statement($loan);
+        $line = $data['transactions'][0];
+
+        $this->assertEquals(150, $line['build_up_applied']);
+        $this->assertEquals(0, $line['overpayment_applied']);
+        $this->assertEquals(11950, $this->sumOfParts($line));
+        $this->assertEquals(0, $data['transaction_totals']['overpayment_applied']);
+    }
+
+    public function test_an_excess_a_build_up_loan_could_not_credit_stays_an_overpayment(): void
+    {
+        $loan = $this->buildUpLoan();
+        DB::table('borrowers')->where('id', $loan->borrower_id)->update(['status' => 'pending']);
+
+        $this->pay($loan, 11950);
+
+        $line = $this->statement($loan)['transactions'][0];
+
+        $this->assertEquals(0, $line['build_up_applied']);
+        $this->assertEquals(150, $line['overpayment_applied']);
+        $this->assertEquals(11950, $this->sumOfParts($line));
+    }
+
+    public function test_an_adjustment_line_has_no_overpayment(): void
+    {
+        $loan = $this->createReleasedLoan();
+        $this->applyBalanceAdjustment($loan, -600);
+
+        $this->assertEquals(0, $this->statement($loan)['transactions'][0]['overpayment_applied']);
+    }
+
     public function test_an_extension_s_collection_reads_as_an_extension_payment(): void
     {
         $this->travelTo('2026-04-27 09:00:00');
@@ -209,6 +263,56 @@ class StatementOfAccountHighFindingsTest extends TestCase
         $this->assertEquals(70921.85, $data['schedule_totals']['total_due']);
         $this->assertEquals(60000, $data['schedule_totals']['principal_due']);
         $this->assertEquals(121.85, $data['schedule_totals']['penalty_amount']);
+    }
+
+    public function test_a_row_s_total_due_less_its_total_paid_is_its_balance(): void
+    {
+        $loan = $this->createReleasedLoan();
+        DB::table('amortization_schedules')->where('loan_id', $loan->id)->where('period_number', 1)
+            ->update(['due_date' => now()->subDays(20)->toDateString()]);
+
+        // Period 1 in full, its ₱200.00 penalty included, then ₱5,000.00 on period 2.
+        $this->pay($loan, 17000);
+
+        // Part of a penalty and of the principal paid.
+        DB::table('amortization_schedules')->where('loan_id', $loan->id)->where('period_number', 4)
+            ->update(['penalty_amount' => 100, 'penalty_paid' => 40, 'principal_paid' => 1000]);
+
+        $data = $this->statement($loan);
+        $rows = collect($data['amortization_schedule'])->keyBy('period_number');
+
+        // Fully paid, with penalty.
+        $this->assertEquals(12000, $rows[1]['total_due']);
+        $this->assertEquals(12000, $rows[1]['total_paid']);
+        $this->assertEquals(11800, $rows[1]['amount_paid'], 'Stays principal and interest.');
+        $this->assertEquals(0, $rows[1]['amount_remaining']);
+
+        // Part paid.
+        $this->assertEquals(11800, $rows[2]['total_due']);
+        $this->assertEquals(5000, $rows[2]['total_paid']);
+        $this->assertEquals(6800, $rows[2]['amount_remaining']);
+
+        // Nothing paid.
+        $this->assertEquals(0, $rows[3]['total_paid']);
+        $this->assertEquals(11800, $rows[3]['amount_remaining']);
+
+        // Part of its penalty paid.
+        $this->assertEquals(11900, $rows[4]['total_due']);
+        $this->assertEquals(1040, $rows[4]['total_paid']);
+        $this->assertEquals(1000, $rows[4]['amount_paid'], 'Stays principal and interest.');
+        $this->assertEquals(10860, $rows[4]['amount_remaining']);
+
+        foreach ($rows as $period => $row) {
+            $this->assertEquals($row['amount_remaining'], round($row['total_due'] - $row['total_paid'], 2), "Period {$period}.");
+        }
+
+        $this->assertEquals(71100, $data['schedule_totals']['total_due']);
+        $this->assertEquals(18040, $data['schedule_totals']['total_paid']);
+        $this->assertEquals(17800, $data['schedule_totals']['amount_paid'], 'Stays principal and interest.');
+        $this->assertEquals(
+            round(collect($data['amortization_schedule'])->sum('amount_remaining'), 2),
+            round($data['schedule_totals']['total_due'] - $data['schedule_totals']['total_paid'], 2),
+        );
     }
 
     public function test_a_build_up_loan_s_schedule_carries_the_build_up_and_total_payment(): void
@@ -323,10 +427,21 @@ class StatementOfAccountHighFindingsTest extends TestCase
         $this->assertSame('Voided', $this->statement($loan)['loan']['status_label']);
     }
 
-    public function test_a_defaulted_loan_with_a_past_due_amount_reads_past_due(): void
+    public function test_a_defaulted_loan_with_a_past_due_amount_keeps_reading_defaulted(): void
     {
         $loan = $this->createReleasedLoan(['start_date' => now()->subMonths(3)->toDateString()]);
         DB::table('loans')->where('id', $loan->id)->update(['status' => 'defaulted']);
+
+        $data = $this->statement($loan);
+
+        $this->assertGreaterThan(0, $data['summary']['overdue_amount']);
+        $this->assertSame('Defaulted', $data['loan']['status_label']);
+    }
+
+    public function test_an_ongoing_loan_with_a_past_due_amount_reads_past_due(): void
+    {
+        $loan = $this->createReleasedLoan(['start_date' => now()->subMonths(3)->toDateString()]);
+        DB::table('loans')->where('id', $loan->id)->update(['status' => 'ongoing']);
 
         $this->assertSame('Past Due', $this->statement($loan)['loan']['status_label']);
     }
@@ -376,7 +491,7 @@ class StatementOfAccountHighFindingsTest extends TestCase
     {
         return round(
             $line['principal_applied'] + $line['interest_applied'] + $line['penalty_applied']
-            + $line['insurance_applied'] + $line['build_up_applied'],
+            + $line['insurance_applied'] + $line['build_up_applied'] + $line['overpayment_applied'],
             2,
         );
     }

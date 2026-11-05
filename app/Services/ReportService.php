@@ -255,6 +255,9 @@ class ReportService
                 // The row's Paid: principal and interest, as on the Due/Past
                 // Due list.
                 'amount_paid' => round((float) $s->principal_paid + (float) $s->interest_paid, 2),
+                // The parts of `total_due` paid, penalty included, so Total Due
+                // less this is the row's Balance.
+                'total_paid' => ($centavos($s->principal_paid) + $centavos($s->interest_paid) + $centavos($s->penalty_paid)) / 100,
                 'penalty_amount' => (float) $s->penalty_amount,
                 'penalty_paid' => (float) $s->penalty_paid,
                 'status' => $s->status,
@@ -312,7 +315,7 @@ class ReportService
                 'address' => $loan->borrower->address,
             ],
             'transactions' => $transactions,
-            'transaction_totals' => self::columnTotals($transactions, ['debit' => 'money', 'credit' => 'money']),
+            'transaction_totals' => self::columnTotals($transactions, ['debit' => 'money', 'credit' => 'money', 'overpayment_applied' => 'money']),
             'amortization_schedule' => $schedule,
             'schedule_note' => $this->scheduleNote($loan),
             'schedule_totals' => self::columnTotals($schedule, [
@@ -323,6 +326,7 @@ class ReportService
                 'build_up_due' => 'money',
                 'total_payment' => 'money',
                 'amount_paid' => 'money',
+                'total_paid' => 'money',
             ]),
             // Everything in arrears today plus, when there are arrears, the
             // insurance premium still owed (payments take it first): the
@@ -364,7 +368,9 @@ class ReportService
      *
      * A line's parts lower the balance when positive, so on every line
      * credit - debit equals its parts added up, and `principal_balance` steps
-     * down by `principal_applied`. An adjustment line receives no money: its
+     * down by `principal_applied`. `overpayment_applied` is the excess a payment
+     * left over and did not credit to build-up, which lowers no balance. An
+     * adjustment line receives no money: its
      * `amount_paid` is 0 and its figure sits in `credit` when it lowered what
      * is owed, `debit` when it raised it.
      *
@@ -408,6 +414,7 @@ class ReportService
             'interest_applied' => (float) $r->interest_applied,
             'penalty_applied' => (float) $r->penalty_applied,
             'build_up_applied' => (float) ($row['scb'] ?? 0),
+            'overpayment_applied' => max(0, $centavosOf($r->overpayment) - $centavosOf($row['scb'] ?? 0)) / 100,
             ...$balances($centavosOf($r->principal_applied), $centavosOf($r->insurance_applied)),
         ];
 
@@ -432,6 +439,7 @@ class ReportService
                 'interest_applied' => $interest / 100,
                 'penalty_applied' => $penalty / 100,
                 'build_up_applied' => 0.0,
+                'overpayment_applied' => 0.0,
                 ...$balances($principal, 0),
             ];
         };
@@ -456,12 +464,14 @@ class ReportService
     }
 
     /**
-     * The statement's Status line. "Past Due" when a loan that can still be
-     * collected on has a Past Due amount, otherwise the app's label.
+     * The statement's Status line. "Past Due" when a released or ongoing loan
+     * has a Past Due amount, the same loans LoanResource's `display_status`
+     * covers, otherwise the app's label: a defaulted loan keeps reading
+     * "Defaulted".
      */
     private static function statementStatusLabel(Loan $loan, int $overdueCentavos): string
     {
-        if ($overdueCentavos > 0 && in_array($loan->status, Loan::COLLECTIBLE_STATUSES, true)) {
+        if ($overdueCentavos > 0 && in_array($loan->status, Loan::ACTIVE_STATUSES, true)) {
             return 'Past Due';
         }
 
