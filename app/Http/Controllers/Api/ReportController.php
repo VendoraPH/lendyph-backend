@@ -16,6 +16,7 @@ use App\Services\ReportService;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
+use Illuminate\Http\Resources\Json\JsonResource;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 use OpenApi\Attributes as OA;
@@ -171,7 +172,7 @@ class ReportController extends Controller
     #[OA\Get(
         path: '/api/reports/statement-of-account/{loan}',
         summary: 'Statement of Account',
-        description: 'All transactions, schedule, and balance for a specific loan. Each `amortization_schedule` row also carries the demand letter\'s arrears: `remaining` (`principal`, `interest`, `penalty` still owed, never below 0), `amount_due` (their sum), `days_overdue` (whole days past the due date, today in Asia/Manila; 0 when not yet due) and `is_overdue` (due before today with something still owed). `total_demanded` is every `is_overdue` row\'s `amount_due` plus, when there are any, the insurance premium still owed (a payment takes it first), and `demand_totals` (`principal`, `interest`, `penalty`, `amount_due`) the columns over those rows, with `insurance_owed` the premium included in `total_demanded`. `summary` also carries `insurance_owed`, inside `outstanding_balance`, and `overdue_amount`: the principal, interest and penalty still unpaid on late periods (past the due date plus the loan\'s grace), equal to GET /loans/{id}/summary `overdue_amount`. Each schedule row also carries `amount_remaining`, its principal, interest and penalty still owed. Totals in whole centavos.',
+        description: 'All transactions, schedule, and balance for a specific loan. Each `amortization_schedule` row also carries the demand letter\'s arrears: `remaining` (`principal`, `interest`, `penalty` still owed, never below 0), `amount_due` (their sum), `days_overdue` (whole days past the due date, today in Asia/Manila; 0 when not yet due) and `is_overdue` (due before today with something still owed). `total_demanded` is every `is_overdue` row\'s `amount_due` plus, when there are any, the insurance premium still owed (a payment takes it first), and `demand_totals` (`principal`, `interest`, `penalty`, `amount_due`) the columns over those rows, with `insurance_owed` the premium included in `total_demanded`. `as_of` is today in the app timezone. `loan.status_label` is "Past Due" when a collectible loan has a Past Due amount above 0, otherwise the app\'s label, and `loan.has_build_up` says whether the loan has a Share Capital Build-Up. `amortization_schedule[].total_due` and `schedule_totals.total_due` include penalty; `build_up_due` is the period\'s build-up and `total_payment` adds it. `schedule_note` is set when an applied balance adjustment, restructure or term extension restated the schedule. `transactions[]` lists the posted payments (`type` `payment`) and each Ledger row that moved the principal otherwise (`type` `adjustment`), in the Ledger\'s order: `payment_method` (label), `reference_number`, `principal_applied`, `interest_applied`, `penalty_applied`, `insurance_applied`, `build_up_applied` (positive lowers the balance, and on every line credit minus debit equals them added up), and `principal_balance`, closing on GET /loans/{id}/ledger `closing.principal`; `balance` is its alias for one release. `running_balance` keeps principal plus premium. An adjustment line has `amount_paid` 0 and its figure in `credit` when it lowered what is owed, `debit` when it raised it, so `transaction_totals.credit` can exceed `summary.total_paid`, which is the money received. `summary` also carries `insurance_owed`, inside `outstanding_balance`, and `overdue_amount`: the principal, interest and penalty still unpaid on late periods (past the due date plus the loan\'s grace), equal to GET /loans/{id}/summary `overdue_amount`. Each schedule row also carries `amount_remaining`, its principal, interest and penalty still owed. Totals in whole centavos.',
         tags: ['Reports'],
         security: [['sanctum' => []]],
         parameters: [
@@ -466,10 +467,13 @@ class ReportController extends Controller
     #[OA\Get(
         path: '/api/reports/income/by-loan',
         summary: 'Income by loan account',
-        description: 'The posted repayments GET /api/reports/income sums, grouped by loan: one row per loan, ordered by '
-            .'`total_income` desc then `loan_id` asc, paginated over loans (`meta.total` counts loans). `totals` covers the '
-            .'whole filtered set: its `interest_income` / `penalty_income` equal the Income report\'s, and `payments` equals '
-            .'the List of Repayments `totals.count`, for the same filters. Processing fees are not included.',
+        description: 'What GET /api/reports/income adds up, by loan: one row per loan with a posted repayment or a processing '
+            .'fee in the period, ordered by `total_income` desc then `loan_id` asc, paginated over loans (`meta.total` counts '
+            .'loans). Rows are IncomeByLoanRow plus `processing_fee`, and their `total_income` is interest, penalty and fee. '
+            .'`meta.totals` (also sent as `totals`) covers the whole filtered set: its `interest_income`, `penalty_income`, '
+            .'`processing_fee` and `total_income` equal the Income report\'s `interest_income`, `penalty_income`, '
+            .'`processing_fees` and `total`, and `payments` equals the List of Repayments `totals.count`, for the same '
+            .'filters. Service and catalog fee income are not in this report.',
         tags: ['Reports'],
         security: [['sanctum' => []]],
         parameters: [
@@ -489,6 +493,7 @@ class ReportController extends Controller
                     new OA\Property(property: 'payments', type: 'integer'),
                     new OA\Property(property: 'interest_income', type: 'number'),
                     new OA\Property(property: 'penalty_income', type: 'number'),
+                    new OA\Property(property: 'processing_fee', type: 'number'),
                     new OA\Property(property: 'total_income', type: 'number'),
                 ]),
             ])),
@@ -500,10 +505,18 @@ class ReportController extends Controller
     {
         $this->authorize('reports:view');
 
-        $filters = $this->reportFilters();
+        $report = $this->reportService->incomeByLoanReport($this->reportFilters());
+        $request = request();
 
-        return IncomeByLoanResource::collection($this->reportService->incomeByLoan($filters))
-            ->additional(['totals' => $this->reportService->incomeByLoanTotals($filters)]);
+        $rows = $report['page']->through(fn (Loan $loan): array => [
+            ...(new IncomeByLoanResource($loan))->toArray($request),
+            'processing_fee' => $loan->getAttribute('processing_fee'),
+        ]);
+
+        return JsonResource::collection($rows)->additional([
+            'totals' => $report['totals'],
+            'meta' => ['totals' => $report['totals']],
+        ]);
     }
 
     #[OA\Get(
@@ -529,6 +542,7 @@ class ReportController extends Controller
     #[OA\Get(
         path: '/api/reports/borrowers',
         summary: 'Borrower report',
+        description: 'The Member Report\'s cards. `total_active_borrowers`: members with at least one collectible loan as of `date_to`. `new_borrowers`: members created in the period. `repeat_borrowers`: members with at least 2 ever-released loans. GET /api/reports/borrowers/list states the same counts and lists the members behind them.',
         tags: ['Reports'],
         security: [['sanctum' => []]],
         parameters: [
@@ -542,6 +556,61 @@ class ReportController extends Controller
         $this->authorize('reports:view');
 
         return response()->json(['data' => $this->reportService->borrowerReport($this->reportFilters())]);
+    }
+
+    #[OA\Get(
+        path: '/api/reports/borrowers/list',
+        summary: 'Members behind the Member Report\'s cards',
+        description: 'Every member who is active or new, by name as displayed then id, paginated over members. `meta.counts` '
+            .'(`active`, `new`, `repeat`) equal the cards of GET /api/reports/borrowers for the same filters. A repeat member who '
+            .'is neither active nor new is on the `repeat` count and not in the rows. `outstanding` is everything still owed today '
+            .'on the loans `active_loans` counts, with the meaning of `total_outstanding`.',
+        tags: ['Reports'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer', minimum: 1)),
+            new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15, maximum: 1000, minimum: 1)),
+            new OA\Parameter(name: 'page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 1, minimum: 1)),
+        ],
+        responses: [
+            new OA\Response(response: 200, description: 'Paginated members with the cards\' counts', content: new OA\JsonContent(properties: [
+                new OA\Property(property: 'data', type: 'array', items: new OA\Items(properties: [
+                    new OA\Property(property: 'borrower_id', type: 'integer'),
+                    new OA\Property(property: 'borrower_code', type: 'string', nullable: true),
+                    new OA\Property(property: 'borrower_name', type: 'string'),
+                    new OA\Property(property: 'branch_name', type: 'string', nullable: true),
+                    new OA\Property(property: 'is_active', type: 'boolean'),
+                    new OA\Property(property: 'is_new', type: 'boolean'),
+                    new OA\Property(property: 'is_repeat', type: 'boolean'),
+                    new OA\Property(property: 'active_loans', type: 'integer'),
+                    new OA\Property(property: 'loans_released', type: 'integer'),
+                    new OA\Property(property: 'outstanding', type: 'number'),
+                    new OA\Property(property: 'last_release_date', type: 'string', format: 'date', nullable: true),
+                ], type: 'object')),
+                new OA\Property(property: 'links', type: 'object'),
+                new OA\Property(property: 'meta', type: 'object', properties: [
+                    new OA\Property(property: 'total', type: 'integer'),
+                    new OA\Property(property: 'counts', type: 'object', properties: [
+                        new OA\Property(property: 'active', type: 'integer'),
+                        new OA\Property(property: 'new', type: 'integer'),
+                        new OA\Property(property: 'repeat', type: 'integer'),
+                    ]),
+                ]),
+            ])),
+            new OA\Response(response: 403, description: 'Missing reports:view, or a branch outside the caller\'s'),
+            new OA\Response(response: 422, description: 'Validation error'),
+        ],
+    )]
+    public function borrowerList(): AnonymousResourceCollection
+    {
+        $this->authorize('reports:view');
+
+        $filters = $this->reportFilters();
+
+        return JsonResource::collection($this->reportService->memberList($filters))
+            ->additional(['meta' => ['counts' => $this->reportService->memberCounts($filters)]]);
     }
 
     #[OA\Get(

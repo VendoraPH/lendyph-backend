@@ -13,6 +13,8 @@ use DateTimeInterface;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Query\Builder as QueryBuilder;
+use Illuminate\Pagination\LengthAwarePaginator as PagePaginator;
+use Illuminate\Pagination\Paginator;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use LogicException;
@@ -38,10 +40,51 @@ class ReportService
     private const RATE_SCALE = 4;
 
     /**
+     * A `loans.deductions` value that holds items.
+     */
+    private const HAS_DEDUCTION_ITEMS_SQL = "JSON_TYPE(loans.deductions) IN ('ARRAY', 'OBJECT')";
+
+    /**
      * Borrower::full_name in SQL: first, middle, last and suffix, empty parts
      * dropped (the same expression CollateralRegister orders its groups by).
      */
     private const BORROWER_NAME_SQL = "CONCAT_WS(' ', NULLIF(borrowers.first_name, ''), NULLIF(borrowers.middle_name, ''), NULLIF(borrowers.last_name, ''), NULLIF(borrowers.suffix, ''))";
+
+    /**
+     * Each `loans.status` as the app's screens word it (LOAN_STATUS_LABELS in
+     * the frontend), for the statement's Status line.
+     *
+     * @var array<string, string>
+     */
+    private const LOAN_STATUS_LABELS = [
+        'draft' => 'Draft',
+        'for_review' => 'For Approval',
+        'approved' => 'Approved',
+        'rejected' => 'Rejected',
+        'released' => 'Current',
+        'ongoing' => 'Current',
+        'completed' => 'Completed',
+        'defaulted' => 'Defaulted',
+        'restructured' => 'Restructured',
+        'void' => 'Voided',
+    ];
+
+    /**
+     * Adjustments that rewrite a saved schedule's figures, with how the
+     * statement's note names each.
+     *
+     * @var array<string, string>
+     */
+    private const SCHEDULE_RESTATING_ADJUSTMENTS = [
+        'balance_adjustment' => 'balance adjustment',
+        'restructure' => 'restructure',
+        'term_extension' => 'term extension',
+    ];
+
+    /**
+     * Ever-released loans that make a member a repeat member.
+     */
+    private const REPEAT_MEMBER_LOANS = 2;
 
     /**
      * Loan-loss provision rate per aging bucket, keyed exactly as
@@ -143,15 +186,21 @@ class ReportService
         $outstandingInterest = $schedules->sum(fn ($s) => max(0, (float) $s->interest_due - (float) $s->interest_paid));
         $outstandingPenalty = $schedules->sum(fn ($s) => max(0, (float) $s->penalty_amount - (float) $s->penalty_paid));
 
-        // Build transaction ledger with running balance. The ledger opens at
-        // principal + the insurance premium owed before any payment collected
-        // it (what is still owed plus what the posted payments collected, so
-        // premium a restructure carried over is in it too), and each payment
-        // takes off its principal and its premium, so that after the last
-        // payment the running balance lands exactly on Loan::$outstanding_balance.
-        // Not on a restructured source: its ledger has no row for what moved to
-        // the new loan, so it closes at the balance that moved (principal and
-        // the premium carried out), not at its zero outstanding balance.
+        // Build transaction ledger with running balances.
+        //
+        // `principal_balance` is the Principal Balance column: it opens at the
+        // principal and closes on the Ledger tab's principal, because it walks
+        // the same rows.
+        //
+        // `running_balance` keeps its older meaning, principal plus premium. It
+        // opens at principal + the insurance premium owed before any payment
+        // collected it (what is still owed plus what the posted payments
+        // collected, so premium a restructure carried over is in it too), and
+        // each payment takes off its principal and its premium, so that after
+        // the last line it lands on Loan::$outstanding_balance. On a
+        // restructured source the line for what moved takes the principal, and
+        // the premium carried out stays in the figure, since no ledger row
+        // states it.
         //
         // A restructured loan's premium owed was zeroed when the restructure
         // carried it to the new loan, so what it carried out is added back
@@ -164,28 +213,8 @@ class ReportService
             : 0;
         $openingCentavos = $centavosOf($loan->principal_amount) + $centavosOf($loan->insurance_remaining_balance) + $premiumCollected + $premiumCarriedOut;
         $openingBalance = $openingCentavos / 100;
-        $runningCentavos = $openingCentavos;
 
-        $transactions = $repayments->map(function ($r) use (&$runningCentavos, $centavosOf) {
-            $runningCentavos -= $centavosOf($r->principal_applied) + $centavosOf($r->insurance_applied);
-
-            return [
-                'date' => $r->payment_date->toDateString(),
-                'receipt_number' => $r->receipt_number,
-                // The statement's Method and Particulars columns.
-                'payment_method' => self::paymentMethodLabel($r->method),
-                'particulars' => trim('Payment '.($r->receipt_number ?? '')),
-                'amount_paid' => (float) $r->amount_paid,
-                // The statement's two-column form: a payment credits the loan.
-                'debit' => null,
-                'credit' => (float) $r->amount_paid,
-                'insurance_applied' => (float) $r->insurance_applied,
-                'principal_applied' => (float) $r->principal_applied,
-                'interest_applied' => (float) $r->interest_applied,
-                'penalty_applied' => (float) $r->penalty_applied,
-                'running_balance' => max(0, $runningCentavos) / 100,
-            ];
-        })->values()->toArray();
+        $transactions = $this->statementLines($loan, $repayments, $openingCentavos);
 
         // The demand letter's arrears, worked out here so the letter computes
         // nothing: what each period still owes on each part, never below 0,
@@ -197,7 +226,9 @@ class ReportService
         $centavos = fn (mixed $pesos): int => (int) round((float) $pesos * 100);
         $owed = fn (mixed $due, mixed $paid): int => max(0, $centavos($due) - $centavos($paid));
 
-        $schedule = $schedules->map(function ($s) use ($today, $owed) {
+        $schedule = $schedules->map(function ($s) use ($today, $owed, $centavos, $loan) {
+            $totalDue = $centavos($s->total_due) + $centavos($s->penalty_amount);
+            $buildUp = PersistedScheduleFigures::shareCapitalBuildUpCentavos($loan, $s);
             $remaining = [
                 'principal' => $owed($s->principal_due, $s->principal_paid),
                 'interest' => $owed($s->interest_due, $s->interest_paid),
@@ -215,11 +246,14 @@ class ReportService
                 'beginning_balance' => round((float) $s->remaining_balance + (float) $s->principal_due, 2),
                 'principal_due' => (float) $s->principal_due,
                 'interest_due' => (float) $s->interest_due,
-                'total_due' => (float) $s->total_due,
+                // The row's principal, interest and penalty, as printed in it.
+                'total_due' => $totalDue / 100,
+                'build_up_due' => $buildUp / 100,
+                'total_payment' => ($totalDue + $buildUp) / 100,
                 'principal_paid' => (float) $s->principal_paid,
                 'interest_paid' => (float) $s->interest_paid,
-                // The row's Paid: principal and interest, the two parts
-                // `total_due` is made of, as on the Due/Past Due list.
+                // The row's Paid: principal and interest, as on the Due/Past
+                // Due list.
                 'amount_paid' => round((float) $s->principal_paid + (float) $s->interest_paid, 2),
                 'penalty_amount' => (float) $s->penalty_amount,
                 'penalty_paid' => (float) $s->penalty_paid,
@@ -269,6 +303,8 @@ class ReportService
                 'start_date' => $loan->start_date->toDateString(),
                 'maturity_date' => $loan->maturity_date->toDateString(),
                 'status' => $loan->status,
+                'status_label' => self::statementStatusLabel($loan, $overdueCentavos),
+                'has_build_up' => $centavosOf($loan->scb_amount) > 0,
             ],
             'borrower' => [
                 'borrower_code' => $loan->borrower->borrower_code,
@@ -278,11 +314,14 @@ class ReportService
             'transactions' => $transactions,
             'transaction_totals' => self::columnTotals($transactions, ['debit' => 'money', 'credit' => 'money']),
             'amortization_schedule' => $schedule,
+            'schedule_note' => $this->scheduleNote($loan),
             'schedule_totals' => self::columnTotals($schedule, [
                 'principal_due' => 'money',
                 'interest_due' => 'money',
                 'penalty_amount' => 'money',
                 'total_due' => 'money',
+                'build_up_due' => 'money',
+                'total_payment' => 'money',
                 'amount_paid' => 'money',
             ]),
             // Everything in arrears today plus, when there are arrears, the
@@ -311,8 +350,149 @@ class ReportService
                 'outstanding_balance' => ($centavosOf($outstandingPrincipal) + $centavosOf($outstandingInterest)
                     + $centavosOf($outstandingPenalty) + max(0, $centavosOf($loan->insurance_remaining_balance))) / 100,
             ],
+            'as_of' => $today->toDateString(),
             'generated_at' => now()->toDateTimeString(),
         ];
+    }
+
+    /**
+     * The statement's Transaction History: the posted payments, plus each row
+     * of the loan's Ledger that moved its principal otherwise (a balance
+     * adjustment, a balance moved to a restructured loan, what an imported loan
+     * was paid before the import, a balance restated to the schedule), in the
+     * Ledger's order.
+     *
+     * A line's parts lower the balance when positive, so on every line
+     * credit - debit equals its parts added up, and `principal_balance` steps
+     * down by `principal_applied`. An adjustment line receives no money: its
+     * `amount_paid` is 0 and its figure sits in `credit` when it lowered what
+     * is owed, `debit` when it raised it.
+     *
+     * A voided payment is left out, and its void too: together they move
+     * nothing.
+     *
+     * @param  Collection<int, Repayment>  $repayments  the posted payments, in statement order
+     * @return list<array<string, mixed>>
+     */
+    private function statementLines(Loan $loan, Collection $repayments, int $openingCentavos): array
+    {
+        $centavosOf = fn (mixed $pesos): int => (int) round((float) $pesos * 100);
+        $principalCentavos = $centavosOf($loan->principal_amount);
+        $runningCentavos = $openingCentavos;
+        $balances = function (int $principal, int $premium) use (&$principalCentavos, &$runningCentavos): array {
+            $principalCentavos -= $principal;
+            $runningCentavos -= $principal + $premium;
+
+            return [
+                'principal_balance' => $principalCentavos / 100,
+                // An alias of `principal_balance`, for one release.
+                'balance' => $principalCentavos / 100,
+                'running_balance' => max(0, $runningCentavos) / 100,
+            ];
+        };
+
+        $paymentLine = fn (Repayment $r, ?array $row = null): array => [
+            'type' => 'payment',
+            'date' => $r->payment_date->toDateString(),
+            'receipt_number' => $r->receipt_number,
+            // The statement's Method and Particulars columns.
+            'payment_method' => self::paymentMethodLabel($r->method),
+            'reference_number' => $r->reference_number,
+            'particulars' => $row['description'] ?? trim('Payment '.($r->receipt_number ?? '')),
+            'amount_paid' => (float) $r->amount_paid,
+            // The statement's two-column form: a payment credits the loan.
+            'debit' => null,
+            'credit' => (float) $r->amount_paid,
+            'insurance_applied' => (float) $r->insurance_applied,
+            'principal_applied' => (float) $r->principal_applied,
+            'interest_applied' => (float) $r->interest_applied,
+            'penalty_applied' => (float) $r->penalty_applied,
+            'build_up_applied' => (float) ($row['scb'] ?? 0),
+            ...$balances($centavosOf($r->principal_applied), $centavosOf($r->insurance_applied)),
+        ];
+
+        $adjustmentLine = function (array $row) use ($centavosOf, $balances): array {
+            $principal = -$centavosOf($row['principal']);
+            $interest = -$centavosOf($row['interest']);
+            $penalty = -$centavosOf($row['penalty']);
+            $lowered = $principal + $interest + $penalty;
+
+            return [
+                'type' => 'adjustment',
+                'date' => $row['date'],
+                'receipt_number' => null,
+                'payment_method' => null,
+                'reference_number' => null,
+                'particulars' => $row['description'],
+                'amount_paid' => 0.0,
+                'debit' => $lowered < 0 ? -$lowered / 100 : null,
+                'credit' => $lowered > 0 ? $lowered / 100 : null,
+                'insurance_applied' => 0.0,
+                'principal_applied' => $principal / 100,
+                'interest_applied' => $interest / 100,
+                'penalty_applied' => $penalty / 100,
+                'build_up_applied' => 0.0,
+                ...$balances($principal, 0),
+            ];
+        };
+
+        $unlisted = $repayments->keyBy('id');
+        $lines = [];
+
+        foreach (app(LoanLedgerService::class)->forLoan($loan)['rows'] as $row) {
+            if ($row['kind'] === 'adjustment' && $centavosOf($row['principal']) !== 0) {
+                $lines[] = $adjustmentLine($row);
+            } elseif ($row['repayment_id'] !== null && $row['kind'] !== 'void' && $unlisted->has($row['repayment_id'])) {
+                $lines[] = $paymentLine($unlisted->pull($row['repayment_id']), $row);
+            }
+        }
+
+        // A loan with no release date has no Ledger rows.
+        foreach ($unlisted as $repayment) {
+            $lines[] = $paymentLine($repayment);
+        }
+
+        return $lines;
+    }
+
+    /**
+     * The statement's Status line. "Past Due" when a loan that can still be
+     * collected on has a Past Due amount, otherwise the app's label.
+     */
+    private static function statementStatusLabel(Loan $loan, int $overdueCentavos): string
+    {
+        if ($overdueCentavos > 0 && in_array($loan->status, Loan::COLLECTIBLE_STATUSES, true)) {
+            return 'Past Due';
+        }
+
+        return self::LOAN_STATUS_LABELS[$loan->status] ?? ucwords(str_replace('_', ' ', $loan->status));
+    }
+
+    /**
+     * The note beside a schedule an applied adjustment rewrote, naming each
+     * one and its day; null when none has.
+     */
+    private function scheduleNote(Loan $loan): ?string
+    {
+        $adjustments = $loan->adjustments()
+            ->where('status', 'applied')
+            ->whereIn('adjustment_type', array_keys(self::SCHEDULE_RESTATING_ADJUSTMENTS))
+            ->orderBy('applied_at')
+            ->orderBy('id')
+            ->get(['adjustment_type', 'adjustment_number', 'applied_at']);
+
+        if ($adjustments->isEmpty()) {
+            return null;
+        }
+
+        $named = $adjustments->map(fn ($adjustment): string => trim(sprintf(
+            '%s %s%s',
+            self::SCHEDULE_RESTATING_ADJUSTMENTS[$adjustment->adjustment_type],
+            $adjustment->adjustment_number,
+            $adjustment->applied_at === null ? '' : ' on '.$adjustment->applied_at->format('M j, Y'),
+        )));
+
+        return 'This schedule was restated by '.$named->join(', ', ' and ').'.';
     }
 
     /**
@@ -1082,44 +1262,102 @@ class ReportService
      */
     private function processingFeesOfReleasedLoans(array $filters): float
     {
-        $releasedLoans = DB::table('loans')
+        $releasedLoans = $this->loansReleasedInPeriod($filters);
+
+        $unrecorded = (float) ((clone $releasedLoans)
+            ->join('loan_products', 'loans.loan_product_id', '=', 'loan_products.id')
+            ->where(self::hasNoDeductionRecord())
+            ->selectRaw('SUM(loan_products.processing_fee / 100 * loans.principal_amount) as total')
+            ->value('total') ?? 0);
+
+        $recordedCentavos = 0;
+
+        $this->eachRecordedProcessingFee($releasedLoans, function (int $loanId, int $centavos) use (&$recordedCentavos): void {
+            $recordedCentavos += $centavos;
+        });
+
+        return $unrecorded + $recordedCentavos / 100;
+    }
+
+    /**
+     * Each released loan's own processing fee, by the rules of
+     * processingFeesOfReleasedLoans(), in whole centavos by loan id. Only loans
+     * that have one.
+     *
+     * @return array<int, int>
+     */
+    private function processingFeeCentavosByLoan(array $filters): array
+    {
+        $releasedLoans = $this->loansReleasedInPeriod($filters);
+        $fees = [];
+
+        (clone $releasedLoans)
+            ->join('loan_products', 'loans.loan_product_id', '=', 'loan_products.id')
+            ->where(self::hasNoDeductionRecord())
+            ->select('loans.id')
+            ->selectRaw('loan_products.processing_fee / 100 * loans.principal_amount as fee')
+            ->get()
+            ->each(function (object $loan) use (&$fees): void {
+                $fees[(int) $loan->id] = (int) round((float) $loan->fee * 100);
+            });
+
+        $this->eachRecordedProcessingFee($releasedLoans, function (int $loanId, int $centavos) use (&$fees): void {
+            $fees[$loanId] = ($fees[$loanId] ?? 0) + $centavos;
+        });
+
+        return array_filter($fees, fn (int $centavos): bool => $centavos > 0);
+    }
+
+    /**
+     * The loans whose processing fee counts in the period.
+     */
+    private function loansReleasedInPeriod(array $filters): QueryBuilder
+    {
+        return DB::table('loans')
             ->whereIn('loans.status', Loan::EVER_RELEASED_STATUSES)
             ->tap(self::inBranches(self::branchScope($filters), 'loans.branch_id'))
             ->when($filters['loan_id'] ?? null, fn ($q, $l) => $q->where('loans.id', $l))
             ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->where('loans.released_at', '>=', self::dayStart($d)))
             ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->where('loans.released_at', '<', self::nextDayStart($d)));
+    }
 
-        $hasItems = "JSON_TYPE(loans.deductions) IN ('ARRAY', 'OBJECT')";
+    /**
+     * A loan with no record of what its release withheld: see
+     * processingFeesOfReleasedLoans().
+     */
+    private static function hasNoDeductionRecord(): Closure
+    {
+        return fn ($q) => $q
+            ->whereNull('loans.deductions')
+            ->orWhereRaw('NOT ('.self::HAS_DEDUCTION_ITEMS_SQL.')')
+            ->orWhereRaw('(JSON_LENGTH(loans.deductions) = 0 AND loans.total_deductions > 0)');
+    }
 
-        $unrecorded = (float) ((clone $releasedLoans)
-            ->join('loan_products', 'loans.loan_product_id', '=', 'loan_products.id')
-            ->where(fn ($q) => $q
-                ->whereNull('loans.deductions')
-                ->orWhereRaw("NOT ({$hasItems})")
-                ->orWhereRaw('(JSON_LENGTH(loans.deductions) = 0 AND loans.total_deductions > 0)'))
-            ->selectRaw('SUM(loan_products.processing_fee / 100 * loans.principal_amount) as total')
-            ->value('total') ?? 0);
-
+    /**
+     * Each processing fee item recorded on `$releasedLoans`, streamed in pages
+     * and matched by FeeOverlapDetector's own name test.
+     *
+     * @param  Closure(int, int): void  $each  given the loan id and the item's centavos
+     */
+    private function eachRecordedProcessingFee(QueryBuilder $releasedLoans, Closure $each): void
+    {
         $detector = app(FeeOverlapDetector::class);
-        $recordedCentavos = 0;
 
         (clone $releasedLoans)
-            ->whereRaw($hasItems)
+            ->whereRaw(self::HAS_DEDUCTION_ITEMS_SQL)
             ->whereRaw('JSON_LENGTH(loans.deductions) > 0')
             ->select(['loans.id', 'loans.deductions'])
             ->lazyById(1000, 'loans.id', 'id')
-            ->each(function (object $loan) use ($detector, &$recordedCentavos): void {
+            ->each(function (object $loan) use ($detector, $each): void {
                 foreach (json_decode($loan->deductions, true) as $item) {
                     if (is_array($item)
                         && is_string($item['name'] ?? null)
                         && $detector->fieldFor($item['name']) === 'processing_fee'
                     ) {
-                        $recordedCentavos += (int) round((float) ($item['amount'] ?? 0) * 100);
+                        $each((int) $loan->id, (int) round((float) ($item['amount'] ?? 0) * 100));
                     }
                 }
             });
-
-        return $unrecorded + $recordedCentavos / 100;
     }
 
     // ── Income by Loan Account ───────────────────────────────────────────
@@ -1139,66 +1377,105 @@ class ReportService
     }
 
     /**
-     * One page of loans, each with the interest and penalty its posted
-     * repayments brought in during the period.
+     * The Income by Loan report for the period: one page of loans and the
+     * totals over all of them.
      *
-     * The repayments are grouped in a derived table and joined to `loans`, so
-     * the outer query is ungrouped and the paginator counts LOANS, not
-     * repayments. Ordered by `total_income` desc, then loan id, a total order
-     * so walking the pages never repeats or skips a loan. Each Loan carries
-     * `payments`, `interest_income`, `penalty_income` and `total_income` as
-     * the database summed them, plus its borrower.
+     * A loan is listed when a posted repayment fell in the period or its
+     * processing fee did. Its fee is the one the Income report's Processing
+     * Fees card counts, so `totals` equal GET /reports/income to the centavo.
+     *
+     * The fee of a recorded loan is matched by name in PHP
+     * (processingFeesOfReleasedLoans()), so the rows are ranked here, not in
+     * SQL: by `total_income` desc, then loan id, a total order so walking the
+     * pages never repeats or skips a loan. Only the page's loans are loaded as
+     * models, with their borrower. Each carries `payments`, `interest_income`,
+     * `penalty_income`, `processing_fee` and `total_income`.
+     *
+     * @return array{page: LengthAwarePaginator, totals: array{count: int, payments: int, interest_income: float, penalty_income: float, processing_fee: float, total_income: float}}
      */
-    public function incomeByLoan(array $filters): LengthAwarePaginator
+    public function incomeByLoanReport(array $filters): array
     {
-        $perLoan = $this->incomeRepaymentsQuery($filters)
+        $rows = [];
+
+        $this->incomeRepaymentsQuery($filters)
+            ->toBase()
             ->select('repayments.loan_id')
             ->selectRaw('COUNT(*) as payments')
             ->selectRaw('COALESCE(SUM(repayments.interest_applied), 0) as interest_income')
             ->selectRaw('COALESCE(SUM(repayments.penalty_applied), 0) as penalty_income')
-            ->selectRaw('COALESCE(SUM(repayments.interest_applied), 0) + COALESCE(SUM(repayments.penalty_applied), 0) as total_income')
-            ->groupBy('repayments.loan_id');
+            ->groupBy('repayments.loan_id')
+            ->get()
+            ->each(function (object $row) use (&$rows): void {
+                $rows[(int) $row->loan_id] = [
+                    'payments' => (int) $row->payments,
+                    'interest' => (int) round((float) $row->interest_income * 100),
+                    'penalty' => (int) round((float) $row->penalty_income * 100),
+                    'fee' => 0,
+                ];
+            });
 
-        return Loan::query()
-            ->joinSub($perLoan, 'per_loan', 'per_loan.loan_id', '=', 'loans.id')
-            ->select([
-                'loans.id',
-                'loans.loan_account_number',
-                'loans.borrower_id',
-                'per_loan.payments',
-                'per_loan.interest_income',
-                'per_loan.penalty_income',
-                'per_loan.total_income',
-            ])
+        foreach ($this->processingFeeCentavosByLoan($filters) as $loanId => $fee) {
+            $rows[$loanId] ??= ['payments' => 0, 'interest' => 0, 'penalty' => 0, 'fee' => 0];
+            $rows[$loanId]['fee'] = $fee;
+        }
+
+        $totalOf = fn (array $row): int => $row['interest'] + $row['penalty'] + $row['fee'];
+
+        uksort($rows, fn (int $a, int $b): int => [$totalOf($rows[$b]), $a] <=> [$totalOf($rows[$a]), $b]);
+
+        $perPage = (int) ($filters['per_page'] ?? 15);
+        $currentPage = Paginator::resolveCurrentPage();
+        $onPage = array_slice($rows, ($currentPage - 1) * $perPage, $perPage, true);
+
+        $loans = Loan::query()
+            ->whereIn('id', array_keys($onPage))
+            ->select(['id', 'loan_account_number', 'borrower_id'])
             ->with('borrower:id,first_name,middle_name,last_name,suffix')
-            ->orderByDesc('per_loan.total_income')
-            ->orderBy('loans.id')
-            ->paginate($filters['per_page'] ?? 15);
+            ->get()
+            ->keyBy('id');
+
+        $items = collect($onPage)->map(fn (array $row, int $loanId): Loan => $loans[$loanId]->forceFill([
+            'payments' => $row['payments'],
+            'interest_income' => $row['interest'] / 100,
+            'penalty_income' => $row['penalty'] / 100,
+            'processing_fee' => $row['fee'] / 100,
+            'total_income' => $totalOf($row) / 100,
+        ]))->values();
+
+        return [
+            'page' => new PagePaginator($items, count($rows), $perPage, $currentPage, [
+                'path' => Paginator::resolveCurrentPath(),
+            ]),
+            'totals' => $this->incomeByLoanTotals($filters, count($rows)),
+        ];
     }
 
     /**
-     * Totals over the WHOLE filtered set. `interest_income` and
-     * `penalty_income` are the same sums incomeReport() returns, and
-     * `payments` is the List of Repayments `count`, for the same filters.
+     * Totals over the WHOLE filtered set: the sums and the rounding
+     * incomeReport() uses, so they equal its cards, and `payments` is the List
+     * of Repayments `count`, for the same filters.
      *
-     * @return array{count: int, payments: int, interest_income: float, penalty_income: float, total_income: float}
+     * @return array{count: int, payments: int, interest_income: float, penalty_income: float, processing_fee: float, total_income: float}
      */
-    public function incomeByLoanTotals(array $filters): array
+    private function incomeByLoanTotals(array $filters, int $loanCount): array
     {
         $agg = $this->incomeRepaymentsQuery($filters)->toBase()->selectRaw('
-            COUNT(DISTINCT repayments.loan_id) as loan_count,
             COUNT(*) as payment_count,
             COALESCE(SUM(repayments.interest_applied), 0) as interest_income,
-            COALESCE(SUM(repayments.penalty_applied), 0) as penalty_income,
-            COALESCE(SUM(repayments.interest_applied), 0) + COALESCE(SUM(repayments.penalty_applied), 0) as total_income
+            COALESCE(SUM(repayments.penalty_applied), 0) as penalty_income
         ')->first();
 
+        $interest = round((float) ($agg->interest_income ?? 0), 2);
+        $penalty = round((float) ($agg->penalty_income ?? 0), 2);
+        $fees = round($this->processingFeesOfReleasedLoans($filters), 2);
+
         return [
-            'count' => (int) ($agg->loan_count ?? 0),
+            'count' => $loanCount,
             'payments' => (int) ($agg->payment_count ?? 0),
-            'interest_income' => round((float) ($agg->interest_income ?? 0), 2),
-            'penalty_income' => round((float) ($agg->penalty_income ?? 0), 2),
-            'total_income' => round((float) ($agg->total_income ?? 0), 2),
+            'interest_income' => $interest,
+            'penalty_income' => $penalty,
+            'processing_fee' => $fees,
+            'total_income' => round($interest + $fees + $penalty, 2),
         ];
     }
 
@@ -1306,34 +1583,219 @@ class ReportService
             ->where('due_date', '<', $asOf->toDateString());
     }
 
+    /**
+     * The Member Report's cards: the counts of memberCounts(), the same
+     * definition its list uses, and the average loan size.
+     */
     public function borrowerReport(array $filters): array
     {
-        $branchIds = self::branchScope($filters);
-        $releasedLoans = fn ($q) => $q
-            ->whereIn('status', Loan::EVER_RELEASED_STATUSES)
-            ->tap(self::inBranches($branchIds, 'branch_id'));
-
-        $totalActive = Borrower::whereHas('loans', $releasedLoans)->count();
-
-        $newBorrowers = Borrower::query()
-            ->tap(self::inBranches($branchIds, 'branch_id'))
-            ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->where('created_at', '>=', self::dayStart($d)))
-            ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->where('created_at', '<', self::nextDayStart($d)))
-            ->count();
+        $counts = $this->memberCounts($filters);
 
         $avgLoanSize = (float) Loan::whereIn('status', Loan::EVER_RELEASED_STATUSES)
-            ->tap(self::inBranches($branchIds, 'branch_id'))
+            ->tap(self::inBranches(self::branchScope($filters), 'branch_id'))
             ->avg('principal_amount') ?? 0;
 
-        $repeatBorrowers = Borrower::whereHas('loans', $releasedLoans, '>=', 2)->count();
-
         return [
-            'total_active_borrowers' => $totalActive,
-            'new_borrowers' => $newBorrowers,
+            'total_active_borrowers' => $counts['active'],
+            'new_borrowers' => $counts['new'],
             'avg_loan_size' => round($avgLoanSize, 2),
-            'repeat_borrowers' => $repeatBorrowers,
+            'repeat_borrowers' => $counts['repeat'],
             'generated_at' => now()->toDateTimeString(),
         ];
+    }
+
+    /**
+     * One page of the members behind the Member Report's cards: everyone who
+     * is active or new, by name as displayed then id, a total order across
+     * pages. `outstanding` is everything still owed today (`total_outstanding`)
+     * on the loans `active_loans` counts.
+     *
+     * Costs the same queries for any page size: the page, its count, its
+     * branches, the page's active loans, and their figures.
+     */
+    public function memberList(array $filters): LengthAwarePaginator
+    {
+        [$newSql, $newBindings] = self::memberCreatedInPeriodSql($filters);
+
+        $page = $this->membersWithLoanFigures($filters)
+            ->select([
+                'borrowers.id',
+                'borrowers.borrower_code',
+                'borrowers.first_name',
+                'borrowers.middle_name',
+                'borrowers.last_name',
+                'borrowers.suffix',
+                'borrowers.branch_id',
+                'member_loans.active_loans',
+                'member_loans.loans_released',
+                'member_loans.last_released_at',
+            ])
+            ->selectRaw("({$newSql}) as is_new_member", $newBindings)
+            ->where(fn ($q) => $q
+                ->where('member_loans.active_loans', '>', 0)
+                ->orWhereRaw($newSql, $newBindings))
+            ->with('branch:id,name')
+            ->orderByRaw(self::BORROWER_NAME_SQL)
+            ->orderBy('borrowers.id')
+            ->paginate($filters['per_page'] ?? 15);
+
+        $outstanding = $this->outstandingCentavosByMember($page->getCollection()->modelKeys(), $filters);
+
+        return $page->through(fn (Borrower $member): array => [
+            'borrower_id' => $member->id,
+            'borrower_code' => $member->borrower_code,
+            'borrower_name' => $member->full_name,
+            'branch_name' => $member->branch?->name,
+            'is_active' => (int) $member->active_loans > 0,
+            'is_new' => (bool) $member->is_new_member,
+            'is_repeat' => (int) $member->loans_released >= self::REPEAT_MEMBER_LOANS,
+            'active_loans' => (int) $member->active_loans,
+            'loans_released' => (int) $member->loans_released,
+            'outstanding' => ($outstanding[$member->id] ?? 0) / 100,
+            'last_release_date' => $member->last_released_at === null
+                ? null
+                : Carbon::parse($member->last_released_at)->toDateString(),
+        ]);
+    }
+
+    /**
+     * The one definition behind the cards and the list. Over members (never
+     * pending or rejected registrations):
+     *  - active: at least one collectible loan as of `date_to`;
+     *  - new: the member was created in the period;
+     *  - repeat: at least 2 ever-released loans.
+     *
+     * Active and repeat read the loans of the caller's branches, new the
+     * member's own branch.
+     *
+     * @return array{active: int, new: int, repeat: int}
+     */
+    public function memberCounts(array $filters): array
+    {
+        [$newSql, $newBindings] = self::memberCreatedInPeriodSql($filters);
+
+        $counts = $this->membersWithLoanFigures($filters)
+            ->toBase()
+            ->selectRaw('COALESCE(SUM(member_loans.active_loans > 0), 0) as active_members')
+            ->selectRaw("COALESCE(SUM({$newSql}), 0) as new_members", $newBindings)
+            ->selectRaw('COALESCE(SUM(member_loans.loans_released >= ?), 0) as repeat_members', [self::REPEAT_MEMBER_LOANS])
+            ->first();
+
+        return [
+            'active' => (int) $counts->active_members,
+            'new' => (int) $counts->new_members,
+            'repeat' => (int) $counts->repeat_members,
+        ];
+    }
+
+    /**
+     * Members, each joined to their loans' figures in one derived table:
+     * `loans_released`, `active_loans` and `last_released_at`. Null for a member
+     * with no ever-released loan in scope.
+     */
+    private function membersWithLoanFigures(array $filters): Builder
+    {
+        [$activeSql, $activeBindings] = self::collectibleAsOfSql($filters);
+
+        $perMember = DB::table('loans')
+            ->whereIn('loans.status', Loan::EVER_RELEASED_STATUSES)
+            ->tap(self::inBranches(self::branchScope($filters), 'loans.branch_id'))
+            ->select('loans.borrower_id')
+            ->selectRaw('COUNT(*) as loans_released')
+            ->selectRaw("SUM({$activeSql}) as active_loans", $activeBindings)
+            ->selectRaw('MAX(loans.released_at) as last_released_at')
+            ->groupBy('loans.borrower_id');
+
+        return Borrower::query()
+            ->members()
+            ->leftJoinSub($perMember, 'member_loans', 'member_loans.borrower_id', '=', 'borrowers.id');
+    }
+
+    /**
+     * Everything still owed today on each member's active loans, in whole
+     * centavos by member id.
+     *
+     * @param  list<int>  $memberIds
+     * @return array<int, int>
+     */
+    private function outstandingCentavosByMember(array $memberIds, array $filters): array
+    {
+        if ($memberIds === []) {
+            return [];
+        }
+
+        [$activeSql, $activeBindings] = self::collectibleAsOfSql($filters);
+
+        $owners = DB::table('loans')
+            ->whereIn('loans.borrower_id', $memberIds)
+            ->tap(self::inBranches(self::branchScope($filters), 'loans.branch_id'))
+            ->whereRaw($activeSql, $activeBindings)
+            ->pluck('loans.borrower_id', 'loans.id');
+
+        $outstanding = [];
+
+        foreach (app(LoanListTotals::class)->byLoan($owners->keys()->all()) as $loanId => $figures) {
+            $memberId = (int) $owners[$loanId];
+            $outstanding[$memberId] = ($outstanding[$memberId] ?? 0) + (int) round($figures['total_outstanding'] * 100);
+        }
+
+        return $outstanding;
+    }
+
+    /**
+     * A collectible loan as of `date_to`: in a collectible status and not
+     * released after that day. `loans.status` is today's, so a loan that was
+     * collectible on `date_to` and has since finished does not count.
+     *
+     * @return array{0: string, 1: list<mixed>}
+     */
+    private static function collectibleAsOfSql(array $filters): array
+    {
+        $statuses = Loan::COLLECTIBLE_STATUSES;
+        $inStatus = 'loans.status IN ('.implode(', ', array_fill(0, count($statuses), '?')).')';
+
+        if (empty($filters['date_to'])) {
+            return [$inStatus, $statuses];
+        }
+
+        return [
+            "({$inStatus} AND (loans.released_at IS NULL OR loans.released_at < ?))",
+            [...$statuses, self::nextDayStart($filters['date_to'])],
+        ];
+    }
+
+    /**
+     * A member created in the period, in the caller's branches.
+     *
+     * @return array{0: string, 1: list<mixed>}
+     */
+    private static function memberCreatedInPeriodSql(array $filters): array
+    {
+        $branchIds = self::branchScope($filters);
+
+        if ($branchIds === []) {
+            return ['0 = 1', []];
+        }
+
+        $conditions = [];
+        $bindings = [];
+
+        if ($branchIds !== null) {
+            $conditions[] = 'borrowers.branch_id IN ('.implode(', ', array_fill(0, count($branchIds), '?')).')';
+            $bindings = $branchIds;
+        }
+
+        if (! empty($filters['date_from'])) {
+            $conditions[] = 'borrowers.created_at >= ?';
+            $bindings[] = self::dayStart($filters['date_from']);
+        }
+
+        if (! empty($filters['date_to'])) {
+            $conditions[] = 'borrowers.created_at < ?';
+            $bindings[] = self::nextDayStart($filters['date_to']);
+        }
+
+        return [$conditions === [] ? '1 = 1' : '('.implode(' AND ', $conditions).')', $bindings];
     }
 
     // ── Borrowers with Loans Released ────────────────────────────────────

@@ -89,7 +89,7 @@ class ReportGroupedTotalsTest extends TestCase
         // pass by everything being zero.
         $branchOnly = $this->getJson("/api/reports/income/by-loan?branch_id={$branch->id}")->assertOk();
         $this->assertSame(
-            ['count' => 2, 'payments' => 4, 'interest_income' => 5400.5, 'penalty_income' => 128.32, 'total_income' => 5528.82],
+            ['count' => 2, 'payments' => 4, 'interest_income' => 5400.5, 'penalty_income' => 128.32, 'processing_fee' => 0, 'total_income' => 5528.82],
             $branchOnly->json('totals'),
         );
     }
@@ -177,7 +177,7 @@ class ReportGroupedTotalsTest extends TestCase
 
         $this->assertSame(4, $grouped->json('meta.total'));
         $this->assertSame(
-            ['count' => 4, 'payments' => 205, 'interest_income' => 5530, 'penalty_income' => 171.5, 'total_income' => 5701.5],
+            ['count' => 4, 'payments' => 205, 'interest_income' => 5530, 'penalty_income' => 171.5, 'processing_fee' => 0, 'total_income' => 5701.5],
             $grouped->json('totals'),
         );
     }
@@ -365,8 +365,9 @@ class ReportGroupedTotalsTest extends TestCase
             'interest_income' => 300,
             'penalty_income' => 3,
             'total_income' => 303,
+            'processing_fee' => 0,
         ]], $response->json('data'));
-        $this->assertSame(['count' => 1, 'payments' => 2, 'interest_income' => 300, 'penalty_income' => 3, 'total_income' => 303], $response->json('totals'));
+        $this->assertSame(['count' => 1, 'payments' => 2, 'interest_income' => 300, 'penalty_income' => 3, 'processing_fee' => 0, 'total_income' => 303], $response->json('totals'));
 
         // The other branch's loan appears only when the branch filter allows it.
         $unscoped = $this->getJson('/api/reports/income/by-loan?date_from=2026-03-01&date_to=2026-03-31')->assertOk();
@@ -422,7 +423,7 @@ class ReportGroupedTotalsTest extends TestCase
             ->assertOk()
             ->assertJsonPath('data', [])
             ->assertJsonPath('meta.total', 0)
-            ->assertJsonPath('totals', ['count' => 0, 'payments' => 0, 'interest_income' => 0, 'penalty_income' => 0, 'total_income' => 0]);
+            ->assertJsonPath('totals', ['count' => 0, 'payments' => 0, 'interest_income' => 0, 'penalty_income' => 0, 'processing_fee' => 0, 'total_income' => 0]);
 
         $this->getJson('/api/reports/borrowers/released?date_from=1999-01-01&date_to=1999-01-31')
             ->assertOk()

@@ -71,7 +71,9 @@ class ReportTotalsFromServerTest extends TestCase
             'principal_due' => 10000.00,
             'interest_due' => 300.20,
             'penalty_amount' => 20.00,
-            'total_due' => 10300.20,
+            'total_due' => 10320.20,
+            'build_up_due' => 0,
+            'total_payment' => 10320.20,
             'amount_paid' => 6384.67,
         ], $data['schedule_totals']);
 
