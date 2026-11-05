@@ -708,7 +708,7 @@ class LoanService
     {
         if (! $loan->is_editable) {
             throw ValidationException::withMessages([
-                'status' => ['Loan can only be edited in draft or for_review status.'],
+                'status' => ['Loan can only be edited while it is a draft or under approval.'],
             ]);
         }
 
@@ -947,7 +947,7 @@ class LoanService
      */
     public function submitForReview(Loan $loan, ?User $submitter = null): Loan
     {
-        $this->guardStatus($loan, 'draft', 'submit for review');
+        $this->guardStatus($loan, 'draft', 'submit for approval');
 
         return LoanWriteTransaction::run(function () use ($loan, $submitter): Loan {
             $this->lockLoanInStatus($loan, 'draft');
@@ -2114,7 +2114,7 @@ class LoanService
         // As updateLoan() refuses it.
         if (! $loan->is_editable) {
             throw ValidationException::withMessages([
-                'status' => ['Loan can only be edited in draft or for_review status.'],
+                'status' => ['Loan can only be edited while it is a draft or under approval.'],
             ]);
         }
 
@@ -2596,8 +2596,10 @@ class LoanService
     private function guardStatus(Loan $loan, string $expected, string $action): void
     {
         if ($loan->status !== $expected) {
+            $status = $expected === 'for_review' ? 'for approval' : $expected;
+
             throw ValidationException::withMessages([
-                'status' => ["Loan must be in '{$expected}' status to {$action}."],
+                'status' => ["Loan must be in '{$status}' status to {$action}."],
             ]);
         }
     }

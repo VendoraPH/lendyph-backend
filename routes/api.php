@@ -41,6 +41,7 @@ use App\Http\Controllers\Api\LoanAdjustmentController;
 use App\Http\Controllers\Api\LoanApprovalStepController;
 use App\Http\Controllers\Api\LoanController;
 use App\Http\Controllers\Api\LoanLedgerController;
+use App\Http\Controllers\Api\LoanPrintLogController;
 use App\Http\Controllers\Api\LoanProductController;
 use App\Http\Controllers\Api\NotificationController;
 use App\Http\Controllers\Api\PromissoryNoteController;
@@ -247,6 +248,10 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::patch('/loans/{loan}/reject', [LoanController::class, 'reject']);
     Route::get('/loans/{loan}/release-preview', [LoanController::class, 'releasePreview']);
     Route::patch('/loans/{loan}/release', [LoanController::class, 'release']);
+    // What a release would deduct, for anyone who can see the loan (`loans:view`).
+    Route::get('/loans/{loan}/deductions-preview', [LoanController::class, 'deductionsPreview'])->whereNumber('loan');
+    // The printables' print and PDF actions leave an audit row (`loans:view`).
+    Route::post('/loans/{loan}/print-log', LoanPrintLogController::class)->whereNumber('loan');
     // The release dialog's "Add Co-Maker": approved loans only, `loans:release`.
     Route::post('/loans/{loan}/co-makers', [LoanController::class, 'addCoMaker'])->whereNumber('loan');
     Route::patch('/loans/{loan}/void', [LoanController::class, 'void']);

@@ -21,6 +21,7 @@ use App\Http\Resources\AmortizationScheduleResource;
 use App\Http\Resources\CoMakerResource;
 use App\Http\Resources\LoanLedgerEntryResource;
 use App\Http\Resources\LoanResource;
+use App\Models\AmortizationSchedule;
 use App\Models\Loan;
 use App\Services\AmortizationBalanceService;
 use App\Services\AutoPayService;
@@ -38,6 +39,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
+use Illuminate\Support\Arr;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 use OpenApi\Attributes as OA;
@@ -62,6 +64,7 @@ class LoanController extends Controller
         'term',
         'status',
         'created_at',
+        'next_due',
     ];
 
     /**
@@ -92,6 +95,15 @@ class LoanController extends Controller
         'ongoing',
         'completed',
     ];
+
+    /**
+     * The applications GET /loans/{id}/deductions-preview quotes: the ones still
+     * on their way to release. Past `approved` the deductions are the stored
+     * ones, and they are not a preview of anything.
+     *
+     * @var array<int, string>
+     */
+    private const DEDUCTIONS_PREVIEW_STATUSES = ['draft', 'for_review', 'approved'];
 
     public function __construct(
         private LoanService $loanService,
@@ -126,6 +138,12 @@ so the tab badges do not sum to the book total, and it is **not** a subset of
 Grace matters here: a loan one day past due on a product granting seven days'
 grace is **not** past due on this filter, and becomes so on the eighth day.
 
+`status=current` is the third virtual value, the Current tab: a `released` or
+`ongoing` loan that is **not** past due by that same rule, so each active loan
+reads under exactly one of the two. Not a member of the enum either. Its row
+count always equals `meta.stats.current`. `status=active` still returns the whole
+set, past due or not.
+
 Deliberately not the same as the Due/Past Due report at
 `/api/reports/due-past-due`. They agree on which loans are collectible, but that
 report asks what is **owed** — `due_date <= today`, grace ignored — because its
@@ -135,18 +153,40 @@ report's count to be the larger of the two.
 Because a comma-separated list is an OR, `status=completed,past_due` means
 "completed OR past due".
 
-A value that is neither a stored status nor one of those two virtual values
-matches nothing rather than returning a 422, so a client still sending the
-retired `current` gets an empty result instead of a broken page: it is not a
-member of the enum and is not reported in `meta.stats`, and the Current tab
-reads `ongoing`.
+A value that is neither a stored status nor one of those three virtual values
+matches nothing rather than returning a 422: an empty result instead of a broken
+page.
+
+Each row's `display_status` is `past_due` for a `released` or `ongoing` loan the
+past due rule catches, otherwise its `status`. A `defaulted` loan keeps reading
+`defaulted`, though `status=past_due` reaches it.
+
+`view=summary` answers rows without `amortization_schedules` or any other heavy
+relation, for a list that shows many loans: `id`, `application_number`,
+`loan_account_number`, `borrower` {`id`, `full_name`, `borrower_code`},
+`borrower_id`, `borrower_name`, `loan_product` {`id`, `name`}, `loan_product_id`,
+`loan_product_name`, `branch` {`id`, `name`}, `principal_amount`, `interest_rate`,
+`interest_method`, `term`, `term_unit`, `frequency`, `maturity_date`, `status`,
+`display_status`, `current_approver`, `current_status_label`, `is_restructure`,
+`released_at`, `release_date`, `created_at`, `next_due_date`, `next_due_amount`
+(the full row's `current_due`, also sent under that name), `amount_due_now`,
+`total_outstanding`, `outstanding_principal`, `overdue_amount`, `penalty_amount`,
+`total_payable` and `insurance_owed`. Each equals the same key on the full row.
+Filters, sorting, paging, `meta.totals` and `meta.stats` are the same. Any other
+value is a 422.
 
 `date_from` / `date_to` are an inclusive whole-day range on **`created_at`**
 (application date), so `date_to=2026-08-27` includes a loan captured at
 23:59 on the 27th. A reversed range simply matches nothing.
 
+`search` matches the application number, the loan account number, the loan
+product's name, and the borrower as `GET /api/borrowers` searches them: code, any
+name part, the whole name as typed ("Juan Dela Cruz"), contact number or email.
+
 `sort` accepts only `application_number`, `borrower`, `product`, `amount`,
-`term`, `status` and `created_at`; anything else is a 422. `borrower` orders by
+`term`, `status`, `created_at` and `next_due`; anything else is a 422. `next_due`
+orders by each loan's earliest unpaid due date (the row's `next_due_date`), soonest
+first unless `dir=desc` is sent, with loans that have none last either way. `borrower` orders by
 the borrower's last name then first name (`full_name` is computed in PHP and
 cannot be ordered by), `product` by loan product name, and `status` by the
 order of the tabs on the loans screen — draft, for_review, approved, rejected,
@@ -198,14 +238,14 @@ caller's branches answers 403.
 `awaiting_me` or the date range. Those counts are the KPI cards and tab badges: scoping them to the
 current filter would make every tab read the number of rows already on screen.
 It carries one entry per status in the enum, plus `active` (the sum of the
-statuses `status=active` selects) and `past_due` (the row count `status=past_due`
-returns).
+statuses `status=active` selects), `past_due` (the row count `status=past_due`
+returns) and `current` (the row count `status=current` returns).
 DESC,
         tags: ['Loans'],
         security: [['sanctum' => []]],
         parameters: [
-            new OA\Parameter(name: 'search', in: 'query', required: false, description: 'Application number, loan account number, borrower name or borrower code.', schema: new OA\Schema(type: 'string')),
-            new OA\Parameter(name: 'status', in: 'query', required: false, description: 'One status, a comma-separated list, or a virtual value: `active` or `past_due` (both preferred over spelling statuses out).', schema: new OA\Schema(type: 'string', example: 'active')),
+            new OA\Parameter(name: 'search', in: 'query', required: false, description: 'Application number, loan account number, loan product name, or the borrower\'s code, name (a part or the whole name), contact number or email.', schema: new OA\Schema(type: 'string')),
+            new OA\Parameter(name: 'status', in: 'query', required: false, description: 'One status, a comma-separated list, or a virtual value: `active`, `past_due` or `current` (preferred over spelling statuses out).', schema: new OA\Schema(type: 'string', example: 'active')),
             new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
             new OA\Parameter(name: 'borrower_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
             new OA\Parameter(name: 'loan_product_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
@@ -215,12 +255,13 @@ DESC,
             new OA\Parameter(name: 'sort', in: 'query', required: false, schema: new OA\Schema(type: 'string', default: 'created_at', enum: self::SORT_KEYS)),
             new OA\Parameter(name: 'dir', in: 'query', required: false, schema: new OA\Schema(type: 'string', default: 'desc', enum: ['asc', 'desc'])),
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15, maximum: 100)),
+            new OA\Parameter(name: 'view', in: 'query', required: false, description: '`summary`: rows without schedules or other heavy relations. See the description.', schema: new OA\Schema(type: 'string', enum: ['summary'])),
         ],
         responses: [
             new OA\Response(response: 200, description: 'Paginated loan list'),
             new OA\Response(response: 401, description: 'Unauthenticated'),
             new OA\Response(response: 403, description: 'A `branch_id` outside the caller\'s branches'),
-            new OA\Response(response: 422, description: 'Unknown sort key, bad direction or malformed date'),
+            new OA\Response(response: 422, description: 'Unknown sort key, bad direction, unknown view or malformed date'),
         ],
     )]
     public function index(): AnonymousResourceCollection
@@ -243,6 +284,7 @@ DESC,
             'dir' => ['nullable', Rule::in(['asc', 'desc'])],
             'per_page' => ['nullable', 'integer', 'min:1'],
             'awaiting_me' => ['nullable', 'boolean'],
+            'view' => ['nullable', Rule::in(['summary'])],
         ]);
 
         /**
@@ -266,6 +308,7 @@ DESC,
         $dateFrom = $filters['date_from'] ?? null;
         $dateTo = $filters['date_to'] ?? null;
         $awaitingMe = filter_var($filters['awaiting_me'] ?? false, FILTER_VALIDATE_BOOLEAN);
+        $wantsSummary = ($filters['view'] ?? null) === 'summary';
 
         $viewer = request()->user();
         app(BranchAccess::class)->authorizeBranchFilter($viewer, $branchId);
@@ -278,14 +321,11 @@ DESC,
             ->when(filled($search), function ($q) use ($search) {
                 $like = LikePattern::contains($search);
 
-                $q->where(function ($query) use ($like) {
+                $q->where(function ($query) use ($like, $search) {
                     $query->where('loans.application_number', 'like', $like)
                         ->orWhere('loans.loan_account_number', 'like', $like)
-                        ->orWhereHas('borrower', function ($bq) use ($like) {
-                            $bq->where('first_name', 'like', $like)
-                                ->orWhere('last_name', 'like', $like)
-                                ->orWhere('borrower_code', 'like', $like);
-                        });
+                        ->orWhereHas('borrower', fn ($bq) => $bq->search($search))
+                        ->orWhereHas('loanProduct', fn ($pq) => $pq->where('name', 'like', $like));
                 });
             })
             ->when(filled($status), fn ($q) => $q->forStatus($status))
@@ -313,13 +353,31 @@ DESC,
             // joins `borrowers`, whose `id`, `status` and `branch_id` would
             // then hydrate OVER the loan's, and LoanResource would publish the
             // borrower's id and status on every row of the list.
-            ->select('loans.*')
-            ->with('borrower', 'loanProduct', 'branch', 'createdByUser', 'amortizationSchedules', 'coMakers', 'approvalSteps')
-            // Aliased count so LoanResource's extension_count reads an
-            // already-loaded value instead of firing a COUNT query per row.
-            ->withCount(['adjustments as extension_count' => fn ($q) => $q->where('adjustment_type', 'extension')]);
+            ->select('loans.*');
 
-        $this->applySort($query, $filters['sort'] ?? 'created_at', $filters['dir'] ?? 'desc');
+        if ($wantsSummary) {
+            // `status` on the borrower is not for the row: amount_due_now reads
+            // it to decide whether a payment credits the build-up.
+            $query->with(
+                'borrower:id,borrower_code,first_name,middle_name,last_name,suffix,status',
+                'loanProduct:id,name',
+                'branch:id,name',
+                'openSchedules',
+                'approvalSteps',
+            );
+        } else {
+            $query
+                ->with('borrower', 'loanProduct', 'branch', 'createdByUser', 'amortizationSchedules', 'coMakers', 'approvalSteps')
+                // Aliased count so LoanResource's extension_count reads an
+                // already-loaded value instead of firing a COUNT query per row.
+                ->withCount(['adjustments as extension_count' => fn ($q) => $q->where('adjustment_type', 'extension')]);
+        }
+
+        $sort = $filters['sort'] ?? 'created_at';
+
+        // Soonest first is what `next_due` is for. Every other key keeps the
+        // newest-first default.
+        $this->applySort($query, $sort, $filters['dir'] ?? ($sort === 'next_due' ? 'asc' : 'desc'));
 
         $loans = $query->paginate(min(max((int) ($filters['per_page'] ?? 15), 1), 100));
 
@@ -367,6 +425,18 @@ DESC,
             ->count();
 
         /**
+         * The Current tab, the active loans that are not past due. Like the past
+         * due count it cuts across `released` and `ongoing`, so it is its own
+         * aggregate through the scope `status=current` filters on, with the same
+         * two scopes.
+         */
+        $currentCount = Loan::visibleTo($viewer)
+            ->when(filled($branchId), fn ($q) => $q->forBranch($branchId))
+            ->when(filled($borrowerId), fn ($q) => $q->where('loans.borrower_id', $borrowerId))
+            ->current()
+            ->count();
+
+        /**
          * Money totals over every loan the filters match, not just this page:
          * unlike `meta.stats`, they follow every filter, because they are the
          * figures for the list on screen. One aggregate query. See
@@ -374,7 +444,7 @@ DESC,
          */
         $totals = app(LoanListTotals::class)->for($filtered);
 
-        return LoanResource::collection($loans)
+        return ($wantsSummary ? LoanResource::summaryCollection($loans) : LoanResource::collection($loans))
             ->additional(['meta' => [
                 'totals' => [
                     'total_outstanding' => $totals['total_outstanding'],
@@ -387,11 +457,6 @@ DESC,
                     'approved' => (int) ($stats['approved'] ?? 0),
                     'rejected' => (int) ($stats['rejected'] ?? 0),
                     'released' => (int) ($stats['released'] ?? 0),
-                    // `current` is deliberately absent and must stay absent: it
-                    // is not a member of the `loans.status` enum, so the key could
-                    // only ever read 0, and a permanently-zero badge invites the
-                    // wrong repair — adding the enum member — rather than the
-                    // right one. The Current tab reads `ongoing` below.
                     'ongoing' => (int) ($stats['ongoing'] ?? 0),
                     'completed' => (int) ($stats['completed'] ?? 0),
                     'defaulted' => (int) ($stats['defaulted'] ?? 0),
@@ -416,6 +481,10 @@ DESC,
                     // It overlaps `released`, `ongoing` and `defaulted` by design,
                     // and is not a subset of `active`.
                     'past_due' => $pastDueCount,
+                    // The Current tab. Not a status either: a released or ongoing
+                    // loan that is not past due (Loan::scopeCurrent()), the row
+                    // count `?status=current` returns.
+                    'current' => $currentCount,
                 ],
             ]]);
     }
@@ -450,6 +519,16 @@ DESC,
                 ->leftJoin('loan_products', 'loan_products.id', '=', 'loans.loan_product_id')
                 ->orderBy('loan_products.name', $dir),
             'status' => $query->orderByRaw($this->statusOrderSql($dir), self::STATUS_SORT_ORDER),
+            // Each loan's earliest unpaid due date, the row's `next_due_date`,
+            // from one probe of (loan_id, status, due_date) per loan. Rows with
+            // none go last in either direction: they have nothing to chase.
+            'next_due' => $query
+                ->addSelect(['next_unpaid_due_date' => AmortizationSchedule::query()
+                    ->selectRaw('MIN(due_date)')
+                    ->whereColumn('amortization_schedules.loan_id', 'loans.id')
+                    ->whereIn('amortization_schedules.status', AmortizationSchedule::UNPAID_STATUSES)])
+                ->orderByRaw('next_unpaid_due_date IS NULL')
+                ->orderBy('next_unpaid_due_date', $dir),
         };
 
         // Deterministic tiebreak on every sort. Without it MySQL may order rows
@@ -664,7 +743,7 @@ DESC,
 
     #[OA\Patch(
         path: '/api/loans/{id}/submit',
-        summary: 'Submit loan for review',
+        summary: 'Submit loan for approval',
         description: 'Needs `loans:update`. A restructure application (`is_restructure`) can also be submitted with `loans:restructure`.',
         tags: ['Loans'],
         security: [['sanctum' => []]],
@@ -672,7 +751,7 @@ DESC,
             new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
         ],
         responses: [
-            new OA\Response(response: 200, description: 'Loan submitted for review'),
+            new OA\Response(response: 200, description: 'Loan submitted for approval'),
             new OA\Response(response: 403, description: 'Missing loans:update, or loans:restructure for a restructure application'),
             new OA\Response(response: 422, description: 'Invalid status transition'),
         ],
@@ -681,7 +760,7 @@ DESC,
     {
         $this->loanService->submitForReview($loan, $request->user());
 
-        return response()->json(['message' => 'Loan submitted for review.', 'data' => new LoanResource($loan)]);
+        return response()->json(['message' => 'Loan submitted for approval.', 'data' => new LoanResource($loan)]);
     }
 
     #[OA\Patch(
@@ -846,6 +925,53 @@ DESC,
                 $preview['total_deductions'],
                 $preview['net_proceeds'],
             ),
+        ]]);
+    }
+
+    #[OA\Get(
+        path: '/api/loans/{id}/deductions-preview',
+        summary: 'The deductions an application will carry at release',
+        description: <<<'TXT'
+        Read-only. The same calculation as GET /api/loans/{id}/release-preview, guard included, for anyone who can see the loan: the application's stored deductions plus the catalog fees the release will charge, and the resulting `total_deductions` and `net_proceeds` as 2dp strings. `deductions` holds the same items as that endpoint.
+
+        `provisional` is true until the loan is approved. Fee settings can still change the figures until release, and insurance is chosen at release, so neither this nor the release preview without its insurance parameters includes it. There is no `fee_fingerprint`: only the release dialog quotes one.
+        TXT,
+        tags: ['Loans'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
+        ],
+        responses: [
+            new OA\Response(
+                response: 200,
+                description: 'Projected deductions and totals',
+                content: new OA\JsonContent(properties: [
+                    new OA\Property(property: 'data', type: 'object', properties: [
+                        new OA\Property(property: 'deductions', type: 'array', items: new OA\Items(type: 'object')),
+                        new OA\Property(property: 'total_deductions', type: 'string', example: '1400.00'),
+                        new OA\Property(property: 'net_proceeds', type: 'string', example: '18600.00'),
+                        new OA\Property(property: 'provisional', type: 'boolean'),
+                    ]),
+                ]),
+            ),
+            new OA\Response(response: 403, description: 'Missing loans:view'),
+            new OA\Response(response: 404, description: 'Loan not found, or in a branch the caller cannot see'),
+            new OA\Response(response: 422, description: 'Loan is not draft, for_review or approved (`status`), or the fees would exceed the principal (`fees`)'),
+        ],
+    )]
+    public function deductionsPreview(Loan $loan, LoanReleaseFeeService $fees): JsonResponse
+    {
+        $this->authorize('loans:view');
+
+        if (! in_array($loan->status, self::DEDUCTIONS_PREVIEW_STATUSES, true)) {
+            throw ValidationException::withMessages([
+                'status' => ['Deductions can only be previewed for a loan that has not been released.'],
+            ]);
+        }
+
+        return response()->json(['data' => [
+            ...Arr::only($fees->preview($loan), ['deductions', 'total_deductions', 'net_proceeds']),
+            'provisional' => $loan->status !== 'approved',
         ]]);
     }
 

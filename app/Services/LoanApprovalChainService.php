@@ -518,7 +518,7 @@ class LoanApprovalChainService
 
         if ($loan->status !== 'for_review') {
             throw ValidationException::withMessages([
-                'status' => ["Loan must be in 'for_review' status to act on its approval chain."],
+                'status' => ["Loan must be in 'for approval' status to act on its approval chain."],
             ]);
         }
 

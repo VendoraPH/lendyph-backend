@@ -7,6 +7,8 @@ use App\Enums\TermUnit;
 use App\Services\BranchAccess;
 use App\Services\SequenceCode;
 use App\Traits\Auditable;
+use Carbon\Carbon;
+use Closure;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -139,6 +141,18 @@ class Loan extends Model
      * loans, which are collectible but not active.
      */
     public const VIRTUAL_STATUS_PAST_DUE = 'past_due';
+
+    /**
+     * Virtual `status` value standing for self::scopeCurrent(): the Current
+     * tab, the active loans that are not past due.
+     *
+     * Never written to a row and never a member of the enum, for the reasons
+     * self::ACTIVE_STATUSES gives. Like `past_due` it resolves to a subquery on
+     * `amortization_schedules`, so it is branched on rather than mapped into a
+     * `whereIn`, and `?status=current` and `meta.stats.current` are built from
+     * the one scope.
+     */
+    public const VIRTUAL_STATUS_CURRENT = 'current';
 
     protected $fillable = [
         'loan_account_number',
@@ -372,6 +386,16 @@ class Loan extends Model
         return $this->hasMany(AmortizationSchedule::class)->orderBy('period_number');
     }
 
+    /**
+     * The periods still taking payments, without the ones already settled, for
+     * a list that shows a loan's next due and overdue figures and must not load
+     * its whole schedule (GET /loans?view=summary).
+     */
+    public function openSchedules(): HasMany
+    {
+        return $this->amortizationSchedules()->whereIn('status', AmortizationSchedule::UNPAID_STATUSES);
+    }
+
     public function repayments(): HasMany
     {
         return $this->hasMany(Repayment::class)->orderBy('payment_date');
@@ -418,22 +442,29 @@ class Loan extends Model
     }
 
     /**
-     * The label the loans list shows while a `for_review` loan waits at its
-     * current step ("For Approval - <label>"): the `status_label` snapshotted
-     * onto the step currentApprover() names. Null under the same conditions as
-     * currentApprover(), and when the step has no label or a blank one, so the
-     * client falls back to the approver name.
+     * The label the loans list shows beside a loan's status, from the
+     * `status_label` snapshotted onto a step of its chain.
+     *
+     * - `for_review` ("For Approval - <label>"): the step currentApprover()
+     *   names. The client falls back to the approver name without a label.
+     * - `approved` ("Approved - <label>"): its release step, the one step left.
+     *   The client reads plain "Approved" without a label.
+     *
+     * Null for every other status, and when the step has no label or a blank
+     * one, so a client never has to tell "" apart from null.
      *
      * Reads the `approvalSteps` relation: eager-load it before calling this
      * across a list.
      */
     public function currentStatusLabel(): ?string
     {
-        if ($this->status !== 'for_review') {
-            return null;
-        }
+        $step = match ($this->status) {
+            'for_review' => $this->currentPendingStep(),
+            'approved' => $this->unfinishedReleaseStep(),
+            default => null,
+        };
 
-        $label = $this->currentPendingStep()?->status_label;
+        $label = $step?->status_label;
 
         return trim((string) $label) === '' ? null : $label;
     }
@@ -442,6 +473,54 @@ class Loan extends Model
     {
         return LoanApprovalStep::currentRound($this->approvalSteps)
             ->firstWhere('status', LoanApprovalStep::STATUS_PENDING);
+    }
+
+    /**
+     * The release step of the live round, in any unfinished state, as
+     * LoanApprovalChainService::markReleased() finds it. Found by kind rather
+     * than as the first pending step, so a chain left mid-flight against an
+     * approved loan still answers with this step's label, not an approver's.
+     */
+    private function unfinishedReleaseStep(): ?LoanApprovalStep
+    {
+        return LoanApprovalStep::currentRound($this->approvalSteps)
+            ->first(fn (LoanApprovalStep $step) => $step->kind === LoanApprovalStep::KIND_RELEASE
+                && $step->status !== LoanApprovalStep::STATUS_APPROVED);
+    }
+
+    /**
+     * The status a screen shows: `past_due` for a released or ongoing loan
+     * holding a late period (self::scopePastDue()'s rule), otherwise `status`.
+     * Never written: `loans.status` keeps its values, and a defaulted loan,
+     * which the Past Due filter also reaches, keeps reading `defaulted`.
+     *
+     * Uses the periods the caller loaded, so a list pays nothing per row. On a
+     * bare model it asks once, so the answer is never silently wrong.
+     */
+    public function displayStatus(): ?string
+    {
+        if (! in_array($this->status, self::ACTIVE_STATUSES, true)) {
+            return $this->status;
+        }
+
+        return $this->holdsLatePeriod() ? self::VIRTUAL_STATUS_PAST_DUE : $this->status;
+    }
+
+    private function holdsLatePeriod(): bool
+    {
+        $asOf = Carbon::today();
+
+        foreach (['amortizationSchedules', 'openSchedules'] as $relation) {
+            if ($this->relationLoaded($relation)) {
+                return AmortizationSchedule::lateUnpaid($this->getRelation($relation), $this->grace_period_days, $asOf)->isNotEmpty();
+            }
+        }
+
+        return $this->amortizationSchedules()
+            ->reorder()
+            ->whereIn('status', AmortizationSchedule::UNPAID_STATUSES)
+            ->where('due_date', '<', AmortizationSchedule::pastGraceCutoff($this->grace_period_days, $asOf)->toDateString())
+            ->exists();
     }
 
     /**
@@ -620,10 +699,58 @@ class Loan extends Model
             $owed['penalty'] += max(0, $centavos($schedule->penalty_amount) - $centavos($schedule->penalty_paid));
         }
 
-        $owed['insurance'] = max(0, $centavos($this->insurance_remaining_balance));
-        $owed['total'] = $owed['principal'] + $owed['interest'] + $owed['penalty'] + $owed['insurance'];
+        return $this->owedWithInsurance($owed);
+    }
 
-        return $owed;
+    /**
+     * self::owedCentavos() from what self::owedOnPeriodsByLoan() added up, for a
+     * list that does not hold every period.
+     *
+     * @param  array{principal: int, interest: int, penalty: int}  $periods
+     * @return array{principal: int, interest: int, penalty: int, insurance: int, total: int}
+     */
+    public function owedWithInsurance(array $periods): array
+    {
+        $insurance = max(0, (int) round((float) ($this->insurance_remaining_balance ?? 0) * 100));
+
+        return [
+            ...$periods,
+            'insurance' => $insurance,
+            'total' => $periods['principal'] + $periods['interest'] + $periods['penalty'] + $insurance,
+        ];
+    }
+
+    /**
+     * What each loan's periods still owe, in whole centavos, in one grouped
+     * query: the sums self::owedCentavos() makes in PHP, over EVERY period and
+     * floored per period by the same AmortizationSchedule SQL helpers. A loan
+     * with no periods has no key.
+     *
+     * @param  array<int, int>  $loanIds
+     * @return array<int, array{principal: int, interest: int, penalty: int}>
+     */
+    public static function owedOnPeriodsByLoan(array $loanIds): array
+    {
+        if ($loanIds === []) {
+            return [];
+        }
+
+        return DB::table('amortization_schedules')
+            ->whereIn('loan_id', $loanIds)
+            ->groupBy('loan_id')
+            ->selectRaw(
+                'loan_id,
+                SUM('.AmortizationSchedule::remainingPrincipalSql().') as principal,
+                SUM('.AmortizationSchedule::remainingInterestSql().') as interest,
+                SUM('.AmortizationSchedule::remainingPenaltySql().') as penalty',
+            )
+            ->get()
+            ->mapWithKeys(fn (object $row) => [(int) $row->loan_id => [
+                'principal' => (int) round((float) $row->principal * 100),
+                'interest' => (int) round((float) $row->interest * 100),
+                'penalty' => (int) round((float) $row->penalty * 100),
+            ]])
+            ->all();
     }
 
     /**
@@ -713,9 +840,30 @@ class Loan extends Model
     {
         return $query
             ->whereIn('loans.status', self::COLLECTIBLE_STATUSES)
-            ->whereHas('amortizationSchedules', fn ($q) => $q
-                ->whereIn('amortization_schedules.status', AmortizationSchedule::UNPAID_STATUSES)
-                ->whereRaw(AmortizationSchedule::pastGraceSql(), [today()->toDateString()]));
+            ->whereHas('amortizationSchedules', self::lateUnpaidPeriods());
+    }
+
+    /**
+     * The Current tab: active loans that are not past due, so every released or
+     * ongoing loan reads either here or under self::scopePastDue().
+     */
+    public function scopeCurrent($query)
+    {
+        return $query
+            ->whereIn('loans.status', self::ACTIVE_STATUSES)
+            ->whereDoesntHave('amortizationSchedules', self::lateUnpaidPeriods());
+    }
+
+    /**
+     * Narrows a query on `amortization_schedules` to its unpaid, late periods.
+     * self::scopePastDue() and self::scopeCurrent() share it so they cannot
+     * disagree about a loan.
+     */
+    private static function lateUnpaidPeriods(): Closure
+    {
+        return fn ($periods) => $periods
+            ->whereIn('amortization_schedules.status', AmortizationSchedule::UNPAID_STATUSES)
+            ->whereRaw(AmortizationSchedule::pastGraceSql(), [today()->toDateString()]);
     }
 
     /**
@@ -725,7 +873,7 @@ class Loan extends Model
      * once (self::ACTIVE_STATUSES) and has to render from ONE request, not one
      * per status. A single value still behaves exactly as it did.
      *
-     * Two virtual values are accepted alongside the real statuses:
+     * Three virtual values are accepted alongside the real statuses:
      *
      * - `active` (self::VIRTUAL_STATUS_ACTIVE) expands to
      *   self::ACTIVE_STATUSES, so a caller may send it or spell the statuses
@@ -734,20 +882,21 @@ class Loan extends Model
      * - `past_due` (self::VIRTUAL_STATUS_PAST_DUE) resolves to
      *   self::scopePastDue() and agrees with `meta.stats.past_due` the same
      *   way.
+     * - `current` (self::VIRTUAL_STATUS_CURRENT) resolves to
+     *   self::scopeCurrent() and agrees with `meta.stats.current`.
      *
-     * Prefer the shorthands: both sets are defined in one place here, and a
-     * list pinned in the client cannot follow them.
+     * Prefer the shorthands: the sets are defined in one place here, and a list
+     * pinned in the client cannot follow them.
      *
      * Note that only `active` can be flattened into the `whereIn` below.
-     * `past_due` is schedule-derived, so it is a subquery, not a status — it
-     * has to be branched on before the `whereIn` rather than mapped into it.
-     * A list mixing the two stays an OR, which is what a comma already means
-     * here, so `status=completed,past_due` is "completed OR past due".
+     * `past_due` and `current` are schedule-derived, so they are subqueries, not
+     * statuses — they have to be branched on rather than mapped into it. A list
+     * mixing them stays an OR, which is what a comma already means here, so
+     * `status=completed,past_due` is "completed OR past due".
      *
      * Values that are neither a status nor a virtual value are deliberately NOT
-     * rejected, they simply match nothing. That is what keeps a client still
-     * sending the retired `current` working — an empty result for it, rather
-     * than a 422 that takes the whole page down with it.
+     * rejected, they simply match nothing: an empty result rather than a 422 that
+     * takes the whole page down with it.
      *
      * @param  string|array<int, string>  $status
      */
@@ -766,25 +915,23 @@ class Loan extends Model
         }
 
         $wantsPastDue = $requested->contains(self::VIRTUAL_STATUS_PAST_DUE);
+        $wantsCurrent = $requested->contains(self::VIRTUAL_STATUS_CURRENT);
 
         $statuses = $requested
-            ->reject(fn (string $value) => $value === self::VIRTUAL_STATUS_PAST_DUE)
+            ->reject(fn (string $value) => in_array($value, [self::VIRTUAL_STATUS_PAST_DUE, self::VIRTUAL_STATUS_CURRENT], true))
             ->flatMap(fn (string $value) => $value === self::VIRTUAL_STATUS_ACTIVE
                 ? self::ACTIVE_STATUSES
                 : [$value])
             ->unique()
             ->values();
 
-        if (! $wantsPastDue) {
+        if (! $wantsPastDue && ! $wantsCurrent) {
             return $query->whereIn('loans.status', $statuses->all());
         }
 
-        if ($statuses->isEmpty()) {
-            return $query->pastDue();
-        }
-
         return $query->where(fn ($q) => $q
-            ->whereIn('loans.status', $statuses->all())
-            ->orWhere(fn ($inner) => $inner->pastDue()));
+            ->when($statuses->isNotEmpty(), fn ($any) => $any->orWhereIn('loans.status', $statuses->all()))
+            ->when($wantsPastDue, fn ($any) => $any->orWhere(fn ($inner) => $inner->pastDue()))
+            ->when($wantsCurrent, fn ($any) => $any->orWhere(fn ($inner) => $inner->current())));
     }
 }

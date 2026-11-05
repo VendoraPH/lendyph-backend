@@ -8,8 +8,12 @@ use App\Services\CollateralSecurity;
 use App\Services\LoanService;
 use App\Services\PersistedScheduleFigures;
 use App\Services\RepaymentService;
+use Carbon\Carbon;
+use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Http\Request;
+use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Http\Resources\Json\JsonResource;
+use Illuminate\Support\Collection;
 use OpenApi\Attributes as OA;
 
 #[OA\Schema(
@@ -36,8 +40,9 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'policy_exception', type: 'boolean'),
         new OA\Property(property: 'policy_exception_details', type: 'string', nullable: true),
         new OA\Property(property: 'status', type: 'string'),
+        new OA\Property(property: 'display_status', type: 'string', description: 'The status a screen shows: `past_due` for a released or ongoing loan holding an unpaid period past its due date and grace (the rule behind `status=past_due`), otherwise `status`. `status` itself never holds `past_due`.'),
         new OA\Property(property: 'current_approver', type: 'string', nullable: true, example: 'Manager', description: 'GET /loans and GET /loans/{id} only (requires `approvalSteps` eager-loaded). Name of the approval step a `for_review` loan is waiting on: the first `pending` step of `current_steps` in GET /loans/{id}/approval-steps. Null when the loan is not `for_review`, no step is pending, or the step name is blank. Never an empty string.'),
-        new OA\Property(property: 'current_status_label', type: 'string', nullable: true, example: 'Credit Review', description: 'GET /loans and GET /loans/{id} only (requires `approvalSteps` eager-loaded). The configured status label of the step `current_approver` names, snapshotted when the loan was submitted. Null whenever `current_approver` is null, and when that step has no label or a blank one. Never an empty string.'),
+        new OA\Property(property: 'current_status_label', type: 'string', nullable: true, example: 'Credit Review', description: 'GET /loans and GET /loans/{id} only (requires `approvalSteps` eager-loaded). The configured status label, snapshotted when the loan was submitted: on a `for_review` loan, of the step `current_approver` names; on an `approved` loan, of its release step. Null for every other status, and when that step has no label or a blank one. Never an empty string.'),
         new OA\Property(property: 'outstanding_balance', type: 'number', deprecated: true, description: 'Deprecated: read `total_outstanding` (everything owed) or `outstanding_principal` (principal only) instead; removed once the frontend has moved. Unpaid principal plus `insurance_owed` (Loan::$outstanding_balance, the reports\' figure), never interest or penalty.'),
         new OA\Property(property: 'total_outstanding', type: 'number', nullable: true, description: 'Everything still owed: the periods\' unpaid principal, interest and penalty plus `insurance_owed`, in whole centavos. Equals GET /loans/{id}/summary `total_outstanding`. 0 before release. Null where the periods were not loaded.'),
         new OA\Property(property: 'outstanding_principal', type: 'number', nullable: true, description: 'Unpaid principal only, in whole centavos; the premium owed is `insurance_owed`. Equals GET /loans/{id}/summary `outstanding_principal`. Null where the periods were not loaded.'),
@@ -126,8 +131,40 @@ use OpenApi\Attributes as OA;
 )]
 class LoanResource extends JsonResource
 {
+    /**
+     * What this loan's periods still owe, set by self::summaryCollection():
+     * present only on a GET /loans?view=summary row.
+     *
+     * @var array{principal: int, interest: int, penalty: int}|null
+     */
+    private ?array $summaryPeriods = null;
+
+    /**
+     * The rows of GET /loans?view=summary: what a list shows, with no schedule.
+     * Each loan needs `openSchedules`, `borrower`, `loanProduct`, `branch` and
+     * `approvalSteps` loaded. What the loans owe on all their periods, settled
+     * ones included, comes from one grouped query for the page.
+     *
+     * @param  LengthAwarePaginator<int, Loan>  $loans
+     */
+    public static function summaryCollection(LengthAwarePaginator $loans): AnonymousResourceCollection
+    {
+        $owedOnPeriods = Loan::owedOnPeriodsByLoan($loans->getCollection()->modelKeys());
+        $rows = static::collection($loans);
+
+        $rows->collection->each(function (self $row) use ($owedOnPeriods): void {
+            $row->summaryPeriods = $owedOnPeriods[$row->resource->getKey()] ?? ['principal' => 0, 'interest' => 0, 'penalty' => 0];
+        });
+
+        return $rows;
+    }
+
     public function toArray(Request $request): array
     {
+        if ($this->summaryPeriods !== null) {
+            return $this->summaryRow();
+        }
+
         // Compute payment-related fields from loaded schedules to avoid N+1
         $nextDueDate = null;
         $currentDue = 0.0;
@@ -146,37 +183,8 @@ class LoanResource extends JsonResource
             $unpaidSchedules = $this->amortizationSchedules
                 ->whereIn('status', ['pending', 'partial', 'overdue']);
 
-            $nextSchedule = $unpaidSchedules->sortBy('due_date')->first();
-            $nextDueDate = $nextSchedule?->due_date?->toDateString();
-
-            // Current due = next unpaid schedule's remaining amount (explicit per-field for consistency)
-            if ($nextSchedule) {
-                $currentDue = round(
-                    max(0, (float) $nextSchedule->principal_due - (float) $nextSchedule->principal_paid)
-                    + max(0, (float) $nextSchedule->interest_due - (float) $nextSchedule->interest_paid)
-                    + max(0, (float) ($nextSchedule->penalty_amount ?? 0) - (float) ($nextSchedule->penalty_paid ?? 0)),
-                    2,
-                );
-            }
-
-            // Overdue = sum of remaining amounts on schedules that are LATE:
-            // past the due date AND past the grace period this loan grants.
-            //
-            // This used to be a bare `due_date < today`, which put a row on the
-            // loans list reading "₱X overdue" for a loan the Past Due tab
-            // correctly excluded, because that tab honours grace. Shares the
-            // cutoff with RepaymentService::getLoanSummary(), which computes
-            // the same figure for the loan detail screen.
-            $overdueSchedules = AmortizationSchedule::lateUnpaid(
-                $unpaidSchedules,
-                $this->grace_period_days,
-                $today,
-            );
-            $overdueAmount = round($overdueSchedules->sum(function ($s) {
-                return max(0, (float) $s->principal_due - (float) $s->principal_paid)
-                    + max(0, (float) $s->interest_due - (float) $s->interest_paid)
-                    + max(0, (float) ($s->penalty_amount ?? 0) - (float) ($s->penalty_paid ?? 0));
-            }), 2);
+            ['next_due_date' => $nextDueDate, 'current_due' => $currentDue, 'overdue_amount' => $overdueAmount]
+                = $this->openPeriodFigures($unpaidSchedules, $today);
 
             // Total penalty remaining
             $totalPenalty = round($this->amortizationSchedules->sum(function ($s) {
@@ -239,11 +247,15 @@ class LoanResource extends JsonResource
                 return $doc?->url;
             }),
             'status' => $this->status,
+            // Past due is a property of the schedule, not a status. See
+            // Loan::displayStatus().
+            'display_status' => $this->resource->displayStatus(),
             // Only GET /loans and GET /loans/{id} load the chain, so every
             // other endpoint leaves the key out rather than paying a query per
             // loan. See Loan::currentApprover().
             'current_approver' => $this->whenLoaded('approvalSteps', fn () => $this->currentApprover()),
-            // The configured label for that same step. See Loan::currentStatusLabel().
+            // The configured label for that step, or an approved loan's release
+            // step. See Loan::currentStatusLabel().
             'current_status_label' => $this->whenLoaded('approvalSteps', fn () => $this->currentStatusLabel()),
             // Read from the model accessor rather than recomputed here: this is
             // the same figure the reports and exports use, it includes any
@@ -365,6 +377,116 @@ class LoanResource extends JsonResource
                 ])->values()),
             'created_at' => $this->created_at,
             'updated_at' => $this->updated_at,
+        ];
+    }
+
+    /**
+     * A GET /loans?view=summary row. Each figure carries the meaning and equals
+     * the value of the key of the same name on the full row; `next_due_amount`
+     * is the full row's `current_due`.
+     *
+     * @return array<string, mixed>
+     */
+    private function summaryRow(): array
+    {
+        $today = now()->startOfDay();
+        $open = $this->openSchedules;
+        $figures = $this->openPeriodFigures($open, $today);
+        $owed = $this->resource->owedWithInsurance($this->summaryPeriods);
+        $borrower = $this->borrower;
+
+        return [
+            'id' => $this->id,
+            'application_number' => $this->application_number,
+            'loan_account_number' => $this->loan_account_number,
+            'borrower' => $borrower === null ? null : [
+                'id' => $borrower->id,
+                'full_name' => $borrower->full_name,
+                'borrower_code' => $borrower->borrower_code,
+            ],
+            'borrower_id' => $this->borrower_id,
+            'borrower_name' => $borrower?->full_name,
+            'loan_product' => $this->loanProduct === null ? null : [
+                'id' => $this->loanProduct->id,
+                'name' => $this->loanProduct->name,
+            ],
+            'loan_product_id' => $this->loan_product_id,
+            'loan_product_name' => $this->loanProduct?->name,
+            'branch' => $this->branch === null ? null : [
+                'id' => $this->branch->id,
+                'name' => $this->branch->name,
+            ],
+            'principal_amount' => (float) $this->principal_amount,
+            'interest_rate' => $this->interest_rate,
+            'interest_method' => $this->interest_method,
+            'term' => $this->term,
+            'term_unit' => $this->term_unit,
+            'frequency' => $this->frequency,
+            'maturity_date' => $this->maturity_date?->toDateString(),
+            'status' => $this->status,
+            'display_status' => $this->resource->displayStatus(),
+            'current_approver' => $this->currentApprover(),
+            'current_status_label' => $this->currentStatusLabel(),
+            'is_restructure' => $this->isRestructure(),
+            'released_at' => $this->released_at,
+            'release_date' => $this->released_at?->toDateString(),
+            'created_at' => $this->created_at,
+            'next_due_date' => $figures['next_due_date'],
+            'next_due_amount' => $figures['current_due'],
+            'current_due' => $figures['current_due'],
+            'amount_due_now' => in_array($this->status, Loan::ACTIVE_STATUSES, true)
+                ? app(RepaymentService::class)->amountDueNow($this->resource, $open, now())
+                : null,
+            'total_outstanding' => $owed['total'] / 100,
+            'outstanding_principal' => $owed['principal'] / 100,
+            'overdue_amount' => $figures['overdue_amount'],
+            'penalty_amount' => $owed['penalty'] / 100,
+            'total_payable' => $this->released_at !== null ? $owed['total'] / 100 : null,
+            'insurance_owed' => (float) $this->insurance_remaining_balance,
+        ];
+    }
+
+    /**
+     * The figures that come from a loan's open periods alone, for the full row
+     * and the summary row alike.
+     *
+     * @param  Collection<int, AmortizationSchedule>  $open  its pending, partial and overdue periods
+     * @return array{next_due_date: string|null, current_due: float, overdue_amount: float}
+     */
+    private function openPeriodFigures(Collection $open, Carbon $today): array
+    {
+        $nextSchedule = $open->sortBy('due_date')->first();
+
+        // Current due = next unpaid schedule's remaining amount (explicit per-field for consistency)
+        $currentDue = 0.0;
+
+        if ($nextSchedule) {
+            $currentDue = round(
+                max(0, (float) $nextSchedule->principal_due - (float) $nextSchedule->principal_paid)
+                + max(0, (float) $nextSchedule->interest_due - (float) $nextSchedule->interest_paid)
+                + max(0, (float) ($nextSchedule->penalty_amount ?? 0) - (float) ($nextSchedule->penalty_paid ?? 0)),
+                2,
+            );
+        }
+
+        // Overdue = sum of remaining amounts on schedules that are LATE:
+        // past the due date AND past the grace period this loan grants.
+        //
+        // This used to be a bare `due_date < today`, which put a row on the
+        // loans list reading "₱X overdue" for a loan the Past Due tab
+        // correctly excluded, because that tab honours grace. Shares the
+        // cutoff with RepaymentService::getLoanSummary(), which computes
+        // the same figure for the loan detail screen.
+        $overdueAmount = round(AmortizationSchedule::lateUnpaid($open, $this->grace_period_days, $today)->sum(function ($s) {
+            return max(0, (float) $s->principal_due - (float) $s->principal_paid)
+                + max(0, (float) $s->interest_due - (float) $s->interest_paid)
+                + max(0, (float) ($s->penalty_amount ?? 0) - (float) ($s->penalty_paid ?? 0));
+        }), 2);
+
+        return [
+            'next_due_date' => $nextSchedule?->due_date?->toDateString(),
+            'current_due' => $currentDue,
+            'overdue_amount' => $overdueAmount,
         ];
     }
 
