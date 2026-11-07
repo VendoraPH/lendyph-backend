@@ -748,7 +748,7 @@ class ReportService
         $adjustments = $loan->adjustments()
             ->where('status', 'applied')
             ->whereIn('adjustment_type', array_keys(self::SCHEDULE_RESTATING_ADJUSTMENTS))
-            ->orderBy('applied_at')
+            ->reorder('applied_at')
             ->orderBy('id')
             ->get(['adjustment_type', 'adjustment_number', 'applied_at']);
 
