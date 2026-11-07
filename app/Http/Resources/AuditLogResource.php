@@ -4,6 +4,10 @@ namespace App\Http\Resources;
 
 use App\Models\AuditLog;
 use App\Models\Branch;
+use App\Models\Fee;
+use App\Models\Loan;
+use App\Models\LoanApprovalStep;
+use App\Models\LoanProduct;
 use App\Models\Role;
 use App\Models\User;
 use App\Services\AuditLogModules;
@@ -33,6 +37,21 @@ class AuditLogResource extends JsonResource
     private const TIMESTAMP_KEYS = ['created_at', 'updated_at', 'deleted_at'];
 
     /**
+     * Never listed as a change either: a hash that means nothing to a reader.
+     */
+    private const TECHNICAL_KEYS = ['fee_fingerprint', 'fingerprint'];
+
+    /**
+     * Change-list fields that hold a loan product id or a list of them.
+     */
+    private const PRODUCT_KEYS = ['loan_product_id', 'applicable_product_ids'];
+
+    /**
+     * The approval-chain step ids an approval closed, read by each step's name.
+     */
+    private const STEP_KEYS = ['steps_closed'];
+
+    /**
      * Change-list fields that hold a branch id or a list of them.
      */
     private const BRANCH_KEYS = ['branch_id', 'branch_ids'];
@@ -56,7 +75,7 @@ class AuditLogResource extends JsonResource
      * (`outstanding_balance`, `collected_at_release`, `new_principal`), unless
      * NOT_MONEY_FIELD says it is about money rather than an amount of it.
      */
-    private const MONEY_FIELD = '/(^|_)(amount|applied|balance|charge|charged|collected|credit|debit|deductions|due|income|outstanding|overpayment|paid|premium|principal|proceeds|shortfall)(_|$)|^(snapshot_value|total_payment)$/';
+    private const MONEY_FIELD = '/(^|_)(amount|applied|balance|charge|charged|collected|credit|debit|deductions|due|income|interest|outstanding|overpayment|owed|paid|penalty|premium|principal|proceeds|shortfall|waived)(_|$)|^(snapshot_value|total_payment)$/';
 
     private const NOT_MONEY_FIELD = '/(_at|_by|_count|_date|_id|_ids|_method|_number|_pct|_percentage|_rate|_status|_type)$|^auto_credit$/';
 
@@ -79,9 +98,10 @@ class AuditLogResource extends JsonResource
     private const TIMESTAMP_WITH_SECONDS = 'M j, Y, g:i:s A';
 
     /**
-     * Load, in ONE query each, the users, roles and branches these rows' old
-     * and new values name, and hand the sets to every row so the change list
-     * can show names instead of ids and keys without a query per row.
+     * Load, in ONE query each, the users, roles, branches, loan products and
+     * approval steps these rows' old and new values name, and hand the sets to
+     * every row so the change list can show names instead of ids and keys
+     * without a query per row.
      *
      * @param  iterable<AuditLog>  $logs
      */
@@ -91,7 +111,13 @@ class AuditLogResource extends JsonResource
 
         $userIds = self::changeIds($logs, self::USER_FOREIGN_KEYS);
         $branchIds = self::changeIds($logs, self::BRANCH_KEYS);
-        $roleKeys = self::changeValues($logs, ['role'])->filter(fn ($key) => is_string($key))->unique()->values();
+        $productIds = self::changeIds($logs, self::PRODUCT_KEYS);
+        $roleKeys = self::changeValues($logs, ['role', ...self::STEP_KEYS])->filter(fn ($key) => is_string($key))->unique()->values();
+        $stepLoanIds = $logs
+            ->filter(fn (AuditLog $log) => $log->auditable_type === Loan::class && self::changeValues(collect([$log]), self::STEP_KEYS)->isNotEmpty())
+            ->pluck('auditable_id')
+            ->unique()
+            ->values();
 
         $users = $userIds->isEmpty()
             ? collect()
@@ -105,9 +131,22 @@ class AuditLogResource extends JsonResource
             ? collect()
             : Role::query()->whereIn('name', $roleKeys)->where('guard_name', 'web')->get()->keyBy('name');
 
+        $products = $productIds->isEmpty()
+            ? collect()
+            : LoanProduct::query()->whereIn('id', $productIds)->pluck('name', 'id');
+
+        // Keyed by loan and step id; a later round's snapshot wins.
+        $steps = $stepLoanIds->isEmpty()
+            ? collect()
+            : LoanApprovalStep::query()->whereIn('loan_id', $stepLoanIds)->orderBy('round')->orderBy('id')
+                ->get(['loan_id', 'step_id', 'name'])
+                ->mapWithKeys(fn (LoanApprovalStep $step) => ["{$step->loan_id}:{$step->step_id}" => $step->name]);
+
         $logs->each(fn (AuditLog $log) => $log->setRelation('changeUsers', $users)
             ->setRelation('changeBranches', $branches)
-            ->setRelation('changeRoles', $roles));
+            ->setRelation('changeRoles', $roles)
+            ->setRelation('changeProducts', $products)
+            ->setRelation('changeSteps', $steps));
     }
 
     /**
@@ -241,7 +280,7 @@ class AuditLogResource extends JsonResource
      * already says what happened. A row with no new values (a deletion) lists
      * its old fields, already redacted when written, with `new: null`. Values
      * read in plain words (self::shownFor()); when both sides read the same, in
-     * detail (self::detailed()), else as JSON, unless the same yes or no, moment
+     * detail ($this->detailed()), else as JSON, unless the same yes or no, moment
      * or date was only written two ways, which isn't a change (two moments in
      * one minute show their seconds). Display only;
      * old_values and new_values are returned as stored.
@@ -263,7 +302,7 @@ class AuditLogResource extends JsonResource
         foreach (array_keys($new ?? $old) as $field) {
             $field = (string) $field;
 
-            if (in_array($field, self::TIMESTAMP_KEYS, true)) {
+            if (in_array($field, self::TIMESTAMP_KEYS, true) || in_array($field, self::TECHNICAL_KEYS, true)) {
                 continue;
             }
 
@@ -274,8 +313,11 @@ class AuditLogResource extends JsonResource
                 continue;
             }
 
-            $oldShown = $this->shownFor($field, $oldValue);
-            $newShown = $this->shownFor($field, $newValue);
+            // Each side read with its own row: an `updated` row's old values
+            // hold the whole original row and its new values the columns that
+            // changed, so the new row is the old one with the changes over it.
+            $oldShown = $this->shownFor($field, $oldValue, $old);
+            $newShown = $this->shownFor($field, $newValue, [...$old, ...($new ?? [])]);
 
             // Two different values can read the same in words (a fee's amount
             // changed inside a deductions list): show the detail, and JSON as a
@@ -291,8 +333,8 @@ class AuditLogResource extends JsonResource
             }
 
             if ($oldShown === $newShown) {
-                $oldShown = self::detailed($oldValue);
-                $newShown = self::detailed($newValue);
+                $oldShown = $this->detailed($oldValue);
+                $newShown = $this->detailed($newValue);
             }
 
             if ($oldShown === $newShown) {
@@ -307,17 +349,22 @@ class AuditLogResource extends JsonResource
     }
 
     /**
-     * A value in plain words: a user, branch or role by name, a boolean as Yes
-     * or No, a timestamp in Manila time, a date as its date, money in pesos and
-     * an enum key in words. Anything else, a status included, as stored.
+     * A value in plain words: a user, branch, role, product or approval step
+     * by name, a fee's value by its row's type, a boolean as Yes or No, a
+     * timestamp in Manila time, a date as its date, money in pesos and an enum
+     * key in words. Anything else, a status and a permission included, as
+     * stored.
+     *
+     * @param  array<string, mixed>|null  $row  the values this side belongs to, when known
      */
-    private function shownFor(string $field, mixed $value): ?string
+    private function shownFor(string $field, mixed $value, ?array $row = null): ?string
     {
         if ($value === null) {
             return null;
         }
 
         return $this->namedBy($field, $value)
+            ?? $this->feeValueInWords($field, $value, $row)
             ?? self::booleanInWords($field, $value, $this->castOf($field))
             ?? $this->timeInWords($field, $value)
             ?? $this->pesosFor($field, $value)
@@ -330,13 +377,23 @@ class AuditLogResource extends JsonResource
         $isUser = in_array($field, self::USER_FOREIGN_KEYS, true) && self::isId($value);
         $isBranch = in_array($field, self::BRANCH_KEYS, true);
         $isRole = $field === 'role' && is_string($value);
+        $isProduct = in_array($field, self::PRODUCT_KEYS, true);
+        $isStep = in_array($field, self::STEP_KEYS, true) && is_array($value) && $value !== [] && array_all($value, fn (mixed $item): bool => is_string($item));
 
-        if (! $isUser && ! $isBranch && ! $isRole) {
+        if (! $isUser && ! $isBranch && ! $isRole && ! $isProduct && ! $isStep) {
             return null;
         }
 
         if (! $this->relationLoaded('changeUsers')) {
             self::loadChangeNames([$this->resource]);
+        }
+
+        if ($isStep) {
+            return implode(', ', array_map($this->stepName(...), $value));
+        }
+
+        if ($isProduct) {
+            return $this->idsByName($value, 'changeProducts', 'Product');
         }
 
         if ($isUser) {
@@ -347,18 +404,72 @@ class AuditLogResource extends JsonResource
             return ($this->getRelation('changeRoles')->get($value) ?? new Role(['name' => $value]))->auditName();
         }
 
+        return $this->idsByName($value, 'changeBranches', 'Branch');
+    }
+
+    /**
+     * An id, or a list of them, by the names in `$relation`: "Branch #5" for
+     * one that is gone. Null for anything else.
+     */
+    private function idsByName(mixed $value, string $relation, string $kind): ?string
+    {
+        $names = $this->getRelation($relation);
+
         if (self::isId($value)) {
-            return $this->getRelation('changeBranches')->get((int) $value) ?? "Branch #{$value}";
+            return $names->get((int) $value) ?? "{$kind} #{$value}";
         }
 
         if (! is_array($value) || $value === [] || ! array_all($value, self::isId(...))) {
             return null;
         }
 
-        return implode(', ', array_map(
-            fn ($id) => $this->getRelation('changeBranches')->get((int) $id) ?? "Branch #{$id}",
-            $value,
-        ));
+        return implode(', ', array_map(fn ($id) => $names->get((int) $id) ?? "{$kind} #{$id}", $value));
+    }
+
+    /**
+     * An approval step id by the name the loan's own chain gave it, else as a
+     * role when a role has that key, else in words.
+     */
+    private function stepName(string $stepId): string
+    {
+        $name = $this->auditable_type === Loan::class
+            ? $this->getRelation('changeSteps')->get("{$this->auditable_id}:{$stepId}")
+            : null;
+
+        if (filled($name)) {
+            return (string) $name;
+        }
+
+        return $this->getRelation('changeRoles')->get($stepId)?->auditName() ?? Str::headline($stepId);
+    }
+
+    /**
+     * A fee's `value` read by the `type` of the row it belongs to: a percentage
+     * or a formula's rate as a percent, a fixed fee in pesos. Null (so it reads
+     * as stored) when that row's type isn't known.
+     *
+     * @param  array<string, mixed>|null  $row
+     */
+    private function feeValueInWords(string $field, mixed $value, ?array $row): ?string
+    {
+        if ($field !== 'value' || $this->auditable_type !== Fee::class || ! is_numeric($value)) {
+            return null;
+        }
+
+        return match ($row['type'] ?? null) {
+            'percentage', 'formula' => self::plainNumber((string) $value).'%',
+            'fixed' => '₱'.number_format((float) $value, 2),
+            default => null,
+        };
+    }
+
+    /**
+     * A rate as written, without trailing zeros: "1.2500" reads "1.25". Never
+     * rounded.
+     */
+    private static function plainNumber(string $number): string
+    {
+        return str_contains($number, '.') ? rtrim(rtrim($number, '0'), '.') : $number;
     }
 
     /**
@@ -546,7 +657,8 @@ class AuditLogResource extends JsonResource
 
     /**
      * An array value in words: a list of scalars joined with ", ", a list of
-     * records by each one's `name` (else `label`, else `title`), any other
+     * records by each one's `name` (else `label`, else `title`, else its
+     * `period_number` as "Period 3"), any other
      * list as "N entries", an associative array as "N fields", and an empty
      * one as "none".
      *
@@ -630,7 +742,7 @@ class AuditLogResource extends JsonResource
      * pairs, keys in words and sorted (a MySQL JSON column keeps its own key
      * order), joined with "; ". Anything else as self::shown().
      */
-    private static function detailed(mixed $value): ?string
+    private function detailed(mixed $value): ?string
     {
         if (! is_array($value) || $value === []) {
             return self::shown($value);
@@ -638,12 +750,17 @@ class AuditLogResource extends JsonResource
 
         if (! array_is_list($value)) {
             $pairs = [];
+            ksort($value);
 
-            foreach (self::canonical($value) as $key => $item) {
-                $pairs[] = str_replace('_', ' ', (string) $key).': '.(is_array($item) ? self::arrayInWords($item) : (self::shown($item) ?? 'none'));
+            foreach ($value as $key => $item) {
+                $pairs[] = str_replace('_', ' ', (string) $key).': '.(is_array($item) ? self::arrayInWords($item) : ($this->shownFor((string) $key, $item) ?? 'none'));
             }
 
             return implode('; ', $pairs);
+        }
+
+        if (array_all($value, fn (mixed $item): bool => is_array($item) && self::isPeriod($item))) {
+            return implode('; ', array_map($this->periodInDetail(...), $value));
         }
 
         $items = [];
@@ -660,6 +777,31 @@ class AuditLogResource extends JsonResource
         }
 
         return implode(', ', $items);
+    }
+
+    /**
+     * A period record with its peso figures, keys in words and sorted (a MySQL
+     * JSON column keeps its own key order), e.g. "Period 2 (penalty amount
+     * ₱0.00, waived ₱59.44)". Its ids and numbers are left out.
+     *
+     * @param  array<mixed>  $period
+     */
+    private function periodInDetail(array $period): string
+    {
+        ksort($period);
+        $figures = [];
+
+        foreach ($period as $key => $item) {
+            $pesos = is_scalar($item) ? $this->pesosFor((string) $key, $item) : null;
+
+            if ($pesos !== null) {
+                $figures[] = str_replace('_', ' ', (string) $key).' '.$pesos;
+            }
+        }
+
+        $name = "Period {$period['period_number']}";
+
+        return $figures === [] ? $name : $name.' ('.implode(', ', $figures).')';
     }
 
     /**
@@ -704,6 +846,17 @@ class AuditLogResource extends JsonResource
             }
         }
 
-        return null;
+        return self::isPeriod($item) ? "Period {$item['period_number']}" : null;
+    }
+
+    /**
+     * A schedule period's record (a waiver's or an extension's `periods`):
+     * one with a period number and no name.
+     *
+     * @param  array<mixed>  $item
+     */
+    private static function isPeriod(array $item): bool
+    {
+        return self::isId($item['period_number'] ?? null) && ! isset($item['name']);
     }
 }
