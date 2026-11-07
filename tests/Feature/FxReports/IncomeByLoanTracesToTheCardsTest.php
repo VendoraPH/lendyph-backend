@@ -79,7 +79,7 @@ class IncomeByLoanTracesToTheCardsTest extends TestCase
 
     public function test_a_loan_with_no_fee_and_no_payment_in_the_period_is_not_listed(): void
     {
-        $this->releasedLoan(60000, [$this->fee('Service Fee', 300)], '2026-03-05 09:00:00');
+        $this->releasedLoan(60000, [$this->fee('Notarial Fee', 300)], '2026-03-05 09:00:00');
 
         $this->assertSame(0, $this->report()->assertOk()->json('meta.total'));
     }

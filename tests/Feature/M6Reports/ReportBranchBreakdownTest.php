@@ -108,6 +108,8 @@ class ReportBranchBreakdownTest extends TestCase
         $this->assertEquals([
             'loan_count' => $summary['portfolio']['loan_count'],
             'total_released' => $summary['portfolio']['total_released'],
+            'total_outstanding' => $summary['total_outstanding'],
+            'outstanding_principal' => $summary['outstanding_principal'],
             'outstanding_balance' => $summary['outstanding_balance'],
         ], $summary['by_branch_totals']);
         $this->assertSame(2, $summary['by_branch_totals']['loan_count']);
