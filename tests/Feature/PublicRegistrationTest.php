@@ -76,6 +76,8 @@ class PublicRegistrationTest extends TestCase
             'employer_or_business' => 'Acme Corp',
             'monthly_income' => 25000,
             'pledge_amount' => 0,
+            'city' => 'Butuan',
+            'province' => 'Agusan del Norte',
         ]);
 
         $response->assertCreated()
@@ -143,6 +145,12 @@ class PublicRegistrationTest extends TestCase
             'last_name' => 'Saved',
             'email' => 'branch-saved@example.com',
             'contact_number' => '09171234588',
+            'birthdate' => '1990-05-12',
+            'civil_status' => 'single',
+            'gender' => 'female',
+            'address' => '12 Mabini St',
+            'city' => 'Butuan',
+            'province' => 'Agusan del Norte',
         ])->assertCreated();
 
         $borrowerId = $response->json('data.id');
@@ -167,6 +175,12 @@ class PublicRegistrationTest extends TestCase
             'last_name' => 'Probe',
             'contact_number' => '09171234500',
             'email' => 'admin-review@example.com',
+            'birthdate' => '1990-05-12',
+            'civil_status' => 'single',
+            'gender' => 'female',
+            'address' => '12 Mabini St',
+            'city' => 'Butuan',
+            'province' => 'Agusan del Norte',
         ])->assertCreated();
 
         $borrowerId = $created->json('data.id');
@@ -189,6 +203,12 @@ class PublicRegistrationTest extends TestCase
             'last_name' => 'Applicant',
             'email' => 'nobranch@example.com',
             'contact_number' => '09171234599',
+            'birthdate' => '1990-05-12',
+            'civil_status' => 'single',
+            'gender' => 'female',
+            'address' => '12 Mabini St',
+            'city' => 'Butuan',
+            'province' => 'Agusan del Norte',
         ]);
 
         $response->assertCreated()
@@ -211,6 +231,12 @@ class PublicRegistrationTest extends TestCase
             'last_name' => 'Created',
             'contact_number' => '09171234567',
             'email' => 'admin-create@example.com',
+            'birthdate' => '1990-05-12',
+            'civil_status' => 'single',
+            'gender' => 'female',
+            'address' => '12 Mabini St',
+            'city' => 'Butuan',
+            'province' => 'Agusan del Norte',
         ]);
 
         $response->assertCreated()
@@ -227,6 +253,12 @@ class PublicRegistrationTest extends TestCase
             'last_name' => 'Tester',
             'email' => 'photo-tester@example.com',
             'contact_number' => '09171234567',
+            'birthdate' => '1990-05-12',
+            'civil_status' => 'single',
+            'gender' => 'female',
+            'address' => '12 Mabini St',
+            'city' => 'Butuan',
+            'province' => 'Agusan del Norte',
         ])->assertCreated();
 
         $borrowerId = $create->json('data.id');
@@ -247,11 +279,23 @@ class PublicRegistrationTest extends TestCase
         $a = $this->postJson('/api/borrowers', [
             'status' => 'pending', 'branch_id' => $this->branch->id,
             'first_name' => 'A', 'last_name' => 'One', 'email' => 'a@x.com', 'contact_number' => '09171000001',
+            'birthdate' => '1990-05-12',
+            'civil_status' => 'single',
+            'gender' => 'female',
+            'address' => '12 Mabini St',
+            'city' => 'Butuan',
+            'province' => 'Agusan del Norte',
         ])->assertCreated();
 
         $b = $this->postJson('/api/borrowers', [
             'status' => 'pending', 'branch_id' => $this->branch->id,
             'first_name' => 'B', 'last_name' => 'Two', 'email' => 'b@x.com', 'contact_number' => '09171000002',
+            'birthdate' => '1991-06-13',
+            'civil_status' => 'single',
+            'gender' => 'female',
+            'address' => '12 Mabini St',
+            'city' => 'Butuan',
+            'province' => 'Agusan del Norte',
         ])->assertCreated();
 
         $bId = $b->json('data.id');
@@ -269,6 +313,12 @@ class PublicRegistrationTest extends TestCase
         $create = $this->postJson('/api/borrowers', [
             'status' => 'pending', 'branch_id' => $this->branch->id,
             'first_name' => 'Exp', 'last_name' => 'Tok', 'email' => 'exp@x.com', 'contact_number' => '09171000003',
+            'birthdate' => '1990-05-12',
+            'civil_status' => 'single',
+            'gender' => 'female',
+            'address' => '12 Mabini St',
+            'city' => 'Butuan',
+            'province' => 'Agusan del Norte',
         ])->assertCreated();
 
         $borrowerId = $create->json('data.id');
@@ -301,6 +351,12 @@ class PublicRegistrationTest extends TestCase
         $create = $this->postJson('/api/borrowers', [
             'status' => 'pending', 'branch_id' => $this->branch->id,
             'first_name' => 'Id', 'last_name' => 'Up', 'email' => 'idup@x.com', 'contact_number' => '09171000004',
+            'birthdate' => '1990-05-12',
+            'civil_status' => 'single',
+            'gender' => 'female',
+            'address' => '12 Mabini St',
+            'city' => 'Butuan',
+            'province' => 'Agusan del Norte',
         ])->assertCreated();
 
         $borrowerId = $create->json('data.id');
@@ -346,6 +402,7 @@ class PublicRegistrationTest extends TestCase
         $this->postJson("/api/borrowers/{$borrower->id}/valid-ids", [
             'type' => 'umid',
             'front_file' => UploadedFile::fake()->image('front.jpg'),
+            'id_number' => '1234-5678-9012',
         ])->assertCreated();
     }
 
@@ -354,6 +411,12 @@ class PublicRegistrationTest extends TestCase
         $create = $this->postJson('/api/borrowers', [
             'status' => 'pending', 'branch_id' => $this->branch->id,
             'first_name' => 'Both', 'last_name' => 'Auth', 'email' => 'both@x.com', 'contact_number' => '09171000005',
+            'birthdate' => '1990-05-12',
+            'civil_status' => 'single',
+            'gender' => 'female',
+            'address' => '12 Mabini St',
+            'city' => 'Butuan',
+            'province' => 'Agusan del Norte',
         ])->assertCreated();
 
         $borrowerId = $create->json('data.id');
@@ -449,6 +512,11 @@ class PublicRegistrationTest extends TestCase
             'last_name' => 'Bautista',
             'contact_number' => '09170001111',
             'address' => '5 Narra St',
+            'birthdate' => '1990-05-12',
+            'civil_status' => 'single',
+            'gender' => 'female',
+            'city' => 'Butuan',
+            'province' => 'Agusan del Norte',
         ])->assertCreated();
 
         $plainText = $response->json('data.submission_token');

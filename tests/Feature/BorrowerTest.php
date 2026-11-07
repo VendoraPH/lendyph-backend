@@ -30,6 +30,8 @@ class BorrowerTest extends TestCase
             'employer_or_business' => 'Sari-sari Store',
             'monthly_income' => 25000,
             'branch_id' => $this->branch->id,
+            'city' => 'Butuan',
+            'province' => 'Agusan del Norte',
         ]);
 
         $response->assertCreated()

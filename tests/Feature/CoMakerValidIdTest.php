@@ -302,6 +302,7 @@ it('keeps a borrower\'s valid IDs and their co-maker\'s valid IDs apart', functi
     $this->postJson("/api/borrowers/{$borrower->id}/valid-ids", [
         'type' => 'umid',
         'front_file' => UploadedFile::fake()->image('borrower.jpg'),
+        'id_number' => '1234-5678-9012',
     ])->assertCreated();
 
     $this->postJson("/api/co-makers/{$coMaker->id}/valid-ids", [
@@ -462,6 +463,7 @@ it('answers in exactly the shape the borrower endpoints do', function () {
         'list' => fn (string $base) => $this->getJson("{$base}/valid-ids"),
         'validation failure' => fn (string $base) => $this->postJson("{$base}/valid-ids", [
             'type' => 'others',
+            'id_number' => 'C-3',
             'front_file' => UploadedFile::fake()->image('front.jpg'),
         ]),
     ];
@@ -601,6 +603,12 @@ it('refuses anonymous callers, even one holding a live submission token', functi
         'last_name' => 'Applicant',
         'email' => 'pat.applicant@example.com',
         'contact_number' => '09171000099',
+        'birthdate' => '1990-05-12',
+        'civil_status' => 'single',
+        'gender' => 'female',
+        'address' => '12 Mabini St',
+        'city' => 'Butuan',
+        'province' => 'Agusan del Norte',
     ])->assertCreated();
 
     $coMaker = CoMaker::factory()->create(['borrower_id' => $registration->json('data.id')]);

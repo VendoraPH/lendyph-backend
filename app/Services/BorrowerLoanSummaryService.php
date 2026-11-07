@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\Borrower;
 use App\Models\Loan;
 use App\Models\Repayment;
+use App\Models\User;
 
 /**
  * The Member Overview's loan totals (GET /borrowers/{borrower}/loan-summary),
@@ -27,6 +28,10 @@ use App\Models\Repayment;
  * - `counts`: the member's loans per status, every status present, and
  *   `current_loans`, the loans in Loan::ACTIVE_STATUSES.
  *
+ * Every figure covers only the loans the viewer can see (Loan::visibleTo), the
+ * same as the loan pages: a member's loans can sit in more than one branch, and
+ * a branch user gets nothing from another branch's loan.
+ *
  * Applications that never released (draft, for_review, approved, rejected,
  * void) count in `counts` only. Money is added in whole centavos.
  */
@@ -45,12 +50,13 @@ class BorrowerLoanSummaryService
     /**
      * @return array{total_borrowed: float|int, total_outstanding: float, outstanding_principal: float, overdue_amount: float, total_paid: float|int, insurance_paid: float|int, current_loans: int, counts: array<string, int>}
      */
-    public function summarize(Borrower $borrower): array
+    public function summarize(Borrower $borrower, User $viewer): array
     {
         $counts = array_fill_keys(self::STATUSES, 0);
         $borrowed = 0;
 
         $rows = $borrower->loans()
+            ->visibleTo($viewer)
             ->reorder()
             ->selectRaw('status, COUNT(*) as loan_count, COALESCE(SUM(principal_amount), 0) as principal')
             ->groupBy('status')
@@ -66,12 +72,13 @@ class BorrowerLoanSummaryService
 
         $owed = $this->totals->for(
             Loan::query()
+                ->visibleTo($viewer)
                 ->where('loans.borrower_id', $borrower->id)
                 ->whereIn('loans.status', Loan::COLLECTIBLE_STATUSES),
         );
 
         $paid = Repayment::query()
-            ->whereIn('loan_id', $borrower->loans()->select('id'))
+            ->whereIn('loan_id', $borrower->loans()->visibleTo($viewer)->reorder()->select('loans.id'))
             ->where('status', 'posted')
             ->selectRaw('COALESCE(SUM(amount_paid), 0) as amount_paid, COALESCE(SUM(insurance_applied), 0) as insurance_applied')
             ->first();

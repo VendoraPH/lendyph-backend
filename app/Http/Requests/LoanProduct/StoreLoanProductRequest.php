@@ -6,12 +6,13 @@ use App\Enums\InterestRateFrequency;
 use App\Enums\LoanFrequency;
 use App\Enums\TermUnit;
 use App\Http\Requests\LoanProduct\Concerns\GuardsAgainstFeeCatalogOverlap;
+use App\Http\Requests\LoanProduct\Concerns\RefusesTermOutsideItsRange;
 use Illuminate\Contracts\Validation\Validator;
 use Illuminate\Foundation\Http\FormRequest;
 
 class StoreLoanProductRequest extends FormRequest
 {
-    use GuardsAgainstFeeCatalogOverlap;
+    use GuardsAgainstFeeCatalogOverlap, RefusesTermOutsideItsRange;
 
     public function authorize(): bool
     {
@@ -79,6 +80,7 @@ class StoreLoanProductRequest extends FormRequest
     public function withValidator(Validator $validator): void
     {
         $this->guardAgainstFeeCatalogOverlap($validator);
+        $this->refuseTermOutsideItsRange($validator);
 
         // Additional fees are retired (see UpdateLoanProductRequest): a new
         // product starts with none, so only an absent, null or empty list passes.

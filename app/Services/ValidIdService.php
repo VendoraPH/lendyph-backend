@@ -33,7 +33,9 @@ use Illuminate\Validation\ValidationException;
  * frontend relies on: it drives co-maker IDs with its borrower client code,
  * changing only the URL.
  *
- * Nothing here branches on the kind of owner except directoryFor().
+ * Only two things here branch on the kind of owner: directoryFor(), and the ID
+ * number, which a member's valid ID needs (audit finding 15) and a co-maker's
+ * may leave out, as the co-maker forms do.
  */
 class ValidIdService
 {
@@ -85,7 +87,7 @@ class ValidIdService
         $request->validate([
             'type' => ['required', 'string', 'max:100'],
             'custom_type_name' => ['nullable', 'string', 'max:100', 'required_if:type,others'],
-            'id_number' => ['nullable', 'string', 'max:100'],
+            'id_number' => [$owner instanceof Borrower ? 'required' : 'nullable', 'string', 'max:100'],
             'file' => ['required_without:front_file', 'file', 'max:10240', 'mimes:jpg,jpeg,png,pdf'],
             'front_file' => ['required_without:file', 'file', 'max:10240', 'mimes:jpg,jpeg,png,pdf'],
             'back_file' => ['nullable', 'file', 'max:10240', 'mimes:jpg,jpeg,png,pdf'],

@@ -56,14 +56,15 @@ class Collateral extends Model
      * Always eager-load it (`with('activeLoans')`); the collateral index is
      * unpaginated, so a lazy access there is one query per row.
      *
-     * Only the two columns the resource exposes are selected, so the loans
+     * Only the columns the resource needs are selected (its two, and the branch
+     * that decides whether the caller reads the account number), so the loans
      * hydrated here are deliberately partial models — do not read any other
      * attribute off them.
      */
     public function activeLoans(): BelongsToMany
     {
         return $this->belongsToMany(Loan::class, 'loan_collaterals')
-            ->select(['loans.id', 'loans.loan_account_number'])
+            ->select(['loans.id', 'loans.loan_account_number', 'loans.branch_id'])
             ->whereIn('loans.status', Loan::PLEDGING_STATUSES);
     }
 

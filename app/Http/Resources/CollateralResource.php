@@ -5,6 +5,7 @@ namespace App\Http\Resources;
 use App\Models\Collateral;
 use App\Models\Loan;
 use App\Models\User;
+use App\Services\BranchAccess;
 use App\Services\CollateralValuation;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Http\Request;
@@ -26,7 +27,7 @@ use OpenApi\Attributes as OA;
         new OA\Property(
             property: 'active_loans',
             type: 'array',
-            description: 'Every loan in an active status holding this collateral. Empty means free.',
+            description: 'Every loan in an active status holding this collateral. Empty means free. `loan_account_number` is null for a loan in a branch the caller cannot see.',
             items: new OA\Items(properties: [
                 new OA\Property(property: 'id', type: 'integer'),
                 new OA\Property(property: 'loan_account_number', type: 'string', nullable: true),
@@ -138,7 +139,9 @@ class CollateralResource extends JsonResource
                 fn () => $this->activeLoans
                     ->map(fn (Loan $loan) => [
                         'id' => $loan->id,
-                        'loan_account_number' => $loan->loan_account_number,
+                        'loan_account_number' => $request->user() !== null && app(BranchAccess::class)->canSee($request->user(), $loan->branch_id)
+                            ? $loan->loan_account_number
+                            : null,
                     ])
                     ->values()
                     ->all()

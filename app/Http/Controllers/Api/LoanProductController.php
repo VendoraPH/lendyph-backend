@@ -76,7 +76,7 @@ class LoanProductController extends Controller
                     new OA\Property(property: 'name', type: 'string', example: 'Personal Loan - 12 Months'),
                     new OA\Property(property: 'interest_rate', type: 'number', example: 3.0),
                     new OA\Property(property: 'interest_method', type: 'string', enum: ['straight', 'diminishing', 'upon_maturity']),
-                    new OA\Property(property: 'term', type: 'integer', example: 12),
+                    new OA\Property(property: 'term', type: 'integer', example: 12, description: 'The default term, within min_term and max_term (422 otherwise)'),
                     new OA\Property(property: 'term_unit', type: 'string', enum: TermUnit::class),
                     new OA\Property(property: 'interest_rate_frequency', type: 'string', enum: InterestRateFrequency::class),
                     new OA\Property(property: 'frequency', type: 'string', enum: LoanFrequency::class),
@@ -136,7 +136,8 @@ class LoanProductController extends Controller
         requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent(
             properties: [
                 new OA\Property(property: 'description', type: 'string', nullable: true, description: 'Absent: the stored description is kept. null clears it'),
-                new OA\Property(property: 'term', type: 'integer', description: 'The default term. Absent: the stored value is kept, whatever max_term is sent'),
+                new OA\Property(property: 'term', type: 'integer', description: 'The default term, within min_term and max_term (422 otherwise). Absent: the stored value is kept, and a min_term or max_term that would leave it outside the range answers 422'),
+                new OA\Property(property: 'frequencies', type: 'array', items: new OA\Items(type: 'string', enum: LoanFrequency::class), description: 'The allowed frequencies. Without `frequency`, the stored one is kept while it is on this list; otherwise it becomes the first on the list'),
                 new OA\Property(property: 'custom_fees', type: 'array', items: new OA\Items(type: 'object'), description: 'Retired ("Additional fees"). Omit it (the stored list is kept), send the stored list unchanged (kept as it is), or send [] (clears it); any other value answers 422. The product still returns the stored list'),
             ],
         )),

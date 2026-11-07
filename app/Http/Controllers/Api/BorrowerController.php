@@ -1054,16 +1054,17 @@ DESC,
             new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
         ],
         responses: [
-            new OA\Response(response: 200, description: 'The member loan totals'),
-            new OA\Response(response: 403, description: 'Missing borrowers:view'),
+            new OA\Response(response: 200, description: 'The member loan totals, covering only the loans the caller can see (Loan::visibleTo)'),
+            new OA\Response(response: 403, description: 'Missing borrowers:view or loans:view'),
             new OA\Response(response: 404, description: 'Borrower not found'),
         ],
     )]
-    public function loanSummary(Borrower $borrower, BorrowerLoanSummaryService $summaries): JsonResponse
+    public function loanSummary(Request $request, Borrower $borrower, BorrowerLoanSummaryService $summaries): JsonResponse
     {
         $this->authorize('borrowers:view');
+        $this->authorize('loans:view');
 
-        return response()->json(['data' => $summaries->summarize($borrower)]);
+        return response()->json(['data' => $summaries->summarize($borrower, $request->user())]);
     }
 
     #[OA\Get(

@@ -138,7 +138,7 @@ class DocumentController extends Controller implements HasMiddleware
                     required: ['file', 'type'],
                     properties: [
                         new OA\Property(property: 'file', type: 'string', format: 'binary'),
-                        new OA\Property(property: 'type', type: 'string', example: 'valid_id'),
+                        new OA\Property(property: 'type', type: 'string', example: 'proof_of_income', description: 'Letters, numbers, spaces, hyphens and underscores. A valid ID has its own upload (`/valid-ids`) and is refused here.'),
                         new OA\Property(property: 'label', type: 'string', example: 'PhilID Front'),
                     ],
                 ),
@@ -166,7 +166,7 @@ class DocumentController extends Controller implements HasMiddleware
                     required: ['file', 'type'],
                     properties: [
                         new OA\Property(property: 'file', type: 'string', format: 'binary'),
-                        new OA\Property(property: 'type', type: 'string', example: 'valid_id'),
+                        new OA\Property(property: 'type', type: 'string', example: 'proof_of_income', description: 'Letters, numbers, spaces, hyphens and underscores. A valid ID has its own upload (`/valid-ids`) and is refused here.'),
                         new OA\Property(property: 'label', type: 'string', example: 'PhilID Front'),
                     ],
                 ),
