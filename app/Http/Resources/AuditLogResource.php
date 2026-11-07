@@ -143,14 +143,16 @@ class AuditLogResource extends JsonResource
      * The fields this row changed, for display.
      *
      * Only keys present in the new values are listed, and only when their
-     * shown value differs from the old one. An `updated` row's old values hold
+     * stored value differs from the old one (compared with associative keys
+     * sorted, as a MySQL JSON column keeps its own key order). An `updated` row's old values hold
      * the WHOLE original row while its new values hold only the changed
      * columns, so comparing every key listed each untouched field as changed
      * to nothing. Timestamps are never listed, and a `created` row lists
      * nothing: its new values are the whole inserted row and the action
      * already says what happened. A row with no new values (a deletion) lists
      * its old fields, already redacted when written, with `new: null`. User ids show as names, and array
-     * values read in words (self::arrayInWords()). Display only;
+     * values read in words (self::arrayInWords()); when both sides read the
+     * same, in detail (self::detailed()), else as JSON. Display only;
      * old_values and new_values are returned as stored.
      *
      * @return list<array{field: string, old: string|null, new: string|null}>
@@ -174,11 +176,27 @@ class AuditLogResource extends JsonResource
                 continue;
             }
 
-            $oldShown = $this->shownFor($field, $old[$field] ?? null);
-            $newShown = $this->shownFor($field, $new[$field] ?? null);
+            $oldValue = $old[$field] ?? null;
+            $newValue = $new[$field] ?? null;
+
+            if (self::canonical($oldValue) === self::canonical($newValue)) {
+                continue;
+            }
+
+            $oldShown = $this->shownFor($field, $oldValue);
+            $newShown = $this->shownFor($field, $newValue);
+
+            // Two different values can read the same in words (a fee's amount
+            // changed inside a deductions list): show the detail, and JSON as a
+            // last resort, so a real change is never hidden.
+            if ($oldShown === $newShown) {
+                $oldShown = self::detailed($oldValue);
+                $newShown = self::detailed($newValue);
+            }
 
             if ($oldShown === $newShown) {
-                continue;
+                $oldShown = self::asJson($oldValue);
+                $newShown = self::asJson($newValue);
             }
 
             $changes[] = ['field' => $field, 'old' => $oldShown, 'new' => $newShown];
@@ -245,6 +263,68 @@ class AuditLogResource extends JsonResource
         }
 
         return $count === 1 ? '1 entry' : "{$count} entries";
+    }
+
+    /**
+     * A value with every associative array's keys sorted, at every depth, so
+     * two values compare equal exactly when they hold the same content.
+     */
+    private static function canonical(mixed $value): mixed
+    {
+        if (! is_array($value)) {
+            return $value;
+        }
+
+        if (! array_is_list($value)) {
+            ksort($value);
+        }
+
+        return array_map(self::canonical(...), $value);
+    }
+
+    /**
+     * A value in more detail than self::shown(), for two values that read the
+     * same in words: a list of records as each one's name and its amount (from
+     * `amount`, else `value`, when numeric) in pesos, e.g. "Processing Fee
+     * ₱2,000.00, Notarial Fee ₱100.00"; an associative array as "key: value"
+     * pairs, keys in words and sorted (a MySQL JSON column keeps its own key
+     * order), joined with "; ". Anything else as self::shown().
+     */
+    private static function detailed(mixed $value): ?string
+    {
+        if (! is_array($value) || $value === []) {
+            return self::shown($value);
+        }
+
+        if (! array_is_list($value)) {
+            $pairs = [];
+
+            foreach (self::canonical($value) as $key => $item) {
+                $pairs[] = str_replace('_', ' ', (string) $key).': '.(is_array($item) ? self::arrayInWords($item) : (self::shown($item) ?? 'none'));
+            }
+
+            return implode('; ', $pairs);
+        }
+
+        $items = [];
+
+        foreach ($value as $item) {
+            $name = self::itemName($item);
+
+            if ($name === null) {
+                return self::shown($value);
+            }
+
+            $amount = array_find([$item['amount'] ?? null, $item['value'] ?? null], fn (mixed $figure): bool => is_numeric($figure));
+            $items[] = $amount === null ? $name : $name.' ₱'.number_format((float) $amount, 2);
+        }
+
+        return implode(', ', $items);
+    }
+
+    private static function asJson(mixed $value): ?string
+    {
+        return $value === null ? null : json_encode($value, JSON_UNESCAPED_UNICODE);
     }
 
     private static function itemName(mixed $item): ?string

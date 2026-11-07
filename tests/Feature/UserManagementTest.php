@@ -478,7 +478,7 @@ class UserManagementTest extends TestCase
 
         $this->assertNotNull($log, 'No role_assigned audit entry was written.');
         $this->assertSame(['role' => 'cashier'], $log->new_values);
-        $this->assertSame('User ninacruz created with role Cashier', $log->description);
+        $this->assertSame('User ninacruz created with role "Cashier" (cashier)', $log->description);
     }
 
     public function test_the_audit_descriptions_name_roles_by_their_display_name_and_keep_the_keys(): void
@@ -502,9 +502,9 @@ class UserManagementTest extends TestCase
         $assigned = AuditLog::where('action', 'role_assigned')->where('auditable_id', $created->id)->firstOrFail();
         $changed = AuditLog::where('action', 'role_changed')->where('auditable_id', $target->id)->latest('id')->firstOrFail();
 
-        $this->assertSame('User liareyes created with role Teller', $assigned->description);
+        $this->assertSame('User liareyes created with role "Teller" (cashier)', $assigned->description);
         $this->assertSame(['role' => 'cashier'], $assigned->new_values);
-        $this->assertSame("Role for {$target->username} changed from Viewer to Teller", $changed->description);
+        $this->assertSame("Role for {$target->username} changed from \"Viewer\" (viewer) to \"Teller\" (cashier)", $changed->description);
         $this->assertSame(['role' => 'viewer'], $changed->old_values);
         $this->assertSame(['role' => 'cashier'], $changed->new_values);
     }

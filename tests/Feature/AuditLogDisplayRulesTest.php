@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Resources\AuditLogResource;
 use App\Models\AccountingJournal;
 use App\Models\AuditLog;
 use App\Models\Borrower;
@@ -346,4 +347,54 @@ it('names a target with no label by its class in words', function () {
         ->and($label(CoMaker::class, 999992))->toBe('Co-maker #999992')
         ->and($label(LoanApprovalStep::class, 999993))->toBe('Loan approval step #999993')
         ->and($label(GCashTransaction::class, 999994))->toBe('GCash transaction #999994');
+});
+
+it('lists a change inside a record that reads the same in words, with both amounts', function () {
+    $row = AuditLog::create([
+        'action' => 'updated',
+        'user_id' => $this->admin->id,
+        'old_values' => ['deductions' => [['name' => 'Processing Fee', 'amount' => 1500], ['name' => 'Notarial Fee', 'amount' => 100]]],
+        'new_values' => ['deductions' => [['name' => 'Processing Fee', 'amount' => 2000], ['name' => 'Notarial Fee', 'amount' => 100]]],
+    ]);
+
+    $this->getJson("/api/audit-logs/{$row->id}")
+        ->assertOk()
+        ->assertJsonPath('data.changes', [[
+            'field' => 'deductions',
+            'old' => "Processing Fee \u{20B1}1,500.00, Notarial Fee \u{20B1}100.00",
+            'new' => "Processing Fee \u{20B1}2,000.00, Notarial Fee \u{20B1}100.00",
+        ]]);
+});
+
+it('lists a change inside an associative array that reads the same in words', function () {
+    $row = AuditLog::create([
+        'action' => 'updated',
+        'user_id' => $this->admin->id,
+        'old_values' => ['settings' => ['grace_days' => 3, 'rate' => 2]],
+        'new_values' => ['settings' => ['grace_days' => 5, 'rate' => 2]],
+    ]);
+
+    $this->getJson("/api/audit-logs/{$row->id}")
+        ->assertOk()
+        ->assertJsonPath('data.changes', [[
+            'field' => 'settings',
+            'old' => 'grace days: 3; rate: 2',
+            'new' => 'grace days: 5; rate: 2',
+        ]]);
+});
+
+it('does not list the same content in a different key order', function () {
+    $row = new AuditLog([
+        'action' => 'updated',
+        'old_values' => [
+            'settings' => ['grace_days' => 3, 'tiers' => ['min' => 1, 'max' => 9]],
+            'deductions' => [['name' => 'Processing Fee', 'amount' => 1500]],
+        ],
+        'new_values' => [
+            'deductions' => [['amount' => 1500, 'name' => 'Processing Fee']],
+            'settings' => ['tiers' => ['max' => 9, 'min' => 1], 'grace_days' => 3],
+        ],
+    ]);
+
+    expect((new AuditLogResource($row))->toArray(request())['changes'])->toBe([]);
 });

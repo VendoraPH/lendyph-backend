@@ -6,6 +6,7 @@ use App\Models\AuditLog;
 use App\Models\Role;
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
@@ -111,6 +112,99 @@ class RewordRoleMemberDescriptionsTest extends TestCase
         $after = $this->snapshot();
         $this->migration()->up();
         $this->assertSame($after, $this->snapshot());
+    }
+
+    public function test_a_role_changed_while_the_fix_ran_is_left_as_it_is_and_logged(): void
+    {
+        $this->restoreOldText();
+        $edited = 'Edited by an admin mid-run.';
+        $raced = false;
+        DB::listen(function ($query) use (&$raced, $edited): void {
+            if (! $raced && str_starts_with($query->sql, 'select') && str_contains($query->sql, 'from `roles`') && str_contains($query->sql, '`description`')) {
+                $raced = true;
+                DB::table('roles')->where('name', 'loan_officer')->update(['description' => $edited]);
+            }
+        });
+        Log::spy();
+        $auditRows = AuditLog::count();
+
+        $this->artisan('roles:reword-member-descriptions')
+            ->expectsOutputToContain('loan_officer (id '.$this->id('loan_officer').') left as it is: changed while the fix ran')
+            ->expectsOutputToContain('Reworded 1 role description(s); 1 left as edited.')
+            ->assertSuccessful();
+
+        $this->assertTrue($raced);
+        $this->assertSame($edited, $this->description('loan_officer'));
+        $this->assertSame($auditRows + 1, AuditLog::count());
+        Log::shouldHaveReceived('warning')->withArgs(
+            fn (string $message, array $context): bool => str_contains($message, 'changed while the fix ran')
+                && ($context['role'] ?? null) === 'loan_officer',
+        );
+    }
+
+    public function test_it_only_rewords_web_guard_roles(): void
+    {
+        $this->restoreOldText();
+        $other = DB::table('roles')->insertGetId([
+            'name' => 'admin',
+            'guard_name' => 'api',
+            'description' => self::OLD_ADMIN,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $this->artisan('roles:reword-member-descriptions')
+            ->expectsOutputToContain('Reworded 2 role description(s); 0 left as edited.')
+            ->assertSuccessful();
+
+        $this->assertSame(self::OLD_ADMIN, DB::table('roles')->where('id', $other)->value('description'));
+    }
+
+    public function test_the_migration_depends_on_no_application_class(): void
+    {
+        $this->assertDoesNotMatchRegularExpression('/^use App\\\\/m', file_get_contents(database_path(self::MIGRATION)));
+    }
+
+    public function test_the_migration_and_the_command_reach_the_same_outcome(): void
+    {
+        foreach (['both old' => null, 'one edited' => self::OLD_OFFICER.' Also handles walk-ins.'] as $case => $editedOfficer) {
+            DB::beginTransaction();
+            $this->restoreOldText();
+            if ($editedOfficer !== null) {
+                DB::table('roles')->where('name', 'loan_officer')->update(['description' => $editedOfficer]);
+            }
+            $fromId = (int) AuditLog::max('id');
+
+            DB::beginTransaction();
+            $this->artisan('roles:reword-member-descriptions')->assertSuccessful();
+            $byCommand = $this->outcome($fromId);
+            DB::rollBack();
+
+            $this->migration()->up();
+            $byMigration = $this->outcome($fromId);
+            DB::rollBack();
+
+            $this->assertSame($byCommand, $byMigration, $case);
+            $this->assertSame(self::NEW_ADMIN, $byMigration['roles']['admin'], $case);
+            $this->assertSame($editedOfficer ?? self::NEW_OFFICER, $byMigration['roles']['loan_officer'], $case);
+            $this->assertCount($editedOfficer === null ? 2 : 1, $byMigration['audit_rows'], $case);
+        }
+    }
+
+    /**
+     * The roles' descriptions and the audit rows written after `$fromId`,
+     * without ids and times.
+     *
+     * @return array{roles: array<string, string|null>, audit_rows: list<array<string, mixed>>}
+     */
+    private function outcome(int $fromId): array
+    {
+        return [
+            'roles' => DB::table('roles')->where('guard_name', 'web')->whereIn('name', ['admin', 'loan_officer'])->orderBy('name')->pluck('description', 'name')->all(),
+            'audit_rows' => AuditLog::query()->where('id', '>', $fromId)->orderBy('auditable_id')->get()
+                ->map(fn (AuditLog $row): array => $row->only(['user_id', 'action', 'auditable_type', 'auditable_id', 'old_values', 'new_values', 'ip_address', 'user_agent', 'description']))
+                ->all(),
+        ];
     }
 
     private function restoreOldText(): void

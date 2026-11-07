@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Spatie\Permission\PermissionRegistrar;
 
@@ -11,8 +12,9 @@ use Spatie\Permission\PermissionRegistrar;
  * "members" on a deployment that still holds the text the seeder wrote before
  * 2026-11-07.
  *
- * A role is reworded only when its description still equals the old seeded
- * text exactly; one somebody edited is left alone and listed with the reason.
+ * Only `web` guard roles are read. A role is reworded only when its
+ * description still equals the old seeded text exactly; one somebody edited,
+ * before or while the fix ran, is left alone and listed with the reason.
  * A reworded role no longer matches, so running it again changes nothing.
  *
  * Each change writes one audit row as a system change (no user, no address):
@@ -21,7 +23,9 @@ use Spatie\Permission\PermissionRegistrar;
  * builder, so the trait writes no second row.
  *
  * Used by `roles:reword-member-descriptions` (with `--dry-run` to preview a
- * database) and by the 2026_11_07_090000 migration that applies it on deploy.
+ * database). The 2026_11_07_090000 migration does the same on deploy, written
+ * out with the query builder so that it depends on no application class; keep
+ * the two in step (RewordRoleMemberDescriptionsTest compares them).
  */
 class RoleMemberDescriptionReword
 {
@@ -58,6 +62,7 @@ class RoleMemberDescriptionReword
 
         $roles = DB::table('roles')
             ->whereIn('name', array_keys(self::REWORDS))
+            ->where('guard_name', 'web')
             ->orderBy('id')
             ->get(['id', 'name', 'display_name', 'description']);
 
@@ -76,7 +81,12 @@ class RoleMemberDescriptionReword
 
             if ($dryRun || $this->write($role, $old, $new)) {
                 $result['updated'][] = ['id' => (int) $role->id, 'name' => $role->name];
+
+                continue;
             }
+
+            $result['skipped'][] = ['id' => (int) $role->id, 'name' => $role->name, 'reason' => 'changed while the fix ran'];
+            Log::warning('A role description changed while the fix ran; it was left as it is.', ['role' => $role->name, 'id' => (int) $role->id]);
         }
 
         if (! $dryRun && $result['updated'] !== []) {

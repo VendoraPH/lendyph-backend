@@ -217,7 +217,7 @@ class UserController extends Controller
             action: 'role_assigned',
             auditable: $user,
             newValues: ['role' => $request->role],
-            description: sprintf('User %s created with role %s', $user->username, self::roleLabel($request->role)),
+            description: sprintf('User %s created with role %s', $user->username, self::roleName($request->role)),
         );
 
         // Same gap, same fix, for the other pivot: `created` records
@@ -367,8 +367,8 @@ class UserController extends Controller
                     description: sprintf(
                         'Role for %s changed from %s to %s',
                         $user->username,
-                        $previousRole === null ? 'none' : self::roleLabel($previousRole),
-                        self::roleLabel($request->role),
+                        $previousRole === null ? 'none' : self::roleName($previousRole),
+                        self::roleName($request->role),
                     ),
                 );
             }
@@ -380,14 +380,15 @@ class UserController extends Controller
     }
 
     /**
-     * How an audit description names a role: its display name
-     * (Role::auditLabel()), or the key in words when no such role exists. The
-     * row's stored values keep the key.
+     * How an audit description names a role: Role::auditName(), e.g.
+     * `"Teller" (cashier)`, as RolePermissionAudit and the role rows do, or the
+     * key in words in the same shape when no such role exists. The row's
+     * stored values keep the key.
      */
-    private static function roleLabel(string $key): string
+    private static function roleName(string $key): string
     {
-        return Role::query()->where('name', $key)->where('guard_name', 'web')->first()?->auditLabel()
-            ?? Str::headline($key);
+        return Role::query()->where('name', $key)->where('guard_name', 'web')->first()?->auditName()
+            ?? json_encode(Str::headline($key), JSON_UNESCAPED_UNICODE).' ('.$key.')';
     }
 
     /**
