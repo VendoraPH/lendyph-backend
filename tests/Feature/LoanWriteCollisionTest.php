@@ -691,7 +691,6 @@ class LoanWriteCollisionTest extends TestCase
 
     // ── helpers ──────────────────────────────────────────────────────────
 
-    /** A posted payment that paid the first period of a released loan in full. */
     // ── editing a loan with no collateral list ───────────────────────────
 
     public function test_an_edit_of_a_loan_approved_since_it_was_read_answers_409_and_changes_nothing(): void
@@ -818,6 +817,7 @@ class LoanWriteCollisionTest extends TestCase
         return app(LoanService::class)->createLoan($this->createPayload(), $this->admin);
     }
 
+    /** A posted payment that paid the first period of a released loan in full. */
     private function postedRepayment(bool $withCollateral = false): Repayment
     {
         $loan = $this->createReleasedLoan();

@@ -55,7 +55,11 @@ use PDOException;
  *   2. the loan rows, in ONE id-ordered statement (a release also locks the
  *      loan it restructures; a create locks the newest loan, for the next
  *      application number, in Loan::booted()). With no collateral to lock,
- *      this is the transaction's first statement, before any plain read;
+ *      this is the transaction's first statement, before any plain read. A
+ *      restructure's principal edit is the one path that locks the child first:
+ *      its own row, then its source, because a release of that child needs
+ *      `approved` while an edit needs `draft` or `for_review`, and no other
+ *      write waits on an editable child's row while holding its source;
  *   3. the newest repayment row, for the next receipt number, when the
  *      operation records a payment: recording one (processRepayment(),
  *      processRepaymentWithAmountUnderLock()) or an extension collecting its
