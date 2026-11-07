@@ -106,11 +106,11 @@ it('keeps rates, counts, numbers and identifiers as stored, never in pesos', fun
         ->and($changes['balance_adjustment_id']['new'])->toBe('8');
 });
 
-it('reads a product fee rate as stored, and its notarial fee in pesos', function () {
-    $changes = auditChangesFor(LoanProduct::class, ['processing_fee' => '2.5000', 'notarial_fee' => '100.0000'], ['processing_fee' => '3.0000', 'notarial_fee' => '150.0000']);
+it('reads a product fee rate as stored, its notarial fee included, never in pesos', function () {
+    $changes = auditChangesFor(LoanProduct::class, ['processing_fee' => '2.5000', 'notarial_fee' => '1.0000'], ['processing_fee' => '3.0000', 'notarial_fee' => '1.5000']);
 
     expect($changes['processing_fee']['new'])->toBe('3.0000')
-        ->and($changes['notarial_fee'])->toMatchArray(['old' => '₱100.00', 'new' => '₱150.00']);
+        ->and($changes['notarial_fee'])->toMatchArray(['old' => '1.0000', 'new' => '1.5000']);
 });
 
 it('converts a journal total stored in centavos, so one peso never reads 100', function () {
@@ -184,6 +184,18 @@ it('does not list the same moment or date written two ways', function () {
     ]);
 
     expect(array_keys($changes))->toBe(['status']);
+});
+
+it('does not list one moment written to a fraction of the same second', function () {
+    $changes = auditChangesFor(Loan::class, ['released_at' => '2026-11-01T02:30:00.500000Z'], ['released_at' => '2026-11-01 10:30:00', 'status' => 'ongoing']);
+
+    expect(array_keys($changes))->toBe(['status']);
+});
+
+it('still lists a real timestamp change within one minute, with the seconds', function () {
+    $changes = auditChangesFor(Loan::class, ['released_at' => '2026-11-01 10:30:05'], ['released_at' => '2026-11-01T02:30:40.000000Z']);
+
+    expect($changes['released_at'])->toMatchArray(['old' => 'Nov 1, 2026, 10:30:05 AM', 'new' => 'Nov 1, 2026, 10:30:40 AM']);
 });
 
 it('reads a role by its audit name, a removed role included', function () {

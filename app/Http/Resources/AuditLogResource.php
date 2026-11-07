@@ -56,7 +56,7 @@ class AuditLogResource extends JsonResource
      * (`outstanding_balance`, `collected_at_release`, `new_principal`), unless
      * NOT_MONEY_FIELD says it is about money rather than an amount of it.
      */
-    private const MONEY_FIELD = '/(^|_)(amount|applied|balance|charge|charged|collected|credit|debit|deductions|due|income|outstanding|overpayment|paid|premium|principal|proceeds|shortfall)(_|$)|^(notarial_fee|snapshot_value|total_payment)$/';
+    private const MONEY_FIELD = '/(^|_)(amount|applied|balance|charge|charged|collected|credit|debit|deductions|due|income|outstanding|overpayment|paid|premium|principal|proceeds|shortfall)(_|$)|^(snapshot_value|total_payment)$/';
 
     private const NOT_MONEY_FIELD = '/(_at|_by|_count|_date|_id|_ids|_method|_number|_pct|_percentage|_rate|_status|_type)$|^auto_credit$/';
 
@@ -75,6 +75,8 @@ class AuditLogResource extends JsonResource
      * The enum keys Str::headline() doesn't read the way the app does.
      */
     private const ENUM_WORDS = ['bi_weekly' => 'Bi-Weekly', 'gcash' => 'GCash', 'semi_monthly' => 'Semi-Monthly'];
+
+    private const TIMESTAMP_WITH_SECONDS = 'M j, Y, g:i:s A';
 
     /**
      * Load, in ONE query each, the users, roles and branches these rows' old
@@ -240,7 +242,8 @@ class AuditLogResource extends JsonResource
      * its old fields, already redacted when written, with `new: null`. Values
      * read in plain words (self::shownFor()); when both sides read the same, in
      * detail (self::detailed()), else as JSON, unless the same yes or no, moment
-     * or date was only written two ways, which isn't a change. Display only;
+     * or date was only written two ways, which isn't a change (two moments in
+     * one minute show their seconds). Display only;
      * old_values and new_values are returned as stored.
      *
      * @return list<array{field: string, old: string|null, new: string|null}>
@@ -277,8 +280,14 @@ class AuditLogResource extends JsonResource
             // Two different values can read the same in words (a fee's amount
             // changed inside a deductions list): show the detail, and JSON as a
             // last resort, so a real change is never hidden.
-            if ($oldShown === $newShown && $this->isOneReadingField($field, $oldValue, $newValue)) {
+            if ($oldShown === $newShown && $this->isOneValueWrittenTwoWays($field, $oldValue, $newValue)) {
                 continue;
+            }
+
+            // Two moments in one minute: the seconds tell them apart.
+            if ($oldShown === $newShown && $this->timeOf($field, $oldValue) !== null && $this->timeOf($field, $newValue) !== null) {
+                $oldShown = $this->timeOf($field, $oldValue)->format(self::TIMESTAMP_WITH_SECONDS);
+                $newShown = $this->timeOf($field, $newValue)->format(self::TIMESTAMP_WITH_SECONDS);
             }
 
             if ($oldShown === $newShown) {
@@ -353,13 +362,26 @@ class AuditLogResource extends JsonResource
     }
 
     /**
-     * Whether a boolean or time field that reads the same on both sides is one
-     * value written two ways (`true` and `1`, a UTC and a Manila timestamp).
+     * Whether a field that reads the same on both sides is one value written
+     * two ways, which isn't a change: `true` and `1`, a date in two forms, or a
+     * UTC and a Manila timestamp of the same instant, to the second.
      */
-    private function isOneReadingField(string $field, mixed $old, mixed $new): bool
+    private function isOneValueWrittenTwoWays(string $field, mixed $old, mixed $new): bool
     {
-        return (self::booleanInWords($field, $old, $this->castOf($field)) !== null && self::booleanInWords($field, $new, $this->castOf($field)) !== null)
-            || ($this->timeInWords($field, $old) !== null && $this->timeInWords($field, $new) !== null);
+        $cast = $this->castOf($field);
+
+        if (self::booleanInWords($field, $old, $cast) !== null && self::booleanInWords($field, $new, $cast) !== null) {
+            return true;
+        }
+
+        $oldTime = $this->timeOf($field, $old);
+        $newTime = $this->timeOf($field, $new);
+
+        if ($oldTime === null || $newTime === null) {
+            return false;
+        }
+
+        return $this->isDateColumn($field) || $oldTime->getTimestamp() === $newTime->getTimestamp();
     }
 
     /**
@@ -402,28 +424,41 @@ class AuditLogResource extends JsonResource
     }
 
     /**
-     * A timestamp in Manila time, whichever way it was stored: JSON writes a
-     * cast model's value in UTC, a raw attribute has the app timezone's wall
-     * clock. A date column reads as its Manila date, with no time. A value that
-     * isn't a date reads as stored.
+     * A timestamp in Manila time, a date column as its Manila date with no
+     * time. A value that isn't a date reads as stored.
      */
     private function timeInWords(string $field, mixed $value): ?string
     {
+        return $this->timeOf($field, $value)?->format($this->isDateColumn($field) ? 'M j, Y' : 'M j, Y, g:i A');
+    }
+
+    /**
+     * A time field's value in Manila time, whichever way it was stored: JSON
+     * writes a cast model's value in UTC, a raw attribute has the app
+     * timezone's wall clock. Null for any other field or a value that isn't a
+     * date.
+     */
+    private function timeOf(string $field, mixed $value): ?CarbonImmutable
+    {
         $cast = (string) $this->castOf($field);
-        $isDate = str_starts_with($cast, 'date') && ! str_starts_with($cast, 'datetime');
         $isTimestamp = str_contains($cast, 'datetime') || str_ends_with($field, '_at');
 
-        if ((! $isDate && ! $isTimestamp) || ! is_string($value) || $value === '') {
+        if ((! $this->isDateColumn($field) && ! $isTimestamp) || ! is_string($value) || $value === '') {
             return null;
         }
 
         try {
-            $time = CarbonImmutable::parse($value, config('app.timezone'))->setTimezone('Asia/Manila');
+            return CarbonImmutable::parse($value, config('app.timezone'))->setTimezone('Asia/Manila');
         } catch (Throwable) {
             return null;
         }
+    }
 
-        return $time->format($isDate ? 'M j, Y' : 'M j, Y, g:i A');
+    private function isDateColumn(string $field): bool
+    {
+        $cast = (string) $this->castOf($field);
+
+        return str_starts_with($cast, 'date') && ! str_starts_with($cast, 'datetime');
     }
 
     /**

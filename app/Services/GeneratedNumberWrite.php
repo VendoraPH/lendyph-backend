@@ -32,10 +32,14 @@ use PDOException;
  * Only the outermost transaction can retry. Inside one, MySQL has already
  * rolled the whole transaction back on a deadlock, and a plain read would see
  * the same stale number again. So a nested call just runs the write, and the
- * outermost one answers for it: this helper for a bulk save, and
- * LoanWriteTransaction or CollateralWriteTransaction, which turn a collision
- * on these indexes into their own 409 without retrying, for a co-maker or an
- * adjustment created inside a loan's money write.
+ * outermost one answers for it: LoanWriteTransaction or
+ * CollateralWriteTransaction, which turn a collision on these indexes into
+ * their own 409 without retrying, for a co-maker or an adjustment created inside
+ * a loan's money write.
+ *
+ * Not for a save that could post twice if tried again after another one
+ * committed: an auto-credit run and a bulk share capital entry answer 409 at
+ * once (ShareCapitalService).
  */
 final class GeneratedNumberWrite
 {

@@ -7,10 +7,12 @@ use App\Models\Borrower;
 use App\Models\CoMaker;
 use App\Models\Loan;
 use App\Models\LoanAdjustment;
+use App\Models\LoanProduct;
 use App\Models\Repayment;
 use App\Models\ShareCapitalLedger;
 use App\Models\ShareCapitalPledge;
 use App\Services\GeneratedNumberWrite;
+use App\Services\LoanService;
 use App\Services\RepaymentService;
 use Closure;
 use Exception;
@@ -20,6 +22,7 @@ use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Str;
 use Illuminate\Testing\TestResponse;
 use PDOException;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -175,28 +178,20 @@ class GeneratedNumberCollisionTest extends TestCase
     public function test_a_retried_member_is_refused_when_the_same_member_landed_meanwhile(): void
     {
         $send = $this->member();
-        $twin = fn () => Borrower::factory()->create([
+        $this->failOnInsertInto('borrowers', self::DEADLOCK, times: 1);
+        $twin = $this->landOnFirstRollback(fn (): Borrower => Borrower::factory()->create([
             'branch_id' => $this->branch->id,
             'first_name' => 'Collision',
             'middle_name' => null,
             'last_name' => 'Probe',
             'birthdate' => '1990-01-15',
-        ]);
-        $this->failOnInsertInto('borrowers', self::DEADLOCK, times: 1);
-
-        $landed = false;
-        Event::listen(TransactionRolledBack::class, function () use (&$landed, $twin): void {
-            if (! $landed) {
-                $landed = true;
-                $twin();
-            }
-        });
+        ]));
 
         $before = Borrower::count();
 
         $send()->assertStatus(422)->assertJsonValidationErrors('first_name');
 
-        $this->assertTrue($landed);
+        $this->assertNotNull($twin());
         $this->assertSame($before + 1, Borrower::count());
     }
 
@@ -215,35 +210,144 @@ class GeneratedNumberCollisionTest extends TestCase
         $send()->assertCreated();
     }
 
-    public function test_a_bulk_share_capital_save_is_retried_as_a_whole(): void
+    public function test_a_bulk_share_capital_save_that_collides_answers_409_at_once_and_posts_nothing(): void
     {
         $pledges = [$this->memberPledge(), $this->memberPledge()];
-        $before = ShareCapitalLedger::count();
-        $slips = $this->slipTheNextNumberIn('share_capital_ledger', 'reference', times: 1);
+        $before = $this->state();
+        $slips = $this->slipTheNextNumberIn('share_capital_ledger', 'reference', times: PHP_INT_MAX);
 
         $this->postJson('/api/pledges/bulk-entries', ['entries' => array_map(fn (ShareCapitalPledge $pledge): array => [
             'pledge_id' => $pledge->id,
             'amount' => 100,
             'type' => 'credit',
             'date' => now()->toDateString(),
-        ], $pledges)])->assertCreated();
+        ], $pledges)])->assertStatus(409)->assertExactJson(['message' => GeneratedNumberWrite::SHARE_CAPITAL_CONFLICT]);
 
-        $this->assertSame(1, $slips());
-        $this->assertSame($before + 2, ShareCapitalLedger::count());
+        $this->assertSame(1, $slips(), 'a bulk save must not be tried again: an overlapping one would post twice');
+        $this->assertSame($before, $this->state());
     }
 
-    public function test_an_auto_credit_run_is_retried_as_a_whole(): void
+    public function test_an_auto_credit_run_that_collides_answers_409_at_once_and_posts_nothing(): void
     {
         $pledge = $this->memberPledge();
         $pledge->update(['amount' => 250, 'auto_credit' => true]);
-        $before = ShareCapitalLedger::count();
-        $slips = $this->slipTheNextNumberIn('share_capital_ledger', 'reference', times: 1);
+        $before = $this->state();
+        $slips = $this->slipTheNextNumberIn('share_capital_ledger', 'reference', times: PHP_INT_MAX);
 
-        $this->postJson('/api/auto-credit/process')->assertCreated()->assertJsonPath('data.total_amount', 250);
+        $this->postJson('/api/auto-credit/process')->assertStatus(409)->assertExactJson(['message' => GeneratedNumberWrite::SHARE_CAPITAL_CONFLICT]);
+
+        $this->assertSame(1, $slips(), 'an auto-credit run must not be tried again: an overlapping one would credit each pledge twice');
+        $this->assertSame($before, $this->state());
+        $this->assertSame(0, DB::table('auto_credit_runs')->count());
+    }
+
+    public function test_an_auto_credit_run_that_deadlocks_answers_409_at_once_and_posts_nothing(): void
+    {
+        $pledge = $this->memberPledge();
+        $pledge->update(['amount' => 250, 'auto_credit' => true]);
+        $before = $this->state();
+        $fired = $this->failOnInsertInto('share_capital_ledger', self::DEADLOCK, times: PHP_INT_MAX);
+
+        $this->postJson('/api/auto-credit/process')->assertStatus(409)->assertExactJson(['message' => GeneratedNumberWrite::SHARE_CAPITAL_CONFLICT]);
+
+        $this->assertSame(1, $fired());
+        $this->assertSame($before, $this->state());
+        $this->assertSame(0, DB::table('auto_credit_runs')->count());
+    }
+
+    public function test_a_co_maker_number_collision_while_creating_a_loan_answers_409_and_leaves_no_loan(): void
+    {
+        $loan = $this->draftLoan();
+        $coMaker = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+        $loans = Loan::count();
+        $before = $this->state();
+        $slips = $this->slipTheNextNumberIn('co_makers', 'co_maker_code', times: PHP_INT_MAX);
+
+        $this->postJson('/api/loans', [
+            'borrower_id' => $loan->borrower_id,
+            'loan_product_id' => $loan->loan_product_id,
+            'principal_amount' => 60000,
+            'start_date' => now()->toDateString(),
+            'co_maker_ids' => [$coMaker->id],
+        ])->assertStatus(409)->assertExactJson(['message' => 'Another loan application was created at the same moment. Submit again.']);
 
         $this->assertSame(1, $slips());
-        $this->assertSame($before + 1, ShareCapitalLedger::count());
-        $this->assertSame(1, DB::table('auto_credit_runs')->count());
+        $this->assertSame($loans, Loan::count());
+        $this->assertSame($before, $this->state());
+    }
+
+    public function test_a_co_maker_number_collision_while_editing_a_loan_with_no_collateral_list_answers_409(): void
+    {
+        $loan = $this->draftLoan();
+        $coMaker = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+        $before = $this->state();
+        $slips = $this->slipTheNextNumberIn('co_makers', 'co_maker_code', times: PHP_INT_MAX);
+
+        $this->putJson("/api/loans/{$loan->id}", ['co_maker_ids' => [$coMaker->id], 'principal_amount' => 55000])
+            ->assertStatus(409)
+            ->assertExactJson(['message' => 'Another change to this loan was saved at the same time. Reload and try again.']);
+
+        $this->assertSame(1, $slips());
+        $this->assertSame($before, $this->state());
+        $this->assertSame(60000.0, (float) $loan->fresh()->principal_amount);
+    }
+
+    public function test_a_co_maker_number_collision_while_editing_a_loan_with_a_collateral_list_answers_409(): void
+    {
+        $loan = $this->draftLoan();
+        $coMaker = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+        $before = $this->state();
+        $slips = $this->slipTheNextNumberIn('co_makers', 'co_maker_code', times: PHP_INT_MAX);
+
+        $this->putJson("/api/loans/{$loan->id}", ['co_maker_ids' => [$coMaker->id], 'collaterals' => [], 'principal_amount' => 55000])
+            ->assertStatus(409)
+            ->assertExactJson(['message' => 'Another change to this collateral was saved at the same time. Reload and try again.']);
+
+        $this->assertSame(1, $slips());
+        $this->assertSame($before, $this->state());
+        $this->assertSame(60000.0, (float) $loan->fresh()->principal_amount);
+    }
+
+    public function test_an_anonymous_registration_refused_after_a_retry_gets_the_generic_message(): void
+    {
+        $send = $this->anonymousRegistration();
+        $this->failOnInsertInto('borrowers', self::DEADLOCK, times: 1);
+        $twin = $this->landOnFirstRollback(fn (): Borrower => Borrower::factory()->create([
+            'branch_id' => $this->branch->id,
+            'first_name' => 'Anonymous',
+            'middle_name' => null,
+            'last_name' => 'Applicant',
+            'birthdate' => '1990-01-15',
+        ]));
+        $before = Borrower::count();
+
+        $response = $send()->assertStatus(422);
+
+        $this->assertSame(['A similar member already exists. Please contact your branch to continue.'], $response->json('errors.first_name'));
+        $this->assertStringNotContainsString($twin()->borrower_code, $response->getContent());
+        $this->assertSame($before + 1, Borrower::count());
+    }
+
+    public function test_an_anonymous_registration_with_a_key_skips_the_recheck_and_reads_the_winner_back(): void
+    {
+        $key = (string) Str::uuid();
+        $send = $this->anonymousRegistration(['registration_uuid' => $key]);
+        $this->failOnInsertInto('borrowers', self::DEADLOCK, times: 1);
+        $twin = $this->landOnFirstRollback(fn (): Borrower => Borrower::factory()->create([
+            'branch_id' => $this->branch->id,
+            'registration_uuid' => $key,
+            'status' => 'pending',
+            'first_name' => 'Anonymous',
+            'middle_name' => null,
+            'last_name' => 'Applicant',
+            'birthdate' => '1990-01-15',
+        ]));
+        $before = Borrower::count();
+
+        $response = $send()->assertCreated();
+
+        $this->assertSame($twin()->id, $response->json('data.id'));
+        $this->assertSame($before + 1, Borrower::count());
     }
 
     public function test_a_co_maker_added_while_awaiting_release_is_retried_with_one_link(): void
@@ -401,6 +505,64 @@ class GeneratedNumberCollisionTest extends TestCase
             'new_values' => ['schedule_ids' => [$loan->amortizationSchedules->first()->id]],
             'remarks' => 'Collision probe',
         ]);
+    }
+
+    /**
+     * The public form's request, from a caller who is not signed in.
+     *
+     * @param  array<string, mixed>  $extra
+     * @return Closure(): TestResponse
+     */
+    private function anonymousRegistration(array $extra = []): Closure
+    {
+        $payload = [
+            'status' => 'pending',
+            'branch_id' => $this->branch->id,
+            'first_name' => 'Anonymous',
+            'last_name' => 'Applicant',
+            'birthdate' => '1990-01-15',
+            'gender' => 'female',
+            'civil_status' => 'single',
+            'contact_number' => '09171234567',
+            'address' => 'Somewhere',
+            ...$extra,
+        ];
+
+        $this->app['auth']->forgetGuards();
+
+        return fn (): TestResponse => $this->postJson('/api/borrowers', $payload);
+    }
+
+    /**
+     * Another request commits `$land` right after this one's first attempt
+     * rolls back, before it is tried again. Returns what landed, or null.
+     *
+     * @return Closure(): mixed
+     */
+    private function landOnFirstRollback(Closure $land): Closure
+    {
+        $landed = null;
+
+        Event::listen(TransactionRolledBack::class, function () use (&$landed, $land): void {
+            $landed ??= $land();
+        });
+
+        return function () use (&$landed): mixed {
+            return $landed;
+        };
+    }
+
+    private function draftLoan(): Loan
+    {
+        $product = LoanProduct::factory()->create(['interest_rate' => 3.0, 'interest_method' => 'straight', 'term' => 6, 'frequency' => 'monthly']);
+        $member = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+
+        return app(LoanService::class)->createLoan([
+            'borrower_id' => $member->id,
+            'loan_product_id' => $product->id,
+            'principal_amount' => 60000,
+            'start_date' => now()->toDateString(),
+        ], $this->admin);
     }
 
     private function memberPledge(): ShareCapitalPledge

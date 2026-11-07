@@ -29,7 +29,10 @@ class ShareCapitalService
             ->where('amount', '>', 0)
             ->get();
 
-        return GeneratedNumberWrite::run(function () use ($eligiblePledges, $user) {
+        // Never tried again. The pledges were read before this transaction, so
+        // a retry after another run committed would credit each pledge twice.
+        // The loser of a collision answers 409 and posts nothing.
+        return LoanWriteTransaction::run(function () use ($eligiblePledges, $user) {
             $today = now()->toDateString();
             $totalAmount = 0.0;
 
@@ -53,7 +56,7 @@ class ShareCapitalService
                 'processed_by' => $user->id,
                 'status' => 'completed',
             ]);
-        }, GeneratedNumberWrite::SHARE_CAPITAL_CONFLICT);
+        }, GeneratedNumberWrite::SHARE_CAPITAL_REFERENCE_INDEX, GeneratedNumberWrite::SHARE_CAPITAL_CONFLICT);
     }
 
     /**
@@ -135,7 +138,10 @@ class ShareCapitalService
 
     public function bulkManualEntries(array $entries, User $user): Collection
     {
-        return GeneratedNumberWrite::run(function () use ($entries, $user) {
+        // Never tried again, as processAutoCredit() isn't: a retry could post the
+        // whole batch a second time when the same batch was submitted twice. The
+        // loser of a collision answers 409 and posts nothing.
+        return LoanWriteTransaction::run(function () use ($entries, $user) {
             $results = new Collection;
 
             foreach ($entries as $entry) {
@@ -152,6 +158,6 @@ class ShareCapitalService
             }
 
             return $results;
-        }, GeneratedNumberWrite::SHARE_CAPITAL_CONFLICT);
+        }, GeneratedNumberWrite::SHARE_CAPITAL_REFERENCE_INDEX, GeneratedNumberWrite::SHARE_CAPITAL_CONFLICT);
     }
 }

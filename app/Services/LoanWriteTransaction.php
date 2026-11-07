@@ -26,7 +26,15 @@ use PDOException;
  * - approving and rejecting a loan in review (LoanService::approve(),
  *   reject());
  * - signing off an approval-chain step and sending a loan back
- *   (LoanApprovalChainService::approve(), sendBack()).
+ *   (LoanApprovalChainService::approve(), sendBack());
+ * - editing a loan with no collateral list (LoanService::updateLoan()), which
+ *   locks the loan row and re-checks that it is still editable. With a list the
+ *   edit is a collateral write (CollateralWriteTransaction).
+ *
+ * Two share capital writes touch no loan but use it for its 409: an auto-credit
+ * run and a bulk entry (ShareCapitalService::processAutoCredit(),
+ * bulkManualEntries()). Tried again, either could post a second time, so a
+ * collision answers 409 once with nothing posted.
  *
  * ── The lock order ───────────────────────────────────────────────────────
  *
@@ -126,7 +134,7 @@ final class LoanWriteTransaction
         try {
             return DB::transaction($callback);
         } catch (UniqueConstraintViolationException $e) {
-            if ($e->index !== $racedUniqueIndex && ! GeneratedNumberWrite::isCollision($e)) {
+            if (($racedUniqueIndex === null || $e->index !== $racedUniqueIndex) && ! GeneratedNumberWrite::isCollision($e)) {
                 throw $e;
             }
 

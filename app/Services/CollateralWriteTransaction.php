@@ -68,7 +68,7 @@ final class CollateralWriteTransaction
         try {
             return DB::transaction($callback);
         } catch (UniqueConstraintViolationException $e) {
-            if ($e->index !== $racedUniqueIndex && ! GeneratedNumberWrite::isCollision($e)) {
+            if (($racedUniqueIndex === null || $e->index !== $racedUniqueIndex) && ! GeneratedNumberWrite::isCollision($e)) {
                 throw $e;
             }
 

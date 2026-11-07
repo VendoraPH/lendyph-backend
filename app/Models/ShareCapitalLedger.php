@@ -37,9 +37,11 @@ class ShareCapitalLedger extends Model
 
     protected static function booted(): void
     {
-        // Two saves can build the same number: their callers run through
-        // GeneratedNumberWrite. Inside a loan's money write the row carries its
-        // own reference instead (RepaymentService, ShareCapitalReleaseCredit).
+        // Two saves can build the same number, so their callers answer that:
+        // GeneratedNumberWrite for a single entry, a 409 at once for an
+        // auto-credit run or a bulk entry (ShareCapitalService). Inside a loan's
+        // money write the row carries its own reference instead
+        // (RepaymentService, ShareCapitalReleaseCredit).
         static::creating(function (ShareCapitalLedger $entry) {
             if (empty($entry->reference)) {
                 $dateStr = Carbon::parse($entry->date ?? now())->format('Ymd');
