@@ -10,6 +10,7 @@ use App\Http\Requests\User\ShowUserRequest;
 use App\Http\Requests\User\StoreUserRequest;
 use App\Http\Requests\User\UpdateUserRequest;
 use App\Http\Resources\UserResource;
+use App\Models\Branch;
 use App\Models\Role;
 use App\Models\User;
 use App\Services\AuditLogService;
@@ -341,10 +342,9 @@ class UserController extends Controller
                     oldValues: ['branch_ids' => $previousBranchIds],
                     newValues: ['branch_ids' => $newBranchIds],
                     description: sprintf(
-                        'Branch assignment for %s changed from [%s] to [%s]',
+                        'Branch assignment for %s changed from %s to %s',
                         $user->username,
-                        implode(', ', $previousBranchIds),
-                        implode(', ', $newBranchIds),
+                        ...self::branchNames($previousBranchIds, $newBranchIds),
                     ),
                 );
             }
@@ -389,6 +389,24 @@ class UserController extends Controller
     {
         return Role::query()->where('name', $key)->where('guard_name', 'web')->first()?->auditName()
             ?? json_encode(Str::headline($key), JSON_UNESCAPED_UNICODE).' ('.$key.')';
+    }
+
+    /**
+     * Each list of branch ids by name, in the same order, for an audit
+     * description: "Branch #5" for a branch that is gone, "none" for an empty
+     * list. One query for all of them.
+     *
+     * @param  list<int>  ...$lists
+     * @return list<string>
+     */
+    private static function branchNames(array ...$lists): array
+    {
+        $names = Branch::query()->whereIn('id', array_merge(...$lists))->pluck('name', 'id');
+
+        return array_map(
+            fn (array $ids): string => $ids === [] ? 'none' : implode(', ', array_map(fn (int $id): string => $names->get($id) ?? "Branch #{$id}", $ids)),
+            $lists,
+        );
     }
 
     /**

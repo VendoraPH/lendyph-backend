@@ -4,6 +4,7 @@ namespace App\Http\Resources;
 
 use App\Models\AuditLog;
 use App\Models\Branch;
+use App\Models\Collateral;
 use App\Models\Fee;
 use App\Models\Loan;
 use App\Models\LoanApprovalStep;
@@ -47,9 +48,32 @@ class AuditLogResource extends JsonResource
     private const PRODUCT_KEYS = ['loan_product_id', 'applicable_product_ids'];
 
     /**
-     * The approval-chain step ids an approval closed, read by each step's name.
+     * Approval-chain step ids (one, or the list an approval closed), read by
+     * each step's name.
      */
-    private const STEP_KEYS = ['steps_closed'];
+    private const STEP_KEYS = ['step_id', 'steps_closed'];
+
+    /**
+     * A change-list field holding a loan id: `loan_id`, `source_loan_id`,
+     * `restructured_into_loan_id` and the like.
+     */
+    private const LOAN_KEY = '/(^|_)loan_id$/';
+
+    /**
+     * Change-list fields that hold a collateral id or a list of them.
+     */
+    private const COLLATERAL_KEYS = ['collateral_id', 'inherited_collateral_ids'];
+
+    /**
+     * A loan product's columns stored as a percentage, checked against the
+     * request rules (`max:100`) and LoanService::productFeeDeductions(), which
+     * charges the three fees as percentages. Read as a percent, never rounded.
+     */
+    private const PRODUCT_PERCENT_FIELDS = [
+        'interest_rate', 'min_interest_rate', 'penalty_rate', 'notarial_fee',
+        'processing_fee', 'min_processing_fee', 'max_processing_fee',
+        'service_fee', 'min_service_fee', 'max_service_fee',
+    ];
 
     /**
      * Change-list fields that hold a branch id or a list of them.
@@ -112,6 +136,8 @@ class AuditLogResource extends JsonResource
         $userIds = self::changeIds($logs, self::USER_FOREIGN_KEYS);
         $branchIds = self::changeIds($logs, self::BRANCH_KEYS);
         $productIds = self::changeIds($logs, self::PRODUCT_KEYS);
+        $collateralIds = self::changeIds($logs, self::COLLATERAL_KEYS);
+        $loanIds = $logs->flatMap(fn (AuditLog $log) => self::changeIds(collect([$log]), self::loanKeysOf($log)))->unique()->values();
         $roleKeys = self::changeValues($logs, ['role', ...self::STEP_KEYS])->filter(fn ($key) => is_string($key))->unique()->values();
         $stepLoanIds = $logs
             ->filter(fn (AuditLog $log) => $log->auditable_type === Loan::class && self::changeValues(collect([$log]), self::STEP_KEYS)->isNotEmpty())
@@ -135,6 +161,21 @@ class AuditLogResource extends JsonResource
             ? collect()
             : LoanProduct::query()->whereIn('id', $productIds)->pluck('name', 'id');
 
+        $loans = $loanIds->isEmpty()
+            ? collect()
+            : Loan::query()->whereIn('id', $loanIds)->get(['id', 'loan_account_number', 'application_number'])
+                ->mapWithKeys(fn (Loan $loan) => [$loan->id => $loan->loan_account_number ?? $loan->application_number]);
+
+        // "Vehicle: ABC 1234", in one query with the type's name.
+        $collaterals = $collateralIds->isEmpty()
+            ? collect()
+            : Collateral::query()
+                ->leftJoin('collateral_types', 'collateral_types.id', '=', 'collaterals.collateral_type_id')
+                ->whereIn('collaterals.id', $collateralIds)
+                ->get(['collaterals.id', 'collaterals.detail_value', 'collateral_types.name as type_name'])
+                ->mapWithKeys(fn (Collateral $collateral) => [$collateral->id => collect([$collateral->type_name, $collateral->detail_value])
+                    ->filter(fn ($part) => filled($part))->implode(': ') ?: "Collateral #{$collateral->id}"]);
+
         // Keyed by loan and step id; a later round's snapshot wins.
         $steps = $stepLoanIds->isEmpty()
             ? collect()
@@ -146,7 +187,24 @@ class AuditLogResource extends JsonResource
             ->setRelation('changeBranches', $branches)
             ->setRelation('changeRoles', $roles)
             ->setRelation('changeProducts', $products)
-            ->setRelation('changeSteps', $steps));
+            ->setRelation('changeSteps', $steps)
+            ->setRelation('changeLoans', $loans)
+            ->setRelation('changeCollaterals', $collaterals));
+    }
+
+    /**
+     * The fields of a row's old and new values that hold a loan id.
+     *
+     * @return list<string>
+     */
+    private static function loanKeysOf(AuditLog $log): array
+    {
+        $keys = [
+            ...array_keys(is_array($log->old_values) ? $log->old_values : []),
+            ...array_keys(is_array($log->new_values) ? $log->new_values : []),
+        ];
+
+        return array_values(array_unique(array_filter(array_map('strval', $keys), fn (string $key) => preg_match(self::LOAN_KEY, $key) === 1)));
     }
 
     /**
@@ -349,8 +407,9 @@ class AuditLogResource extends JsonResource
     }
 
     /**
-     * A value in plain words: a user, branch, role, product or approval step
-     * by name, a fee's value by its row's type, a boolean as Yes or No, a
+     * A value in plain words: a user, branch, role, product, loan, collateral
+     * or approval step by name, a fee's value by its row's type, a product's
+     * rate as a percent, a boolean as Yes or No, a
      * timestamp in Manila time, a date as its date, money in pesos and an enum
      * key in words. Anything else, a status and a permission included, as
      * stored.
@@ -365,6 +424,7 @@ class AuditLogResource extends JsonResource
 
         return $this->namedBy($field, $value)
             ?? $this->feeValueInWords($field, $value, $row)
+            ?? $this->productRateInWords($field, $value)
             ?? self::booleanInWords($field, $value, $this->castOf($field))
             ?? $this->timeInWords($field, $value)
             ?? $this->pesosFor($field, $value)
@@ -378,9 +438,12 @@ class AuditLogResource extends JsonResource
         $isBranch = in_array($field, self::BRANCH_KEYS, true);
         $isRole = $field === 'role' && is_string($value);
         $isProduct = in_array($field, self::PRODUCT_KEYS, true);
-        $isStep = in_array($field, self::STEP_KEYS, true) && is_array($value) && $value !== [] && array_all($value, fn (mixed $item): bool => is_string($item));
+        $isStep = in_array($field, self::STEP_KEYS, true)
+            && (is_string($value) || (is_array($value) && $value !== [] && array_all($value, fn (mixed $item): bool => is_string($item))));
+        $isLoan = preg_match(self::LOAN_KEY, $field) === 1;
+        $isCollateral = in_array($field, self::COLLATERAL_KEYS, true);
 
-        if (! $isUser && ! $isBranch && ! $isRole && ! $isProduct && ! $isStep) {
+        if (! $isUser && ! $isBranch && ! $isRole && ! $isProduct && ! $isStep && ! $isLoan && ! $isCollateral) {
             return null;
         }
 
@@ -389,7 +452,15 @@ class AuditLogResource extends JsonResource
         }
 
         if ($isStep) {
-            return implode(', ', array_map($this->stepName(...), $value));
+            return implode(', ', array_map($this->stepName(...), (array) $value));
+        }
+
+        if ($isLoan) {
+            return $this->idsByName($value, 'changeLoans', 'Loan');
+        }
+
+        if ($isCollateral) {
+            return $this->idsByName($value, 'changeCollaterals', 'Collateral');
         }
 
         if ($isProduct) {
@@ -461,6 +532,19 @@ class AuditLogResource extends JsonResource
             'fixed' => '₱'.number_format((float) $value, 2),
             default => null,
         };
+    }
+
+    /**
+     * A loan product's rate as a percent, as written without trailing zeros
+     * ("0.0000" reads "0%", "1.5" reads "1.5%").
+     */
+    private function productRateInWords(string $field, mixed $value): ?string
+    {
+        if ($this->auditable_type !== LoanProduct::class || ! in_array($field, self::PRODUCT_PERCENT_FIELDS, true) || ! is_numeric($value)) {
+            return null;
+        }
+
+        return self::plainNumber((string) $value).'%';
     }
 
     /**

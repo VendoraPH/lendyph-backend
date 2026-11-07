@@ -3,7 +3,10 @@
 use App\Models\AccountingExpense;
 use App\Models\AccountingJournal;
 use App\Models\AuditLog;
+use App\Models\Borrower;
 use App\Models\Branch;
+use App\Models\Collateral;
+use App\Models\CollateralType;
 use App\Models\Fee;
 use App\Models\Loan;
 use App\Models\LoanAdjustment;
@@ -109,11 +112,11 @@ it('keeps rates, counts, numbers and identifiers as stored, never in pesos', fun
         ->and($changes['balance_adjustment_id']['new'])->toBe('8');
 });
 
-it('reads a product fee rate as stored, its notarial fee included, never in pesos', function () {
+it('reads a product fee rate as a percent, its notarial fee included, never in pesos', function () {
     $changes = auditChangesFor(LoanProduct::class, ['processing_fee' => '2.5000', 'notarial_fee' => '1.0000'], ['processing_fee' => '3.0000', 'notarial_fee' => '1.5000']);
 
-    expect($changes['processing_fee']['new'])->toBe('3.0000')
-        ->and($changes['notarial_fee'])->toMatchArray(['old' => '1.0000', 'new' => '1.5000']);
+    expect($changes['processing_fee']['new'])->toBe('3%')
+        ->and($changes['notarial_fee'])->toMatchArray(['old' => '1%', 'new' => '1.5%']);
 });
 
 it('converts a journal total stored in centavos, so one peso never reads 100', function () {
@@ -442,7 +445,9 @@ it('reads closed approval steps by their names on the loan, else as roles', func
         'auditable_id' => $loan->id,
         'new_values' => ['round' => 1, 'steps_closed' => ['manager', 'chairwoman']],
     ]);
-    $noSteps = auditChangesFor(Loan::class, null, ['steps_closed' => ['manager', 'not_a_role']], 'loan_chain_short_circuited');
+    // No target loan, so no chain to read the names from (a target id of 1
+    // could be the loan above).
+    $noSteps = auditChangesFor(null, null, ['steps_closed' => ['manager', 'not_a_role']], 'loan_chain_short_circuited');
 
     $changes = collect($this->getJson("/api/audit-logs/{$row->id}")->assertOk()->json('data.changes'))->keyBy('field');
 
@@ -482,4 +487,118 @@ it('keeps permissions as keys, for the frontend to read', function () {
     $changes = auditChangesFor(Role::class, ['permissions' => ['loans:view']], ['permissions' => ['loans:view', 'borrowers:view']], 'role_permissions_changed');
 
     expect($changes['permissions'])->toMatchArray(['old' => 'loans:view', 'new' => 'loans:view, borrowers:view']);
+});
+
+it('reads a single approval step id by the step\'s name on the loan', function () {
+    $loan = Loan::factory()->create();
+    LoanApprovalStep::create([
+        'loan_id' => $loan->id, 'round' => 1, 'step_order' => 3, 'step_id' => 'general-bookkeeper',
+        'name' => 'General Bookkeeper', 'role' => 'general_bookkeeper', 'kind' => 'release', 'status' => 'approved',
+    ]);
+
+    $row = AuditLog::create([
+        'action' => 'loan_step_released',
+        'auditable_type' => Loan::class,
+        'auditable_id' => $loan->id,
+        'new_values' => ['role' => 'general_bookkeeper', 'round' => 1, 'step_id' => 'general-bookkeeper', 'step_order' => 3],
+    ]);
+
+    $changes = collect($this->getJson("/api/audit-logs/{$row->id}")->assertOk()->json('data.changes'))->keyBy('field');
+
+    expect($changes['step_id']['new'])->toBe('General Bookkeeper');
+});
+
+it('reads loan ids by the loan\'s number, a removed one by its id', function () {
+    $released = Loan::factory()->create(['loan_account_number' => 'LN-PROBE-17']);
+    $draft = Loan::factory()->create(['loan_account_number' => null]);
+    // Set after the create: Loan::booted() numbers the application itself.
+    DB::table('loans')->where('id', $draft->id)->update(['application_number' => 'LA-PROBE-18']);
+    $gone = Loan::max('id') + 1000;
+
+    $changes = auditChangesFor(Loan::class, ['source_loan_id' => $released->id], [
+        'source_loan_id' => $gone,
+        'restructured_into_loan_id' => $draft->id,
+        'carried_from_loan_id' => $released->id,
+    ], 'restructure_closed');
+
+    expect($changes['source_loan_id'])->toMatchArray(['old' => 'LN-PROBE-17', 'new' => "Loan #{$gone}"])
+        ->and($changes['restructured_into_loan_id']['new'])->toBe('LA-PROBE-18')
+        ->and($changes['carried_from_loan_id']['new'])->toBe('LN-PROBE-17');
+});
+
+it('reads collaterals by their type and detail, a removed one by its id', function () {
+    $type = CollateralType::create(['name' => 'Vehicle', 'detail_field_label' => 'Plate number', 'amount_field_label' => 'Value', 'source' => 'manual', 'display_order' => 99, 'is_visible' => true, 'is_seed' => false]);
+    $member = Borrower::factory()->create();
+    $car = Collateral::create(['borrower_id' => $member->id, 'collateral_type_id' => $type->id, 'detail_value' => 'ABC 1234', 'amount' => 100000]);
+    $gone = $car->id + 1000;
+
+    $changes = auditChangesFor(Loan::class, null, ['inherited_collateral_ids' => [$car->id, $gone]], 'restructure_created');
+    $none = auditChangesFor(Loan::class, ['inherited_collateral_ids' => [$car->id]], ['inherited_collateral_ids' => []]);
+
+    expect($changes['inherited_collateral_ids']['new'])->toBe("Vehicle: ABC 1234, Collateral #{$gone}")
+        ->and($none['inherited_collateral_ids'])->toMatchArray(['old' => 'Vehicle: ABC 1234', 'new' => 'none']);
+});
+
+it('reads a loan product\'s rates as a percent, never rounded, and its build-up range in pesos', function () {
+    $changes = auditChangesFor(LoanProduct::class, [
+        'interest_rate' => '3.0000', 'min_interest_rate' => '1.2500', 'processing_fee' => '0.0000',
+        'min_processing_fee' => '1.0000', 'max_processing_fee' => '5.0000', 'service_fee' => '1.0000',
+        'min_service_fee' => '0.5000', 'max_service_fee' => '2.0000', 'notarial_fee' => '1.0000',
+        'penalty_rate' => '2.0000', 'min_scb' => '0.00', 'max_scb' => '0.00',
+    ], [
+        'interest_rate' => 3.125, 'min_interest_rate' => '1.3333', 'processing_fee' => 1.5,
+        'min_processing_fee' => 1.25, 'max_processing_fee' => 10, 'service_fee' => 2,
+        'min_service_fee' => 0.75, 'max_service_fee' => 3, 'notarial_fee' => 1.5,
+        'penalty_rate' => 2.5, 'min_scb' => 100, 'max_scb' => 500,
+    ]);
+
+    expect($changes['processing_fee'])->toMatchArray(['old' => '0%', 'new' => '1.5%'])
+        ->and($changes['interest_rate'])->toMatchArray(['old' => '3%', 'new' => '3.125%'])
+        ->and($changes['min_interest_rate'])->toMatchArray(['old' => '1.25%', 'new' => '1.3333%'])
+        ->and($changes['min_processing_fee']['new'])->toBe('1.25%')
+        ->and($changes['max_processing_fee']['new'])->toBe('10%')
+        ->and($changes['service_fee']['new'])->toBe('2%')
+        ->and($changes['min_service_fee']['new'])->toBe('0.75%')
+        ->and($changes['max_service_fee']['new'])->toBe('3%')
+        ->and($changes['notarial_fee'])->toMatchArray(['old' => '1%', 'new' => '1.5%'])
+        ->and($changes['penalty_rate'])->toMatchArray(['old' => '2%', 'new' => '2.5%'])
+        ->and($changes['min_scb'])->toMatchArray(['old' => '₱0.00', 'new' => '₱100.00'])
+        ->and($changes['max_scb']['new'])->toBe('₱500.00');
+});
+
+it('loads the loan and collateral names in one query each, whatever the page size', function () {
+    $loan = Loan::factory()->create();
+
+    foreach (range(1, 4) as $i) {
+        AuditLog::create([
+            'action' => 'restructure_created',
+            'auditable_type' => Loan::class,
+            'auditable_id' => $loan->id,
+            'description' => 'loans-probe',
+            'new_values' => ['source_loan_id' => $loan->id, 'inherited_collateral_ids' => [1]],
+        ]);
+    }
+
+    DB::flushQueryLog();
+    DB::enableQueryLog();
+    $this->getJson('/api/audit-logs?search=loans-probe&per_page=4')->assertOk();
+    $queries = collect(DB::getQueryLog())->pluck('query');
+    DB::disableQueryLog();
+
+    // The loans' numbers; the rows' own targets load separately, as they always have.
+    expect($queries->filter(fn (string $sql) => str_contains($sql, '`loan_account_number`, `application_number` from `loans`'))->count())->toBe(1)
+        ->and($queries->filter(fn (string $sql) => str_contains($sql, 'from `collaterals`'))->count())->toBe(1);
+});
+
+it('names the branches in a new branch change row\'s description', function () {
+    $main = Branch::first();
+    $other = Branch::factory()->create(['name' => 'Cabadbaran']);
+    $user = User::factory()->create(['branch_id' => $main->id]);
+    $user->branches()->sync([$main->id]);
+
+    $this->putJson("/api/users/{$user->id}", ['branch_ids' => [$main->id, $other->id]])->assertOk();
+
+    $row = AuditLog::where('action', 'branches_changed')->where('auditable_id', $user->id)->latest('id')->firstOrFail();
+
+    expect($row->description)->toBe("Branch assignment for {$user->username} changed from {$main->name} to {$main->name}, Cabadbaran");
 });
