@@ -535,7 +535,12 @@ class ReportService
             ->tap(self::inBranches(self::branchScope($filters), 'loans.branch_id'))
             ->get();
 
-        $loanSummaries = $loans->map(function ($loan) use ($filters) {
+        // The Past Due Loans report's per-loan figure: what the late periods
+        // (unpaid and past grace) still owe, GET /loans/{id}/summary
+        // `overdue_amount`. One grouped query for every loan.
+        $figures = app(LoanListTotals::class)->byLoan($loans->modelKeys());
+
+        $loanSummaries = $loans->map(function ($loan) use ($filters, $figures) {
             $repayments = $loan->repayments->where('status', 'posted');
 
             if (! empty($filters['date_from'])) {
@@ -556,12 +561,16 @@ class ReportService
                 'released_at' => $loan->released_at?->toDateString(),
                 'maturity_date' => $loan->maturity_date->toDateString(),
                 'status' => $loan->status,
+                // "Past Due" for a released or ongoing loan past grace, from
+                // the periods loaded above; loans.status is unchanged.
+                'display_status' => $loan->displayStatus(),
                 'total_paid' => round($repayments->sum(fn ($r) => (float) $r->amount_paid), 2),
                 // Deprecated alias, kept one release: unpaid principal plus
                 // the premium owed, never interest or penalty.
                 'outstanding_balance' => $loan->outstanding_balance,
                 'total_outstanding' => $owed['total'] / 100,
                 'outstanding_principal' => $owed['principal'] / 100,
+                'overdue_amount' => $figures[$loan->id]['overdue_amount'] ?? 0.0,
                 'payments_count' => $repayments->count(),
             ];
         })->values()->toArray();
@@ -574,6 +583,7 @@ class ReportService
             'outstanding_balance' => 'money',
             'total_outstanding' => 'money',
             'outstanding_principal' => 'money',
+            'overdue_amount' => 'money',
         ]);
 
         return [
