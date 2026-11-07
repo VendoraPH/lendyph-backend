@@ -11,6 +11,7 @@ use App\Models\User;
 use App\Services\LoanLedgerService;
 use App\Services\LoanService;
 use App\Services\RepaymentService;
+use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Spatie\Permission\Models\Permission;
@@ -374,6 +375,117 @@ class MemberLedgerBalanceTest extends TestCase
         }
     }
 
+    public function test_within_a_day_rows_run_in_release_order_not_id_or_posting_order(): void
+    {
+        $member = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+        $loans = app(LoanService::class);
+        $this->travelTo(Carbon::parse('2026-03-02 09:00'));
+
+        // The lower id goes out later the same day, and is paid first.
+        $later = $loans->createLoan([
+            'borrower_id' => $member->id,
+            'loan_product_id' => LoanProduct::factory()->create(['interest_rate' => 3.0, 'interest_method' => 'straight', 'term' => 6, 'frequency' => 'monthly'])->id,
+            'principal_amount' => 60000,
+            'start_date' => now()->toDateString(),
+        ], $this->admin);
+        $loans->submitForReview($later);
+        $loans->approve($later, $this->admin, 'Approved for testing');
+        $earlier = $this->releasedLoanFor(borrower: $member, principal: 30000);
+        $this->travelTo(Carbon::parse('2026-03-02 15:00'));
+        $loans->release($later->fresh(), $this->admin);
+        $this->assertLessThan($earlier->id, $later->id, 'setup: the loan released later has the lower id');
+
+        $this->travelTo(Carbon::parse('2026-03-10 09:00'));
+        $this->payLoan($later, 1000);
+        $this->travelTo(Carbon::parse('2026-03-10 11:00'));
+        $this->payLoan($earlier, 1000);
+
+        $rows = $this->memberLedger($member);
+
+        $this->assertSame([$earlier->id, $later->id], $this->loanIdsOn($rows, '2026-03-02'), 'the releases run in release order');
+        $this->assertSame([$earlier->id, $later->id], $this->loanIdsOn($rows, '2026-03-10'), 'the payments run in release order, not posting order');
+    }
+
+    public function test_loans_released_at_the_same_moment_run_by_id(): void
+    {
+        $member = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+        $this->travelTo(Carbon::parse('2026-03-02 09:00'));
+        $first = $this->releasedLoanFor(borrower: $member);
+        $second = $this->releasedLoanFor(borrower: $member, principal: 30000);
+        $this->assertEquals($first->released_at, $second->released_at, 'setup: released at the same moment');
+
+        $this->travelTo(Carbon::parse('2026-03-10 09:00'));
+        $this->payLoan($second, 1000);
+        $this->travelTo(Carbon::parse('2026-03-10 11:00'));
+        $this->payLoan($first, 1000);
+
+        $this->assertSame([$first->id, $second->id], $this->loanIdsOn($this->memberLedger($member), '2026-03-10'));
+    }
+
+    public function test_the_closing_is_the_member_overviews_outstanding_less_the_premium_owed(): void
+    {
+        $member = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+        $premium = ['insurance_premium_percentage' => 1.0, 'insurance_payment_type' => 'partial', 'insurance_partial_amount' => 200];
+
+        $defaulted = $this->releasedLoanFor(borrower: $member, release: $premium);
+        $this->payLoan($defaulted, 100);
+        DB::table('loans')->where('id', $defaulted->id)->update(['status' => 'defaulted']);
+
+        $source = $this->releasedLoanFor(borrower: $member, principal: 60000, release: $premium);
+        $successor = $this->restructure($source);
+
+        $this->assertMoney(300, $this->summaryOf($defaulted)['insurance_owed'], 'setup: the defaulted loan owes premium');
+        $this->assertMoney(0, $this->summaryOf($source)['insurance_owed'], 'setup: the premium left the restructured loan');
+        $this->assertMoney(400, $this->summaryOf($successor)['insurance_owed'], 'setup: the successor owes the premium it took over');
+
+        $overview = $this->getJson("/api/borrowers/{$member->id}/loan-summary")->assertOk()->json('data');
+        $response = $this->getJson("/api/borrowers/{$member->id}/ledger")->assertOk();
+        $rows = $response->json('data');
+
+        $this->assertMoney($overview['total_outstanding'] - 700, $response->json('meta.closing.balance'), 'closing = Outstanding less the premium owed');
+        $this->assertMoney($response->json('meta.closing.balance'), end($rows)['balance']);
+    }
+
+    public function test_a_payment_that_lands_during_the_read_keeps_its_receipt_and_amount(): void
+    {
+        $member = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+        $loan = $this->releasedLoanFor(borrower: $member);
+        $armed = true;
+        $posted = null;
+
+        DB::listen(function (QueryExecuted $query) use (&$armed, &$posted, $loan): void {
+            if ($armed && str_contains($query->sql, 'from `loan_ledger_entries`')) {
+                $armed = false;
+                $posted = $this->payLoan($loan, 11800);
+            }
+        });
+
+        $rows = $this->memberLedger($member);
+
+        $this->assertNotNull($posted, 'setup: the payment landed during the read');
+        $payment = collect($rows)->firstWhere('repayment_id', $posted->id);
+        $this->assertNotNull($payment, 'setup: the ledger read the payment');
+        $this->assertSame($posted->receipt_number, $payment['reference']);
+        $this->assertMoney(11800, $payment['amount_paid']);
+    }
+
+    public function test_a_restructured_loan_cannot_be_voided_and_its_history_stays(): void
+    {
+        $member = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+        $source = $this->releasedLoanFor(borrower: $member);
+        $paid = $this->payLoan($source, 11800);
+        $this->restructure($source);
+        $before = $this->memberLedger($member);
+
+        $this->patchJson("/api/loans/{$source->id}/void")
+            ->assertStatus(422)
+            ->assertJsonValidationErrors('status');
+
+        $this->assertSame('restructured', $source->fresh()->status);
+        $this->assertSame($before, $this->memberLedger($member));
+        $this->assertContains($paid->receipt_number, array_column($before, 'reference'), 'its real payment stays on the ledger');
+    }
+
     public function test_it_needs_both_borrowers_view_and_loans_view(): void
     {
         $member = Borrower::factory()->create(['branch_id' => $this->branch->id]);
@@ -462,6 +574,15 @@ class MemberLedgerBalanceTest extends TestCase
         $balances = $loanRow['balances'];
 
         return round($balances['principal'] + $balances['interest'] + $balances['penalty'], 2);
+    }
+
+    /**
+     * @param  list<array<string, mixed>>  $rows
+     * @return list<int>
+     */
+    private function loanIdsOn(array $rows, string $date): array
+    {
+        return array_column(array_filter($rows, fn (array $row): bool => $row['date'] === $date), 'loan_id');
     }
 
     /** @param  list<string>  $permissions */

@@ -60,22 +60,28 @@ final class MemberLedgerService
             ->orderBy('loans.id')
             ->get();
 
+        $shareCapitalVisible = $viewer->can('share_capital:view');
+        $ledgers = [];
+        $closing = ['principal' => 0, 'interest' => 0, 'penalty' => 0];
+
+        foreach ($loans as $order => $loan) {
+            $ledgers[$order] = $this->loanLedger->forLoan($loan);
+
+            foreach ($closing as $column => $centavos) {
+                $closing[$column] = $centavos + LoanService::toCentavos($ledgers[$order]['closing'][$column]);
+            }
+        }
+
+        // Read after the ledgers, so this holds every payment they hold, even
+        // one posted while they were being read.
         $repayments = Repayment::whereIn('loan_id', $loans->pluck('id'))
             ->get(['id', 'receipt_number', 'amount_paid'])
             ->keyBy('id');
 
-        $shareCapitalVisible = $viewer->can('share_capital:view');
         $entries = [];
-        $closing = ['principal' => 0, 'interest' => 0, 'penalty' => 0];
 
         foreach ($loans as $order => $loan) {
-            $ledger = $this->loanLedger->forLoan($loan);
-
-            foreach ($closing as $column => $centavos) {
-                $closing[$column] = $centavos + LoanService::toCentavos($ledger['closing'][$column]);
-            }
-
-            array_push($entries, ...$this->entries($loan, $order, $ledger['rows'], $repayments, $shareCapitalVisible));
+            array_push($entries, ...$this->entries($loan, $order, $ledgers[$order]['rows'], $repayments, $shareCapitalVisible));
         }
 
         usort($entries, fn (array $a, array $b): int => [$a['date'], $a['order'], $a['index']] <=> [$b['date'], $b['order'], $b['index']]);
