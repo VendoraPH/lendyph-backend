@@ -1,8 +1,10 @@
 <?php
 
 use App\Models\AuditLog;
+use App\Models\Borrower;
 use App\Models\BrandingSetting;
 use App\Models\CsvImportRun;
+use App\Models\Loan;
 use App\Models\LoanApprovalStep;
 use App\Models\Role;
 use App\Models\User;
@@ -236,4 +238,25 @@ it('quotes the role label as a JSON string in descriptions', function () {
 
 it('refuses, in tests, an audit row for a class with no module', function () {
     expect(fn () => AuditLogService::log('probe', new BrandingSetting))->toThrow(LogicException::class);
+});
+
+it('names a member target "Member" in the CSV export, the way the Audit Trail shows it', function () {
+    $member = Borrower::factory()->create();
+    foreach ([[$member->getMorphClass(), $member->id], [Loan::class, 1]] as [$type, $id]) {
+        AuditLog::create([
+            'action' => 'updated',
+            'user_id' => $this->admin->id,
+            'auditable_type' => $type,
+            'auditable_id' => $id,
+            'description' => 'target-type-probe',
+        ]);
+    }
+
+    $csv = $this->get('/api/audit-logs/export?search=target-type-probe', ['Accept' => 'application/json'])
+        ->assertOk()
+        ->streamedContent();
+
+    $rows = collect(explode("\n", trim($csv)))->slice(1)->map(fn (string $line) => str_getcsv($line, escape: ''))->values();
+
+    expect($rows->pluck(3)->all())->toBe(['Member', 'Loan']);
 });
