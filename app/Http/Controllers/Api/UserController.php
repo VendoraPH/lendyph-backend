@@ -228,9 +228,9 @@ class UserController extends Controller
             auditable: $user,
             newValues: ['branch_ids' => $branchIds],
             description: sprintf(
-                'User %s created with %d branch assignment(s)',
+                'User %s created with %s',
                 $user->username,
-                count($branchIds),
+                count($branchIds) === 1 ? '1 branch' : count($branchIds).' branches',
             ),
         );
 

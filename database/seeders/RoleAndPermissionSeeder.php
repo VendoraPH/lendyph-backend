@@ -147,7 +147,7 @@ class RoleAndPermissionSeeder extends Seeder
         // Default metadata for seeded system roles — flags them so the admin UI
         // knows they cannot be deleted or renamed.
         $systemRoleAttrs = [
-            'super_admin' => ['description' => 'Developer-side super administrator — every permission plus Gate::before bypass. Reserved for the platform team, not client staff.'],
+            'super_admin' => ['description' => 'Platform super administrator — holds every permission. Reserved for the platform team, not client staff.'],
             'admin' => ['description' => 'Client-side administrator — every operational permission for the lending organization (members, loans, payments, staff, reports, settings).'],
             'loan_officer' => ['description' => 'Creates and processes loan applications; manages members and share capital.'],
             'cashier' => ['description' => 'Records payments, releases approved loans, and reconciles cash.'],

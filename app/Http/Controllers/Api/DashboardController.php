@@ -30,7 +30,7 @@ class DashboardController extends Controller
         tags: ['Dashboard'],
         security: [['sanctum' => []]],
         responses: [
-            new OA\Response(response: 200, description: 'Dashboard KPI metrics with sparklines'),
+            new OA\Response(response: 200, description: 'Dashboard KPI metrics with sparklines. `total_portfolio` is the gross loan portfolio: the unpaid principal of the collectible loans (released, ongoing, defaulted) in the caller\'s branches, so a paid-off loan adds nothing and a defaulted loan counts. It equals GET /api/reports/loan-balance-summary `outstanding_principal` with no date range, from the same query. `sparklines.portfolio` is in thousands: its past points are the outstanding principal in each past week\'s last daily snapshot (null without a snapshot, or without branches:view_all), and its last point is this card.'),
             new OA\Response(response: 401, description: 'Unauthenticated'),
         ],
     )]

@@ -678,7 +678,7 @@ DESC,
         responses: [
             new OA\Response(response: 200, description: 'Loan updated'),
             new OA\Response(response: 403, description: 'Missing loans:update, or sent `collaterals` without collaterals:update'),
-            new OA\Response(response: 409, description: 'Sent `collaterals`, and another change to this collateral was saved at the same time; nothing was written. Reload and try again'),
+            new OA\Response(response: 409, description: 'Nothing was written; reload and try again. Another change to this loan or its collateral was saved at the same time, a new co-maker record collided on its number, or, with no `collaterals` sent, the loan stopped being editable after the request read it (checked on the locked loan row, so a loan approved mid-request is never changed).'),
             new OA\Response(response: 422, description: 'Validation error or not editable (on `status`; with `collaterals`, checked again on the locked loan row, so a loan approved while the request was in flight is refused). Collateral errors are on `collaterals.{index}.collateral_id`: not registered to this loan\'s borrower, listed twice, no longer exists, or already pledged to another active loan (the message names it)'),
         ],
     )]

@@ -91,7 +91,7 @@ class AuditLogController extends Controller
             ->pluck('count', 'action')
             ->toArray();
 
-        AuditLogResource::loadChangeUsers($logs->getCollection());
+        AuditLogResource::loadChangeNames($logs->getCollection());
 
         return AuditLogResource::collection($logs)
             ->additional(['meta' => ['stats' => [
@@ -180,13 +180,12 @@ class AuditLogController extends Controller
     }
 
     /**
-     * The target's kind as the Audit Trail screen shows it: the model's class
-     * name, with a member's classes (`Borrower`, `BorrowerSubmissionToken`)
-     * read as Member. Stored rows keep the class name.
+     * The target's kind in the Audit Trail screen's words ("Co-maker", "Loan
+     * approval step"). Stored rows keep the class name.
      */
     private static function targetType(?string $auditableType): string
     {
-        return (string) preg_replace('/^Borrower/', 'Member', class_basename($auditableType ?? ''));
+        return AuditLogResource::typeInWords(class_basename($auditableType ?? ''));
     }
 
     #[OA\Get(
@@ -211,7 +210,7 @@ class AuditLogController extends Controller
         $this->authorize(BranchAccess::VIEW_ALL);
 
         $auditLog->load('user', 'auditable');
-        AuditLogResource::loadChangeUsers([$auditLog]);
+        AuditLogResource::loadChangeNames([$auditLog]);
 
         return new AuditLogResource($auditLog);
     }

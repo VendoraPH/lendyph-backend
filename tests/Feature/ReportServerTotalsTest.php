@@ -170,7 +170,7 @@ class ReportServerTotalsTest extends TestCase
                 ->assertJsonPath('totals.total_principal_due', 6500.49)
                 ->assertJsonPath('totals.total_interest_due', 650.04)
                 ->assertJsonPath('totals.total_penalty', 15.1)
-                ->assertJsonPath('totals.total_due', 7150.53)
+                ->assertJsonPath('totals.total_due', 7165.63)
                 ->assertJsonPath('totals.total_paid', 3000.74)
                 ->assertJsonPath('totals.total_balance', 4164.89);
         }

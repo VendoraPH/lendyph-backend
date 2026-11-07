@@ -179,9 +179,10 @@ class BranchScopedReportsTest extends TestCase
     {
         $receipt = $this->here->repayments()->firstOrFail()->receipt_number;
 
-        $row = $this->getJson("/api/reports/statement-of-account/{$this->here->id}")
+        $lines = $this->getJson("/api/reports/statement-of-account/{$this->here->id}")
             ->assertOk()
-            ->json('data.transactions.0');
+            ->json('data.transactions');
+        $row = collect($lines)->firstWhere('type', 'payment');
 
         $this->assertSame('Cash', $row['payment_method']);
         $this->assertSame("Payment {$receipt}", $row['particulars']);

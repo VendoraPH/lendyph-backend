@@ -9,8 +9,8 @@ use Spatie\Permission\PermissionRegistrar;
 
 /**
  * Reword the admin and loan_officer descriptions from "borrowers" to
- * "members" on a deployment that still holds the text the seeder wrote before
- * 2026-11-07.
+ * "members", and take the developer words out of the super_admin one, on a
+ * deployment that still holds the text the seeder wrote before 2026-11-07.
  *
  * Only `web` guard roles are read. A role is reworded only when its
  * description still equals the old seeded text exactly; one somebody edited,
@@ -23,9 +23,10 @@ use Spatie\Permission\PermissionRegistrar;
  * builder, so the trait writes no second row.
  *
  * Used by `roles:reword-member-descriptions` (with `--dry-run` to preview a
- * database). The 2026_11_07_090000 migration does the same on deploy, written
- * out with the query builder so that it depends on no application class; keep
- * the two in step (RewordRoleMemberDescriptionsTest compares them).
+ * database). The 2026_11_07_090000 and 2026_11_07_100000 migrations do the same
+ * on deploy, written out with the query builder so that they depend on no
+ * application class; keep them in step (RewordRoleMemberDescriptionsTest and
+ * RewordSuperAdminDescriptionTest compare them).
  */
 class RoleMemberDescriptionReword
 {
@@ -43,6 +44,21 @@ class RoleMemberDescriptionReword
             'Creates and processes loan applications; manages borrowers and share capital.',
             'Creates and processes loan applications; manages members and share capital.',
         ],
+        'super_admin' => [
+            'Developer-side super administrator — every permission plus Gate::before bypass. Reserved for the platform team, not client staff.',
+            'Platform super administrator — holds every permission. Reserved for the platform team, not client staff.',
+        ],
+    ];
+
+    /**
+     * What the audit row says the correction was, by role key.
+     *
+     * @var array<string, string>
+     */
+    private const CORRECTIONS = [
+        'admin' => 'now says "members" instead of "borrowers"',
+        'loan_officer' => 'now says "members" instead of "borrowers"',
+        'super_admin' => 'no longer uses developer wording',
     ];
 
     /**
@@ -140,9 +156,10 @@ class RoleMemberDescriptionReword
                 'ip_address' => null,
                 'user_agent' => null,
                 'description' => sprintf(
-                    'System correction: Role %s (%s) description now says "members" instead of "borrowers".',
+                    'System correction: Role %s (%s) description %s.',
                     json_encode($label, JSON_UNESCAPED_UNICODE),
                     $role->name,
+                    self::CORRECTIONS[$role->name],
                 ),
                 'created_at' => $now,
             ]);

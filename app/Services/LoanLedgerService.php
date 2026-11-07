@@ -97,7 +97,8 @@ final class LoanLedgerService
             ];
         }
 
-        $adjustments = $loan->adjustments()->where('status', 'applied')->orderBy('applied_at')->orderBy('id')->get();
+        // reorder(): the relation carries latest(), which an orderBy only adds to.
+        $adjustments = $loan->adjustments()->where('status', 'applied')->reorder('applied_at')->orderBy('id')->get();
         $entries = LoanLedgerEntry::where('loan_id', $loan->id)->orderBy('id')->get();
         $repayments = $loan->repayments()->orderBy('id')->get();
         $closures = $this->closures($adjustments);

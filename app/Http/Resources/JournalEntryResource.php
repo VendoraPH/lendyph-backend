@@ -117,10 +117,11 @@ class JournalEntryResource extends JsonResource
             'branch_name' => $this->whenLoaded('branch', fn () => $this->branch?->name),
             'status' => $this->status,
             'lines' => JournalLineResource::collection($this->whenLoaded('lines')),
-            // Centavos, server-computed from the persisted lines on post. Equal
-            // on anything that is not a draft.
-            'total_debit' => (int) $this->total_debit,
-            'total_credit' => (int) $this->total_credit,
+            // Centavos. Stored from the persisted lines on post, equal on
+            // anything that is not a draft; a draft stores none yet, so it reads
+            // its lines (self::totalOf()).
+            'total_debit' => $this->totalOf('debit'),
+            'total_credit' => $this->totalOf('credit'),
             'reverses_journal_id' => $this->reverses_journal_id,
             'reversed_by_journal_id' => $this->reversed_by_journal_id,
             // The document that caused this entry. All three are null together
@@ -137,6 +138,21 @@ class JournalEntryResource extends JsonResource
             'posted_by' => $this->whenLoaded('poster', fn () => $this->poster?->full_name),
             'posted_at' => $this->posted_at,
         ];
+    }
+
+    /**
+     * A journal's total on one side, in centavos: the stored figure, or a
+     * draft's lines added up, so a draft never reads ₱0.00. Every caller loads
+     * the lines; a draft without them answers the stored figure rather than one
+     * query per row.
+     */
+    private function totalOf(string $side): int
+    {
+        if ($this->status === 'draft' && $this->relationLoaded('lines')) {
+            return $this->lines->sum(fn ($line): int => (int) $line->{$side});
+        }
+
+        return (int) $this->{"total_{$side}"};
     }
 
     /**

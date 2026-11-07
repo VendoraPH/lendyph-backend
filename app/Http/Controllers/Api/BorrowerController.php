@@ -9,19 +9,21 @@ use App\Http\Requests\Borrower\StoreBorrowerRequest;
 use App\Http\Requests\Borrower\UpdateBorrowerRequest;
 use App\Http\Resources\BorrowerResource;
 use App\Models\Borrower;
+use App\Rules\NoDuplicateBorrower;
 use App\Services\BorrowerLoanSummaryService;
 use App\Services\BorrowerPurgeService;
 use App\Services\BorrowerSubmissionTokenService;
 use App\Services\BranchAccess;
 use App\Services\Diagnostics\ErrorDigest;
+use App\Services\GeneratedNumberWrite;
 use App\Services\MemberLedgerService;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\Validator;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 use OpenApi\Attributes as OA;
@@ -280,6 +282,7 @@ DESC,
         responses: [
             new OA\Response(response: 201, description: 'Borrower created (authenticated: full BorrowerResource; anonymous: { id, submission_token, expires_at })'),
             new OA\Response(response: 401, description: 'Anonymous request with status other than `pending`'),
+            new OA\Response(response: 409, description: 'Kept colliding with other saves taking the next member code. Nothing was saved; submit again.'),
             new OA\Response(response: 403, description: 'Forbidden'),
             new OA\Response(
                 response: 422,
@@ -349,17 +352,20 @@ DESC,
         $attributes = $request->safe()->except('force');
 
         try {
-            // Wrap in a transaction so the borrower insert and the Borrower::created
-            // hook (which creates the ShareCapitalPledge) are atomic — if either fails,
-            // neither row is left behind.
-            return DB::transaction(function () use ($attributes) {
+            // In one transaction so the borrower insert and the Borrower::created
+            // hook (which creates the ShareCapitalPledge) are atomic — if either
+            // fails, neither row is left behind. Tried again when another create
+            // takes the same `borrower_code` or the two deadlock; 409 if it keeps
+            // happening.
+            return GeneratedNumberWrite::run(function () use ($request, $attributes) {
+                $this->refuseDuplicateUnderLock($request);
+
                 return Borrower::create($attributes);
-            });
+            }, GeneratedNumberWrite::MEMBER_CONFLICT);
         } catch (UniqueConstraintViolationException $e) {
             $uuid = $attributes['registration_uuid'] ?? null;
 
-            // Not an idempotency-key collision — `borrower_code` is the other
-            // unique column on this table and a clash there is a real fault.
+            // Not an idempotency-key collision: some other unique column clashed.
             if (! is_string($uuid) || ! Borrower::where('registration_uuid', $uuid)->exists()) {
                 throw $e;
             }
@@ -389,10 +395,35 @@ DESC,
              */
             unset($attributes['registration_uuid']);
 
-            return DB::transaction(function () use ($attributes) {
-                return Borrower::create($attributes);
-            });
+            return GeneratedNumberWrite::run(
+                fn () => Borrower::create($attributes),
+                GeneratedNumberWrite::MEMBER_CONFLICT,
+            );
         }
+    }
+
+    /**
+     * Run the duplicate check again under the lock on the newest member, so two
+     * saves of one person that both passed validation can't both create them,
+     * whether the second waited on that lock or was tried again after a
+     * collision. The lock comes first: a plain read before it would fix a
+     * snapshot from before the other save committed.
+     *
+     * Not for "Create Anyway" (`force`), and not for a registration with a
+     * `registration_uuid`: there the unique index decides, and the loser reads
+     * the winner's row back rather than being refused.
+     */
+    private function refuseDuplicateUnderLock(StoreBorrowerRequest $request): void
+    {
+        if ($request->boolean('force') || $request->filled('registration_uuid')) {
+            return;
+        }
+
+        Borrower::query()->orderByDesc('id')->lockForUpdate()->first(['id']);
+
+        Validator::make($request->safe()->only(['first_name', 'middle_name', 'last_name', 'birthdate']), [
+            'first_name' => [new NoDuplicateBorrower(revealDetails: (bool) $request->user(), viewer: $request->user())],
+        ])->validate();
     }
 
     #[OA\Get(
