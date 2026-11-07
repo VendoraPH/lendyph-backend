@@ -535,7 +535,12 @@ class ReportService
             ->tap(self::inBranches(self::branchScope($filters), 'loans.branch_id'))
             ->get();
 
-        $loanSummaries = $loans->map(function ($loan) use ($filters) {
+        // The Past Due Loans report's per-loan figure: what the late periods
+        // (unpaid and past grace) still owe, GET /loans/{id}/summary
+        // `overdue_amount`. One grouped query for every loan.
+        $figures = app(LoanListTotals::class)->byLoan($loans->modelKeys());
+
+        $loanSummaries = $loans->map(function ($loan) use ($filters, $figures) {
             $repayments = $loan->repayments->where('status', 'posted');
 
             if (! empty($filters['date_from'])) {
@@ -545,6 +550,10 @@ class ReportService
                 $repayments = $repayments->where('payment_date', '<=', Carbon::parse($filters['date_to']));
             }
 
+            // Loan::owedCentavos(), the rule GET /loans/{id}/summary and
+            // LoanResource state, so the figures agree to the centavo.
+            $owed = $loan->owedCentavos($loan->amortizationSchedules);
+
             return [
                 'loan_account_number' => $loan->loan_account_number,
                 'product_name' => $loan->loanProduct->name,
@@ -552,14 +561,30 @@ class ReportService
                 'released_at' => $loan->released_at?->toDateString(),
                 'maturity_date' => $loan->maturity_date->toDateString(),
                 'status' => $loan->status,
+                // "Past Due" for a released or ongoing loan past grace, from
+                // the periods loaded above; loans.status is unchanged.
+                'display_status' => $loan->displayStatus(),
                 'total_paid' => round($repayments->sum(fn ($r) => (float) $r->amount_paid), 2),
+                // Deprecated alias, kept one release: unpaid principal plus
+                // the premium owed, never interest or penalty.
                 'outstanding_balance' => $loan->outstanding_balance,
+                'total_outstanding' => $owed['total'] / 100,
+                'outstanding_principal' => $owed['principal'] / 100,
+                'overdue_amount' => $figures[$loan->id]['overdue_amount'] ?? 0.0,
                 'payments_count' => $repayments->count(),
             ];
         })->values()->toArray();
 
         $totalPortfolio = $loans->sum(fn ($l) => (float) $l->principal_amount);
-        $totalOutstanding = array_sum(array_column($loanSummaries, 'outstanding_balance'));
+        $loansTotals = self::columnTotals($loanSummaries, [
+            'principal_amount' => 'money',
+            'total_paid' => 'money',
+            'payments_count' => 'count',
+            'outstanding_balance' => 'money',
+            'total_outstanding' => 'money',
+            'outstanding_principal' => 'money',
+            'overdue_amount' => 'money',
+        ]);
 
         return [
             'borrower' => [
@@ -571,20 +596,16 @@ class ReportService
             'loans' => $loanSummaries,
             // The member ledger card's loans table, each column added up in
             // whole centavos, under the row keys of `loans`.
-            'loans_totals' => self::columnTotals($loanSummaries, [
-                'principal_amount' => 'money',
-                'total_paid' => 'money',
-                'payments_count' => 'count',
-                'outstanding_balance' => 'money',
-            ]),
+            'loans_totals' => $loansTotals,
             'totals' => [
                 'total_loans' => $loans->count(),
                 'total_portfolio' => round($totalPortfolio, 2),
                 // The same figure under the name the ledger's Total Released
                 // reads.
                 'total_principal' => round($totalPortfolio, 2),
-                'total_paid' => self::columnTotals($loanSummaries, ['total_paid' => 'money'])['total_paid'],
-                'total_outstanding' => round($totalOutstanding, 2),
+                'total_paid' => $loansTotals['total_paid'],
+                // Everything the loans still owe: the rows' total_outstanding.
+                'total_outstanding' => $loansTotals['total_outstanding'],
             ],
             'generated_at' => now()->toDateTimeString(),
         ];

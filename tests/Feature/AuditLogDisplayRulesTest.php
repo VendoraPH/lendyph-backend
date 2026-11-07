@@ -1,11 +1,16 @@
 <?php
 
+use App\Http\Resources\AuditLogResource;
+use App\Models\AccountingJournal;
 use App\Models\AuditLog;
 use App\Models\Borrower;
 use App\Models\BrandingSetting;
+use App\Models\CoMaker;
 use App\Models\CsvImportRun;
+use App\Models\GCashTransaction;
 use App\Models\Loan;
 use App\Models\LoanApprovalStep;
+use App\Models\LoanProduct;
 use App\Models\Role;
 use App\Models\User;
 use App\Services\AuditLogService;
@@ -259,4 +264,228 @@ it('names a member target "Member" in the CSV export, the way the Audit Trail sh
     $rows = collect(explode("\n", trim($csv)))->slice(1)->map(fn (string $line) => str_getcsv($line, escape: ''))->values();
 
     expect($rows->pluck(3)->all())->toBe(['Member', 'Loan']);
+});
+
+it('reads array values in the change list in words, and returns the stored values as they are', function () {
+    $old = [
+        'tags' => ['urgent', 'manual'],
+        'deductions' => [['name' => 'Processing Fee', 'amount' => 150], ['label' => 'Notarial Fee', 'amount' => 100]],
+        'steps' => [['title' => 'Manager'], ['title' => 'BOD']],
+        'lines' => [['amount' => 1], ['amount' => 2], ['amount' => 3]],
+        'settings' => ['grace_days' => 3, 'rate' => 2],
+        'collaterals' => [],
+    ];
+    $new = [
+        'tags' => ['urgent'],
+        'deductions' => [['name' => 'Processing Fee', 'amount' => 150]],
+        'steps' => [],
+        'lines' => [['amount' => 1]],
+        'settings' => ['grace_days' => 5],
+        'collaterals' => [7, 9],
+    ];
+    $row = AuditLog::create([
+        'action' => 'updated',
+        'user_id' => $this->admin->id,
+        'old_values' => $old,
+        'new_values' => $new,
+        'description' => 'array-words-probe',
+    ]);
+
+    $response = $this->getJson("/api/audit-logs/{$row->id}")->assertOk();
+
+    expect(collect($response->json('data.changes'))->keyBy('field')->map(fn ($c) => [$c['old'], $c['new']])->all())->toEqual([
+        'tags' => ['urgent, manual', 'urgent'],
+        'deductions' => ['Processing Fee, Notarial Fee', 'Processing Fee'],
+        'steps' => ['Manager, BOD', 'none'],
+        'lines' => ['3 entries', '1 entry'],
+        'settings' => ['2 fields', '1 field'],
+        'collaterals' => ['none', '7, 9'],
+    ]);
+    expect($response->json('data.old_values'))->toEqual($old)
+        ->and($response->json('data.new_values'))->toEqual($new);
+});
+
+it('labels a journal target by its number once posted, else by its reference', function () {
+    $journal = AccountingJournal::create([
+        'date' => now()->toDateString(),
+        'source' => 'loan_collection',
+        'reference' => 'COL-10254',
+        'description' => 'Collection',
+    ]);
+    $row = AuditLog::create([
+        'action' => 'updated',
+        'user_id' => $this->admin->id,
+        'auditable_type' => $journal->getMorphClass(),
+        'auditable_id' => $journal->id,
+    ]);
+
+    $this->getJson("/api/audit-logs/{$row->id}")->assertOk()->assertJsonPath('data.target.label', 'COL-10254');
+
+    // Posting assigns the number; the model refuses updates, so set it as posting would.
+    DB::table('accounting_journals')->where('id', $journal->id)->update(['journal_no' => 'JE-000557']);
+    $this->getJson("/api/audit-logs/{$row->id}")->assertOk()->assertJsonPath('data.target.label', 'JE-000557');
+});
+
+it('names a target with no label by its class in words', function () {
+    $journal = AccountingJournal::create([
+        'date' => now()->toDateString(),
+        'source' => 'loan_collection',
+        'description' => 'No reference',
+    ]);
+    $label = function (string $type, int $id): string {
+        $row = AuditLog::create([
+            'action' => 'updated',
+            'user_id' => $this->admin->id,
+            'auditable_type' => $type,
+            'auditable_id' => $id,
+        ]);
+
+        return $this->getJson("/api/audit-logs/{$row->id}")->assertOk()->json('data.target.label');
+    };
+
+    expect($label($journal->getMorphClass(), $journal->id))->toBe("Accounting journal #{$journal->id}")
+        ->and($label(Borrower::class, 999991))->toBe('Member #999991')
+        ->and($label(CoMaker::class, 999992))->toBe('Co-maker #999992')
+        ->and($label(LoanApprovalStep::class, 999993))->toBe('Loan approval step #999993')
+        ->and($label(GCashTransaction::class, 999994))->toBe('GCash transaction #999994');
+});
+
+it('lists a change inside a record that reads the same in words, with both amounts', function () {
+    $row = AuditLog::create([
+        'action' => 'updated',
+        'user_id' => $this->admin->id,
+        'old_values' => ['deductions' => [['name' => 'Processing Fee', 'amount' => 1500], ['name' => 'Notarial Fee', 'amount' => 100]]],
+        'new_values' => ['deductions' => [['name' => 'Processing Fee', 'amount' => 2000], ['name' => 'Notarial Fee', 'amount' => 100]]],
+    ]);
+
+    $this->getJson("/api/audit-logs/{$row->id}")
+        ->assertOk()
+        ->assertJsonPath('data.changes', [[
+            'field' => 'deductions',
+            'old' => "Processing Fee \u{20B1}1,500.00, Notarial Fee \u{20B1}100.00",
+            'new' => "Processing Fee \u{20B1}2,000.00, Notarial Fee \u{20B1}100.00",
+        ]]);
+});
+
+it('lists a change inside an associative array that reads the same in words', function () {
+    $row = AuditLog::create([
+        'action' => 'updated',
+        'user_id' => $this->admin->id,
+        'old_values' => ['settings' => ['grace_days' => 3, 'rate' => 2]],
+        'new_values' => ['settings' => ['grace_days' => 5, 'rate' => 2]],
+    ]);
+
+    $this->getJson("/api/audit-logs/{$row->id}")
+        ->assertOk()
+        ->assertJsonPath('data.changes', [[
+            'field' => 'settings',
+            'old' => 'grace days: 3; rate: 2',
+            'new' => 'grace days: 5; rate: 2',
+        ]]);
+});
+
+it('does not list the same content in a different key order', function () {
+    $row = new AuditLog([
+        'action' => 'updated',
+        'old_values' => [
+            'settings' => ['grace_days' => 3, 'tiers' => ['min' => 1, 'max' => 9]],
+            'deductions' => [['name' => 'Processing Fee', 'amount' => 1500]],
+        ],
+        'new_values' => [
+            'deductions' => [['amount' => 1500, 'name' => 'Processing Fee']],
+            'settings' => ['tiers' => ['max' => 9, 'min' => 1], 'grace_days' => 3],
+        ],
+    ]);
+
+    expect((new AuditLogResource($row))->toArray(request())['changes'])->toBe([]);
+});
+
+it('reads an Eloquent edit of an array field in words on both sides, with the amounts when only an amount changed', function () {
+    $loan = Loan::factory()->create(['deductions' => [
+        ['name' => 'Processing Fee', 'amount' => 1500, 'type' => 'fixed'],
+        ['name' => 'Notarial Fee', 'amount' => 100, 'type' => 'fixed'],
+    ]]);
+    $loan->update(['deductions' => [
+        ['name' => 'Processing Fee', 'amount' => 2000, 'type' => 'fixed'],
+        ['name' => 'Notarial Fee', 'amount' => 100, 'type' => 'fixed'],
+    ]]);
+    $row = latestAuditRow('updated', $loan->getMorphClass(), $loan->id);
+    expect($row->new_values['deductions'])->toBeString();
+
+    $change = collect($this->getJson("/api/audit-logs/{$row->id}")->assertOk()->json('data.changes'))->firstWhere('field', 'deductions');
+
+    expect($change)->toBe([
+        'field' => 'deductions',
+        'old' => "Processing Fee \u{20B1}1,500.00, Notarial Fee \u{20B1}100.00",
+        'new' => "Processing Fee \u{20B1}2,000.00, Notarial Fee \u{20B1}100.00",
+    ]);
+
+    $product = LoanProduct::factory()->create(['frequencies' => ['monthly']]);
+    $product->update(['frequencies' => ['monthly', 'weekly']]);
+    $productRow = latestAuditRow('updated', $product->getMorphClass(), $product->id);
+
+    expect(collect($this->getJson("/api/audit-logs/{$productRow->id}")->assertOk()->json('data.changes'))->firstWhere('field', 'frequencies'))
+        ->toBe(['field' => 'frequencies', 'old' => 'monthly', 'new' => 'monthly, weekly']);
+});
+
+it('prints a value in pesos only for a fixed record, and never a percentage', function () {
+    $shown = function (array $old, array $new): array {
+        $row = AuditLog::create(['action' => 'updated', 'user_id' => $this->admin->id, 'old_values' => ['fees' => $old], 'new_values' => ['fees' => $new]]);
+        $change = $this->getJson("/api/audit-logs/{$row->id}")->assertOk()->json('data.changes.0');
+
+        return [$change['old'], $change['new']];
+    };
+
+    expect($shown([['name' => 'Late Fee', 'type' => 'fixed', 'value' => 50]], [['name' => 'Late Fee', 'type' => 'fixed', 'value' => 75]]))
+        ->toBe(["Late Fee \u{20B1}50.00", "Late Fee \u{20B1}75.00"]);
+
+    foreach ([
+        [[['name' => 'Late Fee', 'type' => 'percentage', 'value' => 2]], [['name' => 'Late Fee', 'type' => 'percentage', 'value' => 3]]],
+        [[['name' => 'Processing Fee', 'type' => 'percentage', 'amount' => 2]], [['name' => 'Processing Fee', 'type' => 'percentage', 'amount' => 3]]],
+    ] as [$old, $new]) {
+        [$oldShown, $newShown] = $shown($old, $new);
+        expect($oldShown)->not->toContain("\u{20B1}")->toContain('2')
+            ->and($newShown)->not->toContain("\u{20B1}")->toContain('3');
+    }
+});
+
+it('does not list a number stored in another form', function () {
+    $row = new AuditLog([
+        'action' => 'updated',
+        'old_values' => ['count' => 5, 'amount' => 1500, 'fee' => 1500, 'terms' => ['rate' => '2.50']],
+        'new_values' => ['count' => '5', 'amount' => 1500.0, 'fee' => '1500.0', 'terms' => ['rate' => 2.5]],
+    ]);
+
+    expect((new AuditLogResource($row))->toArray(request())['changes'])->toBe([]);
+});
+
+it('lists a digit string that changed, such as a mobile number losing its leading zero', function () {
+    $member = Borrower::factory()->create(['contact_number' => '09171234567']);
+    $member->update(['contact_number' => '9171234567']);
+    $row = latestAuditRow('updated', $member->getMorphClass(), $member->id);
+
+    expect(collect($this->getJson("/api/audit-logs/{$row->id}")->assertOk()->json('data.changes'))->firstWhere('field', 'contact_number'))
+        ->toBe(['field' => 'contact_number', 'old' => '09171234567', 'new' => '9171234567']);
+
+    $padded = new AuditLog([
+        'action' => 'updated',
+        'old_values' => ['code' => '007', 'reference' => '1234567890123456789', 'spaced' => ' 5'],
+        'new_values' => ['code' => '7', 'reference' => '1234567890123456780', 'spaced' => '5'],
+    ]);
+
+    expect(collect((new AuditLogResource($padded))->toArray(request())['changes'])->pluck('field')->sort()->values()->all())
+        ->toBe(['code', 'reference', 'spaced']);
+});
+
+it('shows the peso amounts of a stored percentage deduction', function () {
+    $loan = Loan::factory()->create(['deductions' => [
+        ['name' => 'Processing Fee', 'amount' => 300, 'type' => 'percentage', 'original_value' => 3],
+    ]]);
+    $loan->update(['deductions' => [
+        ['name' => 'Processing Fee', 'amount' => 360, 'type' => 'percentage', 'original_value' => 3],
+    ]]);
+    $row = latestAuditRow('updated', $loan->getMorphClass(), $loan->id);
+
+    expect(collect($this->getJson("/api/audit-logs/{$row->id}")->assertOk()->json('data.changes'))->firstWhere('field', 'deductions'))
+        ->toBe(['field' => 'deductions', 'old' => "Processing Fee \u{20B1}300.00", 'new' => "Processing Fee \u{20B1}360.00"]);
 });

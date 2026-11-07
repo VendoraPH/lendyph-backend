@@ -82,7 +82,7 @@ it('lists the list fields of a permission change row', function () {
 
     $this->getJson("/api/audit-logs/{$row->id}")
         ->assertOk()
-        ->assertJsonPath('data.changes', [['field' => 'permissions', 'old' => '[]', 'new' => '["loans:view"]']]);
+        ->assertJsonPath('data.changes', [['field' => 'permissions', 'old' => 'none', 'new' => 'loans:view']]);
 });
 
 it('lists the old fields of a deleted row with new: null, without timestamps', function () {

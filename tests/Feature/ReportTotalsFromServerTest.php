@@ -100,6 +100,64 @@ class ReportTotalsFromServerTest extends TestCase
         $this->assertEquals(array_sum(array_column($data['loans'], 'total_paid')), $data['totals']['total_paid']);
     }
 
+    public function test_the_subsidiary_ledger_states_everything_owed_and_the_principal_balance_per_loan(): void
+    {
+        $borrower = Borrower::factory()->create(['branch_id' => $this->north->id]);
+        $first = $this->loan($this->north, 10000.10, $borrower);
+        $first->update(['insurance_remaining_balance' => 123.45]);
+        $this->schedule($first, now()->subDays(20)->toDateString(), 1000.10, 100.01, 200.05, 0, 5.05, 'overdue');
+        $this->schedule($first, now()->addDays(10)->toDateString(), 9000.00, 90.00);
+        $second = $this->loan($this->north, 2500.25, $borrower);
+        $this->schedule($second, now()->addDays(10)->toDateString(), 2500.25, 25.03);
+
+        $data = $this->getJson("/api/reports/subsidiary-ledger/{$borrower->id}")->assertOk()->json('data');
+        $rows = collect($data['loans']);
+        $firstRow = $rows->firstWhere('principal_amount', 10000.10);
+        $secondRow = $rows->firstWhere('principal_amount', 2500.25);
+
+        // Unpaid principal 9,800.05 + interest 190.01 + penalty 5.05 + premium 123.45.
+        $this->assertEquals(10118.56, $firstRow['total_outstanding']);
+        $this->assertEquals(9800.05, $firstRow['outstanding_principal']);
+        $this->assertEquals(9923.50, $firstRow['outstanding_balance']);
+        $this->assertEquals(2525.28, $secondRow['total_outstanding']);
+        $this->assertEquals(2500.25, $secondRow['outstanding_principal']);
+
+        $this->assertEquals(12643.84, $data['loans_totals']['total_outstanding']);
+        $this->assertEquals(12300.30, $data['loans_totals']['outstanding_principal']);
+        $this->assertEquals($data['loans_totals']['total_outstanding'], $data['totals']['total_outstanding']);
+    }
+
+    public function test_the_subsidiary_ledger_shows_a_loan_past_grace_as_past_due_with_its_past_due_amount(): void
+    {
+        $borrower = Borrower::factory()->create(['branch_id' => $this->north->id]);
+        $late = $this->loan($this->north, 10000.10, $borrower);
+        $this->schedule($late, now()->subDays(20)->toDateString(), 1000.10, 100.01, 200.05, 0, 5.05, 'overdue');
+        $this->schedule($late, now()->subDays(10)->toDateString(), 1000.00, 90.00, 0, 0, 0, 'overdue');
+        $this->schedule($late, now()->addDays(10)->toDateString(), 8000.00, 80.00);
+        $current = $this->loan($this->north, 2500.25, $borrower);
+        $this->schedule($current, now()->addDays(10)->toDateString(), 2500.25, 25.03);
+
+        $data = $this->getJson("/api/reports/subsidiary-ledger/{$borrower->id}")->assertOk()->json('data');
+        $rows = collect($data['loans']);
+        $lateRow = $rows->firstWhere('principal_amount', 10000.10);
+        $currentRow = $rows->firstWhere('principal_amount', 2500.25);
+
+        $summaryOverdue = $this->getJson("/api/loans/{$late->id}/summary")->assertOk()->json('data.overdue_amount');
+
+        // Periods past due plus grace: (800.05 + 100.01 + 5.05) + (1,000.00 + 90.00).
+        $this->assertEquals(1995.11, $summaryOverdue);
+        $this->assertSame(Loan::VIRTUAL_STATUS_PAST_DUE, $lateRow['display_status']);
+        $this->assertEquals($summaryOverdue, $lateRow['overdue_amount']);
+        $this->assertSame('ongoing', $currentRow['display_status']);
+        $this->assertEquals(0, $currentRow['overdue_amount']);
+
+        $this->assertEquals(1995.11, $data['loans_totals']['overdue_amount']);
+        $this->assertEquals(
+            round(array_sum(array_column($data['loans'], 'overdue_amount')), 2),
+            $data['loans_totals']['overdue_amount'],
+        );
+    }
+
     public function test_the_portfolio_summary_totals_its_composition_and_its_branches(): void
     {
         $north = $this->loan($this->north, 10000.10);
