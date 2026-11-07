@@ -69,11 +69,46 @@ trait HasBorrowerRules
     }
 
     /**
+     * The fields every member form requires, on top of sharedBorrowerRules():
+     * the staff forms and the public registration ask for the same ones
+     * (audit finding 15). A create must send them. An update may leave one out
+     * but can't clear it.
+     *
+     * The street address lives in either `address` or `street_address`, and the
+     * forms send one or both, so one of the two is what's required.
+     *
+     * The CSV importer doesn't come through here: it imports a legacy member
+     * with a blank field on purpose (CustomerRowNormalizer).
+     *
+     * @param  array<string, array<int, mixed>>  $rules
+     * @return array<string, array<int, mixed>>
+     */
+    protected function requireMemberFields(array $rules, bool $creating): array
+    {
+        $presence = $creating ? [] : ['sometimes'];
+
+        foreach (['birthdate', 'civil_status', 'gender', 'contact_number', 'city', 'province'] as $field) {
+            $rules[$field] = [
+                ...$presence,
+                'required',
+                ...array_values(array_diff($rules[$field], ['nullable'])),
+            ];
+        }
+
+        $rules['address'] = [...$presence, 'required_without:street_address', ...$rules['address']];
+        $rules['street_address'] = [...$presence, 'required_without:address', ...$rules['street_address']];
+
+        return $rules;
+    }
+
+    /**
      * @return array<string, string>
      */
     protected function borrowerMessages(): array
     {
         return [
+            'address.required_without' => 'The street address is required.',
+            'street_address.required_without' => 'The street address is required.',
             'contact_number.regex' => 'The contact number must be a valid phone format (e.g., 09171234567 or +639171234567).',
             // Same reasoning as NoDuplicateBorrower: public registration is
             // anonymous, so confirming that an address is already on file lets

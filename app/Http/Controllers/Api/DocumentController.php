@@ -221,6 +221,7 @@ class DocumentController extends Controller implements HasMiddleware
             $document = $parent->documents()->create([
                 'type' => $type,
                 'label' => $request->input('label'),
+                'id_number' => $request->validated('id_number'),
                 'file_path' => $path,
                 'original_filename' => Document::cleanOriginalFilename($file->getClientOriginalName()),
                 'mime_type' => $file->getMimeType(),

@@ -31,7 +31,7 @@ class UpdateBorrowerRequest extends FormRequest
         }
 
         return array_merge(
-            $this->sharedBorrowerRules($borrowerId),
+            $this->requireMemberFields($this->sharedBorrowerRules($borrowerId), creating: false),
             [
                 'first_name' => $firstNameRules,
                 'last_name' => ['sometimes', 'string', 'max:255'],

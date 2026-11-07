@@ -119,7 +119,7 @@ class StoreBorrowerRequest extends FormRequest
             : ['nullable', 'exists:branches,id'];
 
         $rules = array_merge(
-            $this->sharedBorrowerRules($ignoreId),
+            $this->requireMemberFields($this->sharedBorrowerRules($ignoreId), creating: true),
             [
                 'first_name' => $firstNameRules,
                 'last_name' => ['required', 'string', 'max:255'],
