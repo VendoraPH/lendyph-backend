@@ -66,9 +66,11 @@ class BorrowerLedgerTest extends TestCase
 
         $entries = $this->getJson("/api/borrowers/{$borrowerId}/ledger")->json('data');
 
-        // Last entry should be the payment with balance < principal
+        // The balance is principal, interest and penalty, so it opens at what
+        // the release raised it to and the payment takes it down from there.
         $lastEntry = end($entries);
-        $this->assertLessThan((float) $loan->principal_amount, (float) $lastEntry['balance']);
+        $this->assertLessThan((float) $entries[0]['balance'], (float) $lastEntry['balance']);
+        $this->assertEqualsWithDelta((float) $entries[0]['balance'] - 10000, (float) $lastEntry['balance'], 0.001);
     }
 
     public function test_empty_ledger_for_borrower_with_no_loans(): void
