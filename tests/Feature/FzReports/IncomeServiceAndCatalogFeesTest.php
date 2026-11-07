@@ -11,10 +11,11 @@ use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
 /**
- * The Income report counts service fee and catalog fee income, from the
- * deductions recorded at release, classified as the release journal classifies
- * them (4040 Service Fee Income, 4080 Other Fee Income). Taxes, notarial fees,
- * insurance premium and share capital are never income (round fz).
+ * The Income report counts fee income from the deductions recorded at release,
+ * classified as the release journal classifies them: a processing fee and any
+ * hand-typed deduction with no recognised type under Processing Fees (4030), a
+ * service fee (4040), and catalog fees (4080). Taxes, notarial fees, insurance
+ * premium and share capital are never income (round fz).
  */
 class IncomeServiceAndCatalogFeesTest extends TestCase
 {
@@ -77,6 +78,53 @@ class IncomeServiceAndCatalogFeesTest extends TestCase
         $this->assertEquals($credits['other_fee_income'] / 100, $income['other_fees']);
     }
 
+    public function test_a_hand_typed_deduction_with_no_recognised_type_counts_as_the_journal_books_it(): void
+    {
+        $items = [
+            $this->item('Processing Fee', 900),
+            $this->item('Inspection Fee', 123.45),
+            $this->item('Processing Fee Waiver', 10),
+            $this->item('Service Fee', 300),
+            $this->item('Notarial Fee', 100),
+            $this->item('Insurance Premium', 500),
+            $this->item('Share Capital', 1000),
+            $this->item('Documentary Stamp Tax', 45),
+            $this->item('Other Taxes', 12),
+        ];
+        $this->released(60000, $items);
+
+        $income = $this->card();
+        $row = $this->rows()->json('data.0');
+
+        $this->assertEquals(1033.45, $income['processing_fees'], 'The processing fee and the two untyped items.');
+        $this->assertEquals(300, $income['service_fee']);
+        $this->assertEquals(0, $income['other_fees']);
+        $this->assertEquals(1333.45, $income['total'], 'Taxes, notarial, insurance and share capital stay out.');
+        $this->assertEquals(1033.45, $row['processing_fee']);
+        $this->assertEquals($income['total'], $row['total_income']);
+
+        $journalItems = array_map(fn (array $item): array => [
+            'name' => $item['name'],
+            'amount' => (int) round($item['amount'] * 100),
+            'catalog_fee' => false,
+        ], $items);
+        $credits = PostingRules::classifyDeductions(array_sum(array_column($journalItems, 'amount')), $journalItems)['credits'];
+
+        $this->assertEquals($credits['processing_fee_income'] / 100, $income['processing_fees']);
+    }
+
+    public function test_a_loan_with_only_a_hand_typed_deduction_is_listed(): void
+    {
+        $loan = $this->released(60000, [$this->item('Inspection Fee', 200)]);
+
+        $response = $this->rows();
+
+        $this->assertSame(1, $response->json('meta.total'));
+        $this->assertSame($loan->id, $response->json('data.0.loan_id'));
+        $this->assertEquals(200, $response->json('data.0.processing_fee'));
+        $this->assertEquals(200, $response->json('data.0.total_income'));
+    }
+
     public function test_a_catalog_fee_named_a_service_fee_is_a_service_fee_and_a_catalog_tax_is_no_income(): void
     {
         $this->released(60000, [
@@ -107,7 +155,7 @@ class IncomeServiceAndCatalogFeesTest extends TestCase
     public function test_the_rows_add_up_to_the_totals_and_to_the_card(): void
     {
         $this->released(60000, $this->everyKindOfDeduction());
-        $this->released(30000, [$this->item('Service Fee', 100.10), $this->item('Credit Investigation Fee', 33.33, feeId: 7)]);
+        $this->released(30000, [$this->item('Service Fee', 100.10), $this->item('Credit Investigation Fee', 33.33, feeId: 7), $this->item('Inspection Fee', 12.34)]);
         // No record of the deductions: the product's 2%, one centavo apart
         // when added up unrounded (₱666.6666 three times).
         $this->released(33333.33, null);

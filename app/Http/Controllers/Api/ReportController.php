@@ -459,7 +459,7 @@ class ReportController extends Controller
             new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'loan_id', in: 'query', required: false, description: 'One loan only: its interest and penalty collected and its own fee income.', schema: new OA\Schema(type: 'integer', minimum: 1)),
         ],
-        responses: [new OA\Response(response: 200, description: 'Income breakdown. `service_fee` and `other_fees` are the deductions recorded at release of the loans released in the period, classified as the release journal classifies them (4040 and 4080); `total` adds them to `interest_income`, `processing_fees` and `penalty_income`.')],
+        responses: [new OA\Response(response: 200, description: 'Income breakdown. `processing_fees`, `service_fee` and `other_fees` are the deductions recorded at release of the loans released in the period, classified as the release journal classifies them (4030, including hand-typed deductions with no recognised type; 4040; 4080); a loan with no record falls back to the product\'s processing fee rate. `total` adds them to `interest_income`, `processing_fees` and `penalty_income`.')],
     )]
     public function incomeReport(): JsonResponse
     {
@@ -477,8 +477,9 @@ class ReportController extends Controller
             .'`meta.totals` (also sent as `totals`) covers the whole filtered set: its `interest_income`, `penalty_income`, '
             .'`processing_fee`, `service_fee`, `other_fees` and `total_income` equal the Income report\'s `interest_income`, '
             .'`penalty_income`, `processing_fees`, `service_fee`, `other_fees` and `total`, and every row added up equals them '
-            .'too. `payments` equals the List of Repayments `totals.count`, for the same filters. Service and other fees are the '
-            .'deductions recorded at release that the release journal credits to 4040 and 4080; taxes, notarial fees, '
+            .'too. `payments` equals the List of Repayments `totals.count`, for the same filters. The fees are the deductions '
+            .'recorded at release, as the release journal credits them: processing fees and hand-typed deductions with no '
+            .'recognised type to 4030, service fees to 4040 and catalog fees to 4080; taxes, notarial fees, '
             .'insurance premium and share capital are never income.',
         tags: ['Reports'],
         security: [['sanctum' => []]],

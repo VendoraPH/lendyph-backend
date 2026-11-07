@@ -24,7 +24,7 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'payments', type: 'integer', description: 'Posted repayments on this loan in the period.'),
         new OA\Property(property: 'interest_income', type: 'number', description: 'SUM(interest_applied), rounded to 2 decimals.'),
         new OA\Property(property: 'penalty_income', type: 'number', description: 'SUM(penalty_applied), rounded to 2 decimals.'),
-        new OA\Property(property: 'processing_fee', type: 'number', description: 'The processing fee of a loan released in the period, as the Income report\'s card counts it, rounded to 2 decimals; 0 otherwise.'),
+        new OA\Property(property: 'processing_fee', type: 'number', description: 'What the release journal credits to 4030 for a loan released in the period (processing fees and hand-typed deductions with no recognised type), as the Income report\'s card counts it, rounded to 2 decimals; 0 otherwise.'),
         new OA\Property(property: 'service_fee', type: 'number', description: 'The service fee recorded at the release of a loan released in the period (what the release journal credits to 4040); 0 otherwise.'),
         new OA\Property(property: 'other_fees', type: 'number', description: 'The catalog fees recorded at the release of a loan released in the period (what the release journal credits to 4080); 0 otherwise.'),
         new OA\Property(property: 'total_income', type: 'number', description: 'Interest, penalty and the three fees added up, rounded to 2 decimals.'),

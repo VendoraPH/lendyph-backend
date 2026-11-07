@@ -1522,13 +1522,15 @@ class ReportService
      * import); `original_value` is the rate for a percentage item and is never
      * read here.
      *
-     * - `processing`: every item whose name normalises to "processing fee"
-     *   (FeeOverlapDetector's rule, so "PROCESSING-FEE." counts and "Processing
-     *   Fee Waiver" does not).
-     * - `service` and `other`: the items the release journal credits to 4040
-     *   Service Fee Income and 4080 Other Fee Income, by its own rule
-     *   (PostingRules::deductionItemRole()). Taxes, notarial fees, insurance
-     *   premium and share capital have roles of their own and are never income.
+     * Each item counts where the release journal credits it, by its own rule
+     * (PostingRules::deductionItemRole()):
+     * - `processing`: 4030, an item whose name normalises to "processing fee"
+     *   ("PROCESSING-FEE." too), and a hand-typed deduction with no recognised
+     *   type (PostingRules::UNMAPPED_DEDUCTION_ROLE), such as "Inspection Fee";
+     * - `service`: 4040 Service Fee Income;
+     * - `other`: 4080 Other Fee Income, a catalog fee of no other type.
+     * Taxes, notarial fees, insurance premium and share capital have roles of
+     * their own and are never income.
      *
      * A loan with no record falls back, for its processing fee only, to the
      * product's rate × principal, rounded per loan to the centavo so the card
@@ -1554,26 +1556,26 @@ class ReportService
                 $fees[(int) $loan->id] = ['processing' => (int) round((float) $loan->fee * 100)] + $none;
             });
 
-        $detector = app(FeeOverlapDetector::class);
-
         (clone $releasedLoans)
             ->whereRaw(self::HAS_DEDUCTION_ITEMS_SQL)
             ->whereRaw('JSON_LENGTH(loans.deductions) > 0')
             ->select(['loans.id', 'loans.deductions'])
             ->lazyById(1000, 'loans.id', 'id')
-            ->each(function (object $loan) use (&$fees, $none, $detector): void {
+            ->each(function (object $loan) use (&$fees, $none): void {
                 foreach (json_decode($loan->deductions, true) as $item) {
                     if (! is_array($item) || ! is_string($item['name'] ?? null)) {
                         continue;
                     }
 
-                    $kind = $detector->fieldFor($item['name']) === 'processing_fee'
-                        ? 'processing'
-                        : match (PostingRules::deductionItemRole($item['name'], isset($item[LoanReleaseFeeService::ITEM_FEE_KEY]))) {
-                            'service_fee_income' => 'service',
-                            PostingRules::CATALOG_FEE_ROLE => 'other',
-                            default => null,
-                        };
+                    $role = PostingRules::deductionItemRole($item['name'], isset($item[LoanReleaseFeeService::ITEM_FEE_KEY]))
+                        ?? PostingRules::UNMAPPED_DEDUCTION_ROLE;
+
+                    $kind = match ($role) {
+                        PostingRules::UNMAPPED_DEDUCTION_ROLE => 'processing',
+                        'service_fee_income' => 'service',
+                        PostingRules::CATALOG_FEE_ROLE => 'other',
+                        default => null,
+                    };
 
                     if ($kind !== null) {
                         $fees[(int) $loan->id] ??= $none;
