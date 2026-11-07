@@ -2,12 +2,36 @@
 
 namespace App\Http\Resources;
 
+use App\Models\CoMaker;
 use App\Models\Loan;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 
 class CoMakerResource extends JsonResource
 {
+    /**
+     * A co-maker for a caller who may not read their record: who they are and
+     * how they relate to the member, never their address, contact number, work
+     * or income.
+     *
+     * @return array<string, mixed>
+     */
+    public static function slim(CoMaker $coMaker): array
+    {
+        return [
+            'id' => $coMaker->id,
+            'co_maker_code' => $coMaker->co_maker_code,
+            'borrower_id' => $coMaker->borrower_id,
+            'first_name' => $coMaker->first_name,
+            'middle_name' => $coMaker->middle_name,
+            'last_name' => $coMaker->last_name,
+            'suffix' => $coMaker->suffix,
+            'full_name' => $coMaker->full_name,
+            'relationship_to_borrower' => $coMaker->relationship_to_borrower,
+            'status' => $coMaker->status,
+        ];
+    }
+
     /**
      * `added_by` (a user id, or null for links made before it was recorded)
      * and `added_at` say who linked this co-maker to a loan, and when. They

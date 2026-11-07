@@ -71,6 +71,7 @@ it('stores an invalid UTF-8 upload filename scrubbed on a valid ID upload', func
     $this->post("/api/borrowers/{$borrower->id}/valid-ids", [
         'file' => UploadedFile::fake()->image("phil\xC3\x28sys.jpg"),
         'type' => 'PhilSys ID',
+        'id_number' => '1234-5678-9012',
     ], ['Accept' => 'application/json'])->assertCreated();
 
     $name = Document::query()->latest('id')->value('original_filename');

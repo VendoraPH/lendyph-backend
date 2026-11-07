@@ -50,6 +50,7 @@ class CoMakerController extends Controller
                     // still come along — BelongsToMany adds them itself, and
                     // needs them to match each loan to its co-maker.
                     'loans' => fn ($query) => $query
+                        ->visibleTo(request()->user())
                         ->select('loans.id', 'loans.application_number', 'loans.loan_account_number', 'loans.status')
                         ->orderBy('loans.id'),
                 ])

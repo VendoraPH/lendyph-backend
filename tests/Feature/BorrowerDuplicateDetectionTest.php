@@ -38,6 +38,12 @@ function registerPayload(array $overrides = []): array
         'last_name' => 'Dela Cruz',
         'birthdate' => '1990-01-15',
         'branch_id' => $branch->id,
+        'gender' => 'male',
+        'civil_status' => 'single',
+        'contact_number' => '09170000222',
+        'address' => '12 Mabini St',
+        'city' => 'Butuan',
+        'province' => 'Agusan del Norte',
     ], $overrides);
 }
 
