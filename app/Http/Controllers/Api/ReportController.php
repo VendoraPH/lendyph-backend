@@ -195,7 +195,7 @@ class ReportController extends Controller
     #[OA\Get(
         path: '/api/reports/subsidiary-ledger/{borrower}',
         summary: 'Subsidiary Ledger',
-        description: 'All loans with balances and payment history for a borrower. `loans_totals` adds up the `loans` table\'s columns (`principal_amount`, `total_paid`, `outstanding_balance` in whole centavos, `payments_count` as a count).',
+        description: 'All loans with balances and payment history for a member. Each loan row\'s `total_outstanding` is everything still owed (the periods\' unpaid principal, interest and penalty plus the insurance premium owed) and `outstanding_principal` is the unpaid principal only, both in whole centavos and equal to GET /loans/{id}/summary. `outstanding_balance` is deprecated (unpaid principal plus premium owed, never interest or penalty); read `total_outstanding` or `outstanding_principal` instead. `display_status` is `past_due` for a released or ongoing loan past grace, else its status (`status` is unchanged). `overdue_amount` is what the loan\'s late periods (unpaid and past grace) still owe, the Past Due Loans report\'s per-loan figure and GET /loans/{id}/summary `overdue_amount`. `loans_totals` adds up the `loans` table\'s columns (`principal_amount`, `total_paid`, `outstanding_balance`, `total_outstanding`, `outstanding_principal`, `overdue_amount` in whole centavos, `payments_count` as a count). `totals.total_outstanding` equals `loans_totals.total_outstanding`.',
         tags: ['Reports'],
         security: [['sanctum' => []]],
         parameters: [
@@ -205,7 +205,7 @@ class ReportController extends Controller
         ],
         responses: [
             new OA\Response(response: 200, description: 'Subsidiary ledger data'),
-            new OA\Response(response: 404, description: 'Borrower not found'),
+            new OA\Response(response: 404, description: 'Member not found'),
         ],
     )]
     public function subsidiaryLedger(Borrower $borrower): JsonResponse

@@ -149,7 +149,11 @@ class PrintableFiguresTest extends TestCase
             'total_paid' => 600.10,
             'payments_count' => 2,
             'outstanding_balance' => round($rows[0]['outstanding_balance'] + $rows[1]['outstanding_balance'], 2),
+            'total_outstanding' => round($rows[0]['total_outstanding'] + $rows[1]['total_outstanding'], 2),
+            'outstanding_principal' => round($rows[0]['outstanding_principal'] + $rows[1]['outstanding_principal'], 2),
+            'overdue_amount' => round($rows[0]['overdue_amount'] + $rows[1]['overdue_amount'], 2),
         ], $data['loans_totals']);
+        $this->assertEquals($data['loans_totals']['total_outstanding'], $data['totals']['total_outstanding']);
     }
 
     // ── share capital certificate: GET /reports/share-capital-statement ──
