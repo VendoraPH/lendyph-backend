@@ -303,7 +303,7 @@ it('reads array values in the change list in words, and returns the stored value
         ->and($response->json('data.new_values'))->toEqual($new);
 });
 
-it('labels a journal target by its reference', function () {
+it('labels a journal target by its number once posted, else by its reference', function () {
     $journal = AccountingJournal::create([
         'date' => now()->toDateString(),
         'source' => 'loan_collection',
@@ -318,6 +318,10 @@ it('labels a journal target by its reference', function () {
     ]);
 
     $this->getJson("/api/audit-logs/{$row->id}")->assertOk()->assertJsonPath('data.target.label', 'COL-10254');
+
+    // Posting assigns the number; the model refuses updates, so set it as posting would.
+    DB::table('accounting_journals')->where('id', $journal->id)->update(['journal_no' => 'JE-000557']);
+    $this->getJson("/api/audit-logs/{$row->id}")->assertOk()->assertJsonPath('data.target.label', 'JE-000557');
 });
 
 it('names a target with no label by its class in words', function () {

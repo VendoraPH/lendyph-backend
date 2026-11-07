@@ -99,7 +99,7 @@ class AuditLogResource extends JsonResource
         }
 
         // Prefer the most human-friendly attribute available on the related model.
-        foreach (['full_name', 'name', 'application_number', 'loan_account_number', 'receipt_number', 'borrower_code', 'code', 'title', 'reference'] as $attr) {
+        foreach (['full_name', 'name', 'application_number', 'loan_account_number', 'receipt_number', 'borrower_code', 'code', 'title', 'journal_no', 'reference'] as $attr) {
             if (isset($model->{$attr}) && $model->{$attr} !== null && $model->{$attr} !== '') {
                 return (string) $model->{$attr};
             }
