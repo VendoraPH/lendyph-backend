@@ -18,7 +18,6 @@ use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Support\Arr;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
 class LoanService
@@ -754,8 +753,14 @@ class LoanService
         // loan row, the order every collateral write takes (CollateralAttacher),
         // and the editable check made again on that locked row: the one above
         // ran before the transaction, so a loan approved since would otherwise
-        // have its collateral changed after sign-off.
+        // have its collateral changed after sign-off. With no list there is no
+        // collateral to lock, so the loan row comes first, for the same reason:
+        // its principal and deductions are fixed at sign-off too.
         $edit = function () use ($loan, $validated, $user, $collaterals, $heldBefore): Loan {
+            if ($collaterals === null) {
+                $this->lockLoanForEdit($loan);
+            }
+
             $lockedCollaterals = $collaterals === null ? null : CollateralAttacher::lockForList(
                 $loan,
                 array_map(static fn (array $row): int => (int) $row['collateral_id'], $collaterals),
@@ -801,8 +806,30 @@ class LoanService
         };
 
         // With a list this is a collateral write, so a deadlock on its locks is
-        // a 409 like the attach endpoint's rather than a 500.
-        return $collaterals === null ? DB::transaction($edit) : CollateralWriteTransaction::run($edit);
+        // a 409 like the attach endpoint's rather than a 500. Without one it is
+        // a 409 too, as is a co-maker record's number colliding either way: the
+        // edit saves `$loan` itself, so running it a second time would see that
+        // model as already saved and write nothing.
+        return $collaterals === null ? LoanWriteTransaction::run($edit) : CollateralWriteTransaction::run($edit);
+    }
+
+    /**
+     * Lock the loan an edit with no collateral list changes and refuse with a
+     * 409 unless it is still editable. A locking read, and the first statement
+     * of the transaction, so every plain read after it sees what is committed
+     * once the lock is held. `$loan` is refreshed from the locked row.
+     *
+     * @throws HttpResponseException 409 when the loan left the editable statuses since it was read
+     */
+    private function lockLoanForEdit(Loan $loan): void
+    {
+        $locked = Loan::whereKey($loan->getKey())->lockForUpdate()->first();
+
+        if (! $locked?->is_editable) {
+            throw LoanWriteTransaction::conflict();
+        }
+
+        $loan->setRawAttributes($locked->getAttributes(), true);
     }
 
     /**
@@ -1192,7 +1219,7 @@ class LoanService
      */
     public function addCoMakerAwaitingRelease(Loan $loan, array $validated, User $user): CoMaker
     {
-        return DB::transaction(function () use ($loan, $validated, $user) {
+        return GeneratedNumberWrite::run(function () use ($loan, $validated, $user) {
             $lockedLoan = Loan::whereKey($loan->id)->lockForUpdate()->firstOrFail();
 
             if (! $lockedLoan->is_releasable) {
@@ -1258,7 +1285,7 @@ class LoanService
             // Read back through the relation so the pivot (`added_by`,
             // `created_at`) rides along for CoMakerResource.
             return $lockedLoan->coMakers()->whereKey($coMaker->id)->firstOrFail();
-        });
+        }, GeneratedNumberWrite::CO_MAKER_CONFLICT);
     }
 
     public function release(Loan $loan, User $releaser, array $insurance = [], ?string $feeFingerprint = null): Loan

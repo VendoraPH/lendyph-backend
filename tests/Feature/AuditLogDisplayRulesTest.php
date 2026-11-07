@@ -425,7 +425,7 @@ it('reads an Eloquent edit of an array field in words on both sides, with the am
     $productRow = latestAuditRow('updated', $product->getMorphClass(), $product->id);
 
     expect(collect($this->getJson("/api/audit-logs/{$productRow->id}")->assertOk()->json('data.changes'))->firstWhere('field', 'frequencies'))
-        ->toBe(['field' => 'frequencies', 'old' => 'monthly', 'new' => 'monthly, weekly']);
+        ->toBe(['field' => 'frequencies', 'old' => 'Monthly', 'new' => 'Monthly, Weekly']);
 });
 
 it('prints a value in pesos only for a fixed record, and never a percentage', function () {

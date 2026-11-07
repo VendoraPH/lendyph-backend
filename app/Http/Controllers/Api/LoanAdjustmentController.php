@@ -79,6 +79,7 @@ class LoanAdjustmentController extends Controller
         ),
         responses: [
             new OA\Response(response: 201, description: 'Adjustment created'),
+            new OA\Response(response: 409, description: 'Kept colliding with other saves taking the next adjustment number. Nothing was saved; submit again.'),
             new OA\Response(response: 422, description: 'Validation error'),
         ],
     )]

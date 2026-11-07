@@ -10,6 +10,7 @@ use App\Models\LoanAdjustment;
 use App\Models\LoanProduct;
 use App\Models\Repayment;
 use App\Services\LoanAdjustmentService;
+use App\Services\LoanService;
 use App\Services\RepaymentService;
 use Closure;
 use Exception;
@@ -689,6 +690,132 @@ class LoanWriteCollisionTest extends TestCase
     }
 
     // ── helpers ──────────────────────────────────────────────────────────
+
+    // ── editing a loan with no collateral list ───────────────────────────
+
+    public function test_an_edit_of_a_loan_approved_since_it_was_read_answers_409_and_changes_nothing(): void
+    {
+        $loan = $this->draftLoan();
+
+        // The request read the loan as a draft; it is then approved.
+        $requestsCopy = Loan::findOrFail($loan->id);
+        DB::table('loans')->where('id', $loan->id)->update(['status' => 'approved']);
+        $before = $this->state();
+
+        $this->assertConflict(fn () => app(LoanService::class)->updateLoan($requestsCopy, ['principal_amount' => 55000, 'deductions' => []], $this->admin));
+
+        $this->assertSame($before, $this->state());
+        $this->assertSame('approved', $loan->fresh()->status);
+        $this->assertSame(60000.0, (float) $loan->fresh()->principal_amount);
+    }
+
+    public function test_an_edit_request_that_loses_the_race_to_an_approval_answers_409(): void
+    {
+        $loan = $this->draftLoan();
+        $before = $this->state();
+
+        $approved = false;
+        Event::listen(TransactionBeginning::class, function () use (&$approved, $loan): void {
+            if (! $approved) {
+                $approved = true;
+                DB::table('loans')->where('id', $loan->id)->update(['status' => 'approved']);
+            }
+        });
+
+        $this->putJson("/api/loans/{$loan->id}", ['principal_amount' => 55000])
+            ->assertStatus(409)
+            ->assertExactJson(['message' => self::CONFLICT]);
+
+        $this->assertTrue($approved);
+        $this->assertSame($before, $this->state());
+    }
+
+    public function test_an_edit_with_no_collateral_list_locks_the_loan_as_its_first_statement(): void
+    {
+        $loan = $this->draftLoan();
+
+        $statements = $this->statementsInTransaction(fn () => $this->putJson("/api/loans/{$loan->id}", ['principal_amount' => 55000])->assertOk());
+
+        $this->assertStringContainsString('from `loans`', $statements[0]['sql']);
+        $this->assertStringContainsString('for update', $statements[0]['sql']);
+        $this->assertSame([$loan->id], $this->lockedIds($statements[0]));
+    }
+
+    public function test_an_edit_with_no_collateral_list_works_from_the_locked_row(): void
+    {
+        $loan = $this->draftLoan();
+
+        // Another edit committed after the request read the loan.
+        $requestsCopy = Loan::findOrFail($loan->id);
+        DB::table('loans')->where('id', $loan->id)->update(['principal_amount' => 50000]);
+
+        $edited = app(LoanService::class)->updateLoan($requestsCopy, ['deductions' => []], $this->admin);
+
+        $this->assertSame(50000.0, (float) $edited->net_proceeds);
+        $this->assertSame(50000.0, (float) $loan->fresh()->principal_amount);
+    }
+
+    public function test_an_edit_with_no_collateral_list_that_deadlocks_answers_409_and_writes_nothing(): void
+    {
+        $loan = $this->draftLoan();
+        $before = $this->state();
+        $this->failOn(fn (string $sql): bool => str_starts_with($sql, 'update `loans`'), self::DEADLOCK);
+
+        $this->putJson("/api/loans/{$loan->id}", ['principal_amount' => 55000])
+            ->assertStatus(409)
+            ->assertExactJson(['message' => self::CONFLICT]);
+
+        $this->assertSame($before, $this->state());
+    }
+
+    public function test_an_edit_with_no_collateral_list_still_saves(): void
+    {
+        $loan = $this->draftLoan();
+
+        $this->putJson("/api/loans/{$loan->id}", ['principal_amount' => 55000])->assertOk();
+
+        $this->assertSame(55000.0, (float) $loan->fresh()->principal_amount);
+    }
+
+    #[DataProvider('editBodies')]
+    public function test_a_duplicate_with_no_index_name_is_rethrown_not_called_a_conflict(array $body): void
+    {
+        $loan = $this->draftLoan();
+        $before = $this->state();
+
+        DB::connection()->beforeExecuting(function (string $query, array $bindings): void {
+            if (! str_starts_with($query, 'update `loans`')) {
+                return;
+            }
+
+            $message = "SQLSTATE[23000]: Integrity constraint violation: 1062 Duplicate entry 'x'";
+            $pdo = new PDOException($message);
+            $pdo->errorInfo = ['23000', 1062, "Duplicate entry 'x'"];
+            (new ReflectionProperty(Exception::class, 'code'))->setValue($pdo, '23000');
+
+            throw new UniqueConstraintViolationException(DB::connection()->getName(), $query, $bindings, $pdo);
+        });
+
+        $this->putJson("/api/loans/{$loan->id}", ['principal_amount' => 55000, ...$body])->assertStatus(500);
+
+        $this->assertSame($before, $this->state());
+    }
+
+    /**
+     * @return array<string, array{0: array<string, mixed>}>
+     */
+    public static function editBodies(): array
+    {
+        return [
+            'no collateral list (LoanWriteTransaction)' => [[]],
+            'a collateral list (CollateralWriteTransaction)' => [['collaterals' => []]],
+        ];
+    }
+
+    private function draftLoan(): Loan
+    {
+        return app(LoanService::class)->createLoan($this->createPayload(), $this->admin);
+    }
 
     /** A posted payment that paid the first period of a released loan in full. */
     private function postedRepayment(bool $withCollateral = false): Repayment

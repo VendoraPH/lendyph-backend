@@ -50,8 +50,9 @@ final class CollateralWriteTransaction
      * CollateralPledgeGuard::lockCollateralsOf() requires of its callers.
      *
      * A duplicate-key error on `$racedUniqueIndex`, when given, is a 409 too,
-     * worded `$racedUniqueMessage`. Any other database error is rethrown
-     * untouched.
+     * worded `$racedUniqueMessage`. So is one on a generated number
+     * (GeneratedNumberWrite::isCollision()), for a loan edit that creates a
+     * member's co-maker record. Any other database error is rethrown untouched.
      *
      * @template TReturn
      *
@@ -67,7 +68,7 @@ final class CollateralWriteTransaction
         try {
             return DB::transaction($callback);
         } catch (UniqueConstraintViolationException $e) {
-            if ($racedUniqueIndex === null || $e->index !== $racedUniqueIndex) {
+            if (($racedUniqueIndex === null || $e->index !== $racedUniqueIndex) && ! GeneratedNumberWrite::isCollision($e)) {
                 throw $e;
             }
 

@@ -8,12 +8,12 @@ use Illuminate\Console\Attributes\Signature;
 use Illuminate\Console\Command;
 
 #[Signature('roles:reword-member-descriptions {--dry-run : Show what would be reworded without writing}')]
-#[Description('Reword the admin and loan_officer descriptions from "borrowers" to "members" where they still hold the old seeded text')]
+#[Description('Reword the admin, loan_officer and super_admin descriptions (no "borrowers", no developer words) where they still hold the old seeded text')]
 class RewordRoleMemberDescriptions extends Command
 {
     /**
-     * The same logic the 2026_11_07_090000 migration runs on deploy, so a dry
-     * run on a database shows what that migration will change there.
+     * The same logic the 2026_11_07_090000 and 2026_11_07_100000 migrations run
+     * on deploy, so a dry run on a database shows what they will change there.
      */
     public function handle(RoleMemberDescriptionReword $reword): int
     {

@@ -26,7 +26,15 @@ use PDOException;
  * - approving and rejecting a loan in review (LoanService::approve(),
  *   reject());
  * - signing off an approval-chain step and sending a loan back
- *   (LoanApprovalChainService::approve(), sendBack()).
+ *   (LoanApprovalChainService::approve(), sendBack());
+ * - editing a loan with no collateral list (LoanService::updateLoan()), which
+ *   locks the loan row and re-checks that it is still editable. With a list the
+ *   edit is a collateral write (CollateralWriteTransaction).
+ *
+ * Two share capital writes touch no loan but use it for its 409: an auto-credit
+ * run and a bulk entry (ShareCapitalService::processAutoCredit(),
+ * bulkManualEntries()). Tried again, either could post a second time, so a
+ * collision answers 409 once with nothing posted.
  *
  * ── The lock order ───────────────────────────────────────────────────────
  *
@@ -47,7 +55,11 @@ use PDOException;
  *   2. the loan rows, in ONE id-ordered statement (a release also locks the
  *      loan it restructures; a create locks the newest loan, for the next
  *      application number, in Loan::booted()). With no collateral to lock,
- *      this is the transaction's first statement, before any plain read;
+ *      this is the transaction's first statement, before any plain read. A
+ *      restructure's principal edit is the one path that locks the child first:
+ *      its own row, then its source, because a release of that child needs
+ *      `approved` while an edit needs `draft` or `for_review`, and no other
+ *      write waits on an editable child's row while holding its source;
  *   3. the newest repayment row, for the next receipt number, when the
  *      operation records a payment: recording one (processRepayment(),
  *      processRepaymentWithAmountUnderLock()) or an extension collecting its
@@ -86,7 +98,9 @@ use PDOException;
  * payment was inserting the next one (Repayment::RECEIPT_NUMBER_INDEX).
  * The caller names the index (run()'s `$racedUniqueIndex`), so only that
  * collision becomes a 409 and every other unique violation stays the error it
- * is.
+ * is. A co-maker or adjustment number these paths generate is the same race
+ * (GeneratedNumberWrite::isCollision()): a 409 too, not retried, because a
+ * loan's money write is never run twice in one request.
  *
  * Scoped to these paths on purpose, as CollateralWriteTransaction is: the
  * global exception handler is left alone, so a deadlock anywhere else still
@@ -103,8 +117,9 @@ final class LoanWriteTransaction
      * nested, it would be a savepoint, and a deadlock inside one is not rolled
      * back by Laravel.
      *
-     * A duplicate-key error on `$racedUniqueIndex`, when given, is a 409 too.
-     * Any other database error is rethrown untouched.
+     * A duplicate-key error on `$racedUniqueIndex`, when given, or on a
+     * generated number (GeneratedNumberWrite::isCollision()), is a 409 too. Any
+     * other database error is rethrown untouched.
      *
      * `$conflictMessage` replaces the 409's wording for a path where "this
      * loan" is the wrong thing to say: a create has no loan yet.
@@ -123,7 +138,7 @@ final class LoanWriteTransaction
         try {
             return DB::transaction($callback);
         } catch (UniqueConstraintViolationException $e) {
-            if ($racedUniqueIndex === null || $e->index !== $racedUniqueIndex) {
+            if (($racedUniqueIndex === null || $e->index !== $racedUniqueIndex) && ! GeneratedNumberWrite::isCollision($e)) {
                 throw $e;
             }
 

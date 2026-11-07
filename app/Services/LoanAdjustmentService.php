@@ -53,7 +53,7 @@ class LoanAdjustmentService
 
         $oldValues = $this->captureOldValues($loan, $validated['adjustment_type'], $validated['new_values']);
 
-        return LoanAdjustment::create([
+        return GeneratedNumberWrite::run(fn (): LoanAdjustment => LoanAdjustment::create([
             'loan_id' => $loan->id,
             'adjustment_type' => $validated['adjustment_type'],
             'description' => $validated['description'] ?? null,
@@ -62,7 +62,7 @@ class LoanAdjustmentService
             'status' => 'pending',
             'remarks' => $validated['remarks'] ?? null,
             'adjusted_by' => $user->id,
-        ]);
+        ]), GeneratedNumberWrite::ADJUSTMENT_CONFLICT);
     }
 
     /**

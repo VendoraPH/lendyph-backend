@@ -36,6 +36,7 @@ class AutoCreditController extends Controller
         security: [['sanctum' => []]],
         responses: [
             new OA\Response(response: 201, description: 'Auto-credit processed'),
+            new OA\Response(response: 409, description: 'Collided with another save taking the next reference. Not tried again, so overlapping runs cannot credit a pledge twice. Nothing was posted; check the last run before running again.'),
             new OA\Response(response: 403, description: 'Forbidden'),
         ],
     )]
