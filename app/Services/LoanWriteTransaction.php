@@ -86,7 +86,9 @@ use PDOException;
  * payment was inserting the next one (Repayment::RECEIPT_NUMBER_INDEX).
  * The caller names the index (run()'s `$racedUniqueIndex`), so only that
  * collision becomes a 409 and every other unique violation stays the error it
- * is.
+ * is. A co-maker or adjustment number these paths generate is the same race
+ * (GeneratedNumberWrite::isCollision()): a 409 too, not retried, because a
+ * loan's money write is never run twice in one request.
  *
  * Scoped to these paths on purpose, as CollateralWriteTransaction is: the
  * global exception handler is left alone, so a deadlock anywhere else still
@@ -103,8 +105,9 @@ final class LoanWriteTransaction
      * nested, it would be a savepoint, and a deadlock inside one is not rolled
      * back by Laravel.
      *
-     * A duplicate-key error on `$racedUniqueIndex`, when given, is a 409 too.
-     * Any other database error is rethrown untouched.
+     * A duplicate-key error on `$racedUniqueIndex`, when given, or on a
+     * generated number (GeneratedNumberWrite::isCollision()), is a 409 too. Any
+     * other database error is rethrown untouched.
      *
      * `$conflictMessage` replaces the 409's wording for a path where "this
      * loan" is the wrong thing to say: a create has no loan yet.
@@ -123,7 +126,7 @@ final class LoanWriteTransaction
         try {
             return DB::transaction($callback);
         } catch (UniqueConstraintViolationException $e) {
-            if ($racedUniqueIndex === null || $e->index !== $racedUniqueIndex) {
+            if ($e->index !== $racedUniqueIndex && ! GeneratedNumberWrite::isCollision($e)) {
                 throw $e;
             }
 

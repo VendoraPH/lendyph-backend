@@ -927,7 +927,7 @@ it('has no path writing an active loan status outside the ones that are accounte
         // active set. The automatic accounting posting sits immediately BEFORE
         // that assertion, so the assertion is still the transaction's last
         // statement — which is what this entry is really asserting.
-        'app/Services/LoanService.php:1315 — \'status\' => \'released\',',
+        'app/Services/LoanService.php:1317 — \'status\' => \'released\',',
         // recordRepaymentOnLockedLoan(), which records every payment: released
         // → ongoing. Deliberately UNGUARDED — both are already active, so it
         // cannot add a holder.
@@ -936,6 +936,6 @@ it('has no path writing an active loan status outside the ones that are accounte
         // status write, off a lock taken at the top of the transaction. The
         // journal reversal is written before this block and does not move
         // either the lock or the assertion relative to the write.
-        'app/Services/RepaymentService.php:953 — $loan->update([\'status\' => $remainingPayments > 0 ? \'ongoing\' : \'released\']);',
+        'app/Services/RepaymentService.php:959 — $loan->update([\'status\' => $remainingPayments > 0 ? \'ongoing\' : \'released\']);',
     ], 'a new writer of an active loan status appeared; open its transaction with CollateralPledgeGuard::lockCollateralsOf() and call CollateralPledgeGuard::assertNoDoublePledge() before the write, or account for it here and say why it cannot add a second active holder');
 });

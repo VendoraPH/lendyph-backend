@@ -8,6 +8,7 @@ use App\Http\Resources\ShareCapitalLedgerResource;
 use App\Models\Borrower;
 use App\Models\ShareCapitalLedger;
 use App\Services\BranchAccess;
+use App\Services\GeneratedNumberWrite;
 use App\Services\LikePattern;
 use App\Services\ShareCapitalMemberService;
 use Illuminate\Http\JsonResponse;
@@ -161,19 +162,20 @@ class ShareCapitalLedgerController extends Controller
         ),
         responses: [
             new OA\Response(response: 201, description: 'Ledger entry created'),
+            new OA\Response(response: 409, description: 'Kept colliding with other saves taking the next reference. Nothing was saved; submit again.'),
             new OA\Response(response: 422, description: 'Validation error. `borrower_id` must belong to a member — a borrower whose registration is still `pending` or was `rejected` is refused here, exactly as on `/pledges/{pledge}/entries`.'),
         ],
     )]
     public function store(StoreShareCapitalLedgerRequest $request): JsonResponse
     {
-        $entry = ShareCapitalLedger::create([
+        $entry = GeneratedNumberWrite::run(fn (): ShareCapitalLedger => ShareCapitalLedger::create([
             'borrower_id' => $request->borrower_id,
             'date' => $request->date,
             'description' => $request->description,
             'debit' => $request->type === 'debit' ? $request->amount : 0,
             'credit' => $request->type === 'credit' ? $request->amount : 0,
             'created_by' => $request->user()->id,
-        ]);
+        ]), GeneratedNumberWrite::SHARE_CAPITAL_CONFLICT);
 
         $entry->load('borrower', 'createdByUser');
 

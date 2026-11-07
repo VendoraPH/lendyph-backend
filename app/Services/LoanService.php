@@ -18,7 +18,6 @@ use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Support\Arr;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
 class LoanService
@@ -801,8 +800,11 @@ class LoanService
         };
 
         // With a list this is a collateral write, so a deadlock on its locks is
-        // a 409 like the attach endpoint's rather than a 500.
-        return $collaterals === null ? DB::transaction($edit) : CollateralWriteTransaction::run($edit);
+        // a 409 like the attach endpoint's rather than a 500. Without one it is
+        // a 409 too, as is a co-maker record's number colliding either way: the
+        // edit saves `$loan` itself, so running it a second time would see that
+        // model as already saved and write nothing.
+        return $collaterals === null ? LoanWriteTransaction::run($edit) : CollateralWriteTransaction::run($edit);
     }
 
     /**
@@ -1192,7 +1194,7 @@ class LoanService
      */
     public function addCoMakerAwaitingRelease(Loan $loan, array $validated, User $user): CoMaker
     {
-        return DB::transaction(function () use ($loan, $validated, $user) {
+        return GeneratedNumberWrite::run(function () use ($loan, $validated, $user) {
             $lockedLoan = Loan::whereKey($loan->id)->lockForUpdate()->firstOrFail();
 
             if (! $lockedLoan->is_releasable) {
@@ -1258,7 +1260,7 @@ class LoanService
             // Read back through the relation so the pivot (`added_by`,
             // `created_at`) rides along for CoMakerResource.
             return $lockedLoan->coMakers()->whereKey($coMaker->id)->firstOrFail();
-        });
+        }, GeneratedNumberWrite::CO_MAKER_CONFLICT);
     }
 
     public function release(Loan $loan, User $releaser, array $insurance = [], ?string $feeFingerprint = null): Loan

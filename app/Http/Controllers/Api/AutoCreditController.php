@@ -36,6 +36,7 @@ class AutoCreditController extends Controller
         security: [['sanctum' => []]],
         responses: [
             new OA\Response(response: 201, description: 'Auto-credit processed'),
+            new OA\Response(response: 409, description: 'Kept colliding with other saves taking the next reference. Nothing was saved; submit again.'),
             new OA\Response(response: 403, description: 'Forbidden'),
         ],
     )]

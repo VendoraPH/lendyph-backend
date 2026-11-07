@@ -7,7 +7,6 @@ use App\Models\ShareCapitalLedger;
 use App\Models\ShareCapitalPledge;
 use App\Models\User;
 use Illuminate\Database\Eloquent\Collection;
-use Illuminate\Support\Facades\DB;
 
 class ShareCapitalService
 {
@@ -30,7 +29,7 @@ class ShareCapitalService
             ->where('amount', '>', 0)
             ->get();
 
-        return DB::transaction(function () use ($eligiblePledges, $user) {
+        return GeneratedNumberWrite::run(function () use ($eligiblePledges, $user) {
             $today = now()->toDateString();
             $totalAmount = 0.0;
 
@@ -54,7 +53,7 @@ class ShareCapitalService
                 'processed_by' => $user->id,
                 'status' => 'completed',
             ]);
-        });
+        }, GeneratedNumberWrite::SHARE_CAPITAL_CONFLICT);
     }
 
     /**
@@ -124,19 +123,19 @@ class ShareCapitalService
         User $user,
         ?string $description = null,
     ): ShareCapitalLedger {
-        return ShareCapitalLedger::create([
+        return GeneratedNumberWrite::run(fn (): ShareCapitalLedger => ShareCapitalLedger::create([
             'borrower_id' => $pledge->borrower_id,
             'date' => $date,
             'description' => $description ?? ('Manual '.$type.' entry'),
             'debit' => $type === 'debit' ? $amount : 0,
             'credit' => $type === 'credit' ? $amount : 0,
             'created_by' => $user->id,
-        ]);
+        ]), GeneratedNumberWrite::SHARE_CAPITAL_CONFLICT);
     }
 
     public function bulkManualEntries(array $entries, User $user): Collection
     {
-        return DB::transaction(function () use ($entries, $user) {
+        return GeneratedNumberWrite::run(function () use ($entries, $user) {
             $results = new Collection;
 
             foreach ($entries as $entry) {
@@ -153,6 +152,6 @@ class ShareCapitalService
             }
 
             return $results;
-        });
+        }, GeneratedNumberWrite::SHARE_CAPITAL_CONFLICT);
     }
 }

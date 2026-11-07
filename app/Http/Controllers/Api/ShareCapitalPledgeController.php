@@ -206,6 +206,7 @@ DESC,
         requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent),
         responses: [
             new OA\Response(response: 201, description: 'Entry created'),
+            new OA\Response(response: 409, description: 'Kept colliding with other saves taking the next reference. Nothing was saved; submit again.'),
             new OA\Response(response: 422, description: 'The pledge belongs to a borrower whose registration is still `pending` or was `rejected`'),
         ],
     )]
@@ -237,6 +238,7 @@ DESC,
         requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent),
         responses: [
             new OA\Response(response: 201, description: 'Bulk entries created'),
+            new OA\Response(response: 409, description: 'Kept colliding with other saves taking the next reference. Nothing was saved; submit again.'),
             new OA\Response(response: 422, description: 'One of the pledges belongs to a borrower whose registration is still `pending` or was `rejected`'),
         ],
     )]

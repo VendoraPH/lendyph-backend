@@ -9,6 +9,7 @@ use App\Http\Requests\CoMaker\UpdateCoMakerRequest;
 use App\Http\Resources\CoMakerResource;
 use App\Models\Borrower;
 use App\Models\CoMaker;
+use App\Services\GeneratedNumberWrite;
 use App\Services\ValidIdService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -84,6 +85,7 @@ class CoMakerController extends Controller
         ),
         responses: [
             new OA\Response(response: 201, description: 'Co-maker created'),
+            new OA\Response(response: 409, description: 'Kept colliding with other saves taking the next co-maker number. Nothing was saved; submit again.'),
             new OA\Response(response: 401, description: 'Unauthenticated'),
             new OA\Response(response: 403, description: 'Forbidden'),
             new OA\Response(response: 422, description: 'Validation error'),
@@ -91,7 +93,10 @@ class CoMakerController extends Controller
     )]
     public function store(StoreCoMakerRequest $request, Borrower $borrower): JsonResponse
     {
-        $coMaker = $borrower->coMakers()->create($request->validated());
+        $coMaker = GeneratedNumberWrite::run(
+            fn (): CoMaker => $borrower->coMakers()->create($request->validated()),
+            GeneratedNumberWrite::CO_MAKER_CONFLICT,
+        );
 
         return (new CoMakerResource($coMaker))
             ->response()

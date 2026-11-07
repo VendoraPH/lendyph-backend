@@ -403,6 +403,12 @@ class RepaymentService
             ShareCapitalLedger::create([
                 'borrower_id' => $loan->borrower_id,
                 'repayment_id' => $repayment->id,
+                // Its own reference, not one ShareCapitalLedger::booted()
+                // numbers, as ShareCapitalReleaseCredit's is: that hook reads
+                // the day's last number from this payment's snapshot, so two
+                // payments could build the same one. A receipt number is
+                // unique and at most 20 characters, in a 30-character column.
+                'reference' => "SC-{$repayment->receipt_number}",
                 'date' => $paymentDate,
                 'description' => "Share capital build-up from payment {$repayment->receipt_number} (Loan {$loan->loan_account_number})",
                 'debit' => 0,
@@ -1110,6 +1116,8 @@ class RepaymentService
         ShareCapitalLedger::create([
             'borrower_id' => $loan->borrower_id,
             'repayment_id' => $repayment->id,
+            // As the credit's own reference; a payment is voided once.
+            'reference' => "SCV-{$repayment->receipt_number}",
             'date' => now()->toDateString(),
             'description' => "Void reversal of share capital build-up from payment {$repayment->receipt_number}",
             'debit' => $creditedAmount,
