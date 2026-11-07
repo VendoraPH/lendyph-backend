@@ -287,12 +287,15 @@ class AuditLogResource extends JsonResource
     /**
      * A value with every associative array's keys sorted and every number in
      * one form, at every depth, so two values compare equal exactly when they
-     * hold the same content: `5` and `"5"`, or `1500` and `1500.0`, are not a
-     * change.
+     * hold the same content: `5` and `"5"`, or `1500` and `"1500.0"`, are not
+     * a change. Only an int, a float, or a string already written as a plain
+     * number counts as a number; any other string (a mobile number's leading
+     * zero, a padded code, a long reference) is compared exactly as stored.
      */
     private static function canonical(mixed $value): mixed
     {
-        if (is_numeric($value)) {
+        if (is_int($value) || is_float($value)
+            || (is_string($value) && preg_match('/^-?(0|[1-9]\d{0,14})(\.\d+)?$/', $value) === 1)) {
             return (string) ($value + 0);
         }
 
@@ -349,8 +352,11 @@ class AuditLogResource extends JsonResource
 
     /**
      * A record's peso figure: its numeric `amount`, or its numeric `value`
-     * when its `type` is `fixed`. Never a percentage: a record typed as one
-     * (a loan's percentage deduction keeps its rate in `amount`) has none.
+     * when its `type` is `fixed`. A record typed as a percentage has one only
+     * when it carries `original_value`: a saved loan deduction keeps the rate
+     * there and the computed pesos in `amount` (LoanService::deductionItems()),
+     * while a stated rate without it keeps the rate in `amount`, which must
+     * never read as pesos.
      *
      * @param  array<mixed>  $item
      */
@@ -358,7 +364,7 @@ class AuditLogResource extends JsonResource
     {
         $type = is_string($item['type'] ?? null) ? strtolower($item['type']) : null;
 
-        if ($type !== null && str_contains($type, 'percent')) {
+        if ($type !== null && str_contains($type, 'percent') && ! array_key_exists('original_value', $item)) {
             return null;
         }
 

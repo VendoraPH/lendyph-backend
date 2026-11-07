@@ -452,9 +452,40 @@ it('prints a value in pesos only for a fixed record, and never a percentage', fu
 it('does not list a number stored in another form', function () {
     $row = new AuditLog([
         'action' => 'updated',
-        'old_values' => ['count' => 5, 'amount' => 1500, 'terms' => ['rate' => '2.50']],
-        'new_values' => ['count' => '5', 'amount' => 1500.0, 'terms' => ['rate' => 2.5]],
+        'old_values' => ['count' => 5, 'amount' => 1500, 'fee' => 1500, 'terms' => ['rate' => '2.50']],
+        'new_values' => ['count' => '5', 'amount' => 1500.0, 'fee' => '1500.0', 'terms' => ['rate' => 2.5]],
     ]);
 
     expect((new AuditLogResource($row))->toArray(request())['changes'])->toBe([]);
+});
+
+it('lists a digit string that changed, such as a mobile number losing its leading zero', function () {
+    $member = Borrower::factory()->create(['contact_number' => '09171234567']);
+    $member->update(['contact_number' => '9171234567']);
+    $row = latestAuditRow('updated', $member->getMorphClass(), $member->id);
+
+    expect(collect($this->getJson("/api/audit-logs/{$row->id}")->assertOk()->json('data.changes'))->firstWhere('field', 'contact_number'))
+        ->toBe(['field' => 'contact_number', 'old' => '09171234567', 'new' => '9171234567']);
+
+    $padded = new AuditLog([
+        'action' => 'updated',
+        'old_values' => ['code' => '007', 'reference' => '1234567890123456789', 'spaced' => ' 5'],
+        'new_values' => ['code' => '7', 'reference' => '1234567890123456780', 'spaced' => '5'],
+    ]);
+
+    expect(collect((new AuditLogResource($padded))->toArray(request())['changes'])->pluck('field')->sort()->values()->all())
+        ->toBe(['code', 'reference', 'spaced']);
+});
+
+it('shows the peso amounts of a stored percentage deduction', function () {
+    $loan = Loan::factory()->create(['deductions' => [
+        ['name' => 'Processing Fee', 'amount' => 300, 'type' => 'percentage', 'original_value' => 3],
+    ]]);
+    $loan->update(['deductions' => [
+        ['name' => 'Processing Fee', 'amount' => 360, 'type' => 'percentage', 'original_value' => 3],
+    ]]);
+    $row = latestAuditRow('updated', $loan->getMorphClass(), $loan->id);
+
+    expect(collect($this->getJson("/api/audit-logs/{$row->id}")->assertOk()->json('data.changes'))->firstWhere('field', 'deductions'))
+        ->toBe(['field' => 'deductions', 'old' => "Processing Fee \u{20B1}300.00", 'new' => "Processing Fee \u{20B1}360.00"]);
 });
