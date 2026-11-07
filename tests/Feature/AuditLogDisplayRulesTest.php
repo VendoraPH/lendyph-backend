@@ -10,6 +10,7 @@ use App\Models\CsvImportRun;
 use App\Models\GCashTransaction;
 use App\Models\Loan;
 use App\Models\LoanApprovalStep;
+use App\Models\LoanProduct;
 use App\Models\Role;
 use App\Models\User;
 use App\Services\AuditLogService;
@@ -394,6 +395,65 @@ it('does not list the same content in a different key order', function () {
             'deductions' => [['amount' => 1500, 'name' => 'Processing Fee']],
             'settings' => ['tiers' => ['max' => 9, 'min' => 1], 'grace_days' => 3],
         ],
+    ]);
+
+    expect((new AuditLogResource($row))->toArray(request())['changes'])->toBe([]);
+});
+
+it('reads an Eloquent edit of an array field in words on both sides, with the amounts when only an amount changed', function () {
+    $loan = Loan::factory()->create(['deductions' => [
+        ['name' => 'Processing Fee', 'amount' => 1500, 'type' => 'fixed'],
+        ['name' => 'Notarial Fee', 'amount' => 100, 'type' => 'fixed'],
+    ]]);
+    $loan->update(['deductions' => [
+        ['name' => 'Processing Fee', 'amount' => 2000, 'type' => 'fixed'],
+        ['name' => 'Notarial Fee', 'amount' => 100, 'type' => 'fixed'],
+    ]]);
+    $row = latestAuditRow('updated', $loan->getMorphClass(), $loan->id);
+    expect($row->new_values['deductions'])->toBeString();
+
+    $change = collect($this->getJson("/api/audit-logs/{$row->id}")->assertOk()->json('data.changes'))->firstWhere('field', 'deductions');
+
+    expect($change)->toBe([
+        'field' => 'deductions',
+        'old' => "Processing Fee \u{20B1}1,500.00, Notarial Fee \u{20B1}100.00",
+        'new' => "Processing Fee \u{20B1}2,000.00, Notarial Fee \u{20B1}100.00",
+    ]);
+
+    $product = LoanProduct::factory()->create(['frequencies' => ['monthly']]);
+    $product->update(['frequencies' => ['monthly', 'weekly']]);
+    $productRow = latestAuditRow('updated', $product->getMorphClass(), $product->id);
+
+    expect(collect($this->getJson("/api/audit-logs/{$productRow->id}")->assertOk()->json('data.changes'))->firstWhere('field', 'frequencies'))
+        ->toBe(['field' => 'frequencies', 'old' => 'monthly', 'new' => 'monthly, weekly']);
+});
+
+it('prints a value in pesos only for a fixed record, and never a percentage', function () {
+    $shown = function (array $old, array $new): array {
+        $row = AuditLog::create(['action' => 'updated', 'user_id' => $this->admin->id, 'old_values' => ['fees' => $old], 'new_values' => ['fees' => $new]]);
+        $change = $this->getJson("/api/audit-logs/{$row->id}")->assertOk()->json('data.changes.0');
+
+        return [$change['old'], $change['new']];
+    };
+
+    expect($shown([['name' => 'Late Fee', 'type' => 'fixed', 'value' => 50]], [['name' => 'Late Fee', 'type' => 'fixed', 'value' => 75]]))
+        ->toBe(["Late Fee \u{20B1}50.00", "Late Fee \u{20B1}75.00"]);
+
+    foreach ([
+        [[['name' => 'Late Fee', 'type' => 'percentage', 'value' => 2]], [['name' => 'Late Fee', 'type' => 'percentage', 'value' => 3]]],
+        [[['name' => 'Processing Fee', 'type' => 'percentage', 'amount' => 2]], [['name' => 'Processing Fee', 'type' => 'percentage', 'amount' => 3]]],
+    ] as [$old, $new]) {
+        [$oldShown, $newShown] = $shown($old, $new);
+        expect($oldShown)->not->toContain("\u{20B1}")->toContain('2')
+            ->and($newShown)->not->toContain("\u{20B1}")->toContain('3');
+    }
+});
+
+it('does not list a number stored in another form', function () {
+    $row = new AuditLog([
+        'action' => 'updated',
+        'old_values' => ['count' => 5, 'amount' => 1500, 'terms' => ['rate' => '2.50']],
+        'new_values' => ['count' => '5', 'amount' => 1500.0, 'terms' => ['rate' => 2.5]],
     ]);
 
     expect((new AuditLogResource($row))->toArray(request())['changes'])->toBe([]);

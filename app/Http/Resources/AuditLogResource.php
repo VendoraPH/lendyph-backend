@@ -176,8 +176,8 @@ class AuditLogResource extends JsonResource
                 continue;
             }
 
-            $oldValue = $old[$field] ?? null;
-            $newValue = $new[$field] ?? null;
+            $oldValue = self::decoded($old[$field] ?? null);
+            $newValue = self::decoded($new[$field] ?? null);
 
             if (self::canonical($oldValue) === self::canonical($newValue)) {
                 continue;
@@ -266,11 +266,36 @@ class AuditLogResource extends JsonResource
     }
 
     /**
-     * A value with every associative array's keys sorted, at every depth, so
-     * two values compare equal exactly when they hold the same content.
+     * A string holding a JSON array or object, decoded; anything else as it is.
+     *
+     * An Auditable `updated` row takes its old values from getOriginal(), which
+     * casts an array field to an array, and its new values from getChanges(),
+     * which holds the raw JSON string. Decoding lets both sides compare and
+     * read the same way.
+     */
+    private static function decoded(mixed $value): mixed
+    {
+        if (! is_string($value) || ! json_validate($value)) {
+            return $value;
+        }
+
+        $decoded = json_decode($value, true);
+
+        return is_array($decoded) ? $decoded : $value;
+    }
+
+    /**
+     * A value with every associative array's keys sorted and every number in
+     * one form, at every depth, so two values compare equal exactly when they
+     * hold the same content: `5` and `"5"`, or `1500` and `1500.0`, are not a
+     * change.
      */
     private static function canonical(mixed $value): mixed
     {
+        if (is_numeric($value)) {
+            return (string) ($value + 0);
+        }
+
         if (! is_array($value)) {
             return $value;
         }
@@ -284,8 +309,8 @@ class AuditLogResource extends JsonResource
 
     /**
      * A value in more detail than self::shown(), for two values that read the
-     * same in words: a list of records as each one's name and its amount (from
-     * `amount`, else `value`, when numeric) in pesos, e.g. "Processing Fee
+     * same in words: a list of records as each one's name and its peso figure
+     * (self::pesosOf()), e.g. "Processing Fee
      * ₱2,000.00, Notarial Fee ₱100.00"; an associative array as "key: value"
      * pairs, keys in words and sorted (a MySQL JSON column keeps its own key
      * order), joined with "; ". Anything else as self::shown().
@@ -315,11 +340,33 @@ class AuditLogResource extends JsonResource
                 return self::shown($value);
             }
 
-            $amount = array_find([$item['amount'] ?? null, $item['value'] ?? null], fn (mixed $figure): bool => is_numeric($figure));
-            $items[] = $amount === null ? $name : $name.' ₱'.number_format((float) $amount, 2);
+            $pesos = self::pesosOf($item);
+            $items[] = $pesos === null ? $name : $name.' ₱'.number_format((float) $pesos, 2);
         }
 
         return implode(', ', $items);
+    }
+
+    /**
+     * A record's peso figure: its numeric `amount`, or its numeric `value`
+     * when its `type` is `fixed`. Never a percentage: a record typed as one
+     * (a loan's percentage deduction keeps its rate in `amount`) has none.
+     *
+     * @param  array<mixed>  $item
+     */
+    private static function pesosOf(array $item): int|float|string|null
+    {
+        $type = is_string($item['type'] ?? null) ? strtolower($item['type']) : null;
+
+        if ($type !== null && str_contains($type, 'percent')) {
+            return null;
+        }
+
+        if (is_numeric($item['amount'] ?? null)) {
+            return $item['amount'];
+        }
+
+        return $type === 'fixed' && is_numeric($item['value'] ?? null) ? $item['value'] : null;
     }
 
     private static function asJson(mixed $value): ?string

@@ -90,7 +90,7 @@ return new class extends Migration
         }
 
         $summary = sprintf(
-            'role member descriptions: %d reworded, %d left as edited',
+            'role member descriptions: %d reworded, %d left as they are',
             count($result['updated']),
             count($result['skipped']),
         );

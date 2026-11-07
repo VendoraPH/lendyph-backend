@@ -50,7 +50,7 @@ class RewordRoleMemberDescriptionsTest extends TestCase
         $this->artisan('roles:reword-member-descriptions', ['--dry-run' => true])
             ->expectsOutputToContain('admin (id '.$this->id('admin').'): would reword')
             ->expectsOutputToContain('loan_officer (id '.$this->id('loan_officer').'): would reword')
-            ->expectsOutputToContain('Would reword 2 role description(s); 0 left as edited.')
+            ->expectsOutputToContain('Would reword 2 role description(s); 0 left as they are.')
             ->assertSuccessful();
 
         $this->assertSame($before, $this->snapshot());
@@ -65,7 +65,7 @@ class RewordRoleMemberDescriptionsTest extends TestCase
 
         $this->artisan('roles:reword-member-descriptions')
             ->expectsOutputToContain('loan_officer (id '.$this->id('loan_officer').') left as it is: its description was edited')
-            ->expectsOutputToContain('Reworded 1 role description(s); 1 left as edited.')
+            ->expectsOutputToContain('Reworded 1 role description(s); 1 left as they are.')
             ->assertSuccessful();
 
         $this->assertSame(self::NEW_ADMIN, $this->description('admin'));
@@ -91,7 +91,7 @@ class RewordRoleMemberDescriptionsTest extends TestCase
         $after = $this->snapshot();
 
         $this->artisan('roles:reword-member-descriptions')
-            ->expectsOutputToContain('Reworded 0 role description(s); 0 left as edited.')
+            ->expectsOutputToContain('Reworded 0 role description(s); 0 left as they are.')
             ->assertSuccessful();
 
         $this->assertSame($after, $this->snapshot());
@@ -101,9 +101,13 @@ class RewordRoleMemberDescriptionsTest extends TestCase
     {
         $this->restoreOldText();
         $auditRows = AuditLog::count();
+        Log::spy();
 
         $this->migration()->up();
 
+        Log::shouldHaveReceived('info')->withArgs(
+            fn (string $message): bool => $message === 'role member descriptions: 2 reworded, 0 left as they are',
+        );
         $this->assertSame(self::NEW_ADMIN, $this->description('admin'));
         $this->assertSame(self::NEW_OFFICER, $this->description('loan_officer'));
         $this->assertSame($auditRows + 2, AuditLog::count());
@@ -130,7 +134,7 @@ class RewordRoleMemberDescriptionsTest extends TestCase
 
         $this->artisan('roles:reword-member-descriptions')
             ->expectsOutputToContain('loan_officer (id '.$this->id('loan_officer').') left as it is: changed while the fix ran')
-            ->expectsOutputToContain('Reworded 1 role description(s); 1 left as edited.')
+            ->expectsOutputToContain('Reworded 1 role description(s); 1 left as they are.')
             ->assertSuccessful();
 
         $this->assertTrue($raced);
@@ -154,7 +158,7 @@ class RewordRoleMemberDescriptionsTest extends TestCase
         ]);
 
         $this->artisan('roles:reword-member-descriptions')
-            ->expectsOutputToContain('Reworded 2 role description(s); 0 left as edited.')
+            ->expectsOutputToContain('Reworded 2 role description(s); 0 left as they are.')
             ->assertSuccessful();
 
         $this->assertSame(self::OLD_ADMIN, DB::table('roles')->where('id', $other)->value('description'));

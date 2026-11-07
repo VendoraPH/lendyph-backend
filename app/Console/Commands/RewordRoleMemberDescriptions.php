@@ -29,7 +29,7 @@ class RewordRoleMemberDescriptions extends Command
         }
 
         $this->info(sprintf(
-            '%s %d role description(s); %d left as edited.',
+            '%s %d role description(s); %d left as they are.',
             $dryRun ? 'Would reword' : 'Reworded',
             count($result['updated']),
             count($result['skipped']),
