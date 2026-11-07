@@ -1038,7 +1038,7 @@ DESC,
     #[OA\Get(
         path: '/api/borrowers/{id}/ledger',
         summary: 'Member ledger with running balance',
-        description: 'The rows of each loan\'s own Ledger (GET /loans/{id}/ledger), for every ever-released loan (released, ongoing, completed, defaulted, restructured) the caller may see, in date order and, within a day, loan by loan in release order. `balance` is the loans\' principal, interest and penalty balances added up, after this row. It leaves out the insurance premium owed, as the loan Ledger does, and share capital, so a release\'s debit is its principal plus the schedule\'s interest. `debit` and `credit` are what the row moved the balance by; a payment\'s `credit` is the principal, interest and penalty it applied. A voided payment and its void are left out as a pair, so between those two dates the balance reads as if the payment was never made. `meta.closing` is the sum of the loans\' Ledger closings; `meta.closing.balance` equals the last row\'s `balance`. Whole centavos throughout.',
+        description: 'The rows of each loan\'s own Ledger (GET /loans/{id}/ledger), for every ever-released loan (released, ongoing, completed, defaulted, restructured) the caller may see, in date order and, within a day, loan by loan in release order. `balance` is the loans\' principal, interest and penalty balances added up, after this row. It leaves out the insurance premium owed, as the loan Ledger does, and share capital, so a release\'s debit is its principal plus the schedule\'s interest. `debit` and `credit` are what the row moved the balance by; a payment\'s `credit` is the principal, interest and penalty it applied. A voided payment and its void are left out as a pair, so between those two dates the balance reads as if the payment was never made. `meta.closing` is the sum of the loans\' Ledger closings; `meta.closing.balance` equals the last row\'s `balance`. Whole centavos throughout. Needs `borrowers:view` and `loans:view`; `scb` is left out for a caller without `share_capital:view`.',
         tags: ['Borrowers'],
         security: [['sanctum' => []]],
         parameters: [
@@ -1060,7 +1060,7 @@ DESC,
                     new OA\Property(property: 'repayment_id', type: 'integer', nullable: true),
                     new OA\Property(property: 'amount_paid', type: 'number', description: 'Payment rows only: the whole amount the payment took'),
                     new OA\Property(property: 'insurance', type: 'number', description: 'Payment rows only: the insurance premium it collected, outside the balance'),
-                    new OA\Property(property: 'scb', type: 'number', description: 'Payment rows only: the share capital it credited, outside the balance'),
+                    new OA\Property(property: 'scb', type: 'number', description: 'Payment rows only, for a caller with `share_capital:view`: the share capital it credited, outside the balance'),
                 ])),
                 new OA\Property(property: 'meta', type: 'object', properties: [
                     new OA\Property(property: 'closing', type: 'object', properties: [
@@ -1072,13 +1072,14 @@ DESC,
                 ]),
             ])),
             new OA\Response(response: 401, description: 'Unauthenticated'),
-            new OA\Response(response: 403, description: 'Missing borrowers:view'),
+            new OA\Response(response: 403, description: 'Missing borrowers:view or loans:view'),
             new OA\Response(response: 404, description: 'Borrower not found'),
         ],
     )]
     public function ledger(Borrower $borrower, MemberLedgerService $ledger): JsonResponse
     {
         $this->authorize('borrowers:view');
+        $this->authorize('loans:view');
 
         ['rows' => $rows, 'closing' => $closing] = $ledger->forMember($borrower, request()->user());
 

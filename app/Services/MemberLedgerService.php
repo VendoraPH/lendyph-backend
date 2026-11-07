@@ -24,7 +24,8 @@ use Illuminate\Database\Eloquent\Collection as EloquentCollection;
  * by, read from the balances themselves, so a signed adjustment and a balance
  * moved to a restructured loan need no rule of their own. A payment's credit is
  * the principal, interest and penalty it applied; its `amount_paid`, `insurance`
- * and `scb` say what else it took.
+ * and `scb` say what else it took. `scb` is a share capital figure, so a viewer
+ * without `share_capital:view` doesn't get it.
  *
  * Which loans: every ever-released loan (Loan::EVER_RELEASED_STATUSES) the
  * viewer may see. A member's older loan stays in the branch it was booked in, so
@@ -63,6 +64,7 @@ final class MemberLedgerService
             ->get(['id', 'receipt_number', 'amount_paid'])
             ->keyBy('id');
 
+        $shareCapitalVisible = $viewer->can('share_capital:view');
         $entries = [];
         $closing = ['principal' => 0, 'interest' => 0, 'penalty' => 0];
 
@@ -73,7 +75,7 @@ final class MemberLedgerService
                 $closing[$column] = $centavos + LoanService::toCentavos($ledger['closing'][$column]);
             }
 
-            array_push($entries, ...$this->entries($loan, $order, $ledger['rows'], $repayments));
+            array_push($entries, ...$this->entries($loan, $order, $ledger['rows'], $repayments, $shareCapitalVisible));
         }
 
         usort($entries, fn (array $a, array $b): int => [$a['date'], $a['order'], $a['index']] <=> [$b['date'], $b['order'], $b['index']]);
@@ -97,7 +99,7 @@ final class MemberLedgerService
      * @param  EloquentCollection<int, Repayment>  $repayments  by id
      * @return list<array<string, mixed>>
      */
-    private function entries(Loan $loan, int $order, array $rows, EloquentCollection $repayments): array
+    private function entries(Loan $loan, int $order, array $rows, EloquentCollection $repayments, bool $shareCapitalVisible): array
     {
         $voided = array_column(array_filter($rows, fn (array $row): bool => $row['kind'] === 'void'), 'repayment_id');
         $reference = $loan->loan_account_number ?? $loan->application_number;
@@ -132,7 +134,7 @@ final class MemberLedgerService
                     ? [
                         'amount_paid' => LoanService::toCentavos((float) $repayment?->amount_paid) / 100,
                         'insurance' => $row['insurance'],
-                        'scb' => $row['scb'],
+                        ...($shareCapitalVisible ? ['scb' => $row['scb']] : []),
                     ]
                     : [],
             ];

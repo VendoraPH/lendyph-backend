@@ -13,6 +13,7 @@ use App\Services\LoanService;
 use App\Services\RepaymentService;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
+use Spatie\Permission\Models\Permission;
 use Tests\Feature\BrowserMoneyRound\Concerns\BuildsReleasedLoans;
 use Tests\Feature\InsuranceOwed\Concerns\OwesInsurancePremium;
 use Tests\TestCase;
@@ -245,20 +246,7 @@ class MemberLedgerBalanceTest extends TestCase
 
     public function test_share_capital_a_payment_credited_is_outside_the_balance(): void
     {
-        $member = Borrower::factory()->create(['branch_id' => $this->branch->id]);
-        $product = LoanProduct::factory()->create(['interest_rate' => 3.0, 'interest_method' => 'straight', 'term' => 6, 'frequency' => 'monthly', 'penalty_rate' => 2.0, 'grace_period_days' => 3]);
-        $loans = app(LoanService::class);
-        $loan = $loans->createLoan([
-            'borrower_id' => $member->id,
-            'loan_product_id' => $product->id,
-            'principal_amount' => 60000,
-            'scb_amount' => 100,
-            'start_date' => now()->toDateString(),
-        ], $this->admin);
-        $loans->submitForReview($loan);
-        $loans->approve($loan, $this->admin, 'Approved for testing');
-        $loans->release($loan, $this->admin);
-        $this->payLoan($loan, 11900);
+        $member = $this->memberWithABuildUpPayment();
 
         [$release, $payment] = $this->memberLedger($member);
 
@@ -386,6 +374,49 @@ class MemberLedgerBalanceTest extends TestCase
         }
     }
 
+    public function test_it_needs_both_borrowers_view_and_loans_view(): void
+    {
+        $member = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+        $this->releasedLoanFor(borrower: $member);
+
+        $this->actingAs($this->userHolding(['borrowers:view']));
+        $this->getJson("/api/borrowers/{$member->id}/ledger")->assertForbidden();
+
+        $this->actingAs($this->userHolding(['loans:view']));
+        $this->getJson("/api/borrowers/{$member->id}/ledger")->assertForbidden();
+
+        $this->actingAs($this->userHolding(['borrowers:view', 'loans:view']));
+        $this->getJson("/api/borrowers/{$member->id}/ledger")->assertOk();
+    }
+
+    public function test_no_seeded_role_with_borrowers_view_loses_the_ledger(): void
+    {
+        $this->assertSame(
+            [],
+            Permission::findByName('borrowers:view')->roles->pluck('name')
+                ->diff(Permission::findByName('loans:view')->roles->pluck('name'))
+                ->values()->all(),
+        );
+    }
+
+    public function test_scb_is_left_out_for_a_caller_without_share_capital_view(): void
+    {
+        $member = $this->memberWithABuildUpPayment();
+
+        $this->actingAs($this->userHolding(['borrowers:view', 'loans:view']));
+        $payment = $this->memberLedger($member)[1];
+
+        $this->assertSame('repayment', $payment['kind']);
+        $this->assertArrayNotHasKey('scb', $payment);
+        $this->assertMoney(11900, $payment['amount_paid']);
+        $this->assertMoney(0, $payment['insurance']);
+        $this->assertMoney(11800, $payment['credit']);
+        $this->assertMoney(59000, $payment['balance']);
+
+        $this->actingAs($this->userHolding(['borrowers:view', 'loans:view', 'share_capital:view']));
+        $this->assertMoney(100, $this->memberLedger($member)[1]['scb']);
+    }
+
     public function test_the_query_count_does_not_grow_with_the_rows(): void
     {
         $member = Borrower::factory()->create(['branch_id' => $this->branch->id]);
@@ -431,6 +462,36 @@ class MemberLedgerBalanceTest extends TestCase
         $balances = $loanRow['balances'];
 
         return round($balances['principal'] + $balances['interest'] + $balances['penalty'], 2);
+    }
+
+    /** @param  list<string>  $permissions */
+    private function userHolding(array $permissions): User
+    {
+        $user = User::factory()->inBranches($this->branch)->create();
+        $user->givePermissionTo($permissions);
+
+        return $user;
+    }
+
+    /** ₱60,000.00 with a ₱100.00 build-up a period, and one payment that met the period and its build-up. */
+    private function memberWithABuildUpPayment(): Borrower
+    {
+        $member = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+        $product = LoanProduct::factory()->create(['interest_rate' => 3.0, 'interest_method' => 'straight', 'term' => 6, 'frequency' => 'monthly', 'penalty_rate' => 2.0, 'grace_period_days' => 3]);
+        $loans = app(LoanService::class);
+        $loan = $loans->createLoan([
+            'borrower_id' => $member->id,
+            'loan_product_id' => $product->id,
+            'principal_amount' => 60000,
+            'scb_amount' => 100,
+            'start_date' => now()->toDateString(),
+        ], $this->admin);
+        $loans->submitForReview($loan);
+        $loans->approve($loan, $this->admin, 'Approved for testing');
+        $loans->release($loan, $this->admin);
+        $this->payLoan($loan, 11900);
+
+        return $member;
     }
 
     private function queriesFor(Borrower $member): int
