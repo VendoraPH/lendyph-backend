@@ -6,13 +6,14 @@ use App\Enums\InterestRateFrequency;
 use App\Enums\LoanFrequency;
 use App\Enums\TermUnit;
 use App\Http\Requests\LoanProduct\Concerns\GuardsAgainstFeeCatalogOverlap;
+use App\Http\Requests\LoanProduct\Concerns\RefusesTermOutsideItsRange;
 use App\Models\LoanProduct;
 use Illuminate\Contracts\Validation\Validator;
 use Illuminate\Foundation\Http\FormRequest;
 
 class UpdateLoanProductRequest extends FormRequest
 {
-    use GuardsAgainstFeeCatalogOverlap;
+    use GuardsAgainstFeeCatalogOverlap, RefusesTermOutsideItsRange;
 
     /**
      * A product's `custom_fees` ("Additional fees") are retired. No release,
@@ -71,11 +72,14 @@ class UpdateLoanProductRequest extends FormRequest
         // `term` is the product's default term, not the top of the range. An edit
         // that doesn't send one keeps the stored value, so it isn't copied from
         // `max_term` here.
+        // `frequency` is the product's default, one of `frequencies`. Saving a
+        // new list keeps it unless it's no longer on the list.
         if (! $this->has('frequency') && $this->has('frequencies')) {
             $frequencies = $this->input('frequencies');
-            if (is_array($frequencies) && count($frequencies) > 0) {
+            $stored = $this->route('loan_product')?->getRawOriginal('frequency');
+            if (is_array($frequencies) && count($frequencies) > 0 && ! in_array($stored, $frequencies, true)) {
                 $this->merge(['frequency' => $frequencies[0]]);
-            } elseif (is_string($frequencies) && $frequencies !== '') {
+            } elseif (is_string($frequencies) && $frequencies !== '' && $frequencies !== $stored) {
                 $this->merge(['frequency' => $frequencies]);
             }
         }
@@ -94,6 +98,7 @@ class UpdateLoanProductRequest extends FormRequest
 
         $this->guardAgainstFeeCatalogOverlap($validator, $product instanceof LoanProduct ? $product : null);
         $this->refuseChangedCustomFees($validator, $product instanceof LoanProduct ? $product : null);
+        $this->refuseTermOutsideItsRange($validator, $product instanceof LoanProduct ? $product : null);
     }
 
     /**

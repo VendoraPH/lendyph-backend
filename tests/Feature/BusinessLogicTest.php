@@ -410,6 +410,12 @@ class BusinessLogicTest extends TestCase
             'spouse_first_name' => 'Juan',
             'spouse_last_name' => 'Santos',
             'spouse_occupation' => 'Engineer',
+            'birthdate' => '1990-05-12',
+            'gender' => 'female',
+            'address' => '12 Mabini St',
+            'city' => 'Butuan',
+            'province' => 'Agusan del Norte',
+            'contact_number' => '09170000222',
         ]);
 
         $response->assertCreated();

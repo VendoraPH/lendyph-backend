@@ -469,6 +469,39 @@ class Loan extends Model
         return trim((string) $label) === '' ? null : $label;
     }
 
+    /**
+     * When the loan was first submitted for approval: the submit step of its
+     * first round, which LoanApprovalChainService::seed() signs at that moment.
+     * A send-back to the submit step opens a later round and doesn't move it.
+     *
+     * A loan from before the chain existed has no steps. With `$readAuditTrail`,
+     * the audit row its move to `for_review` wrote is the record instead, at the
+     * cost of a query. Otherwise, and with no such row, null.
+     *
+     * Reads the `approvalSteps` relation: eager-load it before calling this
+     * across a list.
+     */
+    public function submittedAt(bool $readAuditTrail = false): ?Carbon
+    {
+        $submitted = $this->approvalSteps
+            ->where('kind', LoanApprovalStep::KIND_SUBMIT)
+            ->whereNotNull('acted_at')
+            ->sortBy('round')
+            ->first()
+            ?->acted_at;
+
+        if ($submitted !== null || ! $readAuditTrail || $this->approvalSteps->isNotEmpty()) {
+            return $submitted;
+        }
+
+        return $this->auditLogs()
+            ->where('action', 'updated')
+            ->where('new_values->status', 'for_review')
+            ->oldest('id')
+            ->first()
+            ?->created_at;
+    }
+
     private function currentPendingStep(): ?LoanApprovalStep
     {
         return LoanApprovalStep::currentRound($this->approvalSteps)

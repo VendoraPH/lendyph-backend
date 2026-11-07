@@ -456,6 +456,8 @@ class GeneratedNumberCollisionTest extends TestCase
             'civil_status' => 'single',
             'contact_number' => '09171234567',
             'address' => 'Somewhere',
+            'city' => 'Quezon City',
+            'province' => 'Metro Manila',
             'branch_id' => $this->branch->id,
             ...$extra,
         ];
@@ -525,6 +527,8 @@ class GeneratedNumberCollisionTest extends TestCase
             'civil_status' => 'single',
             'contact_number' => '09171234567',
             'address' => 'Somewhere',
+            'city' => 'Quezon City',
+            'province' => 'Metro Manila',
             ...$extra,
         ];
 

@@ -233,6 +233,12 @@ it('does not let an authenticated operator claim a pending applicant with their 
         'contact_number' => '09170000111',
         'email' => 'operator.created@example.com',
         'registration_uuid' => $key,
+        'birthdate' => '1990-05-12',
+        'civil_status' => 'single',
+        'gender' => 'female',
+        'address' => '12 Mabini St',
+        'city' => 'Butuan',
+        'province' => 'Agusan del Norte',
     ])->assertCreated();
 
     expect($response->json('data.id'))->not->toBe($applicantId);

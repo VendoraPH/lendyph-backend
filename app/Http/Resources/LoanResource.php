@@ -3,7 +3,9 @@
 namespace App\Http\Resources;
 
 use App\Models\AmortizationSchedule;
+use App\Models\CoMaker;
 use App\Models\Loan;
+use App\Services\BranchAccess;
 use App\Services\CollateralSecurity;
 use App\Services\LoanService;
 use App\Services\PersistedScheduleFigures;
@@ -68,6 +70,13 @@ use OpenApi\Attributes as OA;
             new OA\Property(property: 'short_by', type: 'number', nullable: true),
             new OA\Property(property: 'value_unknown', type: 'boolean', description: 'Present, and true, only when the totals are withheld'),
         ]),
+        new OA\Property(property: 'submitted_at', type: 'string', format: 'date-time', nullable: true, description: 'When the loan was first submitted for approval: the submit step of its approval chain, requires `approvalSteps` eager-loaded (GET /loans and GET /loans/{id}). A loan from before the chain existed reads the audit row its submit wrote, on GET /loans/{id} only. Null when no record of a submission exists. A send-back and re-submit does not move it.'),
+        new OA\Property(property: 'auto_pay_enabled', type: 'boolean'),
+        new OA\Property(property: 'auto_pay_enabled_at', type: 'string', format: 'date-time', nullable: true),
+        new OA\Property(property: 'auto_pay_enabled_by', type: 'integer', nullable: true, description: 'The id of the user who enabled auto-pay'),
+        new OA\Property(property: 'auto_pay_cbs_reference', type: 'string', nullable: true, description: 'The CBS reference auto-pay was enabled with. Null while auto-pay is off, and for a caller holding neither `auto_pay:view` nor `auto_pay:toggle`.'),
+        new OA\Property(property: 'borrower', type: 'object', description: 'The whole member, or only `id`, `full_name` and `borrower_code` for a caller without `borrowers:view` or who cannot see the member\'s branch.'),
+        new OA\Property(property: 'co_makers', type: 'array', items: new OA\Items(type: 'object'), description: 'The co-makers; by the same rule as `borrower`, without their address, contact number, occupation, employer and income.'),
         new OA\Property(property: 'borrower_name', type: 'string', nullable: true),
         new OA\Property(property: 'loan_product_name', type: 'string', nullable: true),
         new OA\Property(property: 'account_officer_id', type: 'integer', nullable: true),
@@ -290,6 +299,20 @@ class LoanResource extends JsonResource
             'amount_due_now' => $this->relationLoaded('amortizationSchedules') && in_array($this->status, Loan::ACTIVE_STATUSES, true)
                 ? app(RepaymentService::class)->amountDueNow($this->resource, $this->amortizationSchedules, now())
                 : null,
+            // What the loan page's Auto-Pay card shows, so it is right after a
+            // reload. The bank reference only for those who work with auto-pay.
+            'auto_pay_enabled' => (bool) $this->auto_pay,
+            'auto_pay_enabled_at' => $this->auto_pay_enabled_at,
+            'auto_pay_enabled_by' => $this->auto_pay_enabled_by,
+            'auto_pay_cbs_reference' => $request->user()?->canAny(['auto_pay:view', 'auto_pay:toggle'])
+                ? $this->cbs_reference
+                : null,
+            // Where the chain is loaded. See Loan::submittedAt(). The audit trail
+            // is read only on the single-loan view (the `collaterals` proxy
+            // contractTotal() uses), so a list never pays a query per row.
+            'submitted_at' => $this->whenLoaded('approvalSteps', fn () => $this->resource->submittedAt(
+                readAuditTrail: $this->relationLoaded('collaterals'),
+            )),
             'approval_remarks' => $this->approval_remarks,
             'approved_at' => $this->approved_at,
             'rejection_remarks' => $this->rejection_remarks,
@@ -312,14 +335,14 @@ class LoanResource extends JsonResource
             'insurance_owed' => (float) $this->insurance_remaining_balance,
             'is_editable' => $this->is_editable,
             'is_releasable' => $this->is_releasable,
-            'borrower' => new BorrowerResource($this->whenLoaded('borrower')),
+            'borrower' => $this->memberOnRow($request),
             'borrower_name' => $this->whenLoaded('borrower', fn () => $this->borrower->full_name),
             'borrower_id' => $this->borrower_id,
             'loan_product' => new LoanProductResource($this->whenLoaded('loanProduct')),
             'loan_product_id' => $this->loan_product_id,
             'loan_product_name' => $this->whenLoaded('loanProduct', fn () => $this->loanProduct->name),
             'branch' => new BranchResource($this->whenLoaded('branch')),
-            'co_makers' => CoMakerResource::collection($this->whenLoaded('coMakers')),
+            'co_makers' => $this->coMakersOnRow($request),
             'approved_by_user' => new UserResource($this->whenLoaded('approvedByUser')),
             'released_by_user' => new UserResource($this->whenLoaded('releasedByUser')),
             'created_by_user' => new UserResource($this->whenLoaded('createdByUser')),
@@ -378,6 +401,56 @@ class LoanResource extends JsonResource
             'created_at' => $this->created_at,
             'updated_at' => $this->updated_at,
         ];
+    }
+
+    /**
+     * The member on a loan row. A caller without `borrowers:view` (the `manager`
+     * and board roles, and any custom role like them) sees who the loan belongs
+     * to and nothing else of theirs: the screens and printables that read this
+     * row (loan page, release voucher, amortization schedule) use only these
+     * three. The disclosure, the promissory note and the demand letter have
+     * endpoints of their own.
+     */
+    private function memberOnRow(Request $request): mixed
+    {
+        return $this->whenLoaded('borrower', function () use ($request) {
+            if ($this->borrower === null) {
+                return null;
+            }
+
+            return $this->canSeeMember($request) ? new BorrowerResource($this->borrower) : [
+                'id' => $this->borrower->id,
+                'full_name' => $this->borrower->full_name,
+                'borrower_code' => $this->borrower->borrower_code,
+            ];
+        });
+    }
+
+    /**
+     * The co-makers on a loan row, by the same rule as memberOnRow(): their
+     * names and relationship (what the loan page and its release card show),
+     * never their address, contact number, work or income.
+     */
+    private function coMakersOnRow(Request $request): mixed
+    {
+        return $this->whenLoaded('coMakers', fn () => $this->canSeeMember($request)
+            ? CoMakerResource::collection($this->coMakers)
+            : $this->coMakers->map(fn (CoMaker $coMaker): array => CoMakerResource::slim($coMaker))->values()->all());
+    }
+
+    /**
+     * Whether the caller may read this loan's member in full: `borrowers:view`
+     * and the member's own branch, which a moved member's loan row doesn't
+     * prove. A loan row otherwise would show what GET /borrowers/{id} answers
+     * 404 for.
+     */
+    private function canSeeMember(Request $request): bool
+    {
+        $user = $request->user();
+
+        return $user !== null
+            && $user->can('borrowers:view')
+            && app(BranchAccess::class)->canSee($user, $this->resource->borrower?->branch_id);
     }
 
     /**
