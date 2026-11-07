@@ -55,7 +55,7 @@ class IncomeReportProcessingFeesTest extends TestCase
         $this->assertProcessingFees(925.92);
     }
 
-    public function test_names_match_the_way_the_fee_overlap_detector_normalises_them(): void
+    public function test_names_are_normalised_and_an_unrecognised_item_counts_as_the_journal_books_it(): void
     {
         $this->releasedLoan(60000, [
             $this->item('PROCESSING-FEE.', 100.10, 'fixed', 100.10),
@@ -64,7 +64,9 @@ class IncomeReportProcessingFeesTest extends TestCase
             $this->item('Processing', 77, 'fixed', 77),
         ]);
 
-        $this->assertProcessingFees(150.35);
+        // The two recognised items, plus the two untyped ones the release journal
+        // credits to 4030 as well.
+        $this->assertProcessingFees(1226.35);
     }
 
     public function test_a_loan_that_recorded_deductions_without_a_processing_fee_contributes_nothing(): void
