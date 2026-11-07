@@ -14,6 +14,7 @@ use App\Services\BorrowerPurgeService;
 use App\Services\BorrowerSubmissionTokenService;
 use App\Services\BranchAccess;
 use App\Services\Diagnostics\ErrorDigest;
+use App\Services\MemberLedgerService;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -1036,73 +1037,51 @@ DESC,
 
     #[OA\Get(
         path: '/api/borrowers/{id}/ledger',
-        summary: 'Borrower transactional ledger',
-        description: 'Returns chronological ledger entries (loan releases as debits, repayments as credits) with running balance.',
+        summary: 'Member ledger with running balance',
+        description: 'The rows of each loan\'s own Ledger (GET /loans/{id}/ledger), for every ever-released loan (released, ongoing, completed, defaulted, restructured) the caller may see, in date order and, within a day, loan by loan in release order. `balance` is the loans\' principal, interest and penalty balances added up, after this row. It leaves out the insurance premium owed, as the loan Ledger does, and share capital, so a release\'s debit is its principal plus the schedule\'s interest. `debit` and `credit` are what the row moved the balance by; a payment\'s `credit` is the principal, interest and penalty it applied. A voided payment and its void are left out as a pair, so between those two dates the balance reads as if the payment was never made. `meta.closing` is the sum of the loans\' Ledger closings; `meta.closing.balance` equals the last row\'s `balance`. Whole centavos throughout.',
         tags: ['Borrowers'],
         security: [['sanctum' => []]],
         parameters: [
             new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
         ],
         responses: [
-            new OA\Response(response: 200, description: 'Ledger entries with running balance'),
+            new OA\Response(response: 200, description: 'Ledger rows with running balance', content: new OA\JsonContent(properties: [
+                new OA\Property(property: 'data', type: 'array', items: new OA\Items(properties: [
+                    new OA\Property(property: 'id', type: 'integer', description: 'The row\'s position in this list'),
+                    new OA\Property(property: 'date', type: 'string', format: 'date'),
+                    new OA\Property(property: 'description', type: 'string', description: 'The loan Ledger row\'s description'),
+                    new OA\Property(property: 'reference', type: 'string', description: 'A payment\'s receipt number, otherwise the loan account number'),
+                    new OA\Property(property: 'debit', type: 'number', description: 'What this row raised the balance by'),
+                    new OA\Property(property: 'credit', type: 'number', description: 'What this row lowered the balance by'),
+                    new OA\Property(property: 'balance', type: 'number', description: 'After this row: principal, interest and penalty'),
+                    new OA\Property(property: 'loan_id', type: 'integer'),
+                    new OA\Property(property: 'loan_account_number', type: 'string', nullable: true),
+                    new OA\Property(property: 'kind', type: 'string', enum: ['release', 'repayment', 'extension_payment', 'extension_charge', 'penalty_charge', 'adjustment'], description: 'The loan Ledger row\'s kind'),
+                    new OA\Property(property: 'repayment_id', type: 'integer', nullable: true),
+                    new OA\Property(property: 'amount_paid', type: 'number', description: 'Payment rows only: the whole amount the payment took'),
+                    new OA\Property(property: 'insurance', type: 'number', description: 'Payment rows only: the insurance premium it collected, outside the balance'),
+                    new OA\Property(property: 'scb', type: 'number', description: 'Payment rows only: the share capital it credited, outside the balance'),
+                ])),
+                new OA\Property(property: 'meta', type: 'object', properties: [
+                    new OA\Property(property: 'closing', type: 'object', properties: [
+                        new OA\Property(property: 'principal', type: 'number'),
+                        new OA\Property(property: 'interest', type: 'number'),
+                        new OA\Property(property: 'penalty', type: 'number'),
+                        new OA\Property(property: 'balance', type: 'number'),
+                    ]),
+                ]),
+            ])),
             new OA\Response(response: 401, description: 'Unauthenticated'),
+            new OA\Response(response: 403, description: 'Missing borrowers:view'),
             new OA\Response(response: 404, description: 'Borrower not found'),
         ],
     )]
-    public function ledger(Borrower $borrower): JsonResponse
+    public function ledger(Borrower $borrower, MemberLedgerService $ledger): JsonResponse
     {
         $this->authorize('borrowers:view');
 
-        // Build chronological list of loan releases (debits) and repayments (credits)
-        $entries = collect();
+        ['rows' => $rows, 'closing' => $closing] = $ledger->forMember($borrower, request()->user());
 
-        $loans = $borrower->loans()
-            ->with(['repayments' => fn ($q) => $q->where('status', 'posted')])
-            ->whereIn('status', ['released', 'ongoing', 'completed'])
-            ->whereNotNull('released_at')
-            ->get();
-
-        foreach ($loans as $loan) {
-            // Loan release as debit entry
-            $entries->push([
-                'date' => $loan->released_at?->toDateString(),
-                'sort_key' => $loan->released_at?->toDateTimeString().'-0-'.$loan->id,
-                'description' => 'Loan released'.($loan->purpose ? ' — '.$loan->purpose : ''),
-                'reference' => $loan->loan_account_number ?? $loan->application_number,
-                'debit' => (float) $loan->principal_amount,
-                'credit' => 0.0,
-            ]);
-
-            // Each repayment as credit entry
-            foreach ($loan->repayments as $repayment) {
-                $entries->push([
-                    'date' => $repayment->payment_date?->toDateString(),
-                    'sort_key' => $repayment->payment_date?->toDateTimeString().'-1-'.$repayment->id,
-                    'description' => 'Payment received'.($repayment->method ? ' via '.ucwords(str_replace('_', ' ', $repayment->method)) : ''),
-                    'reference' => $repayment->receipt_number,
-                    'debit' => 0.0,
-                    'credit' => (float) $repayment->amount_paid,
-                ]);
-            }
-        }
-
-        // Sort chronologically and compute running balance
-        $sorted = $entries->sortBy('sort_key')->values();
-        $runningBalance = 0.0;
-        $withBalance = $sorted->map(function ($entry, $index) use (&$runningBalance) {
-            $runningBalance += $entry['debit'] - $entry['credit'];
-
-            return [
-                'id' => $index + 1,
-                'date' => $entry['date'],
-                'description' => $entry['description'],
-                'reference' => $entry['reference'],
-                'debit' => round($entry['debit'], 2),
-                'credit' => round($entry['credit'], 2),
-                'balance' => round($runningBalance, 2),
-            ];
-        });
-
-        return response()->json(['data' => $withBalance->toArray()]);
+        return response()->json(['data' => $rows, 'meta' => ['closing' => $closing]]);
     }
 }

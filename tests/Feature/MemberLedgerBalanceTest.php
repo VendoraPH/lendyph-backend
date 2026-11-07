@@ -5,11 +5,16 @@ namespace Tests\Feature;
 use App\Models\Borrower;
 use App\Models\Branch;
 use App\Models\Loan;
+use App\Models\LoanProduct;
 use App\Models\Repayment;
 use App\Models\User;
+use App\Services\LoanLedgerService;
+use App\Services\LoanService;
+use App\Services\RepaymentService;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Tests\Feature\BrowserMoneyRound\Concerns\BuildsReleasedLoans;
+use Tests\Feature\InsuranceOwed\Concerns\OwesInsurancePremium;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
@@ -23,11 +28,13 @@ use Tests\Traits\SetupLendyPH;
  * principal, interest and penalty balances, so the balance after any row is
  * the loans' own balances added up, and the closing balance is the sum of the
  * loans' Ledger closings. Each row names its loan (`loan_id`,
- * `loan_account_number`). A voided payment and its void are left out.
+ * `loan_account_number`). A voided payment and its void are left out. The
+ * balance leaves out the insurance premium owed, as the loan Ledger does; a
+ * payment row's `amount_paid`, `insurance` and `scb` say what else it took.
  */
 class MemberLedgerBalanceTest extends TestCase
 {
-    use BuildsReleasedLoans, SetupLendyPH;
+    use BuildsReleasedLoans, OwesInsurancePremium, SetupLendyPH;
 
     protected function setUp(): void
     {
@@ -85,6 +92,8 @@ class MemberLedgerBalanceTest extends TestCase
                 "every Ledger row of loan {$loan->loan_account_number} appears once",
             );
         }
+
+        $this->assertRowsFollowTheLoanLedgers($rows, [$defaulted, $source, $successor]);
     }
 
     public function test_a_voided_payment_and_its_void_do_not_appear(): void
@@ -122,40 +131,26 @@ class MemberLedgerBalanceTest extends TestCase
         $this->payLoan($loanA, 5000.37);
         $this->payLoan($loanB, 3000);
 
-        $loans = [$loanA->id => $loanA, $loanB->id => $loanB];
-        $ledgers = [$loanA->id => $this->loanLedger($loanA)['rows'], $loanB->id => $this->loanLedger($loanB)['rows']];
-        $this->assertContains('penalty_charge', array_column($ledgers[$loanA->id], 'kind'), 'setup: loan A carries a late penalty');
+        $ledgerA = $this->loanLedger($loanA)['rows'];
+        $ledgerB = $this->loanLedger($loanB)['rows'];
+        $this->assertContains('penalty_charge', array_column($ledgerA, 'kind'), 'setup: loan A carries a late penalty');
 
         $rows = $this->memberLedger($member);
 
-        $this->assertCount(count($ledgers[$loanA->id]) + count($ledgers[$loanB->id]), $rows, 'every loan Ledger row appears once');
+        $this->assertCount(count($ledgerA) + count($ledgerB), $rows, 'every loan Ledger row appears once');
         $this->assertSame(
             ['2026-01-10', '2026-02-01', '2026-02-14', '2026-02-20', '2026-02-20'],
             array_column($rows, 'date'),
             'date order across the loans',
         );
 
-        $next = array_fill_keys(array_keys($loans), 0);
-        $latest = array_fill_keys(array_keys($loans), 0.0);
+        $this->assertRowsFollowTheLoanLedgers($rows, [$loanA, $loanB]);
 
         foreach ($rows as $index => $row) {
-            $loanId = $row['loan_id'] ?? null;
-            $this->assertArrayHasKey((int) $loanId, $loans, "row {$index} names its loan");
-            $this->assertSame($loans[$loanId]->loan_account_number, $row['loan_account_number'] ?? null, "row {$index} carries its loan's account number");
-
-            $loanRow = $ledgers[$loanId][$next[$loanId]++];
-            $after = $this->balanceOf($loanRow);
-            $moved = $after - $latest[$loanId];
-            $latest[$loanId] = $after;
-
-            $this->assertSame($loanRow['description'], $row['description'], "row {$index} follows its loan's Ledger order");
-            $this->assertMoney(max(0, $moved), $row['debit'], "row {$index} debit is what its loan Ledger row raised");
-            $this->assertMoney(max(0, -$moved), $row['credit'], "row {$index} credit is what its loan Ledger row lowered");
-            $this->assertMoney(array_sum($latest), $row['balance'], "row {$index} balance is the loans' balances added up");
-
-            if ($loanRow['kind'] === 'repayment') {
-                $this->assertMoney($loanRow['principal'] + $loanRow['interest'] + $loanRow['penalty'], $row['credit'], "row {$index} payment credit is its principal, interest and penalty");
-                $this->assertSame(Repayment::findOrFail($loanRow['repayment_id'])->receipt_number, $row['reference'], "row {$index} payment reference is its receipt");
+            if ($row['kind'] === 'repayment') {
+                $this->assertSame(Repayment::findOrFail($row['repayment_id'])->receipt_number, $row['reference'], "row {$index} payment reference is its receipt");
+            } else {
+                $this->assertSame($row['loan_account_number'], $row['reference'], "row {$index} reference is its loan's account number");
             }
         }
     }
@@ -186,6 +181,230 @@ class MemberLedgerBalanceTest extends TestCase
         $this->assertMoney($hereClosing, end($rows)['balance'], 'closing = the visible loan\'s Ledger closing');
     }
 
+    public function test_a_row_carries_the_contract_and_only_a_payment_row_says_what_it_took(): void
+    {
+        $member = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+        $loan = $this->releasedLoanFor(borrower: $member);
+        $this->payLoan($loan, 11800);
+
+        $response = $this->getJson("/api/borrowers/{$member->id}/ledger")->assertOk()->assertJsonStructure([
+            'data' => ['*' => ['id', 'date', 'description', 'reference', 'debit', 'credit', 'balance', 'loan_id', 'loan_account_number', 'kind', 'repayment_id']],
+            'meta' => ['closing' => ['principal', 'interest', 'penalty', 'balance']],
+        ]);
+
+        [$release, $payment] = $response->json('data');
+
+        $this->assertSame([1, 2], [$release['id'], $payment['id']]);
+        $this->assertSame('release', $release['kind']);
+        $this->assertNull($release['repayment_id']);
+        $this->assertArrayNotHasKey('amount_paid', $release);
+        $this->assertArrayNotHasKey('insurance', $release);
+        $this->assertArrayNotHasKey('scb', $release);
+        $this->assertMoney(70800, $release['debit'], 'a release raises the balance by its principal and the schedule\'s interest');
+        $this->assertMoney(0, $release['credit']);
+
+        $this->assertSame('repayment', $payment['kind']);
+        $this->assertSame(Repayment::where('loan_id', $loan->id)->sole()->id, $payment['repayment_id']);
+        $this->assertMoney(11800, $payment['amount_paid']);
+        $this->assertMoney(0, $payment['insurance']);
+        $this->assertMoney(0, $payment['scb']);
+    }
+
+    public function test_a_payment_that_only_met_the_premium_moves_nothing_and_the_closing_leaves_out_the_premium_owed(): void
+    {
+        $loan = $this->loanOwingPremium();
+        $this->pay($loan, 100);
+
+        $response = $this->getJson("/api/borrowers/{$loan->borrower_id}/ledger")->assertOk();
+        $payment = $response->json('data.1');
+        $closing = $response->json('meta.closing');
+        $summary = $this->summaryOf($loan);
+
+        $this->assertMoney(100, $payment['amount_paid']);
+        $this->assertMoney(100, $payment['insurance']);
+        $this->assertMoney(0, $payment['credit'], 'the premium is outside the balance');
+        $this->assertMoney(0, $payment['debit']);
+        $this->assertMoney(self::SCHEDULE_TOTAL, $payment['balance']);
+
+        $this->assertMoney(300, $summary['insurance_owed'], 'setup: premium still owed');
+        $this->assertMoney($summary['total_outstanding'] - $summary['insurance_owed'], $closing['balance'], 'closing = Outstanding less the premium owed');
+    }
+
+    public function test_a_payment_row_takes_out_the_premium_it_collected(): void
+    {
+        $loan = $this->loanOwingPremium();
+        $this->pay($loan, 1000);
+
+        $payment = $this->memberLedger($loan->borrower)[1];
+
+        $this->assertMoney(1000, $payment['amount_paid']);
+        $this->assertMoney(400, $payment['insurance']);
+        $this->assertMoney(600, $payment['credit']);
+        $this->assertMoney(self::SCHEDULE_TOTAL - 600, $payment['balance']);
+    }
+
+    public function test_share_capital_a_payment_credited_is_outside_the_balance(): void
+    {
+        $member = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+        $product = LoanProduct::factory()->create(['interest_rate' => 3.0, 'interest_method' => 'straight', 'term' => 6, 'frequency' => 'monthly', 'penalty_rate' => 2.0, 'grace_period_days' => 3]);
+        $loans = app(LoanService::class);
+        $loan = $loans->createLoan([
+            'borrower_id' => $member->id,
+            'loan_product_id' => $product->id,
+            'principal_amount' => 60000,
+            'scb_amount' => 100,
+            'start_date' => now()->toDateString(),
+        ], $this->admin);
+        $loans->submitForReview($loan);
+        $loans->approve($loan, $this->admin, 'Approved for testing');
+        $loans->release($loan, $this->admin);
+        $this->payLoan($loan, 11900);
+
+        [$release, $payment] = $this->memberLedger($member);
+
+        $this->assertMoney(70800, $release['debit'], 'the build-up is not owed money');
+        $this->assertMoney(11900, $payment['amount_paid']);
+        $this->assertMoney(100, $payment['scb']);
+        $this->assertMoney(11800, $payment['credit']);
+        $this->assertMoney(59000, $payment['balance']);
+    }
+
+    public function test_between_a_voided_payment_and_its_void_the_balance_reads_as_if_it_was_never_made(): void
+    {
+        $member = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+        $this->travelTo(Carbon::parse('2026-03-01 09:00'));
+        $first = $this->releasedLoanFor(borrower: $member);
+        $second = $this->releasedLoanFor(borrower: $member);
+        $this->travelTo(Carbon::parse('2026-03-02 09:00'));
+        $voided = $this->payLoan($first, 11800);
+        $this->travelTo(Carbon::parse('2026-03-03 09:00'));
+        $this->payLoan($second, 5000);
+        $this->travelTo(Carbon::parse('2026-03-04 09:00'));
+        $this->patchJson("/api/repayments/{$voided->id}/void", ['void_reason' => 'Keyed in error'])->assertOk();
+
+        $rows = $this->memberLedger($member);
+
+        $this->assertSame(['2026-03-01', '2026-03-01', '2026-03-03'], array_column($rows, 'date'));
+        $this->assertMoney(70800 + 70800 - 5000, $rows[2]['balance']);
+        $this->assertMoney($this->closingOf($first) + $this->closingOf($second), $rows[2]['balance']);
+    }
+
+    public function test_a_voided_payment_with_no_void_date_stays_so_the_closing_still_matches(): void
+    {
+        $member = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+        $loan = $this->releasedLoanFor(borrower: $member);
+        $voided = $this->payLoan($loan, 11800);
+        $this->patchJson("/api/repayments/{$voided->id}/void", ['void_reason' => 'Keyed in error'])->assertOk();
+        DB::table('repayments')->where('id', $voided->id)->update(['voided_at' => null]);
+
+        $rows = $this->memberLedger($member);
+
+        $this->assertSame(['release', 'repayment', 'adjustment'], array_column($rows, 'kind'));
+        $this->assertSame($voided->receipt_number, $rows[1]['reference']);
+        $this->assertMoney($this->closingOf($loan), end($rows)['balance']);
+        $this->assertRowsFollowTheLoanLedgers($rows, [$loan]);
+    }
+
+    public function test_a_restated_balance_is_its_own_row(): void
+    {
+        $member = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+        $loan = $this->releasedLoanFor(borrower: $member);
+        $loan->amortizationSchedules()->where('period_number', 1)->update(['principal_paid' => 100.37]);
+
+        $rows = $this->memberLedger($member);
+        $last = end($rows);
+
+        $this->assertSame(LoanLedgerService::RESTATED, $last['description']);
+        $this->assertSame(now()->toDateString(), $last['date']);
+        $this->assertMoney(100.37, $last['credit']);
+        $this->assertMoney($this->closingOf($loan), $last['balance']);
+    }
+
+    public function test_adjustments_and_an_extension_follow_their_loan_ledger_rows(): void
+    {
+        $member = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+        $this->travelTo(Carbon::parse('2026-01-10 09:00'));
+        $adjusted = $this->releasedLoanFor(borrower: $member, principal: 61234.57, startDate: '2026-01-10');
+        $extended = $this->releasedLoanFor(borrower: $member, principal: 61234.57, product: ['interest_method' => 'upon_maturity', 'term' => 1]);
+
+        $this->travelTo(Carbon::parse('2026-02-20 09:00'));
+        app(RepaymentService::class)->applyPenalties($adjusted, now());
+        $this->applyAdjustment($adjusted, 'penalty_waiver', ['waive_all' => true]);
+        $this->applyAdjustment($adjusted, 'balance_adjustment', ['target_principal_balance' => 50000.25]);
+        $this->postJson("/api/loans/{$extended->id}/extend", ['interest_option' => 'pay'])->assertOk();
+
+        $rows = $this->memberLedger($member);
+        $kinds = array_column($rows, 'kind');
+
+        $this->assertContains('adjustment', $kinds);
+        $this->assertContains('extension_payment', $kinds);
+        $this->assertContains('extension_charge', $kinds);
+        $this->assertRowsFollowTheLoanLedgers($rows, [$adjusted, $extended]);
+
+        $payment = array_values(array_filter($rows, fn (array $row): bool => $row['kind'] === 'extension_payment'))[0];
+        $charge = array_values(array_filter($rows, fn (array $row): bool => $row['kind'] === 'extension_charge'))[0];
+        $this->assertMoney(Repayment::findOrFail($payment['repayment_id'])->amount_paid, $payment['amount_paid'], 'an extension\'s collection is a payment row');
+        $this->assertArrayNotHasKey('amount_paid', $charge);
+    }
+
+    public function test_meta_closing_is_the_sum_of_the_loans_closings_column_by_column(): void
+    {
+        $member = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+        $this->travelTo(Carbon::parse('2026-01-10 09:00'));
+        $first = $this->releasedLoanFor(borrower: $member, principal: 61234.57, startDate: '2026-01-10');
+        $second = $this->releasedLoanFor(borrower: $member, principal: 30000, startDate: '2026-01-10');
+        $this->travelTo(Carbon::parse('2026-02-20 09:00'));
+        app(RepaymentService::class)->applyPenalties($first, now());
+        $this->payLoan($second, 3000);
+
+        $response = $this->getJson("/api/borrowers/{$member->id}/ledger")->assertOk();
+        $closing = $response->json('meta.closing');
+        $firstClosing = $this->loanLedger($first)['closing'];
+        $secondClosing = $this->loanLedger($second)['closing'];
+
+        $this->assertGreaterThan(0, $firstClosing['penalty'], 'setup: a penalty is owed');
+
+        foreach (['principal', 'interest', 'penalty'] as $column) {
+            $this->assertMoney($firstClosing[$column] + $secondClosing[$column], $closing[$column], "closing.{$column}");
+        }
+
+        $rows = $response->json('data');
+        $this->assertMoney(end($rows)['balance'], $closing['balance'], 'closing.balance = the last row\'s balance');
+        $this->assertMoney($closing['principal'] + $closing['interest'] + $closing['penalty'], $closing['balance']);
+    }
+
+    public function test_a_member_with_no_released_loans_closes_at_zero(): void
+    {
+        $member = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+
+        $response = $this->getJson("/api/borrowers/{$member->id}/ledger")->assertOk();
+
+        $this->assertSame([], $response->json('data'));
+
+        foreach (['principal', 'interest', 'penalty', 'balance'] as $column) {
+            $this->assertMoney(0, $response->json("meta.closing.{$column}"), "closing.{$column}");
+        }
+    }
+
+    public function test_the_query_count_does_not_grow_with_the_rows(): void
+    {
+        $member = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+        $first = $this->releasedLoanFor(borrower: $member);
+        $second = $this->releasedLoanFor(borrower: $member);
+        $this->payLoan($first, 1000);
+        $this->payLoan($second, 1000);
+        $this->memberLedger($member);
+
+        $before = $this->queriesFor($member);
+
+        foreach ([$first, $second] as $loan) {
+            $this->payLoan($loan, 1000);
+            $this->payLoan($loan, 1000);
+        }
+
+        $this->assertSame($before, $this->queriesFor($member), 'more payments on the same loans add no queries');
+    }
+
     /** @return list<array<string, mixed>> */
     private function memberLedger(Borrower $member): array
     {
@@ -214,6 +433,29 @@ class MemberLedgerBalanceTest extends TestCase
         return round($balances['principal'] + $balances['interest'] + $balances['penalty'], 2);
     }
 
+    private function queriesFor(Borrower $member): int
+    {
+        DB::flushQueryLog();
+        DB::enableQueryLog();
+        $this->memberLedger($member);
+        $queries = count(DB::getQueryLog());
+        DB::disableQueryLog();
+
+        return $queries;
+    }
+
+    /** @param  array<string, mixed>  $newValues */
+    private function applyAdjustment(Loan $loan, string $type, array $newValues): void
+    {
+        $id = $this->postJson("/api/loans/{$loan->id}/adjustments", [
+            'adjustment_type' => $type,
+            'new_values' => $newValues,
+        ])->assertCreated()->json('data.id');
+
+        $this->patchJson("/api/loan-adjustments/{$id}/approve")->assertOk();
+        $this->patchJson("/api/loan-adjustments/{$id}/apply")->assertOk();
+    }
+
     private function restructure(Loan $source): Loan
     {
         $principal = (float) $this->summaryOf($source)['restructurable_balance'];
@@ -231,6 +473,51 @@ class MemberLedgerBalanceTest extends TestCase
         $this->assertSame('restructured', $source->fresh()->status, 'setup: the source is restructured');
 
         return Loan::findOrFail($id);
+    }
+
+    /**
+     * Walks the member rows against the loans' own Ledgers: each row is its
+     * loan's next Ledger row, it moves the balance by what that row moved the
+     * loan's balance, and the balance after it is the loans' balances added up.
+     *
+     * @param  list<array<string, mixed>>  $rows
+     * @param  list<Loan>  $loans
+     */
+    private function assertRowsFollowTheLoanLedgers(array $rows, array $loans): void
+    {
+        $accounts = $ledgers = $next = $latest = [];
+
+        foreach ($loans as $loan) {
+            $accounts[$loan->id] = $loan->loan_account_number;
+            $ledgers[$loan->id] = $this->loanLedger($loan)['rows'];
+            $next[$loan->id] = 0;
+            $latest[$loan->id] = 0.0;
+        }
+
+        foreach ($rows as $index => $row) {
+            $loanId = $row['loan_id'] ?? null;
+            $this->assertArrayHasKey((int) $loanId, $ledgers, "row {$index} names its loan");
+            $this->assertSame($accounts[$loanId], $row['loan_account_number'] ?? null, "row {$index} carries its loan's account number");
+
+            $loanRow = $ledgers[$loanId][$next[$loanId]++];
+            $after = $this->balanceOf($loanRow);
+            $moved = $after - $latest[$loanId];
+            $latest[$loanId] = $after;
+
+            $this->assertSame($loanRow['description'], $row['description'], "row {$index} follows its loan's Ledger order");
+            $this->assertSame($loanRow['kind'], $row['kind'], "row {$index} kind");
+            $this->assertMoney(max(0, $moved), $row['debit'], "row {$index} debit is what its loan Ledger row raised");
+            $this->assertMoney(max(0, -$moved), $row['credit'], "row {$index} credit is what its loan Ledger row lowered");
+            $this->assertMoney(array_sum($latest), $row['balance'], "row {$index} balance is the loans' balances added up");
+
+            if (in_array($loanRow['kind'], ['repayment', 'extension_payment'], true)) {
+                $this->assertMoney($loanRow['principal'] + $loanRow['interest'] + $loanRow['penalty'], $row['credit'], "row {$index} payment credit is its principal, interest and penalty");
+            }
+        }
+
+        foreach ($ledgers as $loanId => $ledger) {
+            $this->assertSame(count($ledger), $next[$loanId], "every Ledger row of loan {$loanId} appears");
+        }
     }
 
     /**
