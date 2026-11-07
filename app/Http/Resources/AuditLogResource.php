@@ -3,11 +3,17 @@
 namespace App\Http\Resources;
 
 use App\Models\AuditLog;
+use App\Models\Branch;
 use App\Models\Role;
 use App\Models\User;
 use App\Services\AuditLogModules;
+use Carbon\CarbonImmutable;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
+use Illuminate\Support\Collection;
+use Illuminate\Support\Str;
+use Throwable;
 
 class AuditLogResource extends JsonResource
 {
@@ -27,30 +33,111 @@ class AuditLogResource extends JsonResource
     private const TIMESTAMP_KEYS = ['created_at', 'updated_at', 'deleted_at'];
 
     /**
-     * Load, in ONE query, the users named by user foreign keys in these rows'
-     * old and new values, and hand the set to every row so the change list can
-     * show names instead of ids without a query per row.
+     * Change-list fields that hold a branch id or a list of them.
+     */
+    private const BRANCH_KEYS = ['branch_id', 'branch_ids'];
+
+    /**
+     * Columns stored in whole centavos, by the class of the row's target. Any
+     * field named `*_centavos` is too, on any target.
+     */
+    private const CENTAVO_FIELDS = [
+        'AccountingJournal' => ['total_debit', 'total_credit'],
+        'AccountingExpense' => ['amount', 'amount_paid'],
+        'AccountingExpensePayment' => ['amount'],
+        'AccountingJournalLine' => ['debit', 'credit'],
+        'AccountingReconciliation' => ['statement_balance'],
+        'AccountingReconciliationLine' => ['amount'],
+    ];
+
+    /**
+     * A money field's name, on a row a service wrote (whose keys aren't always
+     * columns) or one with no target: a word for money anywhere in the name
+     * (`outstanding_balance`, `collected_at_release`, `new_principal`), unless
+     * NOT_MONEY_FIELD says it is about money rather than an amount of it.
+     */
+    private const MONEY_FIELD = '/(^|_)(amount|applied|balance|charge|charged|collected|credit|debit|deductions|due|income|outstanding|overpayment|paid|premium|principal|proceeds|shortfall)(_|$)|^(notarial_fee|snapshot_value|total_payment)$/';
+
+    private const NOT_MONEY_FIELD = '/(_at|_by|_count|_date|_id|_ids|_method|_number|_pct|_percentage|_rate|_status|_type)$|^auto_credit$/';
+
+    /**
+     * Fields holding an enum key, shown in words. Never a status: the frontend
+     * maps those from the raw value.
+     */
+    private const ENUM_FIELDS = [
+        'adjustment_type', 'cash_flow_category', 'cash_kind', 'category', 'civil_status', 'frequencies',
+        'frequency', 'gender', 'insurance_payment_type', 'interest_method', 'interest_option',
+        'interest_rate_frequency', 'interest_type', 'kind', 'method', 'normal_balance', 'payment_frequency',
+        'payment_method', 'payment_type', 'source', 'term_unit', 'type',
+    ];
+
+    /**
+     * The enum keys Str::headline() doesn't read the way the app does.
+     */
+    private const ENUM_WORDS = ['bi_weekly' => 'Bi-Weekly', 'gcash' => 'GCash', 'semi_monthly' => 'Semi-Monthly'];
+
+    /**
+     * Load, in ONE query each, the users, roles and branches these rows' old
+     * and new values name, and hand the sets to every row so the change list
+     * can show names instead of ids and keys without a query per row.
      *
      * @param  iterable<AuditLog>  $logs
      */
-    public static function loadChangeUsers(iterable $logs): void
+    public static function loadChangeNames(iterable $logs): void
     {
         $logs = collect($logs);
 
-        $ids = $logs->flatMap(fn (AuditLog $log) => collect([
-            ...(is_array($log->old_values) ? array_intersect_key($log->old_values, array_flip(self::USER_FOREIGN_KEYS)) : []),
-            ...(is_array($log->new_values) ? array_intersect_key($log->new_values, array_flip(self::USER_FOREIGN_KEYS)) : []),
-        ])->values())
-            ->filter(fn ($id) => is_int($id) || (is_string($id) && ctype_digit($id)))
+        $userIds = self::changeIds($logs, self::USER_FOREIGN_KEYS);
+        $branchIds = self::changeIds($logs, self::BRANCH_KEYS);
+        $roleKeys = self::changeValues($logs, ['role'])->filter(fn ($key) => is_string($key))->unique()->values();
+
+        $users = $userIds->isEmpty()
+            ? collect()
+            : User::query()->whereIn('id', $userIds)->get(['id', 'first_name', 'last_name'])->keyBy('id');
+
+        $branches = $branchIds->isEmpty()
+            ? collect()
+            : Branch::query()->whereIn('id', $branchIds)->pluck('name', 'id');
+
+        $roles = $roleKeys->isEmpty()
+            ? collect()
+            : Role::query()->whereIn('name', $roleKeys)->where('guard_name', 'web')->get()->keyBy('name');
+
+        $logs->each(fn (AuditLog $log) => $log->setRelation('changeUsers', $users)
+            ->setRelation('changeBranches', $branches)
+            ->setRelation('changeRoles', $roles));
+    }
+
+    /**
+     * @param  Collection<int, AuditLog>  $logs
+     * @param  list<string>  $fields
+     * @return Collection<int, mixed>
+     */
+    private static function changeValues(Collection $logs, array $fields): Collection
+    {
+        return $logs->flatMap(fn (AuditLog $log) => [
+            ...(is_array($log->old_values) ? array_values(array_intersect_key($log->old_values, array_flip($fields))) : []),
+            ...(is_array($log->new_values) ? array_values(array_intersect_key($log->new_values, array_flip($fields))) : []),
+        ])->map(self::decoded(...))->flatten();
+    }
+
+    /**
+     * @param  Collection<int, AuditLog>  $logs
+     * @param  list<string>  $fields
+     * @return Collection<int, int>
+     */
+    private static function changeIds(Collection $logs, array $fields): Collection
+    {
+        return self::changeValues($logs, $fields)
+            ->filter(self::isId(...))
             ->map(fn ($id) => (int) $id)
             ->unique()
             ->values();
+    }
 
-        $users = $ids->isEmpty()
-            ? collect()
-            : User::query()->whereIn('id', $ids)->get(['id', 'first_name', 'last_name'])->keyBy('id');
-
-        $logs->each(fn (AuditLog $log) => $log->setRelation('changeUsers', $users));
+    private static function isId(mixed $value): bool
+    {
+        return is_int($value) || (is_string($value) && ctype_digit($value));
     }
 
     public function toArray(Request $request): array
@@ -123,9 +210,9 @@ class AuditLogResource extends JsonResource
      * A class name in words, the rule of the frontend's `auditTargetType()`:
      * `Borrower…` reads "Member…" and `CoMaker` reads "Co-maker", CamelCase is
      * split into words, and only the first word keeps its capitals ("GCash"
-     * keeps them anywhere).
+     * keeps them anywhere). The CSV export reads the same.
      */
-    private static function typeInWords(string $basename): string
+    public static function typeInWords(string $basename): string
     {
         $named = str_replace('CoMaker', 'Co-maker', (string) preg_replace('/^Borrower/', 'Member', $basename));
         $words = explode(' ', (string) preg_replace('/([a-z])([A-Z])/', '$1 $2', $named));
@@ -150,9 +237,10 @@ class AuditLogResource extends JsonResource
      * to nothing. Timestamps are never listed, and a `created` row lists
      * nothing: its new values are the whole inserted row and the action
      * already says what happened. A row with no new values (a deletion) lists
-     * its old fields, already redacted when written, with `new: null`. User ids show as names, and array
-     * values read in words (self::arrayInWords()); when both sides read the
-     * same, in detail (self::detailed()), else as JSON. Display only;
+     * its old fields, already redacted when written, with `new: null`. Values
+     * read in plain words (self::shownFor()); when both sides read the same, in
+     * detail (self::detailed()), else as JSON, unless the same yes or no, moment
+     * or date was only written two ways, which isn't a change. Display only;
      * old_values and new_values are returned as stored.
      *
      * @return list<array{field: string, old: string|null, new: string|null}>
@@ -189,6 +277,10 @@ class AuditLogResource extends JsonResource
             // Two different values can read the same in words (a fee's amount
             // changed inside a deductions list): show the detail, and JSON as a
             // last resort, so a real change is never hidden.
+            if ($oldShown === $newShown && $this->isOneReadingField($field, $oldValue, $newValue)) {
+                continue;
+            }
+
             if ($oldShown === $newShown) {
                 $oldShown = self::detailed($oldValue);
                 $newShown = self::detailed($newValue);
@@ -205,18 +297,203 @@ class AuditLogResource extends JsonResource
         return $changes;
     }
 
+    /**
+     * A value in plain words: a user, branch or role by name, a boolean as Yes
+     * or No, a timestamp in Manila time, a date as its date, money in pesos and
+     * an enum key in words. Anything else, a status included, as stored.
+     */
     private function shownFor(string $field, mixed $value): ?string
     {
-        if ($value === null || ! in_array($field, self::USER_FOREIGN_KEYS, true)
-            || ! (is_int($value) || (is_string($value) && ctype_digit($value)))) {
-            return self::shown($value);
+        if ($value === null) {
+            return null;
+        }
+
+        return $this->namedBy($field, $value)
+            ?? self::booleanInWords($field, $value, $this->castOf($field))
+            ?? $this->timeInWords($field, $value)
+            ?? $this->pesosFor($field, $value)
+            ?? self::enumInWords($field, $value)
+            ?? self::shown($value);
+    }
+
+    private function namedBy(string $field, mixed $value): ?string
+    {
+        $isUser = in_array($field, self::USER_FOREIGN_KEYS, true) && self::isId($value);
+        $isBranch = in_array($field, self::BRANCH_KEYS, true);
+        $isRole = $field === 'role' && is_string($value);
+
+        if (! $isUser && ! $isBranch && ! $isRole) {
+            return null;
         }
 
         if (! $this->relationLoaded('changeUsers')) {
-            self::loadChangeUsers([$this->resource]);
+            self::loadChangeNames([$this->resource]);
         }
 
-        return $this->getRelation('changeUsers')->get((int) $value)?->full_name ?? "User #{$value}";
+        if ($isUser) {
+            return $this->getRelation('changeUsers')->get((int) $value)?->full_name ?? "User #{$value}";
+        }
+
+        if ($isRole) {
+            return ($this->getRelation('changeRoles')->get($value) ?? new Role(['name' => $value]))->auditName();
+        }
+
+        if (self::isId($value)) {
+            return $this->getRelation('changeBranches')->get((int) $value) ?? "Branch #{$value}";
+        }
+
+        if (! is_array($value) || $value === [] || ! array_all($value, self::isId(...))) {
+            return null;
+        }
+
+        return implode(', ', array_map(
+            fn ($id) => $this->getRelation('changeBranches')->get((int) $id) ?? "Branch #{$id}",
+            $value,
+        ));
+    }
+
+    /**
+     * Whether a boolean or time field that reads the same on both sides is one
+     * value written two ways (`true` and `1`, a UTC and a Manila timestamp).
+     */
+    private function isOneReadingField(string $field, mixed $old, mixed $new): bool
+    {
+        return (self::booleanInWords($field, $old, $this->castOf($field)) !== null && self::booleanInWords($field, $new, $this->castOf($field)) !== null)
+            || ($this->timeInWords($field, $old) !== null && $this->timeInWords($field, $new) !== null);
+    }
+
+    /**
+     * The cast the row's target class declares for this field, or null.
+     */
+    private function castOf(string $field): ?string
+    {
+        $cast = self::castsOf($this->auditable_type)[$field] ?? null;
+
+        return is_string($cast) ? $cast : null;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private static function castsOf(?string $type): array
+    {
+        static $casts = [];
+
+        if ($type === null) {
+            return [];
+        }
+
+        return $casts[$type] ??= is_subclass_of($type, Model::class) ? (new $type)->getCasts() : [];
+    }
+
+    private static function booleanInWords(string $field, mixed $value, ?string $cast): ?string
+    {
+        if (is_bool($value)) {
+            return $value ? 'Yes' : 'No';
+        }
+
+        $isBooleanField = $cast === 'boolean' || $field === 'auto_credit' || preg_match('/^(is|has)_/', $field) === 1;
+
+        if (! $isBooleanField || ! in_array($value, [0, 1, '0', '1'], true)) {
+            return null;
+        }
+
+        return (int) $value === 1 ? 'Yes' : 'No';
+    }
+
+    /**
+     * A timestamp in Manila time, whichever way it was stored: JSON writes a
+     * cast model's value in UTC, a raw attribute has the app timezone's wall
+     * clock. A date column reads as its Manila date, with no time. A value that
+     * isn't a date reads as stored.
+     */
+    private function timeInWords(string $field, mixed $value): ?string
+    {
+        $cast = (string) $this->castOf($field);
+        $isDate = str_starts_with($cast, 'date') && ! str_starts_with($cast, 'datetime');
+        $isTimestamp = str_contains($cast, 'datetime') || str_ends_with($field, '_at');
+
+        if ((! $isDate && ! $isTimestamp) || ! is_string($value) || $value === '') {
+            return null;
+        }
+
+        try {
+            $time = CarbonImmutable::parse($value, config('app.timezone'))->setTimezone('Asia/Manila');
+        } catch (Throwable) {
+            return null;
+        }
+
+        return $time->format($isDate ? 'M j, Y' : 'M j, Y, g:i A');
+    }
+
+    /**
+     * Money in pesos with two decimals, in whichever form it was stored
+     * (`1500`, `"1500.0"`, `"1,500.00"`), a column stored in centavos converted.
+     * A rate, a count, a code or a value that isn't a number reads as stored.
+     */
+    private function pesosFor(string $field, mixed $value): ?string
+    {
+        $plain = is_string($value) ? str_replace([',', '₱', ' '], '', $value) : $value;
+
+        if (is_bool($plain) || ! is_numeric($plain)) {
+            return null;
+        }
+
+        $inCentavos = str_ends_with($field, '_centavos')
+            || in_array($field, self::CENTAVO_FIELDS[class_basename((string) $this->auditable_type)] ?? [], true);
+
+        if ($inCentavos) {
+            $amount = (float) $plain / 100;
+        } elseif ($this->isPesoField($field)) {
+            $amount = (float) $plain;
+        } else {
+            return null;
+        }
+
+        return ($amount < 0 ? '-' : '').'₱'.number_format(abs($amount), 2);
+    }
+
+    /**
+     * A column the target casts to two decimals is money, unless named as a
+     * rate. Otherwise (a service's own key, a row with no target) the name says.
+     */
+    private function isPesoField(string $field): bool
+    {
+        if (preg_match(self::NOT_MONEY_FIELD, $field) === 1) {
+            return false;
+        }
+
+        return $this->castOf($field) === 'decimal:2' || preg_match(self::MONEY_FIELD, $field) === 1;
+    }
+
+    /**
+     * An enum key, or a list of them, in words: "semi_monthly" reads
+     * "Semi-Monthly". A value that isn't written as a key reads as stored.
+     */
+    private static function enumInWords(string $field, mixed $value): ?string
+    {
+        if (! in_array($field, self::ENUM_FIELDS, true)) {
+            return null;
+        }
+
+        if (is_string($value)) {
+            return self::enumKeyInWords($value);
+        }
+
+        if (! is_array($value) || $value === [] || ! array_all($value, fn ($item) => is_string($item) && self::enumKeyInWords($item) !== null)) {
+            return null;
+        }
+
+        return implode(', ', array_map(self::enumKeyInWords(...), $value));
+    }
+
+    private static function enumKeyInWords(string $key): ?string
+    {
+        if (preg_match('/^[a-z][a-z0-9_]*$/', $key) !== 1) {
+            return null;
+        }
+
+        return self::ENUM_WORDS[$key] ?? Str::headline($key);
     }
 
     private static function shown(mixed $value): ?string
