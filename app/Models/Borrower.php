@@ -250,8 +250,12 @@ class Borrower extends Model
      * `email` is included because the Members screen searches it. That screen
      * filtered client-side over one page of results; moving it server-side
      * would have silently dropped email matching without this.
+     *
+     * Without `$matchContactDetails`, the contact number and email are left out:
+     * for a caller who may not read them, a hit would confirm that a number or
+     * address belongs to a member.
      */
-    public function scopeSearch($query, string $term)
+    public function scopeSearch($query, string $term, bool $matchContactDetails = true)
     {
         $like = LikePattern::contains($term);
         // A whole name typed with spaces ("Maria Dela Cruz") lives in no single
@@ -260,13 +264,14 @@ class Borrower extends Model
         // collapse to one. NULLIF: CONCAT_WS skips a NULL but not an empty part.
         $nameLike = LikePattern::contains(preg_replace('/\s+/', ' ', trim($term)));
 
-        return $query->where(function ($q) use ($like, $nameLike) {
+        return $query->where(function ($q) use ($like, $nameLike, $matchContactDetails) {
             $q->where('borrower_code', 'like', $like)
                 ->orWhere('first_name', 'like', $like)
                 ->orWhere('middle_name', 'like', $like)
                 ->orWhere('last_name', 'like', $like)
-                ->orWhere('contact_number', 'like', $like)
-                ->orWhere('email', 'like', $like)
+                ->when($matchContactDetails, fn ($contact) => $contact
+                    ->orWhere('contact_number', 'like', $like)
+                    ->orWhere('email', 'like', $like))
                 ->orWhereRaw("CONCAT_WS(' ', first_name, NULLIF(middle_name, ''), last_name, NULLIF(suffix, '')) LIKE ?", [$nameLike])
                 ->orWhereRaw("CONCAT_WS(' ', first_name, last_name) LIKE ?", [$nameLike]);
         });

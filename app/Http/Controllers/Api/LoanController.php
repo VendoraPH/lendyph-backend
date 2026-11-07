@@ -181,7 +181,8 @@ value is a 422.
 
 `search` matches the application number, the loan account number, the loan
 product's name, and the borrower as `GET /api/borrowers` searches them: code, any
-name part, the whole name as typed ("Juan Dela Cruz"), contact number or email.
+name part, the whole name as typed ("Juan Dela Cruz"), contact number or email. The
+contact number and email match only for a caller holding `borrowers:view`.
 
 `sort` accepts only `application_number`, `borrower`, `product`, `amount`,
 `term`, `status`, `created_at` and `next_due`; anything else is a 422. `next_due`
@@ -244,7 +245,7 @@ DESC,
         tags: ['Loans'],
         security: [['sanctum' => []]],
         parameters: [
-            new OA\Parameter(name: 'search', in: 'query', required: false, description: 'Application number, loan account number, loan product name, or the borrower\'s code, name (a part or the whole name), contact number or email.', schema: new OA\Schema(type: 'string')),
+            new OA\Parameter(name: 'search', in: 'query', required: false, description: 'Application number, loan account number, loan product name, or the borrower\'s code or name (a part or the whole name). A caller holding `borrowers:view` also matches the borrower\'s contact number and email.', schema: new OA\Schema(type: 'string')),
             new OA\Parameter(name: 'status', in: 'query', required: false, description: 'One status, a comma-separated list, or a virtual value: `active`, `past_due` or `current` (preferred over spelling statuses out).', schema: new OA\Schema(type: 'string', example: 'active')),
             new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
             new OA\Parameter(name: 'borrower_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
@@ -318,13 +319,14 @@ DESC,
         // below starts from the caller's visible branches (BranchAccess), so
         // the page, `meta.stats` and `meta.totals` all follow the same scope.
         $filtered = Loan::visibleTo($viewer)
-            ->when(filled($search), function ($q) use ($search) {
+            ->when(filled($search), function ($q) use ($search, $viewer) {
                 $like = LikePattern::contains($search);
+                $matchContactDetails = $viewer->can('borrowers:view');
 
-                $q->where(function ($query) use ($like, $search) {
+                $q->where(function ($query) use ($like, $search, $matchContactDetails) {
                     $query->where('loans.application_number', 'like', $like)
                         ->orWhere('loans.loan_account_number', 'like', $like)
-                        ->orWhereHas('borrower', fn ($bq) => $bq->search($search))
+                        ->orWhereHas('borrower', fn ($bq) => $bq->search($search, $matchContactDetails))
                         ->orWhereHas('loanProduct', fn ($pq) => $pq->where('name', 'like', $like));
                 });
             })
