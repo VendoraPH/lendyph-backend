@@ -162,7 +162,7 @@ class AuditLogController extends Controller
                             $log->created_at?->toDateTimeString(),
                             ($log->user ?? $log->inferredActor())?->full_name ?? ($log->user_id ? "User #{$log->user_id}" : 'system'),
                             $log->action,
-                            class_basename($log->auditable_type ?? ''),
+                            self::targetType($log->auditable_type),
                             $log->auditable_id,
                             $log->description,
                             $log->ip_address,
@@ -177,6 +177,16 @@ class AuditLogController extends Controller
             'Content-Type' => 'text/csv',
             'Cache-Control' => 'no-store, no-cache',
         ]);
+    }
+
+    /**
+     * The target's kind as the Audit Trail screen shows it: the model's class
+     * name, with a member's classes (`Borrower`, `BorrowerSubmissionToken`)
+     * read as Member. Stored rows keep the class name.
+     */
+    private static function targetType(?string $auditableType): string
+    {
+        return (string) preg_replace('/^Borrower/', 'Member', class_basename($auditableType ?? ''));
     }
 
     #[OA\Get(
