@@ -148,8 +148,8 @@ class RoleAndPermissionSeeder extends Seeder
         // knows they cannot be deleted or renamed.
         $systemRoleAttrs = [
             'super_admin' => ['description' => 'Developer-side super administrator — every permission plus Gate::before bypass. Reserved for the platform team, not client staff.'],
-            'admin' => ['description' => 'Client-side administrator — every operational permission for the lending organization (borrowers, loans, payments, staff, reports, settings).'],
-            'loan_officer' => ['description' => 'Creates and processes loan applications; manages borrowers and share capital.'],
+            'admin' => ['description' => 'Client-side administrator — every operational permission for the lending organization (members, loans, payments, staff, reports, settings).'],
+            'loan_officer' => ['description' => 'Creates and processes loan applications; manages members and share capital.'],
             'cashier' => ['description' => 'Records payments, releases approved loans, and reconciles cash.'],
             'collector' => ['description' => 'Collects payments on the field and marks collection status.'],
             'viewer' => ['description' => 'Read-only access to operational data.'],

@@ -1,9 +1,12 @@
 <?php
 
+use App\Models\AccountingJournal;
 use App\Models\AuditLog;
 use App\Models\Borrower;
 use App\Models\BrandingSetting;
+use App\Models\CoMaker;
 use App\Models\CsvImportRun;
+use App\Models\GCashTransaction;
 use App\Models\Loan;
 use App\Models\LoanApprovalStep;
 use App\Models\Role;
@@ -259,4 +262,84 @@ it('names a member target "Member" in the CSV export, the way the Audit Trail sh
     $rows = collect(explode("\n", trim($csv)))->slice(1)->map(fn (string $line) => str_getcsv($line, escape: ''))->values();
 
     expect($rows->pluck(3)->all())->toBe(['Member', 'Loan']);
+});
+
+it('reads array values in the change list in words, and returns the stored values as they are', function () {
+    $old = [
+        'tags' => ['urgent', 'manual'],
+        'deductions' => [['name' => 'Processing Fee', 'amount' => 150], ['label' => 'Notarial Fee', 'amount' => 100]],
+        'steps' => [['title' => 'Manager'], ['title' => 'BOD']],
+        'lines' => [['amount' => 1], ['amount' => 2], ['amount' => 3]],
+        'settings' => ['grace_days' => 3, 'rate' => 2],
+        'collaterals' => [],
+    ];
+    $new = [
+        'tags' => ['urgent'],
+        'deductions' => [['name' => 'Processing Fee', 'amount' => 150]],
+        'steps' => [],
+        'lines' => [['amount' => 1]],
+        'settings' => ['grace_days' => 5],
+        'collaterals' => [7, 9],
+    ];
+    $row = AuditLog::create([
+        'action' => 'updated',
+        'user_id' => $this->admin->id,
+        'old_values' => $old,
+        'new_values' => $new,
+        'description' => 'array-words-probe',
+    ]);
+
+    $response = $this->getJson("/api/audit-logs/{$row->id}")->assertOk();
+
+    expect(collect($response->json('data.changes'))->keyBy('field')->map(fn ($c) => [$c['old'], $c['new']])->all())->toEqual([
+        'tags' => ['urgent, manual', 'urgent'],
+        'deductions' => ['Processing Fee, Notarial Fee', 'Processing Fee'],
+        'steps' => ['Manager, BOD', 'none'],
+        'lines' => ['3 entries', '1 entry'],
+        'settings' => ['2 fields', '1 field'],
+        'collaterals' => ['none', '7, 9'],
+    ]);
+    expect($response->json('data.old_values'))->toEqual($old)
+        ->and($response->json('data.new_values'))->toEqual($new);
+});
+
+it('labels a journal target by its reference', function () {
+    $journal = AccountingJournal::create([
+        'date' => now()->toDateString(),
+        'source' => 'loan_collection',
+        'reference' => 'COL-10254',
+        'description' => 'Collection',
+    ]);
+    $row = AuditLog::create([
+        'action' => 'updated',
+        'user_id' => $this->admin->id,
+        'auditable_type' => $journal->getMorphClass(),
+        'auditable_id' => $journal->id,
+    ]);
+
+    $this->getJson("/api/audit-logs/{$row->id}")->assertOk()->assertJsonPath('data.target.label', 'COL-10254');
+});
+
+it('names a target with no label by its class in words', function () {
+    $journal = AccountingJournal::create([
+        'date' => now()->toDateString(),
+        'source' => 'loan_collection',
+        'description' => 'No reference',
+    ]);
+    $label = function (string $type, int $id): string {
+        $row = AuditLog::create([
+            'action' => 'updated',
+            'user_id' => $this->admin->id,
+            'auditable_type' => $type,
+            'auditable_id' => $id,
+        ]);
+
+        return $this->getJson("/api/audit-logs/{$row->id}")->assertOk()->json('data.target.label');
+    };
+
+    expect($label($journal->getMorphClass(), $journal->id))->toBe("Accounting journal #{$journal->id}")
+        ->and($label(Borrower::class, 999991))->toBe('Member #999991')
+        ->and($label(CoMaker::class, 999992))->toBe('Co-maker #999992')
+        ->and($label(LoanApprovalStep::class, 999993))->toBe('Loan approval step #999993')
+        ->and($label(GCashTransaction::class, 999994))->toBe('GCash transaction #999994');
 });

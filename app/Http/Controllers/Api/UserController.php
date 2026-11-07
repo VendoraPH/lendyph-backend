@@ -10,6 +10,7 @@ use App\Http\Requests\User\ShowUserRequest;
 use App\Http\Requests\User\StoreUserRequest;
 use App\Http\Requests\User\UpdateUserRequest;
 use App\Http\Resources\UserResource;
+use App\Models\Role;
 use App\Models\User;
 use App\Services\AuditLogService;
 use App\Services\BranchAccess;
@@ -18,6 +19,7 @@ use App\Services\UserReach;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 use OpenApi\Attributes as OA;
 
 /**
@@ -215,7 +217,7 @@ class UserController extends Controller
             action: 'role_assigned',
             auditable: $user,
             newValues: ['role' => $request->role],
-            description: "User {$user->username} created with role {$request->role}",
+            description: sprintf('User %s created with role %s', $user->username, self::roleLabel($request->role)),
         );
 
         // Same gap, same fix, for the other pivot: `created` records
@@ -365,8 +367,8 @@ class UserController extends Controller
                     description: sprintf(
                         'Role for %s changed from %s to %s',
                         $user->username,
-                        $previousRole ?? 'none',
-                        $request->role,
+                        $previousRole === null ? 'none' : self::roleLabel($previousRole),
+                        self::roleLabel($request->role),
                     ),
                 );
             }
@@ -375,6 +377,17 @@ class UserController extends Controller
         $user->load('branch', 'branches', 'roles');
 
         return new UserResource($user);
+    }
+
+    /**
+     * How an audit description names a role: its display name
+     * (Role::auditLabel()), or the key in words when no such role exists. The
+     * row's stored values keep the key.
+     */
+    private static function roleLabel(string $key): string
+    {
+        return Role::query()->where('name', $key)->where('guard_name', 'web')->first()?->auditLabel()
+            ?? Str::headline($key);
     }
 
     /**

@@ -100,6 +100,33 @@ class ReportTotalsFromServerTest extends TestCase
         $this->assertEquals(array_sum(array_column($data['loans'], 'total_paid')), $data['totals']['total_paid']);
     }
 
+    public function test_the_subsidiary_ledger_states_everything_owed_and_the_principal_balance_per_loan(): void
+    {
+        $borrower = Borrower::factory()->create(['branch_id' => $this->north->id]);
+        $first = $this->loan($this->north, 10000.10, $borrower);
+        $first->update(['insurance_remaining_balance' => 123.45]);
+        $this->schedule($first, now()->subDays(20)->toDateString(), 1000.10, 100.01, 200.05, 0, 5.05, 'overdue');
+        $this->schedule($first, now()->addDays(10)->toDateString(), 9000.00, 90.00);
+        $second = $this->loan($this->north, 2500.25, $borrower);
+        $this->schedule($second, now()->addDays(10)->toDateString(), 2500.25, 25.03);
+
+        $data = $this->getJson("/api/reports/subsidiary-ledger/{$borrower->id}")->assertOk()->json('data');
+        $rows = collect($data['loans']);
+        $firstRow = $rows->firstWhere('principal_amount', 10000.10);
+        $secondRow = $rows->firstWhere('principal_amount', 2500.25);
+
+        // Unpaid principal 9,800.05 + interest 190.01 + penalty 5.05 + premium 123.45.
+        $this->assertEquals(10118.56, $firstRow['total_outstanding']);
+        $this->assertEquals(9800.05, $firstRow['outstanding_principal']);
+        $this->assertEquals(9923.50, $firstRow['outstanding_balance']);
+        $this->assertEquals(2525.28, $secondRow['total_outstanding']);
+        $this->assertEquals(2500.25, $secondRow['outstanding_principal']);
+
+        $this->assertEquals(12643.84, $data['loans_totals']['total_outstanding']);
+        $this->assertEquals(12300.30, $data['loans_totals']['outstanding_principal']);
+        $this->assertEquals($data['loans_totals']['total_outstanding'], $data['totals']['total_outstanding']);
+    }
+
     public function test_the_portfolio_summary_totals_its_composition_and_its_branches(): void
     {
         $north = $this->loan($this->north, 10000.10);

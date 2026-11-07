@@ -89,9 +89,7 @@ class AuditLogResource extends JsonResource
     private function resolveAuditableLabel(): string
     {
         if (! $this->relationLoaded('auditable') || ! $this->auditable) {
-            $basename = $this->auditable_type ? class_basename($this->auditable_type) : 'Record';
-
-            return "{$basename} #{$this->auditable_id}";
+            return $this->fallbackLabel();
         }
 
         $model = $this->auditable;
@@ -101,15 +99,44 @@ class AuditLogResource extends JsonResource
         }
 
         // Prefer the most human-friendly attribute available on the related model.
-        foreach (['full_name', 'name', 'application_number', 'loan_account_number', 'receipt_number', 'borrower_code', 'code', 'title'] as $attr) {
+        foreach (['full_name', 'name', 'application_number', 'loan_account_number', 'receipt_number', 'borrower_code', 'code', 'title', 'reference'] as $attr) {
             if (isset($model->{$attr}) && $model->{$attr} !== null && $model->{$attr} !== '') {
                 return (string) $model->{$attr};
             }
         }
 
-        $basename = class_basename($this->auditable_type);
+        return $this->fallbackLabel();
+    }
 
-        return "{$basename} #{$this->auditable_id}";
+    /**
+     * A target with nothing to name it by: its class in words and its id, e.g.
+     * "Accounting journal #557" or "Member #12".
+     */
+    private function fallbackLabel(): string
+    {
+        $type = $this->auditable_type ? self::typeInWords(class_basename($this->auditable_type)) : 'Record';
+
+        return "{$type} #{$this->auditable_id}";
+    }
+
+    /**
+     * A class name in words, the rule of the frontend's `auditTargetType()`:
+     * `Borrower…` reads "Member…" and `CoMaker` reads "Co-maker", CamelCase is
+     * split into words, and only the first word keeps its capitals ("GCash"
+     * keeps them anywhere).
+     */
+    private static function typeInWords(string $basename): string
+    {
+        $named = str_replace('CoMaker', 'Co-maker', (string) preg_replace('/^Borrower/', 'Member', $basename));
+        $words = explode(' ', (string) preg_replace('/([a-z])([A-Z])/', '$1 $2', $named));
+
+        foreach ($words as $i => $word) {
+            if ($i > 0 && $word !== 'GCash') {
+                $words[$i] = strtolower($word);
+            }
+        }
+
+        return implode(' ', $words);
     }
 
     /**
@@ -122,7 +149,8 @@ class AuditLogResource extends JsonResource
      * to nothing. Timestamps are never listed, and a `created` row lists
      * nothing: its new values are the whole inserted row and the action
      * already says what happened. A row with no new values (a deletion) lists
-     * its old fields, already redacted when written, with `new: null`. User ids show as names. Display only;
+     * its old fields, already redacted when written, with `new: null`. User ids show as names, and array
+     * values read in words (self::arrayInWords()). Display only;
      * old_values and new_values are returned as stored.
      *
      * @return list<array{field: string, old: string|null, new: string|null}>
@@ -179,6 +207,58 @@ class AuditLogResource extends JsonResource
             return null;
         }
 
+        if (is_array($value)) {
+            return self::arrayInWords($value);
+        }
+
         return is_scalar($value) ? (string) $value : json_encode($value);
+    }
+
+    /**
+     * An array value in words: a list of scalars joined with ", ", a list of
+     * records by each one's `name` (else `label`, else `title`), any other
+     * list as "N entries", an associative array as "N fields", and an empty
+     * one as "none".
+     *
+     * @param  array<mixed>  $value
+     */
+    private static function arrayInWords(array $value): string
+    {
+        if ($value === []) {
+            return 'none';
+        }
+
+        $count = count($value);
+
+        if (! array_is_list($value)) {
+            return $count === 1 ? '1 field' : "{$count} fields";
+        }
+
+        if (array_all($value, fn (mixed $item): bool => is_scalar($item))) {
+            return implode(', ', array_map(fn (mixed $item): string => is_bool($item) ? ($item ? 'true' : 'false') : (string) $item, $value));
+        }
+
+        $names = array_map(fn (mixed $item): ?string => self::itemName($item), $value);
+
+        if (! in_array(null, $names, true)) {
+            return implode(', ', $names);
+        }
+
+        return $count === 1 ? '1 entry' : "{$count} entries";
+    }
+
+    private static function itemName(mixed $item): ?string
+    {
+        if (! is_array($item)) {
+            return null;
+        }
+
+        foreach (['name', 'label', 'title'] as $key) {
+            if (isset($item[$key]) && is_scalar($item[$key]) && (string) $item[$key] !== '') {
+                return (string) $item[$key];
+            }
+        }
+
+        return null;
     }
 }
