@@ -30,8 +30,13 @@ class UpdateBorrowerRequest extends FormRequest
             $firstNameRules[] = new NoDuplicateBorrower($borrowerId, revealDetails: true, viewer: $this->user());
         }
 
+        // Not `status`: a change of status goes through its own route, so a PUT
+        // can't skip `borrowers:approve`, the valid-ID check or `approved_by`.
+        $sharedRules = $this->sharedBorrowerRules($borrowerId);
+        unset($sharedRules['status']);
+
         return array_merge(
-            $this->requireMemberFields($this->sharedBorrowerRules($borrowerId), creating: false),
+            $this->requireMemberFields($sharedRules, creating: false),
             [
                 'first_name' => $firstNameRules,
                 'last_name' => ['sometimes', 'string', 'max:255'],

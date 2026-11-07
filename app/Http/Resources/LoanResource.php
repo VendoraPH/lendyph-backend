@@ -5,6 +5,7 @@ namespace App\Http\Resources;
 use App\Models\AmortizationSchedule;
 use App\Models\CoMaker;
 use App\Models\Loan;
+use App\Services\BranchAccess;
 use App\Services\CollateralSecurity;
 use App\Services\LoanService;
 use App\Services\PersistedScheduleFigures;
@@ -73,9 +74,9 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'auto_pay_enabled', type: 'boolean'),
         new OA\Property(property: 'auto_pay_enabled_at', type: 'string', format: 'date-time', nullable: true),
         new OA\Property(property: 'auto_pay_enabled_by', type: 'integer', nullable: true, description: 'The id of the user who enabled auto-pay'),
-        new OA\Property(property: 'auto_pay_cbs_reference', type: 'string', nullable: true, description: 'The CBS reference auto-pay was enabled with. Null while auto-pay is off.'),
-        new OA\Property(property: 'borrower', type: 'object', description: 'The whole member, or for a caller without `borrowers:view` only `id`, `full_name` and `borrower_code`.'),
-        new OA\Property(property: 'co_makers', type: 'array', items: new OA\Items(type: 'object'), description: 'The co-makers; for a caller without `borrowers:view` without their address, contact number, occupation, employer and income.'),
+        new OA\Property(property: 'auto_pay_cbs_reference', type: 'string', nullable: true, description: 'The CBS reference auto-pay was enabled with. Null while auto-pay is off, and for a caller holding neither `auto_pay:view` nor `auto_pay:toggle`.'),
+        new OA\Property(property: 'borrower', type: 'object', description: 'The whole member, or only `id`, `full_name` and `borrower_code` for a caller without `borrowers:view` or who cannot see the member\'s branch.'),
+        new OA\Property(property: 'co_makers', type: 'array', items: new OA\Items(type: 'object'), description: 'The co-makers; by the same rule as `borrower`, without their address, contact number, occupation, employer and income.'),
         new OA\Property(property: 'borrower_name', type: 'string', nullable: true),
         new OA\Property(property: 'loan_product_name', type: 'string', nullable: true),
         new OA\Property(property: 'account_officer_id', type: 'integer', nullable: true),
@@ -299,11 +300,13 @@ class LoanResource extends JsonResource
                 ? app(RepaymentService::class)->amountDueNow($this->resource, $this->amortizationSchedules, now())
                 : null,
             // What the loan page's Auto-Pay card shows, so it is right after a
-            // reload.
+            // reload. The bank reference only for those who work with auto-pay.
             'auto_pay_enabled' => (bool) $this->auto_pay,
             'auto_pay_enabled_at' => $this->auto_pay_enabled_at,
             'auto_pay_enabled_by' => $this->auto_pay_enabled_by,
-            'auto_pay_cbs_reference' => $this->cbs_reference,
+            'auto_pay_cbs_reference' => $request->user()?->canAny(['auto_pay:view', 'auto_pay:toggle'])
+                ? $this->cbs_reference
+                : null,
             // Where the chain is loaded. See Loan::submittedAt(). The audit trail
             // is read only on the single-loan view (the `collaterals` proxy
             // contractTotal() uses), so a list never pays a query per row.
@@ -410,15 +413,17 @@ class LoanResource extends JsonResource
      */
     private function memberOnRow(Request $request): mixed
     {
-        if ($this->canSeeMembers($request)) {
-            return new BorrowerResource($this->whenLoaded('borrower'));
-        }
+        return $this->whenLoaded('borrower', function () use ($request) {
+            if ($this->borrower === null) {
+                return null;
+            }
 
-        return $this->whenLoaded('borrower', fn () => $this->borrower === null ? null : [
-            'id' => $this->borrower->id,
-            'full_name' => $this->borrower->full_name,
-            'borrower_code' => $this->borrower->borrower_code,
-        ]);
+            return $this->canSeeMember($request) ? new BorrowerResource($this->borrower) : [
+                'id' => $this->borrower->id,
+                'full_name' => $this->borrower->full_name,
+                'borrower_code' => $this->borrower->borrower_code,
+            ];
+        });
     }
 
     /**
@@ -428,27 +433,24 @@ class LoanResource extends JsonResource
      */
     private function coMakersOnRow(Request $request): mixed
     {
-        if ($this->canSeeMembers($request)) {
-            return CoMakerResource::collection($this->whenLoaded('coMakers'));
-        }
-
-        return $this->whenLoaded('coMakers', fn () => $this->coMakers->map(fn (CoMaker $coMaker): array => [
-            'id' => $coMaker->id,
-            'co_maker_code' => $coMaker->co_maker_code,
-            'borrower_id' => $coMaker->borrower_id,
-            'first_name' => $coMaker->first_name,
-            'middle_name' => $coMaker->middle_name,
-            'last_name' => $coMaker->last_name,
-            'suffix' => $coMaker->suffix,
-            'full_name' => $coMaker->full_name,
-            'relationship_to_borrower' => $coMaker->relationship_to_borrower,
-            'status' => $coMaker->status,
-        ])->values()->all());
+        return $this->whenLoaded('coMakers', fn () => $this->canSeeMember($request)
+            ? CoMakerResource::collection($this->coMakers)
+            : $this->coMakers->map(fn (CoMaker $coMaker): array => CoMakerResource::slim($coMaker))->values()->all());
     }
 
-    private function canSeeMembers(Request $request): bool
+    /**
+     * Whether the caller may read this loan's member in full: `borrowers:view`
+     * and the member's own branch, which a moved member's loan row doesn't
+     * prove. A loan row otherwise would show what GET /borrowers/{id} answers
+     * 404 for.
+     */
+    private function canSeeMember(Request $request): bool
     {
-        return (bool) $request->user()?->can('borrowers:view');
+        $user = $request->user();
+
+        return $user !== null
+            && $user->can('borrowers:view')
+            && app(BranchAccess::class)->canSee($user, $this->resource->borrower?->branch_id);
     }
 
     /**

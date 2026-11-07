@@ -1049,7 +1049,7 @@ DESC,
 
         return response()->json([
             'message' => 'Co-maker added to the loan.',
-            'data' => new CoMakerResource($coMaker),
+            'data' => $request->user()->can('borrowers:view') ? new CoMakerResource($coMaker) : CoMakerResource::slim($coMaker),
         ], 201);
     }
 

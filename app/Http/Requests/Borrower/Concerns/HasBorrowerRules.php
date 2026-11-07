@@ -2,10 +2,31 @@
 
 namespace App\Http\Requests\Borrower\Concerns;
 
+use App\Models\Borrower;
 use Illuminate\Validation\Rule;
 
 trait HasBorrowerRules
 {
+    /**
+     * A street address also fills a blank `address`, the column the legal
+     * documents print. A filled `address`, sent or stored, is never overwritten.
+     */
+    protected function prepareForValidation(): void
+    {
+        $street = $this->input('street_address');
+
+        if (! is_string($street) || trim($street) === '') {
+            return;
+        }
+
+        $stored = $this->route('borrower');
+        $address = $this->has('address') ? $this->input('address') : ($stored instanceof Borrower ? $stored->address : null);
+
+        if ($address === null || (is_string($address) && trim($address) === '')) {
+            $this->merge(['address' => $street]);
+        }
+    }
+
     /**
      * Field rules shared between StoreBorrowerRequest and UpdateBorrowerRequest.
      * Identity fields (first/last/branch) are intentionally left out so each
@@ -59,7 +80,9 @@ trait HasBorrowerRules
 
             // `pending` is reserved for the public registration flow — every
             // other status is operator-only. StoreBorrowerRequest narrows this
-            // list when the request is anonymous.
+            // list when the request is anonymous, and UpdateBorrowerRequest
+            // removes it: approving, deactivating and reactivating have their
+            // own routes and checks.
             'status' => ['nullable', 'string', 'in:active,inactive,blacklisted,pending'],
 
             // Opt-out of the duplicate-borrower check. When omitted or false,

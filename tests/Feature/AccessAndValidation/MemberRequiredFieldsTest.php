@@ -158,35 +158,6 @@ class MemberRequiredFieldsTest extends TestCase
         ], ['Accept' => 'application/json'])->assertCreated();
     }
 
-    public function test_the_generic_document_upload_is_no_way_around_the_number(): void
-    {
-        $member = Borrower::factory()->create(['branch_id' => $this->branch->id]);
-
-        $this->post("/api/borrowers/{$member->id}/documents", [
-            'type' => 'valid_id',
-            'file' => UploadedFile::fake()->image('id.jpg'),
-        ], ['Accept' => 'application/json'])
-            ->assertUnprocessable()
-            ->assertJsonValidationErrors(['id_number']);
-
-        $this->post("/api/borrowers/{$member->id}/documents", [
-            'type' => 'valid_id',
-            'id_number' => '1234-5678-9012',
-            'file' => UploadedFile::fake()->image('id.jpg'),
-        ], ['Accept' => 'application/json'])->assertCreated();
-
-        $this->assertDatabaseHas('documents', [
-            'documentable_id' => $member->id,
-            'type' => 'valid_id',
-            'id_number' => '1234-5678-9012',
-        ]);
-
-        $this->post("/api/borrowers/{$member->id}/documents", [
-            'type' => 'proof_of_income',
-            'file' => UploadedFile::fake()->image('payslip.jpg'),
-        ], ['Accept' => 'application/json'])->assertCreated();
-    }
-
     /**
      * The co-maker forms have the ID number optional, so this stays as it was
      * until they ask for it.

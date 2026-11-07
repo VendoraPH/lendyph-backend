@@ -69,19 +69,22 @@ class LoanAutoPayAndSubmittedTest extends TestCase
         $this->assertTrue($row['auto_pay_enabled']);
     }
 
-    public function test_the_cbs_reference_reaches_every_caller_who_can_read_the_loan(): void
+    public function test_the_cbs_reference_is_null_without_an_auto_pay_permission(): void
     {
         $loan = $this->createReleasedLoan();
         $this->enableAutoPay($loan);
 
-        $manager = User::factory()->inBranches($this->branch)->create();
-        $manager->assignRole('manager');
-        $this->actingAs($manager);
+        foreach (['manager' => null, 'cashier' => 'CBS-2026-00001', 'loan_officer' => 'CBS-2026-00001'] as $role => $expected) {
+            $user = User::factory()->inBranches($this->branch)->create();
+            $user->assignRole($role);
+            $this->actingAs($user);
 
-        $this->getJson("/api/loans/{$loan->id}")
-            ->assertOk()
-            ->assertJsonPath('data.auto_pay_enabled', true)
-            ->assertJsonPath('data.auto_pay_cbs_reference', 'CBS-2026-00001');
+            $data = $this->getJson("/api/loans/{$loan->id}")->assertOk()->json('data');
+
+            $this->assertTrue($data['auto_pay_enabled'], $role);
+            $this->assertArrayHasKey('auto_pay_cbs_reference', $data, $role);
+            $this->assertSame($expected, $data['auto_pay_cbs_reference'], $role);
+        }
     }
 
     public function test_submitted_at_is_when_the_loan_was_submitted_not_when_it_last_changed(): void

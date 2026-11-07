@@ -26,27 +26,18 @@ class PromissoryNoteService
             'reference_number' => 'PN-'.substr($loan->application_number, 3),
             'generated_at' => now()->toDateTimeString(),
 
+            // What the note prints, and nothing else: this answers to
+            // `loans:view`, not `borrowers:view`.
             'borrower' => [
                 'borrower_code' => $loan->borrower->borrower_code,
                 'full_name' => $loan->borrower->full_name,
-                'address' => $loan->borrower->address,
-                'contact_number' => $loan->borrower->contact_number,
-                'email' => $loan->borrower->email,
-                'birthdate' => $loan->borrower->birthdate?->toDateString(),
-                'civil_status' => $loan->borrower->civil_status,
-                'gender' => $loan->borrower->gender,
-                'employer_or_business' => $loan->borrower->employer_or_business,
-                'monthly_income' => (float) $loan->borrower->monthly_income,
+                'address' => $loan->borrower->address ?: $loan->borrower->street_address,
             ],
 
             'co_makers' => $loan->coMakers->map(fn ($cm) => [
                 'co_maker_code' => $cm->co_maker_code,
                 'full_name' => $cm->full_name,
                 'address' => $cm->address,
-                'contact_number' => $cm->contact_number,
-                'occupation' => $cm->occupation,
-                'employer' => $cm->employer,
-                'monthly_income' => (float) $cm->monthly_income,
                 'relationship_to_borrower' => $cm->relationship_to_borrower,
             ])->values()->toArray(),
 

@@ -191,14 +191,11 @@ class DisclosureService
             'reference_number' => $loan->application_number,
             'generated_at' => now()->toDateTimeString(),
 
+            // What the statement prints, and nothing else: this answers to
+            // `loans:view`, not `borrowers:view`.
             'borrower' => [
                 'borrower_code' => $loan->borrower->borrower_code,
                 'full_name' => $loan->borrower->full_name,
-                'address' => $loan->borrower->address,
-                'contact_number' => $loan->borrower->contact_number,
-                'email' => $loan->borrower->email,
-                'employer_or_business' => $loan->borrower->employer_or_business,
-                'monthly_income' => (float) $loan->borrower->monthly_income,
             ],
 
             'loan_terms' => [
@@ -281,8 +278,6 @@ class DisclosureService
 
             'co_makers' => $loan->coMakers->map(fn ($cm) => [
                 'full_name' => $cm->full_name,
-                'address' => $cm->address,
-                'contact_number' => $cm->contact_number,
             ])->values()->toArray(),
         ];
     }

@@ -213,7 +213,7 @@ class ReportController extends Controller
         $this->authorize('reports:view');
 
         return response()->json([
-            'data' => $this->reportService->subsidiaryLedger($borrower, $this->reportFilters()),
+            'data' => $this->withoutMemberContact($this->reportService->subsidiaryLedger($borrower, $this->reportFilters())),
         ]);
     }
 
@@ -819,7 +819,7 @@ class ReportController extends Controller
         $this->authorize('reports:view');
 
         return response()->json([
-            'data' => $this->reportService->shareCapitalStatement($borrower, $this->reportFilters()),
+            'data' => $this->withoutMemberContact($this->reportService->shareCapitalStatement($borrower, $this->reportFilters())),
         ]);
     }
 
@@ -967,5 +967,21 @@ class ReportController extends Controller
                 $s->status,
             ];
         }));
+    }
+
+    /**
+     * A report's member block, without the contact number for a caller who
+     * doesn't hold `borrowers:view`.
+     *
+     * @param  array<string, mixed>  $report
+     * @return array<string, mixed>
+     */
+    private function withoutMemberContact(array $report): array
+    {
+        if (! request()->user()->can('borrowers:view')) {
+            unset($report['borrower']['contact_number']);
+        }
+
+        return $report;
     }
 }
