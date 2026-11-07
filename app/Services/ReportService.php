@@ -389,13 +389,21 @@ class ReportService
      * its penalty charges, payments, waivers, extension interest and
      * adjustments, as they happened.
      *
+     * The Debit total less the Credit total is what is owed: the summary's
+     * `outstanding_balance`. So when the loan had a premium owed, the line after
+     * the release debits it: what is still owed plus what posted payments
+     * collected. A restructure's premium carried out is not in it, since nothing
+     * here credits it back.
+     *
      * Every line that is not voided has parts that lower the balance when
-     * positive and raise it when negative, so credit - debit equals its parts
-     * added up, and `principal_balance` steps down by `principal_applied`.
-     * `overpayment_applied` is the excess a payment left over and did not credit
-     * to build-up, which lowers no balance. A line that isn't a payment receives
-     * no money: its `amount_paid` is 0 and its figure sits in `credit` when it
-     * lowered what is owed, `debit` when it raised it.
+     * positive and raise it when negative, so credit - debit equals its
+     * principal, interest, penalty and premium, and `principal_balance` steps
+     * down by `principal_applied`. A payment's `amount_paid` is the full receipt:
+     * its `credit` plus `build_up_applied` and `overpayment_applied` (the excess
+     * it did not credit to build-up), which aren't debt and lower no balance. A
+     * line that isn't a payment receives no money: its `amount_paid` is 0 and its
+     * figure sits in `credit` when it lowered what is owed, `debit` when it
+     * raised it.
      *
      * A voided payment stays listed, marked `voided`, so a member holding its
      * receipt can see what happened to it. Its `amount_paid` is the receipt's,
@@ -428,6 +436,8 @@ class ReportService
 
         $paymentLine = function (Repayment $r, ?array $row) use ($centavosOf, $balances): array {
             $voided = $r->status !== 'posted';
+            $reducesDebt = $centavosOf($r->principal_applied) + $centavosOf($r->interest_applied)
+                + $centavosOf($r->penalty_applied) + $centavosOf($r->insurance_applied);
             $description = $row['description'] ?? trim('Payment '.($r->receipt_number ?? '').($voided ? ' (voided)' : ''));
 
             return [
@@ -442,9 +452,9 @@ class ReportService
                 'description' => $description,
                 'particulars' => $description,
                 'amount_paid' => (float) $r->amount_paid,
-                // The statement's two-column form: a payment credits the loan.
+                // The statement's two-column form: what the payment took off the debt.
                 'debit' => null,
-                'credit' => $voided ? null : (float) $r->amount_paid,
+                'credit' => $voided ? null : $reducesDebt / 100,
                 'insurance_applied' => $voided ? 0.0 : (float) $r->insurance_applied,
                 'principal_applied' => $voided ? 0.0 : (float) $r->principal_applied,
                 'interest_applied' => $voided ? 0.0 : (float) $r->interest_applied,
@@ -488,6 +498,32 @@ class ReportService
             ];
         };
 
+        $premiumAtOrigin = max(0, $centavosOf($loan->insurance_remaining_balance))
+            + $repayments->where('status', 'posted')->sum(fn (Repayment $r): int => $centavosOf($r->insurance_applied));
+
+        $premiumLine = fn (array $release): array => [
+            'type' => 'charge',
+            'kind' => 'insurance_debit',
+            'voided' => false,
+            'date' => $release['date'],
+            'receipt_number' => null,
+            'payment_method' => null,
+            'reference_number' => null,
+            'description' => 'Insurance premium owed',
+            'particulars' => 'Insurance premium owed',
+            'amount_paid' => 0.0,
+            'debit' => $premiumAtOrigin / 100,
+            'credit' => null,
+            'insurance_applied' => -$premiumAtOrigin / 100,
+            'principal_applied' => 0.0,
+            'interest_applied' => 0.0,
+            'penalty_applied' => 0.0,
+            'build_up_applied' => 0.0,
+            'overpayment_applied' => 0.0,
+            // `running_balance` already opens with the premium.
+            ...$balances(0, 0),
+        ];
+
         $unlisted = $repayments->keyBy('id');
         $lines = [];
 
@@ -498,6 +534,10 @@ class ReportService
 
             if ($row['repayment_id'] === null) {
                 $lines[] = $ledgerLine($row);
+
+                if ($row['kind'] === 'release' && $premiumAtOrigin > 0) {
+                    $lines[] = $premiumLine($row);
+                }
             } elseif ($unlisted->has($row['repayment_id'])) {
                 $lines[] = $paymentLine($unlisted->pull($row['repayment_id']), $row);
             }
@@ -550,7 +590,7 @@ class ReportService
         $extensions = $loan->adjustments()
             ->where('adjustment_type', 'extension')
             ->where('status', 'applied')
-            ->orderBy('applied_at')
+            ->reorder('applied_at')
             ->orderBy('id')
             ->get();
 
@@ -559,23 +599,45 @@ class ReportService
         }
 
         $schedules = $loan->amortizationSchedules->sortBy('period_number')->values();
+
+        // Each extension's new period. One a later extension deleted has no row,
+        // and is the period before that extension's: each takes the next number.
+        $newRows = $extensions->map(fn ($extension) => $schedules->first(fn ($s): bool => $s->closed_by_adjustment_id !== $extension->id
+            && $s->due_date->toDateString() === ($extension->new_values['new_due_date'] ?? null)))->values();
+        $newPeriods = $newRows->map(fn ($row): ?int => $row === null ? null : (int) $row->period_number)->all();
+
+        for ($i = count($newPeriods) - 2; $i >= 0; $i--) {
+            $newPeriods[$i] ??= $newPeriods[$i + 1] === null ? null : $newPeriods[$i + 1] - 1;
+        }
+
         $rows = [];
         $sentences = [];
 
-        foreach ($extensions as $extension) {
+        foreach ($extensions->values() as $i => $extension) {
             $closed = $schedules->where('closed_by_adjustment_id', $extension->id);
-            $newDueDate = $extension->new_values['new_due_date'] ?? null;
-            $new = $schedules->first(fn ($s): bool => $s->closed_by_adjustment_id !== $extension->id && $s->due_date->toDateString() === $newDueDate);
-            $previous = $new === null ? null : $schedules->last(fn ($s): bool => $s->period_number < $new->period_number);
-            $firstMissing = ((int) $previous?->period_number) + 1;
-            $deleted = $new === null || $firstMissing >= $new->period_number ? [] : range($firstMissing, $new->period_number - 1);
-            $replaced = $closed->pluck('period_number')->map(fn ($n): int => (int) $n)->merge($deleted)->sort()->values();
+            $newPeriod = $newPeriods[$i];
+            $new = $newRows[$i];
+
+            // The periods it replaced: those it closed, and those it deleted,
+            // which never reach back past the previous extension's new period.
+            $replaced = $closed->pluck('period_number')->map(fn ($n): int => (int) $n);
+
+            if ($newPeriod !== null) {
+                $kept = $schedules->last(fn ($s): bool => $s->period_number < $newPeriod && $s->closed_by_adjustment_id !== $extension->id);
+                $first = max(((int) $kept?->period_number) + 1, ($i > 0 ? $newPeriods[$i - 1] : null) ?? 1);
+
+                for ($number = $first; $number < $newPeriod; $number++) {
+                    $replaced->push($number);
+                }
+            }
+
+            $replaced = $replaced->unique()->sort()->values();
 
             $how = trim("extension {$extension->adjustment_number}")
                 .($extension->applied_at === null ? '' : ' on '.$extension->applied_at->format('M j, Y'));
 
             foreach ($closed as $row) {
-                $rows[$row->id] = ($new === null ? "Replaced: {$how}." : "Replaced by period {$new->period_number}: {$how}.")
+                $rows[$row->id] = ($newPeriod === null ? "Replaced: {$how}." : "Replaced by period {$newPeriod}: {$how}.")
                     .' Closed at what was collected on it.';
             }
 
@@ -586,7 +648,7 @@ class ReportService
             if ($replaced->isNotEmpty()) {
                 $sentences[] = ucfirst(self::periodsNamed($replaced->all()))
                     .($replaced->count() === 1 ? ' was' : ' were')
-                    .' replaced'.($new === null ? '' : " by period {$new->period_number}").": {$how}.";
+                    .' replaced'.($newPeriod === null ? '' : " by period {$newPeriod}").": {$how}.";
             }
         }
 
@@ -1530,7 +1592,8 @@ class ReportService
      * - `service`: 4040 Service Fee Income;
      * - `other`: 4080 Other Fee Income, a catalog fee of no other type.
      * Taxes, notarial fees, insurance premium and share capital have roles of
-     * their own and are never income.
+     * their own and are never income. An imported loan (Loan::isImported()) posts
+     * no journal, so a free-text item with no recognised type is not income on it.
      *
      * A loan with no record falls back, for its processing fee only, to the
      * product's rate × principal, rounded per loan to the centavo so the card
@@ -1559,18 +1622,23 @@ class ReportService
         (clone $releasedLoans)
             ->whereRaw(self::HAS_DEDUCTION_ITEMS_SQL)
             ->whereRaw('JSON_LENGTH(loans.deductions) > 0')
-            ->select(['loans.id', 'loans.deductions'])
+            ->select(['loans.id', 'loans.deductions', 'loans.external_loan_no', 'loans.imported_arrears_baseline'])
             ->lazyById(1000, 'loans.id', 'id')
             ->each(function (object $loan) use (&$fees, $none): void {
+                $imported = $loan->external_loan_no !== null || $loan->imported_arrears_baseline !== null;
+
                 foreach (json_decode($loan->deductions, true) as $item) {
                     if (! is_array($item) || ! is_string($item['name'] ?? null)) {
                         continue;
                     }
 
-                    $role = PostingRules::deductionItemRole($item['name'], isset($item[LoanReleaseFeeService::ITEM_FEE_KEY]))
-                        ?? PostingRules::UNMAPPED_DEDUCTION_ROLE;
+                    $role = PostingRules::deductionItemRole($item['name'], isset($item[LoanReleaseFeeService::ITEM_FEE_KEY]));
 
-                    $kind = match ($role) {
+                    if ($role === null && $imported) {
+                        continue;
+                    }
+
+                    $kind = match ($role ?? PostingRules::UNMAPPED_DEDUCTION_ROLE) {
                         PostingRules::UNMAPPED_DEDUCTION_ROLE => 'processing',
                         'service_fee_income' => 'service',
                         PostingRules::CATALOG_FEE_ROLE => 'other',
@@ -2633,6 +2701,7 @@ class ReportService
     {
         $today = Carbon::today();
         $parCutoff = $today->copy()->subDays(self::PAR_THRESHOLD_DAYS);
+        $collectible = implode(', ', array_fill(0, count(Loan::COLLECTIBLE_STATUSES), '?'));
 
         $rows = DB::table('loans')
             ->join('loan_products', 'loan_products.id', '=', 'loans.loan_product_id')
@@ -2654,16 +2723,18 @@ class ReportService
                 COUNT(loans.id) as loan_count,
                 COALESCE(SUM(loans.principal_amount), 0) as total_released,
                 COALESCE(AVG(loans.interest_rate), 0) as avg_interest_rate,
-                COALESCE(SUM(schedule_totals.remaining_principal), 0) as outstanding_principal,
-                COALESCE(SUM(schedule_totals.remaining_total), 0) + COALESCE(SUM(GREATEST(loans.insurance_remaining_balance, 0)), 0) as total_outstanding,
+                COALESCE(SUM(schedule_totals.remaining_principal), 0) as remaining_principal,
+                COALESCE(SUM(CASE WHEN loans.status IN ('.$collectible.') THEN schedule_totals.remaining_principal END), 0) as outstanding_principal,
+                COALESCE(SUM(CASE WHEN loans.status IN ('.$collectible.') THEN COALESCE(schedule_totals.remaining_total, 0) + GREATEST(loans.insurance_remaining_balance, 0) END), 0) as total_outstanding,
                 COALESCE(SUM(loans.insurance_remaining_balance), 0) as insurance_remaining,
                 COALESCE(SUM(schedule_totals.overdue_amount), 0) as overdue_amount,
                 COALESCE(SUM(CASE WHEN schedule_totals.is_at_risk = 1 THEN schedule_totals.remaining_principal ELSE 0 END), 0) as at_risk_amount
-            ')
+            ', [...Loan::COLLECTIBLE_STATUSES, ...Loan::COLLECTIBLE_STATUSES])
             ->orderByRaw('total_released DESC')
             ->get();
 
         $grandReleased = (float) $rows->sum(fn ($r) => (float) $r->total_released);
+        $grandRemainingPrincipal = (float) $rows->sum(fn ($r) => (float) $r->remaining_principal);
         $grandOutstandingPrincipal = (float) $rows->sum(fn ($r) => (float) $r->outstanding_principal);
         $grandInsurance = (float) $rows->sum(fn ($r) => (float) $r->insurance_remaining);
         $grandTotalOutstanding = (float) $rows->sum(fn ($r) => (float) $r->total_outstanding);
@@ -2673,7 +2744,8 @@ class ReportService
         $weightedRate = (float) $rows->sum(fn ($r) => (float) $r->avg_interest_rate * (int) $r->loan_count);
 
         $products = $rows->map(function ($row) use ($grandReleased) {
-            $outstandingPrincipal = round((float) $row->outstanding_principal, 2);
+            // Every ever-released loan: the deprecated alias and PAR read this.
+            $remainingPrincipal = round((float) $row->remaining_principal, 2);
             $released = round((float) $row->total_released, 2);
             $atRisk = round((float) $row->at_risk_amount, 2);
 
@@ -2682,16 +2754,17 @@ class ReportService
                 'product_name' => $row->product_name,
                 'loan_count' => (int) $row->loan_count,
                 'total_released' => $released,
-                // Everything owed, as on the loan pages.
+                // Everything owed and the unpaid principal on the collectible
+                // loans, as on the loan pages.
                 'total_outstanding' => round((float) $row->total_outstanding, 2),
+                'outstanding_principal' => round((float) $row->outstanding_principal, 2),
                 // Deprecated alias: principal plus premium.
-                'outstanding' => round($outstandingPrincipal + (float) $row->insurance_remaining, 2),
-                'outstanding_principal' => $outstandingPrincipal,
+                'outstanding' => round($remainingPrincipal + (float) $row->insurance_remaining, 2),
                 'avg_interest_rate' => round((float) $row->avg_interest_rate, self::RATE_SCALE),
                 'overdue_amount' => round((float) $row->overdue_amount, 2),
                 'at_risk_amount' => $atRisk,
                 // Whole percent, e.g. 12.5 means 12.5%.
-                'par_ratio' => $outstandingPrincipal > 0 ? round($atRisk / $outstandingPrincipal * 100, 2) : 0.0,
+                'par_ratio' => $remainingPrincipal > 0 ? round($atRisk / $remainingPrincipal * 100, 2) : 0.0,
                 'portfolio_share' => $grandReleased > 0 ? round($released / $grandReleased * 100, 2) : 0.0,
             ];
         })->values()->all();
@@ -2705,13 +2778,13 @@ class ReportService
                 'loan_count' => $grandLoanCount,
                 'total_released' => round($grandReleased, 2),
                 'total_outstanding' => round($grandTotalOutstanding, 2),
-                'outstanding' => round($grandOutstandingPrincipal + $grandInsurance, 2),
+                'outstanding' => round($grandRemainingPrincipal + $grandInsurance, 2),
                 'outstanding_principal' => round($grandOutstandingPrincipal, 2),
                 'avg_interest_rate' => $grandLoanCount > 0 ? round($weightedRate / $grandLoanCount, self::RATE_SCALE) : 0.0,
                 'overdue_amount' => round($grandOverdue, 2),
                 'at_risk_amount' => round($grandAtRisk, 2),
-                'par_ratio' => $grandOutstandingPrincipal > 0
-                    ? round($grandAtRisk / $grandOutstandingPrincipal * 100, 2)
+                'par_ratio' => $grandRemainingPrincipal > 0
+                    ? round($grandAtRisk / $grandRemainingPrincipal * 100, 2)
                     : 0.0,
             ],
             'generated_at' => now()->toDateTimeString(),
@@ -2853,13 +2926,14 @@ class ReportService
             COALESCE(SUM(repayment_totals.collected), 0) as collected,
             COALESCE(SUM(repayment_totals.insurance_collected), 0) as insurance_collected,
             COALESCE(SUM(repayment_totals.payment_count), 0) as payment_count,
-            COALESCE(SUM(schedule_totals.remaining_principal), 0) as outstanding_principal,
-            COALESCE(SUM(schedule_totals.remaining_total), 0) + COALESCE(SUM(GREATEST(loans.insurance_remaining_balance, 0)), 0) as total_outstanding,
+            COALESCE(SUM(schedule_totals.remaining_principal), 0) as remaining_principal,
+            COALESCE(SUM(CASE WHEN loans.status IN ('.$collectible.') THEN schedule_totals.remaining_principal END), 0) as outstanding_principal,
+            COALESCE(SUM(CASE WHEN loans.status IN ('.$collectible.') THEN COALESCE(schedule_totals.remaining_total, 0) + GREATEST(loans.insurance_remaining_balance, 0) END), 0) as total_outstanding,
             COALESCE(SUM(loans.insurance_remaining_balance), 0) as insurance_remaining,
             COALESCE(SUM(schedule_totals.overdue_amount), 0) as overdue_amount,
             COALESCE(SUM(CASE WHEN schedule_totals.is_at_risk = 1 THEN schedule_totals.remaining_principal ELSE 0 END), 0) as at_risk_amount,
             COUNT(DISTINCT CASE WHEN loans.status IN ('.$collectible.') THEN loans.borrower_id END) as active_borrowers',
-            [...$releasedBindings, ...$releasedBindings, ...Loan::COLLECTIBLE_STATUSES],
+            [...$releasedBindings, ...$releasedBindings, ...Loan::COLLECTIBLE_STATUSES, ...Loan::COLLECTIBLE_STATUSES, ...Loan::COLLECTIBLE_STATUSES],
         )
             ->orderByRaw('released_amount DESC')
             ->get();
@@ -2869,7 +2943,8 @@ class ReportService
         }
 
         return $rows->map(function ($row) use ($dimension) {
-            $outstandingPrincipal = round((float) $row->outstanding_principal, 2);
+            // Every ever-released loan: the deprecated alias and PAR read this.
+            $remainingPrincipal = round((float) $row->remaining_principal, 2);
             $atRisk = round((float) $row->at_risk_amount, 2);
             $name = trim((string) $row->dimension_name);
 
@@ -2891,15 +2966,16 @@ class ReportService
                 'collected' => round((float) $row->collected, 2),
                 'insurance_collected' => round((float) $row->insurance_collected, 2),
                 'payment_count' => (int) $row->payment_count,
-                // Everything owed, as on the loan pages.
+                // Everything owed and the unpaid principal on the collectible
+                // loans, as on the loan pages.
                 'total_outstanding' => round((float) $row->total_outstanding, 2),
+                'outstanding_principal' => round((float) $row->outstanding_principal, 2),
                 // Deprecated alias: principal plus premium.
-                'outstanding' => round($outstandingPrincipal + (float) $row->insurance_remaining, 2),
-                'outstanding_principal' => $outstandingPrincipal,
+                'outstanding' => round($remainingPrincipal + (float) $row->insurance_remaining, 2),
                 'overdue_amount' => round((float) $row->overdue_amount, 2),
                 'at_risk_amount' => $atRisk,
                 // Whole percent, e.g. 12.5 means 12.5%.
-                'par_ratio' => $outstandingPrincipal > 0 ? round($atRisk / $outstandingPrincipal * 100, 2) : 0.0,
+                'par_ratio' => $remainingPrincipal > 0 ? round($atRisk / $remainingPrincipal * 100, 2) : 0.0,
                 'active_borrowers' => (int) $row->active_borrowers,
             ]);
         })->values()->all();
@@ -2928,6 +3004,7 @@ class ReportService
                 'collected' => 0,
                 'insurance_collected' => 0,
                 'payment_count' => 0,
+                'remaining_principal' => 0,
                 'outstanding_principal' => 0,
                 'total_outstanding' => 0,
                 'insurance_remaining' => 0,

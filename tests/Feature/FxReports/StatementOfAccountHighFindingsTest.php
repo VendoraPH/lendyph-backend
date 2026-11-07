@@ -175,7 +175,8 @@ class StatementOfAccountHighFindingsTest extends TestCase
 
         $this->assertEquals(100, $line['build_up_applied']);
         $this->assertEquals(11900, $this->sumOfParts($line));
-        $this->assertEquals(11900, $line['credit']);
+        $this->assertEquals(11900, $line['amount_paid']);
+        $this->assertEquals(11800, $line['credit'], 'The build-up is not debt, so it stays outside the credit.');
     }
 
     public function test_a_payoff_with_an_excess_adds_up_with_the_excess_on_its_own_figure(): void
@@ -187,7 +188,8 @@ class StatementOfAccountHighFindingsTest extends TestCase
         $data = $this->statement($loan);
         $line = $this->paymentLines($data)[0];
 
-        $this->assertEquals(70850, $line['credit']);
+        $this->assertEquals(70850, $line['amount_paid']);
+        $this->assertEquals(70800, $line['credit']);
         $this->assertEquals(50, $line['overpayment_applied']);
         $this->assertEquals(0, $line['build_up_applied']);
         $this->assertEquals(70850, $this->sumOfParts($line));

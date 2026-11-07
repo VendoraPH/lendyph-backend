@@ -126,7 +126,7 @@ class InsuranceOwedReportsTest extends TestCase
         // Principal plus the premium the release left owed.
         $this->assertEqualsWithDelta(60400.00, (float) $data['summary']['opening_balance'], 0.001);
 
-        [$release, $first, $second] = $data['transactions'];
+        [$release, , $first, $second] = $data['transactions'];
         $this->assertEqualsWithDelta(60400.00, (float) $release['running_balance'], 0.001);
         $this->assertEqualsWithDelta(150.00, (float) ($first['insurance_applied'] ?? 0), 0.001);
         $this->assertEqualsWithDelta(60250.00, (float) $first['running_balance'], 0.001);
@@ -160,8 +160,8 @@ class InsuranceOwedReportsTest extends TestCase
         $statement = $this->statement($loan);
         $this->assertEquals($openingBefore, $statement['summary']['opening_balance']);
         $this->assertEqualsWithDelta(60400.00, (float) $statement['summary']['opening_balance'], 0.001);
-        $this->assertSame([false, false, true], array_column($statement['transactions'], 'voided'));
-        [, $kept, $void] = $statement['transactions'];
+        $this->assertSame([false, false, false, true], array_column($statement['transactions'], 'voided'));
+        [, , $kept, $void] = $statement['transactions'];
         $this->assertEqualsWithDelta(150.00, (float) $kept['insurance_applied'], 0.001);
         $this->assertEqualsWithDelta(60250.00, (float) $kept['running_balance'], 0.001);
         $this->assertEqualsWithDelta(0.00, (float) $void['insurance_applied'], 0.001);

@@ -125,6 +125,26 @@ class IncomeServiceAndCatalogFeesTest extends TestCase
         $this->assertEquals(200, $response->json('data.0.total_income'));
     }
 
+    public function test_an_imported_loan_s_free_text_deduction_is_not_income(): void
+    {
+        $imported = $this->released(60000, [
+            $this->item('Processing Fee', 900),
+            $this->item('Other Fee', 123.45),
+            $this->item('Filing Charge', 10),
+        ]);
+        $imported->update(['external_loan_no' => 'OLD-1']);
+        $this->released(30000, [$this->item('Filing Charge', 20)])->update(['imported_arrears_baseline' => '2026-01-01']);
+        $this->released(30000, [$this->item('Filing Charge', 50)]);
+
+        $income = $this->card();
+        $rows = $this->rows();
+
+        $this->assertEquals(950, $income['processing_fees'], 'The recorded processing fee, and only the released loan\'s untyped item.');
+        $this->assertEquals(950, $income['total']);
+        $this->assertSame(2, $rows->json('meta.total'), 'An imported loan with only a free-text item is not listed.');
+        $this->assertEquals(900, collect($rows->json('data'))->firstWhere('loan_id', $imported->id)['processing_fee']);
+    }
+
     public function test_a_catalog_fee_named_a_service_fee_is_a_service_fee_and_a_catalog_tax_is_no_income(): void
     {
         $this->released(60000, [

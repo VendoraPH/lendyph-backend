@@ -43,9 +43,11 @@ class DashboardService
     {
         $monthStart = Carbon::now()->startOfMonth();
 
-        // The gross loan portfolio: the Portfolio Summary's
-        // `outstanding_principal`, for the same branches.
-        $totalPortfolio = app(PortfolioOutstanding::class)->totals($branchIds)['outstanding_principal'];
+        // One read of the collectible loans. The gross loan portfolio is the
+        // Portfolio Summary's `outstanding_principal`, for the same branches;
+        // the overdue count is GET /loans `meta.totals.overdue_count`'s rule.
+        $collectible = app(PortfolioOutstanding::class)->totals($branchIds);
+        $totalPortfolio = $collectible['outstanding_principal'];
 
         $activeLoansCount = $this->loans($branchIds)->whereIn('status', self::ACTIVE_STATUSES)->count();
 
@@ -57,7 +59,7 @@ class DashboardService
         $totalCollectedMtd = (float) $collectedMtd->collected;
         $insuranceCollectedMtd = (float) $collectedMtd->insurance;
 
-        $overdueLoansCount = $this->overdueLoansCount(Carbon::today(), $branchIds);
+        $overdueLoansCount = $collectible['overdue_count'];
 
         // Cache sparklines for 10 minutes (22 queries → 0 on cache hit). v5:
         // the portfolio points read the unpaid principal, and the points are per
@@ -463,23 +465,6 @@ class DashboardService
         return collect(range(6, 1))->map(fn (int $daysAgo) => [
             'v' => $counts[$today->copy()->subDays($daysAgo)->toDateString()] ?? null,
         ])->values()->all();
-    }
-
-    /**
-     * Collectible loans with an unpaid period past the due date plus the
-     * loan's grace, as of `$asOf`: LoanListTotals' `overdue_count`, the rule
-     * GET /loans `meta.totals.overdue_count` counts by. A period's stored
-     * `overdue` status is not read, as it is only stamped when a payment or
-     * the penalty run touches the loan.
-     *
-     * @param  list<int>|null  $branchIds
-     */
-    private function overdueLoansCount(Carbon $asOf, ?array $branchIds): int
-    {
-        return app(LoanListTotals::class)->for(
-            $this->loans($branchIds)->whereIn('loans.status', Loan::COLLECTIBLE_STATUSES),
-            $asOf,
-        )['overdue_count'];
     }
 
     /**

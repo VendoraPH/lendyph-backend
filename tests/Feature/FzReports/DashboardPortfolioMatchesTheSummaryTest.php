@@ -7,6 +7,7 @@ use App\Models\Loan;
 use App\Models\PortfolioDailySnapshot;
 use App\Models\Role;
 use App\Models\User;
+use App\Services\LoanListTotals;
 use App\Services\RepaymentService;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -62,6 +63,56 @@ class DashboardPortfolioMatchesTheSummaryTest extends TestCase
         $this->assertEquals(60000, $this->card());
         $this->assertEquals(60000, $summary['outstanding_principal']);
         $this->assertEquals(70800, $summary['total_outstanding']);
+
+        $products = $this->getJson('/api/reports/portfolio-by-product')->assertOk()->json('data');
+        $this->assertEquals(60000, $products['totals']['outstanding_principal']);
+        $this->assertEquals(70800, $products['totals']['total_outstanding']);
+        $this->assertEquals(120000, $products['totals']['outstanding'], 'The deprecated alias keeps every ever-released loan.');
+        $closedRow = collect($products['products'])->firstWhere('product_id', $closed->loan_product_id);
+        $this->assertEquals(0, $closedRow['outstanding_principal']);
+        $this->assertEquals(0, $closedRow['total_outstanding']);
+        $this->assertEquals(60000, $closedRow['outstanding']);
+
+        $performance = $this->getJson('/api/reports/performance')->assertOk()->json('data');
+        foreach (['by_officer', 'by_branch'] as $table) {
+            $this->assertEquals(60000, $performance["{$table}_totals"]['outstanding_principal'], $table);
+            $this->assertEquals(70800, $performance["{$table}_totals"]['total_outstanding'], $table);
+            $this->assertEquals(120000, $performance["{$table}_totals"]['outstanding'], $table);
+        }
+    }
+
+    public function test_the_summary_s_new_figures_honour_the_date_range(): void
+    {
+        $inside = $this->createReleasedLoan();
+        $inside->update(['insurance_remaining_balance' => 400]);
+        $outside = $this->createReleasedLoan(['principal_amount' => 30000]);
+        DB::table('loans')->where('id', $inside->id)->update(['released_at' => '2026-03-15 09:00:00']);
+        DB::table('loans')->where('id', $outside->id)->update(['released_at' => '2026-04-01 00:05:00']);
+
+        $summary = $this->getJson('/api/reports/loan-balance-summary?date_from=2026-03-01&date_to=2026-03-31')->assertOk()->json('data');
+
+        $this->assertEquals(60000, $summary['outstanding_principal']);
+        $this->assertEquals(71200, $summary['total_outstanding']);
+
+        $row = collect($summary['by_branch'])->firstWhere('branch_id', $inside->branch_id);
+        $this->assertEquals(60000, $row['outstanding_principal']);
+        $this->assertEquals(71200, $row['total_outstanding']);
+        $this->assertEquals(60000, $summary['by_branch_totals']['outstanding_principal']);
+        $this->assertEquals(71200, $summary['by_branch_totals']['total_outstanding']);
+    }
+
+    public function test_the_dashboard_asks_for_the_list_totals_once(): void
+    {
+        $this->createReleasedLoan();
+
+        $this->partialMock(LoanListTotals::class, function ($mock): void {
+            $mock->shouldReceive('for')->once()->passthru();
+        });
+
+        $stats = $this->stats();
+
+        $this->assertEquals(60000, $stats['total_portfolio']);
+        $this->assertSame(0, $stats['overdue_count']);
     }
 
     public function test_the_card_is_principal_only_and_the_summary_says_which_figure_is_which(): void

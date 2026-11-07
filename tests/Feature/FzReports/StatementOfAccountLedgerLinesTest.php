@@ -5,6 +5,7 @@ namespace Tests\Feature\FzReports;
 use App\Models\Loan;
 use App\Models\LoanProduct;
 use App\Models\Repayment;
+use App\Models\Role;
 use App\Models\User;
 use App\Services\RepaymentService;
 use Illuminate\Support\Carbon;
@@ -215,7 +216,6 @@ class StatementOfAccountLedgerLinesTest extends TestCase
         $this->applyBalanceAdjustment($loan, -600);
 
         $data = $this->statement($loan);
-        $outside = 0.0;
 
         foreach ($data['transactions'] as $line) {
             if ($line['voided']) {
@@ -224,22 +224,138 @@ class StatementOfAccountLedgerLinesTest extends TestCase
 
             $this->assertEquals(
                 round((float) $line['credit'] - (float) $line['debit'], 2),
-                $this->sumOfParts($line),
+                round($line['principal_applied'] + $line['interest_applied'] + $line['penalty_applied'] + $line['insurance_applied'], 2),
                 $line['description'],
             );
-
-            // Money a payment took that the balances never held.
-            $outside += $line['insurance_applied'] + $line['build_up_applied'] + $line['overpayment_applied'];
         }
 
-        $summary = $data['summary'];
-        $owed = round($summary['outstanding_principal'] + $summary['outstanding_interest'] + $summary['outstanding_penalty'], 2);
-
-        $this->assertEquals(
-            $owed,
-            round($data['transaction_totals']['debit'] - $data['transaction_totals']['credit'] + $outside, 2),
-        );
+        $this->assertDebitsLessCreditsAreOutstanding($data);
         $this->assertEquals($this->ledgerClosingPrincipal($loan), collect($data['transactions'])->last()['principal_balance']);
+    }
+
+    public function test_a_payment_s_credit_is_what_reduces_the_debt_and_amount_paid_is_the_receipt(): void
+    {
+        $loan = $this->createReleasedLoan();
+        $loan->update(['scb_amount' => 100, 'insurance_remaining_balance' => 400]);
+
+        // Premium ₱400.00, then the period's ₱11,800.00, then its ₱100.00 build-up.
+        $this->pay($loan, 12300);
+
+        $data = $this->statement($loan);
+        $line = collect($data['transactions'])->firstWhere('type', 'payment');
+
+        $this->assertEquals(12300, $line['amount_paid']);
+        $this->assertEquals(12200, $line['credit']);
+        $this->assertEquals(100, $line['build_up_applied']);
+        $this->assertEquals(400, $line['insurance_applied']);
+        $this->assertEquals(12200, $data['transaction_totals']['credit']);
+        $this->assertEquals(12300, $data['summary']['total_paid']);
+        $this->assertDebitsLessCreditsAreOutstanding($data);
+    }
+
+    public function test_an_overpayment_stays_outside_the_credit(): void
+    {
+        $loan = $this->createReleasedLoan();
+        $this->pay($loan, 70850);
+
+        $data = $this->statement($loan);
+        $line = collect($data['transactions'])->firstWhere('type', 'payment');
+
+        $this->assertEquals(70850, $line['amount_paid']);
+        $this->assertEquals(70800, $line['credit']);
+        $this->assertEquals(50, $line['overpayment_applied']);
+        $this->assertDebitsLessCreditsAreOutstanding($data);
+        $this->assertEquals(0, $data['summary']['outstanding_balance']);
+    }
+
+    public function test_the_premium_owed_at_origin_is_a_debit_line_on_the_release_date(): void
+    {
+        $loan = $this->createReleasedLoan();
+        $loan->update(['insurance_remaining_balance' => 1000]);
+        $this->pay($loan, 300);
+
+        $data = $this->statement($loan);
+        [$release, $premium, $payment] = $data['transactions'];
+
+        $this->assertSame('release', $release['kind']);
+        $this->assertSame('insurance_debit', $premium['kind']);
+        $this->assertSame('Insurance premium owed', $premium['description']);
+        $this->assertSame($release['date'], $premium['date']);
+        $this->assertEquals(1000, $premium['debit'], 'Still owed ₱700.00 plus ₱300.00 collected.');
+        $this->assertNull($premium['credit']);
+        $this->assertEquals(60000, $premium['principal_balance']);
+        $this->assertEquals(300, $payment['credit']);
+        $this->assertEquals(700, $data['summary']['insurance_owed']);
+        $this->assertEquals(71500, $data['summary']['outstanding_balance']);
+        $this->assertDebitsLessCreditsAreOutstanding($data);
+    }
+
+    public function test_a_voided_payment_s_premium_goes_back_to_owed_and_the_debit_stays(): void
+    {
+        $loan = $this->createReleasedLoan();
+        $loan->update(['insurance_remaining_balance' => 1000]);
+        $voided = $this->pay($loan, 300);
+        app(RepaymentService::class)->voidRepayment($voided, 'entered twice', $this->admin);
+
+        $data = $this->statement($loan);
+
+        $this->assertEquals(1000, collect($data['transactions'])->firstWhere('kind', 'insurance_debit')['debit']);
+        $this->assertDebitsLessCreditsAreOutstanding($data);
+    }
+
+    public function test_a_loan_with_no_premium_has_no_premium_line(): void
+    {
+        $data = $this->statement($this->createReleasedLoan());
+
+        $this->assertNull(collect($data['transactions'])->firstWhere('kind', 'insurance_debit'));
+    }
+
+    public function test_debits_less_credits_are_outstanding_on_every_status(): void
+    {
+        foreach (['defaulted', 'void', 'rejected', 'completed', 'ongoing'] as $status) {
+            $loan = $this->createReleasedLoan();
+            $loan->update(['insurance_remaining_balance' => 250, 'scb_amount' => 100]);
+            $this->pay($loan, 12000);
+            DB::table('loans')->where('id', $loan->id)->update(['status' => $status]);
+
+            $this->assertDebitsLessCreditsAreOutstanding($this->statement($loan), $status);
+        }
+    }
+
+    public function test_debits_less_credits_are_outstanding_after_an_extension_and_a_restructure(): void
+    {
+        $this->travelTo('2026-04-27 09:00:00');
+        $extended = $this->oneMonthLoan();
+        $extended->update(['insurance_remaining_balance' => 200]);
+        $this->travelTo('2026-05-20 10:00:00');
+        $this->postJson("/api/loans/{$extended->id}/extend", ['interest_option' => 'pay'])->assertOk();
+        $this->assertDebitsLessCreditsAreOutstanding($this->statement($extended), 'extension on pay');
+
+        $deferred = $this->oneMonthLoan();
+        $deferred->update(['insurance_remaining_balance' => 200]);
+        $this->postJson("/api/loans/{$deferred->id}/extend", ['interest_option' => 'defer'])->assertOk();
+        $this->assertDebitsLessCreditsAreOutstanding($this->statement($deferred), 'extension on defer');
+
+        $source = $this->createReleasedLoan();
+        $this->pay($source, 11800);
+        $source->update(['insurance_remaining_balance' => 300]);
+        $newId = $this->postJson("/api/loans/{$source->id}/restructure", [
+            'borrower_id' => $source->borrower_id,
+            'loan_product_id' => $source->loan_product_id,
+            'principal_amount' => 59000,
+            'start_date' => now()->toDateString(),
+        ])->assertCreated()->json('data.id');
+        $this->patchJson("/api/loans/{$newId}/submit")->assertOk();
+        $approver = User::factory()->create();
+        $approver->assignRole(Role::where('name', 'admin')->first());
+        $this->actingAs($approver);
+        $this->patchJson("/api/loans/{$newId}/approve", ['approval_remarks' => 'ok'])->assertOk();
+        $this->actingAs($this->admin);
+        $this->patchJson("/api/loans/{$newId}/release")->assertOk();
+
+        $this->assertDebitsLessCreditsAreOutstanding($this->statement($source->fresh()), 'restructured source');
+        $this->assertDebitsLessCreditsAreOutstanding($this->statement(Loan::findOrFail($newId)), 'restructured into');
+        $this->assertEquals($this->ledgerClosingPrincipal($source), collect($this->statement($source->fresh())['transactions'])->last()['principal_balance']);
     }
 
     public function test_an_extension_lists_its_interest_and_labels_its_payment(): void
@@ -331,6 +447,44 @@ class StatementOfAccountLedgerLinesTest extends TestCase
         $this->assertStringContainsString("Period 1 was replaced by period 2: extension {$number}", $data['schedule_note']);
     }
 
+    public function test_two_deferred_extensions_each_name_their_own_period(): void
+    {
+        $this->travelTo('2026-04-27 09:00:00');
+        $loan = $this->oneMonthLoan();
+        $this->travelTo('2026-05-20 10:00:00');
+        $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'defer'])->assertOk();
+        $this->travelTo('2026-06-20 10:00:00');
+        $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'defer'])->assertOk();
+
+        $numbers = $loan->adjustments()->where('adjustment_type', 'extension')->reorder('id')->pluck('adjustment_number')->all();
+        $data = $this->statement($loan);
+        $rows = collect($data['amortization_schedule']);
+
+        $this->assertSame([3], $rows->pluck('period_number')->all());
+        $this->assertSame("Replaces period 2: extension {$numbers[1]} on Jun 20, 2026.", $rows[0]['note']);
+        $this->assertSame(
+            "Period 1 was replaced by period 2: extension {$numbers[0]} on May 20, 2026. Period 2 was replaced by period 3: extension {$numbers[1]} on Jun 20, 2026.",
+            $data['schedule_note'],
+        );
+    }
+
+    public function test_an_extension_after_a_paid_extension_names_only_the_period_it_closed(): void
+    {
+        $this->travelTo('2026-04-27 09:00:00');
+        $loan = $this->oneMonthLoan();
+        $this->travelTo('2026-05-20 10:00:00');
+        $this->pay($loan, 500);
+        $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'pay'])->assertOk();
+        $this->travelTo('2026-06-20 10:00:00');
+        $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'defer'])->assertOk();
+
+        $numbers = $loan->adjustments()->where('adjustment_type', 'extension')->reorder('id')->pluck('adjustment_number')->all();
+        $rows = collect($this->statement($loan)['amortization_schedule'])->keyBy('period_number');
+
+        $this->assertSame("Replaced by period 2: extension {$numbers[0]} on May 20, 2026. Closed at what was collected on it.", $rows[1]['note']);
+        $this->assertSame("Replaces period 2: extension {$numbers[1]} on Jun 20, 2026.", $rows[3]['note']);
+    }
+
     public function test_a_loan_with_no_extension_has_no_row_notes(): void
     {
         $data = $this->statement($this->createReleasedLoan());
@@ -387,6 +541,7 @@ class StatementOfAccountLedgerLinesTest extends TestCase
 
         $this->assertSame([], $data['transactions']);
         $this->assertNull($data['loan']['released_at']);
+        $this->assertDebitsLessCreditsAreOutstanding($data);
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────
@@ -403,6 +558,20 @@ class StatementOfAccountLedgerLinesTest extends TestCase
             'product' => ['interest_method' => 'upon_maturity', 'term' => 1, 'frequency' => 'monthly', 'interest_rate' => 3.0],
             'start_date' => now()->toDateString(),
         ]);
+    }
+
+    /**
+     * The Debit total less the Credit total is the statement's Outstanding.
+     *
+     * @param  array<string, mixed>  $data
+     */
+    private function assertDebitsLessCreditsAreOutstanding(array $data, string $message = ''): void
+    {
+        $this->assertEquals(
+            $data['summary']['outstanding_balance'],
+            round($data['transaction_totals']['debit'] - $data['transaction_totals']['credit'], 2),
+            $message,
+        );
     }
 
     private function ledgerClosingPrincipal(Loan $loan): float
