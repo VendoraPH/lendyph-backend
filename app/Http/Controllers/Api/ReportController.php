@@ -172,7 +172,7 @@ class ReportController extends Controller
     #[OA\Get(
         path: '/api/reports/statement-of-account/{loan}',
         summary: 'Statement of Account',
-        description: 'All transactions, schedule, and balance for a specific loan. Each `amortization_schedule` row also carries the demand letter\'s arrears: `remaining` (`principal`, `interest`, `penalty` still owed, never below 0), `amount_due` (their sum), `days_overdue` (whole days past the due date, today in Asia/Manila; 0 when not yet due) and `is_overdue` (due before today with something still owed). `total_demanded` is every `is_overdue` row\'s `amount_due` plus, when there are any, the insurance premium still owed (a payment takes it first), and `demand_totals` (`principal`, `interest`, `penalty`, `amount_due`) the columns over those rows, with `insurance_owed` the premium included in `total_demanded`. `as_of` is today in the app timezone. `loan.status_label` is "Past Due" when a released or ongoing loan has a Past Due amount above 0, otherwise the app\'s label, and `loan.has_build_up` says whether the loan has a Share Capital Build-Up. `amortization_schedule[].total_due` and `schedule_totals.total_due` include penalty; `build_up_due` is the period\'s build-up and `total_payment` adds it. `total_paid` is the period\'s principal, interest and penalty paid, so `total_due` less `total_paid` is its `amount_remaining`, and `amount_paid` stays principal and interest. `schedule_note` is set when an applied balance adjustment, restructure or term extension restated the schedule. `transactions[]` lists the posted payments (`type` `payment`) and each Ledger row that moved the principal otherwise (`type` `adjustment`), in the Ledger\'s order: `payment_method` (label), `reference_number`, `principal_applied`, `interest_applied`, `penalty_applied`, `insurance_applied`, `build_up_applied`, `overpayment_applied` (the excess not credited to build-up, also totalled in `transaction_totals`; positive lowers the balance, except the overpayment, which lowers none, and on every line credit minus debit equals them added up), and `principal_balance`, closing on GET /loans/{id}/ledger `closing.principal`; `balance` is its alias for one release. `running_balance` keeps principal plus premium. An adjustment line has `amount_paid` 0 and its figure in `credit` when it lowered what is owed, `debit` when it raised it, so `transaction_totals.credit` can exceed `summary.total_paid`, which is the money received. `summary` also carries `insurance_owed`, inside `outstanding_balance`, and `overdue_amount`: the principal, interest and penalty still unpaid on late periods (past the due date plus the loan\'s grace), equal to GET /loans/{id}/summary `overdue_amount`. Each schedule row also carries `amount_remaining`, its principal, interest and penalty still owed. Totals in whole centavos.',
+        description: 'All transactions, schedule, and balance for a specific loan. Each `amortization_schedule` row also carries the demand letter\'s arrears: `remaining` (`principal`, `interest`, `penalty` still owed, never below 0), `amount_due` (their sum), `days_overdue` (whole days past the due date, today in Asia/Manila; 0 when not yet due) and `is_overdue` (due before today with something still owed). `total_demanded` is every `is_overdue` row\'s `amount_due` plus, when there are any, the insurance premium still owed (a payment takes it first), and `demand_totals` (`principal`, `interest`, `penalty`, `amount_due`) the columns over those rows, with `insurance_owed` the premium included in `total_demanded`. `as_of` is today in the app timezone. `loan.status_label` is "Past Due" when a released or ongoing loan has a Past Due amount above 0, otherwise the app\'s label, and `loan.has_build_up` says whether the loan has a Share Capital Build-Up. `amortization_schedule[].total_due` and `schedule_totals.total_due` include penalty; `build_up_due` is the period\'s build-up and `total_payment` adds it. `total_paid` is the period\'s principal, interest and penalty paid, so `total_due` less `total_paid` is its `amount_remaining`, and `amount_paid` stays principal and interest. `schedule_note` is set when an applied balance adjustment, restructure or term extension restated the schedule, or an extension replaced a period; a row an extension closed or added carries its own `note`, null otherwise. `schedule_totals.balance` is the rows\' `amount_remaining` added up. `transactions[]` lists the loan\'s Ledger rows in its order, each with `kind` (the Ledger\'s), `type` (`release`, `charge`, `payment` or `adjustment`), `description` (alias `particulars`), `debit`, `credit` and `voided`: the release first (a debit of principal and interest), penalty charges, payments, waivers, extension interest and adjustments. A voided payment stays listed with `voided` true, its receipt\'s `amount_paid`, null `debit` and `credit` and zero parts, so it moves no balance and no total; its void has no line of its own. Each line has `payment_method` (label), `reference_number`, `principal_applied`, `interest_applied`, `penalty_applied`, `insurance_applied`, `build_up_applied`, `overpayment_applied` (the excess not credited to build-up, also totalled in `transaction_totals`; positive lowers the balance and negative raises it, except the overpayment, which lowers none, and on every line that is not voided credit minus debit equals them added up), and `principal_balance`, closing on GET /loans/{id}/ledger `closing.principal`; `balance` is its alias for one release. `running_balance` keeps principal plus premium. A line that is not a payment has `amount_paid` 0 and its figure in `credit` when it lowered what is owed, `debit` when it raised it, so `transaction_totals.credit` can exceed `summary.total_paid`, which is the money received. `loan` also carries `product_name`, `released_at`, `member_address`, `branch_name`, `account_officer_name`, `payment_frequency`, `interest_type`, `term_label`, `rate_label` and `extensions_count`. `summary` also carries `principal_paid`, `interest_paid`, `penalty_paid`, `insurance_paid`, `build_up_paid` and `overpayment_paid` (the excess a payment could not credit), which add up to `total_paid`; `insurance_owed`, inside `outstanding_balance`, and `overdue_amount`: the principal, interest and penalty still unpaid on late periods (past the due date plus the loan\'s grace), equal to GET /loans/{id}/summary `overdue_amount`. Each schedule row also carries `amount_remaining`, its principal, interest and penalty still owed. Totals in whole centavos.',
         tags: ['Reports'],
         security: [['sanctum' => []]],
         parameters: [
@@ -220,7 +220,7 @@ class ReportController extends Controller
     #[OA\Get(
         path: '/api/reports/releases',
         summary: 'List of Releases',
-        description: 'Paginated list of released loans with filters',
+        description: 'Paginated list of released loans with filters. `totals.total_outstanding` is everything owed and `totals.outstanding_principal` the unpaid principal, by the rule of GET /loans; `totals.total_outstanding_balance` is a deprecated alias, principal plus premium.',
         tags: ['Reports'],
         security: [['sanctum' => []]],
         parameters: [
@@ -304,8 +304,8 @@ class ReportController extends Controller
                     new OA\Property(property: 'total_principal_due', type: 'number'),
                     new OA\Property(property: 'total_interest_due', type: 'number'),
                     new OA\Property(property: 'total_penalty', type: 'number'),
-                    new OA\Property(property: 'total_due', type: 'number'),
-                    new OA\Property(property: 'total_paid', type: 'number'),
+                    new OA\Property(property: 'total_due', type: 'number', description: 'Principal, interest and penalty, as on each row.'),
+                    new OA\Property(property: 'total_paid', type: 'number', description: 'Principal, interest and penalty paid; `total_due` less this is `total_balance`.'),
                     new OA\Property(property: 'total_balance', type: 'number'),
                     new OA\Property(property: 'total_outstanding', type: 'number', description: 'Everything owed by the distinct loans the filter matches, each loan once.'),
                     new OA\Property(property: 'past_due_amount', type: 'number', description: 'The late-and-past-grace amount owed by the distinct loans the filter matches, each loan once.'),
@@ -376,12 +376,16 @@ class ReportController extends Controller
                     'principal_due' => (float) $s->principal_due,
                     'interest_due' => (float) $s->interest_due,
                     'penalty_amount' => (float) $s->penalty_amount,
-                    'total_due' => (float) $s->total_due,
+                    // Principal, interest and penalty, as the Statement's
+                    // schedule states it.
+                    'total_due' => $this->dueWithPenalty($s),
                     'principal_paid' => (float) $s->principal_paid,
                     'interest_paid' => (float) $s->interest_paid,
-                    // The row's Paid: principal and interest, the parts
-                    // `total_due` is made of, as `totals.total_paid` adds up.
-                    'amount_paid' => round((float) $s->principal_paid + (float) $s->interest_paid, 2),
+                    'penalty_paid' => (float) $s->penalty_paid,
+                    // The row's Paid: the parts `total_due` is made of, as
+                    // `totals.total_paid` adds up, so `total_due` less this is
+                    // `amount_remaining`.
+                    'amount_paid' => round((float) $s->principal_paid + (float) $s->interest_paid + (float) $s->penalty_paid, 2),
                     'amount_remaining' => $amountRemaining,
                     'balance' => $amountRemaining,
                     'status' => $s->status,
@@ -405,7 +409,7 @@ class ReportController extends Controller
     #[OA\Get(
         path: '/api/reports/loan-balance-summary',
         summary: 'Loan Balance Summary',
-        description: 'Aggregate portfolio, outstanding, and overdue amounts by branch',
+        description: 'Aggregate portfolio, outstanding, and overdue amounts by branch. `total_outstanding` is everything owed (principal, interest, penalty, premium) and `outstanding_principal` the unpaid principal, on the collectible loans (released, ongoing, defaulted) by the rule of GET /loans `meta.totals`, so they agree with the loan pages to the centavo, and with no date range `outstanding_principal` equals the Dashboard\'s `total_portfolio`. `by_branch[]` and `by_branch_totals` carry both too. `outstanding_balance` is a deprecated alias with its old meaning, principal plus premium.',
         tags: ['Reports'],
         security: [['sanctum' => []]],
         parameters: [
@@ -453,9 +457,9 @@ class ReportController extends Controller
         parameters: [
             new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
-            new OA\Parameter(name: 'loan_id', in: 'query', required: false, description: 'One loan only: its interest and penalty collected and its own processing fee.', schema: new OA\Schema(type: 'integer', minimum: 1)),
+            new OA\Parameter(name: 'loan_id', in: 'query', required: false, description: 'One loan only: its interest and penalty collected and its own fee income.', schema: new OA\Schema(type: 'integer', minimum: 1)),
         ],
-        responses: [new OA\Response(response: 200, description: 'Income breakdown')],
+        responses: [new OA\Response(response: 200, description: 'Income breakdown. `service_fee` and `other_fees` are the deductions recorded at release of the loans released in the period, classified as the release journal classifies them (4040 and 4080); `total` adds them to `interest_income`, `processing_fees` and `penalty_income`.')],
     )]
     public function incomeReport(): JsonResponse
     {
@@ -467,13 +471,15 @@ class ReportController extends Controller
     #[OA\Get(
         path: '/api/reports/income/by-loan',
         summary: 'Income by loan account',
-        description: 'What GET /api/reports/income adds up, by loan: one row per loan with a posted repayment or a processing '
-            .'fee in the period, ordered by `total_income` desc then `loan_id` asc, paginated over loans (`meta.total` counts '
-            .'loans). Each row\'s `total_income` is its interest, penalty and fee. '
+        description: 'What GET /api/reports/income adds up, by loan: one row per loan with a posted repayment or fee income '
+            .'in the period, ordered by `total_income` desc then `loan_id` asc, paginated over loans (`meta.total` counts '
+            .'loans). Each row\'s `total_income` is its interest, penalty, processing fee, service fee and other fees. '
             .'`meta.totals` (also sent as `totals`) covers the whole filtered set: its `interest_income`, `penalty_income`, '
-            .'`processing_fee` and `total_income` equal the Income report\'s `interest_income`, `penalty_income`, '
-            .'`processing_fees` and `total`, and `payments` equals the List of Repayments `totals.count`, for the same '
-            .'filters. Service and catalog fee income are not in this report.',
+            .'`processing_fee`, `service_fee`, `other_fees` and `total_income` equal the Income report\'s `interest_income`, '
+            .'`penalty_income`, `processing_fees`, `service_fee`, `other_fees` and `total`, and every row added up equals them '
+            .'too. `payments` equals the List of Repayments `totals.count`, for the same filters. Service and other fees are the '
+            .'deductions recorded at release that the release journal credits to 4040 and 4080; taxes, notarial fees, '
+            .'insurance premium and share capital are never income.',
         tags: ['Reports'],
         security: [['sanctum' => []]],
         parameters: [
@@ -494,6 +500,8 @@ class ReportController extends Controller
                     new OA\Property(property: 'interest_income', type: 'number'),
                     new OA\Property(property: 'penalty_income', type: 'number'),
                     new OA\Property(property: 'processing_fee', type: 'number'),
+                    new OA\Property(property: 'service_fee', type: 'number'),
+                    new OA\Property(property: 'other_fees', type: 'number'),
                     new OA\Property(property: 'total_income', type: 'number'),
                 ]),
             ])),
@@ -711,7 +719,7 @@ class ReportController extends Controller
     #[OA\Get(
         path: '/api/reports/portfolio-by-product',
         summary: 'Loan Portfolio by Product',
-        description: 'Loan count, amount released, outstanding balance, average rate, overdue amount and PAR ratio per loan product. Date filters apply to release date, matching the Loan Balance Summary.',
+        description: 'Loan count, amount released, `total_outstanding` (everything owed), `outstanding_principal` (unpaid principal), `outstanding` (a deprecated alias, principal plus premium), average rate, overdue amount and PAR ratio per loan product. Date filters apply to release date, matching the Loan Balance Summary.',
         tags: ['Reports'],
         security: [['sanctum' => []]],
         parameters: [
@@ -761,7 +769,7 @@ class ReportController extends Controller
     #[OA\Get(
         path: '/api/reports/performance',
         summary: 'Officer / Branch Performance',
-        description: 'Loans released and amounts collected for the period (`collected` leaves out the insurance premium payments collected, stated as `insurance_collected`), alongside outstanding portfolio, overdue amount, PAR ratio and active borrowers as of today, grouped by account officer and mirrored by branch. Loans with no officer appear as an Unassigned row.',
+        description: '`total_outstanding` is everything owed, `outstanding_principal` the unpaid principal, and `outstanding` a deprecated alias, principal plus premium. Loans released and amounts collected for the period (`collected` leaves out the insurance premium payments collected, stated as `insurance_collected`), alongside outstanding portfolio, overdue amount, PAR ratio and active borrowers as of today, grouped by account officer and mirrored by branch. Loans with no officer appear as an Unassigned row.',
         tags: ['Reports'],
         security: [['sanctum' => []]],
         parameters: [
@@ -891,6 +899,15 @@ class ReportController extends Controller
     }
 
     /**
+     * A Due/Past Due row's Total Due: principal, interest and penalty, on the
+     * preview and the export alike.
+     */
+    private function dueWithPenalty(AmortizationSchedule $schedule): float
+    {
+        return round((float) $schedule->total_due + (float) ($schedule->penalty_amount ?? 0), 2);
+    }
+
+    /**
      * How many days late a schedule is, measured from the expiry of its loan's
      * grace period rather than from the due date, and floored at zero.
      *
@@ -963,7 +980,7 @@ class ReportController extends Controller
                 $s->principal_due,
                 $s->interest_due,
                 $s->penalty_amount ?? 0,
-                $s->total_due,
+                $this->dueWithPenalty($s),
                 $s->status,
             ];
         }));

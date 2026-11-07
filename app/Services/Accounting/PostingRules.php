@@ -460,6 +460,20 @@ final class PostingRules
     }
 
     /**
+     * The role one deduction item is credited to by {@see self::classifyDeductions()}'s
+     * order, read without a chart of accounts: its type's role, then a tax's
+     * payable role, then the catalog fee role for an item from the fee catalog.
+     * Null when it has none. For readers that must classify an item as a release
+     * would, such as the Income report; it never refuses an item.
+     */
+    public static function deductionItemRole(string $name, bool $catalogFee): ?string
+    {
+        return self::deductionRoleFor($name)
+            ?? self::taxRoleFor($name)
+            ?? ($catalogFee ? self::CATALOG_FEE_ROLE : null);
+    }
+
+    /**
      * The payable role a deduction named `$name` (or its type) is credited to
      * when it is a tax, or null when it is not one, or its type has a role of
      * its own in {@see self::DEDUCTION_ROLES}.

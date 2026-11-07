@@ -7,6 +7,7 @@ use App\Models\Borrower;
 use App\Models\Loan;
 use App\Models\Repayment;
 use App\Models\ShareCapitalLedger;
+use App\Services\Accounting\PostingRules;
 use Carbon\Carbon;
 use Closure;
 use DateTimeInterface;
@@ -171,13 +172,13 @@ class ReportService
 
     public function statementOfAccount(Loan $loan): array
     {
-        $loan->load('borrower', 'loanProduct', 'branch', 'amortizationSchedules');
+        $loan->load('borrower', 'loanProduct', 'branch', 'accountOfficer', 'amortizationSchedules');
 
-        $repayments = $loan->repayments()
-            ->where('status', 'posted')
+        $allRepayments = $loan->repayments()
             ->orderBy('payment_date')
             ->orderBy('id')
             ->get();
+        $repayments = $allRepayments->where('status', 'posted')->values();
 
         $totalPaid = $repayments->sum(fn ($r) => (float) $r->amount_paid);
         $schedules = $loan->amortizationSchedules;
@@ -214,7 +215,9 @@ class ReportService
         $openingCentavos = $centavosOf($loan->principal_amount) + $centavosOf($loan->insurance_remaining_balance) + $premiumCollected + $premiumCarriedOut;
         $openingBalance = $openingCentavos / 100;
 
-        $transactions = $this->statementLines($loan, $repayments, $openingCentavos);
+        $transactions = $this->statementLines($loan, $allRepayments, $openingCentavos);
+        $receivedParts = $this->statementPaidParts($transactions);
+        ['rows' => $rowNotes, 'note' => $extensionNote] = $this->extensionNotes($loan);
 
         // The demand letter's arrears, worked out here so the letter computes
         // nothing: what each period still owes on each part, never below 0,
@@ -226,7 +229,7 @@ class ReportService
         $centavos = fn (mixed $pesos): int => (int) round((float) $pesos * 100);
         $owed = fn (mixed $due, mixed $paid): int => max(0, $centavos($due) - $centavos($paid));
 
-        $schedule = $schedules->map(function ($s) use ($today, $owed, $centavos, $loan) {
+        $schedule = $schedules->map(function ($s) use ($today, $owed, $centavos, $loan, $rowNotes) {
             $totalDue = $centavos($s->total_due) + $centavos($s->penalty_amount);
             $buildUp = PersistedScheduleFigures::shareCapitalBuildUpCentavos($loan, $s);
             $remaining = [
@@ -268,8 +271,23 @@ class ReportService
                 'amount_remaining' => $amountDue / 100,
                 'days_overdue' => $daysOverdue,
                 'is_overdue' => $daysOverdue > 0 && $amountDue > 0,
+                // Why an extension closed this period or added it; null otherwise.
+                'note' => $rowNotes[$s->id] ?? null,
             ];
         })->values()->toArray();
+
+        $scheduleTotals = self::columnTotals($schedule, [
+            'principal_due' => 'money',
+            'interest_due' => 'money',
+            'penalty_amount' => 'money',
+            'total_due' => 'money',
+            'build_up_due' => 'money',
+            'total_payment' => 'money',
+            'amount_paid' => 'money',
+            'total_paid' => 'money',
+        ]);
+        // The statement's Balance column: what the periods still owe.
+        $scheduleTotals['balance'] = self::sumOfFigures(array_column($schedule, 'amount_remaining'));
 
         $arrears = array_values(array_filter($schedule, fn (array $row): bool => $row['is_overdue']));
         $demandTotals = [
@@ -298,16 +316,27 @@ class ReportService
                 'application_number' => $loan->application_number,
                 'principal_amount' => (float) $loan->principal_amount,
                 'interest_rate' => (float) $loan->interest_rate,
-                'interest_rate_frequency' => $loan->interest_rate_frequency->value,
+                'interest_rate_frequency' => $loan->interest_rate_frequency?->value,
                 'interest_method' => $loan->interest_method,
                 'term' => $loan->term,
-                'term_unit' => $loan->term_unit->value,
+                'term_unit' => $loan->term_unit?->value,
                 'frequency' => $loan->frequency,
-                'start_date' => $loan->start_date->toDateString(),
-                'maturity_date' => $loan->maturity_date->toDateString(),
+                'start_date' => $loan->start_date?->toDateString(),
+                'maturity_date' => $loan->maturity_date?->toDateString(),
                 'status' => $loan->status,
                 'status_label' => self::statementStatusLabel($loan, $overdueCentavos),
                 'has_build_up' => $centavosOf($loan->scb_amount) > 0,
+                // The statement's Account Particulars, in words.
+                'product_name' => $loan->loanProduct?->name,
+                'released_at' => $loan->released_at?->toDateString(),
+                'member_address' => $loan->borrower->address,
+                'branch_name' => $loan->branch?->name,
+                'account_officer_name' => $loan->accountOfficer?->full_name,
+                'payment_frequency' => self::frequencyLabel($loan->frequency),
+                'interest_type' => self::interestTypeLabel($loan->interest_method),
+                'term_label' => self::termLabel($loan),
+                'rate_label' => self::rateLabel($loan),
+                'extensions_count' => (int) $loan->extension_count,
             ],
             'borrower' => [
                 'borrower_code' => $loan->borrower->borrower_code,
@@ -317,17 +346,8 @@ class ReportService
             'transactions' => $transactions,
             'transaction_totals' => self::columnTotals($transactions, ['debit' => 'money', 'credit' => 'money', 'overpayment_applied' => 'money']),
             'amortization_schedule' => $schedule,
-            'schedule_note' => $this->scheduleNote($loan),
-            'schedule_totals' => self::columnTotals($schedule, [
-                'principal_due' => 'money',
-                'interest_due' => 'money',
-                'penalty_amount' => 'money',
-                'total_due' => 'money',
-                'build_up_due' => 'money',
-                'total_payment' => 'money',
-                'amount_paid' => 'money',
-                'total_paid' => 'money',
-            ]),
+            'schedule_note' => self::joinedNotes($this->scheduleNote($loan), $extensionNote),
+            'schedule_totals' => $scheduleTotals,
             // Everything in arrears today plus, when there are arrears, the
             // insurance premium still owed (payments take it first): the
             // demand letter's total. Then its table's column totals over the
@@ -336,6 +356,10 @@ class ReportService
             'demand_totals' => $demandTotals,
             'summary' => [
                 'total_paid' => round($totalPaid, 2),
+                // The money received, by what it went to: these add up to
+                // `total_paid`. `overpayment_paid` is an excess a payment could
+                // not credit anywhere, normally 0.
+                ...$receivedParts,
                 'opening_balance' => $openingBalance,
                 'outstanding_principal' => round($outstandingPrincipal, 2),
                 'outstanding_interest' => round($outstandingInterest, 2),
@@ -360,31 +384,36 @@ class ReportService
     }
 
     /**
-     * The statement's Transaction History: the posted payments, plus each row
-     * of the loan's Ledger that moved its principal otherwise (a balance
-     * adjustment, a balance moved to a restructured loan, what an imported loan
-     * was paid before the import, a balance restated to the schedule), in the
-     * Ledger's order.
+     * The statement's Transaction History: the lines of the loan's Ledger
+     * (LoanLedgerService), in its order. The release is the first line, then
+     * its penalty charges, payments, waivers, extension interest and
+     * adjustments, as they happened.
      *
-     * A line's parts lower the balance when positive, so on every line
-     * credit - debit equals its parts added up, and `principal_balance` steps
-     * down by `principal_applied`. `overpayment_applied` is the excess a payment
-     * left over and did not credit to build-up, which lowers no balance. An
-     * adjustment line receives no money: its
-     * `amount_paid` is 0 and its figure sits in `credit` when it lowered what
-     * is owed, `debit` when it raised it.
+     * Every line that is not voided has parts that lower the balance when
+     * positive and raise it when negative, so credit - debit equals its parts
+     * added up, and `principal_balance` steps down by `principal_applied`.
+     * `overpayment_applied` is the excess a payment left over and did not credit
+     * to build-up, which lowers no balance. A line that isn't a payment receives
+     * no money: its `amount_paid` is 0 and its figure sits in `credit` when it
+     * lowered what is owed, `debit` when it raised it.
      *
-     * A voided payment is left out, and its void too: together they move
-     * nothing.
+     * A voided payment stays listed, marked `voided`, so a member holding its
+     * receipt can see what happened to it. Its `amount_paid` is the receipt's,
+     * its `debit`, `credit` and parts are empty, and no balance or total moves.
+     * Its void has no line: together they moved nothing.
      *
-     * @param  Collection<int, Repayment>  $repayments  the posted payments, in statement order
+     * @param  Collection<int, Repayment>  $repayments  every payment on the loan, voided ones included, in statement order
      * @return list<array<string, mixed>>
      */
     private function statementLines(Loan $loan, Collection $repayments, int $openingCentavos): array
     {
         $centavosOf = fn (mixed $pesos): int => (int) round((float) $pesos * 100);
-        $principalCentavos = $centavosOf($loan->principal_amount);
-        $runningCentavos = $openingCentavos;
+        $rows = app(LoanLedgerService::class)->forLoan($loan)['rows'];
+
+        // With a release line, the balances open there. A loan with no release
+        // date has no Ledger rows, so its balances open at the principal.
+        $principalCentavos = $rows === [] ? $centavosOf($loan->principal_amount) : 0;
+        $runningCentavos = $rows === [] ? $openingCentavos : $openingCentavos - $centavosOf($loan->principal_amount);
         $balances = function (int $principal, int $premium) use (&$principalCentavos, &$runningCentavos): array {
             $principalCentavos -= $principal;
             $runningCentavos -= $principal + $premium;
@@ -397,39 +426,54 @@ class ReportService
             ];
         };
 
-        $paymentLine = fn (Repayment $r, ?array $row = null): array => [
-            'type' => 'payment',
-            'date' => $r->payment_date->toDateString(),
-            'receipt_number' => $r->receipt_number,
-            // The statement's Method and Particulars columns.
-            'payment_method' => self::paymentMethodLabel($r->method),
-            'reference_number' => $r->reference_number,
-            'particulars' => $row['description'] ?? trim('Payment '.($r->receipt_number ?? '')),
-            'amount_paid' => (float) $r->amount_paid,
-            // The statement's two-column form: a payment credits the loan.
-            'debit' => null,
-            'credit' => (float) $r->amount_paid,
-            'insurance_applied' => (float) $r->insurance_applied,
-            'principal_applied' => (float) $r->principal_applied,
-            'interest_applied' => (float) $r->interest_applied,
-            'penalty_applied' => (float) $r->penalty_applied,
-            'build_up_applied' => (float) ($row['scb'] ?? 0),
-            'overpayment_applied' => max(0, $centavosOf($r->overpayment) - $centavosOf($row['scb'] ?? 0)) / 100,
-            ...$balances($centavosOf($r->principal_applied), $centavosOf($r->insurance_applied)),
-        ];
+        $paymentLine = function (Repayment $r, ?array $row) use ($centavosOf, $balances): array {
+            $voided = $r->status !== 'posted';
+            $description = $row['description'] ?? trim('Payment '.($r->receipt_number ?? '').($voided ? ' (voided)' : ''));
 
-        $adjustmentLine = function (array $row) use ($centavosOf, $balances): array {
+            return [
+                'type' => 'payment',
+                'kind' => $row['kind'] ?? 'repayment',
+                'voided' => $voided,
+                'date' => $r->payment_date->toDateString(),
+                'receipt_number' => $r->receipt_number,
+                // The statement's Method and Particulars columns.
+                'payment_method' => self::paymentMethodLabel($r->method),
+                'reference_number' => $r->reference_number,
+                'description' => $description,
+                'particulars' => $description,
+                'amount_paid' => (float) $r->amount_paid,
+                // The statement's two-column form: a payment credits the loan.
+                'debit' => null,
+                'credit' => $voided ? null : (float) $r->amount_paid,
+                'insurance_applied' => $voided ? 0.0 : (float) $r->insurance_applied,
+                'principal_applied' => $voided ? 0.0 : (float) $r->principal_applied,
+                'interest_applied' => $voided ? 0.0 : (float) $r->interest_applied,
+                'penalty_applied' => $voided ? 0.0 : (float) $r->penalty_applied,
+                'build_up_applied' => $voided ? 0.0 : (float) ($row['scb'] ?? 0),
+                'overpayment_applied' => $voided ? 0.0 : max(0, $centavosOf($r->overpayment) - $centavosOf($row['scb'] ?? 0)) / 100,
+                ...($voided ? $balances(0, 0) : $balances($centavosOf($r->principal_applied), $centavosOf($r->insurance_applied))),
+            ];
+        };
+
+        $ledgerLine = function (array $row) use ($centavosOf, $balances): array {
             $principal = -$centavosOf($row['principal']);
             $interest = -$centavosOf($row['interest']);
             $penalty = -$centavosOf($row['penalty']);
             $lowered = $principal + $interest + $penalty;
 
             return [
-                'type' => 'adjustment',
+                'type' => match ($row['kind']) {
+                    'release' => 'release',
+                    'penalty_charge', 'extension_charge' => 'charge',
+                    default => 'adjustment',
+                },
+                'kind' => $row['kind'],
+                'voided' => false,
                 'date' => $row['date'],
                 'receipt_number' => null,
                 'payment_method' => null,
                 'reference_number' => null,
+                'description' => $row['description'],
                 'particulars' => $row['description'],
                 'amount_paid' => 0.0,
                 'debit' => $lowered < 0 ? -$lowered / 100 : null,
@@ -447,20 +491,175 @@ class ReportService
         $unlisted = $repayments->keyBy('id');
         $lines = [];
 
-        foreach (app(LoanLedgerService::class)->forLoan($loan)['rows'] as $row) {
-            if ($row['kind'] === 'adjustment' && $centavosOf($row['principal']) !== 0) {
-                $lines[] = $adjustmentLine($row);
-            } elseif ($row['repayment_id'] !== null && $row['kind'] !== 'void' && $unlisted->has($row['repayment_id'])) {
+        foreach ($rows as $row) {
+            if ($row['kind'] === 'void') {
+                continue;
+            }
+
+            if ($row['repayment_id'] === null) {
+                $lines[] = $ledgerLine($row);
+            } elseif ($unlisted->has($row['repayment_id'])) {
                 $lines[] = $paymentLine($unlisted->pull($row['repayment_id']), $row);
             }
         }
 
         // A loan with no release date has no Ledger rows.
         foreach ($unlisted as $repayment) {
-            $lines[] = $paymentLine($repayment);
+            $lines[] = $paymentLine($repayment, null);
         }
 
         return $lines;
+    }
+
+    /**
+     * The money received, by what it went to, added up from the statement's
+     * posted payment lines in whole centavos.
+     *
+     * @param  list<array<string, mixed>>  $lines
+     * @return array{principal_paid: float, interest_paid: float, penalty_paid: float, insurance_paid: float, build_up_paid: float, overpayment_paid: float}
+     */
+    private function statementPaidParts(array $lines): array
+    {
+        $payments = array_filter($lines, fn (array $line): bool => $line['type'] === 'payment' && ! $line['voided']);
+        $parts = [];
+
+        foreach ([
+            'principal_paid' => 'principal_applied',
+            'interest_paid' => 'interest_applied',
+            'penalty_paid' => 'penalty_applied',
+            'insurance_paid' => 'insurance_applied',
+            'build_up_paid' => 'build_up_applied',
+            'overpayment_paid' => 'overpayment_applied',
+        ] as $part => $column) {
+            $parts[$part] = self::sumOfFigures(array_column($payments, $column));
+        }
+
+        return $parts;
+    }
+
+    /**
+     * What each extension did to the schedule, for a reader who sees a period
+     * closed or the numbers jump: a note per row an extension closed or added,
+     * and one line for the whole statement. A period with nothing collected on
+     * it was deleted, so its number is found in the gap before the new period.
+     *
+     * @return array{rows: array<int, string>, note: string|null}
+     */
+    private function extensionNotes(Loan $loan): array
+    {
+        $extensions = $loan->adjustments()
+            ->where('adjustment_type', 'extension')
+            ->where('status', 'applied')
+            ->orderBy('applied_at')
+            ->orderBy('id')
+            ->get();
+
+        if ($extensions->isEmpty()) {
+            return ['rows' => [], 'note' => null];
+        }
+
+        $schedules = $loan->amortizationSchedules->sortBy('period_number')->values();
+        $rows = [];
+        $sentences = [];
+
+        foreach ($extensions as $extension) {
+            $closed = $schedules->where('closed_by_adjustment_id', $extension->id);
+            $newDueDate = $extension->new_values['new_due_date'] ?? null;
+            $new = $schedules->first(fn ($s): bool => $s->closed_by_adjustment_id !== $extension->id && $s->due_date->toDateString() === $newDueDate);
+            $previous = $new === null ? null : $schedules->last(fn ($s): bool => $s->period_number < $new->period_number);
+            $firstMissing = ((int) $previous?->period_number) + 1;
+            $deleted = $new === null || $firstMissing >= $new->period_number ? [] : range($firstMissing, $new->period_number - 1);
+            $replaced = $closed->pluck('period_number')->map(fn ($n): int => (int) $n)->merge($deleted)->sort()->values();
+
+            $how = trim("extension {$extension->adjustment_number}")
+                .($extension->applied_at === null ? '' : ' on '.$extension->applied_at->format('M j, Y'));
+
+            foreach ($closed as $row) {
+                $rows[$row->id] = ($new === null ? "Replaced: {$how}." : "Replaced by period {$new->period_number}: {$how}.")
+                    .' Closed at what was collected on it.';
+            }
+
+            if ($new !== null && $replaced->isNotEmpty()) {
+                $rows[$new->id] = 'Replaces '.self::periodsNamed($replaced->all()).": {$how}.";
+            }
+
+            if ($replaced->isNotEmpty()) {
+                $sentences[] = ucfirst(self::periodsNamed($replaced->all()))
+                    .($replaced->count() === 1 ? ' was' : ' were')
+                    .' replaced'.($new === null ? '' : " by period {$new->period_number}").": {$how}.";
+            }
+        }
+
+        return ['rows' => $rows, 'note' => $sentences === [] ? null : implode(' ', $sentences)];
+    }
+
+    /**
+     * "period 2", or "periods 2 and 3".
+     *
+     * @param  list<int>  $numbers
+     */
+    private static function periodsNamed(array $numbers): string
+    {
+        return (count($numbers) === 1 ? 'period ' : 'periods ').collect($numbers)->join(', ', ' and ');
+    }
+
+    private static function joinedNotes(?string ...$notes): ?string
+    {
+        $present = array_filter($notes, fn (?string $note): bool => $note !== null && $note !== '');
+
+        return $present === [] ? null : implode(' ', $present);
+    }
+
+    private static function frequencyLabel(?string $frequency): ?string
+    {
+        return match ($frequency) {
+            null, '' => null,
+            'semi_monthly' => 'Semi-Monthly',
+            'bi_weekly' => 'Bi-Weekly',
+            default => ucwords(str_replace('_', ' ', $frequency)),
+        };
+    }
+
+    private static function interestTypeLabel(?string $method): ?string
+    {
+        return $method === null || $method === '' ? null : ucwords(str_replace('_', ' ', $method));
+    }
+
+    /** "6 months", "1 month", "45 days"; null when the loan has no term. */
+    private static function termLabel(Loan $loan): ?string
+    {
+        if ($loan->term === null) {
+            return null;
+        }
+
+        $term = (int) $loan->term;
+        $unit = $loan->term_unit?->value ?? 'months';
+
+        return $term.' '.($term === 1 ? rtrim($unit, 's') : $unit);
+    }
+
+    /**
+     * "3.0% per month", "2.75% per month": every decimal the rate has, never
+     * rounded, with at least one.
+     */
+    private static function rateLabel(Loan $loan): ?string
+    {
+        if ($loan->interest_rate === null) {
+            return null;
+        }
+
+        $rate = rtrim(number_format((float) $loan->interest_rate, 4, '.', ''), '0');
+        $rate = str_ends_with($rate, '.') ? $rate.'0' : $rate;
+
+        $per = match ($loan->interest_rate_frequency?->value) {
+            'daily' => 'per day',
+            'weekly' => 'per week',
+            'bi_weekly' => 'per 2 weeks',
+            'semi_monthly' => 'per half month',
+            default => 'per month',
+        };
+
+        return "{$rate}% {$per}";
     }
 
     /**
@@ -663,10 +862,16 @@ class ReportService
             ->selectRaw('COALESCE(SUM('.AmortizationSchedule::remainingPrincipalSql().'), 0) as balance')
             ->value('balance');
 
+        $owed = app(LoanListTotals::class)->for(clone $base);
+
         return [
             'count' => (int) ($agg->row_count ?? 0),
             'total_principal' => round((float) ($agg->total_principal ?? 0), 2),
             'total_net_proceeds' => round((float) ($agg->total_net_proceeds ?? 0), 2),
+            // Everything owed and the unpaid principal, as on the loan pages.
+            'total_outstanding' => $owed['total_outstanding'],
+            'outstanding_principal' => $owed['outstanding_principal'],
+            // Deprecated alias: principal plus premium.
             'total_outstanding_balance' => round(
                 $remainingPrincipal + (float) ($agg->total_insurance_remaining ?? 0),
                 2,
@@ -856,6 +1061,10 @@ class ReportService
      * cannot show a page of rows all reading 0 days overdue above a totals
      * block claiming several are late, or the reverse.
      *
+     * `total_due` includes penalty, as the Statement's schedule does, and
+     * `total_paid` includes penalty paid, so `total_due` less `total_paid` is
+     * `total_balance`, as on each row.
+     *
      * Nothing else in here implies lateness. The principal/interest/due/balance
      * sums are amounts owed, which grace does not move. `total_penalty` sums
      * the stored `penalty_amount`, which RepaymentService::applyPenalties() now
@@ -883,8 +1092,8 @@ class ReportService
             COALESCE(SUM(principal_due), 0) as total_principal_due,
             COALESCE(SUM(interest_due), 0) as total_interest_due,
             COALESCE(SUM(penalty_amount), 0) as total_penalty,
-            COALESCE(SUM(total_due), 0) as total_due,
-            COALESCE(SUM(principal_paid + interest_paid), 0) as total_paid,
+            COALESCE(SUM(total_due + COALESCE(penalty_amount, 0)), 0) as total_due,
+            COALESCE(SUM(principal_paid + interest_paid + penalty_paid), 0) as total_paid,
             COALESCE(SUM('.AmortizationSchedule::remainingTotalSql().'), 0) as total_balance
         ')->first();
 
@@ -913,9 +1122,8 @@ class ReportService
             'total_interest_due' => round((float) ($agg->total_interest_due ?? 0), 2),
             'total_penalty' => round((float) ($agg->total_penalty ?? 0), 2),
             'total_due' => round((float) ($agg->total_due ?? 0), 2),
-            // The rows' Paid column: principal and interest paid, the two parts
-            // `total_due` is made of. Penalty paid is not in it, as it is not
-            // in any row's figure.
+            // The rows' Paid column: principal, interest and penalty paid, the
+            // parts `total_due` is made of.
             'total_paid' => round((float) ($agg->total_paid ?? 0), 2),
             'total_balance' => round((float) ($agg->total_balance ?? 0), 2),
             'total_outstanding' => $loans['total_outstanding'],
@@ -946,6 +1154,14 @@ class ReportService
                 COALESCE(SUM('.AmortizationSchedule::remainingPenaltySql().'), 0) as outstanding_penalty
             ')
             ->first();
+
+        // Everything owed and the unpaid principal, by the loan pages' rule, on
+        // the collectible loans: the Dashboard's Total Portfolio reads the same.
+        $collectible = app(PortfolioOutstanding::class)->totals(
+            self::branchScope($filters),
+            filled($filters['date_from'] ?? null) ? self::dayStart($filters['date_from']) : null,
+            filled($filters['date_to'] ?? null) ? self::nextDayStart($filters['date_to']) : null,
+        );
 
         // Also from the bare due date. This block feeds the balance summary's
         // `overdue` figures alongside the PAR ratio below and is read with
@@ -1015,6 +1231,12 @@ class ReportService
             // Flat mirrors of the figures the dashboard shows as headline KPIs,
             // so the client is not left deriving them from the nested blocks.
             'active_loans' => $activeLoans,
+            // Everything owed (principal, interest, penalty, premium) and the
+            // unpaid principal, as on the loan pages.
+            'total_outstanding' => $collectible['total_outstanding'],
+            'outstanding_principal' => $collectible['outstanding_principal'],
+            // Deprecated alias with its old meaning, principal plus premium:
+            // read `total_outstanding` or `outstanding_principal`.
             'outstanding_balance' => $outstandingBalance,
             'at_risk_amount' => round($atRiskAmount, 2),
             // Whole percent, e.g. 12.5 means 12.5%.
@@ -1040,6 +1262,8 @@ class ReportService
             'by_branch_totals' => self::columnTotals($byBranch, [
                 'loan_count' => 'count',
                 'total_released' => 'money',
+                'total_outstanding' => 'money',
+                'outstanding_principal' => 'money',
                 'outstanding_balance' => 'money',
             ]),
             'generated_at' => now()->toDateTimeString(),
@@ -1064,7 +1288,11 @@ class ReportService
     {
         $scheduleTotals = DB::table('amortization_schedules')
             ->groupBy('loan_id')
-            ->selectRaw('loan_id, SUM('.AmortizationSchedule::remainingPrincipalSql().') as remaining_principal');
+            ->selectRaw('loan_id,
+                SUM('.AmortizationSchedule::remainingPrincipalSql().') as remaining_principal,
+                SUM('.AmortizationSchedule::remainingTotalSql().') as remaining_total');
+
+        $collectible = implode(', ', array_fill(0, count(Loan::COLLECTIBLE_STATUSES), '?'));
 
         $branchIds = self::branchScope($filters);
 
@@ -1080,8 +1308,10 @@ class ReportService
                 COUNT(loans.id) as loan_count,
                 COALESCE(SUM(loans.principal_amount), 0) as total_released,
                 COALESCE(SUM(schedule_totals.remaining_principal), 0)
-                    + COALESCE(SUM(loans.insurance_remaining_balance), 0) as outstanding_balance
-            ')
+                    + COALESCE(SUM(loans.insurance_remaining_balance), 0) as outstanding_balance,
+                COALESCE(SUM(CASE WHEN loans.status IN ('.$collectible.') THEN schedule_totals.remaining_principal END), 0) as outstanding_principal,
+                COALESCE(SUM(CASE WHEN loans.status IN ('.$collectible.') THEN COALESCE(schedule_totals.remaining_total, 0) + GREATEST(loans.insurance_remaining_balance, 0) END), 0) as total_outstanding
+            ', [...Loan::COLLECTIBLE_STATUSES, ...Loan::COLLECTIBLE_STATUSES])
             ->get()
             ->keyBy(fn ($row) => (int) $row->branch_id);
 
@@ -1094,6 +1324,9 @@ class ReportService
                     'branch_name' => $branch->name,
                     'loan_count' => (int) ($row->loan_count ?? 0),
                     'total_released' => round((float) ($row->total_released ?? 0), 2),
+                    'total_outstanding' => round((float) ($row->total_outstanding ?? 0), 2),
+                    'outstanding_principal' => round((float) ($row->outstanding_principal ?? 0), 2),
+                    // Deprecated alias: principal plus premium.
                     'outstanding_balance' => round((float) ($row->outstanding_balance ?? 0), 2),
                 ];
             })->all();
@@ -1233,114 +1466,127 @@ class ReportService
     }
 
     /**
-     * Interest and penalty collected in the period, plus processing fees on
-     * the loans released in it. `branch_id` and `loan_id` narrow every figure:
-     * the repayments through incomeRepaymentsQuery(), the fees by the loan
-     * they were charged on. See processingFeesOfReleasedLoans() for which fee
-     * figure each loan contributes.
+     * Interest and penalty collected in the period, plus the fee income of the
+     * loans released in it: processing, service and catalog fees. `branch_id`
+     * and `loan_id` narrow every figure: the repayments through
+     * incomeRepaymentsQuery(), the fees by the loan they were charged on. See
+     * feeIncomeCentavosByLoan() for which fee figure each loan contributes.
      */
     public function incomeReport(array $filters): array
     {
         $query = $this->incomeRepaymentsQuery($filters);
 
-        $interestIncome = (float) (clone $query)->sum('interest_applied');
-        $penaltyIncome = (float) (clone $query)->sum('penalty_applied');
-
-        $processingFees = $this->processingFeesOfReleasedLoans($filters);
-
-        $interestIncome = round($interestIncome, 2);
-        $processingFees = round($processingFees, 2);
-        $penaltyIncome = round($penaltyIncome, 2);
+        $interestIncome = round((float) (clone $query)->sum('interest_applied'), 2);
+        $penaltyIncome = round((float) (clone $query)->sum('penalty_applied'), 2);
+        $fees = $this->feeIncomeTotals($filters);
 
         return [
             'interest_income' => $interestIncome,
-            'processing_fees' => $processingFees,
+            'processing_fees' => $fees['processing'],
+            'service_fee' => $fees['service'],
+            'other_fees' => $fees['other'],
             'penalty_income' => $penaltyIncome,
-            // The three figures above, already rounded, added up: Total Income
-            // is what a reader adds up from the report, never a centavo off it
-            // because the unrounded fees were rounded only once, at the end.
-            'total' => round($interestIncome + $processingFees + $penaltyIncome, 2),
+            // The figures above, already rounded, added up: Total Income is what
+            // a reader adds up from the report, never a centavo off it.
+            'total' => round($interestIncome + $fees['processing'] + $fees['service'] + $fees['other'] + $penaltyIncome, 2),
             'generated_at' => now()->toDateTimeString(),
         ];
     }
 
     /**
-     * The processing fees withheld on the loans released in the period, as
-     * they were actually deducted, unrounded.
+     * Each kind of fee income in the period, in pesos: feeIncomeCentavosByLoan()
+     * added up, so the Income report's cards equal its rows to the centavo.
      *
-     * A loan's `deductions` is the record of what was withheld at release, so
-     * its fee is the peso `amount` of every item whose name normalises to
-     * "processing fee" (FeeOverlapDetector's rule, so "PROCESSING-FEE." counts
-     * and "Processing Fee Waiver" does not). That covers the item
-     * LoanService::createLoan() writes from the product, a catalog fee
-     * LoanReleaseFeeService appends at release under that name, and a CSV
-     * import's. `amount` is pesos in all three; `original_value` is the rate
-     * for a percentage item and is never read here. A loan that recorded its
-     * deductions without such an item, `[]` included, withheld no processing
-     * fee and contributes nothing.
-     *
-     * A loan with no record falls back to the product's rate × principal, as
-     * this report always computed it: `deductions` NULL (SQL or JSON), or not
-     * a list of items, or an empty list beside a non-zero `total_deductions`,
-     * which contradicts itself. The rate is not rounded; the caller rounds the
-     * total once, as before.
-     *
-     * Two reads with the same filters. The fallback stays one SQL SUM, so its
-     * decimal arithmetic is exactly what the report produced before. The
-     * recorded items are streamed in pages and matched in PHP, so the name test
-     * is FeeOverlapDetector's own and not a second copy of it in SQL; their
-     * amounts are already whole centavos and are summed as integers.
+     * @return array{processing: float, service: float, other: float}
      */
-    private function processingFeesOfReleasedLoans(array $filters): float
+    private function feeIncomeTotals(array $filters): array
     {
-        $releasedLoans = $this->loansReleasedInPeriod($filters);
+        $totals = ['processing' => 0, 'service' => 0, 'other' => 0];
 
-        $unrecorded = (float) ((clone $releasedLoans)
-            ->join('loan_products', 'loans.loan_product_id', '=', 'loan_products.id')
-            ->where(self::hasNoDeductionRecord())
-            ->selectRaw('SUM(loan_products.processing_fee / 100 * loans.principal_amount) as total')
-            ->value('total') ?? 0);
+        foreach ($this->feeIncomeCentavosByLoan($filters) as $fees) {
+            foreach ($fees as $kind => $centavos) {
+                $totals[$kind] += $centavos;
+            }
+        }
 
-        $recordedCentavos = 0;
-
-        $this->eachRecordedProcessingFee($releasedLoans, function (int $loanId, int $centavos) use (&$recordedCentavos): void {
-            $recordedCentavos += $centavos;
-        });
-
-        return $unrecorded + $recordedCentavos / 100;
+        return array_map(fn (int $centavos): float => $centavos / 100, $totals);
     }
 
     /**
-     * Each released loan's own processing fee, by the rules of
-     * processingFeesOfReleasedLoans(), in whole centavos by loan id. Only loans
-     * that have one.
+     * The fee income of each loan released in the period, in whole centavos by
+     * loan id, only for loans that have some.
      *
-     * @return array<int, int>
+     * A loan's `deductions` is the record of what was withheld at release, so
+     * each fee is the peso `amount` of the items of its kind. `amount` is pesos
+     * in every writer (LoanService::createLoan(), LoanReleaseFeeService, a CSV
+     * import); `original_value` is the rate for a percentage item and is never
+     * read here.
+     *
+     * - `processing`: every item whose name normalises to "processing fee"
+     *   (FeeOverlapDetector's rule, so "PROCESSING-FEE." counts and "Processing
+     *   Fee Waiver" does not).
+     * - `service` and `other`: the items the release journal credits to 4040
+     *   Service Fee Income and 4080 Other Fee Income, by its own rule
+     *   (PostingRules::deductionItemRole()). Taxes, notarial fees, insurance
+     *   premium and share capital have roles of their own and are never income.
+     *
+     * A loan with no record falls back, for its processing fee only, to the
+     * product's rate × principal, rounded per loan to the centavo so the card
+     * equals the rows: `deductions` NULL (SQL or JSON), or not a list of items,
+     * or an empty list beside a non-zero `total_deductions`, which contradicts
+     * itself. The rate itself is not rounded.
+     *
+     * @return array<int, array{processing: int, service: int, other: int}>
      */
-    private function processingFeeCentavosByLoan(array $filters): array
+    private function feeIncomeCentavosByLoan(array $filters): array
     {
         $releasedLoans = $this->loansReleasedInPeriod($filters);
+        $none = ['processing' => 0, 'service' => 0, 'other' => 0];
         $fees = [];
 
         (clone $releasedLoans)
             ->join('loan_products', 'loans.loan_product_id', '=', 'loan_products.id')
             ->where(self::hasNoDeductionRecord())
             ->select('loans.id')
-            ->selectRaw('loan_products.processing_fee / 100 * loans.principal_amount as fee')
+            ->selectRaw('ROUND(loan_products.processing_fee / 100 * loans.principal_amount, 2) as fee')
             ->get()
-            ->each(function (object $loan) use (&$fees): void {
-                $fees[(int) $loan->id] = (int) round((float) $loan->fee * 100);
+            ->each(function (object $loan) use (&$fees, $none): void {
+                $fees[(int) $loan->id] = ['processing' => (int) round((float) $loan->fee * 100)] + $none;
             });
 
-        $this->eachRecordedProcessingFee($releasedLoans, function (int $loanId, int $centavos) use (&$fees): void {
-            $fees[$loanId] = ($fees[$loanId] ?? 0) + $centavos;
-        });
+        $detector = app(FeeOverlapDetector::class);
 
-        return array_filter($fees, fn (int $centavos): bool => $centavos > 0);
+        (clone $releasedLoans)
+            ->whereRaw(self::HAS_DEDUCTION_ITEMS_SQL)
+            ->whereRaw('JSON_LENGTH(loans.deductions) > 0')
+            ->select(['loans.id', 'loans.deductions'])
+            ->lazyById(1000, 'loans.id', 'id')
+            ->each(function (object $loan) use (&$fees, $none, $detector): void {
+                foreach (json_decode($loan->deductions, true) as $item) {
+                    if (! is_array($item) || ! is_string($item['name'] ?? null)) {
+                        continue;
+                    }
+
+                    $kind = $detector->fieldFor($item['name']) === 'processing_fee'
+                        ? 'processing'
+                        : match (PostingRules::deductionItemRole($item['name'], isset($item[LoanReleaseFeeService::ITEM_FEE_KEY]))) {
+                            'service_fee_income' => 'service',
+                            PostingRules::CATALOG_FEE_ROLE => 'other',
+                            default => null,
+                        };
+
+                    if ($kind !== null) {
+                        $fees[(int) $loan->id] ??= $none;
+                        $fees[(int) $loan->id][$kind] += (int) round((float) ($item['amount'] ?? 0) * 100);
+                    }
+                }
+            });
+
+        return array_filter($fees, fn (array $loanFees): bool => array_sum($loanFees) > 0);
     }
 
     /**
-     * The loans whose processing fee counts in the period.
+     * The loans whose fee income counts in the period.
      */
     private function loansReleasedInPeriod(array $filters): QueryBuilder
     {
@@ -1354,7 +1600,7 @@ class ReportService
 
     /**
      * A loan with no record of what its release withheld: see
-     * processingFeesOfReleasedLoans().
+     * feeIncomeCentavosByLoan().
      */
     private static function hasNoDeductionRecord(): Closure
     {
@@ -1362,33 +1608,6 @@ class ReportService
             ->whereNull('loans.deductions')
             ->orWhereRaw('NOT ('.self::HAS_DEDUCTION_ITEMS_SQL.')')
             ->orWhereRaw('(JSON_LENGTH(loans.deductions) = 0 AND loans.total_deductions > 0)');
-    }
-
-    /**
-     * Each processing fee item recorded on `$releasedLoans`, streamed in pages
-     * and matched by FeeOverlapDetector's own name test.
-     *
-     * @param  Closure(int, int): void  $each  given the loan id and the item's centavos
-     */
-    private function eachRecordedProcessingFee(QueryBuilder $releasedLoans, Closure $each): void
-    {
-        $detector = app(FeeOverlapDetector::class);
-
-        (clone $releasedLoans)
-            ->whereRaw(self::HAS_DEDUCTION_ITEMS_SQL)
-            ->whereRaw('JSON_LENGTH(loans.deductions) > 0')
-            ->select(['loans.id', 'loans.deductions'])
-            ->lazyById(1000, 'loans.id', 'id')
-            ->each(function (object $loan) use ($detector, $each): void {
-                foreach (json_decode($loan->deductions, true) as $item) {
-                    if (is_array($item)
-                        && is_string($item['name'] ?? null)
-                        && $detector->fieldFor($item['name']) === 'processing_fee'
-                    ) {
-                        $each((int) $loan->id, (int) round((float) ($item['amount'] ?? 0) * 100));
-                    }
-                }
-            });
     }
 
     // ── Income by Loan Account ───────────────────────────────────────────
@@ -1411,18 +1630,19 @@ class ReportService
      * The Income by Loan report for the period: one page of loans and the
      * totals over all of them.
      *
-     * A loan is listed when a posted repayment fell in the period or its
-     * processing fee did. Its fee is the one the Income report's Processing
-     * Fees card counts, so `totals` equal GET /reports/income to the centavo.
+     * A loan is listed when a posted repayment fell in the period or any of
+     * its fee income did. Its fees are the ones the Income report's cards count,
+     * so `totals` and the rows added up equal GET /reports/income to the centavo.
      *
-     * The fee of a recorded loan is matched by name in PHP
-     * (processingFeesOfReleasedLoans()), so the rows are ranked here, not in
-     * SQL: by `total_income` desc, then loan id, a total order so walking the
-     * pages never repeats or skips a loan. Only the page's loans are loaded as
-     * models, with their borrower. Each carries `payments`, `interest_income`,
-     * `penalty_income`, `processing_fee` and `total_income`.
+     * The fees of a recorded loan are matched by name in PHP
+     * (feeIncomeCentavosByLoan()), so the rows are ranked here, not in SQL: by
+     * `total_income` desc, then loan id, a total order so walking the pages
+     * never repeats or skips a loan. Only the page's loans are loaded as models,
+     * with their borrower. Each carries `payments`, `interest_income`,
+     * `penalty_income`, `processing_fee`, `service_fee`, `other_fees` and
+     * `total_income`.
      *
-     * @return array{page: LengthAwarePaginator, totals: array{count: int, payments: int, interest_income: float, penalty_income: float, processing_fee: float, total_income: float}}
+     * @return array{page: LengthAwarePaginator, totals: array{count: int, payments: int, interest_income: float, penalty_income: float, processing_fee: float, service_fee: float, other_fees: float, total_income: float}}
      */
     public function incomeByLoanReport(array $filters): array
     {
@@ -1441,16 +1661,17 @@ class ReportService
                     'payments' => (int) $row->payments,
                     'interest' => (int) round((float) $row->interest_income * 100),
                     'penalty' => (int) round((float) $row->penalty_income * 100),
-                    'fee' => 0,
+                    'processing' => 0,
+                    'service' => 0,
+                    'other' => 0,
                 ];
             });
 
-        foreach ($this->processingFeeCentavosByLoan($filters) as $loanId => $fee) {
-            $rows[$loanId] ??= ['payments' => 0, 'interest' => 0, 'penalty' => 0, 'fee' => 0];
-            $rows[$loanId]['fee'] = $fee;
+        foreach ($this->feeIncomeCentavosByLoan($filters) as $loanId => $fees) {
+            $rows[$loanId] = [...($rows[$loanId] ?? ['payments' => 0, 'interest' => 0, 'penalty' => 0]), ...$fees];
         }
 
-        $totalOf = fn (array $row): int => $row['interest'] + $row['penalty'] + $row['fee'];
+        $totalOf = fn (array $row): int => $row['interest'] + $row['penalty'] + $row['processing'] + $row['service'] + $row['other'];
 
         uksort($rows, fn (int $a, int $b): int => [$totalOf($rows[$b]), $a] <=> [$totalOf($rows[$a]), $b]);
 
@@ -1469,7 +1690,9 @@ class ReportService
             'payments' => $row['payments'],
             'interest_income' => $row['interest'] / 100,
             'penalty_income' => $row['penalty'] / 100,
-            'processing_fee' => $row['fee'] / 100,
+            'processing_fee' => $row['processing'] / 100,
+            'service_fee' => $row['service'] / 100,
+            'other_fees' => $row['other'] / 100,
             'total_income' => $totalOf($row) / 100,
         ]))->values();
 
@@ -1486,7 +1709,7 @@ class ReportService
      * incomeReport() uses, so they equal its cards, and `payments` is the List
      * of Repayments `count`, for the same filters.
      *
-     * @return array{count: int, payments: int, interest_income: float, penalty_income: float, processing_fee: float, total_income: float}
+     * @return array{count: int, payments: int, interest_income: float, penalty_income: float, processing_fee: float, service_fee: float, other_fees: float, total_income: float}
      */
     private function incomeByLoanTotals(array $filters, int $loanCount): array
     {
@@ -1498,15 +1721,17 @@ class ReportService
 
         $interest = round((float) ($agg->interest_income ?? 0), 2);
         $penalty = round((float) ($agg->penalty_income ?? 0), 2);
-        $fees = round($this->processingFeesOfReleasedLoans($filters), 2);
+        $fees = $this->feeIncomeTotals($filters);
 
         return [
             'count' => $loanCount,
             'payments' => (int) ($agg->payment_count ?? 0),
             'interest_income' => $interest,
             'penalty_income' => $penalty,
-            'processing_fee' => $fees,
-            'total_income' => round($interest + $fees + $penalty, 2),
+            'processing_fee' => $fees['processing'],
+            'service_fee' => $fees['service'],
+            'other_fees' => $fees['other'],
+            'total_income' => round($interest + $fees['processing'] + $fees['service'] + $fees['other'] + $penalty, 2),
         ];
     }
 
@@ -1616,7 +1841,8 @@ class ReportService
 
     /**
      * The Member Report's cards: the counts of memberCounts(), the same
-     * definition its list uses, and the average loan size.
+     * definition its list uses, and the average principal of the loans released
+     * in the date range.
      */
     public function borrowerReport(array $filters): array
     {
@@ -1624,6 +1850,8 @@ class ReportService
 
         $avgLoanSize = (float) Loan::whereIn('status', Loan::EVER_RELEASED_STATUSES)
             ->tap(self::inBranches(self::branchScope($filters), 'branch_id'))
+            ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->where('released_at', '>=', self::dayStart($d)))
+            ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->where('released_at', '<', self::nextDayStart($d)))
             ->avg('principal_amount') ?? 0;
 
         return [
@@ -2425,6 +2653,7 @@ class ReportService
                 COALESCE(SUM(loans.principal_amount), 0) as total_released,
                 COALESCE(AVG(loans.interest_rate), 0) as avg_interest_rate,
                 COALESCE(SUM(schedule_totals.remaining_principal), 0) as outstanding_principal,
+                COALESCE(SUM(schedule_totals.remaining_total), 0) + COALESCE(SUM(GREATEST(loans.insurance_remaining_balance, 0)), 0) as total_outstanding,
                 COALESCE(SUM(loans.insurance_remaining_balance), 0) as insurance_remaining,
                 COALESCE(SUM(schedule_totals.overdue_amount), 0) as overdue_amount,
                 COALESCE(SUM(CASE WHEN schedule_totals.is_at_risk = 1 THEN schedule_totals.remaining_principal ELSE 0 END), 0) as at_risk_amount
@@ -2435,6 +2664,7 @@ class ReportService
         $grandReleased = (float) $rows->sum(fn ($r) => (float) $r->total_released);
         $grandOutstandingPrincipal = (float) $rows->sum(fn ($r) => (float) $r->outstanding_principal);
         $grandInsurance = (float) $rows->sum(fn ($r) => (float) $r->insurance_remaining);
+        $grandTotalOutstanding = (float) $rows->sum(fn ($r) => (float) $r->total_outstanding);
         $grandOverdue = (float) $rows->sum(fn ($r) => (float) $r->overdue_amount);
         $grandAtRisk = (float) $rows->sum(fn ($r) => (float) $r->at_risk_amount);
         $grandLoanCount = (int) $rows->sum(fn ($r) => (int) $r->loan_count);
@@ -2450,6 +2680,9 @@ class ReportService
                 'product_name' => $row->product_name,
                 'loan_count' => (int) $row->loan_count,
                 'total_released' => $released,
+                // Everything owed, as on the loan pages.
+                'total_outstanding' => round((float) $row->total_outstanding, 2),
+                // Deprecated alias: principal plus premium.
                 'outstanding' => round($outstandingPrincipal + (float) $row->insurance_remaining, 2),
                 'outstanding_principal' => $outstandingPrincipal,
                 'avg_interest_rate' => round((float) $row->avg_interest_rate, self::RATE_SCALE),
@@ -2469,6 +2702,7 @@ class ReportService
                 'product_count' => count($products),
                 'loan_count' => $grandLoanCount,
                 'total_released' => round($grandReleased, 2),
+                'total_outstanding' => round($grandTotalOutstanding, 2),
                 'outstanding' => round($grandOutstandingPrincipal + $grandInsurance, 2),
                 'outstanding_principal' => round($grandOutstandingPrincipal, 2),
                 'avg_interest_rate' => $grandLoanCount > 0 ? round($weightedRate / $grandLoanCount, self::RATE_SCALE) : 0.0,
@@ -2517,6 +2751,8 @@ class ReportService
             'released_amount' => 'money',
             'collected' => 'money',
             'insurance_collected' => 'money',
+            'total_outstanding' => 'money',
+            'outstanding_principal' => 'money',
             'outstanding' => 'money',
             'overdue_amount' => 'money',
         ];
@@ -2616,6 +2852,7 @@ class ReportService
             COALESCE(SUM(repayment_totals.insurance_collected), 0) as insurance_collected,
             COALESCE(SUM(repayment_totals.payment_count), 0) as payment_count,
             COALESCE(SUM(schedule_totals.remaining_principal), 0) as outstanding_principal,
+            COALESCE(SUM(schedule_totals.remaining_total), 0) + COALESCE(SUM(GREATEST(loans.insurance_remaining_balance, 0)), 0) as total_outstanding,
             COALESCE(SUM(loans.insurance_remaining_balance), 0) as insurance_remaining,
             COALESCE(SUM(schedule_totals.overdue_amount), 0) as overdue_amount,
             COALESCE(SUM(CASE WHEN schedule_totals.is_at_risk = 1 THEN schedule_totals.remaining_principal ELSE 0 END), 0) as at_risk_amount,
@@ -2652,6 +2889,9 @@ class ReportService
                 'collected' => round((float) $row->collected, 2),
                 'insurance_collected' => round((float) $row->insurance_collected, 2),
                 'payment_count' => (int) $row->payment_count,
+                // Everything owed, as on the loan pages.
+                'total_outstanding' => round((float) $row->total_outstanding, 2),
+                // Deprecated alias: principal plus premium.
                 'outstanding' => round($outstandingPrincipal + (float) $row->insurance_remaining, 2),
                 'outstanding_principal' => $outstandingPrincipal,
                 'overdue_amount' => round((float) $row->overdue_amount, 2),
@@ -2687,6 +2927,7 @@ class ReportService
                 'insurance_collected' => 0,
                 'payment_count' => 0,
                 'outstanding_principal' => 0,
+                'total_outstanding' => 0,
                 'insurance_remaining' => 0,
                 'overdue_amount' => 0,
                 'at_risk_amount' => 0,
@@ -3232,6 +3473,7 @@ class ReportService
             ->selectRaw(
                 'loan_id,
                 SUM('.AmortizationSchedule::remainingPrincipalSql().') as remaining_principal,
+                SUM('.AmortizationSchedule::remainingTotalSql().') as remaining_total,
                 SUM(CASE WHEN status IN ('.$placeholders.') AND due_date < ? THEN '.AmortizationSchedule::remainingTotalSql().' ELSE 0 END) as overdue_amount,
                 MAX(CASE WHEN status IN ('.$placeholders.') AND due_date < ? THEN 1 ELSE 0 END) as is_at_risk',
                 [...$unpaid, $today->toDateString(), ...$unpaid, $parCutoff->toDateString()],

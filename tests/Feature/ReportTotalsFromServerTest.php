@@ -76,11 +76,14 @@ class ReportTotalsFromServerTest extends TestCase
             'total_payment' => 10320.20,
             'amount_paid' => 6384.67,
             'total_paid' => 6404.67,
+            'balance' => 3915.53,
         ], $data['schedule_totals']);
 
-        $this->assertEquals([5170.10, 1234.57], array_column($data['transactions'], 'credit'));
-        $this->assertSame([null, null], array_column($data['transactions'], 'debit'));
-        $this->assertEquals(['debit' => 0, 'credit' => 6404.67, 'overpayment_applied' => 0], $data['transaction_totals']);
+        $payments = array_values(array_filter($data['transactions'], fn (array $line): bool => $line['type'] === 'payment'));
+        $this->assertEquals([5170.10, 1234.57], array_column($payments, 'credit'));
+        $this->assertSame([null, null], array_column($payments, 'debit'));
+        // The release's ₱10,300.20 and the ₱20.00 penalty charge.
+        $this->assertEquals(['debit' => 10320.20, 'credit' => 6404.67, 'overpayment_applied' => 0], $data['transaction_totals']);
         $this->assertEquals($data['summary']['total_paid'], $data['transaction_totals']['credit']);
     }
 
@@ -175,6 +178,8 @@ class ReportTotalsFromServerTest extends TestCase
         $this->assertEquals([
             'loan_count' => $data['portfolio']['loan_count'],
             'total_released' => $data['portfolio']['total_released'],
+            'total_outstanding' => $data['total_outstanding'],
+            'outstanding_principal' => $data['outstanding_principal'],
             'outstanding_balance' => $data['outstanding_balance'],
         ], $data['by_branch_totals']);
         $this->assertEquals(array_sum(array_column($data['by_branch'], 'loan_count')), $data['by_branch_totals']['loan_count']);
@@ -223,6 +228,8 @@ class ReportTotalsFromServerTest extends TestCase
                 'released_amount' => round(array_sum(array_column($rows, 'released_amount')), 2),
                 'collected' => round(array_sum(array_column($rows, 'collected')), 2),
                 'insurance_collected' => round(array_sum(array_column($rows, 'insurance_collected')), 2),
+                'total_outstanding' => round(array_sum(array_column($rows, 'total_outstanding')), 2),
+                'outstanding_principal' => round(array_sum(array_column($rows, 'outstanding_principal')), 2),
                 'outstanding' => round(array_sum(array_column($rows, 'outstanding')), 2),
                 'overdue_amount' => round(array_sum(array_column($rows, 'overdue_amount')), 2),
             ], $data["{$table}_totals"], $table);

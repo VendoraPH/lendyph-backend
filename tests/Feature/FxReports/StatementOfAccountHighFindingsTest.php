@@ -40,9 +40,9 @@ class StatementOfAccountHighFindingsTest extends TestCase
 
         $data = $this->statement($loan);
 
-        $this->assertSame(['payment', 'adjustment'], array_column($data['transactions'], 'type'));
+        $this->assertSame(['release', 'payment', 'adjustment'], array_column($data['transactions'], 'type'));
 
-        [$payment, $line] = $data['transactions'];
+        [, $payment, $line] = $data['transactions'];
         $this->assertEquals(50000, $payment['principal_balance']);
         $this->assertEquals(600, $line['credit']);
         $this->assertNull($line['debit']);
@@ -64,7 +64,7 @@ class StatementOfAccountHighFindingsTest extends TestCase
         $loan = $this->createReleasedLoan();
         $this->applyBalanceAdjustment($loan, 500);
 
-        $line = $this->statement($loan)['transactions'][0];
+        $line = $this->statement($loan)['transactions'][1];
 
         $this->assertSame('adjustment', $line['type']);
         $this->assertEquals(500, $line['debit']);
@@ -80,7 +80,7 @@ class StatementOfAccountHighFindingsTest extends TestCase
         $this->pay($loan, 11800);
         $this->applyBalanceAdjustment($loan, -600);
 
-        $this->assertEquals(['debit' => 0, 'credit' => 12400, 'overpayment_applied' => 0], $this->statement($loan)['transaction_totals']);
+        $this->assertEquals(['debit' => 70800, 'credit' => 12400, 'overpayment_applied' => 0], $this->statement($loan)['transaction_totals']);
     }
 
     public function test_the_schedule_carries_a_note_only_once_an_adjustment_restated_it(): void
@@ -96,7 +96,7 @@ class StatementOfAccountHighFindingsTest extends TestCase
         $this->assertStringContainsString($adjustment->fresh()->applied_at->format('M j, Y'), $note);
     }
 
-    public function test_a_voided_payment_stays_off_the_statement_and_off_its_balance(): void
+    public function test_a_voided_payment_moves_no_balance(): void
     {
         $loan = $this->createReleasedLoan();
         $voided = $this->pay($loan, 11800);
@@ -105,9 +105,11 @@ class StatementOfAccountHighFindingsTest extends TestCase
 
         $transactions = $this->statement($loan)['transactions'];
 
-        $this->assertCount(1, $transactions);
-        $this->assertEquals(50000, $transactions[0]['principal_balance']);
-        $this->assertEquals($this->ledgerClosingPrincipal($loan), $transactions[0]['principal_balance']);
+        $this->assertCount(3, $transactions);
+        $this->assertTrue($transactions[1]['voided']);
+        $this->assertEquals(60000, $transactions[1]['principal_balance']);
+        $this->assertEquals(50000, $transactions[2]['principal_balance']);
+        $this->assertEquals($this->ledgerClosingPrincipal($loan), $transactions[2]['principal_balance']);
     }
 
     public function test_a_restructured_source_closes_on_the_ledger_principal_with_a_line_for_what_moved(): void
@@ -150,7 +152,7 @@ class StatementOfAccountHighFindingsTest extends TestCase
 
         $this->pay($loan, 10000);
 
-        $line = $this->statement($loan)['transactions'][0];
+        $line = $this->paymentLines($this->statement($loan))[0];
 
         $this->assertSame('payment', $line['type']);
         $this->assertEquals(400, $line['insurance_applied']);
@@ -169,7 +171,7 @@ class StatementOfAccountHighFindingsTest extends TestCase
 
         $this->pay($loan, 11900);
 
-        $line = $this->statement($loan)['transactions'][0];
+        $line = $this->paymentLines($this->statement($loan))[0];
 
         $this->assertEquals(100, $line['build_up_applied']);
         $this->assertEquals(11900, $this->sumOfParts($line));
@@ -183,7 +185,7 @@ class StatementOfAccountHighFindingsTest extends TestCase
         $this->pay($loan, 70850);
 
         $data = $this->statement($loan);
-        $line = $data['transactions'][0];
+        $line = $this->paymentLines($data)[0];
 
         $this->assertEquals(70850, $line['credit']);
         $this->assertEquals(50, $line['overpayment_applied']);
@@ -200,7 +202,7 @@ class StatementOfAccountHighFindingsTest extends TestCase
         $this->pay($loan, 11950);
 
         $data = $this->statement($loan);
-        $line = $data['transactions'][0];
+        $line = $this->paymentLines($data)[0];
 
         $this->assertEquals(150, $line['build_up_applied']);
         $this->assertEquals(0, $line['overpayment_applied']);
@@ -215,7 +217,7 @@ class StatementOfAccountHighFindingsTest extends TestCase
 
         $this->pay($loan, 11950);
 
-        $line = $this->statement($loan)['transactions'][0];
+        $line = $this->paymentLines($this->statement($loan))[0];
 
         $this->assertEquals(0, $line['build_up_applied']);
         $this->assertEquals(150, $line['overpayment_applied']);
@@ -227,7 +229,7 @@ class StatementOfAccountHighFindingsTest extends TestCase
         $loan = $this->createReleasedLoan();
         $this->applyBalanceAdjustment($loan, -600);
 
-        $this->assertEquals(0, $this->statement($loan)['transactions'][0]['overpayment_applied']);
+        $this->assertEquals(0, $this->statement($loan)['transactions'][1]['overpayment_applied']);
     }
 
     public function test_an_extension_s_collection_reads_as_an_extension_payment(): void
@@ -241,7 +243,7 @@ class StatementOfAccountHighFindingsTest extends TestCase
 
         $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'pay'])->assertOk();
 
-        $line = $this->statement($loan)['transactions'][0];
+        $line = $this->paymentLines($this->statement($loan))[0];
 
         $this->assertSame('payment', $line['type']);
         $this->assertSame("Extension payment {$line['receipt_number']}", $line['particulars']);
@@ -355,7 +357,7 @@ class StatementOfAccountHighFindingsTest extends TestCase
         app(RepaymentService::class)->processRepayment($loan->fresh(), 1000, now()->toDateString(), $this->admin, null, 'gcash', 'GC12345678');
         $this->pay($loan, 1000);
 
-        [$gcash, $cash] = $this->statement($loan)['transactions'];
+        [$gcash, $cash] = $this->paymentLines($this->statement($loan));
 
         $this->assertSame('GCash', $gcash['payment_method']);
         $this->assertSame('GC12345678', $gcash['reference_number']);
@@ -452,6 +454,17 @@ class StatementOfAccountHighFindingsTest extends TestCase
     private function statement(Loan $loan): array
     {
         return $this->getJson("/api/reports/statement-of-account/{$loan->id}")->assertOk()->json('data');
+    }
+
+    /**
+     * The statement's payment lines, without the release and charges around them.
+     *
+     * @param  array<string, mixed>  $data
+     * @return list<array<string, mixed>>
+     */
+    private function paymentLines(array $data): array
+    {
+        return array_values(array_filter($data['transactions'], fn (array $line): bool => $line['type'] === 'payment'));
     }
 
     private function ledgerClosingPrincipal(Loan $loan): float

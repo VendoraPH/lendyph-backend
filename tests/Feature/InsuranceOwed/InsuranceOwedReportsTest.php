@@ -126,7 +126,8 @@ class InsuranceOwedReportsTest extends TestCase
         // Principal plus the premium the release left owed.
         $this->assertEqualsWithDelta(60400.00, (float) $data['summary']['opening_balance'], 0.001);
 
-        [$first, $second] = $data['transactions'];
+        [$release, $first, $second] = $data['transactions'];
+        $this->assertEqualsWithDelta(60400.00, (float) $release['running_balance'], 0.001);
         $this->assertEqualsWithDelta(150.00, (float) ($first['insurance_applied'] ?? 0), 0.001);
         $this->assertEqualsWithDelta(60250.00, (float) $first['running_balance'], 0.001);
         $this->assertEqualsWithDelta(250.00, (float) ($second['insurance_applied'] ?? 0), 0.001);
@@ -159,10 +160,12 @@ class InsuranceOwedReportsTest extends TestCase
         $statement = $this->statement($loan);
         $this->assertEquals($openingBefore, $statement['summary']['opening_balance']);
         $this->assertEqualsWithDelta(60400.00, (float) $statement['summary']['opening_balance'], 0.001);
-        $this->assertCount(1, $statement['transactions']);
-        $this->assertEqualsWithDelta(150.00, (float) $statement['transactions'][0]['insurance_applied'], 0.001);
-        $this->assertEqualsWithDelta(60250.00, (float) $statement['transactions'][0]['running_balance'], 0.001);
-        $this->assertEqualsWithDelta((float) $loan->fresh()->outstanding_balance, (float) $statement['transactions'][0]['running_balance'], 0.001);
+        $this->assertSame([false, false, true], array_column($statement['transactions'], 'voided'));
+        [, $kept, $void] = $statement['transactions'];
+        $this->assertEqualsWithDelta(150.00, (float) $kept['insurance_applied'], 0.001);
+        $this->assertEqualsWithDelta(60250.00, (float) $kept['running_balance'], 0.001);
+        $this->assertEqualsWithDelta(0.00, (float) $void['insurance_applied'], 0.001);
+        $this->assertEqualsWithDelta((float) $loan->fresh()->outstanding_balance, (float) $void['running_balance'], 0.001);
     }
 
     public function test_the_statements_of_a_restructure_open_with_the_premium_carried_on_both_loans(): void
@@ -221,7 +224,7 @@ class InsuranceOwedReportsTest extends TestCase
 
         $statement = $this->statement($loan);
         $this->assertEqualsWithDelta(60000.00, (float) $statement['summary']['opening_balance'], 0.001);
-        $this->assertSame([0.0], array_map('floatval', array_column($statement['transactions'], 'insurance_applied')));
+        $this->assertSame([0.0, 0.0], array_map('floatval', array_column($statement['transactions'], 'insurance_applied')));
     }
 
     public function test_the_branch_filter_keeps_each_branch_s_premium_apart(): void
