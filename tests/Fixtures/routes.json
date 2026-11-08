@@ -1,0 +1,3808 @@
+[
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/documentation",
+        "name": "l5-swagger.default.api",
+        "action": "\\L5Swagger\\Http\\Controllers\\SwaggerController@api",
+        "middleware": [
+            "App\\Http\\Middleware\\EnsureDocsAreEnabled",
+            "throttle:10,1",
+            "L5Swagger\\Http\\Middleware\\Config"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "docs",
+        "name": "l5-swagger.default.docs",
+        "action": "\\L5Swagger\\Http\\Controllers\\SwaggerController@docs",
+        "middleware": [
+            "App\\Http\\Middleware\\EnsureDocsAreEnabled",
+            "throttle:10,1",
+            "L5Swagger\\Http\\Middleware\\Config"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "docs/asset/{asset}",
+        "name": "l5-swagger.default.asset",
+        "action": "\\L5Swagger\\Http\\Controllers\\SwaggerAssetController@index",
+        "middleware": [
+            "App\\Http\\Middleware\\EnsureDocsAreEnabled",
+            "throttle:10,1",
+            "L5Swagger\\Http\\Middleware\\Config"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/oauth2-callback",
+        "name": "l5-swagger.default.oauth2_callback",
+        "action": "\\L5Swagger\\Http\\Controllers\\SwaggerController@oauth2Callback",
+        "middleware": [
+            "App\\Http\\Middleware\\EnsureDocsAreEnabled",
+            "throttle:10,1",
+            "L5Swagger\\Http\\Middleware\\Config"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "sanctum/csrf-cookie",
+        "name": "sanctum.csrf-cookie",
+        "action": "Laravel\\Sanctum\\Http\\Controllers\\CsrfCookieController@show",
+        "middleware": [
+            "web"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/health",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\HealthController",
+        "middleware": [
+            "api"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/auth/login",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AuthController@login",
+        "middleware": [
+            "api",
+            "throttle:auth"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/branches/public",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\BranchController@publicIndex",
+        "middleware": [
+            "api"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/branding/public",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\BrandingController@publicShow",
+        "middleware": [
+            "api"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/branding/logo",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\BrandingController@publicLogo",
+        "middleware": [
+            "api"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/files/documents/{document}",
+        "name": "files.document",
+        "action": "App\\Http\\Controllers\\Api\\FileController@document",
+        "middleware": [
+            "api",
+            "signed"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/files/borrowers/{borrower}/photo",
+        "name": "files.borrower-photo",
+        "action": "App\\Http\\Controllers\\Api\\FileController@borrowerPhoto",
+        "middleware": [
+            "api",
+            "signed"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/borrowers",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\BorrowerController@store",
+        "middleware": [
+            "api",
+            "App\\Http\\Middleware\\OptionalSanctumAuth",
+            "throttle:public-registration",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/borrowers/{borrower}/photo",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\BorrowerController@uploadPhoto",
+        "middleware": [
+            "api",
+            "App\\Http\\Middleware\\AllowAuthOrSubmissionToken",
+            "throttle:registration-uploads",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/borrowers/{borrower}/valid-ids",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\BorrowerController@uploadValidId",
+        "middleware": [
+            "api",
+            "App\\Http\\Middleware\\AllowAuthOrSubmissionToken",
+            "throttle:registration-uploads",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/auth/logout",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AuthController@logout",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/auth/me",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AuthController@me",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "PATCH",
+        "uri": "api/auth/me",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AuthController@updateMe",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/auth/change-password",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AuthController@changePassword",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/auth/refresh",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AuthController@refresh",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/notifications",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\NotificationController@index",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/notifications/unread-count",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\NotificationController@unreadCount",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/notifications/read-all",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\NotificationController@markAllRead",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/notifications/{id}/read",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\NotificationController@markRead",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": {
+            "id": "[\\da-fA-F]{8}-[\\da-fA-F]{4}-[\\da-fA-F]{4}-[\\da-fA-F]{4}-[\\da-fA-F]{12}"
+        }
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/users",
+        "name": "users.index",
+        "action": "App\\Http\\Controllers\\Api\\UserController@index",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": {
+            "user": "[0-9]+"
+        }
+    },
+    {
+        "methods": "POST",
+        "uri": "api/users",
+        "name": "users.store",
+        "action": "App\\Http\\Controllers\\Api\\UserController@store",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": {
+            "user": "[0-9]+"
+        }
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/users/{user}",
+        "name": "users.show",
+        "action": "App\\Http\\Controllers\\Api\\UserController@show",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": {
+            "user": "[0-9]+"
+        }
+    },
+    {
+        "methods": "PUT|PATCH",
+        "uri": "api/users/{user}",
+        "name": "users.update",
+        "action": "App\\Http\\Controllers\\Api\\UserController@update",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": {
+            "user": "[0-9]+"
+        }
+    },
+    {
+        "methods": "PATCH",
+        "uri": "api/users/{user}/deactivate",
+        "name": "users.deactivate",
+        "action": "App\\Http\\Controllers\\Api\\UserController@deactivate",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": {
+            "user": "[0-9]+"
+        }
+    },
+    {
+        "methods": "PATCH",
+        "uri": "api/users/{user}/reactivate",
+        "name": "users.reactivate",
+        "action": "App\\Http\\Controllers\\Api\\UserController@reactivate",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": {
+            "user": "[0-9]+"
+        }
+    },
+    {
+        "methods": "POST",
+        "uri": "api/users/{user}/reset-password",
+        "name": "users.reset-password",
+        "action": "App\\Http\\Controllers\\Api\\UserController@resetPassword",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": {
+            "user": "[0-9]+"
+        }
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/staff",
+        "name": "staff.index",
+        "action": "App\\Http\\Controllers\\Api\\StaffController@index",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/branches",
+        "name": "branches.index",
+        "action": "App\\Http\\Controllers\\Api\\BranchController@index",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/branches",
+        "name": "branches.store",
+        "action": "App\\Http\\Controllers\\Api\\BranchController@store",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/branches/{branch}",
+        "name": "branches.show",
+        "action": "App\\Http\\Controllers\\Api\\BranchController@show",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "PUT|PATCH",
+        "uri": "api/branches/{branch}",
+        "name": "branches.update",
+        "action": "App\\Http\\Controllers\\Api\\BranchController@update",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "PATCH",
+        "uri": "api/borrowers/bulk-deactivate",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\BorrowerController@bulkDeactivate",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "DELETE",
+        "uri": "api/borrowers/bulk",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\BorrowerController@bulkDestroy",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/borrowers",
+        "name": "borrowers.index",
+        "action": "App\\Http\\Controllers\\Api\\BorrowerController@index",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/borrowers/{borrower}",
+        "name": "borrowers.show",
+        "action": "App\\Http\\Controllers\\Api\\BorrowerController@show",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "PUT|PATCH",
+        "uri": "api/borrowers/{borrower}",
+        "name": "borrowers.update",
+        "action": "App\\Http\\Controllers\\Api\\BorrowerController@update",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "DELETE",
+        "uri": "api/borrowers/{borrower}",
+        "name": "borrowers.destroy",
+        "action": "App\\Http\\Controllers\\Api\\BorrowerController@destroy",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "PATCH",
+        "uri": "api/borrowers/{borrower}/deactivate",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\BorrowerController@deactivate",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "PATCH",
+        "uri": "api/borrowers/{borrower}/reactivate",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\BorrowerController@reactivate",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "PATCH",
+        "uri": "api/borrowers/{borrower}/approve-registration",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\BorrowerController@approveRegistration",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "PATCH",
+        "uri": "api/borrowers/{borrower}/reject",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\BorrowerController@reject",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "DELETE",
+        "uri": "api/borrowers/{borrower}/photo",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\BorrowerController@deletePhoto",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/borrowers/{borrower}/valid-ids",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\BorrowerController@listValidIds",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "DELETE",
+        "uri": "api/borrowers/{borrower}/valid-ids/{validIdId}",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\BorrowerController@deleteValidId",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/borrowers/{borrower}/ledger",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\BorrowerController@ledger",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/borrowers/{borrower}/loan-summary",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\BorrowerController@loanSummary",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/borrowers/{borrower}/co-makers",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\CoMakerController@index",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/borrowers/{borrower}/co-makers",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\CoMakerController@store",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/co-makers/{coMaker}",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\CoMakerController@show",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "PUT",
+        "uri": "api/co-makers/{coMaker}",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\CoMakerController@update",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "DELETE",
+        "uri": "api/co-makers/{coMaker}",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\CoMakerController@destroy",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/co-makers/{coMaker}/valid-ids",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\CoMakerController@uploadValidId",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/co-makers/{coMaker}/valid-ids",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\CoMakerController@listValidIds",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "DELETE",
+        "uri": "api/co-makers/{coMaker}/valid-ids/{validIdId}",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\CoMakerController@deleteValidId",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": {
+            "validIdId": "[0-9]+"
+        }
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/borrowers/{borrower}/documents",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\DocumentController@index",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange",
+            "Closure"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/borrowers/{borrower}/documents",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\DocumentController@store",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange",
+            "Closure"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/co-makers/{coMaker}/documents",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\DocumentController@index",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange",
+            "Closure"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/co-makers/{coMaker}/documents",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\DocumentController@store",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange",
+            "Closure"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/loans/{loan}/documents",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\DocumentController@index",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange",
+            "Closure"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/loans/{loan}/documents",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\DocumentController@store",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange",
+            "Closure"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/documents/{document}",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\DocumentController@show",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "DELETE",
+        "uri": "api/documents/{document}",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\DocumentController@destroy",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/dashboard/stats",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\DashboardController@stats",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/dashboard/collections-trend",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\DashboardController@collectionsTrend",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/dashboard/daily-dues",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\DashboardController@dailyDues",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/dashboard/recent-transactions",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\DashboardController@recentTransactions",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/fees",
+        "name": "fees.index",
+        "action": "App\\Http\\Controllers\\Api\\FeeController@index",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/fees",
+        "name": "fees.store",
+        "action": "App\\Http\\Controllers\\Api\\FeeController@store",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/fees/{fee}",
+        "name": "fees.show",
+        "action": "App\\Http\\Controllers\\Api\\FeeController@show",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "PUT|PATCH",
+        "uri": "api/fees/{fee}",
+        "name": "fees.update",
+        "action": "App\\Http\\Controllers\\Api\\FeeController@update",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "DELETE",
+        "uri": "api/fees/{fee}",
+        "name": "fees.destroy",
+        "action": "App\\Http\\Controllers\\Api\\FeeController@destroy",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/loan-products",
+        "name": "loan-products.index",
+        "action": "App\\Http\\Controllers\\Api\\LoanProductController@index",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/loan-products",
+        "name": "loan-products.store",
+        "action": "App\\Http\\Controllers\\Api\\LoanProductController@store",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/loan-products/{loan_product}",
+        "name": "loan-products.show",
+        "action": "App\\Http\\Controllers\\Api\\LoanProductController@show",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "PUT|PATCH",
+        "uri": "api/loan-products/{loan_product}",
+        "name": "loan-products.update",
+        "action": "App\\Http\\Controllers\\Api\\LoanProductController@update",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "DELETE",
+        "uri": "api/loan-products/{loan_product}",
+        "name": "loan-products.destroy",
+        "action": "App\\Http\\Controllers\\Api\\LoanProductController@destroy",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/loans/preview",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\LoanController@formPreview",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/loans/amortization-calculator",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AmortizationCalculatorController",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange",
+            "throttle:calculator"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/loans",
+        "name": "loans.index",
+        "action": "App\\Http\\Controllers\\Api\\LoanController@index",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/loans",
+        "name": "loans.store",
+        "action": "App\\Http\\Controllers\\Api\\LoanController@store",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/loans/{loan}",
+        "name": "loans.show",
+        "action": "App\\Http\\Controllers\\Api\\LoanController@show",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "PUT|PATCH",
+        "uri": "api/loans/{loan}",
+        "name": "loans.update",
+        "action": "App\\Http\\Controllers\\Api\\LoanController@update",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "DELETE",
+        "uri": "api/loans/{loan}",
+        "name": "loans.destroy",
+        "action": "App\\Http\\Controllers\\Api\\LoanController@destroy",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "PATCH",
+        "uri": "api/loans/{loan}/submit",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\LoanController@submit",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "PATCH",
+        "uri": "api/loans/{loan}/approve",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\LoanController@approve",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "PATCH",
+        "uri": "api/loans/{loan}/reject",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\LoanController@reject",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/loans/{loan}/release-preview",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\LoanController@releasePreview",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "PATCH",
+        "uri": "api/loans/{loan}/release",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\LoanController@release",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/loans/{loan}/deductions-preview",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\LoanController@deductionsPreview",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": {
+            "loan": "[0-9]+"
+        }
+    },
+    {
+        "methods": "POST",
+        "uri": "api/loans/{loan}/print-log",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\LoanPrintLogController",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": {
+            "loan": "[0-9]+"
+        }
+    },
+    {
+        "methods": "POST",
+        "uri": "api/loans/{loan}/co-makers",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\LoanController@addCoMaker",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": {
+            "loan": "[0-9]+"
+        }
+    },
+    {
+        "methods": "PATCH",
+        "uri": "api/loans/{loan}/void",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\LoanController@void",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/loans/{loan}/extension-preview",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\LoanController@extensionPreview",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": {
+            "loan": "[0-9]+"
+        }
+    },
+    {
+        "methods": "POST",
+        "uri": "api/loans/{loan}/extend",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\LoanController@extend",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/loans/{loan}/restructure",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\LoanController@restructure",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/loans/{loan}/ledger-entries",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\LoanController@ledgerEntries",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/loans/{loan}/ledger",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\LoanLedgerController@show",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": {
+            "loan": "[0-9]+"
+        }
+    },
+    {
+        "methods": "PATCH",
+        "uri": "api/loans/{loan}/auto-pay",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\LoanController@toggleAutoPay",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "PATCH",
+        "uri": "api/loans/{loan}/account-officer",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\LoanController@assignAccountOfficer",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": {
+            "loan": "[0-9]+"
+        }
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/loans/{loan}/amortization-preview",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\LoanController@amortizationPreview",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/loans/{loan}/amortization-schedule",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\LoanController@amortizationSchedule",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/loans/{loan}/amortization-balances",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\LoanController@amortizationBalances",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": {
+            "loan": "[0-9]+"
+        }
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/loans/{loan}/approval-steps",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\LoanApprovalStepController@index",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "PATCH",
+        "uri": "api/loans/{loan}/approval-steps/{approvalStep}/approve",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\LoanApprovalStepController@approve",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "PATCH",
+        "uri": "api/loans/{loan}/approval-steps/{approvalStep}/send-back",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\LoanApprovalStepController@sendBack",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/repayments",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\RepaymentController@listAll",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/loans/{loan}/repayments",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\RepaymentController@index",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/loans/{loan}/repayments/preview",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\RepaymentController@preview",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/loans/{loan}/repayments",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\RepaymentController@store",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/loans/{loan}/summary",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\RepaymentController@summary",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/repayments/{repayment}",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\RepaymentController@show",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "PATCH",
+        "uri": "api/repayments/{repayment}/void",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\RepaymentController@void",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/loans/{loan}/disclosure",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\DisclosureController@show",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/loans/{loan}/promissory-note",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\PromissoryNoteController@show",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/loans/{loan}/adjustments",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\LoanAdjustmentController@index",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/loans/{loan}/adjustments",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\LoanAdjustmentController@store",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/loans/{loan}/balance-adjustment-preview",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\LoanAdjustmentController@balanceAdjustmentPreview",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/loan-adjustments/{loanAdjustment}",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\LoanAdjustmentController@show",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "PATCH",
+        "uri": "api/loan-adjustments/{loanAdjustment}/approve",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\LoanAdjustmentController@approve",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "PATCH",
+        "uri": "api/loan-adjustments/{loanAdjustment}/reject",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\LoanAdjustmentController@reject",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "PATCH",
+        "uri": "api/loan-adjustments/{loanAdjustment}/apply",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\LoanAdjustmentController@apply",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/reports/statement-of-account/{loan}",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\ReportController@statementOfAccount",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/reports/subsidiary-ledger/{borrower}",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\ReportController@subsidiaryLedger",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/reports/releases",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\ReportController@listOfReleases",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/reports/repayments",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\ReportController@listOfRepayments",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/reports/due-past-due",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\ReportController@listOfDuePastDue",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/reports/loan-balance-summary",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\ReportController@loanBalanceSummary",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/reports/daily-collection",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\ReportController@dailyCollection",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/reports/income",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\ReportController@incomeReport",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/reports/income/by-loan",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\ReportController@incomeByLoan",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/reports/aging",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\ReportController@agingReport",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/reports/borrowers",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\ReportController@borrowerReport",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/reports/borrowers/list",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\ReportController@borrowerList",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/reports/borrowers/released",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\ReportController@borrowersReleased",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/reports/disbursements",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\ReportController@disbursementReport",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/reports/cash-flow",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\ReportController@cashFlow",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/reports/collection-efficiency",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\ReportController@collectionEfficiency",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/reports/portfolio-by-product",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\ReportController@portfolioByProduct",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/reports/share-capital",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\ReportController@shareCapital",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/reports/performance",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\ReportController@performance",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/reports/provisioning",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\ReportController@provisioning",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/reports/share-capital-statement/{borrower}",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\ReportController@shareCapitalStatement",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/reports/releases/export",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\ReportController@exportReleases",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange",
+            "throttle:exports"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/reports/repayments/export",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\ReportController@exportRepayments",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange",
+            "throttle:exports"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/reports/due-past-due/export",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\ReportController@exportDuePastDue",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange",
+            "throttle:exports"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/roles",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\RoleController@index",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/roles/{role}",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\RoleController@show",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/roles",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\RoleController@store",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "PUT",
+        "uri": "api/roles/{role}",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\RoleController@update",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "PATCH",
+        "uri": "api/roles/{role}/deactivate",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\RoleController@deactivate",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "PATCH",
+        "uri": "api/roles/{role}/reactivate",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\RoleController@reactivate",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "DELETE",
+        "uri": "api/roles/{role}",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\RoleController@destroy",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/audit-logs",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AuditLogController@index",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/audit-logs/export",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AuditLogController@export",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange",
+            "throttle:exports"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/audit-logs/{auditLog}",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AuditLogController@show",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/collaterals",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\CollateralController@index",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/collaterals",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\CollateralController@store",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/collaterals/register",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\CollateralController@register",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/collaterals/{collateral}",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\CollateralController@show",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "PUT",
+        "uri": "api/collaterals/{collateral}",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\CollateralController@update",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "DELETE",
+        "uri": "api/collaterals/{collateral}",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\CollateralController@destroy",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/loans/{loan}/collaterals",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\CollateralController@loanIndex",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/loans/{loan}/collaterals",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\CollateralController@attach",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "DELETE",
+        "uri": "api/loans/{loan}/collaterals/{collateral}",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\CollateralController@detach",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/collateral-types",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\CollateralTypeController@index",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/collateral-types",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\CollateralTypeController@store",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/collateral-types/reorder",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\CollateralTypeController@reorder",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/collateral-types/{collateralType}",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\CollateralTypeController@show",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "PUT",
+        "uri": "api/collateral-types/{collateralType}",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\CollateralTypeController@update",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "DELETE",
+        "uri": "api/collateral-types/{collateralType}",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\CollateralTypeController@destroy",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/share-capital/ledger",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\ShareCapitalLedgerController@index",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/share-capital/ledger",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\ShareCapitalLedgerController@store",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/share-capital/members",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\ShareCapitalLedgerController@members",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/pledges",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\ShareCapitalPledgeController@index",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "PUT",
+        "uri": "api/pledges/{pledge}",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\ShareCapitalPledgeController@update",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "PATCH",
+        "uri": "api/pledges/{pledge}/auto-credit",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\ShareCapitalPledgeController@toggleAutoCredit",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/pledges/{pledge}/entries",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\ShareCapitalPledgeController@manualEntry",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/pledges/bulk-entries",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\ShareCapitalPledgeController@bulkEntry",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/auto-credit/status",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AutoCreditController@status",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/auto-credit/process",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AutoCreditController@process",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/auto-pay/preview",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AutoPayController@preview",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/auto-pay/process",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AutoPayController@process",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/gcash/transactions",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\GCashTransactionController@index",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/gcash/transactions/preview",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\GCashTransactionController@preview",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/gcash/transactions",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\GCashTransactionController@store",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "PATCH",
+        "uri": "api/gcash/transactions/{transaction}/paid",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\GCashTransactionController@markPaid",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/gcash/non-members",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\GCashNonMemberController@index",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/gcash/non-members",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\GCashNonMemberController@store",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "PUT",
+        "uri": "api/gcash/non-members/{nonMember}",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\GCashNonMemberController@update",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "DELETE",
+        "uri": "api/gcash/non-members/{nonMember}",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\GCashNonMemberController@destroy",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/gcash/tiers",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\GCashTierController@index",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "PUT",
+        "uri": "api/gcash/tiers",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\GCashTierController@replace",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/gcash/reports/income",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\GCashReportController@income",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/gcash/reports/pending",
+        "name": "gcash.reports.pending",
+        "action": "App\\Http\\Controllers\\Api\\GCashReportController@pending",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/settings/approval-workflow",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\ApprovalWorkflowController@show",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "PUT",
+        "uri": "api/settings/approval-workflow",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\ApprovalWorkflowController@update",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "DELETE",
+        "uri": "api/settings/approval-workflow",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\ApprovalWorkflowController@destroy",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/imports",
+        "name": "imports.index",
+        "action": "App\\Http\\Controllers\\Api\\CsvImportController@index",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange",
+            "throttle:imports"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/imports",
+        "name": "imports.store",
+        "action": "App\\Http\\Controllers\\Api\\CsvImportController@store",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange",
+            "throttle:imports"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "PUT|POST",
+        "uri": "api/imports/{run}/files/{kind}/chunks/{index}",
+        "name": "imports.chunk",
+        "action": "App\\Http\\Controllers\\Api\\CsvImportController@uploadChunk",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange",
+            "throttle:imports"
+        ],
+        "wheres": {
+            "run": "[0-9]+",
+            "kind": "customers|loans",
+            "index": "[0-9]+"
+        }
+    },
+    {
+        "methods": "POST",
+        "uri": "api/imports/{run}/assemble",
+        "name": "imports.assemble",
+        "action": "App\\Http\\Controllers\\Api\\CsvImportController@assemble",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange",
+            "throttle:imports"
+        ],
+        "wheres": {
+            "run": "[0-9]+"
+        }
+    },
+    {
+        "methods": "DELETE",
+        "uri": "api/imports/{run}",
+        "name": "imports.destroy",
+        "action": "App\\Http\\Controllers\\Api\\CsvImportController@destroy",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange",
+            "throttle:imports"
+        ],
+        "wheres": {
+            "run": "[0-9]+"
+        }
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/imports/{run}",
+        "name": "imports.show",
+        "action": "App\\Http\\Controllers\\Api\\CsvImportStatusController@show",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange",
+            "throttle:imports"
+        ],
+        "wheres": {
+            "run": "[0-9]+"
+        }
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/imports/{run}/product-mapping",
+        "name": "imports.product-mapping.show",
+        "action": "App\\Http\\Controllers\\Api\\CsvImportMappingController@show",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange",
+            "throttle:imports",
+            "throttle:exports"
+        ],
+        "wheres": {
+            "run": "[0-9]+"
+        }
+    },
+    {
+        "methods": "PUT",
+        "uri": "api/imports/{run}/product-mapping",
+        "name": "imports.product-mapping.update",
+        "action": "App\\Http\\Controllers\\Api\\CsvImportMappingController@update",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange",
+            "throttle:imports",
+            "throttle:exports"
+        ],
+        "wheres": {
+            "run": "[0-9]+"
+        }
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/imports/{run}/errors.csv",
+        "name": "imports.errors.export",
+        "action": "App\\Http\\Controllers\\Api\\CsvImportErrorReportController@export",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange",
+            "throttle:imports",
+            "throttle:exports"
+        ],
+        "wheres": {
+            "run": "[0-9]+"
+        }
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/imports/{run}/errors",
+        "name": "imports.errors.index",
+        "action": "App\\Http\\Controllers\\Api\\CsvImportErrorReportController@index",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange",
+            "throttle:imports"
+        ],
+        "wheres": {
+            "run": "[0-9]+"
+        }
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/accounting/accounts",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AccountingAccountController@index",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/accounting/accounts",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AccountingAccountController@store",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/accounting/accounts/seed",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AccountingAccountController@seed",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/accounting/accounts/{account}",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AccountingAccountController@show",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": {
+            "account": "[0-9]+"
+        }
+    },
+    {
+        "methods": "PUT",
+        "uri": "api/accounting/accounts/{account}",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AccountingAccountController@update",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": {
+            "account": "[0-9]+"
+        }
+    },
+    {
+        "methods": "DELETE",
+        "uri": "api/accounting/accounts/{account}",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AccountingAccountController@destroy",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": {
+            "account": "[0-9]+"
+        }
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/accounting/journals",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AccountingJournalController@index",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/accounting/journals",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AccountingJournalController@store",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/accounting/journals/{journal}",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AccountingJournalController@show",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": {
+            "journal": "[0-9]+"
+        }
+    },
+    {
+        "methods": "PUT",
+        "uri": "api/accounting/journals/{journal}",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AccountingJournalController@update",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": {
+            "journal": "[0-9]+"
+        }
+    },
+    {
+        "methods": "POST",
+        "uri": "api/accounting/journals/{journal}/post",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AccountingJournalController@post",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": {
+            "journal": "[0-9]+"
+        }
+    },
+    {
+        "methods": "POST",
+        "uri": "api/accounting/journals/{journal}/reverse",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AccountingJournalController@reverse",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": {
+            "journal": "[0-9]+"
+        }
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/accounting/general-ledger",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AccountingReportController@generalLedger",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/accounting/trial-balance",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AccountingReportController@trialBalance",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/accounting/dashboard",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AccountingReportController@dashboard",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/accounting/books/general-journal",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AccountingBookController@generalJournal",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/accounting/books/general-ledger",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AccountingBookController@generalLedger",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/accounting/books/cash-receipts",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AccountingBookController@cashReceipts",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/accounting/books/cash-disbursements",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AccountingBookController@cashDisbursements",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/accounting/loans/aging",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AccountingReportController@receivableAging",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/accounting/cash-accounts",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AccountingAccountController@cashAccounts",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/accounting/settings/account-mapping",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AccountingSettingsController@showAccountMapping",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "PUT",
+        "uri": "api/accounting/settings/account-mapping",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AccountingSettingsController@updateAccountMapping",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/accounting/expenses",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AccountingExpenseController@index",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/accounting/expenses",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AccountingExpenseController@store",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/accounting/expenses/{expense}",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AccountingExpenseController@show",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": {
+            "expense": "[0-9]+"
+        }
+    },
+    {
+        "methods": "PUT",
+        "uri": "api/accounting/expenses/{expense}",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AccountingExpenseController@update",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": {
+            "expense": "[0-9]+"
+        }
+    },
+    {
+        "methods": "POST",
+        "uri": "api/accounting/expenses/{expense}/pay",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AccountingExpenseController@pay",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": {
+            "expense": "[0-9]+"
+        }
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/accounting/reconciliations",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AccountingReconciliationController@index",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/accounting/reconciliations",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AccountingReconciliationController@store",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/accounting/reconciliations/{reconciliation}",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AccountingReconciliationController@show",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": {
+            "reconciliation": "[0-9]+"
+        }
+    },
+    {
+        "methods": "POST",
+        "uri": "api/accounting/reconciliations/{reconciliation}/match",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AccountingReconciliationController@match",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": {
+            "reconciliation": "[0-9]+"
+        }
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/accounting/periods",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AccountingPeriodController@index",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/accounting/periods/{period}/close",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AccountingPeriodController@close",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": {
+            "period": "[0-9]+"
+        }
+    },
+    {
+        "methods": "POST",
+        "uri": "api/accounting/periods/{period}/reopen",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AccountingPeriodController@reopen",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": {
+            "period": "[0-9]+"
+        }
+    },
+    {
+        "methods": "POST",
+        "uri": "api/accounting/cash-accounts/transfer",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AccountingCashAccountController@transfer",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/accounting/statements/cash-flow",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AccountingStatementController@cashFlow",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/accounting/statements/equity-changes",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\AccountingStatementController@equityChanges",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/credit-scoring/dashboard",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\CreditScoringController@dashboard",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/credit-scoring/borrowers",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\CreditScoringController@borrowers",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/credit-scoring/borrowers/{borrowerId}",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\CreditScoringController@borrower",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": {
+            "borrowerId": "[0-9]+"
+        }
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/credit-scoring/borrowers/{borrowerId}/history",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\CreditScoringController@borrowerHistory",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": {
+            "borrowerId": "[0-9]+"
+        }
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/credit-scoring/borrowers/{borrowerId}/policy-flags",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\CreditScoringController@policyFlags",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": {
+            "borrowerId": "[0-9]+"
+        }
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/credit-scoring/score-history",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\CreditScoringController@scoreHistory",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/credit-scoring/risk-monitoring",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\CreditScoringController@riskMonitoring",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/credit-scoring/scorecard-config",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\CreditScoringController@showScorecardConfig",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "PUT",
+        "uri": "api/credit-scoring/scorecard-config",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\CreditScoringController@updateScorecardConfig",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/credit-scoring/settings",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\CreditScoringController@showSettings",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "PUT",
+        "uri": "api/credit-scoring/settings",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\CreditScoringController@updateSettings",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/credit-scoring/decisions",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\CreditScoringController@storeDecision",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "api/settings/branding",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\BrandingController@show",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "PUT",
+        "uri": "api/settings/branding",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\BrandingController@update",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "POST",
+        "uri": "api/settings/branding/logo",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\BrandingController@uploadLogo",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "DELETE",
+        "uri": "api/settings/branding/logo",
+        "name": null,
+        "action": "App\\Http\\Controllers\\Api\\BrandingController@deleteLogo",
+        "middleware": [
+            "api",
+            "auth:sanctum",
+            "App\\Http\\Middleware\\CheckTokenExpiry",
+            "App\\Http\\Middleware\\EnsureUserIsActive",
+            "App\\Http\\Middleware\\RequirePasswordChange"
+        ],
+        "wheres": []
+    },
+    {
+        "methods": "GET|HEAD",
+        "uri": "up",
+        "name": null,
+        "action": "Closure",
+        "middleware": [],
+        "wheres": []
+    }
+]

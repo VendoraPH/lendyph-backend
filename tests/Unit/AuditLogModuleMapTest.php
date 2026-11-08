@@ -79,9 +79,28 @@ it('files auth events under auth whatever their class', function () {
 
 it('lists the module values', function () {
     expect(AuditLogModules::all())->toEqualCanonicalizing([
-        'auth', 'borrowers', 'loans', 'payments', 'collections', 'users', 'roles', 'accounting', 'gcash', 'system',
+        'auth', 'borrowers', 'loans', 'payments', 'collections', 'users', 'roles', 'accounting', 'gcash',
+        'reminders', 'credit_scoring', 'system',
     ]);
 });
+
+it('files the planned Phase 2 models under their modules', function (string $class, string $module) {
+    expect(AuditLogModules::isMapped($class))->toBeTrue()
+        ->and(AuditLogModules::for('updated', $class))->toBe($module);
+})->with([
+    'ReminderSetting' => ['App\\Models\\ReminderSetting', 'reminders'],
+    'ReminderBranchSetting' => ['App\\Models\\ReminderBranchSetting', 'reminders'],
+    'ReminderRule' => ['App\\Models\\ReminderRule', 'reminders'],
+    'ReminderTemplate' => ['App\\Models\\ReminderTemplate', 'reminders'],
+    'ReminderPause' => ['App\\Models\\ReminderPause', 'reminders'],
+    'BorrowerNotificationPreference' => ['App\\Models\\BorrowerNotificationPreference', 'reminders'],
+    'CreditScoringSetting' => ['App\\Models\\CreditScoringSetting', 'credit_scoring'],
+    'CreditScorecardRevision' => ['App\\Models\\CreditScorecardRevision', 'credit_scoring'],
+    'CreditApplicationProfile' => ['App\\Models\\CreditApplicationProfile', 'credit_scoring'],
+    'CreditDecision' => ['App\\Models\\CreditDecision', 'credit_scoring'],
+    'AccountingYearClose' => ['App\\Models\\AccountingYearClose', 'accounting'],
+    'AccountingAllowancePosting' => ['App\\Models\\AccountingAllowancePosting', 'accounting'],
+]);
 
 it('compares full class names, so a same-named class elsewhere is not mapped', function () {
     expect(AuditLogModules::for('updated', Role::class))->toBe('roles')

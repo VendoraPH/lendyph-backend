@@ -1,0 +1,65 @@
+[
+    {
+        "command": "loans:check-defaulted",
+        "expression": "5 0 * * *",
+        "timezone": "Asia/Manila",
+        "without_overlapping": false,
+        "expires_at": 1440
+    },
+    {
+        "command": "loans:apply-penalties",
+        "expression": "10 0 * * *",
+        "timezone": "Asia/Manila",
+        "without_overlapping": false,
+        "expires_at": 1440
+    },
+    {
+        "command": "notifications:past-due",
+        "expression": "20 0 * * *",
+        "timezone": "Asia/Manila",
+        "without_overlapping": false,
+        "expires_at": 1440
+    },
+    {
+        "command": "portfolio:snapshot",
+        "expression": "55 23 * * *",
+        "timezone": "Asia/Manila",
+        "without_overlapping": false,
+        "expires_at": 1440
+    },
+    {
+        "command": "db:backup --keep=7",
+        "expression": "0 2 * * *",
+        "timezone": "Asia/Manila",
+        "without_overlapping": false,
+        "expires_at": 1440
+    },
+    {
+        "command": "registrations:prune",
+        "expression": "30 3 * * *",
+        "timezone": "Asia/Manila",
+        "without_overlapping": false,
+        "expires_at": 1440
+    },
+    {
+        "command": "imports:process",
+        "expression": "* * * * *",
+        "timezone": "Asia/Manila",
+        "without_overlapping": true,
+        "expires_at": 10
+    },
+    {
+        "command": "imports:redact-rows",
+        "expression": "45 3 * * *",
+        "timezone": "Asia/Manila",
+        "without_overlapping": false,
+        "expires_at": 1440
+    },
+    {
+        "command": "notifications:prune",
+        "expression": "0 4 * * *",
+        "timezone": "Asia/Manila",
+        "without_overlapping": false,
+        "expires_at": 1440
+    }
+]
