@@ -751,7 +751,6 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
      */
     require __DIR__.'/api/credit-scoring.php';
     require __DIR__.'/api/reminders.php';
-    require __DIR__.'/api/linda.php';
 
     // Branding (organization logo + identity printed on reports and documents)
     Route::get('/settings/branding', [BrandingController::class, 'show']);

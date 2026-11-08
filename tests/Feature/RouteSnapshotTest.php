@@ -15,8 +15,13 @@ use Tests\TestCase;
  * (routes/api/*.php, routes/accounting/*.php, routes/console/*.php). Moving a
  * block into a partial must not change a route's method, URI, name, action,
  * middleware, constraints or registration order (Laravel matches in that
- * order), nor any schedule. A module that adds routes on purpose updates the
- * fixture in the same PR, so the change shows in review.
+ * order), nor any schedule.
+ *
+ * New routes and schedules are allowed and need no fixture change, so the
+ * module slices never edit one shared file. Every route and schedule in the
+ * fixture must still be there, exactly as it was and in the same order
+ * relative to the others; a route is found by its methods and URI, and a
+ * schedule by its command and expression.
  */
 uses(TestCase::class);
 
@@ -64,10 +69,31 @@ function routeSnapshotFixture(string $name): array
     );
 }
 
+/**
+ * The current entries that the fixture also has, in their current order, so a
+ * changed, missing or reordered entry fails and an added one does not.
+ *
+ * @param  list<array<string, mixed>>  $current
+ * @param  list<array<string, mixed>>  $fixture
+ * @param  list<string>  $keyFields
+ * @return list<array<string, mixed>>
+ */
+function snapshotEntriesInFixture(array $current, array $fixture, array $keyFields): array
+{
+    $key = fn (array $entry) => implode(' ', array_map(fn (string $field) => (string) $entry[$field], $keyFields));
+    $fixtureKeys = array_flip(array_map($key, $fixture));
+
+    return array_values(array_filter($current, fn (array $entry) => isset($fixtureKeys[$key($entry)])));
+}
+
 it('registers every route exactly as before, in the same order', function () {
-    expect(registeredRouteSnapshot())->toBe(routeSnapshotFixture('routes'));
+    $fixture = routeSnapshotFixture('routes');
+
+    expect(snapshotEntriesInFixture(registeredRouteSnapshot(), $fixture, ['methods', 'uri']))->toBe($fixture);
 });
 
 it('schedules every command exactly as before', function () {
-    expect(scheduledCommandSnapshot())->toBe(routeSnapshotFixture('schedule'));
+    $fixture = routeSnapshotFixture('schedule');
+
+    expect(snapshotEntriesInFixture(scheduledCommandSnapshot(), $fixture, ['command', 'expression']))->toBe($fixture);
 });
