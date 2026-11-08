@@ -5,8 +5,11 @@ namespace App\Http\Resources;
 use App\Models\AccountingExpense;
 use App\Models\AccountingExpensePayment;
 use App\Models\AccountingJournal;
+use App\Models\GCashTransaction;
 use App\Models\Loan;
+use App\Models\LoanAdjustment;
 use App\Models\Repayment;
+use App\Models\ShareCapitalLedger;
 use App\Services\Accounting\AutomaticPoster;
 use App\Services\Accounting\ExpenseRecorder;
 use Illuminate\Http\Request;
@@ -80,19 +83,24 @@ class JournalEntryResource extends JsonResource
     /**
      * The stable public name for each class that reaches `postable_type`.
      *
-     * These four are the only ones any production path writes:
+     * The lending and expense documents a production path writes:
      * {@see AutomaticPoster::loanRelease()} posts a
      * Loan (`loan_release`), `loanCollection()` a Repayment
      * (`loan_collection`), and {@see ExpenseRecorder}
      * an AccountingExpense (`expense`/`payable`) and an AccountingExpensePayment
      * (`payable`).
      *
-     * AutomaticPoster also exposes `loanFee()`, `creditLossProvision()`,
-     * `fundTransfer()` and `walletCharge()`, which each take an untyped
-     * `Model $postable` and so can put ANY class in this column. No lending
-     * flow calls them yet — but they are public, so an unmapped class is a
-     * case that has to answer something rather than throw. See
-     * {@see self::postableAlias()}.
+     * Phase 2 adds three documents: a balance adjustment
+     * (`loan_adjustment`, {@see AutomaticPoster::balanceAdjustment()}), a
+     * share capital entry (`share_capital_entry`,
+     * {@see AutomaticPoster::shareCapitalEntry()}) and a GCash transaction
+     * (`gcash_transaction`, {@see AutomaticPoster::gcashTransaction()}).
+     *
+     * AutomaticPoster also exposes `allowanceAdjustment()`, `loanFee()`,
+     * `creditLossProvision()`, `fundTransfer()` and `walletCharge()`, which
+     * each take an untyped `Model $postable` and so can put ANY class in this
+     * column, so an unmapped class is a case that has to answer something
+     * rather than throw. See {@see self::postableAlias()}.
      *
      * Adding an entry here is a contract change on both sides, which is why it
      * is a curated constant and not `class_basename()` for everything.
@@ -102,6 +110,9 @@ class JournalEntryResource extends JsonResource
         Repayment::class => 'repayment',
         AccountingExpense::class => 'expense',
         AccountingExpensePayment::class => 'expense_payment',
+        LoanAdjustment::class => 'loan_adjustment',
+        ShareCapitalLedger::class => 'share_capital_entry',
+        GCashTransaction::class => 'gcash_transaction',
     ];
 
     public function toArray(Request $request): array
