@@ -188,7 +188,7 @@ class ReleaseDeductionAccountsBackfillTest extends TestCase
     public function test_it_skips_a_role_whose_name_is_on_an_account_it_cannot_post_to(): void
     {
         $this->chartSeededBeforeTheseAccounts();
-        $this->account3('4090', 'Other Fee Income', 'income')->update(['is_active' => false]);
+        $this->account3('4095', 'Other Fee Income', 'income')->update(['is_active' => false]);
 
         $this->migration()->up();
 
