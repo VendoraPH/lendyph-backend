@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\AccountingAccount;
 use App\Models\AccountingAccountMapping;
+use App\Models\AccountingAllowancePosting;
 use App\Models\AccountingExpense;
 use App\Models\AccountingExpensePayment;
 use App\Models\AccountingJournal;
@@ -11,14 +12,20 @@ use App\Models\AccountingJournalLine;
 use App\Models\AccountingPeriod;
 use App\Models\AccountingReconciliation;
 use App\Models\AccountingReconciliationLine;
+use App\Models\AccountingYearClose;
 use App\Models\AmortizationSchedule;
 use App\Models\ApprovalWorkflowSetting;
 use App\Models\AuditLog;
 use App\Models\Borrower;
+use App\Models\BorrowerNotificationPreference;
 use App\Models\Branch;
 use App\Models\Collateral;
 use App\Models\CollateralType;
 use App\Models\CoMaker;
+use App\Models\CreditApplicationProfile;
+use App\Models\CreditDecision;
+use App\Models\CreditScorecardRevision;
+use App\Models\CreditScoringSetting;
 use App\Models\CsvImportRun;
 use App\Models\Document;
 use App\Models\Fee;
@@ -30,6 +37,11 @@ use App\Models\LoanAdjustment;
 use App\Models\LoanApprovalStep;
 use App\Models\LoanLedgerEntry;
 use App\Models\LoanProduct;
+use App\Models\ReminderBranchSetting;
+use App\Models\ReminderPause;
+use App\Models\ReminderRule;
+use App\Models\ReminderSetting;
+use App\Models\ReminderTemplate;
 use App\Models\Repayment;
 use App\Models\RepaymentAllocation;
 use App\Models\Role;
@@ -106,9 +118,25 @@ class AuditLogModules
         AccountingPeriod::class => 'accounting',
         AccountingReconciliation::class => 'accounting',
         AccountingReconciliationLine::class => 'accounting',
+        AccountingYearClose::class => 'accounting',
+        AccountingAllowancePosting::class => 'accounting',
         GCashTransaction::class => 'gcash',
         GCashNonMember::class => 'gcash',
         GCashTier::class => 'gcash',
+        // Planned Phase 2 models (reminders and credit scoring here, year-end
+        // close and allowance postings with accounting above), filed ahead of
+        // the slices that create them so those slices never edit this file.
+        // The class names are the contract those slices build to.
+        ReminderSetting::class => 'reminders',
+        ReminderBranchSetting::class => 'reminders',
+        ReminderRule::class => 'reminders',
+        ReminderTemplate::class => 'reminders',
+        ReminderPause::class => 'reminders',
+        BorrowerNotificationPreference::class => 'reminders',
+        CreditScoringSetting::class => 'credit_scoring',
+        CreditScorecardRevision::class => 'credit_scoring',
+        CreditApplicationProfile::class => 'credit_scoring',
+        CreditDecision::class => 'credit_scoring',
         // Deliberately system: an import run is housekeeping, not a record
         // any module's screen shows.
         CsvImportRun::class => self::UNMAPPED,
