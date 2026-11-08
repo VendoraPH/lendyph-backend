@@ -72,3 +72,9 @@ Schedule::command('imports:redact-rows')->dailyAt('03:45');
 // after 365, in chunks. After the registration prune and the import redaction,
 // so the retention jobs never overlap.
 Schedule::command('notifications:prune')->dailyAt('04:00')->timezone('Asia/Manila');
+
+// Module schedules, one file per module, so a module adds its own schedule
+// without editing this file. RouteSnapshotTest pins every schedule.
+require __DIR__.'/console/reminders.php';
+require __DIR__.'/console/credit-scoring.php';
+require __DIR__.'/console/linda.php';
