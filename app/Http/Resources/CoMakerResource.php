@@ -4,19 +4,31 @@ namespace App\Http\Resources;
 
 use App\Models\CoMaker;
 use App\Models\Loan;
+use App\Services\PersonalDataKeys;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
+use Illuminate\Support\Arr;
 
 class CoMakerResource extends JsonResource
 {
     /**
      * A co-maker for a caller who may not read their record: who they are and
      * how they relate to the member, never their address, contact number, work
-     * or income.
+     * or income (PersonalDataKeys::CO_MAKER).
      *
      * @return array<string, mixed>
      */
     public static function slim(CoMaker $coMaker): array
+    {
+        return Arr::except(self::record($coMaker), PersonalDataKeys::CO_MAKER);
+    }
+
+    /**
+     * The co-maker's own fields, personal ones included.
+     *
+     * @return array<string, mixed>
+     */
+    private static function record(CoMaker $coMaker): array
     {
         return [
             'id' => $coMaker->id,
@@ -27,6 +39,11 @@ class CoMakerResource extends JsonResource
             'last_name' => $coMaker->last_name,
             'suffix' => $coMaker->suffix,
             'full_name' => $coMaker->full_name,
+            'address' => $coMaker->address,
+            'contact_number' => $coMaker->contact_number,
+            'occupation' => $coMaker->occupation,
+            'employer' => $coMaker->employer,
+            'monthly_income' => $coMaker->monthly_income,
             'relationship_to_borrower' => $coMaker->relationship_to_borrower,
             'status' => $coMaker->status,
         ];
@@ -47,21 +64,7 @@ class CoMakerResource extends JsonResource
     public function toArray(Request $request): array
     {
         return [
-            'id' => $this->id,
-            'co_maker_code' => $this->co_maker_code,
-            'borrower_id' => $this->borrower_id,
-            'first_name' => $this->first_name,
-            'middle_name' => $this->middle_name,
-            'last_name' => $this->last_name,
-            'suffix' => $this->suffix,
-            'full_name' => $this->full_name,
-            'address' => $this->address,
-            'contact_number' => $this->contact_number,
-            'occupation' => $this->occupation,
-            'employer' => $this->employer,
-            'monthly_income' => $this->monthly_income,
-            'relationship_to_borrower' => $this->relationship_to_borrower,
-            'status' => $this->status,
+            ...self::record($this->resource),
             'borrower' => new BorrowerResource($this->whenLoaded('borrower')),
             'documents' => DocumentResource::collection($this->whenLoaded('documents')),
             'added_by' => $this->whenPivotLoaded('co_maker_loan', fn () => $this->pivot->added_by),
