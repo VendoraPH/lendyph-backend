@@ -62,6 +62,37 @@ class BalanceReductionClearingTest extends TestCase
         $this->assertEndsAtZero(116_667, 50_000);
     }
 
+    /**
+     * The apply endpoint alone posts the share (A2 on A0b): balanceAdjustment()
+     * runs after the periods are restated, so the principal reduced is the
+     * drop in unpaid principal, and the share is measured on what was unpaid
+     * before it.
+     */
+    public function test_applying_a_partial_reduction_posts_its_share_measured_on_the_drop_in_unpaid_principal(): void
+    {
+        $before = $this->unpaidPrincipalOf($this->new);
+        $this->assertSame(5_000_000, $before);
+
+        $adjustment = $this->applyReduction($this->new, -1_000_000);
+
+        $this->assertSame(1_000_000, $before - $this->unpaidPrincipalOf($this->new));
+        $this->assertSame(1, AccountingJournal::where('source', 'adjustment')->count());
+        $journal = $this->journalFor($adjustment, 'adjustment');
+        $this->assertNotNull($journal);
+        $this->assertSame(
+            PostingRules::deferralShare(583_333, 250_000, 1_000_000, $before),
+            [
+                'interest' => $this->described($journal, PostingRules::DEFERRED_INTEREST_CLEARED_LINE, 'debit'),
+                'penalty' => $this->described($journal, PostingRules::DEFERRED_PENALTY_CLEARED_LINE, 'debit'),
+            ],
+        );
+        $this->assertSame(166_667, $this->sumOn($journal, '1210', 'debit'));
+        $this->assertSame(166_667, $this->sumOn($journal, '1180', 'credit'));
+        $this->assertSame(1_000_000, $this->sumOn($journal, '1180', 'debit'));
+        $this->assertSame(1_000_000, $this->sumOn($journal, '1110', 'credit'));
+        $this->assertSame(['interest' => 466_666, 'penalty' => 200_000], $this->poster()->unrecognisedDeferral($this->new->fresh()));
+    }
+
     /** A second, completing reduction clears all that is left, as before. */
     public function test_a_completing_reduction_after_a_partial_one_clears_the_rest(): void
     {

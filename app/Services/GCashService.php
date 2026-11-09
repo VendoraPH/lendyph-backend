@@ -18,6 +18,12 @@ class GCashService
     /** The 409 when recording collides with another save on a lock. Nothing was saved. */
     public const CREATE_CONFLICT = 'Another GCash transaction was saved at the same moment. Nothing was saved; check the list, then submit again.';
 
+    /**
+     * The reference number's unique index. Two creates that read the same
+     * newest number collide on it; the second answers CREATE_CONFLICT.
+     */
+    public const REFERENCE_NO_INDEX = 'gcash_transactions_reference_no_unique';
+
     /** The 409 when mark-paid collides with another change to the transaction. */
     public const MARK_PAID_CONFLICT = 'This transaction was changed at the same moment. Nothing was saved; reload it and try again.';
 
@@ -31,9 +37,10 @@ class GCashService
      * charge, dated `transaction_date`. A pending Cash In posts nothing until
      * markPaid().
      *
-     * A deadlock or lock wait timeout answers 409 with nothing saved, never
-     * 500, and is not tried again: the duplicate check would have to run again
-     * against whatever the other save committed.
+     * A deadlock, a lock wait timeout or a collision on the reference number
+     * answers 409 with nothing saved, never 500, and is not tried again: the
+     * duplicate check would have to run again against whatever the other save
+     * committed.
      */
     public function createTransaction(array $payload, User $actor): GCashTransaction
     {
@@ -91,7 +98,7 @@ class GCashService
             }
 
             return $tx;
-        }, conflictMessage: self::CREATE_CONFLICT);
+        }, racedUniqueIndex: self::REFERENCE_NO_INDEX, conflictMessage: self::CREATE_CONFLICT);
     }
 
     /**

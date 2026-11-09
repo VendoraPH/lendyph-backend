@@ -37,6 +37,22 @@ class ReminderTemplate extends Model
     }
 
     /**
+     * Each type in words, for titles and reasons.
+     */
+    public static function typeLabel(?string $type): string
+    {
+        return match ($type) {
+            'upcoming' => 'Upcoming due',
+            'due_today' => 'Due today',
+            'past_due' => 'Past due',
+            'long_past_due' => 'Long past due',
+            'partial_payment' => 'Partial payment',
+            'payment_confirmation' => 'Payment confirmation',
+            default => 'Reminder',
+        };
+    }
+
+    /**
      * The active template for this type and channel in the language, falling
      * back to English.
      */
