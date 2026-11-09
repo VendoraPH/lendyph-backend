@@ -19,6 +19,30 @@ class RoleAndPermissionSeeder extends Seeder
     public const BOARD_ROLE_PATTERN = '/^bod(\d+$|_)/';
 
     /**
+     * The Accountant keeps the books (Phase 2, accounting round C): every
+     * accounting permission, allowance included, every branch, and read-only
+     * lending and report views. Pointedly WITHOUT `borrowers:view` (members'
+     * personal data, round fz), any lending write, users or settings. No user
+     * is given the role here; the owner assigns it in Users.
+     *
+     * Mirrors 2026_11_09_120000_add_accountant_role_and_allowance_permission,
+     * which creates the role with this list on already-migrated deployments.
+     *
+     * @var list<string>
+     */
+    public const ACCOUNTANT_PERMISSIONS = [
+        'accounting:view', 'accounting:reconcile', 'accounting:close', 'accounting:settings', 'accounting:allowance',
+        'chart_of_accounts:view', 'chart_of_accounts:create', 'chart_of_accounts:update', 'chart_of_accounts:delete',
+        'journals:view', 'journals:create', 'journals:post', 'journals:reverse',
+        'expenses:view', 'expenses:create', 'expenses:update', 'expenses:pay',
+        'cash_accounts:view', 'cash_accounts:transfer',
+        BranchAccess::VIEW_ALL,
+        'dashboard:view', 'reports:view', 'reports:export',
+        'loans:view', 'payments:view', 'loan_adjustments:view', 'share_capital:view',
+        'gcash:view', 'fees:view', 'audit_logs:view',
+    ];
+
+    /**
      * Seeding writes no audit rows: a fresh database's roles are the baseline,
      * not a change anyone made (Role is Auditable).
      */
@@ -121,6 +145,12 @@ class RoleAndPermissionSeeder extends Seeder
             // grants it on the already-migrated deployments.
             'expenses:pay',
             'cash_accounts:view', 'cash_accounts:transfer',
+            // Posting the allowance for credit losses. Its own permission, so a
+            // bookkeeper can't post one: super_admin and admin (through
+            // Permission::all() below) and accountant only. Mirrors
+            // 2026_11_09_120000_add_accountant_role_and_allowance_permission,
+            // which grants it on the already-migrated deployments.
+            'accounting:allowance',
 
             // Credit Scoring. Seeded together with its placeholder routes, which
             // answer 501 until the module is built. admin and super_admin only,
@@ -160,6 +190,7 @@ class RoleAndPermissionSeeder extends Seeder
             'collector' => ['description' => 'Collects payments on the field and marks collection status.'],
             'viewer' => ['description' => 'Read-only access to operational data.'],
             'general_bookkeeper' => ['description' => 'Releases loans after BOD approval in the normal workflow.'],
+            'accountant' => ['description' => 'Keeps the books: journals, expenses, reconciliation, period and year-end close, opening balances and the allowance. Assigned by the owner.'],
 
             // Approval-chain roles. ApprovalWorkflowSetting's default chains
             // have always named these, but until 2026-09-16 none of them
@@ -332,6 +363,20 @@ class RoleAndPermissionSeeder extends Seeder
             // Keeps the books for every branch.
             BranchAccess::VIEW_ALL,
         ]);
+
+        // Accountant: self::ACCOUNTANT_PERMISSIONS. Unlike the older system
+        // roles it comes with a display name, "Accountant", set only while it
+        // has none, so a label edited in User Roles survives a re-seed.
+        $accountant = Role::updateOrCreate(
+            ['name' => 'accountant', 'guard_name' => $guard],
+            ['is_system' => true, 'is_active' => true, 'description' => $systemRoleAttrs['accountant']['description']],
+        );
+
+        if (blank($accountant->display_name)) {
+            $accountant->update(['display_name' => 'Accountant']);
+        }
+
+        $accountant->syncPermissions(self::ACCOUNTANT_PERMISSIONS);
 
         /**
          * The five READ-ONLY accounting permissions `manager` is granted by
