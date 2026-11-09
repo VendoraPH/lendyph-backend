@@ -162,7 +162,15 @@ class CooperativeTemplateBackfill
     private function repoint(bool $dryRun, array $usable): array
     {
         $to = collect(ChartOfAccountsSeeder::COOPERATIVE_MAPPING_OVERRIDES)->get(self::ROLE);
-        $mapping = DB::table('accounting_account_mappings')->where('role', self::ROLE)->first();
+        /*
+         * Locked outside a dry run, so a mapping saved from Settings while
+         * this runs waits for it, and the "changed by a user" check below
+         * can't be overtaken between the read and the update.
+         */
+        $mapping = DB::table('accounting_account_mappings')
+            ->where('role', self::ROLE)
+            ->when(! $dryRun, fn ($query) => $query->lockForUpdate())
+            ->first();
 
         if ($mapping === null) {
             return ['status' => 'skipped', 'reason' => 'it is not mapped; set it in Accounting → Settings → Default Accounts'];

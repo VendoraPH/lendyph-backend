@@ -1,6 +1,7 @@
 <?php
 
 use App\Models\Role;
+use App\Rules\UniqueRoleDisplayName;
 use App\Services\RolePermissionAudit;
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Support\Facades\DB;
@@ -17,10 +18,14 @@ use Spatie\Permission\PermissionRegistrar;
  *   system change. Mirrors 2026_11_09_100000_add_reminders_permissions.
  * - The `accountant` system role is created when it is missing, with its
  *   display name, description and permission list, and one system audit row
- *   (`created`, the list in its new values). INSERT-only, as in
+ *   (`created`, the list in its new values). The display name gets the
+ *   check a role save gets (UniqueRoleDisplayName): when another role
+ *   already reads as "Accountant", the role is created with no display name
+ *   and its audit row says so. INSERT-only, as in
  *   2026_09_16_110001_add_approval_chain_roles: a role an admin already built
- *   under that key is left exactly as it is, permissions included, and
- *   logged. Nobody is given the role; the owner assigns it in Users.
+ *   under that key is left exactly as it is, permissions included, with one
+ *   system audit row naming it (`role_kept_by_migration`). Nobody is given
+ *   the role; the owner assigns it in Users.
  *
  * Listed here AND in RoleAndPermissionSeeder (ACCOUNTANT_PERMISSIONS): this
  * migration is what deployed databases get, the seeder is what a fresh
@@ -43,6 +48,8 @@ return new class extends Migration
 
     private const ROLE_TYPE = 'App\Models\Role';
 
+    private const KEPT_ACTION = 'role_kept_by_migration';
+
     private const ROLE_ATTRIBUTES = [
         'display_name' => 'Accountant',
         'description' => 'Keeps the books: journals, expenses, reconciliation, period and year-end close, opening balances and the allowance. Assigned by the owner.',
@@ -59,7 +66,7 @@ return new class extends Migration
         'branches:view_all',
         'dashboard:view', 'reports:view', 'reports:export',
         'loans:view', 'payments:view', 'loan_adjustments:view', 'share_capital:view',
-        'gcash:view', 'fees:view', 'audit_logs:view',
+        'gcash:view', 'fees:view',
     ];
 
     public function up(): void
@@ -125,14 +132,11 @@ return new class extends Migration
 
     private function createTheAccountant(string $guard): void
     {
-        $existing = DB::table('roles')->where('name', self::ROLE)->where('guard_name', $guard)->first(['id', 'is_system']);
+        $existing = DB::table('roles')->where('name', self::ROLE)->where('guard_name', $guard)->first(['id', 'name', 'display_name', 'is_system']);
 
         if ($existing !== null) {
             if (! (bool) $existing->is_system) {
-                Log::warning('A role keyed accountant already exists; it was left as it is, permissions included.', [
-                    'migration' => self::NAME,
-                    'role_id' => (int) $existing->id,
-                ]);
+                $this->recordTheKeptRole($existing);
             }
 
             return;
@@ -141,11 +145,13 @@ return new class extends Migration
         $this->ensurePermissions(self::ACCOUNTANT_PERMISSIONS, $guard);
 
         $now = now();
+        $clash = $this->roleReadingAs(self::ROLE_ATTRIBUTES['display_name']);
+        $attributes = [...self::ROLE_ATTRIBUTES, 'display_name' => $clash === null ? self::ROLE_ATTRIBUTES['display_name'] : null];
 
         $roleId = DB::table('roles')->insertGetId([
             'name' => self::ROLE,
             'guard_name' => $guard,
-            ...self::ROLE_ATTRIBUTES,
+            ...$attributes,
             'created_at' => $now,
             'updated_at' => $now,
         ]);
@@ -174,19 +180,92 @@ return new class extends Migration
             'new_values' => json_encode([
                 'name' => self::ROLE,
                 'guard_name' => $guard,
-                ...self::ROLE_ATTRIBUTES,
+                ...$attributes,
                 'permissions' => array_values($permissions),
             ], JSON_UNESCAPED_UNICODE),
             'ip_address' => null,
             'user_agent' => null,
             'description' => sprintf(
-                'System change: Role "%s" (%s) created by migration %s with %d permissions. No user is given it; the owner assigns it.',
-                self::ROLE_ATTRIBUTES['display_name'],
+                'System change: Role %s (%s) created by migration %s with %d permissions. No user is given it; the owner assigns it.%s',
+                json_encode($attributes['display_name'] ?? self::ROLE, JSON_UNESCAPED_UNICODE),
                 self::ROLE,
                 self::NAME,
                 count($permissions),
+                $clash === null ? '' : sprintf(
+                    ' Its display name "%s" was left empty: role %s (%s) already reads as it. Set one in Settings > User Roles.',
+                    self::ROLE_ATTRIBUTES['display_name'],
+                    json_encode($clash->display_name ?? $clash->name, JSON_UNESCAPED_UNICODE),
+                    $clash->name,
+                ),
             ),
             'created_at' => $now,
+        ]);
+
+        if ($clash !== null) {
+            Log::warning('The Accountant role was created with no display name; another role already reads as "Accountant".', [
+                'migration' => self::NAME,
+                'role_id' => $roleId,
+                'clashing_role' => $clash->name,
+            ]);
+        }
+    }
+
+    /**
+     * The role whose key or display name already reads as `$displayName`,
+     * by the same comparison a role save makes (UniqueRoleDisplayName), any
+     * guard. Null when there is none.
+     */
+    private function roleReadingAs(string $displayName): ?object
+    {
+        foreach (DB::table('roles')->orderBy('id')->get(['id', 'name', 'display_name']) as $role) {
+            if (UniqueRoleDisplayName::readsAsAnotherRole([$role], $displayName)) {
+                return $role;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * A role keyed `accountant` that this migration didn't create: left as
+     * it is, and named once in the audit log so the owner knows the Accountant
+     * role wasn't created. A re-run writes no second row.
+     */
+    private function recordTheKeptRole(object $role): void
+    {
+        $recorded = DB::table('audit_logs')
+            ->where('action', self::KEPT_ACTION)
+            ->where('auditable_type', self::ROLE_TYPE)
+            ->where('auditable_id', $role->id)
+            ->exists();
+
+        if ($recorded) {
+            return;
+        }
+
+        $label = filled($role->display_name) ? trim((string) $role->display_name) : $role->name;
+
+        DB::table('audit_logs')->insert([
+            'user_id' => null,
+            'action' => self::KEPT_ACTION,
+            'auditable_type' => self::ROLE_TYPE,
+            'auditable_id' => $role->id,
+            'old_values' => null,
+            'new_values' => null,
+            'ip_address' => null,
+            'user_agent' => null,
+            'description' => sprintf(
+                'System change: Role %s (%s) already existed and was left as it is, permissions included; migration %s did not create the Accountant role or change this one.',
+                json_encode($label, JSON_UNESCAPED_UNICODE),
+                $role->name,
+                self::NAME,
+            ),
+            'created_at' => now(),
+        ]);
+
+        Log::warning('A role keyed accountant already exists; it was left as it is, permissions included.', [
+            'migration' => self::NAME,
+            'role_id' => (int) $role->id,
         ]);
     }
 

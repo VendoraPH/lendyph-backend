@@ -89,10 +89,10 @@ class AccountantRoleTest extends TestCase
             'branches:view_all',
             'dashboard:view', 'reports:view', 'reports:export',
             'loans:view', 'payments:view', 'loan_adjustments:view', 'share_capital:view',
-            'gcash:view', 'fees:view', 'audit_logs:view',
+            'gcash:view', 'fees:view',
         ]), $this->sorted(RoleAndPermissionSeeder::ACCOUNTANT_PERMISSIONS));
 
-        foreach (['borrowers:view', 'loans:create', 'loans:update', 'payments:create', 'users:view', 'settings:update'] as $permission) {
+        foreach (['borrowers:view', 'audit_logs:view', 'audit_logs:export', 'loans:create', 'loans:update', 'payments:create', 'users:view', 'settings:update'] as $permission) {
             $this->assertNotContains($permission, RoleAndPermissionSeeder::ACCOUNTANT_PERMISSIONS);
         }
     }
@@ -204,7 +204,37 @@ class AccountantRoleTest extends TestCase
         $this->assertFalse($role->is_active);
         $this->assertSame('Built by hand', $role->description);
         $this->assertSame(['journals:view'], $this->grants('accountant'));
-        $this->assertSame(0, AuditLog::query()->where('id', '>', $before)->where('auditable_id', $role->id)->count());
+
+        $kept = AuditLog::query()->where('id', '>', $before)->where('auditable_type', Role::class)->where('auditable_id', $role->id)->sole();
+        $this->assertSame('role_kept_by_migration', $kept->action);
+        $this->assertNull($kept->user_id);
+        $this->assertStringContainsString('(accountant)', (string) $kept->description);
+        $this->assertStringContainsString(self::MIGRATION, (string) $kept->description);
+
+        $audits = AuditLog::query()->count();
+        $this->migration()->up();
+        $this->assertSame($audits, AuditLog::query()->count(), 'A second run names the kept role once only.');
+    }
+
+    public function test_a_display_name_another_role_already_reads_as_is_left_empty_and_audited(): void
+    {
+        $this->forgetRoleAndPermission();
+        Role::findByName('general_bookkeeper')->update(['display_name' => '  ACCOUNTANT ']);
+        Auth::logout();
+        $before = AuditLog::query()->max('id') ?? 0;
+
+        $this->migration()->up();
+        app(PermissionRegistrar::class)->forgetCachedPermissions();
+
+        $role = Role::findByName('accountant');
+        $this->assertNull($role->display_name);
+        $this->assertSame($this->sorted(RoleAndPermissionSeeder::ACCOUNTANT_PERMISSIONS), $this->grants('accountant'));
+
+        $created = AuditLog::query()->where('id', '>', $before)->where('action', 'created')->where('auditable_id', $role->id)->sole();
+        $this->assertNull($created->user_id);
+        $this->assertNull($created->new_values['display_name']);
+        $this->assertStringContainsString('display name "Accountant" was left empty', (string) $created->description);
+        $this->assertStringContainsString('(general_bookkeeper)', (string) $created->description);
     }
 
     // ── What an Accountant can do ──
@@ -242,6 +272,24 @@ class AccountantRoleTest extends TestCase
 
         $this->getJson('/api/borrowers')->assertForbidden();
         $this->postJson('/api/loans', [])->assertForbidden();
+    }
+
+    public function test_the_accountant_cannot_read_the_audit_trail(): void
+    {
+        $row = AuditLog::query()->create([
+            'user_id' => $this->admin->id,
+            'action' => 'updated',
+            'auditable_type' => Role::class,
+            'auditable_id' => Role::findByName('viewer')->id,
+            'old_values' => ['description' => 'Before'],
+            'new_values' => ['description' => 'After'],
+            'description' => 'Probe row',
+        ]);
+
+        $this->actingAs($this->userWithRole('accountant'));
+
+        $this->getJson('/api/audit-logs')->assertForbidden();
+        $this->getJson("/api/audit-logs/{$row->id}")->assertForbidden();
     }
 
     // ── Helpers ──

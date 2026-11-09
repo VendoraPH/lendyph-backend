@@ -22,8 +22,11 @@ class RoleAndPermissionSeeder extends Seeder
      * The Accountant keeps the books (Phase 2, accounting round C): every
      * accounting permission, allowance included, every branch, and read-only
      * lending and report views. Pointedly WITHOUT `borrowers:view` (members'
-     * personal data, round fz), any lending write, users or settings. No user
-     * is given the role here; the owner assigns it in Users.
+     * personal data, round fz), any lending write, users or settings, and
+     * WITHOUT `audit_logs:view`: the audit trail quotes whole member rows
+     * (contacts, birthdate, address, spouse, income) across every branch, so
+     * reading it reads what `borrowers:view` guards. No user is given the role
+     * here; the owner assigns it in Users.
      *
      * Mirrors 2026_11_09_120000_add_accountant_role_and_allowance_permission,
      * which creates the role with this list on already-migrated deployments.
@@ -39,7 +42,7 @@ class RoleAndPermissionSeeder extends Seeder
         BranchAccess::VIEW_ALL,
         'dashboard:view', 'reports:view', 'reports:export',
         'loans:view', 'payments:view', 'loan_adjustments:view', 'share_capital:view',
-        'gcash:view', 'fees:view', 'audit_logs:view',
+        'gcash:view', 'fees:view',
     ];
 
     /**
