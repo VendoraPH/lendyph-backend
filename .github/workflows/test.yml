@@ -1,53 +1,46 @@
 name: tests
 
-# Runs the Pest suite on PRs and on pushes to the long-lived branches.
-# deploy.yml uses `paths-ignore: ['.github/**']`, so adding this workflow does
-# not trigger a deploy.
+# Runs the Pest suite on PRs, on pushes to the long-lived branches, and on
+# merge-queue groups. deploy.yml uses `paths-ignore: ['.github/**']`, so
+# editing this workflow does not trigger a deploy, and no deploy workflow
+# listens for merge_group: the queue's temporary gh-readonly-queue/* branch is
+# tested here and deploys still run only on the push the queue makes when it
+# merges.
 on:
   pull_request:
   push:
+    branches: [development, main]
+  merge_group:
     branches: [development, main]
 
 concurrency:
   group: tests-${{ github.ref }}
   cancel-in-progress: true
 
+# Layout (2026-11-09). The suite reached ~5,700 tests and one job took 15-21
+# minutes, so it is split:
+#
+#   checks      Composer audit + Pint, once, beside the shards.
+#   shard 1..4  Pest's own time-balanced sharding (--shard=i/4, timings in
+#               tests/.pest/shards.json), each on its own runner and MySQL,
+#               each with its own "Tests:" summary gate.
+#   pest        The aggregate. It is the required status check, so its name
+#               must stay exactly `pest`: it fails unless `checks` and every
+#               shard succeeded, then sums the shards' passed counts against
+#               the MIN_TESTS floor.
+#
+# A new test file that shards.json does not know yet still runs: Pest deals
+# unknown files round-robin across the shards and prints a WARN. Refresh the
+# timings now and then with `vendor/bin/pest --parallel --update-shards`
+# (all green, on a quiet machine), and commit tests/.pest/shards.json.
 jobs:
-  pest:
+  checks:
+    name: Composer audit and Pint
     runs-on: ubuntu-latest
-    # A stuck run used to burn an hour in silence: GitHub withholds the logs
-    # until a run completes, so an unbounded job is also an unreadable one.
-    # Fail at 45 and hand back the log instead.
-    timeout-minutes: 45
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v7
-
-      # MySQL is started as an explicit container (not a GitHub `services:` block)
-      # because service containers can't override the command, and we need the
-      # tmpfs + durability-off flags. Matches phpunit.xml: lendyph_testing / root /
-      # empty password on 127.0.0.1:3306.
-      - name: Start MySQL (tmpfs, durability off)
-        run: |
-          docker run -d --name mysql-test \
-            -p 3306:3306 \
-            --tmpfs /var/lib/mysql \
-            -e MYSQL_ALLOW_EMPTY_PASSWORD=yes \
-            -e MYSQL_DATABASE=lendyph_testing \
-            mysql:8.0 \
-            --innodb-flush-log-at-trx-commit=0 \
-            --innodb-doublewrite=0 \
-            --skip-log-bin \
-            --innodb-buffer-pool-size=512M \
-            --lock-wait-timeout=120
-          echo "Waiting for MySQL to accept connections..."
-          for i in $(seq 1 60); do
-            if docker exec mysql-test mysqladmin ping -h 127.0.0.1 --silent 2>/dev/null; then
-              echo "MySQL ready"; exit 0
-            fi
-            sleep 2
-          done
-          echo "MySQL did not become ready"; docker logs mysql-test; exit 1
 
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
@@ -55,6 +48,12 @@ jobs:
           php-version: '8.4'
           extensions: pdo_mysql, gd, mbstring, bcmath, intl, zip
           coverage: none
+
+      - name: Cache vendor
+        uses: actions/cache@v6
+        with:
+          path: vendor
+          key: vendor-${{ runner.os }}-php8.4-${{ hashFiles('composer.lock') }}
 
       - name: Install Composer dependencies
         run: composer install --no-interaction --prefer-dist --no-progress
@@ -101,41 +100,97 @@ jobs:
       - name: Check code style (Pint)
         run: ./vendor/bin/pint --test
 
+  shard:
+    name: pest shard ${{ matrix.shard }}/4
+    runs-on: ubuntu-latest
+    # A stuck run used to burn an hour in silence: GitHub withholds the logs
+    # until a run completes, so an unbounded job is also an unreadable one.
+    # A shard takes a quarter of the suite; fail at 20 and hand back the log.
+    timeout-minutes: 20
+    strategy:
+      # Every shard reports, so one red shard doesn't hide another's failures.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # MySQL is started as an explicit container (not a GitHub `services:` block)
+      # because service containers can't override the command, and we need the
+      # tmpfs + durability-off flags. Matches phpunit.xml: lendyph_testing / root /
+      # empty password on 127.0.0.1:3306. It boots while PHP and Composer are
+      # set up; "Wait for MySQL" below blocks only on what is left.
+      - name: Start MySQL (tmpfs, durability off)
+        run: |
+          docker run -d --name mysql-test \
+            -p 3306:3306 \
+            --tmpfs /var/lib/mysql \
+            -e MYSQL_ALLOW_EMPTY_PASSWORD=yes \
+            -e MYSQL_DATABASE=lendyph_testing \
+            mysql:8.0 \
+            --innodb-flush-log-at-trx-commit=0 \
+            --innodb-doublewrite=0 \
+            --skip-log-bin \
+            --innodb-buffer-pool-size=512M \
+            --lock-wait-timeout=120
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_mysql, gd, mbstring, bcmath, intl, zip
+          coverage: none
+
+      - name: Cache vendor
+        uses: actions/cache@v6
+        with:
+          path: vendor
+          key: vendor-${{ runner.os }}-php8.4-${{ hashFiles('composer.lock') }}
+
+      - name: Install Composer dependencies
+        run: composer install --no-interaction --prefer-dist --no-progress
+
       - name: Prepare environment
         run: |
           cp .env.example .env
           php artisan key:generate
 
-      - name: Run tests (parallel)
-        # --processes stays at FOUR, but the old reason for it is no longer true
-        # and has been replaced with a measured one.
+      - name: Wait for MySQL
+        run: |
+          for i in $(seq 1 60); do
+            if docker exec mysql-test mysqladmin ping -h 127.0.0.1 --silent 2>/dev/null; then
+              echo "MySQL ready"; exit 0
+            fi
+            sleep 2
+          done
+          echo "MySQL did not become ready"; docker logs mysql-test; exit 1
+
+      - name: Run tests (shard ${{ matrix.shard }}/4, parallel)
+        # Pest directly, not `php artisan test`: artisan adds Laravel's
+        # --runner argument, which Pest's shard step then hands to a plain
+        # `pest --list-tests` that refuses it. `pest --parallel` sets up the
+        # same Laravel parallel runner and per-worker databases itself.
         #
-        # The previous note said "every test calls migrate:fresh
-        # (SetupLendyPH.php), so more workers means more concurrent DROP/CREATE
-        # against one server", measuring 6 workers (1080s) slower than 4 (1039s).
-        # That regime is gone: the suite moved to RefreshDatabase, the schema is
-        # built once per worker, and each test runs in a transaction. The DDL
-        # bottleneck those figures came from no longer exists.
+        # Four worker processes, one per vCPU of a public repo's standard
+        # runner. The count is ParaTest's default (the core count) because
+        # Pest's shard step also refuses --processes; the old single job ran
+        # --processes=4 on the same 4 vCPUs. Measured on 2026-10 with the
+        # suite in transactions: 4 and 8 processes were at parity. Re-measure
+        # here before changing it.
         #
-        # Re-measured on the full suite, same machine, same image, back to back:
-        # 4 processes 60.8s, 8 processes 61.2s, both 1873 passed. Parity, so
-        # there is nothing to gain by raising it. Treat those as an upper bound
-        # rather than a prediction for CI: this ran on a developer Mac, and a
-        # GitHub standard runner has fewer cores, where 4 is already the
-        # oversubscribed end. Re-measure here before changing the number.
-        #
-        # MIN_TESTS is a FLOOR, not an expected count. The suite grows; this only
-        # has to be high enough to catch a run that collapsed. Raise it when it
-        # drifts far below the real total, and do not pin it to the exact number.
+        # The passed-count floor (MIN_TESTS) is checked once, on the sum of all
+        # shards, by the `pest` job. Here a shard only has to finish, fail
+        # nothing, and pass at least one test.
         env:
-          MIN_TESTS: "1800"
+          SHARD: ${{ matrix.shard }}/4
         run: |
           set -uo pipefail
 
-          # Captured, not trusted. `artisan test` exits 0 over real failures
-          # (verified repeatedly on this project), so the exit code cannot gate
-          # this job and the summary line has to be read instead.
-          php artisan test --parallel --processes=4 2>&1 | tee pest-output.log
+          # Captured, not trusted. The parallel run has exited 0 over real
+          # failures (verified repeatedly on this project), so the exit code
+          # cannot gate this job and the summary line has to be read instead.
+          vendor/bin/pest --parallel --shard="$SHARD" 2>&1 | tee pest-output.log
           echo
 
           # Strip ANSI colour before matching. Pest writes "\e[90mTests:\e[39m",
@@ -148,7 +203,7 @@ jobs:
           summary="$(grep -aE '^[[:space:]]*Tests:' pest-output.plain.log | tail -1 || true)"
 
           if [ -z "$summary" ]; then
-            echo "::error::The suite produced no 'Tests:' summary line. It did not"
+            echo "::error::Shard $SHARD produced no 'Tests:' summary line. It did not"
             echo "::error::finish - most likely it died mid-run (OOM, a worker crash,"
             echo "::error::or a fatal during bootstrap). A green exit code here means"
             echo "::error::nothing; see pest-output.log in this run's artifacts."
@@ -158,7 +213,7 @@ jobs:
           echo "Summary: $summary"
 
           if echo "$summary" | grep -qaE 'failed|errored'; then
-            echo "::error::Tests failed or errored: $summary"
+            echo "::error::Shard $SHARD: tests failed or errored: $summary"
             exit 1
           fi
 
@@ -170,23 +225,88 @@ jobs:
               ;;
           esac
 
-          if [ "$passed" -lt "$MIN_TESTS" ]; then
-            echo "::error::Only $passed tests ran, floor is $MIN_TESTS. The suite"
-            echo "::error::did not collapse loudly, but it ran far less than it should."
-            echo "::error::Something stopped collecting tests - check for a bootstrap"
-            echo "::error::failure or a suite/path change before lowering this floor."
+          if [ "$passed" -lt 1 ]; then
+            echo "::error::Shard $SHARD passed no tests: $summary"
             exit 1
           fi
 
-          echo "OK: $passed tests passed (floor $MIN_TESTS)."
+          echo "OK: shard $SHARD, $passed tests passed."
 
       - name: Upload test output
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: pest-output
+          name: pest-output-${{ matrix.shard }}
           path: |
             pest-output.log
             pest-output.plain.log
           if-no-files-found: ignore
           retention-days: 7
+
+  pest:
+    # The required status check. Keep the name exactly `pest`.
+    name: pest
+    needs: [checks, shard]
+    # always(): a failed or cancelled shard must turn this red, not skip it. A
+    # skipped required check reads as passing.
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Every shard and check succeeded
+        env:
+          CHECKS: ${{ needs.checks.result }}
+          SHARDS: ${{ needs.shard.result }}
+        run: |
+          echo "checks: $CHECKS, shards: $SHARDS"
+          if [ "$CHECKS" != success ] || [ "$SHARDS" != success ]; then
+            echo "::error::A shard or the audit/Pint job did not succeed (checks: $CHECKS, shards: $SHARDS)."
+            exit 1
+          fi
+
+      - name: Download shard output
+        uses: actions/download-artifact@v7
+        with:
+          pattern: pest-output-*
+          path: shards
+
+      # MIN_TESTS is a FLOOR, not an expected count. The suite grows; this only
+      # has to be high enough to catch a run that collapsed. Raise it when it
+      # drifts far below the real total, and do not pin it to the exact number.
+      - name: Passed-count floor across all shards
+        env:
+          MIN_TESTS: "5000"
+          SHARD_COUNT: "4"
+        run: |
+          set -uo pipefail
+          total=0
+          found=0
+          for f in shards/pest-output-*/pest-output.plain.log; do
+            [ -f "$f" ] || continue
+            summary="$(grep -aE '^[[:space:]]*Tests:' "$f" | tail -1 || true)"
+            passed="$(echo "$summary" | sed -E 's/.*[^0-9]([0-9]+) passed.*/\1/')"
+            case "$passed" in
+              ''|*[!0-9]*)
+                echo "::error::Could not read a passed count from $f: $summary"
+                exit 1
+                ;;
+            esac
+            echo "$f: $summary"
+            total=$((total + passed))
+            found=$((found + 1))
+          done
+
+          if [ "$found" -ne "$SHARD_COUNT" ]; then
+            echo "::error::Found $found shard summaries, expected $SHARD_COUNT."
+            exit 1
+          fi
+
+          if [ "$total" -lt "$MIN_TESTS" ]; then
+            echo "::error::Only $total tests ran across all shards, floor is $MIN_TESTS."
+            echo "::error::Something stopped collecting tests - check for a bootstrap"
+            echo "::error::failure or a suite/path change before lowering this floor."
+            exit 1
+          fi
+
+          echo "OK: $total tests passed across $found shards (floor $MIN_TESTS)."
