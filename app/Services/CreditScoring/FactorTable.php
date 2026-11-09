@@ -4,7 +4,6 @@ namespace App\Services\CreditScoring;
 
 use App\Models\CreditScorecardRevision;
 use InvalidArgumentException;
-use UnexpectedValueException;
 
 /**
  * A scorecard revision's rules, read for scoring: the categories, the active
@@ -83,19 +82,13 @@ final class FactorTable
     }
 
     /**
-     * A percent with at most two decimals, in hundredths, read from its
-     * shortest decimal form so 16.67 is 1667 exactly. More decimals are an
-     * error: a weight is never rounded.
+     * A percent with at most two decimals, in hundredths (Decimal), so
+     * 16.67 is 1667 exactly. More decimals are an error: a weight is never
+     * rounded.
      */
     public static function hundredths(int|float|string $percent): int
     {
-        $text = is_string($percent) ? trim($percent) : json_encode($percent, JSON_PRESERVE_ZERO_FRACTION);
-
-        if (! is_string($text) || preg_match('/^(\d+)(?:\.(\d{1,2})0*)?$/', $text, $parts) !== 1) {
-            throw new UnexpectedValueException("A weight must be a number with at most two decimals, not '{$text}'.");
-        }
-
-        return (int) $parts[1] * 100 + (int) str_pad($parts[2] ?? '', 2, '0');
+        return Decimal::scaled($percent, 2);
     }
 
     /**
