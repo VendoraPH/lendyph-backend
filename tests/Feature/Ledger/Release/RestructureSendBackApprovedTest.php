@@ -3,6 +3,7 @@
 namespace Tests\Feature\Ledger\Release;
 
 use App\Models\AuditLog;
+use App\Models\Branch;
 use App\Models\Loan;
 use App\Models\LoanApprovalStep;
 use App\Models\Role;
@@ -292,6 +293,58 @@ class RestructureSendBackApprovedTest extends TestCase
         $this->assertSame(LoanApprovalStep::KIND_SUBMIT, $round2->first()->kind);
         $this->assertSame(LoanApprovalStep::STATUS_SENT_BACK, $new->approvalSteps()->where('round', 1)->where('kind', LoanApprovalStep::KIND_RELEASE)->sole()->status);
         $this->assertSame('for_review', $new->fresh()->status);
+    }
+
+    public function test_a_release_between_the_send_back_and_the_re_approval_is_refused_with_422(): void
+    {
+        $source = $this->createReleasedLoan();
+        $new = $this->chainApprovedRestructureOf($source);
+        $this->patchJson("/api/loans/{$new->id}/send-back-approved", ['reason' => 'Figures changed'])->assertOk();
+        $before = $this->releaseState();
+
+        $this->patchJson("/api/loans/{$new->id}/release")
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['status' => "Loan must be in 'approved' status to release."]);
+
+        $this->assertSame($before, $this->releaseState());
+        $this->assertContains($source->fresh()->status, ['released', 'ongoing']);
+    }
+
+    public function test_in_the_new_round_a_single_shot_approve_by_another_role_is_refused(): void
+    {
+        $source = $this->createReleasedLoan();
+        $new = $this->chainApprovedRestructureOf($source);
+        $this->patchJson("/api/loans/{$new->id}/send-back-approved", ['reason' => 'Figures changed'])->assertOk();
+        // loan_officer holds loans:approve and didn't create the restructure.
+        $officer = $this->userWithRole('loan_officer');
+        $before = $this->releaseState();
+
+        $this->actingAs($officer)
+            ->patchJson("/api/loans/{$new->id}/approve", ['approval_remarks' => 'ok'])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['status' => 'This loan is still moving through its approval chain. Sign off on the current step instead.']);
+
+        $this->assertSame($before, $this->releaseState());
+        $this->assertSame('for_review', $new->fresh()->status);
+    }
+
+    public function test_a_caller_from_another_branch_gets_404_and_nothing_is_written(): void
+    {
+        $source = $this->createReleasedLoan();
+        $new = $this->chainApprovedRestructureOf($source);
+        // A cashier holds loans:release but not branches:view_all.
+        $far = Branch::factory()->create(['name' => 'Far Branch', 'code' => 'FAR']);
+        $cashier = User::factory()->create(['branch_id' => $far->id]);
+        $cashier->assignRole(Role::where('name', 'cashier')->firstOrFail());
+        $this->assertTrue($cashier->can('loans:release'));
+        $before = $this->releaseState();
+
+        $this->actingAs($cashier)
+            ->patchJson("/api/loans/{$new->id}/send-back-approved", ['reason' => 'Figures changed'])
+            ->assertNotFound();
+
+        $this->assertSame($before, $this->releaseState());
+        $this->assertSame('approved', $new->fresh()->status);
     }
 
     private function assertRefusedByStatus(Loan $loan, string $message): void

@@ -66,7 +66,7 @@ class RestructureSendBackApprovedConflictTest extends TestCase
         $this->assertWaitingOnRowAnswers409($new, $source->id);
     }
 
-    public function test_of_two_send_backs_one_after_the_other_the_second_answers_409(): void
+    public function test_a_second_send_back_after_the_first_committed_answers_422_on_status(): void
     {
         $new = $this->approvedRestructureOf($this->createReleasedLoan(), 50000, 'Board approved write-off');
 

@@ -1311,19 +1311,36 @@ class LoanService
      *
      * A loan that was not an approved restructure when it was read is a 422,
      * checked before the transaction. Inside it (the outermost
-     * LoanWriteTransaction) the restructure row is locked first, then its
-     * source, as approval does, and the status is read again under the lock:
-     * a restructure sent back, released or voided since it was read is a 409,
-     * as is a deadlock or a lock wait timeout. Nothing is written then, and
-     * nobody is told: the notices wait for the commit.
+     * LoanWriteTransaction) the restructure and its source are locked in ONE
+     * id-ordered statement, as the first statement, the way a release locks
+     * them (lockAndGuardReleaseRows()), so a send-back and a release of the
+     * same restructure queue up instead of deadlocking. The status is then
+     * read again under the lock: a restructure sent back, released or voided
+     * since it was read is a 409, as is a lock wait timeout. Nothing is
+     * written then, and nobody is told: the notices wait for the commit.
      */
     public function sendBackApproved(Loan $loan, User $user, string $reason): Loan
     {
         $this->guardSendBackApproved($loan);
 
         return LoanWriteTransaction::run(function () use ($loan, $user, $reason): Loan {
-            $this->lockLoanInStatus($loan, 'approved');
-            $this->lockSourceLoan((int) $loan->source_loan_id);
+            $ids = [(int) $loan->getKey(), (int) $loan->source_loan_id];
+            sort($ids);
+
+            $locked = Loan::whereKey($ids)->orderBy('id')->lockForUpdate()->get()->keyBy('id');
+            $current = $locked->get($loan->getKey());
+
+            if ($current === null || $current->status !== 'approved') {
+                throw LoanWriteTransaction::conflict();
+            }
+
+            if (! $locked->has($loan->source_loan_id)) {
+                throw ValidationException::withMessages([
+                    'loan' => ['The loan being restructured no longer exists.'],
+                ]);
+            }
+
+            $loan->setRawAttributes($current->getAttributes(), true);
 
             $loan->update([
                 'status' => 'for_review',
@@ -2273,6 +2290,18 @@ class LoanService
         );
     }
 
+    /**
+     * Void a loan that was never released: PATCH /loans/{loan}/void.
+     *
+     * A loan released (or further) when it was read is the 422 it always was,
+     * checked before the transaction. Inside it (the outermost
+     * LoanWriteTransaction) the loan row is locked as the first statement and
+     * its status read again: a loan released, voided or otherwise moved since
+     * this request read it is a 409, as is a lock wait timeout, and nothing is
+     * written. So a void that read `approved` while a release ran can never
+     * overwrite `released`. No collateral lock: a void moves a loan only
+     * between statuses that pledge nothing (Loan::PLEDGING_STATUSES).
+     */
     public function voidLoan(Loan $loan): Loan
     {
         if (in_array($loan->status, Loan::EVER_RELEASED_STATUSES, true)) {
@@ -2281,9 +2310,13 @@ class LoanService
             ]);
         }
 
-        $loan->update(['status' => 'void']);
+        return LoanWriteTransaction::run(function () use ($loan): Loan {
+            $this->lockLoanInStatus($loan, (string) $loan->status);
 
-        return $loan;
+            $loan->update(['status' => 'void']);
+
+            return $loan;
+        });
     }
 
     /**

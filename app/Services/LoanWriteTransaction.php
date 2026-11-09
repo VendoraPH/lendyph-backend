@@ -27,6 +27,9 @@ use PDOException;
  *   reject());
  * - signing off an approval-chain step and sending a loan back
  *   (LoanApprovalChainService::approve(), sendBack());
+ * - sending an approved restructure back for approval
+ *   (LoanService::sendBackApproved());
+ * - voiding a loan that was never released (LoanService::voidLoan());
  * - editing a loan with no collateral list (LoanService::updateLoan()), which
  *   locks the loan row and re-checks that it is still editable. With a list the
  *   edit is a collateral write (CollateralWriteTransaction).
@@ -44,20 +47,23 @@ use PDOException;
  *
  *   1. the collateral rows the operation touches, in ONE id-ordered statement,
  *      as the transaction's first locking read (and before its first plain
- *      read, for CollateralPledgeGuard's snapshot rule). A release and a void
- *      can move a loan into Loan::PLEDGING_STATUSES, so they take it; a
+ *      read, for CollateralPledgeGuard's snapshot rule). A release and a
+ *      payment void can move a loan into Loan::PLEDGING_STATUSES, so they
+ *      take it; a
  *      create pledges nothing, a payment only moves a loan within that set or
  *      out of it, an adjustment or an extension neither changes what a
  *      loan pledges nor moves it into or out of that set, and a submit or
- *      an approval decision only moves a loan between statuses that pledge
- *      nothing (draft, for_review, approved, rejected), so none of those has
- *      collateral rows to lock;
- *   2. the loan rows, in ONE id-ordered statement (a release also locks the
- *      loan it restructures; a create locks the newest loan, for the next
- *      application number, in Loan::booted()). With no collateral to lock,
- *      this is the transaction's first statement, before any plain read. A
- *      restructure's principal edit is the one path that locks the child first:
- *      its own row, then its source, because a release of that child needs
+ *      an approval decision (a send-back of an approved restructure included)
+ *      only moves a loan between statuses that pledge nothing (draft,
+ *      for_review, approved, rejected), and a loan void only moves one from
+ *      those to void, so none of those has collateral rows to lock;
+ *   2. the loan rows, in ONE id-ordered statement (a release, and a send-back
+ *      of an approved restructure, also lock the loan it restructures, so the
+ *      two queue up on the lower id instead of deadlocking; a create locks
+ *      the newest loan, for the next application number, in Loan::booted()).
+ *      With no collateral to lock, this is the transaction's first statement,
+ *      before any plain read. A restructure's principal edit is the one path
+ *      that locks the child first: its own row, then its source, because a release of that child needs
  *      `approved` while an edit needs `draft` or `for_review`, and no other
  *      write waits on an editable child's row while holding its source;
  *   3. the newest repayment row, for the next receipt number, when the
