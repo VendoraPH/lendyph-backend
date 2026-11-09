@@ -34,8 +34,10 @@ use Illuminate\Validation\ValidationException;
  * final check on it (ReminderEligibility::check). A cancel or skip reason
  * blocks the send; a wait for contact hours to open only says when it goes.
  * The day's slot (one message per loan, channel and day) and an open manual
- * row for the channel today also block it. The send repeats all of it under
- * the loan row's lock.
+ * row for the channel today also block it, and so does a template that
+ * doesn't fit the loan today (TemplateFit; 422 on `template_type`). The send
+ * repeats all of it under the loan row's lock. Recipients and a member
+ * pause's text follow ContactVisibility.
  */
 final class ManualReminders
 {
@@ -44,14 +46,17 @@ final class ManualReminders
         private readonly ReminderRenderer $renderer,
         private readonly MemberContact $contacts,
         private readonly DeploymentMode $mode,
+        private readonly TemplateFit $fit,
+        private readonly ContactVisibility $visibility,
     ) {}
 
     /**
      * @return array<string, mixed>
      */
-    public function preview(Loan $loan, string $channel, string $templateType): array
+    public function preview(Loan $loan, string $channel, string $templateType, User $user): array
     {
         $assessment = $this->assess($loan, $channel, $templateType, now());
+        $contact = $this->visibility->allows($user, $loan->borrower?->branch_id === null ? null : (int) $loan->borrower->branch_id);
 
         return [
             'borrower_name' => (string) $loan->borrower?->full_name,
@@ -61,12 +66,13 @@ final class ManualReminders
             'amount_due' => $assessment['amount'],
             'messages' => array_map(fn (array $one) => [
                 'channel' => $one['channel'],
-                'recipient' => $one['recipient'],
+                'recipient' => $contact ? $one['recipient'] : null,
                 'subject' => $one['subject'],
                 'body' => $one['body'],
             ], $assessment['channels']),
-            'blocked_reasons' => $assessment['blocked'],
+            'blocked_reasons' => array_values(array_unique(array_map(fn (string $reason) => (string) $this->visibility->reason($reason, $contact), [...$assessment['unfit'], ...$assessment['blocked']]))),
             'notes' => $assessment['notes'],
+            'allowed_template_types' => $assessment['allowed'],
             'test_mode' => $this->mode->testMode(),
         ];
     }
@@ -85,8 +91,11 @@ final class ManualReminders
             $now = now();
             $assessment = $this->assess($loan, $channel, $templateType, $now);
 
-            if ($assessment['blocked'] !== []) {
-                throw ValidationException::withMessages(['channel' => $assessment['blocked']]);
+            if ($assessment['unfit'] !== [] || $assessment['blocked'] !== []) {
+                throw ValidationException::withMessages(array_filter([
+                    'template_type' => $assessment['unfit'],
+                    'channel' => $assessment['blocked'],
+                ]));
             }
 
             $period = $assessment['period'];
@@ -132,13 +141,18 @@ final class ManualReminders
     }
 
     /**
-     * @return array{period: ?AmortizationSchedule, amount: ?float, channels: list<array{channel: string, recipient: ?string, subject: ?string, body: string}>, blocked: list<string>, notes: list<string>}
+     * @return array{period: ?AmortizationSchedule, amount: ?float, channels: list<array{channel: string, recipient: ?string, subject: ?string, body: string}>, blocked: list<string>, unfit: list<string>, notes: list<string>, allowed: list<string>}
      */
     private function assess(Loan $loan, string $channelChoice, string $templateType, Carbon $now): array
     {
         $loan->loadMissing(['borrower', 'branch', 'amortizationSchedules']);
         $period = LoanReminderSummary::nextOpenPeriod($loan);
-        $result = ['period' => $period, 'amount' => null, 'channels' => [], 'blocked' => [], 'notes' => []];
+        $allowed = $this->fit->allowed($loan, $now);
+        $result = ['period' => $period, 'amount' => null, 'channels' => [], 'blocked' => [], 'unfit' => [], 'notes' => [], 'allowed' => $allowed];
+
+        if (! in_array($templateType, $allowed, true)) {
+            $result['unfit'][] = sprintf("A %s reminder doesn't fit this loan today", ReminderTemplate::typeLabel($templateType));
+        }
 
         if ($period === null) {
             $result['blocked'][] = in_array($loan->status, Loan::COLLECTIBLE_STATUSES, true)

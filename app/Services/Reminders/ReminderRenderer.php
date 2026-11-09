@@ -112,8 +112,16 @@ final class ReminderRenderer
     {
         $unknown = array_values(array_unique([...self::unknownVariables((string) $subject), ...self::unknownVariables($body)]));
 
-        $renderedSubject = $subject === null || trim($subject) === '' ? null : trim($this->fill($subject, $values));
-        $renderedBody = $this->fill($body, $values);
+        // Email: each value is escaped in the body, so a name or a branch's
+        // text can't add markup, and kept on one line in the subject. The
+        // template's own text is the staff's and stays as written. SMS is
+        // plain text and takes the values as they are.
+        $isEmail = $channel === 'email';
+        $subjectValues = $isEmail ? array_map(fn (string $value) => trim((string) preg_replace('/[\r\n]+/', ' ', $value)), $values) : $values;
+        $bodyValues = $isEmail ? array_map(fn (string $value) => e($value), $values) : $values;
+
+        $renderedSubject = $subject === null || trim($subject) === '' ? null : trim($this->fill($subject, $subjectValues));
+        $renderedBody = $this->fill($body, $bodyValues);
         $renderedBody = $channel === 'email'
             ? trim((string) preg_replace("/\n{3,}/", "\n\n", (string) preg_replace("/[ \t]+\n/", "\n", $renderedBody)))
             : trim((string) preg_replace('/ {2,}/', ' ', $renderedBody));

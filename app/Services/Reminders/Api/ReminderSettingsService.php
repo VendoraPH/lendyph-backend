@@ -72,7 +72,7 @@ final class ReminderSettingsService
             $settings->save();
 
             foreach ($data['branches'] ?? [] as $branch) {
-                $row = ReminderBranchSetting::query()->firstOrNew(['branch_id' => (int) $branch['branch_id']]);
+                $row = ReminderBranchSetting::query()->firstOrNew(['branch_id' => (int) filter_var($branch['branch_id'], FILTER_VALIDATE_INT)]);
                 $row->fill(array_merge(
                     Arr::only($branch, ['use_company_default', 'sender_name', 'contact_phone', 'contact_email', 'payment_instructions']),
                     ['updated_by' => $user->id],
@@ -80,6 +80,39 @@ final class ReminderSettingsService
                 $row->save();
             }
         });
+    }
+
+    /**
+     * The company-wide columns this save would change: every field of the one
+     * settings row (the switch, times, channels, retries, providers and keys,
+     * the company payment text), compared with what is stored. Sending a
+     * stored value back unchanged changes nothing. A filled key that differs
+     * from the stored one is a change; the key itself is never returned.
+     *
+     * @param  array<string, mixed>  $data  validated UpdateReminderSettingsRequest input
+     * @return list<string>
+     */
+    public function companyChanges(array $data): array
+    {
+        $settings = ReminderSetting::current();
+        $changed = [];
+
+        foreach ($this->columns($data) as $column => $value) {
+            if (self::normalised($settings->getAttribute($column)) !== self::normalised($value)) {
+                $changed[] = $column;
+            }
+        }
+
+        return $changed;
+    }
+
+    private static function normalised(mixed $value): string
+    {
+        return match (true) {
+            is_bool($value) => $value ? '1' : '0',
+            is_numeric($value) => (string) (float) $value,
+            default => trim((string) $value),
+        };
     }
 
     /**

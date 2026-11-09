@@ -4,6 +4,7 @@ namespace App\Http\Requests\Reminders;
 
 use App\Models\ReminderRule;
 use App\Models\ReminderTemplate;
+use App\Services\BranchAccess;
 use App\Services\Reminders\ReminderRenderer;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
@@ -12,7 +13,8 @@ use Illuminate\Validation\Validator;
 /**
  * A reminder template. Email needs a subject; a `{{variable}}` the renderer
  * doesn't know (ReminderRenderer::unknownVariables, aliases included) is
- * refused; one template per type, channel and language.
+ * refused; one template per type, channel and language. Writing one needs
+ * `branches:view_all` as well as `reminders:settings`.
  */
 class ReminderTemplateRequest extends FormRequest
 {
@@ -20,7 +22,11 @@ class ReminderTemplateRequest extends FormRequest
 
     public function authorize(): bool
     {
-        return (bool) $this->user()?->can('reminders:settings');
+        $user = $this->user();
+
+        // Templates speak for every branch, so only staff who see every
+        // branch write them (Arvin, 2026-11-09).
+        return $user !== null && $user->can('reminders:settings') && $user->can(BranchAccess::VIEW_ALL);
     }
 
     /**

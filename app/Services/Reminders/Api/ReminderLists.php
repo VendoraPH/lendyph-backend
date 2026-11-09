@@ -20,9 +20,9 @@ final class ReminderLists
 
     public const MESSAGE_STATUSES = ['pending', 'sent', 'delivered', 'failed', 'rejected', 'bounced', 'opened'];
 
-    public const QUEUE_RELATIONS = ['loan:id,loan_account_number,application_number', 'borrower:id,first_name,middle_name,last_name,suffix,contact_number,email', 'rule:id,name', 'message:id,queue_item_id,test_mode'];
+    public const QUEUE_RELATIONS = ['loan:id,loan_account_number,application_number', 'borrower:id,branch_id,first_name,middle_name,last_name,suffix,contact_number,email', 'rule:id,name', 'message:id,queue_item_id,test_mode'];
 
-    public const MESSAGE_RELATIONS = ['loan:id,loan_account_number,application_number', 'borrower:id,first_name,middle_name,last_name,suffix', 'createdBy:id,first_name,last_name'];
+    public const MESSAGE_RELATIONS = ['loan:id,loan_account_number,application_number', 'borrower:id,branch_id,first_name,middle_name,last_name,suffix', 'createdBy:id,first_name,last_name'];
 
     public function __construct(private readonly ReminderScope $scope) {}
 

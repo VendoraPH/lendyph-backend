@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Reminders\UpdateReminderSettingsRequest;
+use App\Services\BranchAccess;
 use App\Services\Reminders\Api\ReminderSettingsService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -11,7 +12,9 @@ use OpenApi\Attributes as OA;
 
 /**
  * The reminders settings. Readable with `reminders:view` (credentials are
- * write-only and never returned); saving needs `reminders:settings`.
+ * write-only and never returned); saving needs `reminders:settings`, and
+ * changing a company-wide field also needs `branches:view_all`: a branch
+ * user manages only their own branch's settings.
  */
 class ReminderSettingController extends Controller
 {
@@ -41,13 +44,18 @@ class ReminderSettingController extends Controller
         security: [['sanctum' => []]],
         responses: [
             new OA\Response(response: 200, description: 'The settings'),
-            new OA\Response(response: 403, description: 'Missing reminders:settings, or a branch outside the caller\'s branches'),
+            new OA\Response(response: 403, description: 'Missing reminders:settings, a branch outside the caller\'s branches, or a company-wide change without branches:view_all'),
             new OA\Response(response: 422, description: 'Outside the engine\'s limits'),
         ],
     )]
     public function update(UpdateReminderSettingsRequest $request, ReminderSettingsService $settings): JsonResponse
     {
         $this->authorize('reminders:settings');
+        abort_if(
+            $settings->companyChanges($request->validated()) !== [] && ! $request->user()->can(BranchAccess::VIEW_ALL),
+            403,
+            'Only staff who see every branch can change the company-wide reminder settings.',
+        );
         $settings->update($request->user(), $request->validated());
 
         return response()->json(['message' => 'Reminder settings saved.', 'data' => $settings->present($request->user())]);

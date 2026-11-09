@@ -39,7 +39,7 @@ class ReminderManualSendTest extends TestCase
         });
 
         $preview = $this->postJson('/api/reminders/manual-send/preview', $this->body('both'))->assertOk();
-        $this->assertSame(['borrower_name', 'loan_account_number', 'installment_number', 'due_date', 'amount_due', 'messages', 'blocked_reasons', 'notes', 'test_mode'], array_keys($preview->json('data')));
+        $this->assertSame(['borrower_name', 'loan_account_number', 'installment_number', 'due_date', 'amount_due', 'messages', 'blocked_reasons', 'notes', 'allowed_template_types', 'test_mode'], array_keys($preview->json('data')));
         $this->assertSame(['channel', 'recipient', 'subject', 'body'], array_keys($preview->json('data.messages.0')));
         $this->assertSame('63917*****01', $preview->json('data.messages.0.recipient'));
         $this->assertSame([], $preview->json('data.blocked_reasons'));

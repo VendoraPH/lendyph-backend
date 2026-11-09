@@ -19,14 +19,15 @@ class ReminderLoanController extends Controller
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'loan', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
         responses: [
-            new OA\Response(response: 200, description: 'loan_id, next_due_date, next_amount_due, next_reminder_at, pause, inherited_pause, suggested_template_type, events'),
-            new OA\Response(response: 403, description: 'Missing reminders:view'),
+            new OA\Response(response: 200, description: 'loan_id, next_due_date, next_amount_due, next_reminder_at, pause, inherited_pause, suggested_template_type, allowed_template_types, events'),
+            new OA\Response(response: 403, description: 'Missing reminders:view or loans:view'),
             new OA\Response(response: 404, description: 'No such loan in the caller\'s branches'),
         ],
     )]
     public function show(Request $request, Loan $loan, LoanReminderSummary $summary): JsonResponse
     {
         $this->authorize('reminders:view');
+        $this->authorize('loans:view');
 
         return response()->json(['data' => $summary->build($loan, $request)]);
     }

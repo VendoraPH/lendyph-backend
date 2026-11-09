@@ -16,7 +16,9 @@ use OpenApi\Attributes as OA;
 /**
  * Reminder rules: when to remind, on which channels, for which loans. A
  * plain list. A rule scoped to a branch the caller can't see is left out of
- * the list and answers 404. Each change audits itself.
+ * the list and answers 404. A rule with no branch (stored or requested) can
+ * be written only with `branches:view_all`, so a branch user manages only
+ * their own branch's rules. Each change audits itself.
  */
 class ReminderRuleController extends Controller
 {
@@ -61,7 +63,7 @@ class ReminderRuleController extends Controller
         ])),
         responses: [
             new OA\Response(response: 201, description: 'The rule'),
-            new OA\Response(response: 403, description: 'Missing reminders:settings'),
+            new OA\Response(response: 403, description: 'Missing reminders:settings, or branches:view_all for a rule that covers every branch'),
             new OA\Response(response: 422, description: 'Invalid rule, or a branch outside the caller\'s branches'),
         ],
     )]
@@ -86,7 +88,7 @@ class ReminderRuleController extends Controller
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
         responses: [
             new OA\Response(response: 200, description: 'The rule'),
-            new OA\Response(response: 403, description: 'Missing reminders:settings'),
+            new OA\Response(response: 403, description: 'Missing reminders:settings, or branches:view_all for a rule that covers every branch'),
             new OA\Response(response: 404, description: 'No such rule the caller can see'),
             new OA\Response(response: 422, description: 'Invalid rule'),
         ],
@@ -95,6 +97,7 @@ class ReminderRuleController extends Controller
     {
         $this->authorize('reminders:settings');
         $rule = $this->visible($request->user())->whereKey($id)->firstOrFail();
+        $this->authorizeEveryBranch($rule, $request->user());
 
         $rule->update(array_merge($this->attributes($request), ['updated_by' => $request->user()->id]));
 
@@ -109,7 +112,7 @@ class ReminderRuleController extends Controller
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
         responses: [
             new OA\Response(response: 200, description: 'The rule, is_active false'),
-            new OA\Response(response: 403, description: 'Missing reminders:settings'),
+            new OA\Response(response: 403, description: 'Missing reminders:settings, or branches:view_all for a rule that covers every branch'),
             new OA\Response(response: 404, description: 'No such rule the caller can see'),
         ],
     )]
@@ -117,10 +120,20 @@ class ReminderRuleController extends Controller
     {
         $this->authorize('reminders:settings');
         $rule = $this->visible($request->user())->whereKey($id)->firstOrFail();
+        $this->authorizeEveryBranch($rule, $request->user());
 
         $rule->update(['is_active' => false, 'updated_by' => $request->user()->id]);
 
         return response()->json(['message' => 'Reminder rule switched off.', 'data' => $this->present($rule, $request)]);
+    }
+
+    /**
+     * A rule with no branch covers every branch: changing it needs
+     * `branches:view_all` (Arvin, 2026-11-09).
+     */
+    private function authorizeEveryBranch(ReminderRule $rule, User $user): void
+    {
+        abort_if($rule->branch_id === null && ! $user->can(BranchAccess::VIEW_ALL), 403, 'Only staff who see every branch can change a rule that covers every branch.');
     }
 
     /**

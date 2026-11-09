@@ -11,7 +11,10 @@ use Illuminate\Http\Request;
 use OpenApi\Attributes as OA;
 
 /**
- * A member's reminder preferences. The mobile number and email read masked.
+ * A member's reminder preferences. Reading them needs `borrowers:view` (and
+ * the member's branch, through the binding); the mobile number and email read
+ * masked. Saving needs `borrowers:update`; its answer leaves the contact
+ * details out for a caller without `borrowers:view`.
  */
 class ReminderPreferenceController extends Controller
 {
@@ -23,13 +26,14 @@ class ReminderPreferenceController extends Controller
         parameters: [new OA\Parameter(name: 'borrower', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
         responses: [
             new OA\Response(response: 200, description: 'The preferences, contact masked'),
-            new OA\Response(response: 403, description: 'Missing reminders:view'),
+            new OA\Response(response: 403, description: 'Missing reminders:view or borrowers:view'),
             new OA\Response(response: 404, description: 'No such member in the caller\'s branches'),
         ],
     )]
     public function show(Request $request, Borrower $borrower, MemberPreferences $preferences): JsonResponse
     {
         $this->authorize('reminders:view');
+        $this->authorize('borrowers:view');
 
         return response()->json(['data' => $preferences->present($borrower, $request)]);
     }

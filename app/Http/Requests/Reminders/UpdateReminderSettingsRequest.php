@@ -14,7 +14,9 @@ use Illuminate\Validation\Validator;
  * optional; a part that is sent is checked whole. The engine's limits: Asia/
  * Manila only, contact hours within 06:00-22:00 with the start first, 1-3
  * attempts. `test_mode` is read-only and ignored. A branch outside the
- * caller's branches needs `branches:view_all` (403). Credentials are never
+ * caller's branches needs `branches:view_all` (403), and so does changing
+ * any company-wide field (the controller compares them with the stored
+ * row, so the whole form saved unchanged is accepted). Credentials are never
  * echoed in an error.
  */
 class UpdateReminderSettingsRequest extends FormRequest
@@ -33,10 +35,12 @@ class UpdateReminderSettingsRequest extends FormRequest
 
         $access = app(BranchAccess::class);
 
+        // The id as the `integer` rule will accept it: JSON `true` reads as
+        // 1, so it is checked as branch 1, never skipped.
         foreach ((array) $this->input('branches', []) as $branch) {
-            $branchId = is_array($branch) ? ($branch['branch_id'] ?? null) : null;
+            $branchId = is_array($branch) ? filter_var($branch['branch_id'] ?? null, FILTER_VALIDATE_INT) : false;
 
-            if (is_numeric($branchId) && ! $access->canSee($user, (int) $branchId)) {
+            if ($branchId !== false && ! $access->canSee($user, $branchId)) {
                 return false;
             }
         }
@@ -76,7 +80,7 @@ class UpdateReminderSettingsRequest extends FormRequest
             'email_provider.api_key' => ['nullable', 'string', 'max:2000'],
             'payment_instructions' => ['sometimes', 'nullable', 'string', 'max:2000'],
             'branches' => ['sometimes', 'array'],
-            'branches.*.branch_id' => ['required', 'integer', 'distinct', Rule::exists('branches', 'id')],
+            'branches.*.branch_id' => ['required', 'integer', 'distinct', app(BranchAccess::class)->constrainBranchExists(Rule::exists('branches', 'id'), $this->user())],
             'branches.*.use_company_default' => ['required', 'boolean'],
             'branches.*.sender_name' => ['nullable', 'string', 'max:120'],
             'branches.*.contact_phone' => ['nullable', 'string', 'max:50'],

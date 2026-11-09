@@ -11,10 +11,14 @@ use Illuminate\Http\Request;
 /**
  * A member's reminder preferences (frontend `BorrowerNotificationPreferences`).
  * The mobile number and email are masked; whether each is verified, or was
- * proved bad by a send, is read against the member's current value.
+ * proved bad by a send, is read against the member's current value. A caller
+ * who may not read the member's details (ContactVisibility) gets none of
+ * them: the switches only.
  */
 final class MemberPreferences
 {
+    public function __construct(private readonly ContactVisibility $visibility) {}
+
     /**
      * @return array<string, mixed>
      */
@@ -25,6 +29,7 @@ final class MemberPreferences
         $pause = ReminderPause::query()->inForce()->where('scope', 'borrower')->where('borrower_id', $member->id)
             ->with(ReminderPauseResource::RELATIONS)->latest('paused_at')->first();
 
+        $contact = $this->visibility->allows($request->user(), $member->branch_id === null ? null : (int) $member->branch_id);
         $invalid = match (true) {
             $preference->mobileFlaggedFor($member->contact_number) => $preference->mobile_invalid_reason,
             $preference->emailFlaggedFor($member->email) => $preference->email_invalid_reason,
@@ -37,11 +42,11 @@ final class MemberPreferences
             'email_enabled' => (bool) $preference->email_enabled,
             'preferred_channel' => $preference->preferred_channel,
             'language' => $preference->language,
-            'mobile_number' => ReminderFormat::maskedContact($member, 'sms'),
-            'mobile_verified' => $preference->mobileVerifiedFor($member->contact_number),
-            'email' => ReminderFormat::maskedContact($member, 'email'),
-            'email_verified' => $preference->emailVerifiedFor($member->email),
-            'invalid_contact_reason' => $invalid,
+            'mobile_number' => $contact ? ReminderFormat::maskedContact($member, 'sms') : null,
+            'mobile_verified' => $contact && $preference->mobileVerifiedFor($member->contact_number),
+            'email' => $contact ? ReminderFormat::maskedContact($member, 'email') : null,
+            'email_verified' => $contact && $preference->emailVerifiedFor($member->email),
+            'invalid_contact_reason' => $contact ? $invalid : null,
             'pause' => $pause === null ? null : (new ReminderPauseResource($pause))->resolve($request),
         ];
     }

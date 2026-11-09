@@ -18,14 +18,19 @@ use Illuminate\Http\Request;
 /**
  * One loan's reminders card (frontend `LoanReminderSummary`): its next open
  * period and what the loan engine says is due by then, the next reminder,
- * the pauses that stop it, the template today's rules would pick, and the
- * reminder timeline, oldest first.
+ * the pauses that stop it, the template today's rules would pick, the
+ * templates a manual send may use (TemplateFit), and the reminder timeline,
+ * oldest first. Contact details follow ContactVisibility.
  */
 final class LoanReminderSummary
 {
     private const EVENT_LIMIT = 200;
 
-    public function __construct(private readonly ReminderEligibility $eligibility) {}
+    public function __construct(
+        private readonly ReminderEligibility $eligibility,
+        private readonly ContactVisibility $visibility,
+        private readonly TemplateFit $fit,
+    ) {}
 
     /**
      * @return array<string, mixed>
@@ -59,7 +64,8 @@ final class LoanReminderSummary
             'pause' => $pause === null ? null : (new ReminderPauseResource($pause))->resolve($request),
             'inherited_pause' => $inherited === null ? null : (new ReminderPauseResource($inherited))->resolve($request),
             'suggested_template_type' => $period === null ? null : $this->suggestedTemplate($loan, $period),
-            'events' => $this->events($loan),
+            'allowed_template_types' => $this->fit->allowed($loan, $now),
+            'events' => $this->events($loan, $this->visibility->allows($request->user(), $loan->borrower?->branch_id)),
         ];
     }
 
@@ -100,7 +106,7 @@ final class LoanReminderSummary
     /**
      * @return list<array<string, mixed>>
      */
-    private function events(Loan $loan): array
+    private function events(Loan $loan, bool $contact): array
     {
         return ReminderEvent::query()
             ->where(fn ($scope) => $scope->where('loan_id', $loan->id)
@@ -110,15 +116,34 @@ final class LoanReminderSummary
             ->limit(self::EVENT_LIMIT)
             ->get()
             ->reverse()
-            ->map(fn (ReminderEvent $event) => self::event($event))
+            ->map(fn (ReminderEvent $event) => $this->event($event, $contact))
             ->values()
             ->all();
     }
 
     /**
+     * The event's detail as the caller may read it. Without the member's
+     * details, a hand-over's detail (it names the masked recipient) and a
+     * member pause's text read null, and a skip for it is cut to its words.
+     */
+    private function detail(ReminderEvent $event, string $kind, bool $contact): ?string
+    {
+        if ($contact) {
+            return $event->detail;
+        }
+
+        if (in_array($kind, ['sent', 'manual_sent', 'delivered'], true)
+            || (in_array($kind, ['paused', 'resumed'], true) && $event->loan_id === null)) {
+            return null;
+        }
+
+        return $this->visibility->reason($event->detail, false);
+    }
+
+    /**
      * @return array<string, mixed>
      */
-    private static function event(ReminderEvent $event): array
+    private function event(ReminderEvent $event, bool $contact): array
     {
         $manual = $event->queueItem?->source === 'manual';
         $kind = match (true) {
@@ -148,7 +173,7 @@ final class LoanReminderSummary
             'kind' => $kind,
             'at' => ReminderFormat::time($event->created_at),
             'title' => $title.$channel,
-            'detail' => $event->detail,
+            'detail' => $this->detail($event, $kind, $contact),
             'channel' => $event->channel,
             'installment_number' => $event->period_number === null ? null : (int) $event->period_number,
             'test_mode' => $testMode === null ? null : (bool) $testMode,

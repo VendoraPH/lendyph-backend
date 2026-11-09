@@ -14,8 +14,9 @@ use Illuminate\Validation\Rule;
 /**
  * A reminder rule, checked as the rule form checks it (`validateRule` in the
  * frontend's src/lib/reminders.ts): 0 days on the due date and 1-90
- * otherwise, a send time inside contact hours, at least one channel. A
- * `branch_id` outside the caller's branches fails like a missing one.
+ * otherwise, a send time inside contact hours (before they end), at least
+ * one channel. A `branch_id` outside the caller's branches fails like a
+ * missing one, and a rule with no branch needs `branches:view_all`.
  */
 class ReminderRuleRequest extends FormRequest
 {
@@ -23,7 +24,15 @@ class ReminderRuleRequest extends FormRequest
 
     public function authorize(): bool
     {
-        return (bool) $this->user()?->can('reminders:settings');
+        $user = $this->user();
+
+        if ($user === null || ! $user->can('reminders:settings')) {
+            return false;
+        }
+
+        // A rule with no branch covers every branch: only staff who see every
+        // branch may ask for one (Arvin, 2026-11-09).
+        return filled($this->input('branch_id')) || $user->can(BranchAccess::VIEW_ALL);
     }
 
     /**
@@ -48,8 +57,8 @@ class ReminderRuleRequest extends FormRequest
                 [$hour, $minute] = array_map('intval', explode(':', (string) $value));
                 $at = $hour * 60 + $minute;
 
-                if ($at < $hours->startMinute || $at > $hours->endMinute) {
-                    $fail(sprintf('The send time must be within contact hours, %s to %s.', self::clock($hours->startMinute), self::clock($hours->endMinute)));
+                if ($at < $hours->startMinute || $at >= $hours->endMinute) {
+                    $fail(sprintf('The send time must be within contact hours: from %s and before %s.', self::clock($hours->startMinute), self::clock($hours->endMinute)));
                 }
             }],
             'channels' => ['required', 'array', 'min:1'],

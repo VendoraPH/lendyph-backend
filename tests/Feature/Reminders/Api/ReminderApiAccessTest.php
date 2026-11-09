@@ -44,17 +44,17 @@ class ReminderApiAccessTest extends TestCase
         return [
             'dashboard' => ['GET', '/api/reminders/dashboard', ['reminders:view']],
             'rules' => ['GET', '/api/reminders/rules', ['reminders:view']],
-            'rule store' => ['POST', '/api/reminders/rules', ['reminders:settings']],
-            'rule update' => ['PUT', "/api/reminders/rules/{$rule->id}", ['reminders:settings']],
-            'rule deactivate' => ['POST', "/api/reminders/rules/{$rule->id}/deactivate", ['reminders:settings']],
+            'rule store' => ['POST', '/api/reminders/rules', ['reminders:settings', 'branches:view_all']],
+            'rule update' => ['PUT', "/api/reminders/rules/{$rule->id}", ['reminders:settings', 'branches:view_all']],
+            'rule deactivate' => ['POST', "/api/reminders/rules/{$rule->id}/deactivate", ['reminders:settings', 'branches:view_all']],
             'templates' => ['GET', '/api/reminders/templates', ['reminders:view']],
-            'template store' => ['POST', '/api/reminders/templates', ['reminders:settings']],
-            'template update' => ['PUT', "/api/reminders/templates/{$template->id}", ['reminders:settings']],
+            'template store' => ['POST', '/api/reminders/templates', ['reminders:settings', 'branches:view_all']],
+            'template update' => ['PUT', "/api/reminders/templates/{$template->id}", ['reminders:settings', 'branches:view_all']],
             'template preview' => ['POST', '/api/reminders/templates/preview', ['reminders:settings']],
             'queue' => ['GET', '/api/reminders/queue', ['reminders:view']],
             'history' => ['GET', '/api/reminders/history', ['reminders:view']],
             'history detail' => ['GET', "/api/reminders/history/{$message->id}", ['reminders:view']],
-            'loan summary' => ['GET', "/api/loans/{$loan}/reminders", ['reminders:view']],
+            'loan summary' => ['GET', "/api/loans/{$loan}/reminders", ['reminders:view', 'loans:view']],
             'manual preview' => ['POST', '/api/reminders/manual-send/preview', ['reminders:send']],
             'manual send' => ['POST', '/api/reminders/manual-send', ['reminders:send']],
             'pauses' => ['GET', '/api/reminders/pauses', ['reminders:view']],
@@ -62,7 +62,7 @@ class ReminderApiAccessTest extends TestCase
             'resume' => ['POST', '/api/reminders/resume', ['reminders:pause']],
             'settings' => ['GET', '/api/reminders/settings', ['reminders:view']],
             'settings update' => ['PUT', '/api/reminders/settings', ['reminders:settings']],
-            'preferences' => ['GET', "/api/borrowers/{$member}/notification-preferences", ['reminders:view']],
+            'preferences' => ['GET', "/api/borrowers/{$member}/notification-preferences", ['reminders:view', 'borrowers:view']],
             'preferences update' => ['PUT', "/api/borrowers/{$member}/notification-preferences", ['reminders:view', 'borrowers:update']],
         ];
     }
@@ -112,7 +112,7 @@ class ReminderApiAccessTest extends TestCase
         $this->getJson("/api/loans/{$far->id}/reminders")->assertNotFound();
         $this->getJson("/api/borrowers/{$far->borrower_id}/notification-preferences")->assertNotFound();
         $this->putJson("/api/borrowers/{$far->borrower_id}/notification-preferences", ['sms_enabled' => false])->assertNotFound();
-        $this->putJson("/api/reminders/rules/{$farRule->id}", $this->ruleBody())->assertNotFound();
+        $this->putJson("/api/reminders/rules/{$farRule->id}", $this->ruleBody(['branch_id' => $this->branch->id]))->assertNotFound();
         $this->postJson("/api/reminders/rules/{$farRule->id}/deactivate")->assertNotFound();
         $this->assertTrue($farRule->fresh()->is_active);
         $this->assertNotContains($farRule->id, array_column($this->getJson('/api/reminders/rules')->assertOk()->json('data'), 'id'));

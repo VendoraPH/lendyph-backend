@@ -170,7 +170,7 @@ class ReminderListsAndShapesTest extends TestCase
 
         $summary = $this->getJson("/api/loans/{$this->loan->id}/reminders")->assertOk()->json('data');
 
-        $this->assertSame(['loan_id', 'next_due_date', 'next_amount_due', 'next_reminder_at', 'pause', 'inherited_pause', 'suggested_template_type', 'events'], array_keys($summary));
+        $this->assertSame(['loan_id', 'next_due_date', 'next_amount_due', 'next_reminder_at', 'pause', 'inherited_pause', 'suggested_template_type', 'allowed_template_types', 'events'], array_keys($summary));
         $this->assertSame('2026-09-15', $summary['next_due_date']);
         $this->assertSame(5000.0, (float) $summary['next_amount_due']);
         $this->assertNull($summary['pause']);

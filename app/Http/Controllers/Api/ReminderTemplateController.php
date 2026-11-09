@@ -52,7 +52,7 @@ class ReminderTemplateController extends Controller
         security: [['sanctum' => []]],
         responses: [
             new OA\Response(response: 201, description: 'The template'),
-            new OA\Response(response: 403, description: 'Missing reminders:settings'),
+            new OA\Response(response: 403, description: 'Missing reminders:settings or branches:view_all'),
             new OA\Response(response: 422, description: 'Invalid template, unknown variables or a duplicate'),
         ],
     )]
@@ -76,7 +76,7 @@ class ReminderTemplateController extends Controller
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
         responses: [
             new OA\Response(response: 200, description: 'The template'),
-            new OA\Response(response: 403, description: 'Missing reminders:settings'),
+            new OA\Response(response: 403, description: 'Missing reminders:settings or branches:view_all'),
             new OA\Response(response: 404, description: 'No such template'),
             new OA\Response(response: 422, description: 'Invalid template, unknown variables or a duplicate'),
         ],

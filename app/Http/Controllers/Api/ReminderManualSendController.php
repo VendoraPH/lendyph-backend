@@ -29,7 +29,7 @@ class ReminderManualSendController extends Controller
             new OA\Property(property: 'template_type', type: 'string'),
         ])),
         responses: [
-            new OA\Response(response: 200, description: 'borrower_name, loan_account_number, installment_number, due_date, amount_due, messages, blocked_reasons, notes, test_mode'),
+            new OA\Response(response: 200, description: 'borrower_name, loan_account_number, installment_number, due_date, amount_due, messages, blocked_reasons, notes, allowed_template_types, test_mode'),
             new OA\Response(response: 403, description: 'Missing reminders:send'),
             new OA\Response(response: 422, description: 'Invalid request, or a loan outside the caller\'s branches'),
         ],
@@ -39,13 +39,13 @@ class ReminderManualSendController extends Controller
         $this->authorize('reminders:send');
         $loan = Loan::query()->with(['borrower', 'branch', 'amortizationSchedules'])->findOrFail((int) $request->validated('loan_id'));
 
-        return response()->json(['data' => $manual->preview($loan, (string) $request->validated('channel'), (string) $request->validated('template_type'))]);
+        return response()->json(['data' => $manual->preview($loan, (string) $request->validated('channel'), (string) $request->validated('template_type'), $request->user())]);
     }
 
     #[OA\Post(
         path: '/api/reminders/manual-send',
         summary: 'Queue a manual reminder',
-        description: 'Repeats the preview\'s checks under the loan\'s lock. 422 on `channel` while anything blocks it, including a manual reminder already queued for that channel today. Writes one reminder_manual_send audit row on the loan.',
+        description: 'Repeats the preview\'s checks under the loan\'s lock. 422 on `template_type` when the template doesn\'t fit the loan today, and on `channel` while anything else blocks it, including a manual reminder already queued for that channel today. Writes one reminder_manual_send audit row on the loan.',
         tags: ['Reminders'],
         security: [['sanctum' => []]],
         responses: [
