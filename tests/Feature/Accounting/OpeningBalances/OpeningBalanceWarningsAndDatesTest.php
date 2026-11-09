@@ -62,12 +62,12 @@ class OpeningBalanceWarningsAndDatesTest extends TestCase
         $this->save($this->balancedLines(), $version, '2026-07-31')->assertOk();
         $this->finalise($version + 1)->assertOk();
 
-        $this->assertStringStartsWith(
-            'Started the opening balances as of Aug 31, 2026 ',
+        $this->assertSame(
+            'Started the opening balances as of Aug 31, 2026 with 4 lines',
             (string) AuditLog::query()->where('action', 'accounting_opening_balance_created')->sole()->description,
         );
         $this->assertStringStartsWith(
-            'Saved the opening balances as of Jul 31, 2026:',
+            'Saved the opening balances as of Jul 31, 2026: 4 lines,',
             (string) AuditLog::query()->where('action', 'accounting_opening_balance_saved')->sole()->description,
         );
         $this->assertStringStartsWith(

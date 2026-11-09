@@ -22,6 +22,7 @@ use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
+use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use OpenApi\Attributes as OA;
 
@@ -411,7 +412,7 @@ class AccountingAccountController extends Controller
 
         if ($children > 0) {
             throw ValidationException::withMessages([
-                'account' => "{$label} has {$children} account(s) beneath it. Move or remove them first.",
+                'account' => "{$label} has {$children} ".Str::plural('account', $children).' beneath it. Move or remove '.($children === 1 ? 'it' : 'them').' first.',
             ]);
         }
 
@@ -439,7 +440,7 @@ class AccountingAccountController extends Controller
             // DELETE. Deactivating is the remedy: it stops the account taking
             // new history while keeping what it has.
             throw ValidationException::withMessages([
-                'account' => "{$label} has {$lines} journal line(s) against it and cannot be deleted. Deactivate it instead — an account with history keeps its history.",
+                'account' => "{$label} has {$lines} ".Str::plural('journal line', $lines).' against it and cannot be deleted. Deactivate it instead — an account with history keeps its history.',
             ]);
         }
 

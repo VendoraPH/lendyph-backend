@@ -18,6 +18,7 @@ use Illuminate\Console\ConfirmableTrait;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 
 #[Signature('accounting:opening-balances
@@ -464,7 +465,7 @@ class RecordOpeningBalances extends Command
                 }
 
                 if (count($cells) !== 3) {
-                    $this->refuse(sprintf('Line %d has %d column(s), not 3.', $lineNo, count($cells)), [
+                    $this->refuse(sprintf('Line %d has %d %s, not 3.', $lineNo, count($cells), Str::plural('column', count($cells))), [
                         'Every row is: account code, debit, credit. A file of a different width is a',
                         'different report, or a column was inserted — and read positionally it would put',
                         'somebody\'s balance in the wrong column of the wrong account.',
@@ -572,8 +573,10 @@ class RecordOpeningBalances extends Command
         if ($skipped !== []) {
             $this->newLine();
             $this->warn(sprintf(
-                '%d account(s) carried no balance and were left out: %s',
+                '%d %s no balance and %s left out: %s',
                 count($skipped),
+                count($skipped) === 1 ? 'account carried' : 'accounts carried',
+                count($skipped) === 1 ? 'was' : 'were',
                 implode(', ', $skipped),
             ));
         }
@@ -1254,9 +1257,10 @@ class RecordOpeningBalances extends Command
         $this->newLine();
         $this->warn('  THIS HAPPENS ONCE');
         $this->line(sprintf(
-            '  %s of opening balances across %d account(s) goes onto the books, and this',
+            '  %s of opening balances across %d %s goes onto the books, and this',
             Money::format($plan['total_debit']),
             count($plan['lines']),
+            Str::plural('account', count($plan['lines'])),
         ));
         $this->line('  command will refuse to run again on this deployment. A posted journal cannot be');
         $this->line('  edited or deleted — correcting it means a reversing entry, which leaves both');

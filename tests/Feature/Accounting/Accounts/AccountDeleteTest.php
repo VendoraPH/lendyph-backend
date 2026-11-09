@@ -67,4 +67,38 @@ class AccountDeleteTest extends TestCase
 
         $this->assertFalse(AccountingAccount::query()->whereKey($this->account('1420'))->exists());
     }
+
+    public function test_the_journal_line_count_reads_in_the_singular_and_the_plural(): void
+    {
+        $this->postSimpleJournal('1420', '3050', 10_000);
+
+        $this->deleteJson('/api/accounting/accounts/'.$this->account('1420'))
+            ->assertStatus(422)
+            ->assertJsonPath('errors.account.0', '1420 Computer Equipment has 1 journal line against it and cannot be deleted. Deactivate it instead — an account with history keeps its history.');
+
+        $this->postSimpleJournal('1420', '3050', 10_000);
+        $this->postSimpleJournal('3050', '1420', 5_000);
+
+        $this->deleteJson('/api/accounting/accounts/'.$this->account('1420'))
+            ->assertStatus(422)
+            ->assertJsonPath('errors.account.0', '1420 Computer Equipment has 3 journal lines against it and cannot be deleted. Deactivate it instead — an account with history keeps its history.');
+    }
+
+    public function test_the_sub_account_count_reads_in_the_singular_and_the_plural(): void
+    {
+        $this->deleteJson('/api/accounting/accounts/'.$this->account('1400'))
+            ->assertStatus(422)
+            ->assertJsonPath('errors.account.0', fn (string $message): bool => str_ends_with($message, ' accounts beneath it. Move or remove them first.'));
+
+        $heading = $this->postJson('/api/accounting/accounts', [
+            'code' => '1600', 'name' => 'Other Assets', 'type' => 'asset', 'parent_id' => $this->account('1000'), 'is_group' => true,
+        ])->assertCreated()->json('data.id');
+        $this->postJson('/api/accounting/accounts', [
+            'code' => '1610', 'name' => 'Deposits', 'type' => 'asset', 'parent_id' => $heading,
+        ])->assertCreated();
+
+        $this->deleteJson("/api/accounting/accounts/{$heading}")
+            ->assertStatus(422)
+            ->assertJsonPath('errors.account.0', '1600 Other Assets has 1 account beneath it. Move or remove it first.');
+    }
 }

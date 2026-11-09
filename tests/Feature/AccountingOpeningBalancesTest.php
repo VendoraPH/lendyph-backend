@@ -234,6 +234,17 @@ class AccountingOpeningBalancesTest extends TestCase
         $this->assertSame(1, AccountingJournal::query()->count());
     }
 
+    public function test_counts_in_the_plan_read_in_the_singular_and_the_plural(): void
+    {
+        $one = $this->runCommand(['--file' => $this->csv("1010,500.00,\n1020,,\n2300,,100.00\n"), '--as-of' => self::AS_OF, '--dry-run' => true]);
+
+        $this->assertStringContainsString('1 account carried no balance and was left out: 1020', $one);
+
+        $width = $this->runCommand(['--file' => $this->csv("1010,500.00,\n2300\n"), '--as-of' => self::AS_OF], Command::FAILURE);
+
+        $this->assertStringContainsString('Line 2 has 1 column, not 3.', $width);
+    }
+
     public function test_messages_and_the_audit_row_read_the_as_of_date_in_words(): void
     {
         $output = $this->runCommand(['--file' => $this->canonicalCsv(), '--as-of' => self::AS_OF]);

@@ -17,6 +17,7 @@ use App\Services\AuditLogService;
 use App\Services\BranchAccess;
 use App\Services\LoanWriteTransaction;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use OpenApi\Attributes as OA;
 
@@ -218,7 +219,7 @@ class AccountingOpeningBalanceController extends Controller
                 'accounting_opening_balance_created',
                 auditable: $draft,
                 newValues: $figures($new),
-                description: sprintf('Started the opening balances as of %s with %d line(s)', OpeningBalancePoster::dateInWords($asOf), count($lines)),
+                description: sprintf('Started the opening balances as of %s with %d %s', OpeningBalancePoster::dateInWords($asOf), count($lines), Str::plural('line', count($lines))),
                 userId: $userId,
             );
 
@@ -231,9 +232,10 @@ class AccountingOpeningBalanceController extends Controller
             oldValues: $figures($old),
             newValues: $figures($new),
             description: sprintf(
-                'Saved the opening balances as of %s: %d line(s), %s debit and %s credit',
+                'Saved the opening balances as of %s: %d %s, %s debit and %s credit',
                 OpeningBalancePoster::dateInWords($asOf),
                 count($lines),
+                Str::plural('line', count($lines)),
                 Money::format($new['total_debit']),
                 Money::format($new['total_credit']),
             ),
