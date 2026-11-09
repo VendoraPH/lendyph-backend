@@ -161,7 +161,7 @@ class RestructureReleaseConflictTest extends TestCase
 
         $this->patchJson("/api/loans/{$new->id}/release")
             ->assertUnprocessable()
-            ->assertJsonValidationErrors(['principal_amount' => 'The source loan was paid down or adjusted after this restructure was approved. Void this restructure and create it again with the current balance.']);
+            ->assertJsonValidationErrors(['principal_amount' => 'The source loan was paid down or adjusted after this restructure was approved. Send it back for approval so the figures can be taken again.']);
 
         $this->assertNotNull($paid, 'the payment never landed inside the release, so this test proved nothing');
         $this->assertSame('posted', Repayment::findOrFail($paid)->status);

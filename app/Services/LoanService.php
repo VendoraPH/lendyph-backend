@@ -1299,6 +1299,97 @@ class LoanService
     }
 
     /**
+     * Send an approved restructure that isn't released yet back for approval:
+     * PATCH /loans/{loan}/send-back-approved (loans:release).
+     *
+     * `approved -> for_review`, the approval cleared, and the chain reopened
+     * at its submit step (LoanApprovalChainService::reopenApprovedRestructure()),
+     * so the restructure is re-submitted and signed off again, and its figures
+     * are taken again on re-submit and approval (retakeRestructureTerms()). It
+     * is how a restructure whose source was paid down or adjusted after
+     * approval gets to release.
+     *
+     * A loan that was not an approved restructure when it was read is a 422,
+     * checked before the transaction. Inside it (the outermost
+     * LoanWriteTransaction) the restructure and its source are locked in ONE
+     * id-ordered statement, as the first statement, the way a release locks
+     * them (lockAndGuardReleaseRows()), so a send-back and a release of the
+     * same restructure queue up instead of deadlocking. The status is then
+     * read again under the lock: a restructure sent back, released or voided
+     * since it was read is a 409, as is a lock wait timeout. Nothing is
+     * written then, and nobody is told: the notices wait for the commit.
+     */
+    public function sendBackApproved(Loan $loan, User $user, string $reason): Loan
+    {
+        $this->guardSendBackApproved($loan);
+
+        return LoanWriteTransaction::run(function () use ($loan, $user, $reason): Loan {
+            $ids = [(int) $loan->getKey(), (int) $loan->source_loan_id];
+            sort($ids);
+
+            $locked = Loan::whereKey($ids)->orderBy('id')->lockForUpdate()->get()->keyBy('id');
+            $current = $locked->get($loan->getKey());
+
+            if ($current === null || $current->status !== 'approved') {
+                throw LoanWriteTransaction::conflict();
+            }
+
+            if (! $locked->has($loan->source_loan_id)) {
+                throw ValidationException::withMessages([
+                    'loan' => ['The loan being restructured no longer exists.'],
+                ]);
+            }
+
+            $loan->setRawAttributes($current->getAttributes(), true);
+
+            $loan->update([
+                'status' => 'for_review',
+                'approved_by' => null,
+                'approved_at' => null,
+                'approval_remarks' => null,
+            ]);
+
+            app(LoanApprovalChainService::class)->reopenApprovedRestructure($loan, $user, $reason);
+
+            AuditLogService::log(
+                action: 'restructure_sent_back',
+                auditable: $loan,
+                newValues: [
+                    'reason' => $reason,
+                    'acted_by' => $user->id,
+                    'previous_status' => 'approved',
+                ],
+                description: "Approved restructure {$loan->application_number} sent back for approval before release. Reason: {$reason}",
+                userId: $user->id,
+            );
+
+            return $loan;
+        });
+    }
+
+    /**
+     * Only an approved restructure can be sent back from here; the refusal
+     * says why, by status.
+     *
+     * @throws ValidationException 422 on `status`
+     */
+    private function guardSendBackApproved(Loan $loan): void
+    {
+        $message = match (true) {
+            ! $loan->isRestructure() => 'Only a restructure can be sent back for approval once it is approved.',
+            $loan->status === 'approved' => null,
+            $loan->status === 'draft' => 'This restructure has not been submitted for approval yet.',
+            $loan->status === 'for_review' => 'This restructure has not been approved yet, so it can\'t be sent back from here. Send it back from its approval chain instead.',
+            in_array($loan->status, ['rejected', 'void'], true) => 'This restructure was rejected or voided, so it can\'t be sent back for approval.',
+            default => 'This restructure has already been released, so it can\'t be sent back for approval.',
+        };
+
+        if ($message !== null) {
+            throw ValidationException::withMessages(['status' => [$message]]);
+        }
+    }
+
+    /**
      * Link a co-maker to a loan that is approved and waiting to be released —
      * the release dialog's "Add Co-Maker".
      *
@@ -1910,13 +2001,13 @@ class LoanService
 
     /**
      * The refusal for a source that owes less than was approved, worded by
-     * the restructure's status: one still in review is sent back, an approved
-     * one can't be, so it is voided and created again.
+     * the restructure's status: one still in review is sent back on its chain,
+     * an approved one with PATCH /loans/{loan}/send-back-approved.
      */
     public static function sourceFellMessage(string $status): string
     {
         return $status === 'approved'
-            ? 'The source loan was paid down or adjusted after this restructure was approved. Void this restructure and create it again with the current balance.'
+            ? 'The source loan was paid down or adjusted after this restructure was approved. Send it back for approval so the figures can be taken again.'
             : 'The source loan was paid down or adjusted after approval. Send the restructure back for approval again.';
     }
 
@@ -2199,6 +2290,18 @@ class LoanService
         );
     }
 
+    /**
+     * Void a loan that was never released: PATCH /loans/{loan}/void.
+     *
+     * A loan released (or further) when it was read is the 422 it always was,
+     * checked before the transaction. Inside it (the outermost
+     * LoanWriteTransaction) the loan row is locked as the first statement and
+     * its status read again: a loan released, voided or otherwise moved since
+     * this request read it is a 409, as is a lock wait timeout, and nothing is
+     * written. So a void that read `approved` while a release ran can never
+     * overwrite `released`. No collateral lock: a void moves a loan only
+     * between statuses that pledge nothing (Loan::PLEDGING_STATUSES).
+     */
     public function voidLoan(Loan $loan): Loan
     {
         if (in_array($loan->status, Loan::EVER_RELEASED_STATUSES, true)) {
@@ -2207,9 +2310,13 @@ class LoanService
             ]);
         }
 
-        $loan->update(['status' => 'void']);
+        return LoanWriteTransaction::run(function () use ($loan): Loan {
+            $this->lockLoanInStatus($loan, (string) $loan->status);
 
-        return $loan;
+            $loan->update(['status' => 'void']);
+
+            return $loan;
+        });
     }
 
     /**
