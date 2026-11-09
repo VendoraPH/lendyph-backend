@@ -376,6 +376,9 @@ class AllowancePostingTest extends TestCase
 
     public function test_a_future_dated_no_branch_1200_entry_never_blocks_a_run(): void
     {
+        // A fixed day, so "today", "yesterday" and "a year ahead" never depend
+        // on when the suite runs (a run near midnight, or around Feb 29).
+        $this->travelTo(Carbon::parse('2026-11-10 09:00:00', 'Asia/Manila'));
         $this->twoPastDueLoans();
         // A move typed a year ahead, and its reversal: neither is in the books yet.
         $typo = Carbon::today()->addYear()->toDateString();
