@@ -1,5 +1,6 @@
 <?php
 
+use App\Console\Commands\ProcessCreditScoreChanges;
 use App\Models\CreditScore;
 use App\Models\CreditScoreDirtyMember;
 use App\Models\CreditScoreMember;
@@ -134,7 +135,7 @@ it('does not reach back past the overlap window', function () {
     expect($scanner->scan())->toBe(0);
 });
 
-it('moves a member whose scoring keeps failing to the back of the queue, and scores the others', function () {
+it('backs off a member whose scoring keeps failing, and scores the others', function () {
     $broken = $this->member(['monthly_income' => 40000]);
     $fine = $this->member(['monthly_income' => 30000]);
     app()->instance(Recalculator::class, failingRecalculatorFor($broken->id));
@@ -150,13 +151,81 @@ it('moves a member whose scoring keeps failing to the back of the queue, and sco
     expect(CreditScoreMember::query()->where('borrower_id', $fine->id)->exists())->toBeTrue()
         ->and(CreditScoreDirtyMember::query()->where('borrower_id', $fine->id)->exists())->toBeFalse()
         ->and($dirty->attempts)->toBe(1)
-        ->and($dirty->flagged_at->gte(now()->startOfSecond()))->toBeTrue();
+        ->and($dirty->flagged_at->toDateTimeString())->toBe(now()->addMinutes(2)->toDateTimeString());
+
+    // Not retried before its 2 minutes are up.
+    $this->travel(1)->minutes();
+    $this->artisan('credit-scoring:process-changes')->assertSuccessful();
+    expect(CreditScoreDirtyMember::query()->where('borrower_id', $broken->id)->value('attempts'))->toBe(1);
 
     $this->travel(1)->minutes();
     $this->artisan('credit-scoring:process-changes')->assertFailed();
 
-    expect(CreditScoreDirtyMember::query()->where('borrower_id', $broken->id)->value('attempts'))->toBe(2);
+    $dirty = CreditScoreDirtyMember::query()->where('borrower_id', $broken->id)->sole();
+    expect($dirty->attempts)->toBe(2)
+        ->and($dirty->flagged_at->toDateTimeString())->toBe(now()->addMinutes(4)->toDateTimeString());
     Log::shouldHaveReceived('warning')->with('Credit scoring failed for a member.', ['borrower_id' => $broken->id, 'attempts' => 2]);
+});
+
+it('caps the back-off at 60 minutes', function () {
+    $broken = $this->member(['monthly_income' => 40000]);
+    app()->instance(Recalculator::class, failingRecalculatorFor($broken->id));
+    app(ChangeScanner::class)->flag([$broken->id => 'Loan changed'], now()->subMinute());
+    CreditScoreDirtyMember::query()->where('borrower_id', $broken->id)->update(['attempts' => 4]);
+    Log::spy();
+
+    $this->artisan('credit-scoring:process-changes')->assertFailed();
+
+    $dirty = CreditScoreDirtyMember::query()->where('borrower_id', $broken->id)->sole();
+    expect($dirty->attempts)->toBe(5)
+        ->and($dirty->flagged_at->toDateTimeString())->toBe(now()->addMinutes(32)->toDateTimeString());
+
+    expect(ProcessCreditScoreChanges::retryDelayMinutes(6))->toBe(60)
+        ->and(ProcessCreditScoreChanges::retryDelayMinutes(1))->toBe(2);
+});
+
+it('leaves a member to the nightly run after 5 failed attempts', function () {
+    $broken = $this->member(['monthly_income' => 40000]);
+    $counter = new stdClass;
+    app()->instance(Recalculator::class, failingRecalculatorCounting([$broken->id], $counter));
+    app(ChangeScanner::class)->flag([$broken->id => 'Loan changed'], now()->subMinute());
+    CreditScoreDirtyMember::query()->where('borrower_id', $broken->id)->update(['attempts' => ProcessCreditScoreChanges::MAX_ATTEMPTS]);
+    Log::spy();
+
+    $this->artisan('credit-scoring:process-changes')->assertSuccessful();
+
+    expect($counter->calls)->toBe(0)
+        ->and(CreditScoreDirtyMember::query()->where('borrower_id', $broken->id)->value('attempts'))->toBe(ProcessCreditScoreChanges::MAX_ATTEMPTS);
+
+    app()->forgetInstance(Recalculator::class);
+    $this->artisan('credit-scoring:recalculate', ['--borrower' => $broken->id])->assertSuccessful();
+
+    expect(CreditScoreDirtyMember::query()->where('borrower_id', $broken->id)->exists())->toBeFalse()
+        ->and(CreditScoreMember::query()->where('borrower_id', $broken->id)->exists())->toBeTrue();
+});
+
+it('scores a new change while 250 members keep failing', function () {
+    $failing = collect(range(1, 250))->map(fn () => $this->member()->id)->all();
+    $scanner = app(ChangeScanner::class);
+    $scanner->flag(array_fill_keys($failing, 'Loan changed'), now()->subMinutes(10));
+    app()->instance(Recalculator::class, failingRecalculatorFor(...$failing));
+    Log::spy();
+
+    $this->artisan('credit-scoring:process-changes')->assertFailed();
+
+    $newcomer = $this->member(['monthly_income' => 40000]);
+    $scanner->flag([$newcomer->id => 'Payment recorded or changed'], now());
+    $this->travel(1)->minutes();
+    $this->artisan('credit-scoring:process-changes')->assertFailed();
+
+    expect(CreditScoreMember::query()->where('borrower_id', $newcomer->id)->exists())->toBeTrue()
+        ->and(CreditScoreDirtyMember::query()->where('borrower_id', $newcomer->id)->exists())->toBeFalse()
+        ->and(CreditScoreDirtyMember::query()->whereIn('borrower_id', $failing)->where('attempts', 1)->count())->toBe(250);
+
+    // A third tick, still inside every failing member's back-off, scores nothing and tries none of them.
+    $this->travel(30)->seconds();
+    $this->artisan('credit-scoring:process-changes')->assertSuccessful();
+    expect(CreditScoreDirtyMember::query()->whereIn('borrower_id', $failing)->where('attempts', '>', 1)->count())->toBe(0);
 });
 
 it('rescores a member flagged again while being scored on the next tick', function () {
@@ -177,18 +246,32 @@ it('rescores a member flagged again while being scored on the next tick', functi
         ->and(CreditScoreMember::query()->where('borrower_id', $member->id)->sole()->checked_at->gte(now()->startOfSecond()))->toBeTrue();
 });
 
-function failingRecalculatorFor(int $borrowerId): Recalculator
+function failingRecalculatorFor(int ...$borrowerIds): Recalculator
 {
-    return new class(app(Scorer::class), app(PolicyFlags::class), $borrowerId) extends Recalculator
+    return failingRecalculatorCounting($borrowerIds);
+}
+
+/**
+ * @param  list<int>  $borrowerIds
+ */
+function failingRecalculatorCounting(array $borrowerIds, ?stdClass $counter = null): Recalculator
+{
+    return new class(app(Scorer::class), app(PolicyFlags::class), $borrowerIds, $counter ?? new stdClass) extends Recalculator
     {
-        public function __construct(Scorer $scorer, PolicyFlags $flags, private readonly int $failingId)
+        /**
+         * @param  list<int>  $failingIds
+         */
+        public function __construct(Scorer $scorer, PolicyFlags $flags, private readonly array $failingIds, private readonly stdClass $counter)
         {
             parent::__construct($scorer, $flags);
+            $this->counter->calls ??= 0;
         }
 
         public function scoreMember(int $borrowerId, string $reason, bool $dryRun = false, ?Carbon\Carbon $asOf = null): array
         {
-            if ($borrowerId === $this->failingId) {
+            if (in_array($borrowerId, $this->failingIds, true)) {
+                $this->counter->calls++;
+
                 throw new RuntimeException('Scoring failed for a test member.');
             }
 

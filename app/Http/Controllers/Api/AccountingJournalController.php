@@ -11,6 +11,7 @@ use App\Http\Resources\JournalEntryResource;
 use App\Models\AccountingJournal;
 use App\Services\Accounting\JournalPoster;
 use App\Services\Accounting\JournalPreview;
+use App\Services\Accounting\YearEndCloser;
 use App\Services\BranchAccess;
 use App\Services\LikePattern;
 use Illuminate\Database\Eloquent\Builder;
@@ -35,7 +36,10 @@ use OpenApi\Attributes as OA;
  */
 class AccountingJournalController extends Controller
 {
-    public function __construct(private JournalPoster $poster) {}
+    public function __construct(
+        private JournalPoster $poster,
+        private YearEndCloser $yearEnd,
+    ) {}
 
     #[OA\Get(
         path: '/api/accounting/journals',
@@ -335,7 +339,7 @@ class AccountingJournalController extends Controller
     #[OA\Post(
         path: '/api/accounting/journals/{id}/reverse',
         summary: 'Reverse a posted entry',
-        description: "Writes a MIRROR entry — every debit becomes a credit against the same account — built from the original's stored lines, and posts it. The original is not edited beyond `status` and `reversed_by_journal_id`, so both halves stay on the record and the pair nets to zero on every statement. Returns the REVERSAL, not the original. Refused with 422 on a draft or on an entry already reversed.",
+        description: "Writes a MIRROR entry — every debit becomes a credit against the same account — built from the original's stored lines, and posts it. The original is not edited beyond `status` and `reversed_by_journal_id`, so both halves stay on the record and the pair nets to zero on every statement. Returns the REVERSAL, not the original. Refused with 422 on a draft, on an entry already reversed, and on a year-end `closing` entry or the reversal of one (reopen the year instead).",
         tags: ['Accounting'],
         security: [['sanctum' => []]],
         parameters: [
@@ -351,11 +355,14 @@ class AccountingJournalController extends Controller
         responses: [
             new OA\Response(response: 201, description: 'The posted reversing entry'),
             new OA\Response(response: 403, description: 'Missing journals:reverse'),
-            new OA\Response(response: 422, description: 'Not posted, or already reversed'),
+            new OA\Response(response: 422, description: 'Not posted, already reversed, or part of a year-end close'),
         ],
     )]
     public function reverse(ReverseJournalRequest $request, AccountingJournal $journal): JsonResponse
     {
+        // A closing entry is undone by reopening its year, never by hand.
+        $this->yearEnd->assertNotPartOfAClose($journal);
+
         $reversal = $this->poster->reverse(
             $journal,
             $request->input('date') ?: now()->toDateString(),

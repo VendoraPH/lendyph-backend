@@ -5,7 +5,9 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Loan;
 use App\Services\PromissoryNoteService;
+use App\Services\Reminders\Api\ContactVisibility;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
 use OpenApi\Attributes as OA;
 
 class PromissoryNoteController extends Controller
@@ -15,7 +17,7 @@ class PromissoryNoteController extends Controller
     #[OA\Get(
         path: '/api/loans/{loan}/promissory-note',
         summary: 'Generate promissory note',
-        description: 'Returns borrower promise-to-pay data, co-maker details, loan terms, and signature fields',
+        description: 'Returns borrower promise-to-pay data, co-maker details, loan terms, and signature fields. `borrower.address` and each `co_makers[].address` are null for a caller without `borrowers:view` or who cannot see the member\'s branch.',
         tags: ['Loan Documents'],
         security: [['sanctum' => []]],
         parameters: [
@@ -27,7 +29,7 @@ class PromissoryNoteController extends Controller
             new OA\Response(response: 404, description: 'Loan not found'),
         ],
     )]
-    public function show(Loan $loan): JsonResponse
+    public function show(Request $request, Loan $loan): JsonResponse
     {
         $this->authorize('loans:view');
 
@@ -38,7 +40,10 @@ class PromissoryNoteController extends Controller
         }
 
         return response()->json([
-            'data' => $this->promissoryNoteService->generatePromissoryNote($loan),
+            'data' => $this->promissoryNoteService->generatePromissoryNote(
+                $loan,
+                app(ContactVisibility::class)->allows($request->user(), $loan->borrower?->branch_id),
+            ),
         ]);
     }
 }

@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace App\Console\Commands;
 
 use App\Models\Borrower;
+use App\Models\CreditScoreDirtyMember;
+use App\Services\CreditScoring\ChangeScanner;
 use App\Services\CreditScoring\Recalculator;
 use Carbon\Carbon;
 use Illuminate\Console\Attributes\Description;
@@ -26,8 +28,9 @@ use Throwable;
  *
  * `--dry-run` calculates and compares and writes nothing, listing what would
  * change. `--borrower=` scores one member. A member whose scoring fails is
- * logged by id only and counted, and the run carries on; it then exits with
- * a failure. Their change flag stays, so the minute job retries them.
+ * logged by id only, counted and flagged for the minute job to retry (or
+ * keeps the flag they had), and the run carries on; it then exits with a
+ * failure. A dry run flags nobody.
  */
 #[Signature('credit-scoring:recalculate
     {--dry-run : Calculate and list what would change, writing nothing}
@@ -37,7 +40,9 @@ class RecalculateCreditScores extends Command
 {
     private const CHUNK = 200;
 
-    public function handle(Recalculator $recalculator): int
+    public const FAILURE_REASON = 'Nightly scoring failed';
+
+    public function handle(Recalculator $recalculator, ChangeScanner $scanner): int
     {
         $dryRun = (bool) $this->option('dry-run');
         $only = $this->option('borrower');
@@ -55,7 +60,7 @@ class RecalculateCreditScores extends Command
             ->whereNotIn('status', Borrower::NON_MEMBER_STATUSES)
             ->when($only !== null, fn ($q) => $q->where('id', (int) $only))
             ->select('id')
-            ->chunkById(self::CHUNK, function ($members) use ($recalculator, $dryRun, $startedAt, &$counts) {
+            ->chunkById(self::CHUNK, function ($members) use ($recalculator, $scanner, $dryRun, $startedAt, &$counts) {
                 foreach ($members as $member) {
                     $borrowerId = (int) $member->id;
 
@@ -64,6 +69,10 @@ class RecalculateCreditScores extends Command
                     } catch (Throwable) {
                         $counts['failed']++;
                         Log::warning('Credit scoring failed for a member.', ['borrower_id' => $borrowerId]);
+
+                        if (! $dryRun) {
+                            $this->flagForRetry($scanner, $borrowerId);
+                        }
                     }
                 }
             });
@@ -82,6 +91,21 @@ class RecalculateCreditScores extends Command
         ));
 
         return $counts['failed'] > 0 ? self::FAILURE : self::SUCCESS;
+    }
+
+    /**
+     * Flag a member whose nightly scoring failed, keeping a flag they already
+     * have (and its attempts).
+     */
+    private function flagForRetry(ChangeScanner $scanner, int $borrowerId): void
+    {
+        try {
+            if (! CreditScoreDirtyMember::query()->where('borrower_id', $borrowerId)->exists()) {
+                $scanner->flag([$borrowerId => self::FAILURE_REASON], Carbon::now());
+            }
+        } catch (Throwable) {
+            Log::warning('Credit scoring could not flag a member for a retry.', ['borrower_id' => $borrowerId]);
+        }
     }
 
     /**

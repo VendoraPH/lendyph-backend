@@ -12,6 +12,10 @@ use InvalidArgumentException;
  * Bands are tried in order. `at_least` takes the first band whose threshold
  * the value reaches, `at_most` the first whose threshold the value does not
  * exceed, and a value no band takes earns the factor's `otherwise` points.
+ *
+ * A category's weight scales its factors: each factor's points count
+ * weight / (the category's active factor points). Weights are read in
+ * hundredths of a percent, never rounded.
  */
 final class FactorTable
 {
@@ -48,6 +52,43 @@ final class FactorTable
     public function categories(): array
     {
         return array_values($this->categories);
+    }
+
+    /**
+     * The points of the category's active factors, all of them, with data
+     * or not: what its weight is spread over.
+     */
+    public function categoryFactorPoints(string $categoryKey): int
+    {
+        return (int) array_sum(array_map(
+            fn (array $factor) => (int) $factor['points'],
+            array_filter($this->factors(), fn (array $factor) => $factor['category_key'] === $categoryKey),
+        ));
+    }
+
+    /**
+     * The category's weight in hundredths of a percent, or null when the
+     * revision has no such category.
+     */
+    public function weightHundredths(string $categoryKey): ?int
+    {
+        foreach ($this->categories as $category) {
+            if ($category['key'] === $categoryKey) {
+                return self::hundredths($category['weight_percent']);
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * A percent with at most two decimals, in hundredths (Decimal), so
+     * 16.67 is 1667 exactly. More decimals are an error: a weight is never
+     * rounded.
+     */
+    public static function hundredths(int|float|string $percent): int
+    {
+        return Decimal::scaled($percent, 2);
     }
 
     /**

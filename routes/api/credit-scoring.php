@@ -1,25 +1,28 @@
 <?php
 
+use App\Http\Controllers\Api\CreditAssessmentController;
 use App\Http\Controllers\Api\CreditScoringController;
 use Illuminate\Support\Facades\Route;
 
 /*
 |--------------------------------------------------------------------------
-| Credit Scoring — placeholders
+| Credit Scoring
 |--------------------------------------------------------------------------
 |
-| Every endpoint the frontend's Credit Scoring module calls, answering 501
-| to a caller who holds the permission and 403 to one who does not. The
-| frontend shows "not connected yet" on 404 and 501 only, so 501 is what a
-| permitted user must get until the module is built. Permissions are checked
-| in the controller, like every other API endpoint.
+| The endpoints the frontend's Credit Scoring module calls, plus a loan
+| application's assessment. Permissions are checked in the controllers and
+| requests, like every other API endpoint: view for the reads, settings for
+| the scorecard and settings (both verbs), override for decisions, and the
+| assessment also needs loans:view to read and loans:update to save.
 |
 | Required from routes/api.php inside the authenticated group, at the place
-| these routes sat before they moved here, so their order is unchanged.
+| these routes sat before they moved here, so their order is unchanged; the
+| assessment routes come after them.
 |
-| `{borrowerId}` is a plain number, not a bound Borrower: a placeholder
-| reads nothing from the database. No `GET /alerts`; alerts arrive inside
-| the risk-monitoring response (see the frontend's
+| `{borrowerId}` is a plain number, not a bound Borrower: the controller
+| resolves it through Borrower::visibleTo(), so another branch's member
+| answers 404. `{loan}` binds only loans the caller may see. No `GET /alerts`;
+| alerts arrive inside the risk-monitoring response (see the frontend's
 | docs/CREDIT_SCORING_BACKEND_HANDOFF.md).
 */
 Route::prefix('credit-scoring')->group(function () {
@@ -38,4 +41,9 @@ Route::prefix('credit-scoring')->group(function () {
     Route::get('/settings', [CreditScoringController::class, 'showSettings']);
     Route::put('/settings', [CreditScoringController::class, 'updateSettings']);
     Route::post('/decisions', [CreditScoringController::class, 'storeDecision']);
+
+    Route::get('/loans/{loan}/assessment', [CreditAssessmentController::class, 'show'])
+        ->whereNumber('loan');
+    Route::put('/loans/{loan}/assessment', [CreditAssessmentController::class, 'update'])
+        ->whereNumber('loan');
 });

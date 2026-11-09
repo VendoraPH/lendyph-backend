@@ -8,6 +8,7 @@ use App\Models\Loan;
 use App\Models\LoanProduct;
 use App\Models\User;
 use App\Services\CreditScoring\Capacity;
+use App\Services\CreditScoring\Centavos;
 use App\Services\CreditScoring\Recalculator;
 use App\Services\LoanService;
 use Tests\Feature\CreditScoring\Engine\CreditFixtures;
@@ -132,13 +133,29 @@ function singlePaymentApplication(Borrower $member, int $term, string $termUnit)
     ])->fresh();
 }
 
+/**
+ * The previewed schedule's total in integer centavos.
+ */
+function previewTotalCentavos(Loan $loan): int
+{
+    return collect(app(LoanService::class)->buildAmortizationPreview($loan))
+        ->sum(fn (array $row) => Centavos::of($row['total_due']));
+}
+
+/**
+ * Centavos divided by a whole number, rounded half up, as two-decimal pesos.
+ */
+function centavosOver(int $centavos, int $divisor): string
+{
+    return Centavos::toPesos(intdiv(2 * $centavos + $divisor, 2 * $divisor));
+}
+
 it('spreads a single payment over its term in months for capacity, and says so', function () {
     $loan = singlePaymentApplication($this->member(['monthly_income' => 40000]), 3, 'months');
-    $total = collect(app(LoanService::class)->buildAmortizationPreview($loan))->sum('total_due');
 
     $result = $this->scoreOf($loan->borrower, $loan);
 
-    expect($result['capacity']['proposed_payment'])->toBe(number_format(round($total / 3, 2), 2, '.', ''))
+    expect($result['capacity']['proposed_payment'])->toBe(centavosOver(previewTotalCentavos($loan), 3))
         ->and($result['capacity']['proposed_payment_basis'])->toContain('over 3 months')
         ->and($this->factorOf($result, 'debt_service_ratio')['detail'])->toContain('monthly equivalent');
 });
@@ -147,9 +164,8 @@ it('keeps a one-month single payment whole, and a days term spread over its 30-d
     $oneMonth = singlePaymentApplication($this->member(['monthly_income' => 40000]), 1, 'months');
     $days = singlePaymentApplication($this->member(['monthly_income' => 40000]), 90, 'days');
     $short = singlePaymentApplication($this->member(['monthly_income' => 40000]), 15, 'days');
-    $preview = fn (Loan $loan) => collect(app(LoanService::class)->buildAmortizationPreview($loan))->sum('total_due');
 
-    expect($this->scoreOf($oneMonth->borrower, $oneMonth)['capacity']['proposed_payment'])->toBe(number_format($preview($oneMonth), 2, '.', ''))
-        ->and($this->scoreOf($days->borrower, $days)['capacity']['proposed_payment'])->toBe(number_format(round($preview($days) / 3, 2), 2, '.', ''))
-        ->and($this->scoreOf($short->borrower, $short)['capacity']['proposed_payment'])->toBe(number_format($preview($short), 2, '.', ''));
+    expect($this->scoreOf($oneMonth->borrower, $oneMonth)['capacity']['proposed_payment'])->toBe(Centavos::toPesos(previewTotalCentavos($oneMonth)))
+        ->and($this->scoreOf($days->borrower, $days)['capacity']['proposed_payment'])->toBe(centavosOver(previewTotalCentavos($days), 3))
+        ->and($this->scoreOf($short->borrower, $short)['capacity']['proposed_payment'])->toBe(Centavos::toPesos(previewTotalCentavos($short)));
 });

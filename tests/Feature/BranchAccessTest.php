@@ -448,7 +448,7 @@ class BranchAccessTest extends TestCase
             ->all();
 
         $this->assertSame(
-            ['admin', 'bod1', 'bod2', 'bod3', 'bod4', 'bod5', 'bod6', 'bod7', 'general_bookkeeper', 'manager', 'super_admin'],
+            ['accountant', 'admin', 'bod1', 'bod2', 'bod3', 'bod4', 'bod5', 'bod6', 'bod7', 'general_bookkeeper', 'manager', 'super_admin'],
             $holders,
         );
     }

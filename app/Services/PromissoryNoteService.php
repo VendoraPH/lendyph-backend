@@ -8,7 +8,13 @@ class PromissoryNoteService
 {
     public function __construct(private LoanService $loanService) {}
 
-    public function generatePromissoryNote(Loan $loan): array
+    /**
+     * The note's data. `$withAddresses` is false for a caller who may not read
+     * the member's personal data (`borrowers:view` and the member's branch,
+     * the round fz rule): the member's and each co-maker's address then read
+     * null.
+     */
+    public function generatePromissoryNote(Loan $loan, bool $withAddresses): array
     {
         $loan->load('borrower', 'loanProduct', 'branch', 'coMakers', 'amortizationSchedules', 'approvedByUser');
 
@@ -27,17 +33,17 @@ class PromissoryNoteService
             'generated_at' => now()->toDateTimeString(),
 
             // What the note prints, and nothing else: this answers to
-            // `loans:view`, not `borrowers:view`.
+            // `loans:view`, so the addresses also need member access.
             'borrower' => [
                 'borrower_code' => $loan->borrower->borrower_code,
                 'full_name' => $loan->borrower->full_name,
-                'address' => $loan->borrower->address ?: $loan->borrower->street_address,
+                'address' => $withAddresses ? ($loan->borrower->address ?: $loan->borrower->street_address) : null,
             ],
 
             'co_makers' => $loan->coMakers->map(fn ($cm) => [
                 'co_maker_code' => $cm->co_maker_code,
                 'full_name' => $cm->full_name,
-                'address' => $cm->address,
+                'address' => $withAddresses ? $cm->address : null,
                 'relationship_to_borrower' => $cm->relationship_to_borrower,
             ])->values()->toArray(),
 

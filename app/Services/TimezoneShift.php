@@ -128,6 +128,13 @@ class TimezoneShift
         // csv_import_* tables below.
         'accounting_account_mappings' => ['created_at', 'updated_at'],
         'accounting_accounts' => ['created_at', 'updated_at'],
+        // Added 2026-11-09 with the allowance posting (Phase 2), well after the
+        // cutover completed (2026-08-06 on every deployment). `as_of` is a DATE.
+        'accounting_allowance_postings' => ['created_at', 'updated_at'],
+        // The year-end close (Phase 2, round C), added 2026-11-09: the same
+        // reasoning, well after the cutover.
+        'accounting_year_close_entries' => ['created_at', 'updated_at'],
+        'accounting_year_closes' => ['closed_at', 'created_at', 'reopened_at', 'updated_at'],
         // The accounting write modules, added 2026-09-18 — same reasoning as
         // the two above and as the csv_import_* tables below: created well
         // after the cutover completed (2026-08-06 on every deployment), and the
