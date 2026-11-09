@@ -27,7 +27,10 @@ use Illuminate\Validation\Validator;
  * can restructure, as POST /loans/{id}/restructure is, and it adds that page's
  * `restructure` figures. With `loan_id` it is the edit page's preview, open to
  * whoever can edit a loan, as PUT /loans/{id} is: the loan's held pledges
- * count at the value they were pledged at. The two cannot be combined.
+ * count at the value they were pledged at. The restructure edit form sends
+ * both, so one preview carries the edit's figures and the restructure's: each
+ * id keeps its own permission and branch checks, and the edited loan must be
+ * the restructure of that source (LoanService::formPreview()).
  *
  * Collateral is listed by id only. The server values each row from the
  * borrower's register (`borrower_id`, or the edited or source loan's
@@ -42,15 +45,22 @@ class PreviewLoanRequest extends FormRequest
 
     public function authorize(): bool
     {
-        if ($this->filled('source_loan_id')) {
-            return $this->user()->can('loans:restructure');
+        $needs = array_keys(array_filter([
+            'loans:restructure' => $this->filled('source_loan_id'),
+            'loans:update' => $this->filled('loan_id'),
+        ]));
+
+        if ($needs === []) {
+            return $this->user()->canAny(['loans:create', 'loans:update']);
         }
 
-        if ($this->filled('loan_id')) {
-            return $this->user()->can('loans:update');
+        foreach ($needs as $permission) {
+            if (! $this->user()->can($permission)) {
+                return false;
+            }
         }
 
-        return $this->user()->canAny(['loans:create', 'loans:update']);
+        return true;
     }
 
     public function rules(): array
@@ -59,7 +69,7 @@ class PreviewLoanRequest extends FormRequest
             // Loans and members in the caller's branches only (BranchAccess);
             // another branch's id fails like a missing one.
             'source_loan_id' => ['nullable', 'integer', $this->visibleExists('loans')],
-            'loan_id' => ['nullable', 'integer', $this->visibleExists('loans'), 'prohibits:source_loan_id'],
+            'loan_id' => ['nullable', 'integer', $this->visibleExists('loans')],
             // Needed once collateral is listed, to find it on the register;
             // an edit or a restructure takes its loan's borrower instead.
             'borrower_id' => [
