@@ -14,7 +14,9 @@ use OpenApi\Attributes as OA;
  * The reminders settings. Readable with `reminders:view` (credentials are
  * write-only and never returned); saving needs `reminders:settings`, and
  * changing a company-wide field also needs `branches:view_all`: a branch
- * user manages only their own branch's settings.
+ * user's save writes only their own branch's settings, and is refused while
+ * it would change a company field or carries a key
+ * (ReminderSettingsService::update).
  */
 class ReminderSettingController extends Controller
 {
@@ -51,12 +53,7 @@ class ReminderSettingController extends Controller
     public function update(UpdateReminderSettingsRequest $request, ReminderSettingsService $settings): JsonResponse
     {
         $this->authorize('reminders:settings');
-        abort_if(
-            $settings->companyChanges($request->validated()) !== [] && ! $request->user()->can(BranchAccess::VIEW_ALL),
-            403,
-            'Only staff who see every branch can change the company-wide reminder settings.',
-        );
-        $settings->update($request->user(), $request->validated());
+        $settings->update($request->user(), $request->validated(), $request->user()->can(BranchAccess::VIEW_ALL));
 
         return response()->json(['message' => 'Reminder settings saved.', 'data' => $settings->present($request->user())]);
     }

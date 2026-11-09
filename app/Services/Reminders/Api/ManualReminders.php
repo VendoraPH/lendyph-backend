@@ -92,9 +92,11 @@ final class ManualReminders
             $assessment = $this->assess($loan, $channel, $templateType, $now);
 
             if ($assessment['unfit'] !== [] || $assessment['blocked'] !== []) {
+                $contact = $this->visibility->allows($user, $loan->borrower?->branch_id === null ? null : (int) $loan->borrower->branch_id);
+
                 throw ValidationException::withMessages(array_filter([
                     'template_type' => $assessment['unfit'],
-                    'channel' => $assessment['blocked'],
+                    'channel' => array_values(array_unique(array_map(fn (string $reason) => (string) $this->visibility->reason($reason, $contact), $assessment['blocked']))),
                 ]));
             }
 

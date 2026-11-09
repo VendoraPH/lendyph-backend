@@ -43,7 +43,7 @@ class ReminderQueueItemResource extends JsonResource
             'recipient' => $contact ? ($this->recipient_masked ?? ReminderFormat::maskedContact($this->borrower, $this->channel)) : null,
             'scheduled_at' => ReminderFormat::time($this->scheduled_at),
             'status' => $this->status,
-            'reason' => $visibility->reason($this->reason, $contact),
+            'reason' => $visibility->reason($this->reason, $contact, $this->status === 'failed' ? (string) $this->reason_code : null),
             'reason_code' => $this->reason_code,
             'attempts' => (int) $this->attempts,
             'source' => $this->source,

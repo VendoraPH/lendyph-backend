@@ -12,8 +12,8 @@ use Illuminate\Http\Resources\Json\JsonResource;
  * One message that was handed to a driver (frontend `ReminderMessage`).
  *
  * Only the masked recipient is ever sent, and only to a caller who may read
- * the member's details (ContactVisibility); the full number or address stays
- * in the table. A redacted message (two years after its loan closed) sends
+ * the member's details (ContactVisibility), as is the provider's
+ * `failure_reason`; the full number or address stays in the table. A redacted message (two years after its loan closed) sends
  * `subject` and `body` as null, with `redacted_at`. `test_mode` is the
  * message's own stored flag: true when it was only logged.
  *
@@ -27,6 +27,7 @@ class ReminderMessageResource extends JsonResource
     public function toArray(Request $request): array
     {
         $redacted = $this->redacted_at !== null;
+        $contact = app(ContactVisibility::class)->allows($request->user(), $this->borrower?->branch_id);
 
         return [
             'id' => $this->id,
@@ -37,7 +38,7 @@ class ReminderMessageResource extends JsonResource
             'loan_account_number' => ReminderFormat::loanNumber($this->loan),
             'installment_number' => $this->period_number === null ? null : (int) $this->period_number,
             'channel' => $this->channel,
-            'recipient' => app(ContactVisibility::class)->allows($request->user(), $this->borrower?->branch_id) ? $this->recipient_masked : null,
+            'recipient' => $contact ? $this->recipient_masked : null,
             'template_type' => $this->template_type,
             'subject' => $redacted ? null : $this->subject,
             'body' => $redacted ? null : $this->body,
@@ -48,7 +49,7 @@ class ReminderMessageResource extends JsonResource
             'provider' => $this->provider,
             'provider_reference' => $this->provider_reference,
             'attempts' => (int) $this->attempts,
-            'failure_reason' => $this->failure_reason,
+            'failure_reason' => $contact ? $this->failure_reason : null,
             'source' => $this->source,
             'created_by_name' => $this->createdBy?->full_name,
             'segments' => $this->sms_parts,

@@ -9,6 +9,7 @@ use App\Models\User;
 use App\Services\BranchAccess;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
+use Symfony\Component\HttpKernel\Exception\HttpException;
 
 /**
  * The reminders settings as the frontend's `ReminderSettings` reads them, and
@@ -23,6 +24,12 @@ use Illuminate\Support\Facades\DB;
  */
 final class ReminderSettingsService
 {
+    private const BOOLEAN_COLUMNS = ['enabled', 'sms_enabled', 'email_enabled'];
+
+    private const NUMERIC_COLUMNS = ['max_attempts', 'retry_delay_minutes', 'sms_cost_per_part'];
+
+    private const CREDENTIAL_COLUMNS = ['sms_api_key', 'sms_api_secret', 'email_api_key'];
+
     public function __construct(
         private readonly DeploymentMode $mode,
         private readonly BranchAccess $branches,
@@ -62,14 +69,26 @@ final class ReminderSettingsService
     }
 
     /**
+     * Saves the settings. Without `$mayChangeCompany` (the caller lacks
+     * `branches:view_all`) no company column is ever written: only
+     * `branches` is saved, and the save is refused (403) when any company
+     * column it sends differs from the stored one or it carries any API key
+     * or secret. The check runs under the settings row's lock, so a stale
+     * whole-form save can't undo a change saved in the meantime.
+     *
      * @param  array<string, mixed>  $data  validated UpdateReminderSettingsRequest input
      */
-    public function update(User $user, array $data): void
+    public function update(User $user, array $data, bool $mayChangeCompany): void
     {
-        DB::transaction(function () use ($user, $data): void {
+        DB::transaction(function () use ($user, $data, $mayChangeCompany): void {
             $settings = ReminderSetting::query()->orderBy('id')->lockForUpdate()->first() ?? ReminderSetting::current();
-            $settings->fill(array_merge($this->columns($data), ['updated_by' => $user->id]));
-            $settings->save();
+
+            if ($mayChangeCompany) {
+                $settings->fill(array_merge($this->columns($data), ['updated_by' => $user->id]));
+                $settings->save();
+            } elseif ($this->companyChanges($data, $settings) !== []) {
+                throw new HttpException(403, 'Only staff who see every branch can change the company-wide reminder settings.');
+            }
 
             foreach ($data['branches'] ?? [] as $branch) {
                 $row = ReminderBranchSetting::query()->firstOrNew(['branch_id' => (int) filter_var($branch['branch_id'], FILTER_VALIDATE_INT)]);
@@ -83,22 +102,21 @@ final class ReminderSettingsService
     }
 
     /**
-     * The company-wide columns this save would change: every field of the one
-     * settings row (the switch, times, channels, retries, providers and keys,
-     * the company payment text), compared with what is stored. Sending a
-     * stored value back unchanged changes nothing. A filled key that differs
-     * from the stored one is a change; the key itself is never returned.
+     * The company columns this save would change, each compared by its own
+     * type with the stored row: switches as booleans, counts and the SMS cost
+     * as numbers, times and text exactly (an empty value and none are the
+     * same). Any filled API key or secret counts as a change, whatever is
+     * stored, so a save never tells whether a guess matched.
      *
      * @param  array<string, mixed>  $data  validated UpdateReminderSettingsRequest input
      * @return list<string>
      */
-    public function companyChanges(array $data): array
+    private function companyChanges(array $data, ReminderSetting $settings): array
     {
-        $settings = ReminderSetting::current();
         $changed = [];
 
         foreach ($this->columns($data) as $column => $value) {
-            if (self::normalised($settings->getAttribute($column)) !== self::normalised($value)) {
+            if (in_array($column, self::CREDENTIAL_COLUMNS, true) || ! self::same($column, $settings->getAttribute($column), $value)) {
                 $changed[] = $column;
             }
         }
@@ -106,13 +124,18 @@ final class ReminderSettingsService
         return $changed;
     }
 
-    private static function normalised(mixed $value): string
+    private static function same(string $column, mixed $stored, mixed $sent): bool
     {
-        return match (true) {
-            is_bool($value) => $value ? '1' : '0',
-            is_numeric($value) => (string) (float) $value,
-            default => trim((string) $value),
-        };
+        if (in_array($column, self::BOOLEAN_COLUMNS, true)) {
+            return filter_var($stored, FILTER_VALIDATE_BOOL) === filter_var($sent, FILTER_VALIDATE_BOOL);
+        }
+
+        if (in_array($column, self::NUMERIC_COLUMNS, true)) {
+            return ($stored === null && $sent === null)
+                || ($stored !== null && $sent !== null && is_numeric($stored) && is_numeric($sent) && round((float) $stored, 4) === round((float) $sent, 4));
+        }
+
+        return (string) $stored === (string) $sent;
     }
 
     /**

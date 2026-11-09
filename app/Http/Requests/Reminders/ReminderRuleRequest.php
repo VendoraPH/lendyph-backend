@@ -6,6 +6,7 @@ use App\Models\ReminderRule;
 use App\Models\ReminderSetting;
 use App\Models\ReminderTemplate;
 use App\Services\BranchAccess;
+use App\Services\Reminders\Api\TemplateFit;
 use App\Services\Reminders\ContactHours;
 use Closure;
 use Illuminate\Foundation\Http\FormRequest;
@@ -15,8 +16,9 @@ use Illuminate\Validation\Rule;
  * A reminder rule, checked as the rule form checks it (`validateRule` in the
  * frontend's src/lib/reminders.ts): 0 days on the due date and 1-90
  * otherwise, a send time inside contact hours (before they end), at least
- * one channel. A `branch_id` outside the caller's branches fails like a
- * missing one, and a rule with no branch needs `branches:view_all`.
+ * one channel, and a template that fits the trigger (TemplateFit::FOR_TRIGGER).
+ * A `branch_id` outside the caller's branches fails like a missing one, and
+ * a rule with no branch needs `branches:view_all`.
  */
 class ReminderRuleRequest extends FormRequest
 {
@@ -66,7 +68,13 @@ class ReminderRuleRequest extends FormRequest
             'branch_id' => ['nullable', 'integer', app(BranchAccess::class)->constrainBranchExists(Rule::exists('branches', 'id'), $this->user())],
             'loan_product_id' => ['nullable', 'integer', Rule::exists('loan_products', 'id')],
             'borrower_type' => ['sometimes', Rule::in(ReminderRule::BORROWER_TYPES)],
-            'template_type' => ['required', Rule::in(ReminderTemplate::TYPES)],
+            'template_type' => ['required', Rule::in(ReminderTemplate::TYPES), function (string $attribute, mixed $value, Closure $fail): void {
+                $fits = TemplateFit::FOR_TRIGGER[(string) $this->input('trigger')] ?? null;
+
+                if ($fits !== null && ! in_array($value, $fits, true)) {
+                    $fail(sprintf('This rule can use only: %s.', implode(', ', array_map(ReminderTemplate::typeLabel(...), $fits))));
+                }
+            }],
             'is_active' => ['sometimes', 'boolean'],
         ];
     }

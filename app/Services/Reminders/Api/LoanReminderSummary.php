@@ -137,7 +137,7 @@ final class LoanReminderSummary
             return null;
         }
 
-        return $this->visibility->reason($event->detail, false);
+        return $this->visibility->reason($event->detail, false, $kind === 'failed' ? (string) $event->reason_code : null);
     }
 
     /**

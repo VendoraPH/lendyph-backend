@@ -27,9 +27,19 @@ use Illuminate\Support\Carbon;
  *
  * Inside grace, nothing overdue fits. The list keeps ReminderTemplate::TYPES'
  * order.
+ *
+ * A rule fires on due dates alone, so its template follows from its trigger
+ * by the same rules (FOR_TRIGGER); the payment-state templates (part paid,
+ * payment confirmation) don't apply to rules.
  */
 final class TemplateFit
 {
+    public const FOR_TRIGGER = [
+        'before_due' => ['upcoming'],
+        'on_due' => ['due_today'],
+        'after_due' => ['past_due', 'long_past_due'],
+    ];
+
     private const LONG_PAST_DUE_DAYS = 15;
 
     private const CONFIRMATION_DAYS = 7;

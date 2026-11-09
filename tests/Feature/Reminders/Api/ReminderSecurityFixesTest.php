@@ -10,6 +10,7 @@ use App\Models\ReminderRule;
 use App\Models\ReminderSetting;
 use App\Models\ReminderTemplate;
 use App\Models\Repayment;
+use App\Services\Reminders\Drivers\OutgoingReminder;
 use App\Services\Reminders\MemberContact;
 use App\Services\Reminders\ReminderRenderer;
 use Tests\TestCase;
@@ -178,18 +179,21 @@ class ReminderSecurityFixesTest extends TestCase
         $this->assertSame(['long_past_due', 'partial_payment', 'payment_confirmation'], $this->getJson("/api/loans/{$this->loan->id}/reminders")->json('data.allowed_template_types'));
     }
 
-    public function test_email_values_are_escaped_and_sms_values_stay_plain(): void
+    public function test_values_stay_raw_in_plain_text_email_and_the_subject_stays_on_one_line(): void
     {
         $renderer = app(ReminderRenderer::class);
         $values = ['borrower_first_name' => '<b>Juan</b> & "Co"', 'borrower_full_name' => "Juan\r\nBcc: x@y.z"];
 
-        $email = $renderer->render('Hi {{borrower_full_name}}', 'Hi {{borrower_first_name}}, <p>pay</p>', $values, 'email');
-        $this->assertSame('Hi &lt;b&gt;Juan&lt;/b&gt; &amp; &quot;Co&quot;, <p>pay</p>', $email->body);
-        $this->assertStringNotContainsString("\n", (string) $email->subject);
-        $this->assertStringNotContainsString("\r", (string) $email->subject);
+        $email = $renderer->render('Hi {{borrower_full_name}}', 'Hi {{borrower_first_name}}', $values, 'email');
+        $this->assertSame('Hi <b>Juan</b> & "Co"', $email->body);
+        $this->assertSame('Hi Juan Bcc: x@y.z', $email->subject);
 
         $sms = $renderer->render(null, 'Hi {{borrower_first_name}}', $values, 'sms');
         $this->assertSame('Hi <b>Juan</b> & "Co"', $sms->body);
+
+        $outgoing = fn (string $channel) => new OutgoingReminder(1, 1, $channel, 'x', 'x', null, 'body', null);
+        $this->assertSame('text/plain; charset=UTF-8', $outgoing('email')->contentType());
+        $this->assertSame('text/plain; charset=UTF-8', $outgoing('sms')->contentType());
     }
 
     public function test_a_rule_send_time_must_be_before_contact_hours_end(): void
