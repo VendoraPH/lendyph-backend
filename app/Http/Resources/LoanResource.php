@@ -106,7 +106,8 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'is_restructure', type: 'boolean', description: 'True when source_loan_id is set'),
         new OA\Property(property: 'restructured_at', type: 'string', format: 'date-time', nullable: true, description: 'When this loan was closed because its balance moved to a restructure'),
         new OA\Property(property: 'restructured_balance', type: 'number', nullable: true, description: 'What was still owed on this loan when the restructure closed it'),
-        new OA\Property(property: 'write_off_amount', type: 'number', nullable: true, description: 'restructured_balance minus the new loan\'s principal, when the restructure took on less than the full balance'),
+        new OA\Property(property: 'write_off_amount', type: 'number', nullable: true, description: 'On a source loan: the forgiveness approved, the approved balance (principal, interest and penalty) minus the new loan\'s principal, when the restructure took on less than the full balance. Not what the books wrote off: that is the new loan\'s `restructure_written_off_principal`.'),
+        new OA\Property(property: 'restructure_written_off_principal', type: 'number', nullable: true, description: 'On a restructure released since Phase 2: the source\'s unpaid principal it did not carry, written off in the books (J2 on the source). Principal only, so it differs from the source\'s approved forgiveness `write_off_amount`. Null for other loans and for restructures released before it was recorded.'),
         new OA\Property(
             property: 'source_loan',
             type: 'object',
@@ -135,6 +136,7 @@ use OpenApi\Attributes as OA;
                     new OA\Property(property: 'status', type: 'string'),
                     new OA\Property(property: 'principal_amount', type: 'number'),
                     new OA\Property(property: 'start_date', type: 'string', format: 'date', nullable: true),
+                    new OA\Property(property: 'restructure_written_off_principal', type: 'number', nullable: true, description: 'Principal written off in the books when that restructure released'),
                 ],
             ),
         ),
@@ -376,6 +378,9 @@ class LoanResource extends JsonResource
             'write_off_amount' => $this->write_off_amount !== null
                 ? (float) $this->write_off_amount
                 : null,
+            'restructure_written_off_principal' => $this->restructure_written_off_principal !== null
+                ? (float) $this->restructure_written_off_principal
+                : null,
             // Lineage is FLAT, not a nested LoanResource: a chain of
             // restructures would recurse, and LoanResource's totals need
             // `amortizationSchedules` loaded, which these summaries never are.
@@ -401,6 +406,9 @@ class LoanResource extends JsonResource
                     'status' => $child->status,
                     'principal_amount' => (float) $child->principal_amount,
                     'start_date' => $child->start_date?->toDateString(),
+                    'restructure_written_off_principal' => $child->restructure_written_off_principal !== null
+                        ? (float) $child->restructure_written_off_principal
+                        : null,
                 ])->values()),
             'created_at' => $this->created_at,
             'updated_at' => $this->updated_at,

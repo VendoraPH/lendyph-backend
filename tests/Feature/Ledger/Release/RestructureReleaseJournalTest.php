@@ -4,7 +4,9 @@ namespace Tests\Feature\Ledger\Release;
 
 use App\Models\AccountingJournal;
 use App\Models\AmortizationSchedule;
+use App\Models\AuditLog;
 use App\Services\LoanService;
+use Illuminate\Support\Facades\DB;
 use Tests\TestCase;
 use Tests\Traits\PostsJournals;
 use Tests\Traits\SetupLendyPH;
@@ -23,7 +25,7 @@ class RestructureReleaseJournalTest extends TestCase
 {
     use PostsJournals, ReleasesLoans, SetupLendyPH;
 
-    private const PAID_DOWN = 'The source loan was paid down after approval. Send the restructure back for approval again.';
+    private const PAID_DOWN = 'The source loan was paid down or adjusted after approval. Send the restructure back for approval again.';
 
     protected function setUp(): void
     {
@@ -172,6 +174,98 @@ class RestructureReleaseJournalTest extends TestCase
         $this->getJson("/api/loans/{$new->id}/release-preview")
             ->assertUnprocessable()
             ->assertJsonValidationErrors(['principal_amount' => self::PAID_DOWN]);
+    }
+
+    public function test_any_fall_in_what_the_source_owes_since_approval_refuses_the_release(): void
+    {
+        $this->seedChartOfAccounts();
+        $source = $this->createReleasedLoan();
+        // Approved at ₱50,000.00 with ₱70,800.00 owed. Period 1 is paid after
+        // approval, leaving ₱59,000.00: still above the principal, but the
+        // forgiveness signed off no longer matches.
+        $new = $this->approvedRestructureOf($source, 50000, 'Board approved write-off');
+        $this->payOn($source, 11800);
+        $before = $this->releaseState();
+
+        $this->patchJson("/api/loans/{$new->id}/release")
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['principal_amount' => self::PAID_DOWN]);
+
+        $this->assertSame($before, $this->releaseState());
+        $this->getJson("/api/loans/{$new->id}/release-preview")
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['principal_amount' => self::PAID_DOWN]);
+    }
+
+    public function test_a_rise_from_penalty_since_approval_is_accepted_and_logged_as_drift(): void
+    {
+        $this->seedChartOfAccounts();
+        $source = $this->createReleasedLoan();
+        $new = $this->approvedRestructureOf($source, 50000, 'Board approved write-off');
+        $source->amortizationSchedules()->orderBy('period_number')->first()->update(['penalty_amount' => 500]);
+
+        $this->getJson("/api/loans/{$new->id}/release-preview")->assertOk();
+        $this->patchJson("/api/loans/{$new->id}/release")->assertOk();
+
+        $closed = AuditLog::where('action', 'restructure_closed')->where('auditable_id', $source->id)->firstOrFail();
+        $this->assertEqualsWithDelta(500.0, (float) $closed->new_values['balance_drift_since_approval'], 0.001);
+        $this->assertSame('20800.00', $source->fresh()->write_off_amount, 'the approved forgiveness is unchanged');
+        $this->assertSame(['50000.00', '0.00', '0.00', '10000.00'], $this->storedSplit($new));
+    }
+
+    public function test_the_closing_audit_row_and_the_loans_label_the_forgiveness_and_the_books_write_off_apart(): void
+    {
+        $this->seedChartOfAccounts();
+        $source = $this->createReleasedLoan();
+        $new = $this->approvedRestructureOf($source, 50000, 'Board approved write-off');
+
+        $this->patchJson("/api/loans/{$new->id}/release")->assertOk();
+
+        $new->refresh();
+        $closed = AuditLog::where('action', 'restructure_closed')->where('auditable_id', $source->id)->firstOrFail();
+        $this->assertSame(50000.0, (float) $closed->new_values['restructure_carried_principal']);
+        $this->assertSame(0.0, (float) $closed->new_values['restructure_capitalised_interest']);
+        $this->assertSame(0.0, (float) $closed->new_values['restructure_capitalised_penalty']);
+        $this->assertSame(10000.0, (float) $closed->new_values['restructure_written_off_principal']);
+        $this->assertSame(20800.0, (float) $closed->new_values['write_off_amount']);
+        $this->assertSame(
+            "Loan closed as restructured — ₱70,800.00 moved to loan {$new->loan_account_number}, ₱20,800.00 forgiven (approved), "
+            .'₱10,000.00 principal written off in the books (Board approved write-off)',
+            $closed->description,
+        );
+
+        $this->getJson("/api/loans/{$new->id}")
+            ->assertOk()
+            ->assertJsonPath('data.restructure_written_off_principal', fn (mixed $v): bool => (float) $v === 10000.0);
+        $this->getJson("/api/loans/{$source->id}")
+            ->assertOk()
+            ->assertJsonPath('data.write_off_amount', fn (mixed $v): bool => (float) $v === 20800.0)
+            ->assertJsonPath('data.restructured_into.0.restructure_written_off_principal', fn (mixed $v): bool => (float) $v === 10000.0);
+    }
+
+    public function test_the_release_preview_refuses_every_restructure_the_release_refuses(): void
+    {
+        $this->seedChartOfAccounts();
+
+        // The principal edited after sign-off.
+        $edited = $this->approvedRestructureOf($this->createReleasedLoan(), 60000, 'Interest forgiven');
+        DB::table('loans')->where('id', $edited->id)->update(['principal_amount' => 59000]);
+        // No approved terms recorded.
+        $unrecorded = $this->approvedRestructureOf($this->createReleasedLoan(), 60000, 'Interest forgiven');
+        DB::table('loans')->where('id', $unrecorded->id)->update(['restructure_principal' => null]);
+        // Approved while the premium owed still counted as balance.
+        $premiumSource = $this->createReleasedLoan();
+        $premium = $this->approvedRestructureOf($premiumSource, 70800);
+        DB::table('loans')->where('id', $premiumSource->id)->update(['insurance_remaining_balance' => 500]);
+        DB::table('loans')->where('id', $premium->id)->update(['restructure_outstanding' => 71300]);
+
+        foreach ([[$edited, 'principal_amount'], [$unrecorded, 'source_loan_id'], [$premium, 'principal_amount']] as [$loan, $field]) {
+            $release = $this->patchJson("/api/loans/{$loan->id}/release")->assertUnprocessable()->json("errors.{$field}.0");
+            $preview = $this->getJson("/api/loans/{$loan->id}/release-preview")->assertUnprocessable()->json("errors.{$field}.0");
+
+            $this->assertNotNull($release);
+            $this->assertSame($release, $preview, "loan {$loan->id}");
+        }
     }
 
     public function test_the_release_preview_restructure_block_is_what_the_release_posts(): void

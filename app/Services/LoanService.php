@@ -1536,6 +1536,28 @@ class LoanService
 
         $source = $locked->get($loan->source_loan_id);
 
+        $this->assertRestructureReleasable($loan, $source);
+
+        return $source;
+    }
+
+    /**
+     * Refuse to release a restructure unless its source is still open and
+     * what was approved still holds. The one rule the release (under the loan
+     * locks, lockAndGuardReleaseRows()) and its preview (restructureReleasePreview())
+     * apply, so the preview never shows a block the release would refuse.
+     *
+     * Catches a source already closed by a different restructure, terms with
+     * no approved snapshot, a principal edited after sign-off, terms approved
+     * while the premium owed still counted as balance, and any fall in what
+     * the source owes since approval (a payment, waiver or adjustment). A rise
+     * from penalty accrued since is accepted, and closeRestructuredSource()
+     * logs it as drift.
+     *
+     * @throws ValidationException 422 when the restructure must be re-approved, or its source is closed
+     */
+    private function assertRestructureReleasable(Loan $loan, ?Loan $source): void
+    {
         if (! $source || ! in_array($source->status, ['released', 'ongoing'], true)) {
             throw ValidationException::withMessages([
                 'source_loan_id' => ['The loan being restructured is no longer open, so this restructure cannot be released.'],
@@ -1578,9 +1600,7 @@ class LoanService
             }
         }
 
-        $this->assertSourceStillCoversPrincipal($loan, $source);
-
-        return $source;
+        $this->assertSourceStillCoversApproval($loan, $source);
     }
 
     /**
@@ -1684,10 +1704,22 @@ class LoanService
                 // The event destroys debt, so it carries the stated reason.
                 'remarks' => $newLoan->restructure_remarks,
                 'closed_by' => $releaser->id,
+                // The split the books post (J1, J2), stored on the new loan.
+                // `write_off_amount` above is the forgiveness approved
+                // (principal, interest and penalty); the books write off
+                // principal only.
+                'restructure_carried_principal' => $split['carried_principal'] / 100,
+                'restructure_capitalised_interest' => $split['capitalised_interest'] / 100,
+                'restructure_capitalised_penalty' => $split['capitalised_penalty'] / 100,
+                'restructure_written_off_principal' => $split['written_off_principal'] / 100,
             ],
-            description: "Loan closed as restructured — ₱{$closingBalance} moved to loan "
+            description: 'Loan closed as restructured — '.Money::format(self::toCentavos($closingBalance)).' moved to loan '
                 .($newLoan->loan_account_number ?? $newLoan->application_number)
-                .($writeOff > 0 ? ", ₱{$writeOff} written off ({$newLoan->restructure_remarks})" : ''),
+                .($writeOff > 0 || $split['written_off_principal'] > 0
+                    ? ', '.Money::format(self::toCentavos($writeOff)).' forgiven (approved), '
+                        .Money::format($split['written_off_principal']).' principal written off in the books'
+                        .(blank($newLoan->restructure_remarks) ? '' : " ({$newLoan->restructure_remarks})")
+                    : ''),
         );
     }
 
@@ -1730,19 +1762,13 @@ class LoanService
      *
      * @return array{carried_principal: string, capitalised_interest: string, capitalised_penalty: string, written_off_principal: string, collected_now: string, paid_out: string}
      *
-     * @throws ValidationException when the source is no longer open, or was paid down below the principal
+     * @throws ValidationException whenever the release would refuse it (assertRestructureReleasable())
      */
     public function restructureReleasePreview(Loan $loan, string $collectedNow): array
     {
         $source = $loan->sourceLoan()->first();
 
-        if (! $source || ! in_array($source->status, ['released', 'ongoing'], true)) {
-            throw ValidationException::withMessages([
-                'source_loan_id' => ['The loan being restructured is no longer open, so this restructure cannot be released.'],
-            ]);
-        }
-
-        $this->assertSourceStillCoversPrincipal($loan, $source);
+        $this->assertRestructureReleasable($loan, $source);
         $split = $this->restructureSplitOf(self::restructurableParts($source->amortizationSchedules()->reorder()->get()), $loan);
 
         return [
@@ -1756,19 +1782,23 @@ class LoanService
     }
 
     /**
-     * Refuse a restructure whose principal is now more than its source owes
-     * on its open periods: the source was paid down after approval, and a
-     * restructure pays nothing out, so it cannot carry more than is owed.
+     * Refuse a restructure when what its source owes on its open periods has
+     * fallen since approval (below `restructure_outstanding`, the approved
+     * snapshot), or below the new principal: the source was paid down,
+     * waived or adjusted after sign-off, so the forgiveness approved no longer
+     * matches, and a restructure pays nothing out. Staff send it back for
+     * approval. A rise (penalty accrued since) is accepted.
      *
      * @throws ValidationException 422 on `principal_amount`
      */
-    private function assertSourceStillCoversPrincipal(Loan $loan, Loan $source): void
+    private function assertSourceStillCoversApproval(Loan $loan, Loan $source): void
     {
         $owed = array_sum(self::restructurableParts($source->amortizationSchedules()->reorder()->get()));
+        $approved = $loan->restructure_outstanding === null ? 0 : self::toCentavos((float) $loan->restructure_outstanding);
 
-        if (self::toCentavos((float) $loan->principal_amount) > $owed) {
+        if ($owed < $approved || self::toCentavos((float) $loan->principal_amount) > $owed) {
             throw ValidationException::withMessages([
-                'principal_amount' => ['The source loan was paid down after approval. Send the restructure back for approval again.'],
+                'principal_amount' => ['The source loan was paid down or adjusted after approval. Send the restructure back for approval again.'],
             ]);
         }
     }

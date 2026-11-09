@@ -133,7 +133,7 @@ class RestructureReleaseConflictTest extends TestCase
         $this->assertNull($this->journalFor($new, 'loan_release'));
     }
 
-    public function test_a_payment_that_lands_before_the_source_lock_is_seen_by_the_split_and_the_write_off(): void
+    public function test_a_payment_that_lands_before_the_source_lock_is_seen_and_refuses_the_release(): void
     {
         $source = $this->createReleasedLoan();
         // Approved with ₱70,800.00 owed: ₱10,000.00 principal would be written off.
@@ -142,8 +142,9 @@ class RestructureReleaseConflictTest extends TestCase
 
         // Right before the release locks the loan rows, inside its transaction,
         // another request pays period 1 (₱10,000.00 principal, ₱1,800.00
-        // interest) and commits. A plain read before the lock would fix the
-        // snapshot without it and write ₱10,000.00 off.
+        // interest) and commits: ₱59,000.00 is now owed, below the ₱70,800.00
+        // approved. A plain read before the lock would fix the snapshot
+        // without the payment and release on the approved figures.
         DB::connection()->beforeExecuting(function (string $query) use (&$paid, $source): void {
             $sql = strtolower($query);
 
@@ -158,14 +159,17 @@ class RestructureReleaseConflictTest extends TestCase
             $paid = $this->payOnTheOtherConnection($source->id, 11800);
         });
 
-        $this->patchJson("/api/loans/{$new->id}/release")->assertOk();
+        $this->patchJson("/api/loans/{$new->id}/release")
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['principal_amount' => 'The source loan was paid down or adjusted after approval. Send the restructure back for approval again.']);
 
         $this->assertNotNull($paid, 'the payment never landed inside the release, so this test proved nothing');
         $this->assertSame('posted', Repayment::findOrFail($paid)->status);
-        // ₱50,000.00 principal left on the source, all of it carried.
-        $this->assertSame(['50000.00', '0.00', '0.00', '0.00'], $this->storedSplit($new));
+        $this->assertSame('approved', $new->fresh()->status);
+        $this->assertContains($source->fresh()->status, ['released', 'ongoing']);
+        $this->assertSame([null, null, null, null], $this->storedSplit($new));
+        $this->assertNull($this->journalFor($new, 'loan_release'));
         $this->assertNull($this->journalFor($source, 'credit_loss'));
-        $this->assertSame(5_000_000, $this->sumOn($this->journalFor($new, 'loan_release'), '1110', 'credit'));
     }
 
     /** Record a payment on the other connection, as another request would, and commit it. */
