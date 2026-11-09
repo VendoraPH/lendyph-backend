@@ -12,6 +12,7 @@ use App\Models\LoanAdjustment;
 use App\Services\LoanAdjustmentService;
 use App\Services\Notifications;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use OpenApi\Attributes as OA;
 
@@ -234,11 +235,11 @@ class LoanAdjustmentController extends Controller
             new OA\Response(response: 422, description: 'Invalid status, or the loan is no longer released or ongoing (on `loan`)'),
         ],
     )]
-    public function apply(LoanAdjustment $loanAdjustment): JsonResponse
+    public function apply(Request $request, LoanAdjustment $loanAdjustment): JsonResponse
     {
         $this->authorize('loan_adjustments:approve');
 
-        $adjustment = $this->adjustmentService->applyAdjustment($loanAdjustment);
+        $adjustment = $this->adjustmentService->applyAdjustment($loanAdjustment, $request->user()->id);
         $adjustment->load('loan.amortizationSchedules');
 
         return response()->json([

@@ -81,7 +81,7 @@ final class ReminderDispatcher
                 break;
             }
 
-            foreach ($batch as $item) {
+            foreach ($batch->values() as $position => $item) {
                 if (microtime(true) >= $deadline) {
                     $this->release($item);
 
@@ -91,7 +91,13 @@ final class ReminderDispatcher
                 try {
                     $outcome = $this->process($item);
                 } catch (Throwable $e) {
-                    $outcome = $this->failOnError($item, $e);
+                    try {
+                        $outcome = $this->failOnError($item, $e);
+                    } catch (Throwable $failure) {
+                        $this->abandon($batch->values()->slice($position + 1), $failure);
+
+                        return $totals;
+                    }
                 }
 
                 $totals['processed']++;
@@ -231,7 +237,9 @@ final class ReminderDispatcher
         [$message, $slotTaken] = $this->stageMessage($item, $loan, $template, $rendered, $decision, $driver, $smsParts);
 
         if ($message === null) {
-            return $slotTaken === null ? 'lost' : $this->finish($item, 'cancelled', 'superseded', $slotTaken, $decision);
+            return $slotTaken === null
+                ? $this->finish($item, 'failed', 'already_handed_over', 'Its message was already handed over; not sent again', $decision)
+                : $this->finish($item, 'cancelled', 'superseded', $slotTaken, $decision);
         }
 
         // Committed before the driver call, and only while the claim is still
@@ -327,17 +335,50 @@ final class ReminderDispatcher
             ->where('queue_item_id', '!=', $item->id)
             ->value('status');
 
-        return match ($holder) {
+        return self::slotTakenBy($holder);
+    }
+
+    /**
+     * Why a reminder can't take a loan's slot on a channel today, given the
+     * status of the message that holds it. Shared with the manual send's own
+     * check (App\Services\Reminders\Api\ManualReminders).
+     */
+    public static function slotTakenBy(?string $holderStatus): string
+    {
+        return match ($holderStatus) {
             'failed', 'rejected', 'bounced' => "Today's reminder for this loan on this channel failed; a second one doesn't go the same day",
             'pending' => 'Another reminder for this loan on this channel is being sent today',
             default => 'Another reminder went out for this loan on this channel today',
         };
     }
 
+    /**
+     * Records the driver's answer, message first, as before. When the claim
+     * was lost while the driver had the message (another run found it stale
+     * and failed it), only a true "sent" is put on the message, and only while
+     * it is still pending; nothing moves it back to pending, and no staff
+     * notice or contact flag follows, since the run that took the row already
+     * told staff.
+     */
     private function record(ReminderQueueItem $item, ReminderMessage $message, Loan $loan, DriverResult $result, ReminderSetting $settings, string $recipient): string
     {
+        $sent = ['status' => 'sent', 'sent_at' => now(), 'provider_reference' => $result->reference, 'cost' => $result->cost, 'failure_reason' => null];
+
+        if (! $this->stillHeld($item)) {
+            if ($result->outcome === DriverResult::SENT) {
+                ReminderMessage::query()->whereKey($message->id)->where('status', 'pending')->toBase()->update($sent + ['updated_at' => now()]);
+            }
+
+            Log::warning('A reminder row stopped being this run\'s claim while its driver had it; only a true "sent" was recorded, and no notice was sent.', [
+                'queue_item_id' => $item->id,
+                'outcome' => $result->outcome,
+            ]);
+
+            return 'lost';
+        }
+
         if ($result->outcome === DriverResult::SENT) {
-            $message->forceFill(['status' => 'sent', 'sent_at' => now(), 'provider_reference' => $result->reference, 'cost' => $result->cost, 'failure_reason' => null])->save();
+            $message->forceFill($sent)->save();
             $this->guardedUpdate($item, ['status' => 'sent', 'reason_code' => null, 'reason' => null, 'next_attempt_at' => null] + $this->unclaimed(), mustHold: false);
             ReminderEvent::forItem('sent', $item, ReminderEligibility::channelLabel($item->channel).' to '.$item->recipient_masked, (int) $message->id);
 
@@ -358,7 +399,10 @@ final class ReminderDispatcher
         }
 
         $message->forceFill(['status' => $result->deliveryStatus, 'failure_reason' => $result->reason])->save();
-        $this->finish($item, 'failed', (string) $result->reasonCode, (string) $result->reason, null, (int) $message->id);
+
+        if ($this->finish($item, 'failed', (string) $result->reasonCode, (string) $result->reason, null, (int) $message->id) === 'lost') {
+            return 'lost';
+        }
 
         if ($result->outcome === DriverResult::PERMANENT) {
             $this->flagContact($loan, $item, $recipient, (string) $result->reason);
@@ -388,9 +432,6 @@ final class ReminderDispatcher
     }
 
     /**
-     * @return 'cancelled'|'skipped'|'failed'
-     */
-    /**
      * @return 'cancelled'|'skipped'|'failed'|'lost'
      */
     private function finish(ReminderQueueItem $item, string $status, string $code, string $reason, ?EligibilityDecision $decision = null, ?int $messageId = null): string
@@ -419,6 +460,19 @@ final class ReminderDispatcher
             'status' => $item->attempts > 0 ? 'queued' : 'scheduled',
             'scheduled_at' => $until ?? $item->scheduled_at,
         ] + $this->unclaimed());
+    }
+
+    /**
+     * Whether the row is still this run's claim (same id, claim token, and
+     * `processing`), read without writing.
+     */
+    private function stillHeld(ReminderQueueItem $item): bool
+    {
+        return $item->claim_token !== null && ReminderQueueItem::query()
+            ->whereKey($item->id)
+            ->where('claim_token', $item->claim_token)
+            ->where('status', 'processing')
+            ->exists();
     }
 
     /**
@@ -485,6 +539,29 @@ final class ReminderDispatcher
         return $current->sending_started_at === null
             ? $this->fail($current, $loan, 'error', 'Could not be prepared for sending')
             : $this->fail($current, $loan, 'interrupted', 'Sending was interrupted; not resent so the member is not sent it twice');
+    }
+
+    /**
+     * The database failed while a row's own error was being recorded: the
+     * run stops, and the rows it still holds go back to the queue (a row it
+     * can't release is left to recoverStale()).
+     *
+     * @param  Collection<int, ReminderQueueItem>  $rest
+     */
+    private function abandon(Collection $rest, Throwable $failure): void
+    {
+        Log::error('Recording a reminder row\'s error failed; this run stops and releases the rows it still holds.', [
+            'exception_class' => $failure::class,
+            'released' => $rest->count(),
+        ]);
+
+        foreach ($rest as $item) {
+            try {
+                $this->release($item);
+            } catch (Throwable) {
+                return;
+            }
+        }
     }
 
     /**

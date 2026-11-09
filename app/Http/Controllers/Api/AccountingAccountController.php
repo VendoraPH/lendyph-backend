@@ -8,6 +8,8 @@ use App\Http\Requests\Accounting\StoreAccountingAccountRequest;
 use App\Http\Requests\Accounting\UpdateAccountingAccountRequest;
 use App\Http\Resources\AccountingAccountResource;
 use App\Models\AccountingAccount;
+use App\Models\AccountingAccountMapping;
+use App\Services\Accounting\AccountRules;
 use App\Services\Accounting\ChartOfAccountsSeeder;
 use App\Services\Accounting\TrialBalanceBuilder;
 use Illuminate\Database\Eloquent\Collection;
@@ -122,7 +124,7 @@ class AccountingAccountController extends Controller
     #[OA\Get(
         path: '/api/accounting/cash-accounts',
         summary: 'The money accounts, with their balances',
-        description: "Cash on hand, bank accounts, GCash and Maya — every account carrying a `cash_kind` — in code order, with `balance` in integer CENTAVOS. Returns the raw Laravel paginator envelope ({data, links, meta}); the Cash & Bank screen drains it by following `meta.last_page`, because it sums the balances into one headline figure and a short page would understate the co-op's cash position. Balances come from the SAME TrialBalanceBuilder aggregate the trial balance and the chart of accounts read, so this screen cannot drift from them. INACTIVE money accounts are included — see the method. `balance` covers the caller's branches only (every branch, unbranched journals included, for branches:view_all).",
+        description: "Cash on hand, bank accounts, GCash and Maya — every account carrying a `cash_kind` — in code order, with `balance` in integer CENTAVOS. Returns the raw Laravel paginator envelope ({data, links, meta}). `meta.totals` covers every money account, not the page: `balance` (the headline total) and `by_kind` (cash, bank, gcash, maya and wallet), in centavos and in the same branch scope as each row's balance. Balances come from the SAME TrialBalanceBuilder aggregate the trial balance and the chart of accounts read, so this screen cannot drift from them. INACTIVE money accounts are included — see the method. `balance` covers the caller's branches only (every branch, unbranched journals included, for branches:view_all).",
         tags: ['Accounting'],
         security: [['sanctum' => []]],
         parameters: [
@@ -131,7 +133,24 @@ class AccountingAccountController extends Controller
             new OA\Parameter(name: 'branch_id', in: 'query', required: false, description: 'Balances of one of the caller\'s branches (another answers 403). Without it, every branch the caller holds.', schema: new OA\Schema(type: 'integer')),
         ],
         responses: [
-            new OA\Response(response: 200, description: 'Paginated money accounts'),
+            new OA\Response(
+                response: 200,
+                description: 'Paginated money accounts',
+                content: new OA\JsonContent(properties: [
+                    new OA\Property(property: 'meta', type: 'object', properties: [
+                        new OA\Property(property: 'totals', type: 'object', properties: [
+                            new OA\Property(property: 'balance', type: 'integer', description: 'Centavos, over every money account.'),
+                            new OA\Property(property: 'by_kind', type: 'object', properties: [
+                                new OA\Property(property: 'cash', type: 'integer'),
+                                new OA\Property(property: 'bank', type: 'integer'),
+                                new OA\Property(property: 'gcash', type: 'integer'),
+                                new OA\Property(property: 'maya', type: 'integer'),
+                                new OA\Property(property: 'wallet', type: 'integer'),
+                            ]),
+                        ]),
+                    ]),
+                ]),
+            ),
             new OA\Response(response: 401, description: 'Unauthenticated'),
             new OA\Response(response: 403, description: 'Missing cash_accounts:view'),
         ],
@@ -192,7 +211,35 @@ class AccountingAccountController extends Controller
 
         $this->attachBalances($accounts->getCollection(), $filters['branch_id'] ?? null);
 
-        return AccountingAccountResource::collection($accounts);
+        /*
+         * `meta.totals` over EVERY money account, not the page: the same
+         * accounts as the list (non-group, inactive included), from the same
+         * signedBalances() aggregate and in the same branch scope as each
+         * row's balance, so the headline equals the sum of the rows across
+         * all pages and the trial balance's money accounts.
+         */
+        $kinds = AccountingAccount::query()
+            ->whereNotNull('cash_kind')
+            ->where('is_group', false)
+            ->pluck('cash_kind', 'id');
+
+        $balances = $this->trialBalance->signedBalances(
+            null,
+            $this->branchScope($filters['branch_id'] ?? null),
+            $kinds->keys()->map(static fn ($id): int => (int) $id)->all(),
+        );
+
+        $byKind = array_fill_keys(AccountRules::CASH_KINDS, 0);
+
+        foreach ($kinds as $id => $kind) {
+            $byKind[$kind] += $balances[(int) $id] ?? 0;
+        }
+
+        return AccountingAccountResource::collection($accounts)
+            ->additional(['meta' => ['totals' => [
+                'balance' => array_sum($byKind),
+                'by_kind' => $byKind,
+            ]]]);
     }
 
     #[OA\Post(
@@ -306,7 +353,7 @@ class AccountingAccountController extends Controller
         $roles = $account->mappings()->pluck('role')->all();
 
         if ($roles !== []) {
-            $list = implode(', ', $roles);
+            $list = AccountingAccountMapping::labelList($roles);
 
             throw ValidationException::withMessages([
                 'account' => "{$account->code} {$account->name} is the account for {$list}. Point those roles somewhere else first.",

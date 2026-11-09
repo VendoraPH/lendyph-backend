@@ -136,6 +136,12 @@ class RoleAndPermissionSeeder extends Seeder
             // 2026_11_02_210000_add_branches_view_all_permission, which grants
             // it on the already-migrated deployments.
             BranchAccess::VIEW_ALL,
+
+            // Payment reminders. admin and super_admin only, through
+            // Permission::all() below; no other role lists them. Mirrors
+            // 2026_11_09_100000_add_reminders_permissions, which grants them on
+            // the already-migrated deployments.
+            'reminders:view', 'reminders:send', 'reminders:pause', 'reminders:settings',
         ];
 
         $guard = 'web';

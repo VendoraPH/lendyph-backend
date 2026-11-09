@@ -65,7 +65,13 @@ final class ReminderEligibility
         $isSystem = $item->source === 'system';
 
         if ($isSystem) {
-            if ($rule === null || ! $rule->is_active) {
+            // A system row always had a rule; none now means it was deleted,
+            // with its branch or product (the foreign key cascades) or by hand.
+            if ($rule === null) {
+                return EligibilityDecision::skip(3, 'rule_deleted', 'The reminder rule was deleted', $amount);
+            }
+
+            if (! $rule->is_active) {
                 return EligibilityDecision::skip(3, 'rule_inactive', 'Reminder rule is switched off', $amount);
             }
 

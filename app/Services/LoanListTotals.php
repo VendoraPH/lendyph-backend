@@ -61,12 +61,14 @@ class LoanListTotals
 
     /**
      * The same figures for each loan on its own, keyed by loan id, in one
-     * grouped query: `total_outstanding` (GET /loans `total_outstanding`) and
-     * `overdue_amount` (GET /loans/{id}/summary `overdue_amount`). A list
-     * that shows a loan's figures beside each of its rows asks once per page.
+     * grouped query: `total_outstanding` (GET /loans `total_outstanding`),
+     * `overdue_amount` (GET /loans/{id}/summary `overdue_amount`) and
+     * `outstanding_principal` (GET /loans/{id} `outstanding_principal`, the
+     * per-loan figure self::for() sums). A list that shows a loan's figures
+     * beside each of its rows asks once per page.
      *
      * @param  array<int, int>  $loanIds
-     * @return array<int, array{total_outstanding: float, overdue_amount: float}>
+     * @return array<int, array{total_outstanding: float, overdue_amount: float, outstanding_principal: float}>
      */
     public function byLoan(array $loanIds, ?Carbon $asOf = null): array
     {
@@ -82,12 +84,14 @@ class LoanListTotals
             ->selectRaw(
                 'loans.id,
                 COALESCE(per_loan.owed, 0) + COALESCE(GREATEST(loans.insurance_remaining_balance, 0), 0) as total_outstanding,
-                COALESCE(per_loan.overdue, 0) as overdue_amount',
+                COALESCE(per_loan.overdue, 0) as overdue_amount,
+                COALESCE(per_loan.principal, 0) as outstanding_principal',
             )
             ->get()
             ->mapWithKeys(fn (object $row) => [(int) $row->id => [
                 'total_outstanding' => round((float) $row->total_outstanding, 2),
                 'overdue_amount' => round((float) $row->overdue_amount, 2),
+                'outstanding_principal' => round((float) $row->outstanding_principal, 2),
             ]])
             ->all();
     }

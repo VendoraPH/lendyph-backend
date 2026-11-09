@@ -10,6 +10,7 @@ use App\Http\Resources\AccountingExpenseResource;
 use App\Models\AccountingExpense;
 use App\Services\Accounting\ExpenseRecorder;
 use App\Services\BranchAccess;
+use Closure;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
@@ -30,7 +31,7 @@ class AccountingExpenseController extends Controller
     #[OA\Get(
         path: '/api/accounting/expenses',
         summary: 'List expenses and payables',
-        description: 'One page of expenses, newest first. Returns the raw Laravel paginator envelope ({data, links, meta}); the Expenses screen DRAINS it by following `meta.last_page` because it totals the outstanding balance client-side. `per_page` is clamped at 100.',
+        description: 'One page of expenses, newest first. Returns the raw Laravel paginator envelope ({data, links, meta}). `per_page` is clamped at 100 and defaults to 15. Each row carries `amount_due` (amount less amount paid). `meta.totals` cover every matching expense, the `status` filter included, not the page. `meta.stats` counts expenses per status with every filter except `status`; `overdue` is by today in Manila. Amounts are integer CENTAVOS.',
         tags: ['Accounting'],
         security: [['sanctum' => []]],
         parameters: [
@@ -40,10 +41,30 @@ class AccountingExpenseController extends Controller
             new OA\Parameter(name: 'from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
+            new OA\Parameter(name: 'search', in: 'query', required: false, description: 'Payee or reference, anywhere in the text. `%`, `_` and `\\` match literally.', schema: new OA\Schema(type: 'string', maxLength: 100)),
         ],
         responses: [
-            new OA\Response(response: 200, description: 'Paginated expense list'),
-            new OA\Response(response: 403, description: 'Missing expenses:view'),
+            new OA\Response(
+                response: 200,
+                description: 'Paginated expense list',
+                content: new OA\JsonContent(properties: [
+                    new OA\Property(property: 'meta', type: 'object', properties: [
+                        new OA\Property(property: 'totals', type: 'object', properties: [
+                            new OA\Property(property: 'count', type: 'integer'),
+                            new OA\Property(property: 'amount', type: 'integer', description: 'Centavos.'),
+                            new OA\Property(property: 'amount_paid', type: 'integer', description: 'Centavos.'),
+                            new OA\Property(property: 'amount_due', type: 'integer', description: 'Centavos.'),
+                        ]),
+                        new OA\Property(property: 'stats', type: 'object', properties: [
+                            new OA\Property(property: 'unpaid', type: 'integer'),
+                            new OA\Property(property: 'partially_paid', type: 'integer'),
+                            new OA\Property(property: 'paid', type: 'integer'),
+                            new OA\Property(property: 'overdue', type: 'integer'),
+                        ]),
+                    ]),
+                ]),
+            ),
+            new OA\Response(response: 403, description: 'Missing expenses:view, or a branch_id outside the caller\'s branches'),
         ],
     )]
     public function index(): AnonymousResourceCollection
@@ -60,6 +81,7 @@ class AccountingExpenseController extends Controller
             'from' => ['nullable', 'date_format:Y-m-d'],
             'to' => ['nullable', 'date_format:Y-m-d'],
             'branch_id' => ['nullable', 'integer', 'exists:branches,id'],
+            'search' => ['nullable', 'string', 'max:100'],
         ]);
 
         // The same clamp every list endpoint in this file applies, and the one
@@ -71,26 +93,35 @@ class AccountingExpenseController extends Controller
 
         app(BranchAccess::class)->authorizeBranchFilter(request()->user(), $filters['branch_id'] ?? null);
 
-        $expenses = $this->visibleToCaller(AccountingExpense::query())
-            // One query for the whole page instead of one per row. The table
-            // renders `expense_account_name` on every line.
-            ->with('expenseAccount:id,code,name')
+        // Every filter but `status`, so the status counts can share it.
+        $filtered = fn (): Builder => $this->visibleToCaller(AccountingExpense::query())
+            ->search($filters['search'] ?? null)
+            ->when(isset($filters['from']), fn ($q) => $q->where('date', '>=', $filters['from']))
+            ->when(isset($filters['to']), fn ($q) => $q->where('date', '<=', $filters['to']))
+            ->when(isset($filters['branch_id']), fn ($q) => $q->where('branch_id', $filters['branch_id']));
+
+        $matching = fn (): Builder => $filtered()
             ->when(
                 isset($filters['status']),
                 fn ($q) => $q->withStatus((string) $filters['status']),
-            )
-            ->when(isset($filters['from']), fn ($q) => $q->where('date', '>=', $filters['from']))
-            ->when(isset($filters['to']), fn ($q) => $q->where('date', '<=', $filters['to']))
-            ->when(isset($filters['branch_id']), fn ($q) => $q->where('branch_id', $filters['branch_id']))
+            );
+
+        $expenses = $matching()
+            // One query for the whole page instead of one per row. The table
+            // renders `expense_account_name` on every line.
+            ->with('expenseAccount:id,code,name')
             // A TOTAL order, not just `date desc`. See
             // AccountingExpense::scopeNewestFirst() — a partial order lets a
-            // drained list serve one row twice and another not at all, and the
-            // headline total is a sum over whatever came back.
+            // paged list serve one row twice and another not at all.
             ->newestFirst()
             ->paginate($perPage)
             ->withQueryString();
 
-        return AccountingExpenseResource::collection($expenses);
+        return AccountingExpenseResource::collection($expenses)
+            ->additional(['meta' => [
+                'totals' => $this->listTotals($matching()),
+                'stats' => $this->statusCounts($filtered),
+            ]]);
     }
 
     #[OA\Post(
@@ -136,7 +167,7 @@ class AccountingExpenseController extends Controller
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
         responses: [
-            new OA\Response(response: 200, description: 'Expense details'),
+            new OA\Response(response: 200, description: 'Expense details, with `amount_due` in centavos'),
             new OA\Response(response: 403, description: 'Missing expenses:view'),
             new OA\Response(response: 404, description: 'Not found'),
         ],
@@ -209,6 +240,50 @@ class AccountingExpenseController extends Controller
         $expense->load('expenseAccount:id,code,name');
 
         return (new AccountingExpenseResource($expense))->response()->setStatusCode($status);
+    }
+
+    /**
+     * `{count, amount, amount_paid, amount_due}` over every expense the list
+     * matches (its `status` filter included), not the page, in one aggregate.
+     * Integer centavos; `amount_due` is `amount - amount_paid` summed in SQL,
+     * the same figure as each row's `amount_due`.
+     *
+     * @param  Builder<AccountingExpense>  $matching
+     * @return array{count: int, amount: int, amount_paid: int, amount_due: int}
+     */
+    private function listTotals(Builder $matching): array
+    {
+        $row = $matching
+            ->toBase()
+            ->selectRaw('COUNT(*) as row_count, COALESCE(SUM(amount), 0) as amount, COALESCE(SUM(amount_paid), 0) as amount_paid, COALESCE(SUM(amount - amount_paid), 0) as amount_due')
+            ->first();
+
+        return [
+            'count' => (int) $row->row_count,
+            'amount' => (int) $row->amount,
+            'amount_paid' => (int) $row->amount_paid,
+            'amount_due' => (int) $row->amount_due,
+        ];
+    }
+
+    /**
+     * Expenses per derived status, with every filter except `status`: the
+     * screen's tab counts. Each count goes through
+     * AccountingExpense::scopeWithStatus(), so a count always agrees with the
+     * rows its tab lists (overdue by Manila's today).
+     *
+     * @param  Closure(): Builder<AccountingExpense>  $filtered
+     * @return array<string, int> status => count, for every AccountingExpense::STATUSES
+     */
+    private function statusCounts(Closure $filtered): array
+    {
+        $counts = [];
+
+        foreach (AccountingExpense::STATUSES as $status) {
+            $counts[$status] = $filtered()->withStatus($status)->count();
+        }
+
+        return $counts;
     }
 
     /**

@@ -14,6 +14,7 @@ use App\Http\Requests\Loan\RejectLoanRequest;
 use App\Http\Requests\Loan\ReleaseLoanRequest;
 use App\Http\Requests\Loan\ReleasePreviewRequest;
 use App\Http\Requests\Loan\RestructureLoanRequest;
+use App\Http\Requests\Loan\SendBackApprovedLoanRequest;
 use App\Http\Requests\Loan\StoreLoanRequest;
 use App\Http\Requests\Loan\SubmitLoanRequest;
 use App\Http\Requests\Loan\UpdateLoanRequest;
@@ -845,13 +846,15 @@ DESC,
                     new OA\Property(property: 'insurance_partial_amount', type: 'number', nullable: true, description: 'Required when payment_type=partial (0 allowed: nothing collected now), and no more than the server\'s premium (else 422 on this field). Must be absent, null or 0 when payment_type=full.'),
                     new OA\Property(property: 'insurance_remaining_balance', type: 'number', nullable: true, description: 'Accepted and ignored: the server computes it (0 when full; premium − partial amount when partial).'),
                     new OA\Property(property: 'fee_fingerprint', type: 'string', nullable: true, description: 'The `fee_fingerprint` returned by GET /api/loans/{id}/release-preview. Optional. When sent and the fee configuration has changed since that preview, the release is refused with 409 and nothing is written.'),
+                    new OA\Property(property: 'method', type: 'string', enum: ['cash', 'gcash', 'maya', 'bank_transfer', 'online'], default: 'cash', description: 'How the net proceeds went out (a restructure: how its deductions were collected). Stored as `release_method`; the release journal settles through that method\'s account.'),
+                    new OA\Property(property: 'reference_number', type: 'string', nullable: true, maxLength: 100, description: 'Required unless `method` is cash. Stored as `release_reference`.'),
                 ],
             ),
         ),
         responses: [
             new OA\Response(response: 200, description: 'Loan released'),
             new OA\Response(response: 409, description: 'The fee configuration changed since the preview this release quoted, or another change to this loan was saved at the same time; nothing was written. Reload and try again'),
-            new OA\Response(response: 422, description: 'Invalid status transition, fees exceeding principal, a sent premium that is not the server\'s, a partial amount above the premium, insurance above the net proceeds, or share capital withheld for a borrower who is not a member'),
+            new OA\Response(response: 422, description: 'Invalid status transition, fees exceeding principal, a sent premium that is not the server\'s, a partial amount above the premium, insurance above the net proceeds, share capital withheld for a borrower who is not a member, an unknown `method` or a missing `reference_number`, or a restructure whose source was paid down after approval below its principal (on `principal_amount`)'),
         ],
     )]
     public function release(ReleaseLoanRequest $request, Loan $loan): JsonResponse
@@ -861,11 +864,46 @@ DESC,
             $request->user(),
             $request->insurancePayload(),
             $request->feeFingerprint(),
+            $request->releaseMethod(),
+            $request->releaseReference(),
         );
         $loan->load('borrower', 'loanProduct', 'branch', 'coMakers',
             'approvedByUser', 'releasedByUser', 'amortizationSchedules');
 
         return response()->json(['message' => 'Loan released successfully.', 'data' => new LoanResource($loan)]);
+    }
+
+    #[OA\Patch(
+        path: '/api/loans/{id}/send-back-approved',
+        summary: 'Send an approved restructure back for approval',
+        description: 'For an approved restructure that is not released yet, for example one whose source was paid down or adjusted after approval (the release then answers 422 on `principal_amount`). The loan goes back to `for_review` with its approval cleared; the release step of the current round is recorded as sent back with the reason, and a new round opens with the submit step pending and every other step waiting. The restructure is then re-submitted and approved again through its approval chain, and its figures are taken again from what the source owes on re-submit and on approval. Writes a `restructure_sent_back` audit row. The creator and the account officer are told it came back, and the submit step\'s role that it is theirs (in-app, staff only). `can_send_back_approved` on the loan says whether the caller may do this.',
+        tags: ['Loans'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
+        ],
+        requestBody: new OA\RequestBody(
+            required: true,
+            content: new OA\JsonContent(
+                required: ['reason'],
+                properties: [
+                    new OA\Property(property: 'reason', type: 'string', maxLength: 1000, description: 'Required, trimmed: why it is going back.'),
+                ],
+            ),
+        ),
+        responses: [
+            new OA\Response(response: 200, description: 'Restructure sent back; `data` is the loan, now `for_review`'),
+            new OA\Response(response: 403, description: 'Missing loans:release'),
+            new OA\Response(response: 404, description: 'No such loan, or outside the caller\'s branches'),
+            new OA\Response(response: 409, description: 'The restructure was sent back, released or voided since it was read, or another change to it or its source was saved at the same time; nothing was written and nobody was notified. Message: "Another change to this loan was saved at the same time. Reload and try again."'),
+            new OA\Response(response: 422, description: 'Missing or too long `reason`, or (on `status`) the loan is not a restructure or the restructure is not approved'),
+        ],
+    )]
+    public function sendBackApproved(SendBackApprovedLoanRequest $request, Loan $loan): JsonResponse
+    {
+        $this->loanService->sendBackApproved($loan, $request->user(), $request->reason());
+
+        return response()->json(['message' => 'Restructure sent back for approval.', 'data' => new LoanResource($loan)]);
     }
 
     #[OA\Get(
@@ -881,6 +919,8 @@ DESC,
         Insurance: send the release dialog's `insurance_premium_percentage` (0–100, up to 2 places), `insurance_payment_type` (`full`, the default, or `partial`) and, for a partial payment, `insurance_partial_amount` (0 allowed), validated as the release validates them. `insurance` then quotes `premium_amount` (the principal × the percentage / 100, to the centavo, half up: the figure the release withholds), `collected` (the premium, or the partial amount), `partial_amount` (null on a full payment) and `remaining_balance`; it is null with no percentage or 0. `total_deductions_after_insurance` (`total_deductions` + collected), `net_proceeds_after_insurance` (`net_proceeds` − collected, negative when it overruns) and `exceeds_net_proceeds` (collected above `net_proceeds`, which the release refuses) are always present, equal to the totals without insurance. All figures are 2dp strings.
 
         Pass the returned `fee_fingerprint` back to `PATCH /api/loans/{id}/release` to be refused with a 409 if the fee configuration changed in between.
+
+        A restructure also gets `restructure`, by the code its release posts with, writing nothing: `carried_principal` (the source's unpaid principal the new loan carries), `capitalised_interest` and `capitalised_penalty` (taken into the principal, interest first), `written_off_principal` (the source's unpaid principal not carried), `collected_now` (every deduction, insurance included, collected from the member: equals `total_deductions_after_insurance`) and `paid_out` (always 0.00). 2dp strings. A source no longer open answers 422 on `source_loan_id`, and one paid down below the principal since approval 422 on `principal_amount`. Ordinary loans get no `restructure` key.
         TXT,
         tags: ['Loans'],
         security: [['sanctum' => []]],
@@ -919,15 +959,20 @@ DESC,
 
         // What the insurance the dialog is filling in would collect, and what
         // that leaves, by the code the release withholds it with.
-        return response()->json(['data' => [
-            ...$preview,
-            ...$this->loanService->insurancePreview(
-                $loan,
-                $request->insurancePayload(),
-                $preview['total_deductions'],
-                $preview['net_proceeds'],
-            ),
-        ]]);
+        $insurance = $this->loanService->insurancePreview(
+            $loan,
+            $request->insurancePayload(),
+            $preview['total_deductions'],
+            $preview['net_proceeds'],
+        );
+
+        // A restructure: what its release posts, collected from the member
+        // rather than paid out.
+        $restructure = $loan->source_loan_id === null ? [] : [
+            'restructure' => $this->loanService->restructureReleasePreview($loan, $insurance['total_deductions_after_insurance']),
+        ];
+
+        return response()->json(['data' => [...$preview, ...$insurance, ...$restructure]]);
     }
 
     #[OA\Get(
@@ -1159,6 +1204,8 @@ DESC,
             $request->input('remarks'),
             $request->user(),
             $request->input('interest_option'),
+            $request->validated('method', 'cash'),
+            $request->validated('reference_number'),
         );
 
         // Mirrors show()'s eager-loads, lineage included — this endpoint

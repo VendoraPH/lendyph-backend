@@ -114,7 +114,7 @@ class BranchAccessRouteSweepTest extends TestCase
 
         foreach (Router::getRoutes()->getRoutes() as $route) {
             $uri = $route->uri();
-            $isReport = preg_match('#^api/(reports|accounting/(general-ledger|trial-balance|dashboard|books|statements|loans/aging|accounts|cash-accounts|reconciliations)|audit-logs)(/|$)#', $uri) === 1;
+            $isReport = preg_match('#^api/(reports|accounting/(general-ledger|trial-balance|dashboard|books|statements|loans/aging|accounts|cash-accounts|reconciliations|ledger-gaps)|audit-logs)(/|$)#', $uri) === 1;
 
             if (! $isReport || ! in_array('GET', $route->methods(), true) || $route->parameterNames() !== []) {
                 continue;

@@ -35,20 +35,33 @@ use Illuminate\Support\Facades\DB;
  * changes:
  *
  * 1. **3040 Current Year Earnings is a group here** and postable there.
- *    `statements.ts` ALSO derives 3040 as a synthetic balance-sheet line from
- *    the period's net income, so anything posted to the real account would be
- *    counted twice on the same statement — once as the posting, once as the
- *    derivation. It stays in the chart because year-end closing needs somewhere
- *    to move the result to; it must not accept ordinary entries in the meantime.
+ *    BalanceSheetBuilder derives the year's earnings as a balance-sheet line
+ *    of its own (no account code), so anything posted to a real "Current Year
+ *    Earnings" account would be counted twice on the same statement — once as
+ *    the posting, once as the derivation. It stays in the chart because
+ *    year-end closing needs somewhere to move the result to; it must not
+ *    accept ordinary entries in the meantime.
  * 2. **3050 Opening Balance Equity does not exist there.** The opening-balance
  *    backfill needs a named plug for the difference between the assets and
  *    liabilities an organisation arrives with. Folding it into 3030 Retained
  *    Earnings hides it permanently, in the one account nobody ever reconciles.
- *    Deliberately NOT 3045: `statements.ts` already uses that code for its
- *    synthetic prior-period earnings line.
+ *
+ * The loan accounts in {@see self::OPERATING_LOAN_ACCOUNT_CODES} are seeded
+ * with `cash_flow_category` operating (Phase 2, decision 9); every other
+ * account gets CashFlowCategories::defaultFor() from the model's saving hook.
  */
 final class ChartOfAccountsSeeder
 {
+    /**
+     * The loan book: principal (1110, 1120), the receivables beside it (1150,
+     * 1160), adjustments clearing (1180), the allowance (1200) and the
+     * restructure deferral (1210). Seeded as operating, because lending is
+     * this organisation's operation (Phase 2, decision 9).
+     *
+     * @var list<string>
+     */
+    public const OPERATING_LOAN_ACCOUNT_CODES = ['1110', '1120', '1150', '1160', '1180', '1200', '1210'];
+
     /**
      * The seed rows, parents before children so ids resolve in one pass.
      *
@@ -332,6 +345,8 @@ final class ChartOfAccountsSeeder
                         'is_group' => $seed['is_group'] ?? false,
                         'is_active' => true,
                         'cash_kind' => $seed['cash_kind'] ?? null,
+                        // Null lets the saving hook apply the default rule.
+                        'cash_flow_category' => in_array($seed['code'], self::OPERATING_LOAN_ACCOUNT_CODES, true) ? 'operating' : null,
                         // Parents always precede their children in CHART, so one
                         // pass is enough and a missing parent is a broken
                         // constant rather than an ordering accident.

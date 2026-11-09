@@ -187,9 +187,12 @@ final class BookBuilder
      * repeated here only so the grouping runs over the period's lines rather
      * than the whole history of every money account.
      *
+     * Public so ColumnBookBuilder lists exactly these journals: the column
+     * books are the same two books laid out by account, never a second rule.
+     *
      * @param  'in'|'out'  $direction
      */
-    private function movedMoney(string $direction, string $from, string $to): Builder
+    public function movedMoney(string $direction, string $from, string $to): Builder
     {
         return DB::table('accounting_journal_lines as cl')
             ->join('accounting_journals as cj', 'cj.id', '=', 'cl.accounting_journal_id')
