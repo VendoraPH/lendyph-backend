@@ -27,7 +27,10 @@ use App\Models\User;
  *
  * A share capital pledge is its member's balance, so a saved loan's summary
  * withholds its figures from a viewer without `share_capital:view`
- * (ofLoan()); the preview refuses such a pledge instead (PreviewLoanRequest).
+ * (ofLoan(), withheld()). The preview refuses a listed one, or a restructure
+ * source's unlisted one (PreviewLoanRequest), and withholds an edited loan's
+ * held one when no list is sent (LoanService::formPreview()), by the same
+ * rule (withholdsBalances()).
  */
 final class CollateralSecurity
 {
@@ -59,16 +62,22 @@ final class CollateralSecurity
      *
      * A share capital pledge is its member's balance. When the loan holds one
      * and the viewer cannot `share_capital:view` (or there is no viewer),
-     * `total_value` and `short_by` are null and `value_unknown` is true: with
-     * one such pledge the total IS the balance, and with others beside it the
-     * balance is the total less amounts the viewer can see. `security_status`
-     * stays. `value_unknown` is present only then, so every other summary
-     * keeps the shape POST /loans/preview's `collateral` has.
+     * every figure built from the total is null and `value_unknown` is true
+     * (withheld()): with one such pledge the total IS the balance, and with
+     * others beside it the balance is the total less amounts the viewer can
+     * see. `security_status` is null too, since "secured" would say the
+     * balance covers the principal. `value_unknown` is present only then, so
+     * every other summary keeps the shape POST /loans/preview's `collateral`
+     * has.
      *
-     * @return array{total_value: float|int|null, security_status: string, short_by: float|int|null, value_unknown?: true}
+     * @return array{total_value: float|int|null, security_status: string|null, short_by: float|int|null, value_unknown?: true}
      */
     public static function ofLoan(Loan $loan, ?User $viewer = null): array
     {
+        if (self::withholdsBalances($loan, $viewer)) {
+            return self::withheld();
+        }
+
         $pledged = 0;
 
         foreach ($loan->collaterals as $collateral) {
@@ -76,20 +85,29 @@ final class CollateralSecurity
             $pledged += LoanService::toCentavos((float) ($collateral->pivot->snapshot_value ?? 0));
         }
 
-        $summary = self::summary(LoanService::toCentavos((float) ($loan->principal_amount ?? 0)), $pledged);
-
-        if (! self::withholdsBalances($loan, $viewer)) {
-            return $summary;
-        }
-
-        return [...$summary, 'total_value' => null, 'short_by' => null, 'value_unknown' => true];
+        return self::summary(LoanService::toCentavos((float) ($loan->principal_amount ?? 0)), $pledged);
     }
 
     /**
-     * Whether the loan holds a share capital pledge the viewer may not see.
-     * The types are read in one query, and only for such a viewer.
+     * A summary whose figures would reveal a share capital balance: every
+     * figure built from the total is null, and `value_unknown` says why. The
+     * one shape GET /loans/{id} `collateral_summary` and POST /loans/preview's
+     * `collateral` withhold with.
+     *
+     * @return array{total_value: null, security_status: null, short_by: null, value_unknown: true}
      */
-    private static function withholdsBalances(Loan $loan, ?User $viewer): bool
+    public static function withheld(): array
+    {
+        return ['total_value' => null, 'security_status' => null, 'short_by' => null, 'value_unknown' => true];
+    }
+
+    /**
+     * Whether the loan holds a share capital pledge the viewer may not see
+     * (no `share_capital:view`, or no viewer). The types are read in one
+     * query, and only for such a viewer. Reads the loan's `collaterals`
+     * relation, loading it if it isn't.
+     */
+    public static function withholdsBalances(Loan $loan, ?User $viewer): bool
     {
         if ($loan->collaterals->isEmpty() || $viewer?->can('share_capital:view')) {
             return false;

@@ -2481,7 +2481,8 @@ class LoanService
      *   pledges count at their stored value, as PUT /loans/{id} leaves them.
      *   When one of them is share capital and `$viewer` lacks
      *   `share_capital:view`, the section is withheld instead
-     *   (withheldCollateral()): its figures would reveal the balance.
+     *   (CollateralSecurity::withheld(), by withholdsBalances(), the loan
+     *   card's rule): its figures would reveal the balance.
      * - `maturity_date`: where the loan would mature, by the code a create
      *   stores it with. Null until the product, a term inside its range, the
      *   frequency and the start date are known; the principal and the rate
@@ -2534,8 +2535,8 @@ class LoanService
         $maturity = $this->formMaturity($product, $input);
 
         $preview = [
-            'collateral' => $rows === null && $edited !== null && self::withholdsHeldShareCapital($edited, $viewer)
-                ? self::withheldCollateral()
+            'collateral' => $rows === null && $edited !== null && CollateralSecurity::withholdsBalances($edited, $viewer)
+                ? CollateralSecurity::withheld()
                 : CollateralSecurity::summary($principal, $pledged),
             'maturity_date' => $maturity?->toDateString(),
             'deductions' => $product === null || $principal <= 0 ? null : $this->formDeductions($product, $input, $principal, $maturity, $edited?->term_unit),
@@ -2556,33 +2557,6 @@ class LoanService
         }
 
         return $preview;
-    }
-
-    /**
-     * Whether the edited loan holds a share capital pledge `$viewer` may not
-     * see (no `share_capital:view`), so an edit preview with no list, which
-     * counts its held pledges, must not show their total.
-     */
-    private static function withholdsHeldShareCapital(Loan $edited, ?User $viewer): bool
-    {
-        if ($viewer?->can('share_capital:view')) {
-            return false;
-        }
-
-        return $edited->collaterals()->with('collateralType')->get()
-            ->contains(fn (Collateral $collateral): bool => CollateralValuation::isShareCapital($collateral));
-    }
-
-    /**
-     * The preview's `collateral` section when its figures would reveal a share
-     * capital balance: every figure built from the total is null, and
-     * `value_unknown` says why, as the loan's collaterals card does.
-     *
-     * @return array{total_value: null, security_status: null, short_by: null, value_unknown: true}
-     */
-    private static function withheldCollateral(): array
-    {
-        return ['total_value' => null, 'security_status' => null, 'short_by' => null, 'value_unknown' => true];
     }
 
     /**

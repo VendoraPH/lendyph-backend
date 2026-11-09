@@ -66,9 +66,9 @@ use OpenApi\Attributes as OA;
             new OA\Property(property: 'share_capital_build_up', type: 'number', description: 'One `scb_amount` per period, none on a period an extension or adjustment closed'),
             new OA\Property(property: 'total_payment', type: 'number', description: '`total_due` plus `share_capital_build_up`; equals POST /loans/preview\'s `amortization.totals.total_payment` for the same loan'),
         ]),
-        new OA\Property(property: 'collateral_summary', type: 'object', nullable: true, description: 'GET /loans/{id} only; null where the loan\'s collaterals are not loaded (lists). The values the server pledged each collateral at (`snapshot_value`: its `amount`, or for share capital its member\'s balance) added up against the principal, by the rule POST /loans/preview\'s `collateral` uses. When the loan holds a share capital pledge and the caller lacks `share_capital:view`, `total_value` and `short_by` are null and `value_unknown` is true, because they would reveal the balance.', properties: [
+        new OA\Property(property: 'collateral_summary', type: 'object', nullable: true, description: 'GET /loans/{id} only; null where the loan\'s collaterals are not loaded (lists). The values the server pledged each collateral at (`snapshot_value`: its `amount`, or for share capital its member\'s balance) added up against the principal, by the rule POST /loans/preview\'s `collateral` uses. When the loan holds a share capital pledge and the caller lacks `share_capital:view`, `total_value`, `security_status` and `short_by` are null and `value_unknown` is true, because they would reveal the balance ("secured" would say it covers the principal).', properties: [
             new OA\Property(property: 'total_value', type: 'number', nullable: true),
-            new OA\Property(property: 'security_status', type: 'string', enum: ['secured', 'partially_secured', 'unsecured']),
+            new OA\Property(property: 'security_status', type: 'string', nullable: true, enum: ['secured', 'partially_secured', 'unsecured']),
             new OA\Property(property: 'short_by', type: 'number', nullable: true),
             new OA\Property(property: 'value_unknown', type: 'boolean', description: 'Present, and true, only when the totals are withheld'),
         ]),
