@@ -51,7 +51,7 @@ class AccountingReconciliationController extends Controller
     #[OA\Get(
         path: '/api/accounting/reconciliations',
         summary: 'List reconciliations',
-        description: 'One page of reconciliations, newest period first, each with its full worksheet of lines. Returns the raw Laravel paginator envelope ({data, links, meta}); the screen drains it. `book_balance` and `difference` are computed from the ledger on every read, never stored — so posting the entry that was missing CLOSES the difference instead of leaving a stale gap. `per_page` is clamped at 100. `is_reconciled` is true only when `difference` is 0 and every statement line is matched (a `possible` row is not). The worksheet `lines` also hold outstanding items: entries dated up to 60 days before the period or 5 days after it that no statement line has claimed; such a row carries `outside_period: true` and its own `date`. Reversals are judged as of `end_date`: a pair whose legs are both dated on or before it, neither matched, is never suggested or listed as outstanding. Every row carries `matchable` (exactly whether match accepts its ledger line by hand: false for a draft, a line another reconciliation matched, a leg outside the period that was not in the books at the period end, or no ledger line). `unmatched_count` counts in-period rows only; `outstanding_count` counts unmatched entries dated before the period.',
+        description: 'One page of reconciliations, newest period first, each with its full worksheet of lines. Returns the raw Laravel paginator envelope ({data, links, meta}); the screen drains it. `book_balance` and `difference` are computed from the ledger on every read, never stored — so posting the entry that was missing CLOSES the difference instead of leaving a stale gap. `per_page` is clamped at 100. `is_reconciled` is true only when `difference` is 0 and every statement line is matched (a `possible` row is not). The worksheet `lines` also hold outstanding items: entries dated up to 60 days before the period or 5 days after it that no statement line has claimed; such a row carries `outside_period: true` and its own `date`. Every leg of a reversal is an ordinary ledger line; only a simple reversed pair dated before the period that nothing on the worksheet touches is left out of the outstanding items, as it nets to nothing. Every row carries `matchable`: exactly whether match accepts its ledger line (false for a draft, a line another statement line matched, or no ledger line). `unmatched_count` counts in-period rows only; `outstanding_count` counts unmatched entries dated before the period.',
         tags: ['Accounting'],
         security: [['sanctum' => []]],
         parameters: [
@@ -255,7 +255,7 @@ class AccountingReconciliationController extends Controller
     #[OA\Post(
         path: '/api/accounting/reconciliations/{id}/match',
         summary: 'Confirm or undo pairings',
-        description: 'Either `{"matches":[{"line_id":1,"journal_line_id":2}]}` (a null `journal_line_id` UNMATCHES) or `{"accept_suggestions":true}`, which confirms every row currently marked `possible`. Suggestions are re-derived server-side, so a stale tab cannot write pairings the books no longer support. A ledger line may be claimed by only one statement line, and a draft never. Besides the period\'s own lines, an outstanding item can be matched: an entry dated up to 60 days before the period or 5 days after it that was in the books at the period end (a reversed entry is, when its reversal is dated after the period end or has been matched). Rows carry `matchable` for the picker. Returns the whole reconciliation.',
+        description: 'Either `{"matches":[{"line_id":1,"journal_line_id":2}]}` (a null `journal_line_id` UNMATCHES) or `{"accept_suggestions":true}`, which confirms every row currently marked `possible`. Suggestions are re-derived server-side, so a stale tab cannot write pairings the books no longer support. A ledger line may be claimed by only one statement line, and a draft never. Besides the period\'s own lines, an outstanding item can be matched: an entry dated up to 60 days before the period or 5 days after it. Every leg of a reversal is an ordinary line. Each row\'s `matchable` uses the same rule. Returns the whole reconciliation.',
         tags: ['Accounting'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
@@ -264,7 +264,7 @@ class AccountingReconciliationController extends Controller
             new OA\Response(response: 200, description: 'Updated reconciliation'),
             new OA\Response(response: 403, description: 'Missing accounting:reconcile or branches:view_all'),
             new OA\Response(response: 409, description: 'The statement line is already matched to another ledger line (unmatch it first; accept-suggestions skips such lines instead), the ledger line was claimed at the same moment, or a lock collided'),
-            new OA\Response(response: 422, description: 'A line belongs elsewhere, the journal is a draft, the ledger line is outside the period and not an outstanding item (60 days before to 5 days after, in the books at the period end), or it is already claimed'),
+            new OA\Response(response: 422, description: 'A line belongs elsewhere, the journal is a draft, the ledger line is outside the period and not an outstanding item (60 days before to 5 days after), or it is already claimed'),
         ],
     )]
     public function match(
@@ -364,25 +364,20 @@ class AccountingReconciliationController extends Controller
     }
 
     /**
-     * The ledger line has to be in the books (not a draft), on THIS account, inside THIS period or
-     * an outstanding item of it, and not already claimed by another statement
-     * line.
-     *
-     * An outstanding item (the standard bank reconciliation rule) is a deposit
-     * in transit or an uncleared cheque, dated up to
-     * {@see ReconciliationMatcher::OUTSTANDING_DAYS_BEFORE} days before the
-     * period or {@see ReconciliationMatcher::DATE_WINDOW_DAYS} days after it,
-     * that was in the books at the period end
-     * ({@see ReconciliationMatcher::standingAsOf()}). Inside the period only a
-     * draft is refused: the bank may show a deposit and the bounce that
-     * reversed it.
+     * The ledger line has to be in the books (not a draft), on THIS account,
+     * inside THIS period or an outstanding item of it (up to
+     * {@see ReconciliationMatcher::OUTSTANDING_DAYS_BEFORE} days before or
+     * {@see ReconciliationMatcher::DATE_WINDOW_DAYS} days after), and not
+     * already claimed by another statement line. Every leg of a reversal is
+     * an ordinary line. The rule is {@see ReconciliationMatcher::matchRefusal()},
+     * the same one behind each worksheet row's `matchable`.
      *
      * The last check is the one that matters most. A ₱5,000 deposit that
      * appears twice on a statement could otherwise be matched twice to the
      * single ledger entry behind it, and the reconciliation would report itself
      * clean while one of the two deposits was genuinely missing from the books
      * — a green screen standing for the exact condition it exists to detect.
-     * It is read under a lock, and the unique index on
+     * The claim is read under a lock, and the unique index on
      * `matched_journal_line_id` is the backstop; this is what makes the
      * refusal a message rather than a 500.
      */
@@ -399,67 +394,15 @@ class AccountingReconciliationController extends Controller
             ]);
         }
 
-        if ($line['status'] === 'draft') {
-            throw ValidationException::withMessages([
-                'matches' => [
-                    "Journal line {$journalLineId} is a draft. Only posted entries are in the books, so post it "
-                    .'before matching it.',
-                ],
-            ]);
-        }
-
-        if ($line['account_id'] !== $reconciliation->accounting_account_id) {
-            throw ValidationException::withMessages([
-                'matches' => [
-                    "Journal line {$journalLineId} is against a different account. A reconciliation proves one "
-                    .'account, so a line on another one cannot be part of it.',
-                ],
-            ]);
-        }
-
-        $date = $line['date'];
-        $end = $reconciliation->end_date->toDateString();
-        $inPeriod = $date >= $reconciliation->start_date->toDateString() && $date <= $end;
-
-        if (! $inPeriod) {
-            [$from, $to] = ReconciliationMatcher::candidateDates($reconciliation);
-
-            if ($date < $from || $date > $to) {
-                throw ValidationException::withMessages([
-                    'matches' => [
-                        "Journal line {$journalLineId} is dated {$date}, outside the period being reconciled. An "
-                        .'entry from up to '.ReconciliationMatcher::OUTSTANDING_DAYS_BEFORE.' days before the period '
-                        .'or '.ReconciliationMatcher::DATE_WINDOW_DAYS.' days after it can be matched as an '
-                        .'outstanding item; this one is further away.',
-                    ],
-                ]);
-            }
-
-            if (! ReconciliationMatcher::standingAsOf($line, $end)['live']) {
-                throw ValidationException::withMessages([
-                    'matches' => [
-                        "Journal line {$journalLineId} belongs to an entry reversed on {$line['partner_date']}, on or "
-                        ."before this period's end ({$end}), so it was no longer in the books. Match its reversal "
-                        .'first if the bank shows both.',
-                    ],
-                ]);
-            }
-        }
-
-        $claimedBy = AccountingReconciliationLine::query()
+        $line['claimed_by_line'] = AccountingReconciliationLine::query()
             ->where('matched_journal_line_id', $journalLineId)
-            ->where('id', '!=', $statementLineId)
             ->lockForUpdate()
             ->value('id');
 
-        if ($claimedBy !== null) {
-            throw ValidationException::withMessages([
-                'matches' => [
-                    "Journal line {$journalLineId} is already matched to statement line {$claimedBy}. One ledger "
-                    .'entry cannot stand for two statement lines — if the statement really shows the same amount '
-                    .'twice, one of them is missing from the books.',
-                ],
-            ]);
+        $refusal = ReconciliationMatcher::matchRefusal($reconciliation, $line, $statementLineId);
+
+        if ($refusal !== null) {
+            throw ValidationException::withMessages(['matches' => [$refusal]]);
         }
     }
 
