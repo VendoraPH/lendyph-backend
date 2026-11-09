@@ -251,4 +251,30 @@ class ShareCapitalEntryJournalTest extends TestCase
         $this->postJson("/api/pledges/{$this->pledge->id}/entries", ['amount' => 100, 'type' => 'credit', 'date' => '2026-11-09'])
             ->assertCreated();
     }
+
+    /**
+     * Just after midnight Manila it is still the day before in UTC: an entry
+     * dated today's Manila date is accepted on every route and posts on that
+     * date.
+     */
+    public function test_an_entry_dated_today_just_after_midnight_manila_is_accepted_on_every_route(): void
+    {
+        $this->travelTo(Carbon::parse('2026-11-08 16:30:00', 'UTC'));
+        $today = '2026-11-09';
+
+        $this->postJson("/api/pledges/{$this->pledge->id}/entries", ['amount' => 100, 'type' => 'credit', 'date' => $today])
+            ->assertCreated();
+
+        $this->postJson('/api/share-capital/ledger', [
+            'borrower_id' => $this->member->id, 'date' => $today, 'description' => 'Early', 'type' => 'credit', 'amount' => 100,
+        ])->assertCreated();
+
+        $this->postJson('/api/pledges/bulk-entries', ['entries' => [
+            ['pledge_id' => $this->pledge->id, 'amount' => 100, 'type' => 'credit', 'date' => $today],
+        ]])->assertCreated();
+
+        $this->assertSame(3, ShareCapitalLedger::count());
+        $this->assertSame([$today], $this->journalsFrom('share_capital')->map(fn ($journal) => $journal->date->toDateString())->unique()->values()->all());
+        $this->assertSame(3, $this->shareCapitalJournalCount());
+    }
 }

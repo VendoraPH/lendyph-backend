@@ -3,7 +3,9 @@
 namespace Tests\Feature\Ledger\Deferral;
 
 use App\Models\AccountingJournal;
+use App\Models\AmortizationSchedule;
 use App\Models\Loan;
+use App\Models\LoanAdjustment;
 use App\Models\Repayment;
 use App\Services\Accounting\AutomaticPoster;
 use App\Services\Accounting\PostingRules;
@@ -92,6 +94,35 @@ trait DeferralScenarios
         $this->assertSame('completed', $loan->fresh()->status, 'the loan never completed');
 
         return $repayments;
+    }
+
+    /**
+     * Request, approve and apply a balance adjustment by amount through the
+     * real endpoints, which restate the periods and post its journal; the
+     * adjustment, as applied.
+     */
+    protected function applyReduction(Loan $loan, int $signedCentavos): LoanAdjustment
+    {
+        $id = $this->postJson("/api/loans/{$loan->id}/adjustments", [
+            'adjustment_type' => 'balance_adjustment',
+            'new_values' => ['adjustment_amount' => $signedCentavos / 100],
+        ])->assertCreated()->json('data.id');
+        $this->patchJson("/api/loan-adjustments/{$id}/approve")->assertOk();
+        $this->patchJson("/api/loan-adjustments/{$id}/apply")->assertOk();
+
+        return LoanAdjustment::findOrFail($id);
+    }
+
+    /** The principal still unpaid on a loan's open periods, in centavos. */
+    protected function unpaidPrincipalOf(Loan $loan): int
+    {
+        $pesos = AmortizationSchedule::query()
+            ->where('loan_id', $loan->id)
+            ->whereIn('status', AmortizationSchedule::UNPAID_STATUSES)
+            ->selectRaw('COALESCE(SUM('.AmortizationSchedule::remainingPrincipalSql().'), 0) AS unpaid')
+            ->value('unpaid');
+
+        return (int) round(((float) $pesos) * 100);
     }
 
     /** What a loan's collections recognised of its deferral, by part, in centavos. */

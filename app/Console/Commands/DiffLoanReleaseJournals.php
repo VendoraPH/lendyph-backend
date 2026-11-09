@@ -59,8 +59,12 @@ use Illuminate\Database\Eloquent\Collection as EloquentCollection;
  * debits and the part taken from the source's deferral. How the rest was
  * split between the allowance and expense depended on the allowance balance
  * at the moment it posted, and is not compared. A write-off that can't be
- * rebuilt is its own skip; its release journal is still compared. An
- * ordinary release is rebuilt with the method it was released by
+ * rebuilt is its own skip; its release journal is still compared.
+ * Write-offs are keyed by source: the posted `credit_loss` journal whose
+ * `postable_id` is the source loan. That assumes one posted J2 per source,
+ * which holds because a restructured loan can't be restructured again.
+ *
+ * An ordinary release is rebuilt with the method it was released by
  * (`release_method`, `cash` where none was recorded). A restructure released
  * before its split was stored cannot be rebuilt; it is skipped, and listed
  * by `accounting:ledger-gaps-report`.
@@ -276,9 +280,9 @@ class DiffLoanReleaseJournals extends Command
      * - the unearned restructure debit is what the source's deferral could
      *   take: the lesser of the principal and the deferral as it stood just
      *   before the restructure. The rebuild reads that deferral from the
-     *   source's own journals without its J2 and without what its new loan's
-     *   J1 carried off it, before any cap, so a J2 that took more than the
-     *   source ever held shows. The source is closed by the restructure and
+     *   source's own journals without J2's own lines, and without what its
+     *   new loan's J1 carried off it, so a J2 that took more than the source
+     *   held shows. The source is closed by the restructure and
      *   its voids are refused, so nothing else has moved it since. A missing
      *   or reversed J2 is already a difference on its principal, so this part
      *   isn't compared again for it.
