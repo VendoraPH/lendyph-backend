@@ -87,14 +87,15 @@ class StoreReconciliationRequest extends FormRequest
                 return;
             }
 
-            $from = (string) $this->input('start_date');
-            $to = (string) $this->input('end_date');
-            $days = (int) CarbonImmutable::parse($from)->diffInDays(CarbonImmutable::parse($to)) + 1;
+            $from = CarbonImmutable::parse((string) $this->input('start_date'));
+            $to = CarbonImmutable::parse((string) $this->input('end_date'));
+            $days = (int) $from->diffInDays($to) + 1;
 
             if ($days > self::MAX_PERIOD_DAYS) {
                 $v->errors()->add(
                     'end_date',
-                    'A reconciliation covers at most '.self::MAX_PERIOD_DAYS." days, and {$from} to {$to} is {$days} "
+                    'A reconciliation covers at most '.self::MAX_PERIOD_DAYS.' days, and '.$from->format('M j, Y')
+                    .' to '.$to->format('M j, Y')." is {$days} "
                     .'days. Reconcile it a month or a quarter at a time.',
                 );
 

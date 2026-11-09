@@ -77,7 +77,7 @@ class ReconciliationWindowAndMatchingTest extends TestCase
             ->assertStatus(422)
             ->assertJsonPath(
                 'errors.end_date.0',
-                'A reconciliation covers at most 92 days, and 2026-06-30 to 2026-09-30 is 93 days. Reconcile it a '
+                'A reconciliation covers at most 92 days, and Jun 30, 2026 to Sep 30, 2026 is 93 days. Reconcile it a '
                 .'month or a quarter at a time.',
             );
 
