@@ -107,4 +107,18 @@ class AutoCreditJournalTest extends TestCase
         $this->assertSame(0, AutoCreditRun::count());
         $this->assertSame(0, $this->shareCapitalJournalCount());
     }
+
+    /** Share capital staff without `auto_credit:process` get a 403, and nothing is written. */
+    public function test_a_caller_without_the_auto_credit_permission_is_refused_and_nothing_is_written(): void
+    {
+        $clerk = $this->userWithNoRole();
+        $clerk->givePermissionTo(['share_capital:view', 'share_capital:create', 'share_capital:update']);
+        $this->actingAs($clerk);
+
+        $this->postJson('/api/auto-credit/process', ['method' => 'cash'])->assertForbidden();
+
+        $this->assertSame(0, ShareCapitalLedger::count());
+        $this->assertSame(0, AutoCreditRun::count());
+        $this->assertSame(0, $this->shareCapitalJournalCount());
+    }
 }

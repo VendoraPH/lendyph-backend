@@ -21,13 +21,15 @@ class ShareCapitalManualEntryRequest extends FormRequest
      *
      * `method` is how the money moved, and its journal posts to that
      * method's account; `reference_number` is required unless cash.
+     *
+     * The date can't be after today, as Record Payment's.
      */
     public function rules(): array
     {
         return [
             'amount' => ['required', 'numeric', 'min:0.01', 'decimal:0,2'],
             'type' => ['required', 'in:credit,debit'],
-            'date' => ['required', 'date'],
+            'date' => ['required', 'date', 'before_or_equal:today'],
             'description' => ['nullable', 'string', 'max:255'],
             'method' => ['sometimes', Rule::in(ShareCapitalService::ENTRY_METHODS)],
             'reference_number' => ['nullable', 'string', 'max:100', 'required_unless:method,cash'],

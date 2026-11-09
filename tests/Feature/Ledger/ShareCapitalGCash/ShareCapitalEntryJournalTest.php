@@ -6,6 +6,7 @@ use App\Models\Borrower;
 use App\Models\ShareCapitalLedger;
 use App\Models\ShareCapitalPledge;
 use App\Services\GeneratedNumberWrite;
+use Illuminate\Support\Carbon;
 use Tests\TestCase;
 use Tests\Traits\PostsJournals;
 use Tests\Traits\SetupLendyPH;
@@ -222,5 +223,32 @@ class ShareCapitalEntryJournalTest extends TestCase
 
         $this->assertSame([$older->id, $newer->id], ShareCapitalLedger::orderBy('id')->pluck('id')->all());
         $this->assertSame(0, $this->shareCapitalJournalCount());
+    }
+
+    // ── Dates ──
+
+    /** As Record Payment: an entry can't be dated after today, on any of the three routes. */
+    public function test_an_entry_dated_after_today_is_refused_on_every_route(): void
+    {
+        $this->travelTo(Carbon::parse('2026-11-09 23:30:00'));
+        $tomorrow = '2026-11-10';
+
+        $this->postJson("/api/pledges/{$this->pledge->id}/entries", ['amount' => 100, 'type' => 'credit', 'date' => $tomorrow])
+            ->assertUnprocessable()->assertJsonValidationErrors('date');
+
+        $this->postJson('/api/share-capital/ledger', [
+            'borrower_id' => $this->member->id, 'date' => $tomorrow, 'description' => 'Early', 'type' => 'credit', 'amount' => 100,
+        ])->assertUnprocessable()->assertJsonValidationErrors('date');
+
+        $this->postJson('/api/pledges/bulk-entries', ['entries' => [
+            ['pledge_id' => $this->pledge->id, 'amount' => 100, 'type' => 'credit', 'date' => '2026-11-09'],
+            ['pledge_id' => $this->pledge->id, 'amount' => 100, 'type' => 'credit', 'date' => $tomorrow],
+        ]])->assertUnprocessable()->assertJsonValidationErrors('entries.1.date');
+
+        $this->assertSame(0, ShareCapitalLedger::count());
+        $this->assertSame(0, $this->shareCapitalJournalCount());
+
+        $this->postJson("/api/pledges/{$this->pledge->id}/entries", ['amount' => 100, 'type' => 'credit', 'date' => '2026-11-09'])
+            ->assertCreated();
     }
 }

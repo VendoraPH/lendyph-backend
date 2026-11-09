@@ -20,7 +20,7 @@ class StoreShareCapitalLedgerRequest extends FormRequest
     {
         return [
             'borrower_id' => ['required', 'integer', $this->memberBorrowerRule()],
-            'date' => ['required', 'date'],
+            'date' => ['required', 'date', 'before_or_equal:today'],
             'description' => ['required', 'string', 'max:255'],
             'type' => ['required', 'in:credit,debit'],
             'amount' => ['required', 'numeric', 'min:0.01', 'decimal:0,2'],

@@ -57,10 +57,12 @@ class ShareCapitalService
             $today = now()->toDateString();
             $totalAmount = 0.0;
 
+            $rows = [];
+
             foreach ($eligiblePledges as $pledge) {
                 $totalAmount += (float) $pledge->amount;
 
-                $this->writeEntry([
+                $rows[] = ShareCapitalLedger::create([
                     'borrower_id' => $pledge->borrower_id,
                     'date' => $today,
                     'description' => 'Monthly pledge - auto-credit',
@@ -71,6 +73,11 @@ class ShareCapitalService
                     'created_by' => $user->id,
                 ]);
             }
+
+            // Every row first, then the journals: the journal-number lock is
+            // taken by the first posting and held to commit, so posting last
+            // keeps it for the shortest time.
+            $this->postEntries($rows);
 
             return AutoCreditRun::create([
                 'total_amount' => round($totalAmount, 2),
@@ -183,7 +190,30 @@ class ShareCapitalService
         string $method = 'cash',
         ?string $referenceNumber = null,
     ): ShareCapitalLedger {
-        return GeneratedNumberWrite::run(fn (): ShareCapitalLedger => $this->writeEntry([
+        return GeneratedNumberWrite::run(function () use ($borrowerId, $amount, $type, $date, $user, $description, $method, $referenceNumber): ShareCapitalLedger {
+            $row = ShareCapitalLedger::create($this->entryAttributes($borrowerId, $amount, $type, $date, $user, $description, $method, $referenceNumber));
+            $this->postEntries([$row]);
+
+            return $row;
+        }, GeneratedNumberWrite::SHARE_CAPITAL_CONFLICT);
+    }
+
+    /**
+     * A standalone row's attributes.
+     *
+     * @return array<string, mixed>
+     */
+    private function entryAttributes(
+        int $borrowerId,
+        float|string $amount,
+        string $type,
+        string $date,
+        User $user,
+        string $description,
+        string $method,
+        ?string $referenceNumber,
+    ): array {
+        return [
             'borrower_id' => $borrowerId,
             'date' => $date,
             'description' => $description,
@@ -192,7 +222,7 @@ class ShareCapitalService
             'method' => $method,
             'reference_number' => $referenceNumber,
             'created_by' => $user->id,
-        ]), GeneratedNumberWrite::SHARE_CAPITAL_CONFLICT);
+        ];
     }
 
     /**
@@ -213,35 +243,38 @@ class ShareCapitalService
             foreach ($entries as $entry) {
                 $pledge = ShareCapitalPledge::findOrFail($entry['pledge_id']);
 
-                $results->push($this->createManualEntry(
-                    $pledge,
+                $results->push(ShareCapitalLedger::create($this->entryAttributes(
+                    $pledge->borrower_id,
                     (float) $entry['amount'],
                     $entry['type'],
                     $entry['date'],
                     $user,
-                    $entry['description'] ?? null,
+                    $entry['description'] ?? ('Manual '.$entry['type'].' entry'),
                     $method,
                     $referenceNumber,
-                ));
+                )));
             }
+
+            // As processAutoCredit(): the rows first, then their journals.
+            $this->postEntries($results->all());
 
             return $results;
         }, GeneratedNumberWrite::SHARE_CAPITAL_REFERENCE_INDEX, GeneratedNumberWrite::SHARE_CAPITAL_CONFLICT);
     }
 
     /**
-     * Writes a standalone row and posts it. The caller holds the transaction.
-     * Only for rows with no `repayment_id` or `loan_id`: those are already in
-     * their payment's or release's journal, and the poster refuses them.
+     * Posts each standalone row, one journal per row, through its own method.
+     * The caller holds the transaction, so a refused posting takes every row
+     * with it. Only for rows with no `repayment_id` or `loan_id`: those are
+     * already in their payment's or release's journal, and the poster refuses
+     * them.
      *
-     * @param  array<string, mixed>  $attributes
+     * @param  list<ShareCapitalLedger>  $rows
      */
-    private function writeEntry(array $attributes): ShareCapitalLedger
+    private function postEntries(array $rows): void
     {
-        $row = ShareCapitalLedger::create($attributes);
-
-        $this->poster->shareCapitalEntry($row, $attributes['method'], $attributes['created_by']);
-
-        return $row;
+        foreach ($rows as $row) {
+            $this->poster->shareCapitalEntry($row, (string) $row->method, (int) $row->created_by);
+        }
     }
 }

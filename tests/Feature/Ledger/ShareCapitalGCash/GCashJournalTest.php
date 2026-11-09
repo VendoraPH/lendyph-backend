@@ -147,4 +147,19 @@ class GCashJournalTest extends TestCase
 
         $this->assertSame(['1010 Dr 600000', '1020 Cr 600000'], $this->linesOf($this->journalOn($tx, 'cash_in')));
     }
+
+    /**
+     * Paid at 00:30 Manila on 6 November, which is still 5 November in UTC:
+     * the journal is dated the Manila day.
+     */
+    public function test_a_cash_in_paid_just_after_midnight_manila_is_dated_the_manila_day(): void
+    {
+        $tx = $this->record(['type' => 'cash_in', 'amount' => 1000, 'is_pending' => true]);
+
+        $this->travelTo(Carbon::parse('2026-11-05 16:30:00', 'UTC'));
+        $this->patchJson("/api/gcash/transactions/{$tx->id}/paid")->assertOk();
+
+        $this->assertSame('2026-11-06 00:30:00', $tx->fresh()->paid_at->toDateTimeString());
+        $this->assertSame('2026-11-06', $this->journalOn($tx, 'cash_in')->date->toDateString());
+    }
 }

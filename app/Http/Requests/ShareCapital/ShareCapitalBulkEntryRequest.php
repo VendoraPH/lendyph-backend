@@ -24,6 +24,8 @@ class ShareCapitalBulkEntryRequest extends FormRequest
      *
      * One `method` and `reference_number` for the whole batch, stored on each
      * row; `reference_number` is required unless cash.
+     *
+     * The date can't be after today, as Record Payment's.
      */
     public function rules(): array
     {
@@ -32,7 +34,7 @@ class ShareCapitalBulkEntryRequest extends FormRequest
             'entries.*.pledge_id' => ['required', 'integer', $this->visiblePledgeRule()],
             'entries.*.amount' => ['required', 'numeric', 'min:0.01', 'decimal:0,2'],
             'entries.*.type' => ['required', 'in:credit,debit'],
-            'entries.*.date' => ['required', 'date'],
+            'entries.*.date' => ['required', 'date', 'before_or_equal:today'],
             'entries.*.description' => ['nullable', 'string', 'max:255'],
             'method' => ['sometimes', Rule::in(ShareCapitalService::ENTRY_METHODS)],
             'reference_number' => ['nullable', 'string', 'max:100', 'required_unless:method,cash'],

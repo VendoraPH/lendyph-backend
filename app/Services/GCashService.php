@@ -15,6 +15,12 @@ use Illuminate\Validation\ValidationException;
 
 class GCashService
 {
+    /** The 409 when recording collides with another save on a lock. Nothing was saved. */
+    public const CREATE_CONFLICT = 'Another GCash transaction was saved at the same moment. Nothing was saved; check the list, then submit again.';
+
+    /** The 409 when mark-paid collides with another change to the transaction. */
+    public const MARK_PAID_CONFLICT = 'This transaction was changed at the same moment. Nothing was saved; reload it and try again.';
+
     public function __construct(private AutomaticPoster $poster) {}
 
     /**
@@ -24,12 +30,16 @@ class GCashService
      * `paid_at`; Cash Out Dr 1020 amount / Cr 1010 amount − charge / Cr 4090
      * charge, dated `transaction_date`. A pending Cash In posts nothing until
      * markPaid().
+     *
+     * A deadlock or lock wait timeout answers 409 with nothing saved, never
+     * 500, and is not tried again: the duplicate check would have to run again
+     * against whatever the other save committed.
      */
     public function createTransaction(array $payload, User $actor): GCashTransaction
     {
         $isPending = (bool) ($payload['is_pending'] ?? false);
 
-        return DB::transaction(function () use ($payload, $actor, $isPending) {
+        return LoanWriteTransaction::run(function () use ($payload, $actor, $isPending) {
             [
                 'type' => $type,
                 'amount' => $amount,
@@ -81,7 +91,7 @@ class GCashService
             }
 
             return $tx;
-        });
+        }, conflictMessage: self::CREATE_CONFLICT);
     }
 
     /**
@@ -127,11 +137,12 @@ class GCashService
      *
      * The row is locked and re-read first, so of two mark-paid requests only
      * the first finds it pending: the second answers the same 422 as a Cash In
-     * that was already paid, and nothing posts twice.
+     * that was already paid, and nothing posts twice. A deadlock or lock wait
+     * timeout answers 409 with nothing saved, never 500.
      */
     public function markPaid(GCashTransaction $tx, User $actor): GCashTransaction
     {
-        return DB::transaction(function () use ($tx, $actor): GCashTransaction {
+        return LoanWriteTransaction::run(function () use ($tx, $actor): GCashTransaction {
             $locked = GCashTransaction::query()->whereKey($tx->getKey())->lockForUpdate()->firstOrFail();
 
             if ($locked->type !== 'cash_in' || $locked->status !== 'pending') {
@@ -163,7 +174,7 @@ class GCashService
             $this->poster->gcashTransaction($locked, $actor->id);
 
             return $locked->fresh();
-        });
+        }, conflictMessage: self::MARK_PAID_CONFLICT);
     }
 
     public function replaceTiers(array $tiers): Collection
