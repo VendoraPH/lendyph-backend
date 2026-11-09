@@ -21,12 +21,11 @@ use Illuminate\Support\Facades\DB;
  * Scores members and loan applications, and keeps the history.
  *
  * A history row (`credit_scores`) is written only when the status, score,
- * band, confidence or revision differs from the last one, or the score was
- * taken from other application details, so the current score always names
- * the details its flags were raised from; otherwise only the
+ * band, confidence or revision differs from the last one; otherwise only the
  * member's `checked_at` moves. A new score that dropped by the settings'
  * decline points (10) or more, or moved into a high band, writes an alert.
- * Policy flags are kept in step on every run.
+ * Policy flags are kept in step on every run, and the member's row records
+ * the application details they were raised from (`flags_profile_id`).
  *
  * Advisory only: it writes the credit scoring tables and nothing else, and
  * never a loan. A dry run calculates and compares, and writes nothing.
@@ -63,7 +62,7 @@ class Recalculator
             [$settings, $table] = $this->rules();
             $data = MemberCreditData::load($borrowerId, null, $asOf);
             $result = $this->scorer->score($data, $settings, $table);
-            $current = CreditScoreMember::query()->with('creditScore:id,revision_id,data_used')->where('borrower_id', $borrowerId)->first();
+            $current = CreditScoreMember::query()->with('creditScore:id,revision_id')->where('borrower_id', $borrowerId)->first();
             $changed = $this->differs($result, $current?->creditScore, $current);
 
             if ($dryRun) {
@@ -84,6 +83,7 @@ class Recalculator
                     'branch_id' => $data->member->branch_id,
                     'has_active_loan' => $result['has_active_loan'],
                     'past_due' => $result['past_due'],
+                    'flags_profile_id' => $result['data_used']['application_profile_id'] ?? null,
                     'checked_at' => $now,
                 ], $changed ? [
                     'credit_score_id' => $scoreId,
@@ -262,8 +262,7 @@ class Recalculator
             || $last->score !== $result['score']
             || $last->risk_level !== $result['risk_level']
             || $last->confidence !== $result['confidence']
-            || (int) $lastScore->revision_id !== $result['revision_id']
-            || ($lastScore->data_used['application_profile_id'] ?? null) !== ($result['data_used']['application_profile_id'] ?? null);
+            || (int) $lastScore->revision_id !== $result['revision_id'];
     }
 
     /**

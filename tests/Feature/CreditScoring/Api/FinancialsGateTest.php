@@ -3,6 +3,7 @@
 use App\Models\CreditApplicationProfile;
 use App\Models\CreditPolicyFlag;
 use App\Models\CreditScore;
+use App\Models\CreditScoreMember;
 use App\Models\CreditScoringSetting;
 use App\Models\Loan;
 use App\Models\User;
@@ -214,12 +215,46 @@ it('keeps the debt flags generic when the newest details sit on another branch\'
     CreditApplicationProfile::query()->create(['loan_id' => $this->application($member, ['branch_id' => $this->farBranch()->id])->id] + $details);
     $this->scoreNow($member);
 
-    $current = CreditScore::query()->where('borrower_id', $member->id)->latest('id')->first();
     $farProfile = CreditApplicationProfile::query()->latest('id')->first();
-    expect($current->data_used['application_profile_id'])->toBe($farProfile->id)
-        ->and(CreditScore::query()->where('borrower_id', $member->id)->count())->toBe($before + 1)
+    expect(CreditScore::query()->where('borrower_id', $member->id)->count())->toBe($before)
+        ->and(CreditScoreMember::query()->where('borrower_id', $member->id)->value('flags_profile_id'))->toBe($farProfile->id)
         ->and($flags()['Active loans above policy limit'])->not->toContain('4 active loans')
         ->and($flags()['Debt service ratio above caution'])->not->toContain('%,');
+});
+
+it('reads every personal factor, the confidence reason, the recommendation and the income flag generically without the member\'s details', function () {
+    $farMember = $this->member(['branch_id' => $this->farBranch()->id, 'monthly_income' => 35000, 'date_hired' => '2019-03-01']);
+    $loan = $this->application($farMember, ['branch_id' => $this->mainBranch()->id]);
+    $head = $this->actingAs($this->headOffice())->putJson("/api/credit-scoring/loans/{$loan->id}/assessment", [
+        'household_expenses' => 20000, 'years_at_residence' => 6, 'verified_references_count' => 1, 'income_verification' => 'failed',
+    ])->assertOk()->json('data');
+    $personalKeys = ['Job tenure or business age', 'Years at residence', 'Membership tenure', 'Income verified', 'Two or more verified references', 'Valid ID on file', 'Valid mobile number'];
+    expect($head['score']['recommendation'])->toContain('Income verification failed')
+        ->and(collect($head['policy_flags'])->pluck('label'))->toContain('Income verification failed')
+        ->and(collect($head['score']['factors'])->firstWhere('label', 'Income verified')['detail'])->toBe('Income verification failed.');
+
+    foreach ([$this->full, $this->caller(['credit_scoring:view', 'loans:view'])] as $caller) {
+        $data = $this->actingAs($caller)->getJson("/api/credit-scoring/loans/{$loan->id}/assessment")->assertOk()->json('data');
+        $factors = collect($data['score']['factors'])->keyBy('label');
+        $everything = json_encode($data);
+
+        foreach ($personalKeys as $label) {
+            if ($factors->has($label)) {
+                expect($factors[$label]['impact'])->toBe('neutral', $label)
+                    ->and($factors[$label]['detail'])->toEndWith('Shown to staff who can read the member\'s details.', $label);
+            }
+        }
+
+        expect($factors->keys()->intersect(['Income verified', 'Two or more verified references', 'Years at residence', 'Job tenure or business age'])->count())->toBe(4)
+            ->and(collect($data['score']['factors_without_data'])->pluck('label')->intersect($personalKeys)->all())->toBe([])
+            ->and($data['score']['confidence_reason'])->toBe('Shown to staff who can read the member\'s details.')
+            ->and($data['score']['recommendation'])->toContain('Manual review required: a policy check needs review.')
+            ->and($everything)->not->toContain('Income verification failed')
+            ->and($everything)->not->toContain('could not be verified')
+            ->and($everything)->not->toContain('1 verified reference.')
+            ->and($everything)->not->toContain('Verified income')
+            ->and(collect($data['policy_flags'])->pluck('label'))->toContain('Policy check');
+    }
 });
 
 it('needs loans:view to save an assessment, as well as loans:update', function () {

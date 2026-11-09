@@ -28,8 +28,10 @@ use Carbon\CarbonInterface;
  * flags that print income, debt or amounts owed, and a recommendation
  * without the suggested maximum's amount; `financials_hidden` says so. A
  * caller who may not read the member's personal details (borrowers:view and
- * the member's branch, round fz) gets generic job-tenure, residence and
- * membership lines.
+ * the member's branch, round fz) gets generic, neutral lines on the factors
+ * that read them (tenure, residence, membership, income verification,
+ * references, ID and mobile), a generic confidence reason and manual review
+ * sentence, and the income verification flag as a generic policy check.
  */
 final class Presenter
 {
@@ -57,12 +59,31 @@ final class Presenter
         'past_due_amount' => 'Past due amount against the amount outstanding. The figures are shown to staff who can read the member\'s details and loans.',
     ];
 
-    /** Factor lines that print the member's personal details, and their stand-ins (round fz). */
+    /**
+     * Factor lines that read the member's personal or application details,
+     * and their stand-ins (round fz). For a caller who may not read them the
+     * line is generic and its impact neutral, so neither gives the value away.
+     */
     private const PERSONAL_FACTOR_DETAILS = [
         'tenure' => 'Years in the current job or business. Shown to staff who can read the member\'s details.',
         'residence' => 'Years at the current residence. Shown to staff who can read the member\'s details.',
         'membership_tenure' => 'Membership tenure. Shown to staff who can read the member\'s details.',
+        'income_verified' => 'Income verification. Shown to staff who can read the member\'s details.',
+        'verified_references' => 'Verified references. Shown to staff who can read the member\'s details.',
+        'valid_id' => 'Valid ID on file. Shown to staff who can read the member\'s details.',
+        'valid_mobile' => 'Mobile number on file. Shown to staff who can read the member\'s details.',
     ];
+
+    /** Flags whose label and detail read the member's application details. */
+    private const PERSONAL_FLAG_RULES = ['income_verification_failed'];
+
+    private const PERSONAL_FLAG_LABEL = 'Policy check';
+
+    private const PERSONAL_FLAG_DETAIL = 'A policy check needs review. Shown to staff who can read the member\'s details.';
+
+    private const PERSONAL_HIDDEN = 'Shown to staff who can read the member\'s details.';
+
+    private const MANUAL_REVIEW_GENERIC = 'Manual review required: a policy check needs review.';
 
     /** Request attribute prefix for the per-request memos (as BranchAccess::for() keeps its own). */
     private const MEMO_PREFIX = 'credit_scoring.presenter.';
@@ -113,22 +134,24 @@ final class Presenter
                     ! $personal && isset(self::PERSONAL_FACTOR_DETAILS[$factor->factor_key]) => self::PERSONAL_FACTOR_DETAILS[$factor->factor_key],
                     default => $factor->detail,
                 },
-                'impact' => $factor->impact,
+                'impact' => ! $personal && isset(self::PERSONAL_FACTOR_DETAILS[$factor->factor_key]) ? 'neutral' : $factor->impact,
                 'category' => $labels[$factor->category_key] ?? $factor->category_key,
             ])->values()->all(),
-            'recommendation' => $financial ? $score->recommendation : self::withoutAmounts($score->recommendation),
+            'recommendation' => $this->recommendation($score->recommendation, $financial, $personal),
             'calculated_at' => self::time($score->calculated_at),
             'status' => $score->status,
             'limited_history' => (bool) $score->limited_history,
-            'confidence_reason' => $score->confidence_reason,
+            'confidence_reason' => $personal ? $score->confidence_reason : self::PERSONAL_HIDDEN,
             'validated' => (bool) $score->revision?->validated,
             'previous_score' => $score->previous_score,
             'context' => $score->context,
             'loan_id' => $score->loan_id === null ? null : (int) $score->loan_id,
-            'factors_without_data' => $factors->where('has_data', false)->map(fn ($factor) => [
-                'label' => $factor->label,
-                'category' => $labels[$factor->category_key] ?? $factor->category_key,
-            ])->values()->all(),
+            'factors_without_data' => $factors->where('has_data', false)
+                ->reject(fn ($factor) => ! $personal && isset(self::PERSONAL_FACTOR_DETAILS[$factor->factor_key]))
+                ->map(fn ($factor) => [
+                    'label' => $factor->label,
+                    'category' => $labels[$factor->category_key] ?? $factor->category_key,
+                ])->values()->all(),
             'capacity' => $financial ? $score->capacity : null,
             'data_used' => $this->dataUsed($viewer, $score, $financial),
             'financials_hidden' => ! $financial,
@@ -205,8 +228,8 @@ final class Presenter
         return [
             'id' => (int) $flag->id,
             'type' => $flag->type,
-            'label' => $flag->label,
-            'detail' => $this->flagDetail($viewer, $flag, $member),
+            'label' => $this->hidesPersonalFlag($viewer, $flag, $member) ? self::PERSONAL_FLAG_LABEL : $flag->label,
+            'detail' => $this->hidesPersonalFlag($viewer, $flag, $member) ? self::PERSONAL_FLAG_DETAIL : $this->flagDetail($viewer, $flag, $member),
             'triggered_at' => self::time($flag->first_triggered_at),
             'loan_id' => $flag->loan_id === null ? null : (int) $flag->loan_id,
         ];
@@ -303,6 +326,24 @@ final class Presenter
     }
 
     /**
+     * The recommendation as the caller may read it: without the suggested
+     * maximum's amount when the figures are hidden, and with the manual
+     * review sentence read generically when the member's details are, since
+     * it names the hard flags (income verification among them).
+     */
+    private function recommendation(string $recommendation, bool $financial, bool $personal): string
+    {
+        $text = $financial ? $recommendation : self::withoutAmounts($recommendation);
+
+        return $personal ? $text : (string) preg_replace('/Manual review required: [^.]*\./u', self::MANUAL_REVIEW_GENERIC, $text);
+    }
+
+    private function hidesPersonalFlag(User $viewer, CreditPolicyFlag $flag, Borrower $member): bool
+    {
+        return in_array($flag->rule_key, self::PERSONAL_FLAG_RULES, true) && ! $this->scope->seesMemberDetails($viewer, $member);
+    }
+
+    /**
      * The recommendation without the suggested maximum payment's amount.
      */
     private static function withoutAmounts(string $recommendation): string
@@ -331,40 +372,42 @@ final class Presenter
             return $flag->detail;
         }
 
-        $table = $this->memo('policy_rules', fn () => FactorTable::fromRevision(CreditScoringSetting::current()->currentRevision()->firstOrFail()));
+        $table = $this->memo(null, 'policy_rules', fn () => FactorTable::fromRevision(CreditScoringSetting::current()->currentRevision()->firstOrFail()));
 
         return (string) ($table->policyRule($flag->rule_key)['description'] ?? $flag->label);
     }
 
     private function seesMemberFinancials(User $viewer, Borrower $member): bool
     {
-        return $this->memo("member_financials.{$viewer->getKey()}.{$member->getKey()}", function () use ($viewer, $member) {
-            $scoreId = CreditScoreMember::query()->where('borrower_id', $member->id)->value('credit_score_id');
-            $score = $scoreId === null ? null : CreditScore::query()->select(['id', 'data_used'])->find($scoreId);
+        return $this->memo($viewer, "member_financials.{$member->getKey()}", function () use ($viewer, $member) {
+            $profileId = CreditScoreMember::query()->where('borrower_id', $member->id)->value('flags_profile_id');
 
-            return $this->scope->seesFinancials($viewer, $member, $score);
+            return $this->scope->seesFinancialsFrom($viewer, $member, $profileId === null ? null : (int) $profileId);
         });
     }
 
     /**
-     * A value kept for the current request only, so a long-lived process
-     * never answers one request, or one caller, from another's memo. Without
-     * a request (console) it is worked out each time.
+     * A value kept for the current HTTP request only, so a long-lived process
+     * never answers one request, or one caller, from another's memo. Keyed by
+     * the viewer when there is one, and kept only for a saved user, as
+     * BranchAccess::for() does. In the console (where artisan binds a
+     * request of its own) it is worked out each time, except under tests.
      *
      * @template TValue
      *
      * @param  callable(): TValue  $resolve
      * @return TValue
      */
-    private function memo(string $key, callable $resolve): mixed
+    private function memo(?User $viewer, string $key, callable $resolve): mixed
     {
         $request = app()->bound('request') ? app('request') : null;
+        $consoleOnly = app()->runningInConsole() && ! app()->runningUnitTests();
 
-        if ($request === null) {
+        if ($request === null || $consoleOnly || ($viewer !== null && ! $viewer->exists)) {
             return $resolve();
         }
 
-        $key = self::MEMO_PREFIX.$key;
+        $key = self::MEMO_PREFIX.($viewer === null ? '' : "viewer.{$viewer->getKey()}.").$key;
 
         if (! $request->attributes->has($key)) {
             $request->attributes->set($key, $resolve());

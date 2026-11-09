@@ -117,17 +117,26 @@ final class CreditScope
      */
     public function seesFinancials(User $user, Borrower $member, ?CreditScore $score): bool
     {
+        $profileId = $score?->data_used['application_profile_id'] ?? null;
+
+        return $this->seesFinancialsFrom($user, $member, $profileId === null ? null : (int) $profileId);
+    }
+
+    /**
+     * seesFinancials() for figures taken from the given application details
+     * (none: the member record's alone).
+     */
+    public function seesFinancialsFrom(User $user, Borrower $member, ?int $profileId): bool
+    {
         if (! $user->can('loans:view') || ! $this->seesMemberDetails($user, $member)) {
             return false;
         }
-
-        $profileId = $score?->data_used['application_profile_id'] ?? null;
 
         if ($profileId === null) {
             return true;
         }
 
-        $loanId = CreditApplicationProfile::query()->whereKey((int) $profileId)->value('loan_id');
+        $loanId = CreditApplicationProfile::query()->whereKey($profileId)->value('loan_id');
 
         return $loanId !== null && Loan::query()->visibleTo($user)->whereKey($loanId)->exists();
     }
