@@ -9,7 +9,8 @@ use Illuminate\Foundation\Http\FormRequest;
 /**
  * POST /accounting/allowance/postings: `as_of` (today or earlier, in
  * Manila) and `expected_adjustment`, the preview's `totals.adjustment` in
- * signed centavos. Needs `accounting:allowance` and `branches:view_all`.
+ * signed centavos. Needs `accounting:view`, `accounting:allowance` and
+ * `branches:view_all`.
  */
 class PostAllowanceRequest extends FormRequest
 {
@@ -17,7 +18,10 @@ class PostAllowanceRequest extends FormRequest
     {
         $user = $this->user();
 
-        return $user !== null && $user->can('accounting:allowance') && $user->can(BranchAccess::VIEW_ALL);
+        return $user !== null
+            && $user->can('accounting:view')
+            && $user->can('accounting:allowance')
+            && $user->can(BranchAccess::VIEW_ALL);
     }
 
     /**

@@ -61,6 +61,16 @@ class AllowancePermissionsTest extends TestCase
         $this->assertSame(0, AccountingAllowancePosting::count());
     }
 
+    public function test_posting_needs_accounting_view(): void
+    {
+        $expected = $this->preview()['totals']['adjustment'];
+        $this->actingAs($this->branchUser($this->branch, ['accounting:allowance', 'branches:view_all']));
+
+        $this->postJson('/api/accounting/allowance/postings', ['as_of' => $this->today(), 'expected_adjustment' => $expected])
+            ->assertForbidden();
+        $this->assertSame(0, AccountingAllowancePosting::count());
+    }
+
     /** @return array<string, array{0: string}> */
     public static function rolesWithoutTheAllowance(): array
     {

@@ -98,6 +98,22 @@ class AllowanceCalculatorTest extends TestCase
         $this->assertSame(83, $buckets['61_90']['required']);
     }
 
+    public function test_large_amounts_are_exact_with_integer_arithmetic_and_no_bcmath(): void
+    {
+        // ₱9,999,999,999.99 × 15% = 149,999,999,999.85 centavos; × 5% = 49,999,999,999.95.
+        $this->assertSame(150_000_000_000, AllowanceCalculator::requiredFor(999_999_999_999, '31_60'));
+        $this->assertSame(50_000_000_000, AllowanceCalculator::requiredFor(999_999_999_999, '1_30'));
+        $this->assertSame(250_000_000_000, AllowanceCalculator::requiredFor(999_999_999_999, '61_90'));
+        $this->assertSame(500_000_000_000, AllowanceCalculator::requiredFor(999_999_999_999, 'over_120'));
+        $this->assertSame(0, AllowanceCalculator::requiredFor(0, '1_30'));
+
+        // The servers may not have the BCMath extension.
+        $this->assertDoesNotMatchRegularExpression(
+            '/\bbc[a-z]+\s*\(/',
+            (string) file_get_contents(app_path('Services/Accounting/AllowanceCalculator.php')),
+        );
+    }
+
     public function test_the_bucket_is_rounded_not_each_loan(): void
     {
         // Two loans of ₱0.10 at 5%: 0.5 centavo each. Rounded per loan that

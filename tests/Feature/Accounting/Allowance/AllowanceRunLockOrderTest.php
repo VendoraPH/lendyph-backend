@@ -4,6 +4,7 @@ namespace Tests\Feature\Accounting\Allowance;
 
 use App\Models\AccountingJournal;
 use App\Models\Loan;
+use App\Services\Accounting\AllowancePoster;
 use App\Services\Accounting\AutomaticPoster;
 use Illuminate\Support\Facades\DB;
 use Symfony\Component\Process\Process;
@@ -122,6 +123,42 @@ class AllowanceRunLockOrderTest extends TestCase
         $this->assertSame(50_000, $this->sumOn($j2, '1200', 'debit'));
         $this->assertSame(250_000, $this->sumOn($j2, '5140', 'debit'));
         $this->assertSame(0, $this->allowanceBalance());
+    }
+
+    /**
+     * The run's 1200 balance comes from locking reads. Here this transaction's
+     * snapshot is taken first, and a provision committed on another connection
+     * after it is still counted: a plain read would miss it and answer 409.
+     */
+    public function test_the_run_counts_a_provision_committed_after_its_snapshot(): void
+    {
+        config(['database.connections.allowance_snapshot_race' => config('database.connections.'.DB::getDefaultConnection())]);
+        DB::purge('allowance_snapshot_race');
+
+        try {
+            $result = DB::transaction(function (): array {
+                $this->assertSame(500_000, $this->allowanceBalance());
+
+                $default = DB::getDefaultConnection();
+                DB::setDefaultConnection('allowance_snapshot_race');
+
+                try {
+                    $this->postSimpleJournal('5140', '1200', 100_000);
+                } finally {
+                    DB::setDefaultConnection($default);
+                }
+
+                $this->assertSame(500_000, $this->allowanceBalance(), 'the snapshot moved, so this test proved nothing');
+
+                // ₱500.00 required against the ₱6,000.00 now held.
+                return app(AllowancePoster::class)->post($this->today(), -550_000, $this->admin);
+            });
+        } finally {
+            DB::purge('allowance_snapshot_race');
+        }
+
+        $this->assertSame([600_000, -550_000], [$result['postings'][0]['previous_balance'], $result['postings'][0]['adjustment']]);
+        $this->assertSame(50_000, $this->allowanceBalance());
     }
 
     private function markerPath(): string

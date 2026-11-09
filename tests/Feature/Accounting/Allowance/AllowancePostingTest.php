@@ -8,9 +8,11 @@ use App\Models\AccountingPeriod;
 use App\Models\AuditLog;
 use App\Models\Branch;
 use App\Models\Loan;
+use App\Services\Accounting\AllowancePoster;
 use App\Services\Accounting\PeriodCalendar;
 use App\Services\Accounting\TrialBalanceBuilder;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\DB;
 use Tests\TestCase;
 use Tests\Traits\PostsJournals;
 use Tests\Traits\SetupLendyPH;
@@ -260,13 +262,14 @@ class AllowancePostingTest extends TestCase
         $this->assertSame($this->today(), $this->getJson('/api/accounting/allowance/preview')->assertOk()->json('data.as_of'));
     }
 
-    public function test_the_1200_balance_on_journals_with_no_branch_is_shown_and_left_alone(): void
+    public function test_a_1200_balance_on_journals_with_no_branch_blocks_the_run_until_it_is_moved_to_a_branch(): void
     {
         $this->twoPastDueLoans();
-        // A hand-posted opening line on 1200 with no branch.
+        // An opening balance posts with no branch: ₱700.00 of allowance.
         $this->postSimpleJournal('3050', '1200', 70_000, ['branch_id' => null, 'date' => Carbon::today()->subDays(3)->toDateString()]);
         // ₱90.00 already held in Main, dated after the earlier as_of below.
         $this->postSimpleJournal('5140', '1200', 9_000, ['date' => Carbon::today()->subDays(2)->toDateString()]);
+        $refusal = 'The allowance has ₱700.00 on entries with no branch. Move it to the branches with a journal entry first, then post.';
 
         $earlier = $this->preview(Carbon::today()->subDays(2)->subDay()->toDateString());
         $this->assertSame(0, $this->branchRow($earlier, $this->branch)['current_balance']);
@@ -274,15 +277,72 @@ class AllowancePostingTest extends TestCase
         $preview = $this->preview();
         $this->assertSame(70_000, $preview['unassigned_balance']);
         $this->assertSame(9_000, $this->branchRow($preview, $this->branch)['current_balance']);
-        $this->assertSame(41_000, $this->branchRow($preview, $this->branch)['adjustment']);
-        $this->assertSame(141_000, $preview['totals']['adjustment']);
+        $this->assertFalse($preview['can_post']);
+        $this->assertSame([$refusal], $preview['blocking_reasons']);
 
-        $data = $this->postTheRun()->assertCreated()->json('data');
+        $this->postTheRun()->assertStatus(422)->assertJsonPath('errors.allowance.0', $refusal);
+        $this->assertSame(0, AccountingAllowancePosting::count());
+        $this->assertSame(0, AccountingJournal::query()->where('source', 'credit_loss')->count());
 
-        $this->assertSame([$this->branch->id, $this->far->id], collect($data['postings'])->pluck('branch.id')->sort()->values()->all());
+        // Moved to Main with a journal entry: out of the no-branch balance, into Main's.
+        $this->postSimpleJournal('1200', '3050', 70_000, ['branch_id' => null]);
+        $this->postSimpleJournal('3050', '1200', 70_000);
+
+        $moved = $this->preview();
+        $this->assertSame(0, $moved['unassigned_balance']);
+        $this->assertTrue($moved['can_post']);
+        $main = $this->branchRow($moved, $this->branch);
+        $this->assertSame([79_000, -29_000], [$main['current_balance'], $main['adjustment']]);
+
+        $this->postTheRun()->assertCreated();
         $this->assertSame(0, AccountingJournal::query()->where('source', 'credit_loss')->whereNull('branch_id')->count());
-        $this->assertSame(70_000, $this->preview()['unassigned_balance']);
-        $this->assertSame(70_000 + 9_000 + 141_000, $this->balances('1200')['1200']);
+        $this->assertSame(150_000, $this->balances('1200')['1200']);
+    }
+
+    public function test_a_run_dated_before_an_earlier_posting_is_refused(): void
+    {
+        [$main] = $this->twoPastDueLoans();
+        $this->postTheRun()->assertCreated();
+        $yesterday = Carbon::yesterday()->toDateString();
+        $refusal = 'An allowance was already posted as of '.$this->today().'. Post only on or after that date.';
+
+        $backDated = $this->preview($yesterday);
+        $this->assertFalse($backDated['can_post']);
+        $this->assertContains($refusal, $backDated['blocking_reasons']);
+
+        $this->postJson('/api/accounting/allowance/postings', [
+            'as_of' => $yesterday,
+            'expected_adjustment' => $backDated['totals']['adjustment'],
+        ])->assertStatus(422)->assertJsonPath('errors.as_of.0', $refusal);
+        $this->assertSame(2, AccountingAllowancePosting::count());
+
+        // The same date is still open to a run once something changes.
+        $main->amortizationSchedules()->first()->update(['principal_paid' => 6000, 'status' => 'partial']);
+        $this->assertNotContains($refusal, $this->preview()['blocking_reasons']);
+        $this->postTheRun()->assertCreated();
+    }
+
+    public function test_the_allowance_lock_is_taken_before_any_loan_is_read(): void
+    {
+        $this->twoPastDueLoans();
+        $expected = $this->preview()['totals']['adjustment'];
+
+        DB::flushQueryLog();
+        DB::enableQueryLog();
+        app(AllowancePoster::class)->post($this->today(), $expected, $this->admin);
+        $queries = array_map(fn (array $query): string => strtolower($query['query']), DB::getQueryLog());
+        DB::disableQueryLog();
+
+        $lock = collect($queries)->search(fn (string $sql): bool => str_starts_with($sql, 'select * from `accounting_accounts`') && str_contains($sql, 'for update'));
+        $firstLoanRead = collect($queries)->search(fn (string $sql): bool => str_contains($sql, 'from `loans`'));
+
+        $this->assertNotFalse($lock, 'the run never locked the allowance account');
+        $this->assertNotFalse($firstLoanRead, 'the run never read the loans');
+        $this->assertLessThan($firstLoanRead, $lock, 'the loans were read before the allowance lock');
+        $this->assertEmpty(
+            collect($queries)->filter(fn (string $sql): bool => str_contains($sql, '`loans`') && str_contains($sql, 'for update'))->all(),
+            'the run locked loan rows',
+        );
     }
 
     public function test_postings_are_listed_newest_first_with_totals_over_every_row(): void

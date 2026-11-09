@@ -18,7 +18,7 @@ use Illuminate\Support\Facades\DB;
  *   posting and the report count the same loans.
  * - The rates are {@see ReportService::PROVISION_RATES}, the one source;
  *   91–120 and over 120 days both take its `over_90` rate. They are used
- *   exactly, as decimal strings with BCMath, and each bucket's required
+ *   exactly, as fractions of integers, and each bucket's required
  *   amount is rounded half up to the centavo once. A branch's required
  *   amount is the sum of its buckets.
  * - Money is integer centavos throughout.
@@ -48,9 +48,6 @@ final class AllowanceCalculator
 
     /** The Provisioning report's `principal_basis.basis_note`. */
     public const BASIS_NOTE = 'Outstanding principal of each loan, in the bucket of its oldest unpaid instalment';
-
-    /** BCMath's working scale: well past the centavo, so only the final rounding rounds. */
-    private const SCALE = 15;
 
     public function __construct(private LoanAgingBuilder $aging) {}
 
@@ -258,8 +255,12 @@ final class AllowanceCalculator
 
     /**
      * `$principal` centavos at a bucket's rate, exactly, then rounded half
-     * up to the centavo. The principal is never negative (LoanListTotals
-     * floors each period at zero), so truncating `x + 0.5` is half up.
+     * up to the centavo, in integers: with the rate as `num / den`,
+     * `intdiv(2 × p × num + den, 2 × den)` is p × rate + ½ rounded down,
+     * which is half up for p ≥ 0. The principal is never negative
+     * (LoanListTotals floors each period at zero).
+     *
+     * @throws \LogicException when the product would not fit in an integer
      */
     public static function requiredFor(int $principal, string $bucket): int
     {
@@ -267,9 +268,13 @@ final class AllowanceCalculator
             return 0;
         }
 
-        $exact = bcmul((string) $principal, self::rate(self::RATE_KEYS[$bucket]), self::SCALE);
+        [$numerator, $denominator] = self::fraction(self::RATE_KEYS[$bucket]);
 
-        return (int) bcadd($exact, '0.5', 0);
+        if ($numerator > 0 && $principal > intdiv(PHP_INT_MAX - $denominator, 2 * $numerator)) {
+            throw new \LogicException("Allowance: {$principal} centavos at the {$bucket} rate is too large to work out exactly.");
+        }
+
+        return intdiv(2 * $principal * $numerator + $denominator, 2 * $denominator);
     }
 
     /**
@@ -300,24 +305,42 @@ final class AllowanceCalculator
 
     /**
      * A PROVISION_RATES rate as a decimal string: 0.05 is "0.05". Fifteen
-     * decimals are as many as a double holds exactly, so the float's
-     * binary tail (0.05 is stored as 0.05000000000000000277…) is dropped
-     * and the rate the policy states is what BCMath multiplies by.
+     * decimals are as many as a double holds exactly, so the float's binary
+     * tail (0.05 is stored as 0.05000000000000000277…) is dropped and the
+     * rate the policy states is the one used.
      */
-    private static function rate(string $key): string
+    private static function decimal(string $key): string
     {
-        return self::trimmed(sprintf('%.15F', ReportService::PROVISION_RATES[$key]));
+        $text = rtrim(sprintf('%.15F', ReportService::PROVISION_RATES[$key]), '0');
+
+        return str_ends_with($text, '.') ? $text.'0' : $text;
     }
 
-    /** A PROVISION_RATES rate as a percentage string, never rounded: "5", "12.5". */
+    /**
+     * A rate as an exact fraction of integers: "0.05" is 5 / 100.
+     *
+     * @return array{0: int, 1: int} numerator, denominator
+     */
+    private static function fraction(string $key): array
+    {
+        [$whole, $decimals] = explode('.', self::decimal($key));
+        $decimals = rtrim($decimals, '0');
+
+        return [(int) ($whole.$decimals), 10 ** strlen($decimals)];
+    }
+
+    /**
+     * A rate as a percentage string, never rounded: the decimal point moved
+     * two places right, so 0.05 is "5", 0.5 is "50" and 0.125 is "12.5".
+     */
     private static function percent(string $key): string
     {
-        return self::trimmed(bcmul(self::rate($key), '100', self::SCALE));
-    }
+        [$whole, $decimals] = explode('.', self::decimal($key));
+        $decimals = str_pad($decimals, 2, '0');
+        $whole = ltrim($whole.substr($decimals, 0, 2), '0');
+        $fraction = rtrim(substr($decimals, 2), '0');
 
-    private static function trimmed(string $decimal): string
-    {
-        return str_contains($decimal, '.') ? rtrim(rtrim($decimal, '0'), '.') : $decimal;
+        return ($whole === '' ? '0' : $whole).($fraction === '' ? '' : '.'.$fraction);
     }
 
     /**

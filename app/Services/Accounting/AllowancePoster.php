@@ -15,14 +15,21 @@ use Illuminate\Validation\ValidationException;
 /**
  * The allowance for credit losses, previewed and posted (decision 12): one
  * `credit_loss` journal per branch whose 1200 balance differs from what its
- * past-due loans require ({@see AllowanceCalculator}). The 1200 balance on
- * journals with no branch is shown and never adjusted.
+ * past-due loans require ({@see AllowanceCalculator}).
+ *
+ * Two dates and one balance stop a run: a closed period, an allowance
+ * already posted as of a later date (a back-dated run would misstate every
+ * date after it), and a 1200 balance on journals with no branch (an opening
+ * balance posts there, and a run that left it alone would provide the same
+ * allowance again in the branches). That balance is moved to the branches
+ * with a journal entry first; a run never adjusts it.
  *
  * Lock order, the one every writer of 1200 lines follows: the allowance
- * account row first, before any period, journal or line lock. The loan
- * figures are plain reads taken before it, and no loan row is ever locked
- * after it, so a restructure release (which locks its loans, then the
- * allowance) queues behind a run instead of deadlocking with it.
+ * account row first, before any period, journal or line lock, and before
+ * this transaction's first plain read, so its snapshot is taken after the
+ * wait. The loan figures are plain reads, and no loan row is ever locked, so
+ * a restructure release (which locks its loans, then the allowance) queues
+ * behind a run instead of deadlocking with it.
  */
 final class AllowancePoster
 {
@@ -33,6 +40,12 @@ final class AllowancePoster
     public const NO_BOOKS = 'The books aren\'t set up yet: seed the chart of accounts first.';
 
     public const NO_PERMISSION = 'You don\'t have permission to post the allowance for credit losses.';
+
+    /** `%s`: the no-branch 1200 balance, in ₱ with two decimals. */
+    public const UNASSIGNED = 'The allowance has %s on entries with no branch. Move it to the branches with a journal entry first, then post.';
+
+    /** `%s`: the latest posting's `as_of`. */
+    public const LATER_POSTING = 'An allowance was already posted as of %s. Post only on or after that date.';
 
     private const CONFLICT = 'Another change to the allowance was saved at the same time. Review the preview and try again.';
 
@@ -64,18 +77,15 @@ final class AllowancePoster
         $reasons = $this->booksReasons();
 
         if ($reasons === []) {
-            $closed = $this->closedPeriodReason($asOf);
-
-            if ($closed !== null) {
-                $reasons[] = $closed;
-            }
-
-            if ($this->nothingChanges($figures)) {
-                $reasons[] = self::NOTHING_TO_POST;
-            }
+            $reasons = array_values(array_filter([
+                $this->closedPeriodReason($asOf),
+                $this->laterPostingReason($asOf),
+                $this->unassignedReason($figures['unassigned_balance']),
+                $this->nothingChanges($figures) ? self::NOTHING_TO_POST : null,
+            ]));
         }
 
-        if (! $user->can('accounting:allowance') || ! $user->can(BranchAccess::VIEW_ALL)) {
+        if (! $user->can('accounting:view') || ! $user->can('accounting:allowance') || ! $user->can(BranchAccess::VIEW_ALL)) {
             $reasons[] = self::NO_PERMISSION;
         }
 
@@ -90,12 +100,16 @@ final class AllowancePoster
     /**
      * Posts the run the preview showed, in one transaction:
      *
-     * 1. the loan figures, with plain reads (no loan row is locked);
-     * 2. the allowance account row lock, then the period check (its shared
-     *    lock), then each branch's 1200 balance with locking reads;
-     * 3. 409 when the recomputed total isn't `$expectedAdjustment`, 422 when
-     *    no branch changes, with nothing written;
-     * 4. per changed branch, a posting row, its journal (keyed on that row,
+     * 1. the allowance account row lock, as the transaction's first
+     *    statement (the account id is resolved before it begins);
+     * 2. 422 on `as_of` for a closed period (the period guard's shared lock)
+     *    or a posting already made as of a later date;
+     * 3. the loan figures, with plain reads (no loan row is locked), then
+     *    each branch's 1200 balance with locking reads;
+     * 4. 422 while 1200 holds a balance on journals with no branch, 409 when
+     *    the recomputed total isn't `$expectedAdjustment`, and 422 when no
+     *    branch changes, each with nothing written;
+     * 5. per changed branch, a posting row, its journal (keyed on that row,
      *    never a Loan) and one audit row.
      *
      * A deadlock or lock wait answers 409.
@@ -103,7 +117,7 @@ final class AllowancePoster
      * @return array{run_id: string, as_of: string, postings: list<array<string, mixed>>, totals: array{required: int, previous_balance: int, adjustment: int}}
      *
      * @throws CannotPostToTheBooksException 422 without books or a default account
-     * @throws ValidationException 422 for a closed period or nothing to post
+     * @throws ValidationException 422 for a closed period, a later posting, a no-branch balance or nothing to post
      */
     public function post(string $asOf, int $expectedAdjustment, User $user): array
     {
@@ -113,13 +127,23 @@ final class AllowancePoster
             throw CannotPostToTheBooksException::because($reasons[0]);
         }
 
-        return LoanWriteTransaction::run(function () use ($asOf, $expectedAdjustment, $user): array {
-            $base = $this->calculator->forDate($asOf);
+        $allowanceAccountId = AccountMap::resolve()->accountFor('allowance_credit_losses');
 
-            $this->lockTheAllowance();
+        return LoanWriteTransaction::run(function () use ($allowanceAccountId, $asOf, $expectedAdjustment, $user): array {
+            $this->lockTheAllowance($allowanceAccountId);
             $this->assertOpen($asOf);
+            $this->assertNoLaterPosting($asOf);
 
-            $figures = $this->calculator->withBalances($base, $this->calculator->balances($asOf, lock: true));
+            $figures = $this->calculator->withBalances(
+                $this->calculator->forDate($asOf),
+                $this->calculator->balances($asOf, lock: true),
+            );
+
+            $unassigned = $this->unassignedReason($figures['unassigned_balance']);
+
+            if ($unassigned !== null) {
+                throw ValidationException::withMessages(['allowance' => [$unassigned]]);
+            }
 
             if ($figures['totals']['adjustment'] !== $expectedAdjustment) {
                 throw LoanWriteTransaction::conflict(self::STALE);
@@ -231,14 +255,37 @@ final class AllowancePoster
     /**
      * The allowance account row lock, as {@see AutomaticPoster::lockTheAllowance()}
      * takes it, held to the end of the transaction. Taken before the period
-     * check and every journal or line lock.
+     * check, every journal or line lock and every plain read.
      */
-    private function lockTheAllowance(): void
+    private function lockTheAllowance(int $allowanceAccountId): void
     {
-        AccountingAccount::query()
-            ->whereKey(AccountMap::resolve()->accountFor('allowance_credit_losses'))
-            ->lockForUpdate()
-            ->first();
+        AccountingAccount::query()->whereKey($allowanceAccountId)->lockForUpdate()->first();
+    }
+
+    /**
+     * Refuses a run dated before the latest posting. Read under the
+     * allowance lock, which every run takes first, so no other run can post
+     * between this read and this run's own rows.
+     */
+    private function assertNoLaterPosting(string $asOf): void
+    {
+        $reason = $this->laterPostingReason($asOf);
+
+        if ($reason !== null) {
+            throw ValidationException::withMessages(['as_of' => [$reason]]);
+        }
+    }
+
+    private function laterPostingReason(string $asOf): ?string
+    {
+        $latest = AccountingAllowancePosting::query()->where('as_of', '>', $asOf)->max('as_of');
+
+        return $latest === null ? null : sprintf(self::LATER_POSTING, substr((string) $latest, 0, 10));
+    }
+
+    private function unassignedReason(int $unassigned): ?string
+    {
+        return $unassigned === 0 ? null : sprintf(self::UNASSIGNED, Money::format($unassigned));
     }
 
     /** PeriodGuard's refusal of a closed period, on `as_of`. */
