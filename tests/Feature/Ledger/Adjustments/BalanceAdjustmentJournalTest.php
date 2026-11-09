@@ -14,6 +14,7 @@ use App\Services\LoanAdjustmentService;
 use App\Services\RepaymentService;
 use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Support\Facades\DB;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 use Tests\Traits\PostsJournals;
 use Tests\Traits\SetupLendyPH;
@@ -229,34 +230,40 @@ class BalanceAdjustmentJournalTest extends TestCase
         $this->assertSame($before, AccountingJournal::count());
     }
 
-    public function test_a_zero_adjustment_by_amount_applies_and_posts_nothing(): void
+    /**
+     * A ₱0.00 adjustment is now refused when it is requested
+     * (ZeroBalanceAdjustmentRequestTest). One requested before that, by amount
+     * or by a target equal to the unpaid principal, still applies and posts
+     * nothing; it is never left stuck as approved.
+     *
+     * @return array<string, array{array<string, mixed>}>
+     */
+    public static function zeroAdjustmentsRequestedBefore(): array
     {
-        $loan = $this->createReleasedLoan();
-        $this->seedChartOfAccounts();
-        $before = $this->periodFigures($loan);
-
-        $adjustment = $this->applyByAmount($loan, 0);
-
-        $this->assertSame('applied', $adjustment->status);
-        $this->assertSame($before, $this->periodFigures($loan));
-        $this->assertNull($this->adjustmentJournalOrNull($adjustment));
+        return [
+            'by amount' => [['adjustment_amount' => 0]],
+            'by target' => [['target_principal_balance' => 60000, 'adjustment_amount' => 0, 'outstanding_principal_at_request' => 60000]],
+        ];
     }
 
-    public function test_a_target_equal_to_the_unpaid_principal_applies_and_posts_nothing(): void
+    #[DataProvider('zeroAdjustmentsRequestedBefore')]
+    public function test_a_zero_adjustment_requested_before_the_request_refused_it_applies_and_posts_nothing(array $newValues): void
     {
         $loan = $this->createReleasedLoan();
         $this->seedChartOfAccounts();
-
         $id = $this->postJson("/api/loans/{$loan->id}/adjustments", [
             'adjustment_type' => 'balance_adjustment',
-            'new_values' => ['target_principal_balance' => 60000],
+            'new_values' => ['adjustment_amount' => -1000],
         ])->assertCreated()->json('data.id');
-        $this->assertEquals(0, LoanAdjustment::findOrFail($id)->new_values['adjustment_amount'], 'setup: the server works it out to zero');
+        LoanAdjustment::whereKey($id)->update(['new_values' => $newValues]);
+        $before = $this->periodFigures($loan);
+
         $this->patchJson("/api/loan-adjustments/{$id}/approve")->assertOk();
         $this->patchJson("/api/loan-adjustments/{$id}/apply")->assertOk();
 
         $adjustment = LoanAdjustment::findOrFail($id);
         $this->assertSame('applied', $adjustment->status);
+        $this->assertSame($before, $this->periodFigures($loan));
         $this->assertNull($this->adjustmentJournalOrNull($adjustment));
     }
 

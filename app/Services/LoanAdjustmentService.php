@@ -53,6 +53,10 @@ class LoanAdjustmentService
             $validated['new_values']['outstanding_principal_at_request'] = $figures['outstanding_principal'];
         }
 
+        if ($validated['adjustment_type'] === 'balance_adjustment') {
+            $this->refuseNothingToAdjust($validated['new_values']);
+        }
+
         $oldValues = $this->captureOldValues($loan, $validated['adjustment_type'], $validated['new_values']);
 
         return GeneratedNumberWrite::run(fn (): LoanAdjustment => LoanAdjustment::create([
@@ -65,6 +69,29 @@ class LoanAdjustmentService
             'remarks' => $validated['remarks'] ?? null,
             'adjusted_by' => $user->id,
         ]), GeneratedNumberWrite::ADJUSTMENT_CONFLICT);
+    }
+
+    /**
+     * Refuse (422) a balance adjustment that changes nothing, so a no-op never
+     * goes through approval: a target equal to the current unpaid principal
+     * (reported on the target) or an amount of ₱0.00 (on the amount). Read in
+     * whole centavos, after the amount is worked out. The preview still shows
+     * a ₱0.00 amount, and applyBalanceAdjustment() still applies one requested
+     * before this check, posting nothing.
+     *
+     * @param  array<string, mixed>  $newValues
+     */
+    private function refuseNothingToAdjust(array $newValues): void
+    {
+        $amount = $newValues['adjustment_amount'] ?? null;
+
+        if (! is_numeric($amount) || (int) round((float) $amount * 100) !== 0) {
+            return;
+        }
+
+        throw ValidationException::withMessages(($newValues['target_principal_balance'] ?? null) !== null
+            ? ['new_values.target_principal_balance' => 'The target equals the current principal balance, so there is nothing to adjust.']
+            : ['new_values.adjustment_amount' => 'The adjustment amount is ₱0.00, so there is nothing to adjust.']);
     }
 
     /**
