@@ -21,7 +21,8 @@ use Illuminate\Support\Facades\DB;
  * Scores members and loan applications, and keeps the history.
  *
  * A history row (`credit_scores`) is written only when the status, score,
- * band, confidence or revision differs from the last one; otherwise only the
+ * band, confidence, Limited History label, confidence reason or revision
+ * differs from the last one; otherwise only the
  * member's `checked_at` moves. A new score that dropped by the settings'
  * decline points (10) or more, or moved into a high band, writes an alert.
  * Policy flags are kept in step on every run, and the member's row records
@@ -62,7 +63,7 @@ class Recalculator
             [$settings, $table] = $this->rules();
             $data = MemberCreditData::load($borrowerId, null, $asOf);
             $result = $this->scorer->score($data, $settings, $table);
-            $current = CreditScoreMember::query()->with('creditScore:id,revision_id')->where('borrower_id', $borrowerId)->first();
+            $current = CreditScoreMember::query()->with('creditScore:id,revision_id,limited_history,confidence_reason')->where('borrower_id', $borrowerId)->first();
             $changed = $this->differs($result, $current?->creditScore, $current);
 
             if ($dryRun) {
@@ -262,7 +263,9 @@ class Recalculator
             || $last->score !== $result['score']
             || $last->risk_level !== $result['risk_level']
             || $last->confidence !== $result['confidence']
-            || (int) $lastScore->revision_id !== $result['revision_id'];
+            || (int) $lastScore->revision_id !== $result['revision_id']
+            || (bool) $lastScore->limited_history !== $result['limited_history']
+            || $lastScore->confidence_reason !== mb_substr($result['confidence_reason'], 0, 500);
     }
 
     /**

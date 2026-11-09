@@ -103,7 +103,7 @@ final class Portfolio
                     ->where('type', CreditPolicyFlag::HARD)
                     ->where('first_triggered_at', '>=', $since)
                     ->whereIn('borrower_id', $this->scope->memberIds($user))
-                    ->where(fn ($q) => $q->whereNull('loan_id')->orWhereIn('loan_id', $this->scope->loanIds($user)))
+                    ->where(fn ($q) => $q->whereNull('loan_id')->when($user->can('loans:view'), fn ($q) => $q->orWhereIn('loan_id', $this->scope->loanIds($user))))
                     ->count(),
             ],
             'affected_total' => (clone $affected)->count(),

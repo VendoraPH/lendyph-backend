@@ -23,6 +23,7 @@ use App\Http\Resources\CoMakerResource;
 use App\Http\Resources\LoanLedgerEntryResource;
 use App\Http\Resources\LoanResource;
 use App\Models\AmortizationSchedule;
+use App\Models\CreditDecision;
 use App\Models\Loan;
 use App\Services\AmortizationBalanceService;
 use App\Services\AutoPayService;
@@ -729,6 +730,15 @@ DESC,
 
             if ($locked->status !== 'draft') {
                 throw new HttpResponseException($this->onlyDraftsCanBeDeleted());
+            }
+
+            // Credit decisions are an append-only record of a person's
+            // decision on this application; deleting the loan would orphan
+            // them (credit_decisions.loan_id is nulled on delete).
+            if (CreditDecision::query()->where('loan_id', $locked->getKey())->exists()) {
+                throw new HttpResponseException(response()->json([
+                    'message' => 'This draft has credit decisions recorded against it, which are kept as a record, so it can\'t be deleted. Reject or void it instead.',
+                ], 422));
             }
 
             CollateralAttacher::detachAllLocked($locked, $collaterals->keys()->all(), request()->user());

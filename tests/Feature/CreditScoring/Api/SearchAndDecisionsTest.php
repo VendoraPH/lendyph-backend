@@ -1,7 +1,11 @@
 <?php
 
 use App\Models\CreditDecision;
+use App\Models\CreditPolicyFlag;
 use App\Models\CreditScore;
+use App\Models\Loan;
+use App\Services\CreditScoring\Recalculator;
+use Illuminate\Support\Facades\DB;
 use Tests\Feature\CreditScoring\Api\CreditApiFixtures;
 use Tests\TestCase;
 
@@ -81,4 +85,67 @@ it('redacts a member\'s decisions for a summary caller, and answers 404 and 403 
     $far = $this->scoredMember($this->farBranch());
     $this->actingAs($this->analyst)->getJson("/api/credit-scoring/borrowers/{$far->id}/decisions")->assertNotFound();
     $this->actingAs($this->caller(['loans:view']))->getJson("/api/credit-scoring/borrowers/{$member->id}/decisions")->assertForbidden();
+});
+
+it('keeps a deleted draft\'s decisions out of another branch\'s member list: only nightly-score decisions are member-level', function () {
+    $member = $this->scoredMember();
+    $farDraft = $this->application($member, ['branch_id' => $this->farBranch()->id]);
+    $assessment = CreditScore::query()->findOrFail(app(Recalculator::class)->assessLoan($farDraft, 'Assessment saved')['credit_score_id']);
+    CreditDecision::query()->create([
+        'borrower_id' => $member->id, 'loan_id' => $farDraft->id, 'credit_score_id' => $assessment->id, 'decision' => 'decline',
+        'reason' => 'Far application', 'score_snapshot' => [], 'recommendation_snapshot' => 'Advice', 'revision_version' => '1.0',
+        'decided_by' => $this->analyst->id, 'decided_at' => now(),
+    ]);
+    // A draft removed outside the API (the foreign key nulls the decision's loan).
+    DB::table('loans')->where('id', $farDraft->id)->delete();
+    expect(CreditDecision::query()->where('reason', 'Far application')->value('loan_id'))->toBeNull();
+
+    $reasons = collect($this->actingAs($this->analyst)->getJson("/api/credit-scoring/borrowers/{$member->id}/decisions")->json('data.data'))->pluck('reason');
+
+    expect($reasons)->not->toContain('Far application');
+});
+
+it('refuses to delete a draft loan that has credit decisions, in words', function () {
+    $member = $this->scoredMember();
+    $draft = $this->application($member);
+    $assessment = CreditScore::query()->findOrFail(app(Recalculator::class)->assessLoan($draft, 'Assessment saved')['credit_score_id']);
+    CreditDecision::query()->create([
+        'borrower_id' => $member->id, 'loan_id' => $draft->id, 'credit_score_id' => $assessment->id, 'decision' => 'hold',
+        'reason' => 'Waiting', 'score_snapshot' => [], 'recommendation_snapshot' => 'Advice', 'revision_version' => '1.0',
+        'decided_by' => $this->analyst->id, 'decided_at' => now(),
+    ]);
+
+    $this->actingAs($this->caller(['loans:view', 'loans:void']))->deleteJson("/api/loans/{$draft->id}")
+        ->assertUnprocessable()
+        ->assertJsonPath('message', 'This draft has credit decisions recorded against it, which are kept as a record, so it can\'t be deleted. Reject or void it instead.');
+
+    expect(Loan::query()->whereKey($draft->id)->exists())->toBeTrue()
+        ->and(CreditDecision::query()->where('loan_id', $draft->id)->count())->toBe(1);
+
+    $clean = $this->application($member);
+    $this->actingAs($this->caller(['loans:view', 'loans:void']))->deleteJson("/api/loans/{$clean->id}")->assertOk();
+});
+
+it('lists loan-linked decisions and loan flags only to a caller with loans:view', function () {
+    $member = $this->scoredMember();
+    $draft = $this->application($member);
+    $assessment = CreditScore::query()->findOrFail(app(Recalculator::class)->assessLoan($draft, 'Assessment saved')['credit_score_id']);
+    $nightly = CreditScore::query()->where('borrower_id', $member->id)->where('context', 'nightly')->sole();
+    foreach ([[$draft->id, $assessment->id, 'On the application'], [null, $nightly->id, 'On the member']] as [$loanId, $scoreId, $reason]) {
+        CreditDecision::query()->create([
+            'borrower_id' => $member->id, 'loan_id' => $loanId, 'credit_score_id' => $scoreId, 'decision' => 'hold', 'reason' => $reason,
+            'score_snapshot' => [], 'recommendation_snapshot' => 'Advice', 'revision_version' => '1.0',
+            'decided_by' => $this->analyst->id, 'decided_at' => now(),
+        ]);
+    }
+    expect(CreditPolicyFlag::query()->open()->where('loan_id', $draft->id)->exists())->toBeTrue();
+    $noLoans = $this->caller(['credit_scoring:view', 'borrowers:view']);
+
+    $reasons = fn ($caller) => collect($this->actingAs($caller)->getJson("/api/credit-scoring/borrowers/{$member->id}/decisions")->json('data.data'))->pluck('reason')->sort()->values()->all();
+    $flagLoans = fn ($caller) => collect($this->actingAs($caller)->getJson("/api/credit-scoring/borrowers/{$member->id}/policy-flags")->json('data.data'))->pluck('loan_id')->filter()->values()->all();
+
+    expect($reasons($noLoans))->toBe(['On the member'])
+        ->and($reasons($this->analyst))->toBe(['On the application', 'On the member'])
+        ->and($flagLoans($noLoans))->toBe([])
+        ->and($flagLoans($this->analyst))->toContain($draft->id);
 });

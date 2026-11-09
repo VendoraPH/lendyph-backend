@@ -1,8 +1,11 @@
 <?php
 
 use App\Models\CreditApplicationProfile;
+use App\Models\CreditScore;
 use App\Models\Loan;
 use App\Models\User;
+use App\Services\CreditScoring\Recalculator;
+use Illuminate\Support\Facades\DB;
 use Tests\Feature\CreditScoring\Engine\CreditFixtures;
 use Tests\TestCase;
 
@@ -61,4 +64,29 @@ it('counts a loan that ended badly as history, not a thin file', function () {
 
     expect($result['limited_history'])->toBeFalse()
         ->and($result['confidence'])->not->toBe('low');
+});
+
+it('writes a new row when only the Limited History label or confidence reason changes, and none when nothing does', function () {
+    $member = $this->member(['monthly_income' => 40000]);
+    $this->paidMonthly($this->releasedLoan($member), '2026-06-01', 4);
+    $recalculator = app(Recalculator::class);
+    $recalculator->scoreMember($member->id, 'Nightly review');
+    $rows = fn () => CreditScore::query()->where('borrower_id', $member->id)->count();
+
+    $recalculator->scoreMember($member->id, 'Nightly review');
+    expect($rows())->toBe(1);
+
+    // A row written under the old rule: same score, band and confidence, another label.
+    DB::table('credit_scores')->where('borrower_id', $member->id)
+        ->update(['limited_history' => false, 'confidence_reason' => 'Only 4 matured periods of Lendy repayment history.']);
+
+    $recalculator->scoreMember($member->id, 'Nightly review');
+    $latest = CreditScore::query()->where('borrower_id', $member->id)->latest('id')->first();
+
+    expect($rows())->toBe(2)
+        ->and($latest->limited_history)->toBeTrue()
+        ->and($latest->confidence_reason)->toStartWith('Limited History');
+
+    $recalculator->scoreMember($member->id, 'Nightly review');
+    expect($rows())->toBe(2);
 });

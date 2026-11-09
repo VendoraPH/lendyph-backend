@@ -213,7 +213,7 @@ class CreditScoringController extends Controller
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
         ],
         responses: [
-            new OA\Response(response: 200, description: 'A paginator of CreditDecision, plus details_hidden; without the member\'s details, each leaves out reason and remarks'),
+            new OA\Response(response: 200, description: 'A paginator of CreditDecision, plus details_hidden. Member-level decisions (no loan, on a nightly score) and, with loans:view, decisions on loans the caller can see. Without the member\'s details, each leaves out reason and remarks'),
             new OA\Response(response: 403, description: 'Missing credit_scoring:view'),
             new OA\Response(response: 404, description: 'No such member, or a member in another branch'),
         ],
@@ -226,7 +226,9 @@ class CreditScoringController extends Controller
 
         $rows = CreditDecision::query()
             ->where('borrower_id', $member->id)
-            ->where(fn ($q) => $q->whereNull('loan_id')->orWhereIn('loan_id', $this->scope->loanIds($request->user())))
+            ->where(fn ($q) => $q
+                ->where(fn ($memberLevel) => $memberLevel->whereNull('loan_id')->whereIn('credit_score_id', CreditScore::query()->where('context', CreditScore::CONTEXT_NIGHTLY)->select('id')))
+                ->when($request->user()->can('loans:view'), fn ($q) => $q->orWhereIn('loan_id', $this->scope->loanIds($request->user()))))
             ->with('decidedByUser:id,first_name,last_name')
             ->orderByDesc('decided_at')
             ->orderByDesc('id')
