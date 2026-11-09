@@ -16,8 +16,8 @@ use Illuminate\Support\Facades\Route;
 | assessment also needs loans:view to read and loans:update to save.
 |
 | Required from routes/api.php inside the authenticated group, at the place
-| these routes sat before they moved here, so their order is unchanged; the
-| assessment routes come after them.
+| these routes sat before they moved here, so their order is unchanged; a
+| member's decisions and the assessment routes come after them.
 |
 | `{borrowerId}` is a plain number, not a bound Borrower: the controller
 | resolves it through Borrower::visibleTo(), so another branch's member
@@ -41,6 +41,9 @@ Route::prefix('credit-scoring')->group(function () {
     Route::get('/settings', [CreditScoringController::class, 'showSettings']);
     Route::put('/settings', [CreditScoringController::class, 'updateSettings']);
     Route::post('/decisions', [CreditScoringController::class, 'storeDecision']);
+
+    Route::get('/borrowers/{borrowerId}/decisions', [CreditScoringController::class, 'borrowerDecisions'])
+        ->whereNumber('borrowerId');
 
     Route::get('/loans/{loan}/assessment', [CreditAssessmentController::class, 'show'])
         ->whereNumber('loan');

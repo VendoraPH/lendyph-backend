@@ -7,7 +7,10 @@ namespace App\Services\CreditScoring;
  * - high: at least 12 matured periods, with income and expenses declared;
  * - medium: at least 3 matured periods, or verified income with expenses;
  * - low: otherwise.
- * Under 3 matured periods the profile reads Limited History. When most
+ * A thin file reads Limited History, always with Low confidence: a member
+ * with no completed loan, unless one of their loans ended badly (defaulted,
+ * written off or restructured), the same rule that leaves the
+ * completed-loan factors without data. When most
  * matured periods rely on payment records from before 1 October 2026 (the
  * replayed allocations), confidence is capped at medium.
  */
@@ -31,6 +34,12 @@ final class Confidence
 
     public static function assess(PaymentHistory $history, Capacity $capacity, bool $incomeVerified): self
     {
+        $endedBadly = $history->defaultedLoans + $history->writtenOffLoans + $history->restructuredLoans > 0;
+
+        if ($history->completedLoans === 0 && ! $endedBadly) {
+            return new self(self::LOW, 'Limited History: the member has no completed Lendy loan yet, so confidence is low.', true);
+        }
+
         $periods = $history->maturedCount;
         $hasIncome = $capacity->incomeCentavos !== null;
         $hasExpenses = $capacity->expensesCentavos !== null;
@@ -51,6 +60,6 @@ final class Confidence
             $reason .= ' Capped at medium: most matured periods rely on payment records from before 1 October 2026.';
         }
 
-        return new self($level, $reason, $periods < self::MEDIUM_MIN_PERIODS);
+        return new self($level, $reason, false);
     }
 }
