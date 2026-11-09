@@ -7,6 +7,7 @@ use App\Models\AccountingReconciliation;
 use App\Models\AccountingReconciliationLine;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
+use Illuminate\Database\Query\Builder;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 
@@ -45,9 +46,10 @@ use Illuminate\Support\Facades\DB;
  *    transaction and a bug, and blurring that is how a reconciliation stops
  *    meaning anything.
  *
- * Candidates are the period's own posted lines plus its outstanding items
- * ({@see self::candidateDates()}); a reversed entry, or a line another
- * reconciliation's statement line has claimed, is never offered.
+ * Candidates are the period's own lines plus its outstanding items
+ * ({@see self::candidateDates()}). A reversal is judged as of the period end
+ * ({@see self::standingAsOf()}), and a line another reconciliation's
+ * statement line has claimed is never offered.
  *
  * A ledger line already claimed by a stronger pass is never offered again, and
  * where several candidates tie, the nearest date wins and then the lowest id —
@@ -182,11 +184,14 @@ class ReconciliationMatcher
                     $rows,
                     static fn (array $row): bool => $row['match'] === 'unmatched' && ! $row['outside_period'],
                 )),
-                // Entries dated outside the period that no statement line has
-                // matched yet: deposits in transit and uncleared cheques.
+                // Entries dated BEFORE the period that no statement line has
+                // matched yet: deposits in transit and uncleared cheques. An
+                // entry dated after the period is listed only as a value-dating
+                // candidate and counts in neither figure.
                 'outstanding_count' => count(array_filter(
                     $rows,
-                    static fn (array $row): bool => $row['match'] === 'unmatched' && $row['outside_period'],
+                    static fn (array $row): bool => $row['match'] === 'unmatched' && $row['outside_period']
+                        && $row['date'] < $start,
                 )),
                 'notes' => $reconciliation->notes,
                 'lines' => $rows,
@@ -198,16 +203,17 @@ class ReconciliationMatcher
 
     /**
      * The ledger lines this reconciliation works with, each marked
-     * `outside_period` and `suggestable`.
+     * `outside_period`, `suggestable` and `matchable`. Reversals are judged
+     * as of the period end ({@see self::standingAsOf()}).
      *
-     * - Inside the period: every posted or reversed line, as before. One a
-     *   statement line of ANOTHER reconciliation has claimed stays on the
-     *   worksheet (it is still an item of this period) but is never
-     *   suggested, and neither is a reversed entry: neither can be matched.
+     * - Inside the period: every posted or reversed line. One a statement
+     *   line of ANOTHER reconciliation has claimed stays on the worksheet (it
+     *   is still an item of this period) but is neither suggested nor
+     *   matchable. Neither is a leg that was not live at the period end, and
+     *   a dropped reversal pair is never suggested.
      * - Outside it, within {@see self::candidateDates()}: only lines this
-     *   reconciliation already matched, or posted lines that are not a
-     *   reversal and that no statement line has claimed. A reversed entry and
-     *   its reversal net to nothing, so they are not outstanding.
+     *   reconciliation already matched, or live lines no statement line has
+     *   claimed, not part of a dropped pair.
      *
      * @param  Collection<int, array<string, mixed>>  $ledger
      * @return Collection<int, array<string, mixed>>
@@ -223,12 +229,11 @@ class ReconciliationMatcher
                 $claimedHere = $line['claimed_by'] === $reconciliation->id;
                 $claimedElsewhere = $line['claimed_by'] !== null && ! $claimedHere;
                 $inPeriod = $line['date'] >= $start && $line['date'] <= $end;
+                ['live' => $live, 'dropped' => $dropped] = self::standingAsOf($line, $end);
 
                 if (! $inPeriod) {
                     $outstanding = $line['date'] >= $from && $line['date'] <= $to
-                        && $line['status'] === 'posted'
-                        && ! $line['is_reversal']
-                        && ! $claimedElsewhere;
+                        && $live && ! $dropped && ! $claimedElsewhere;
 
                     if (! $claimedHere && ! $outstanding) {
                         return null;
@@ -237,7 +242,8 @@ class ReconciliationMatcher
 
                 return $line + [
                     'outside_period' => ! $inPeriod,
-                    'suggestable' => $line['status'] === 'posted' && ! $claimedElsewhere,
+                    'suggestable' => $live && ! $dropped && ! $claimedElsewhere,
+                    'matchable' => $claimedHere || ($live && ! $claimedElsewhere),
                 ];
             })
             ->filter()
@@ -323,11 +329,7 @@ class ReconciliationMatcher
         $from = $reconciliations->min(fn (AccountingReconciliation $r): string => self::candidateDates($r)[0]);
         $to = $reconciliations->max(fn (AccountingReconciliation $r): string => self::candidateDates($r)[1]);
 
-        return DB::table('accounting_journal_lines as l')
-            ->join('accounting_journals as j', 'j.id', '=', 'l.accounting_journal_id')
-            // Which reconciliation, if any, has claimed the line. The UNIQUE
-            // index on `matched_journal_line_id` keeps this to one row.
-            ->leftJoin('accounting_reconciliation_lines as r', 'r.matched_journal_line_id', '=', 'l.id')
+        return self::ledgerQuery()
             ->whereIn('l.accounting_account_id', $accountIds)
             ->whereIn('j.status', AccountingJournal::HISTORICAL_STATUSES)
             // Plain comparisons on a DATE column, so the index on `j.date`
@@ -337,6 +339,46 @@ class ReconciliationMatcher
             ->where('j.date', '<=', $to)
             ->orderBy('j.date')
             ->orderBy('l.id')
+            ->get()
+            ->map(static fn (object $row): array => self::toLedgerLine($row))
+            ->groupBy('account_id')
+            ->all();
+    }
+
+    /**
+     * One ledger line with the facts the matching rules read, whatever its
+     * journal's status (a draft included), or null. Match reads it through
+     * here so it judges a line exactly as the worksheet does.
+     *
+     * @return array<string, mixed>|null
+     */
+    public static function ledgerLine(int $journalLineId): ?array
+    {
+        $row = self::ledgerQuery()->where('l.id', $journalLineId)->first();
+
+        return $row === null ? null : self::toLedgerLine($row);
+    }
+
+    /**
+     * Journal lines with their journal, the reconciliation (if any) that has
+     * claimed them, and the other leg of a reversal: its date and whether a
+     * statement line has claimed it on the same account.
+     */
+    private static function ledgerQuery(): Builder
+    {
+        return DB::table('accounting_journal_lines as l')
+            ->join('accounting_journals as j', 'j.id', '=', 'l.accounting_journal_id')
+            // Which reconciliation, if any, has claimed the line. The UNIQUE
+            // index on `matched_journal_line_id` keeps this to one row.
+            ->leftJoin('accounting_reconciliation_lines as r', 'r.matched_journal_line_id', '=', 'l.id')
+            // The other leg of a reversal: the reversal of a reversed entry, or
+            // the entry a reversal reverses.
+            ->leftJoin(
+                'accounting_journals as pj',
+                'pj.id',
+                '=',
+                DB::raw('COALESCE(j.reversed_by_journal_id, j.reverses_journal_id)'),
+            )
             ->select([
                 'l.id as line_id',
                 'l.accounting_account_id as account_id',
@@ -349,30 +391,72 @@ class ReconciliationMatcher
                 'j.reference',
                 'j.description as journal_description',
                 'j.status',
-                'j.reverses_journal_id',
                 'r.accounting_reconciliation_id as claimed_by',
+                'pj.date as partner_date',
             ])
-            ->get()
-            ->map(static fn (object $row): array => [
-                'line_id' => (int) $row->line_id,
-                'account_id' => (int) $row->account_id,
-                'journal_id' => (int) $row->journal_id,
-                // A DATE column comes back as "2026-09-18" on MySQL; normalised
-                // anyway so the string comparisons above cannot be tripped by a
-                // driver that appends a time.
-                'date' => substr((string) $row->date, 0, 10),
-                // SIGNED, positive for money in. A cash account is debit-normal,
-                // so a debit is a receipt and a credit is a payment out.
-                'amount' => (int) $row->debit - (int) $row->credit,
-                'description' => (string) ($row->line_description ?: $row->journal_description),
-                'journal_no' => $row->journal_no,
-                'reference' => $row->reference,
-                'status' => (string) $row->status,
-                'is_reversal' => $row->reverses_journal_id !== null,
-                'claimed_by' => $row->claimed_by === null ? null : (int) $row->claimed_by,
-            ])
-            ->groupBy('account_id')
-            ->all();
+            ->addSelect(DB::raw(
+                'EXISTS (SELECT 1 FROM accounting_journal_lines pl'
+                .' JOIN accounting_reconciliation_lines pr ON pr.matched_journal_line_id = pl.id'
+                .' WHERE pl.accounting_journal_id = pj.id AND pl.accounting_account_id = l.accounting_account_id)'
+                .' AS partner_matched',
+            ));
+    }
+
+    /** @return array<string, mixed> */
+    private static function toLedgerLine(object $row): array
+    {
+        return [
+            'line_id' => (int) $row->line_id,
+            'account_id' => (int) $row->account_id,
+            'journal_id' => (int) $row->journal_id,
+            // A DATE column comes back as "2026-09-18" on MySQL; normalised
+            // anyway so the string comparisons cannot be tripped by a driver
+            // that appends a time.
+            'date' => substr((string) $row->date, 0, 10),
+            // SIGNED, positive for money in. A cash account is debit-normal,
+            // so a debit is a receipt and a credit is a payment out.
+            'amount' => (int) $row->debit - (int) $row->credit,
+            'description' => (string) ($row->line_description ?: $row->journal_description),
+            'journal_no' => $row->journal_no,
+            'reference' => $row->reference,
+            'status' => (string) $row->status,
+            'claimed_by' => $row->claimed_by === null ? null : (int) $row->claimed_by,
+            'partner_date' => $row->partner_date === null ? null : substr((string) $row->partner_date, 0, 10),
+            'partner_matched' => (bool) $row->partner_matched,
+        ];
+    }
+
+    /**
+     * Where a ledger line stands as of the period end, one rule for both legs
+     * of a reversal. A void dates its reversal on the day it is made, so a
+     * payment posted Sep 5 and voided Oct 3 was in the books on Sep 30.
+     *
+     * - `live`: the line was in the books at the period end. A posted line
+     *   is; a reversed entry is when its reversal is dated after the period
+     *   end, or when a statement line has matched the reversal (the bank
+     *   showed both). A draft never is.
+     * - `dropped`: a reversal pair that nets to nothing within the period's
+     *   books: both legs dated on or before the period end and neither
+     *   matched. Never suggested and never an outstanding item.
+     *
+     * @param  array<string, mixed>  $line  from {@see self::ledgerLine()}
+     * @return array{live: bool, dropped: bool}
+     */
+    public static function standingAsOf(array $line, string $periodEnd): array
+    {
+        $partnerDate = $line['partner_date'];
+
+        $live = $line['status'] === 'posted'
+            || ($line['status'] === 'reversed' && $partnerDate !== null
+                && ($partnerDate > $periodEnd || $line['partner_matched']));
+
+        $dropped = $partnerDate !== null
+            && $line['date'] <= $periodEnd
+            && $partnerDate <= $periodEnd
+            && $line['claimed_by'] === null
+            && ! $line['partner_matched'];
+
+        return ['live' => $live, 'dropped' => $dropped];
     }
 
     /**
@@ -529,6 +613,7 @@ class ReconciliationMatcher
                 'statement_line_id' => $line->id,
                 'journal_line_id' => null,
                 'outside_period' => false,
+                'matchable' => false,
             ];
         }
 
@@ -553,6 +638,8 @@ class ReconciliationMatcher
                 'journal_line_id' => $lineId,
                 // An outstanding item: dated outside the period, still unmatched.
                 'outside_period' => $candidate['outside_period'],
+                // Whether the screen's picker should offer this ledger line.
+                'matchable' => $candidate['matchable'],
             ];
         }
 
@@ -655,6 +742,7 @@ class ReconciliationMatcher
             'statement_line_id' => $line->id,
             'journal_line_id' => $candidate['line_id'],
             'outside_period' => $candidate['outside_period'],
+            'matchable' => $candidate['matchable'],
         ];
     }
 

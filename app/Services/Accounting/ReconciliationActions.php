@@ -374,8 +374,10 @@ class ReconciliationActions
      * statement line ({@see ReconciliationMatcher::candidateDates()}), so
      * "Match it instead" can be done. Its pairing is one to one, so an entry
      * it gives to another statement line of the same amount is not held
-     * against this one; it never offers a reversed entry, a reversal outside
-     * the period, or a reference on the other side.
+     * against this one. It judges a reversal as of the period end, so a
+     * payment voided after the period is still caught here
+     * ({@see ReconciliationMatcher::standingAsOf()}), and never offers a
+     * reference on the other side.
      *
      * @return array{journal_no: string, message: string}|null
      */
