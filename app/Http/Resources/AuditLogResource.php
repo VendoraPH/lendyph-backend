@@ -243,20 +243,17 @@ class AuditLogResource extends JsonResource
 
     /**
      * A row's old and new values as $user may read them: without the personal
-     * fields of a member, co-maker or credit application row for a caller
-     * without `borrowers:view` (PersonalDataKeys). The list, the detail and the
+     * fields of a member, co-maker, contact preference or credit row for a
+     * caller without `borrowers:view` (and, for credit rows,
+     * `credit_scoring:view`) (PersonalDataKeys). The list, the detail and the
      * CSV all read them through here. The stored row is never changed.
      *
      * @return array{0: mixed, 1: mixed}
      */
     public static function valuesShownTo(AuditLog $log, ?User $user): array
     {
-        if (PersonalDataKeys::auditReaderSeesThem($user)) {
-            return [$log->old_values, $log->new_values];
-        }
-
         return array_map(
-            fn (mixed $values) => is_array($values) ? PersonalDataKeys::withoutThemForAuditTarget($log->auditable_type, $values) : $values,
+            fn (mixed $values) => is_array($values) ? PersonalDataKeys::auditValuesFor($user, $log->auditable_type, $values) : $values,
             [$log->old_values, $log->new_values],
         );
     }

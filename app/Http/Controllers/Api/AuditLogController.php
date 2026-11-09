@@ -29,9 +29,10 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
  * endpoint here also requires `branches:view_all` (decision B2): a branch
  * user holding `audit_logs:view` or `audit_logs:export` gets 403.
  *
- * A caller without `borrowers:view` reads member, co-maker and credit
- * application rows without their personal fields, in the list, the detail and
- * the CSV alike (AuditLogResource::valuesShownTo()).
+ * A caller without `borrowers:view` reads member, co-maker, contact
+ * preference and credit rows without their personal fields (credit rows also
+ * need `credit_scoring:view`), in the list, the detail and the CSV alike
+ * (AuditLogResource::valuesShownTo()).
  */
 class AuditLogController extends Controller
 {

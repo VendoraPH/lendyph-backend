@@ -4,12 +4,14 @@ namespace Tests\Feature\AccessAndValidation;
 
 use App\Models\AuditLog;
 use App\Models\Borrower;
+use App\Models\BorrowerNotificationPreference;
 use App\Models\CoMaker;
 use App\Models\CreditApplicationProfile;
 use App\Models\CreditDecision;
 use App\Models\Role;
 use App\Models\User;
 use App\Services\AuditLogService;
+use App\Services\PersonalDataKeys;
 use Spatie\Permission\PermissionRegistrar;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
@@ -37,7 +39,8 @@ class AuditTrailPersonalDataTest extends TestCase
         'member@private.test', '12 Hidden Street', 'Barangay Lihim', 'Employer Lihim Inc', 'Spouse Occupation Lihim',
         '77 Co-maker Lane', '09173330000', 'Co-maker Occupation Lihim', 'Co-maker Employer Lihim',
         'Reason about the member Lihim', 'Remarks about the member Lihim', 'Recommendation Lihim',
-        'Rejected for a private reason Lihim',
+        'Rejected for a private reason Lihim', 'EXT-LIHIM-0042', 'Future column Lihim',
+        'Mobile reason Lihim', 'Email reason Lihim',
     ];
 
     /**
@@ -49,8 +52,9 @@ class AuditTrailPersonalDataTest extends TestCase
             'birthdate', 'civil_status', 'gender', 'address', 'street_address', 'barangay', 'city', 'province',
             'contact_number', 'email', 'employer_or_business', 'monthly_income', 'date_hired', 'photo_path',
             'spouse_first_name', 'spouse_middle_name', 'spouse_last_name', 'spouse_contact_number', 'spouse_occupation',
-            'rejection_reason',
+            'rejection_reason', 'external_account_no', 'pledge_amount', 'a_column_added_later',
         ],
+        'BorrowerNotificationPreference' => ['mobile_invalid_reason', 'email_invalid_reason'],
         'CoMaker' => ['address', 'contact_number', 'occupation', 'employer', 'monthly_income'],
         'CreditDecision' => ['reason', 'remarks', 'score_snapshot', 'recommendation_snapshot'],
         'CreditApplicationProfile' => [
@@ -85,8 +89,25 @@ class AuditTrailPersonalDataTest extends TestCase
             'spouse_last_name' => 'Spouse-Lastname',
             'spouse_contact_number' => '09172220000',
             'spouse_occupation' => 'Spouse Occupation Lihim',
+            'external_account_no' => 'EXT-LIHIM-0042',
+            'pledge_amount' => 4321.09,
         ]);
         $this->rows['member_created'] = $this->lastRowFor($member);
+
+        // A column the member record gains later is hidden until it's listed
+        // as one to keep.
+        $this->rows['member_later_column'] = AuditLogService::log('updated', $member, [
+            'a_column_added_later' => 'Future column Lihim',
+        ], [
+            'a_column_added_later' => 'Future column Lihim, changed',
+        ])->id;
+
+        $preference = BorrowerNotificationPreference::query()->create([
+            'borrower_id' => $member->id,
+            'mobile_invalid_reason' => 'Mobile reason Lihim',
+            'email_invalid_reason' => 'Email reason Lihim',
+        ]);
+        $this->rows['preference_created'] = $this->lastRowFor($preference);
 
         // An update's old values hold the whole original record.
         $member->update(['status' => 'inactive', 'rejection_reason' => 'Rejected for a private reason Lihim']);
@@ -217,7 +238,7 @@ class AuditTrailPersonalDataTest extends TestCase
             $this->assertStringNotContainsString($secret, $body);
         }
 
-        foreach (['48123.45', '31987.65', '12345.67', '23456.78', '15432.1', '16543.21', '2109.87'] as $figure) {
+        foreach (['4321.09', '48123.45', '31987.65', '12345.67', '23456.78', '15432.1', '16543.21', '2109.87'] as $figure) {
             $this->assertStringNotContainsString($figure, $body);
         }
     }
@@ -282,6 +303,42 @@ class AuditTrailPersonalDataTest extends TestCase
         $this->assertSame($profile['new_values']['loan_id'], CreditApplicationProfile::query()->value('loan_id'));
     }
 
+    public function test_credit_figures_and_reasons_also_need_credit_scoring_view(): void
+    {
+        $this->actingAs($this->userWith(['audit_logs:view', 'audit_logs:export', 'branches:view_all', 'borrowers:view']));
+
+        $member = $this->getJson("/api/audit-logs/{$this->rows['member_created']}")->assertOk()->json('data');
+        $this->assertSame('member@private.test', $member['new_values']['email']);
+
+        $decision = $this->getJson("/api/audit-logs/{$this->rows['decision_created']}")->assertOk()->json('data');
+        $this->assertSame('declined', $decision['new_values']['decision']);
+        $this->assertArrayNotHasKey('reason', $decision['new_values']);
+        $this->assertArrayNotHasKey('score_snapshot', $decision['new_values']);
+
+        $profile = $this->getJson("/api/audit-logs/{$this->rows['profile_created']}")->assertOk()->json('data');
+        $this->assertArrayNotHasKey('household_expenses', $profile['new_values']);
+
+        $csv = $this->csv();
+        $this->assertStringContainsString('12 Hidden Street', $csv);
+        $this->assertStringNotContainsString('Reason about the member Lihim', $csv);
+        $this->assertStringNotContainsString('15432.1', $csv);
+
+        $this->actingAs($this->userWith(['audit_logs:view', 'branches:view_all', 'borrowers:view', 'credit_scoring:view']));
+
+        $decision = $this->getJson("/api/audit-logs/{$this->rows['decision_created']}")->assertOk()->json('data');
+        $this->assertSame('Reason about the member Lihim', $decision['new_values']['reason']);
+    }
+
+    public function test_a_branch_user_with_borrowers_view_would_not_read_them(): void
+    {
+        $branchUser = $this->userWith(['audit_logs:view', 'borrowers:view', 'credit_scoring:view']);
+        $headOffice = $this->userWith(['audit_logs:view', 'borrowers:view', 'branches:view_all']);
+
+        $this->assertFalse(PersonalDataKeys::auditReaderSeesThem($branchUser));
+        $this->assertFalse(PersonalDataKeys::auditReaderSeesThem(null));
+        $this->assertTrue(PersonalDataKeys::auditReaderSeesThem($headOffice));
+    }
+
     public function test_an_admin_still_sees_every_personal_field(): void
     {
         $admin = User::factory()->inBranches($this->branch)->create();
@@ -294,7 +351,7 @@ class AuditTrailPersonalDataTest extends TestCase
         $csv = $this->csv();
 
         foreach ([$list, $csv] as $body) {
-            foreach (['12 Hidden Street', 'Spouse-Firstname', '09173330000', 'Reason about the member Lihim', '15432.1'] as $value) {
+            foreach (['EXT-LIHIM-0042', 'Future column Lihim', 'Mobile reason Lihim', '12 Hidden Street', 'Spouse-Firstname', '09173330000', 'Reason about the member Lihim', '15432.1'] as $value) {
                 $this->assertStringContainsString($value, $body);
             }
         }
