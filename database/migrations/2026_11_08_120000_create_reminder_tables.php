@@ -15,7 +15,8 @@ use Illuminate\Support\Facades\Schema;
  * - reminder_queue_items: one row per reminder, keyed on loan, period number,
  *   due date, rule and channel, so planning twice plans it once.
  * - reminder_messages: what was handed to a driver, exactly, one per queue
- *   item; at most one per loan, channel and day.
+ *   item; at most one per loan, channel and day. Recipient columns are 255
+ *   wide, as borrowers.email is, so any stored address fits.
  * - reminder_events: the append-only story of each reminder.
  * - reminder_pauses: global, member and loan pauses.
  * - borrower_notification_preferences: a member's switches and the contact
@@ -76,8 +77,10 @@ return new class extends Migration
                 $table->unsignedSmallInteger('days')->default(0);
                 $table->time('send_time');
                 $table->json('channels');
-                $table->foreignId('branch_id')->nullable()->constrained()->nullOnDelete();
-                $table->foreignId('loan_product_id')->nullable()->constrained()->nullOnDelete();
+                // Cascade, not null: a rule scoped to a branch or product that is
+                // deleted goes with it, rather than widening to every loan.
+                $table->foreignId('branch_id')->nullable()->constrained()->cascadeOnDelete();
+                $table->foreignId('loan_product_id')->nullable()->constrained()->cascadeOnDelete();
                 $table->enum('borrower_type', ['all', 'member', 'non_member'])->default('all');
                 $table->string('template_type', 32);
                 $table->boolean('is_active')->default(true);
@@ -128,7 +131,7 @@ return new class extends Migration
                 $table->char('claim_token', 36)->nullable();
                 $table->dateTime('claimed_at')->nullable();
                 $table->dateTime('sending_started_at')->nullable();
-                $table->string('recipient_masked', 191)->nullable();
+                $table->string('recipient_masked', 255)->nullable();
                 $table->enum('source', ['system', 'manual'])->default('system');
                 $table->foreignId('created_by')->nullable()->constrained('users')->nullOnDelete();
                 $table->timestamps();
@@ -153,8 +156,8 @@ return new class extends Migration
                 $table->string('language', 8)->default('en');
                 $table->string('subject', 255)->nullable();
                 $table->text('body')->nullable();
-                $table->string('recipient', 191)->nullable();
-                $table->string('recipient_masked', 191);
+                $table->string('recipient', 255)->nullable();
+                $table->string('recipient_masked', 255);
                 $table->string('provider', 32);
                 $table->string('provider_reference', 191)->nullable();
                 $table->enum('status', ['pending', 'sent', 'delivered', 'failed', 'rejected', 'bounced', 'opened'])->default('pending');
@@ -233,10 +236,10 @@ return new class extends Migration
                 $table->string('mobile_invalid_reason', 255)->nullable();
                 $table->dateTime('mobile_invalid_at')->nullable();
                 $table->foreignId('mobile_invalid_by')->nullable()->constrained('users')->nullOnDelete();
-                $table->string('email_verified_value', 191)->nullable();
+                $table->string('email_verified_value', 255)->nullable();
                 $table->dateTime('email_verified_at')->nullable();
                 $table->foreignId('email_verified_by')->nullable()->constrained('users')->nullOnDelete();
-                $table->string('email_invalid_value', 191)->nullable();
+                $table->string('email_invalid_value', 255)->nullable();
                 $table->string('email_invalid_reason', 255)->nullable();
                 $table->dateTime('email_invalid_at')->nullable();
                 $table->foreignId('email_invalid_by')->nullable()->constrained('users')->nullOnDelete();

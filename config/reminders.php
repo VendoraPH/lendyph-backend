@@ -55,8 +55,10 @@ return [
         // reminders, so each minute's run ends before the next one starts.
         'max_seconds' => 50,
         'max_messages' => 200,
-        // A row claimed longer ago than this belongs to a run that died.
-        'stale_claim_minutes' => 10,
+        // A row claimed longer ago than this belongs to a run that died. Kept
+        // well past the scheduler's 10-minute overlap lock, so a run that only
+        // stalled is never mistaken for a dead one while it still holds rows.
+        'stale_claim_minutes' => 30,
     ],
 
     /*

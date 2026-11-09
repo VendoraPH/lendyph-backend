@@ -3,11 +3,14 @@
 namespace Tests\Feature\Reminders;
 
 use App\Models\AuditLog;
+use App\Models\BorrowerNotificationPreference;
 use App\Models\ReminderEvent;
 use App\Models\ReminderMessage;
+use App\Models\ReminderQueueItem;
 use App\Models\ReminderSetting;
 use App\Services\Reminders\AllowList;
 use App\Services\Reminders\Drivers\DriverResolver;
+use App\Services\Reminders\Drivers\DriverResult;
 use App\Services\Reminders\Drivers\LogDriver;
 use App\Services\Reminders\Drivers\UnavailableDriver;
 use Illuminate\Console\Scheduling\Event;
@@ -32,24 +35,98 @@ class ReminderSafetyTest extends TestCase
         $this->setUpReminders();
     }
 
-    public function test_no_network_code_exists_in_the_reminders_engine_or_its_commands(): void
+    public function test_no_network_code_exists_in_the_reminders_engine_its_models_or_its_commands(): void
     {
         $files = collect(File::allFiles(app_path('Services/Reminders')))->map(fn ($file) => $file->getPathname())
+            ->merge(File::glob(app_path('Models/Reminder*.php')))
             ->merge([
+                app_path('Models/BorrowerNotificationPreference.php'),
                 app_path('Console/Commands/PlanReminders.php'),
                 app_path('Console/Commands/DispatchReminders.php'),
                 app_path('Console/Commands/RedactReminderMessages.php'),
             ]);
-        $this->assertGreaterThan(10, $files->count());
+        $this->assertGreaterThan(20, $files->count());
 
-        $forbidden = ['Http::', 'Facades\\Http', 'Mail::', 'Facades\\Mail', 'Notification::route', 'Guzzle', 'curl_', 'fsockopen', 'stream_socket_client', 'file_get_contents(\'http', 'Symfony\\Component\\Mailer'];
+        $forbidden = [
+            'Http facade' => '/\bHttp::|Facades\\\\Http\b/',
+            'HTTP client' => '/Http\\\\Client/i',
+            'Mail facade' => '/\bMail::|Facades\\\\Mail\b|Symfony\\\\Component\\\\Mailer/',
+            'mail()' => '/(?<![\w>:$])mail\s*\(/i',
+            'on-demand notification' => '/Notification::route/',
+            'notify()' => '/->notify\s*\(/',
+            'Guzzle' => '/guzzle/i',
+            'curl' => '/\bcurl/i',
+            'sockets' => '/\bsocket_|fsockopen|stream_socket_client/i',
+            'URL streams' => '/\b(fopen|file_get_contents|file|readfile|copy)\s*\(\s*[\'"](https?|ftp|ssl|tls):/i',
+            'processes' => '/Facades\\\\Process|Component\\\\Process|\bProcess::|(?<![\w>:$])(exec|shell_exec|system|passthru|proc_open|popen)\s*\(/',
+        ];
         foreach ($files as $path) {
             $this->assertFileExists($path);
             $source = File::get($path);
-            foreach ($forbidden as $needle) {
-                $this->assertStringNotContainsStringIgnoringCase($needle, $source, "{$needle} appears in {$path}");
+            foreach ($forbidden as $what => $pattern) {
+                $this->assertDoesNotMatchRegularExpression($pattern, $source, "{$what} appears in {$path}");
             }
         }
+    }
+
+    public function test_with_the_default_config_no_driver_is_handed_anything(): void
+    {
+        config(['reminders' => require config_path('reminders.php')]);
+        $this->assertFalse(config('reminders.allow_all_recipients'));
+        $this->assertSame([], config('reminders.allow_list'));
+        $lines = [];
+        Log::listen(function ($event) use (&$lines) {
+            $lines[] = $event->message;
+        });
+        $this->at('2026-09-15 07:00');
+        $loan = $this->loanDue('2026-09-15');
+        $this->plan();
+        $this->at('2026-09-15 08:00');
+        $this->dispatchReminders();
+
+        $this->assertSame(['skipped'], ReminderQueueItem::query()->where('loan_id', $loan->id)->whereDate('fire_date', '2026-09-15')->pluck('status')->unique()->values()->all());
+        $this->assertSame(['not_allowed'], ReminderQueueItem::query()->where('loan_id', $loan->id)->whereDate('fire_date', '2026-09-15')->pluck('reason_code')->unique()->values()->all());
+        $this->assertSame(0, ReminderMessage::query()->count());
+        $this->assertCount(0, $this->driver->calls);
+        $this->assertSame([], array_values(array_filter($lines, fn (string $line) => str_contains($line, 'driver'))));
+    }
+
+    public function test_the_fake_driver_exists_only_in_tests(): void
+    {
+        config(['reminders.drivers.sms' => 'fake']);
+        $this->assertSame($this->driver, app(DriverResolver::class)->for('sms'));
+
+        $this->app['env'] = 'production';
+        try {
+            $driver = app(DriverResolver::class)->for('sms');
+        } finally {
+            $this->app['env'] = 'testing';
+        }
+
+        $this->assertInstanceOf(UnavailableDriver::class, $driver);
+    }
+
+    public function test_audit_rows_never_keep_a_members_full_number_or_email(): void
+    {
+        $this->at('2026-09-15 07:00');
+        $loan = $this->loanDue('2026-09-15');
+        BorrowerNotificationPreference::query()->create([
+            'borrower_id' => $loan->borrower_id,
+            'mobile_verified_value' => '639171234501',
+            'email_verified_value' => 'juan1@example.com',
+        ]);
+        $this->plan();
+        $this->driver->willReturn('sms', DriverResult::permanentFailure('invalid_number', 'Invalid mobile number'));
+        $this->driver->willReturn('email', DriverResult::permanentFailure('bounced', 'Address bounced', 'bounced'));
+        $this->at('2026-09-15 08:00');
+        $this->dispatchReminders();
+
+        $rows = AuditLog::query()->where('auditable_type', BorrowerNotificationPreference::class)->get();
+        $this->assertGreaterThanOrEqual(2, $rows->count());
+        $json = json_encode($rows->map(fn (AuditLog $row) => [$row->old_values, $row->new_values])->all());
+        $this->assertStringNotContainsString('639171234501', $json);
+        $this->assertStringNotContainsString('juan1@example.com', $json);
+        $this->assertStringContainsString('Invalid mobile number', $json);
     }
 
     public function test_the_config_defaults_are_safe_with_no_env_change(): void

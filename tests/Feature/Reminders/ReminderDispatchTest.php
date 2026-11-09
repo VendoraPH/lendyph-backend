@@ -14,6 +14,8 @@ use App\Notifications\StaffNotification;
 use App\Services\Reminders\Drivers\DriverResult;
 use App\Services\Reminders\ReminderDispatcher;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use RuntimeException;
 use Tests\TestCase;
 
 /**
@@ -382,7 +384,7 @@ class ReminderDispatchTest extends TestCase
         $this->plan();
         $this->item($other, 'Due today')->forceFill(['status' => 'processing', 'claim_token' => 'dead-run', 'claimed_at' => now()->setTime(8, 0)])->save();
 
-        $this->at('2026-09-15 08:20');
+        $this->at('2026-09-15 08:35');
         $this->dispatchReminders();
 
         $this->assertSame(['failed', 'interrupted'], array_slice($this->outcome($this->item($loan, 'Due today')), 0, 2));
@@ -440,6 +442,122 @@ class ReminderDispatchTest extends TestCase
 
         $this->assertCount(3, $this->driver->calls);
         $this->assertSame(3, ReminderQueueItem::query()->where('status', 'scheduled')->whereDate('fire_date', '2026-09-15')->count());
+    }
+
+    public function test_one_bad_row_is_failed_with_a_reason_and_the_rest_of_the_run_goes_on(): void
+    {
+        $this->at('2026-09-15 07:00');
+        $bad = $this->loanDue('2026-09-15');
+        $good = $this->loanDue('2026-09-15');
+        $this->rule('Due today')->update(['channels' => ['sms']]);
+        $this->plan();
+        $lines = [];
+        Log::listen(function ($event) use (&$lines) {
+            $lines[] = [$event->level, $event->message, $event->context];
+        });
+        ReminderMessage::saving(function (ReminderMessage $message) use ($bad) {
+            if ((int) $message->loan_id === $bad->id) {
+                throw new RuntimeException('insert into reminder_messages values (639171234501, Hi Juan ...)');
+            }
+        });
+
+        $this->at('2026-09-15 08:00');
+        $this->dispatchReminders();
+
+        $this->assertSame(['failed', 'error', 'Could not be prepared for sending'], $this->outcome($this->item($bad, 'Due today')));
+        $this->assertSame('sent', $this->item($good, 'Due today')->status);
+        $this->assertSame(0, ReminderQueueItem::query()->where('status', 'processing')->count());
+        $this->assertCount(1, $this->driver->calls);
+        $logged = json_encode($lines);
+        $this->assertStringContainsString('63917*****01', $logged);
+        $this->assertStringNotContainsString('639171234501', $logged);
+        $this->assertStringNotContainsString('Hi Juan', $logged);
+    }
+
+    public function test_an_error_after_the_attempt_started_is_failed_and_never_resent(): void
+    {
+        $this->at('2026-09-15 07:00');
+        $loan = $this->loanDue('2026-09-15');
+        $this->rule('Due today')->update(['channels' => ['sms']]);
+        $this->plan();
+        ReminderMessage::saving(function (ReminderMessage $message) {
+            if ($message->status === 'sent') {
+                throw new RuntimeException('database went away');
+            }
+        });
+
+        $this->at('2026-09-15 08:00');
+        $this->dispatchReminders();
+        $this->at('2026-09-15 09:00');
+        $this->dispatchReminders();
+
+        $this->assertSame(['failed', 'interrupted'], array_slice($this->outcome($this->item($loan, 'Due today')), 0, 2));
+        $this->assertCount(1, $this->driver->calls);
+    }
+
+    public function test_a_long_email_address_is_stored_whole(): void
+    {
+        $email = 'juan'.str_repeat('x', 56).'@'.str_repeat('d', 60).'.'.str_repeat('e', 60).'.'.str_repeat('f', 10).'.com';
+        $this->assertGreaterThan(191, strlen($email));
+        $this->at('2026-09-15 07:00');
+        $loan = $this->loanDue('2026-09-15', [], [], ['email' => $email]);
+        $this->plan();
+        $this->at('2026-09-15 08:00');
+        $this->dispatchReminders();
+
+        $this->assertSame('sent', $this->item($loan, 'Due today', 'email')->status);
+        $this->assertSame($email, ReminderMessage::query()->where('loan_id', $loan->id)->where('channel', 'email')->sole()->recipient);
+    }
+
+    public function test_a_run_that_stalls_past_the_stale_cutoff_never_sends_twice(): void
+    {
+        $this->assertGreaterThan(10, (int) config('reminders.dispatch.stale_claim_minutes'));
+        $this->at('2026-09-15 07:00');
+        $loan = $this->loanDue('2026-09-15');
+        $this->rule('Due today')->update(['channels' => ['sms']]);
+        $this->plan();
+
+        // Run A claims the row, then stalls before sending.
+        $this->at('2026-09-15 08:00');
+        $stalled = app(ReminderDispatcher::class);
+        $claimed = $stalled->claim(10);
+        $this->assertCount(1, $claimed);
+
+        // Its claim goes stale; run B releases it, reclaims it and sends it.
+        $this->at('2026-09-15 08:'.(1 + (int) config('reminders.dispatch.stale_claim_minutes')));
+        $this->dispatchReminders();
+        $this->assertSame('sent', $this->item($loan, 'Due today')->status);
+
+        // Run A wakes up with its old copy of the row.
+        $stalled->process($claimed->first());
+
+        $this->assertCount(1, $this->driver->calls);
+        $this->assertSame('sent', $this->item($loan, 'Due today')->status);
+        $this->assertSame('sent', ReminderMessage::query()->where('loan_id', $loan->id)->sole()->status);
+    }
+
+    public function test_a_failed_message_holding_the_days_slot_is_named_in_the_cancel_reason(): void
+    {
+        $this->at('2026-09-15 07:00');
+        $loan = $this->loanDue('2026-09-15');
+        $this->rule('Due today')->update(['channels' => ['sms']]);
+        $this->plan();
+        $earlier = ReminderQueueItem::query()->create([
+            'loan_id' => $loan->id, 'borrower_id' => $loan->borrower_id, 'period_number' => 1, 'due_date' => '2026-09-15',
+            'channel' => 'sms', 'template_type' => 'due_today', 'fire_date' => '2026-09-15', 'scheduled_at' => now(),
+            'status' => 'failed', 'source' => 'manual', 'attempts' => 3,
+        ]);
+        ReminderMessage::query()->create([
+            'queue_item_id' => $earlier->id, 'loan_id' => $loan->id, 'borrower_id' => $loan->borrower_id, 'channel' => 'sms',
+            'recipient_masked' => '63917*****01', 'provider' => 'fake', 'status' => 'failed', 'send_date' => '2026-09-15',
+        ]);
+
+        $this->at('2026-09-15 08:00');
+        $this->dispatchReminders();
+
+        $this->assertSame(['cancelled', 'superseded', "Today's reminder for this loan on this channel failed; a second one doesn't go the same day"],
+            $this->outcome($this->item($loan, 'Due today')));
+        $this->assertCount(0, $this->driver->calls);
     }
 
     /**

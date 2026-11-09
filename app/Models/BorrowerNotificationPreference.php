@@ -20,6 +20,15 @@ class BorrowerNotificationPreference extends Model
 {
     use Auditable;
 
+    /**
+     * The contact values themselves never reach the audit trail: the rows
+     * keep who flagged or verified what, when and why, not the full number
+     * or address.
+     *
+     * @var list<string>
+     */
+    protected array $auditRedacted = ['mobile_verified_value', 'mobile_invalid_value', 'email_verified_value', 'email_invalid_value'];
+
     public const CHANNELS = ['sms', 'email', 'both'];
 
     protected $fillable = [

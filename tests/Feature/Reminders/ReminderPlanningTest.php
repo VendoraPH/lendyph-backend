@@ -4,6 +4,7 @@ namespace Tests\Feature\Reminders;
 
 use App\Models\AmortizationSchedule;
 use App\Models\Branch;
+use App\Models\LoanProduct;
 use App\Models\ReminderQueueItem;
 use App\Models\ReminderRule;
 use App\Models\ReminderSetting;
@@ -197,5 +198,24 @@ class ReminderPlanningTest extends TestCase
 
         $this->assertFalse(ReminderQueueItem::query()->where('loan_id', $loan->id)->where('rule_id', $this->rule('Upcoming due')->id)->exists());
         $this->assertTrue(ReminderQueueItem::query()->where('loan_id', $loan->id)->where('rule_id', $this->rule('Due today')->id)->exists());
+    }
+
+    public function test_a_rule_whose_product_or_branch_was_deleted_plans_nothing(): void
+    {
+        $this->at('2026-09-12 08:00');
+        $loan = $this->loanDue('2026-09-15');
+        $product = LoanProduct::factory()->create();
+        $branch = Branch::factory()->create();
+        $this->rule('Upcoming due')->update(['loan_product_id' => $product->id]);
+        $this->rule('Due today')->update(['branch_id' => $branch->id]);
+
+        $product->delete();
+        $branch->delete();
+        $this->plan();
+
+        $planned = ReminderQueueItem::query()->where('loan_id', $loan->id)->get();
+        $this->assertSame(0, $planned->where('template_type', 'upcoming')->count());
+        $this->assertSame(0, $planned->where('template_type', 'due_today')->count());
+        $this->assertSame(2, $planned->where('template_type', 'past_due')->count());
     }
 }
