@@ -92,6 +92,14 @@ class RestructureWriteOffConcurrencyTest extends TestCase
      * draft on the other connection waits for it (and, with a one-second
      * lock wait here, gives up) instead of slipping in. Once J2 commits, the
      * same post goes through.
+     *
+     * It waits on the allowance ACCOUNT row, before any journal or line lock:
+     * the lock order. Before that order (JournalPoster at d0d7a53) it waited
+     * too, so the outcome alone proved nothing: it waited on its journal row,
+     * which J2's locking read of the allowance lines' journals had taken.
+     * That is a lock taken out of order, the half of the deadlock
+     * AllowanceLockOrderTest races. Run against that JournalPoster, this test
+     * fails on the query it waited on.
      */
     public function test_a_bookkeeper_post_on_the_allowance_waits_for_the_write_off_and_never_slips_in(): void
     {
@@ -116,7 +124,11 @@ class RestructureWriteOffConcurrencyTest extends TestCase
                     return 'posted';
                 } catch (QueryException $e) {
                     if (($e->errorInfo[1] ?? null) === 1205) {
-                        return 'waited';
+                        $sql = strtolower($e->getSql());
+
+                        return str_starts_with($sql, 'select * from `accounting_accounts`') && str_contains($sql, 'for update')
+                            ? 'waited on the allowance account'
+                            : 'waited on: '.$sql;
                     }
 
                     throw $e;
@@ -126,7 +138,7 @@ class RestructureWriteOffConcurrencyTest extends TestCase
             return $writeOff;
         });
 
-        $this->assertSame('waited', $outcome);
+        $this->assertSame('waited on the allowance account', $outcome);
         $this->assertSame(300_000, $this->sumOn($writeOff, '1200', 'debit'));
         $this->assertSame(0, $this->sumOn($writeOff, '5140', 'debit'));
         $this->assertSame('draft', $draft->fresh()->status);
