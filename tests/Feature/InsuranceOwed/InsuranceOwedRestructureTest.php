@@ -175,7 +175,7 @@ class InsuranceOwedRestructureTest extends TestCase
         $this->assertTrue($line['provisional']);
     }
 
-    public function test_legacy_style_terms_on_a_source_owing_no_premium_still_release(): void
+    public function test_legacy_style_terms_on_a_source_owing_no_premium_are_sent_back_for_approval(): void
     {
         $source = $this->loanOwingPremium();
         // The premium is paid off before the restructure; periods untouched.
@@ -185,15 +185,19 @@ class InsuranceOwedRestructureTest extends TestCase
         $new = $this->approvedRestructure($source);
 
         // A saved outstanding above what the periods owe, as an old
-        // application could carry: with no premium owed it is not refused.
+        // application could carry. The source owes less than was approved,
+        // so the release is refused and staff re-approve the terms
+        // (Arvin, 2026-11-09).
         DB::table('loans')->where('id', $new->id)->update([
             'restructure_outstanding' => self::SCHEDULE_TOTAL + self::OWED,
             'restructure_shortfall' => 0,
         ]);
 
-        $this->patchJson("/api/loans/{$new->id}/release")->assertOk();
+        $this->patchJson("/api/loans/{$new->id}/release")
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['principal_amount' => 'The source loan was paid down or adjusted after approval. Send the restructure back for approval again.']);
 
-        $this->assertSame('restructured', $source->fresh()->status);
-        $this->assertEqualsWithDelta(0.00, (float) $new->fresh()->insurance_remaining_balance, 0.001);
+        $this->assertContains($source->fresh()->status, ['released', 'ongoing']);
+        $this->assertSame('approved', $new->fresh()->status);
     }
 }
