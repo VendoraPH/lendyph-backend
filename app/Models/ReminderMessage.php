@@ -74,4 +74,9 @@ class ReminderMessage extends Model
     {
         return $this->belongsTo(Borrower::class);
     }
+
+    public function createdBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'created_by');
+    }
 }
