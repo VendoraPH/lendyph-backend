@@ -89,6 +89,43 @@ class AccountingAccountMapping extends Model
     ];
 
     /**
+     * Each role in words, as the Accounting Settings screen labels it
+     * (`mapping-fields.ts` in the frontend). Messages name a role through
+     * {@see self::label()}, never by its stored key.
+     *
+     * @var array<string, string>
+     */
+    public const LABELS = [
+        'cash' => 'Cash',
+        'gcash' => 'GCash',
+        'maya' => 'Maya',
+        'bank' => 'Bank',
+        'loans_receivable' => 'Loans receivable',
+        'interest_receivable' => 'Interest receivable',
+        'penalty_receivable' => 'Penalty receivable',
+        'interest_income' => 'Interest income',
+        'penalty_income' => 'Penalty income',
+        'processing_fee_income' => 'Processing fee income',
+        'credit_loss_expense' => 'Credit loss expense',
+        'allowance_credit_losses' => 'Allowance for credit losses',
+        'accounts_payable' => 'Accounts payable',
+        'borrower_advances' => 'Member advances',
+        'service_fee_income' => 'Service fee income',
+        'notarial_fees_payable' => 'Notarial fees payable',
+        'insurance_premium_payable' => 'Insurance premium payable',
+        'share_capital' => 'Share capital',
+        'other_fee_income' => 'Other fee income',
+        'documentary_stamp_tax_payable' => 'Documentary stamp tax payable',
+        'withholding_tax_payable' => 'Withholding tax payable',
+        'other_taxes_payable' => 'Other taxes payable',
+        'gcash_service_income' => 'GCash service income',
+        'loan_adjustments' => 'Loan adjustments clearing',
+        'unearned_restructure_income' => 'Unearned restructure interest and penalty',
+        'net_surplus' => 'Retained earnings or net surplus',
+        'suspense' => 'Suspense',
+    ];
+
+    /**
      * What each role's account has to BE, beyond merely being postable.
      *
      * ## Why the type has to be checked and why it is not enough to be careful
@@ -266,6 +303,7 @@ class AccountingAccountMapping extends Model
         ?string $cashKind,
     ): ?array {
         $shape = self::ROLE_SHAPES[$role] ?? null;
+        $roleLabel = self::label($role);
 
         // A role with no declared shape is refused rather than waved through:
         // it means ROLES gained an entry that ROLE_SHAPES did not, and
@@ -274,14 +312,14 @@ class AccountingAccountMapping extends Model
         if ($shape === null) {
             return [
                 'field' => 'role',
-                'message' => "There is no defined account shape for the {$role} role, so it cannot be set.",
+                'message' => "There is no defined account shape for the {$roleLabel} role, so it cannot be set.",
             ];
         }
 
         if ($type !== $shape['type']) {
             return [
                 'field' => 'type',
-                'message' => "{$label} is {$type}, but the {$role} role has to resolve to "
+                'message' => "{$label} is {$type}, but the {$roleLabel} role has to resolve to "
                     .self::article($shape['type'])." {$shape['type']} account. Posting through it would put the "
                     .'amount on the wrong statement, and the entry would still balance — so nothing would report '
                     .'the mistake.',
@@ -291,7 +329,7 @@ class AccountingAccountMapping extends Model
         if (($shape['is_contra'] ?? false) && ! $isContra) {
             return [
                 'field' => 'is_contra',
-                'message' => "{$label} is not a contra account. The {$role} role must resolve to one: a contra "
+                'message' => "{$label} is not a contra account. The {$roleLabel} role must resolve to one: a contra "
                     .'asset carries a credit balance and SUBTRACTS from the assets above it, so an ordinary asset '
                     .'here would make the net figure come out as gross plus the allowance instead of minus.',
             ];
@@ -310,7 +348,7 @@ class AccountingAccountMapping extends Model
         if ($kind === null && $cashKind !== null) {
             return [
                 'field' => 'cash_kind',
-                'message' => "{$label} is the {$role} account, which is not a money account — but it is marked "
+                'message' => "{$label} is the {$roleLabel} account, which is not a money account — but it is marked "
                     ."as a {$cashKind} account. `cash_kind` is what puts a balance into the dashboard cash "
                     .'figures, so this would report the balance as money on hand.',
             ];
@@ -321,13 +359,41 @@ class AccountingAccountMapping extends Model
 
             return [
                 'field' => 'cash_kind',
-                'message' => "{$label} {$held}, but the {$role} role has to resolve to one whose cash kind is "
+                'message' => "{$label} {$held}, but the {$roleLabel} role has to resolve to one whose cash kind is "
                     ."{$kind}. `cash_kind` is what puts an account on the Cash & Bank screen and into the "
                     .'dashboard cash figures, so settlements through it would never appear in the money on hand.',
             ];
         }
 
         return null;
+    }
+
+    /**
+     * A role in words. A role with no label reads as its key in words
+     * ("Some new role"), so a stored key never reaches the screen.
+     */
+    public static function label(string $role): string
+    {
+        return self::LABELS[$role] ?? ucfirst(strtolower(str_replace('_', ' ', $role)));
+    }
+
+    /**
+     * Several roles in words, in role-list order: "Loan adjustments clearing
+     * and Suspense", "Cash, Bank and Suspense".
+     *
+     * @param  iterable<string>  $roles
+     */
+    public static function labelList(iterable $roles): string
+    {
+        $roles = collect($roles)->unique()->sortBy(static function (string $role): int {
+            $position = array_search($role, self::ROLES, true);
+
+            return $position === false ? PHP_INT_MAX : $position;
+        });
+
+        return $roles->map(static fn (string $role): string => self::label($role))
+            ->values()
+            ->join(', ', ' and ');
     }
 
     /** "an asset", "a liability". Only `liability` takes "a". */

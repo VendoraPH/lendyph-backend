@@ -13,10 +13,12 @@ use Carbon\Carbon;
  * payment those loans take.
  *
  * The monthly payment of a loan is its highest calendar-month total of the
- * instalments still open from the current month on, the same measure as the
- * proposed loan's payment (Capacity). Principal and interest still unpaid on
- * periods due before this month are owed now, so they count in this month's
- * total; a loan past its maturity owes all of it this month.
+ * principal and interest still unpaid on its open instalments, from the
+ * current month on: the same measure as the proposed loan's payment
+ * (Capacity). Penalty never counts, and a part-paid period counts only what
+ * is left of it. Principal and interest still unpaid on periods due before
+ * this month are owed now, so they count in this month's total; a loan past
+ * its maturity owes all of it this month.
  */
 final class Exposure
 {
@@ -78,14 +80,8 @@ final class Exposure
                     continue;
                 }
 
-                if ($due->lt($monthStart)) {
-                    $months[$thisMonth] = ($months[$thisMonth] ?? 0) + $owed - $paid;
-
-                    continue;
-                }
-
-                $month = $due->format('Y-m');
-                $months[$month] = ($months[$month] ?? 0) + Centavos::of($period->total_due);
+                $month = $due->lt($monthStart) ? $thisMonth : $due->format('Y-m');
+                $months[$month] = ($months[$month] ?? 0) + $owed - $paid;
             }
 
             $total += $months === [] ? 0 : max($months);

@@ -253,7 +253,7 @@ trait ValidatesAccountShape
 
             if ($roles !== []) {
                 $field = $isGroup ? 'is_group' : 'is_active';
-                $list = implode(', ', $roles);
+                $list = AccountingAccountMapping::labelList($roles);
 
                 $validator->errors()->add(
                     $field,
@@ -346,7 +346,7 @@ trait ValidatesAccountShape
 
             $validator->errors()->add(
                 $mismatch['field'] === 'role' ? 'type' : $mismatch['field'],
-                "{$label} is the account for {$role}. {$mismatch['message']} "
+                "{$label} is the account for ".AccountingAccountMapping::label($role).". {$mismatch['message']} "
                 .'Point that role somewhere else before changing this account.',
             );
         }
@@ -426,7 +426,7 @@ trait ValidatesAccountShape
         foreach ($anchored as $role) {
             $validator->errors()->add(
                 'parent_id',
-                "{$label} is the account for {$role}, and that figure is reported across "
+                "{$label} is the account for ".AccountingAccountMapping::label($role).', and that figure is reported across '
                 .'every account under its heading. Moving it to another heading would change '
                 .'which accounts are counted. Point that role somewhere else before moving this account.',
             );
