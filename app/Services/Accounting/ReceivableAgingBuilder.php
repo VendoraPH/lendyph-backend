@@ -67,7 +67,7 @@ final class ReceivableAgingBuilder
      *
      * Each row's `share_percent` is its amount as a percentage of `total`, a
      * string with two decimals rounded half up ("0.00" on an empty book), and
-     * `count_total` adds up the rows' counts.
+     * `count_total` adds up the rows' counts: outstanding instalments, not loans.
      *
      * @return array{as_of: string, rows: list<array{bucket: string, amount: int, count: int, share_percent: string}>, total: int, past_due_total: int, count_total: int}
      */

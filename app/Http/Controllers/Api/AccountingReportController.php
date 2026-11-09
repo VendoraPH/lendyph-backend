@@ -200,7 +200,7 @@ class AccountingReportController extends Controller
     #[OA\Get(
         path: '/api/accounting/loans/aging',
         summary: 'Receivable aging by days past due',
-        description: "Outstanding loan receivables split into the buckets a provisioning policy needs. Answers `{data: Aging}`. All six buckets are always present, in report order, even when empty, so the table has a stable shape. Amounts are integer CENTAVOS — this is the one accounting report that reads the LENDING tables, where money is `decimal:2` pesos, and the conversion happens once inside the builder. `count` is outstanding INSTALMENTS, not loans, because the screen's footer sums the column. Days past due are measured from the bare due date, deliberately ignoring each product's grace period, exactly as `ReportService::agingReport()` does.",
+        description: "Outstanding loan receivables split into the buckets a provisioning policy needs. Answers `{data: Aging}`. All six buckets are always present, in report order, even when empty, so the table has a stable shape. Amounts are integer CENTAVOS — this is the one accounting report that reads the LENDING tables, where money is `decimal:2` pesos, and the conversion happens once inside the builder. `count` is outstanding INSTALMENTS, not loans, because the screen's footer sums the column, and `count_total` adds them up (instalments too). Each row's `share_percent` is its amount as a percentage of `total`, a string with two decimals rounded half up (\"0.00\" when `total` is 0). Days past due are measured from the bare due date, deliberately ignoring each product's grace period, exactly as `ReportService::agingReport()` does.",
         tags: ['Accounting'],
         security: [['sanctum' => []]],
         parameters: [

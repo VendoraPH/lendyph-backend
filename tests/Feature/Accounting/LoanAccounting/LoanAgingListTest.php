@@ -290,6 +290,22 @@ class LoanAgingListTest extends TestCase
         $this->assertSame(0, $body['meta']['stats']['current']);
     }
 
+    public function test_past_due_only_accepts_true_and_false_as_well_as_1_and_0(): void
+    {
+        $this->period($this->agedLoan(['loan_account_number' => 'LN-PB-LATE']), 4, principal: 20);
+        $this->period($this->agedLoan(['loan_account_number' => 'LN-PB-CUR']), 0, principal: 30);
+
+        foreach (['true', '1'] as $value) {
+            $this->assertSame(['LN-PB-LATE'], array_column($this->loans("&past_due_only={$value}")['data'], 'account_number'), $value);
+        }
+
+        foreach (['false', '0'] as $value) {
+            $this->assertCount(2, $this->loans("&past_due_only={$value}")['data'], $value);
+        }
+
+        $this->getJson('/api/accounting/loan-accounting/loans?past_due_only=yes')->assertUnprocessable();
+    }
+
     public function test_search_matches_account_number_member_name_or_code_literally(): void
     {
         $this->period($this->agedLoan(['loan_account_number' => 'LN-50%']), 1, principal: 10);

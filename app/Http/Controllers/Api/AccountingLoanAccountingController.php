@@ -33,8 +33,8 @@ class AccountingLoanAccountingController extends Controller
 
     #[OA\Get(
         path: '/api/accounting/loan-accounting/summary',
-        summary: 'Loan Accounting summary: aging and the loan records',
-        description: 'Answers `{data: {as_of, aging, records}}` in integer CENTAVOS. `aging` is GET /accounting/loans/aging for the same `as_of` and branch. `records` totals the collectible loans with something unpaid (`loan_count`, `outstanding_principal`, `total_outstanding`, `past_due_amount` and `past_due_count`, past due by the grace rule); loan records keep no history, so `records` is always as of today and its own `as_of` says so.',
+        summary: 'Loan Accounting summary: aging, the books and the loan records',
+        description: 'Answers `{data: {as_of, aging, books, records, books_vs_records}}` in integer CENTAVOS. `aging` is GET /accounting/loans/aging for the same `as_of` and branch (its `count` and `count_total` are outstanding instalments, not loans). `books` is the ledger at `as_of`: `gross` (loans receivable), `allowance` (1200), `unearned_income` (1210), `adjustments_clearing` (1180, debit normal, may be negative), `adjustments_clearing_needs_review` (true when 1180 is not zero) and `net` (gross − allowance − unearned income). `records` totals the collectible loans with something unpaid (`loan_count`, `outstanding_principal`, `total_outstanding`, `past_due_amount` and `past_due_count`, past due by the grace rule). Loan records keep no history, so `records` and `books_vs_records` are always as of today and their own `as_of` says so. `books_vs_records`: `books_principal` is the books\' gross receivable today, `records_principal` is `records.outstanding_principal`, `difference` = books − records, and `is_reconciled` is true when it is 0. A loan released before the books existed shows as minus its principal.',
         tags: ['Accounting'],
         security: [['sanctum' => []]],
         parameters: [
@@ -75,7 +75,7 @@ class AccountingLoanAccountingController extends Controller
             new OA\Parameter(name: 'as_of', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date'), description: 'YYYY-MM-DD. Defaults to today.'),
             new OA\Parameter(name: 'branch_id', in: 'query', required: false, description: 'One of the caller\'s branches (another answers 403). Without it, every branch the caller holds.', schema: new OA\Schema(type: 'integer')),
             new OA\Parameter(name: 'bucket', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ReceivableAgingBuilder::BUCKETS)),
-            new OA\Parameter(name: 'past_due_only', in: 'query', required: false, description: 'Only loans past due by the grace rule.', schema: new OA\Schema(type: 'boolean')),
+            new OA\Parameter(name: 'past_due_only', in: 'query', required: false, description: 'Only loans past due by the grace rule. `1`, `0`, `true` or `false`.', schema: new OA\Schema(type: 'string', enum: ['1', '0', 'true', 'false'])),
             new OA\Parameter(name: 'search', in: 'query', required: false, description: 'Account number, member name or member code. `%`, `_` and `\\` match literally.', schema: new OA\Schema(type: 'string')),
             new OA\Parameter(name: 'group', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: LoanAgingBuilder::GROUPS, default: 'loan')),
             new OA\Parameter(name: 'page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', minimum: 1)),
@@ -95,7 +95,9 @@ class AccountingLoanAccountingController extends Controller
             'as_of' => ['nullable', 'date_format:Y-m-d'],
             'branch_id' => ['nullable', 'integer'],
             'bucket' => ['nullable', Rule::in(ReceivableAgingBuilder::BUCKETS)],
-            'past_due_only' => ['nullable', 'boolean'],
+            // Query strings carry text, so `true` and `false` are accepted
+            // beside 1 and 0.
+            'past_due_only' => ['nullable', Rule::in(['1', '0', 'true', 'false'])],
             'search' => ['nullable', 'string', 'max:100'],
             'group' => ['nullable', Rule::in(LoanAgingBuilder::GROUPS)],
             'page' => ['nullable', 'integer', 'min:1'],
@@ -107,7 +109,7 @@ class AccountingLoanAccountingController extends Controller
             $this->branchScope($filters['branch_id'] ?? null),
             [
                 'bucket' => $filters['bucket'] ?? null,
-                'past_due_only' => (bool) ($filters['past_due_only'] ?? false),
+                'past_due_only' => filter_var($filters['past_due_only'] ?? false, FILTER_VALIDATE_BOOLEAN),
                 'search' => $filters['search'] ?? null,
             ],
             $filters['group'] ?? 'loan',
