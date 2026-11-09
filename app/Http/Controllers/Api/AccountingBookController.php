@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Api\Traits\ScopesBranchFilter;
 use App\Http\Controllers\Controller;
 use App\Services\Accounting\BookBuilder;
+use App\Services\Accounting\ColumnBookBuilder;
 use Carbon\CarbonImmutable;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Validation\ValidationException;
@@ -24,6 +25,11 @@ use OpenApi\Attributes as OA;
  * `BookKind`. A book that returned its own shape would not merely need new
  * frontend code, it would need a branch in a component whose whole point is
  * that BIR prescribes the same columns for every book.
+ *
+ * The two cash books also come in columns (`/columns`, `{data: ColumnBook}`,
+ * see ColumnBookBuilder): the same journals, one row each, laid out by
+ * account. They are a second view of those two books, not a fifth book, so the
+ * four line books keep their one shape.
  */
 class AccountingBookController extends Controller
 {
@@ -47,7 +53,10 @@ class AccountingBookController extends Controller
      */
     private const MAX_RANGE_DAYS = 366;
 
-    public function __construct(private BookBuilder $books) {}
+    public function __construct(
+        private BookBuilder $books,
+        private ColumnBookBuilder $columnBooks,
+    ) {}
 
     #[OA\Get(
         path: '/api/accounting/books/general-journal',
@@ -137,18 +146,92 @@ class AccountingBookController extends Controller
         return $this->book('cash_disbursements');
     }
 
+    #[OA\Get(
+        path: '/api/accounting/books/cash-receipts/columns',
+        summary: 'Cash receipts book in columns — one row per journal',
+        description: 'The same journals as the cash receipts book, one row each, in date then journal-number order. Answers `{data: ColumnBook}` in integer centavos. `money_columns` are the money accounts that moved, in code order, each row reading debit − credit. `columns`, in this order and only where the role is mapped: loans_receivable, interest_income, penalty_income, insurance_premium_payable, share_capital, borrower_advances, gcash_service_income, each the credits on the mapped account. Every other line is in `sundry` with its own side. Each row and the totals balance: money = columns + sundry credit − sundry debit. Not paged: the book is printed whole, within the same 366-day limit.',
+        tags: ['Accounting'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'from', in: 'query', required: true, schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'to', in: 'query', required: true, schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, description: 'One of the caller\'s branches (another answers 403). Without it, every branch the caller holds; journals with no branch only for branches:view_all.', schema: new OA\Schema(type: 'integer')),
+        ],
+        responses: [
+            new OA\Response(response: 200, description: 'The cash receipts book in columns'),
+            new OA\Response(response: 403, description: 'Missing accounting:view, or a branch outside the caller\'s'),
+            new OA\Response(response: 422, description: 'Missing dates, reversed range, or a range longer than 366 days'),
+        ],
+    )]
+    public function cashReceiptsColumns(): JsonResponse
+    {
+        return $this->columnBook('cash_receipts');
+    }
+
+    #[OA\Get(
+        path: '/api/accounting/books/cash-disbursements/columns',
+        summary: 'Cash disbursements book in columns — one row per journal',
+        description: 'The same journals as the cash disbursements book, one row each, in date then journal-number order. Answers `{data: ColumnBook}` in integer centavos. `money_columns` are the money accounts that moved, in code order, each row reading credit − debit. `columns`, in this order and only where the role is mapped: loans_receivable, accounts_payable, share_capital, borrower_advances, each the debits on the mapped account. Every other line, such as a release\'s withheld deductions, is in `sundry` with its own side. Each row and the totals balance: money = columns + sundry debit − sundry credit. Not paged: the book is printed whole, within the same 366-day limit.',
+        tags: ['Accounting'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'from', in: 'query', required: true, schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'to', in: 'query', required: true, schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, description: 'One of the caller\'s branches (another answers 403). Without it, every branch the caller holds; journals with no branch only for branches:view_all.', schema: new OA\Schema(type: 'integer')),
+        ],
+        responses: [
+            new OA\Response(response: 200, description: 'The cash disbursements book in columns'),
+            new OA\Response(response: 403, description: 'Missing accounting:view, or a branch outside the caller\'s'),
+            new OA\Response(response: 422, description: 'Missing dates, reversed range, or a range longer than 366 days'),
+        ],
+    )]
+    public function cashDisbursementsColumns(): JsonResponse
+    {
+        return $this->columnBook('cash_disbursements');
+    }
+
     /**
      * Every book, which differ only in which entries they read and in order.
-     *
-     * `from` and `to` are REQUIRED rather than defaulted to the current month.
-     * A book of account is a book FOR A PERIOD, and a defaulted range would
-     * mean the figures on screen answered a question nobody asked — the same
-     * reason the screen sends both on every request.
      */
     private function book(string $kind): JsonResponse
     {
         $this->authorize('accounting:view');
 
+        [$from, $to, $branchScope] = $this->period();
+
+        return response()->json([
+            'data' => $this->books->build($kind, $from, $to, $branchScope),
+        ]);
+    }
+
+    /**
+     * A cash book in columns, over the same period rules as the line books.
+     *
+     * @param  'cash_receipts'|'cash_disbursements'  $kind
+     */
+    private function columnBook(string $kind): JsonResponse
+    {
+        $this->authorize('accounting:view');
+
+        [$from, $to, $branchScope] = $this->period();
+
+        return response()->json([
+            'data' => $this->columnBooks->build($kind, $from, $to, $branchScope),
+        ]);
+    }
+
+    /**
+     * The validated period and branch scope every book is read over.
+     *
+     * `from` and `to` are REQUIRED rather than defaulted to the current month.
+     * A book of account is a book FOR A PERIOD, and a defaulted range would
+     * mean the figures on screen answered a question nobody asked — the same
+     * reason the screen sends both on every request.
+     *
+     * @return array{0: string, 1: string, 2: int|list<int>|null}
+     */
+    private function period(): array
+    {
         $filters = request()->validate([
             'from' => ['required', 'date'],
             'to' => ['required', 'date'],
@@ -174,13 +257,10 @@ class AccountingBookController extends Controller
             ]);
         }
 
-        return response()->json([
-            'data' => $this->books->build(
-                $kind,
-                $from->toDateString(),
-                $to->toDateString(),
-                $this->branchScope($filters['branch_id'] ?? null),
-            ),
-        ]);
+        return [
+            $from->toDateString(),
+            $to->toDateString(),
+            $this->branchScope($filters['branch_id'] ?? null),
+        ];
     }
 }
