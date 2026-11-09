@@ -3,16 +3,20 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\Accounting\PreviewJournalRequest;
 use App\Http\Requests\Accounting\ReverseJournalRequest;
 use App\Http\Requests\Accounting\StoreJournalRequest;
 use App\Http\Requests\Accounting\UpdateJournalRequest;
 use App\Http\Resources\JournalEntryResource;
 use App\Models\AccountingJournal;
 use App\Services\Accounting\JournalPoster;
+use App\Services\Accounting\JournalPreview;
 use App\Services\BranchAccess;
+use App\Services\LikePattern;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 use OpenApi\Attributes as OA;
 
@@ -51,12 +55,30 @@ class AccountingJournalController extends Controller
                 schema: new OA\Schema(type: 'string', enum: AccountingJournal::SOURCES),
             ),
             new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
+            new OA\Parameter(name: 'search', in: 'query', required: false, description: 'Journal number, reference or description, anywhere in the text. `%`, `_` and `\\` match literally.', schema: new OA\Schema(type: 'string', maxLength: 100)),
             new OA\Parameter(name: 'page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 1)),
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15, maximum: 100)),
         ],
         responses: [
-            new OA\Response(response: 200, description: 'Paginated journal register'),
-            new OA\Response(response: 403, description: 'Missing journals:view'),
+            new OA\Response(
+                response: 200,
+                description: 'Paginated journal register. `meta.totals` cover every matching journal, not the page: `count`, and `total_debit` and `total_credit` in integer centavos (a draft counts its lines). `meta.stats` counts journals per status with every filter except `status`.',
+                content: new OA\JsonContent(properties: [
+                    new OA\Property(property: 'meta', type: 'object', properties: [
+                        new OA\Property(property: 'totals', type: 'object', properties: [
+                            new OA\Property(property: 'count', type: 'integer'),
+                            new OA\Property(property: 'total_debit', type: 'integer', description: 'Centavos.'),
+                            new OA\Property(property: 'total_credit', type: 'integer', description: 'Centavos.'),
+                        ]),
+                        new OA\Property(property: 'stats', type: 'object', properties: [
+                            new OA\Property(property: 'draft', type: 'integer'),
+                            new OA\Property(property: 'posted', type: 'integer'),
+                            new OA\Property(property: 'reversed', type: 'integer'),
+                        ]),
+                    ]),
+                ]),
+            ),
+            new OA\Response(response: 403, description: 'Missing journals:view, or a branch_id outside the caller\'s branches'),
         ],
     )]
     public function index(): AnonymousResourceCollection
@@ -90,6 +112,7 @@ class AccountingJournalController extends Controller
              */
             'source' => ['nullable', Rule::in(AccountingJournal::SOURCES)],
             'branch_id' => ['nullable', 'integer'],
+            'search' => ['nullable', 'string', 'max:100'],
             'page' => ['nullable', 'integer', 'min:1'],
             // `min:1` matters: `?per_page=0` reaches Builder::paginate() as
             // `$perPage ?: $model->getPerPage()` and silently becomes 15, while
@@ -101,13 +124,28 @@ class AccountingJournalController extends Controller
 
         app(BranchAccess::class)->authorizeBranchFilter(request()->user(), $filters['branch_id'] ?? null);
 
-        $journals = $this->visibleToCaller(AccountingJournal::query())
-            ->withRegisterRelations()
+        $search = trim((string) ($filters['search'] ?? ''));
+
+        // Every filter but `status`, so the status counts can share it.
+        $filtered = fn (): Builder => $this->visibleToCaller(AccountingJournal::query())
             ->when(isset($filters['from']), fn ($q) => $q->where('date', '>=', $filters['from']))
             ->when(isset($filters['to']), fn ($q) => $q->where('date', '<=', $filters['to']))
-            ->when(isset($filters['status']), fn ($q) => $q->where('status', $filters['status']))
             ->when(isset($filters['source']), fn ($q) => $q->where('source', $filters['source']))
             ->when(isset($filters['branch_id']), fn ($q) => $q->where('branch_id', $filters['branch_id']))
+            ->when($search !== '', function (Builder $q) use ($search): void {
+                $like = LikePattern::contains($search);
+
+                $q->where(fn (Builder $w) => $w
+                    ->where('journal_no', 'like', $like)
+                    ->orWhere('reference', 'like', $like)
+                    ->orWhere('description', 'like', $like));
+            });
+
+        $matching = fn (): Builder => $filtered()
+            ->when(isset($filters['status']), fn ($q) => $q->where('status', $filters['status']));
+
+        $journals = $matching()
+            ->withRegisterRelations()
             // Newest first, and `id` as the tiebreak so two entries on the same
             // date do not swap places between pages — which would show one
             // twice and hide the other.
@@ -115,7 +153,11 @@ class AccountingJournalController extends Controller
             ->orderByDesc('id')
             ->paginate($perPage);
 
-        return JournalEntryResource::collection($journals);
+        return JournalEntryResource::collection($journals)
+            ->additional(['meta' => [
+                'totals' => $this->registerTotals($matching()),
+                'stats' => $this->statusCounts($filtered()),
+            ]]);
     }
 
     #[OA\Post(
@@ -165,6 +207,57 @@ class AccountingJournalController extends Controller
         );
 
         return $this->respond($journal, 201);
+    }
+
+    #[OA\Post(
+        path: '/api/accounting/journals/preview',
+        summary: 'Preview a journal entry\'s totals',
+        description: 'The entry form\'s totals, summed on the server exactly as posting sums them, so the preview of a draft\'s lines equals what saving and posting it would record. Integer CENTAVOS. Writes nothing. Lines may be incomplete: there is no two-line minimum, `account_id` is optional and not checked, and a blank row (0 and 0) is counted as a line. Each side is an integer from 0 to Money::maxCentavos(), and an entry carries at most JournalPoster::MAX_LINES lines. `is_balanced` compares the two totals only; posting also needs two lines and a non-zero total.',
+        tags: ['Accounting'],
+        security: [['sanctum' => []]],
+        requestBody: new OA\RequestBody(
+            required: false,
+            content: new OA\JsonContent(
+                properties: [
+                    new OA\Property(
+                        property: 'lines',
+                        type: 'array',
+                        maxItems: JournalPoster::MAX_LINES,
+                        items: new OA\Items(
+                            required: ['debit', 'credit'],
+                            properties: [
+                                new OA\Property(property: 'account_id', type: 'integer', nullable: true, description: 'Optional, and not checked.'),
+                                new OA\Property(property: 'debit', type: 'integer', minimum: 0, maximum: 9007199254740992, description: 'Centavos.'),
+                                new OA\Property(property: 'credit', type: 'integer', minimum: 0, maximum: 9007199254740992, description: 'Centavos.'),
+                            ],
+                        ),
+                    ),
+                ],
+            ),
+        ),
+        responses: [
+            new OA\Response(
+                response: 200,
+                description: 'The totals',
+                content: new OA\JsonContent(properties: [
+                    new OA\Property(property: 'data', type: 'object', properties: [
+                        new OA\Property(property: 'total_debit', type: 'integer', description: 'Centavos.'),
+                        new OA\Property(property: 'total_credit', type: 'integer', description: 'Centavos.'),
+                        new OA\Property(property: 'difference', type: 'integer', description: 'total_debit − total_credit, in centavos; negative when the credits are heavier.'),
+                        new OA\Property(property: 'out_by', type: 'integer', description: 'The size of the difference, in centavos.'),
+                        new OA\Property(property: 'heavier_side', type: 'string', enum: ['debit', 'credit'], nullable: true),
+                        new OA\Property(property: 'is_balanced', type: 'boolean'),
+                        new OA\Property(property: 'line_count', type: 'integer'),
+                    ]),
+                ]),
+            ),
+            new OA\Response(response: 403, description: 'Missing journals:create'),
+            new OA\Response(response: 422, description: 'A side that is not a whole number of centavos from 0 to the ceiling, or too many lines'),
+        ],
+    )]
+    public function preview(PreviewJournalRequest $request): JsonResponse
+    {
+        return response()->json(['data' => JournalPreview::summarise($request->previewLines())]);
     }
 
     #[OA\Get(
@@ -294,6 +387,53 @@ class AccountingJournalController extends Controller
         $journal->loadPostable();
 
         return (new JournalEntryResource($journal))->response()->setStatusCode($status);
+    }
+
+    /**
+     * `{count, total_debit, total_credit}` over every journal the register
+     * matches, not the page: one aggregate over those journals' lines, summed in
+     * SQL. A draft stores no totals until it posts and a posted entry's totals
+     * are recomputed from its lines, so the lines are the one source for both
+     * (JournalEntryResource::totalOf()).
+     *
+     * @param  Builder<AccountingJournal>  $matching
+     * @return array{count: int, total_debit: int, total_credit: int}
+     */
+    private function registerTotals(Builder $matching): array
+    {
+        $ids = (clone $matching)->select('accounting_journals.id');
+
+        $sums = DB::table('accounting_journal_lines')
+            ->whereIn('accounting_journal_id', $ids)
+            ->selectRaw('COALESCE(SUM(debit), 0) as total_debit, COALESCE(SUM(credit), 0) as total_credit')
+            ->first();
+
+        return [
+            'count' => $matching->count(),
+            'total_debit' => (int) $sums->total_debit,
+            'total_credit' => (int) $sums->total_credit,
+        ];
+    }
+
+    /**
+     * Journals per status, with every filter except `status`: the register's
+     * tab counts.
+     *
+     * @param  Builder<AccountingJournal>  $filtered
+     * @return array{draft: int, posted: int, reversed: int}
+     */
+    private function statusCounts(Builder $filtered): array
+    {
+        $counts = $filtered
+            ->selectRaw('status, COUNT(*) as aggregate')
+            ->groupBy('status')
+            ->pluck('aggregate', 'status');
+
+        return [
+            'draft' => (int) ($counts['draft'] ?? 0),
+            'posted' => (int) ($counts['posted'] ?? 0),
+            'reversed' => (int) ($counts['reversed'] ?? 0),
+        ];
     }
 
     /**
