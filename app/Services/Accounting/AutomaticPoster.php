@@ -21,6 +21,7 @@ use Illuminate\Database\Query\Builder as QueryBuilder;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use LogicException;
 
 /**
  * The automatic posting engine. Lending services call this; nothing else does.
@@ -637,13 +638,34 @@ final class AutomaticPoster
      * before anything else in the transaction posts a journal: every posting
      * takes the journal-number lock, and the allowance lock must come first.
      *
+     * It must run inside the release's own transaction, and is refused
+     * outside one (books or not, so a misplaced call fails in every test).
+     * Refused rather than wrapped in a transaction of its own: that would
+     * hold J1 and J2 together, but not with the release itself (the loan's
+     * status, schedules and stored split), so the books could post a
+     * restructure the lending side then fails to save. Outside a transaction
+     * the allowance lock would also be released at once.
+     *
+     * The source's unrecognised deferral is read from this transaction's
+     * snapshot. That is sound only while the release locks the source loan
+     * row before its first plain read (LoanService::release() takes its
+     * collateral and loan locks first), so nothing can post to the source
+     * between the snapshot and here. The caller must keep that order.
+     *
      * @param  string  $method  how the member paid the deductions, in the lending vocabulary
      * @return array{release: AccountingJournal|null, write_off: AccountingJournal|null}
      *
      * @throws CannotPostToTheBooksException when the split is missing or does not reconcile, or a role is unmapped
+     * @throws LogicException when called outside a transaction
      */
     public function restructureRelease(Loan $new, Loan $source, int $userId, string $method): array
     {
+        if (DB::transactionLevel() === 0) {
+            throw new LogicException(
+                'AutomaticPoster::restructureRelease() must run inside the release\'s transaction: its allowance lock '
+                .'and its two journals only hold together there.');
+        }
+
         if (! $this->enabled()) {
             return ['release' => null, 'write_off' => null];
         }
@@ -782,9 +804,28 @@ final class AutomaticPoster
 
     /**
      * The allowance account's organisation-wide credit balance, in centavos,
-     * signed: every posted and reversed line on it, every branch. With
-     * `$lock`, the account row is locked first, so an allowance posting
-     * cannot move the balance between this read and the write-off.
+     * signed: every posted and reversed line on it, every branch.
+     *
+     * With `$lock` (a real write-off) the account row is locked first, so
+     * nothing that takes the same lock (another write-off, an allowance
+     * adjustment) can move the balance before this transaction commits. Then
+     * the balance is read with LOCKING reads, which is what makes the lock
+     * sound. Under REPEATABLE READ a plain SELECT answers from the snapshot
+     * this transaction's first plain read took, long before a release gets
+     * here, and would miss a provision another request committed since: two
+     * restructures could then both take the same allowance
+     * (CollateralPledgeGuard documents the same trap). A locking read answers
+     * from the latest committed rows.
+     *
+     * Two locking reads, lines by their account index and then their
+     * journals by primary key, so InnoDB locks exactly the allowance's lines
+     * and their journals, whatever plan a joined query would get. FOR UPDATE,
+     * not FOR SHARE: the write-off goes on to take the journal-number lock,
+     * an exclusive lock on the newest journal, and that may be one of these.
+     * Holding a shared lock on it and then asking for an exclusive one while
+     * another posting waits for it is InnoDB's textbook deadlock.
+     *
+     * Without `$lock` (a preview, which writes nothing) it is one plain read.
      */
     private function allowanceBalance(AccountMap $map, bool $lock): int
     {
@@ -792,6 +833,25 @@ final class AutomaticPoster
 
         if ($lock) {
             AccountingAccount::query()->whereKey($accountId)->lockForUpdate()->first();
+
+            $byJournal = DB::table('accounting_journal_lines')
+                ->where('accounting_account_id', $accountId)
+                ->groupBy('accounting_journal_id')
+                ->selectRaw('accounting_journal_id, COALESCE(SUM(credit), 0) - COALESCE(SUM(debit), 0) AS balance')
+                ->lockForUpdate()
+                ->pluck('balance', 'accounting_journal_id');
+
+            if ($byJournal->isEmpty()) {
+                return 0;
+            }
+
+            $historical = DB::table('accounting_journals')
+                ->whereIn('id', $byJournal->keys()->all())
+                ->whereIn('status', AccountingJournal::HISTORICAL_STATUSES)
+                ->lockForUpdate()
+                ->pluck('id');
+
+            return (int) $historical->sum(fn (mixed $journalId): int => (int) $byJournal[(int) $journalId]);
         }
 
         return (int) DB::table('accounting_journal_lines as l')
@@ -815,7 +875,7 @@ final class AutomaticPoster
      * (Dr unearned restructure / Cr loan adjustments), so call it after the
      * adjustment has restated the periods.
      *
-     * @throws CannotPostToTheBooksException for another adjustment type, an amount that disagrees, or an unmapped role
+     * @throws CannotPostToTheBooksException for another adjustment type, a stated amount that is missing or disagrees, or an unmapped role
      */
     public function balanceAdjustment(LoanAdjustment $adjustment, int $signedCentavos, int $userId): ?AccountingJournal
     {
@@ -830,9 +890,15 @@ final class AutomaticPoster
                 "{$number} is not a balance adjustment, so it posts no balance adjustment journal.");
         }
 
-        $stated = $adjustment->new_values['adjustment_amount'] ?? null;
+        $stated = $adjustment->ownNewValues()['adjustment_amount'] ?? null;
 
-        if (is_numeric($stated) && $this->signedCentavos($stated) !== $signedCentavos) {
+        if (! is_numeric($stated)) {
+            throw CannotPostToTheBooksException::because(
+                "{$number} records no adjustment amount, so there is nothing to check the "
+                .Money::format($signedCentavos).' to be posted against. Nothing has been saved.');
+        }
+
+        if ($this->signedCentavos($stated) !== $signedCentavos) {
             throw CannotPostToTheBooksException::because(
                 "{$number} states an adjustment of ".Money::format($this->signedCentavos($stated)).', but '
                 .Money::format($signedCentavos).' was to be posted. Nothing has been saved.');
@@ -957,11 +1023,7 @@ final class AutomaticPoster
             return null;
         }
 
-        if ($postable instanceof Loan) {
-            throw CannotPostToTheBooksException::because(
-                'An allowance adjustment cannot be keyed on a loan: that slot is the loan\'s restructure write-off. '
-                .'Key it on the allowance run that produced it.');
-        }
+        $this->refuseTheWriteOffSlot($postable, 'An allowance adjustment', 'the allowance run that produced it');
 
         $map = AccountMap::resolve();
         $posting = PostingRules::allowanceAdjustment($signedCentavos, $map);
@@ -972,6 +1034,20 @@ final class AutomaticPoster
             'description' => $posting['description'],
             'branch_id' => $branchId,
         ], $userId);
+    }
+
+    /**
+     * A `credit_loss` journal keyed on a Loan is that loan's restructure
+     * write-off (J2). Anything else posted there would take the slot, and the
+     * idempotency index would hand it back as the write-off, so J2 would
+     * never post.
+     */
+    private function refuseTheWriteOffSlot(Model $postable, string $what, string $keyOn): void
+    {
+        if ($postable instanceof Loan) {
+            throw CannotPostToTheBooksException::because(
+                "{$what} cannot be keyed on a loan: that slot is the loan's restructure write-off. Key it on {$keyOn}.");
+        }
     }
 
     /**
@@ -1029,13 +1105,16 @@ final class AutomaticPoster
      *
      * `$postable` must be the provision row, not the loan it covers — a loan is
      * provisioned against repeatedly as its risk changes, and keying on the
-     * loan would let it happen exactly once. See {@see self::loanFee()}.
+     * loan would let it happen exactly once. See {@see self::loanFee()}. A
+     * Loan is refused: its `credit_loss` slot is its restructure write-off.
      */
     public function creditLossProvision(Model $postable, string|int|float $pesos, int $userId, array $context = []): ?AccountingJournal
     {
         if (! $this->enabled()) {
             return null;
         }
+
+        $this->refuseTheWriteOffSlot($postable, 'A credit loss provision', 'the provision row');
 
         return $this->write(
             PostingRules::creditLossProvision($this->centavos($pesos, 'provision amount', $postable), AccountMap::resolve()),

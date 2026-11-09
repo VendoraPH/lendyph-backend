@@ -15,6 +15,7 @@ use App\Services\Accounting\AccountMap;
 use App\Services\Accounting\AutomaticPoster;
 use App\Services\Accounting\PostingRules;
 use Illuminate\Database\Eloquent\Model;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 use Tests\Traits\PostsJournals;
 use Tests\Traits\SetupLendyPH;
@@ -162,6 +163,41 @@ class PostingRulesNewTest extends TestCase
         $this->poster()->restructureRelease($new->fresh(), $source, $this->admin->id, 'cash');
     }
 
+    /** J2 would land on a loan the new one never came from. */
+    public function test_a_restructure_posted_against_a_loan_that_is_not_its_source_is_refused(): void
+    {
+        $source = $this->createReleasedLoan();
+        $other = $this->createReleasedLoan();
+        $new = $this->restructureOf($this->createReleasedLoan(), $source, 6_000_000, 0, 0, 500_000);
+        $this->seedChartOfAccounts();
+
+        try {
+            $this->poster()->restructureRelease($new, $other, $this->admin->id, 'cash');
+            $this->fail('A restructure posted against the wrong source was accepted.');
+        } catch (CannotPostToTheBooksException $e) {
+            $this->assertStringContainsString('is not a restructure of', $e->getMessage());
+        }
+
+        $this->assertSame(0, AccountingJournal::count());
+    }
+
+    /** WP > 0 only when nothing is capitalised (PostingRules::restructureSplit()). */
+    public function test_a_stored_split_that_both_writes_off_and_capitalises_is_refused(): void
+    {
+        $source = $this->createReleasedLoan();
+        $new = $this->restructureOf($this->createReleasedLoan(), $source, 5_000_000, 900_000, 100_000, 200_000);
+        $this->seedChartOfAccounts();
+
+        try {
+            $this->poster()->restructureRelease($new, $source, $this->admin->id, 'cash');
+            $this->fail('A split that both writes off and capitalises was accepted.');
+        } catch (CannotPostToTheBooksException $e) {
+            $this->assertStringContainsString('never both', $e->getMessage());
+        }
+
+        $this->assertSame(0, AccountingJournal::count());
+    }
+
     // ── Restructure: J2 on the source ──
 
     public function test_a_restructure_write_off_takes_the_allowance_then_expense(): void
@@ -305,6 +341,72 @@ class PostingRulesNewTest extends TestCase
         $this->assertSame($adjustment->adjustment_number, $journal->reference);
         $this->assertSame(250_000, $this->sumOn($journal, '1180', 'debit'));
         $this->assertSame(250_000, $this->sumOn($journal, '1110', 'credit'));
+    }
+
+    public function test_an_amount_that_disagrees_with_the_adjustments_own_is_refused(): void
+    {
+        $loan = $this->createReleasedLoan();
+        $this->seedChartOfAccounts();
+        $adjustment = $this->balanceAdjustmentOn($loan, -250_000);
+
+        try {
+            $this->poster()->balanceAdjustment($adjustment, -250_001, $this->admin->id);
+            $this->fail('An amount that disagrees with the adjustment was posted.');
+        } catch (CannotPostToTheBooksException $e) {
+            $this->assertStringContainsString('states an adjustment of -₱2,500.00', $e->getMessage());
+        }
+
+        $this->assertSame(0, AccountingJournal::count());
+    }
+
+    /**
+     * With no usable `adjustment_amount` there is nothing to check the
+     * posted amount against, so it is refused rather than trusted.
+     *
+     * @return array<string, array{0: array<string, mixed>}>
+     */
+    public static function unusableAdjustmentAmounts(): array
+    {
+        return [
+            'missing' => [['target_principal_balance' => 0]],
+            'not a number' => [['adjustment_amount' => 'two thousand five hundred']],
+            'null' => [['adjustment_amount' => null]],
+        ];
+    }
+
+    #[DataProvider('unusableAdjustmentAmounts')]
+    public function test_an_adjustment_with_no_usable_amount_of_its_own_is_refused(array $newValues): void
+    {
+        $loan = $this->createReleasedLoan();
+        $this->seedChartOfAccounts();
+        $adjustment = $this->balanceAdjustmentOn($loan, -250_000);
+        $adjustment->update(['new_values' => $newValues]);
+
+        try {
+            $this->poster()->balanceAdjustment($adjustment->fresh(), -250_000, $this->admin->id);
+            $this->fail('An adjustment with no amount of its own was posted.');
+        } catch (CannotPostToTheBooksException $e) {
+            $this->assertStringContainsString('records no adjustment amount', $e->getMessage());
+        }
+
+        $this->assertSame(0, AccountingJournal::count());
+    }
+
+    public function test_an_adjustment_that_is_not_a_balance_adjustment_is_refused(): void
+    {
+        $loan = $this->createReleasedLoan();
+        $this->seedChartOfAccounts();
+        $adjustment = $this->balanceAdjustmentOn($loan, -250_000);
+        $adjustment->update(['adjustment_type' => 'penalty_waiver']);
+
+        try {
+            $this->poster()->balanceAdjustment($adjustment->fresh(), -250_000, $this->admin->id);
+            $this->fail('A penalty waiver posted a balance adjustment journal.');
+        } catch (CannotPostToTheBooksException $e) {
+            $this->assertStringContainsString('is not a balance adjustment', $e->getMessage());
+        }
+
+        $this->assertSame(0, AccountingJournal::count());
     }
 
     public function test_a_balance_increase_posts_the_mirror(): void
@@ -500,6 +602,26 @@ class PostingRulesNewTest extends TestCase
         $this->expectException(CannotPostToTheBooksException::class);
 
         $this->poster()->allowanceAdjustment($loan, 300_000, null, '2026-11-07', $this->admin->id);
+    }
+
+    /**
+     * The older provision rule takes the same slot: keyed on a loan, it would
+     * be handed back as that loan's restructure write-off, and J2 would never
+     * post.
+     */
+    public function test_a_credit_loss_provision_keyed_on_a_loan_is_refused(): void
+    {
+        $loan = $this->createReleasedLoan();
+        $this->seedChartOfAccounts();
+
+        try {
+            $this->poster()->creditLossProvision($loan, '2500.00', $this->admin->id);
+            $this->fail('A provision keyed on a loan was posted.');
+        } catch (CannotPostToTheBooksException $e) {
+            $this->assertStringContainsString('restructure write-off', $e->getMessage());
+        }
+
+        $this->assertSame(0, AccountingJournal::count());
     }
 
     // ── The release method ──
