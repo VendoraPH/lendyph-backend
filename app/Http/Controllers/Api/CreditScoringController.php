@@ -8,6 +8,8 @@ use App\Http\Requests\CreditScoring\ScoreHistoryRequest;
 use App\Http\Requests\CreditScoring\StoreCreditDecisionRequest;
 use App\Http\Requests\CreditScoring\UpdateCreditScoringSettingsRequest;
 use App\Http\Requests\CreditScoring\UpdateScorecardConfigRequest;
+use App\Models\Borrower;
+use App\Models\CreditDecision;
 use App\Models\CreditPolicyFlag;
 use App\Models\CreditScore;
 use App\Models\CreditScoreMember;
@@ -69,6 +71,7 @@ class CreditScoringController extends Controller
         tags: ['Credit Scoring'],
         security: [['sanctum' => []]],
         parameters: [
+            new OA\Parameter(name: 'search', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
             new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
             new OA\Parameter(name: 'risk_level', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
             new OA\Parameter(name: 'min_score', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
@@ -91,6 +94,10 @@ class CreditScoringController extends Controller
         $pastDue = $request->flag('past_due');
 
         $rows = $this->scope->currentScores($request->user(), $branchId)
+            ->when($request->filled('search'), fn ($q) => $q->whereIn(
+                'credit_score_members.borrower_id',
+                Borrower::query()->search((string) $request->input('search'), false)->select('borrowers.id'),
+            ))
             ->when($request->filled('risk_level'), fn ($q) => $q->where('credit_score_members.risk_level', $request->input('risk_level')))
             ->when($request->filled('min_score'), fn ($q) => $q->where('credit_score_members.score', '>=', (int) $request->input('min_score')))
             ->when($request->filled('max_score'), fn ($q) => $q->where('credit_score_members.score', '<=', (int) $request->input('max_score')))
@@ -194,6 +201,41 @@ class CreditScoringController extends Controller
                 ->all(),
             'details_hidden' => false,
         ]);
+    }
+
+    #[OA\Get(
+        path: '/api/credit-scoring/borrowers/{borrowerId}/decisions',
+        summary: "A member's credit decisions, newest first",
+        tags: ['Credit Scoring'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'borrowerId', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
+            new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
+        ],
+        responses: [
+            new OA\Response(response: 200, description: 'A paginator of CreditDecision, plus details_hidden. Member-level decisions (no loan, on a nightly score) and, with loans:view, decisions on loans the caller can see. Without the member\'s details, each leaves out reason and remarks'),
+            new OA\Response(response: 403, description: 'Missing credit_scoring:view'),
+            new OA\Response(response: 404, description: 'No such member, or a member in another branch'),
+        ],
+    )]
+    public function borrowerDecisions(Request $request, int $borrowerId): JsonResponse
+    {
+        $this->authorize('credit_scoring:view');
+        $member = $this->scope->member($request->user(), $borrowerId);
+        $details = $this->scope->seesMemberDetails($request->user(), $member);
+
+        $rows = CreditDecision::query()
+            ->where('borrower_id', $member->id)
+            ->where(fn ($q) => $q
+                ->where(fn ($memberLevel) => $memberLevel->whereNull('loan_id')->whereIn('credit_score_id', CreditScore::query()->where('context', CreditScore::CONTEXT_NIGHTLY)->select('id')))
+                ->when($request->user()->can('loans:view'), fn ($q) => $q->orWhereIn('loan_id', $this->scope->loanIds($request->user()))))
+            ->with('decidedByUser:id,first_name,last_name')
+            ->orderByDesc('decided_at')
+            ->orderByDesc('id')
+            ->paginate($this->perPage($request))
+            ->through(fn (CreditDecision $decision) => $this->presenter->decision($decision, $details));
+
+        return $this->ok($rows->toArray() + ['details_hidden' => ! $details]);
     }
 
     #[OA\Get(

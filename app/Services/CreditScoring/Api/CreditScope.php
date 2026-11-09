@@ -94,7 +94,8 @@ final class CreditScope
 
     /**
      * Open policy flags of the members the caller may see: member-wide
-     * flags, and an application's own flags only when its loan is visible.
+     * flags, and an application's own flags only to a caller with
+     * `loans:view` who can see its loan.
      *
      * @return Builder<CreditPolicyFlag>
      */
@@ -103,7 +104,7 @@ final class CreditScope
         return CreditPolicyFlag::query()
             ->open()
             ->whereIn('borrower_id', $this->memberIds($user))
-            ->where(fn ($q) => $q->whereNull('loan_id')->orWhereIn('loan_id', $this->loanIds($user)));
+            ->where(fn ($q) => $q->whereNull('loan_id')->when($user->can('loans:view'), fn ($q) => $q->orWhereIn('loan_id', $this->loanIds($user))));
     }
 
     /**

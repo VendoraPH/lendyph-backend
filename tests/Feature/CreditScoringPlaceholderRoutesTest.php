@@ -38,6 +38,7 @@ function creditScoringEndpoints(): array
         'GET borrower' => ['GET', '/api/credit-scoring/borrowers/{member}', ['credit_scoring:view']],
         'GET borrower history' => ['GET', '/api/credit-scoring/borrowers/{member}/history', ['credit_scoring:view']],
         'GET borrower policy flags' => ['GET', '/api/credit-scoring/borrowers/{member}/policy-flags', ['credit_scoring:view']],
+        'GET borrower decisions' => ['GET', '/api/credit-scoring/borrowers/{member}/decisions', ['credit_scoring:view']],
         'GET score history' => ['GET', '/api/credit-scoring/score-history', ['credit_scoring:view']],
         'GET risk monitoring' => ['GET', '/api/credit-scoring/risk-monitoring', ['credit_scoring:view']],
         'GET scorecard config' => ['GET', '/api/credit-scoring/scorecard-config', ['credit_scoring:settings']],
@@ -69,7 +70,7 @@ function creditScoringUri(string $uri, Borrower $member, int $loanId): string
     return str_replace(['{member}', '{loan}'], [(string) $member->id, (string) $loanId], $uri);
 }
 
-it('serves exactly the endpoints the frontend calls, plus the loan assessment', function () {
+it('serves exactly the endpoints the frontend calls, plus the loan assessment and a member\'s decisions', function () {
     $routes = collect(Route::getRoutes()->getRoutes())
         ->filter(fn ($route) => str_starts_with($route->uri(), 'api/credit-scoring'))
         ->flatMap(fn ($route) => collect($route->methods())
@@ -82,6 +83,7 @@ it('serves exactly the endpoints the frontend calls, plus the loan assessment', 
     expect($routes)->toBe([
         'GET /api/credit-scoring/borrowers',
         'GET /api/credit-scoring/borrowers/{borrowerId}',
+        'GET /api/credit-scoring/borrowers/{borrowerId}/decisions',
         'GET /api/credit-scoring/borrowers/{borrowerId}/history',
         'GET /api/credit-scoring/borrowers/{borrowerId}/policy-flags',
         'GET /api/credit-scoring/dashboard',
@@ -155,4 +157,4 @@ it('answers 404 to a borrower id that is not a number', function (string $suffix
     $this->actingAs(creditScoringCallerInRole('admin'))
         ->getJson("/api/credit-scoring/borrowers/abc{$suffix}")
         ->assertNotFound();
-})->with(['', '/history', '/policy-flags']);
+})->with(['', '/history', '/policy-flags', '/decisions']);

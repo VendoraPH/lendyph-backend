@@ -19,10 +19,7 @@ class SaveCreditAssessmentRequest extends FormRequest
 {
     public const MONEY_FIELDS = ['other_income', 'business_income', 'household_expenses', 'outside_debt_payments'];
 
-    public const PROFILE_FIELDS = [
-        'other_income', 'business_income', 'household_expenses', 'outside_debt_payments', 'outside_lenders_count',
-        'employment_status', 'business_start_date', 'years_at_residence', 'verified_references_count', 'income_verification',
-    ];
+    public const PROFILE_FIELDS = CreditApplicationProfile::DETAIL_FIELDS;
 
     public function authorize(): bool
     {

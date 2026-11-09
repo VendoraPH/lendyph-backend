@@ -145,7 +145,7 @@ it('reads the debt flags generically when the figures are hidden, and in full wi
     $fullFlags = collect($this->actingAs($this->full)->getJson("/api/credit-scoring/loans/{$loan->id}/assessment")->json('data.policy_flags'))->pluck('detail', 'label');
 
     expect($memberFlags['too_many_active_loans'])->toBe('The member\'s active loans, outside lenders included, exceed the policy limit.')
-        ->and($memberFlags['debt_service_above_caution'])->toBe('Debt payments take more of the member\'s income than the caution level.')
+        ->and($memberFlags->has('debt_service_above_caution'))->toBeFalse('A loan\'s own flag needs loans:view.')
         ->and($fullFlags['debt_service_above_caution'])->toContain('52.10%')
         ->and($fullFlags['too_many_active_loans'])->toContain('4 active loans');
 });

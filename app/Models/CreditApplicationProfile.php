@@ -19,6 +19,29 @@ class CreditApplicationProfile extends Model
 
     public const INCOME_VERIFICATIONS = ['verified', 'failed'];
 
+    /**
+     * The application details: what staff enter and what the score reads.
+     * The notice fields are not details.
+     */
+    public const DETAIL_FIELDS = [
+        'other_income', 'business_income', 'household_expenses', 'outside_debt_payments', 'outside_lenders_count',
+        'employment_status', 'business_start_date', 'years_at_residence', 'verified_references_count', 'income_verification',
+    ];
+
+    /**
+     * Whether the profile holds at least one detail.
+     */
+    public function hasDetails(): bool
+    {
+        foreach (self::DETAIL_FIELDS as $field) {
+            if ($this->getAttribute($field) !== null) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     protected $fillable = [
         'loan_id',
         'other_income',

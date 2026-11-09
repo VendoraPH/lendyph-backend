@@ -24,8 +24,14 @@ use Illuminate\Support\Facades\DB;
  *   applied restructure adjustment), which keep their own status.
  * - `periods`: their schedule rows, each with `allocations`, the principal
  *   and interest each posted payment put on it, in payment order.
- * - `profile`: the application loan's own details, else the member's most
- *   recent ones on any loan.
+ * - `profile`: the application details the score reads, counting only a
+ *   profile that holds at least one detail
+ *   (CreditApplicationProfile::DETAIL_FIELDS). An application is judged on
+ *   its own details alone: its own profile, or none, never another loan's.
+ *   A member's own score reads their most recent detailed profile on any
+ *   loan, so one that records only the notice never hides earlier details.
+ * - `noticeAcknowledged`: whether the application loan's own profile
+ *   records the member's acknowledgement of the credit assessment notice.
  * - `applicationLoan`: the loan being assessed, if any; it is never part of
  *   `loans`, which holds released loans only.
  */
@@ -45,6 +51,7 @@ final class MemberCreditData
         public readonly ?CreditApplicationProfile $profile,
         public readonly ?Loan $applicationLoan,
         public readonly Carbon $asOf,
+        public readonly bool $noticeAcknowledged = false,
     ) {}
 
     public static function load(int $borrowerId, ?Loan $applicationLoan = null, ?Carbon $asOf = null): self
@@ -82,6 +89,8 @@ final class MemberCreditData
             ->map(fn ($id) => (int) $id)
             ->all();
 
+        $own = $applicationLoan === null ? null : CreditApplicationProfile::query()->where('loan_id', $applicationLoan->id)->first();
+
         $hasValidId = DB::table('documents')
             ->where('documentable_type', Borrower::class)
             ->where('documentable_id', $borrowerId)
@@ -94,9 +103,10 @@ final class MemberCreditData
             $periods,
             $inPlaceRestructured,
             $hasValidId,
-            self::profileFor($borrowerId, $applicationLoan),
+            $applicationLoan === null ? self::newestDetailedProfile($borrowerId) : ($own?->hasDetails() ? $own : null),
             $applicationLoan,
             $asOf,
+            $own?->notice_acknowledged_at !== null,
         );
     }
 
@@ -169,18 +179,19 @@ final class MemberCreditData
         });
     }
 
-    private static function profileFor(int $borrowerId, ?Loan $applicationLoan): ?CreditApplicationProfile
+    /**
+     * The member's most recent profile, on any of their loans, that holds at
+     * least one detail.
+     */
+    private static function newestDetailedProfile(int $borrowerId): ?CreditApplicationProfile
     {
-        if ($applicationLoan !== null) {
-            $own = CreditApplicationProfile::query()->where('loan_id', $applicationLoan->id)->first();
-
-            if ($own !== null) {
-                return $own;
-            }
-        }
-
         return CreditApplicationProfile::query()
             ->whereIn('loan_id', DB::table('loans')->where('borrower_id', $borrowerId)->select('id'))
+            ->where(function ($any) {
+                foreach (CreditApplicationProfile::DETAIL_FIELDS as $field) {
+                    $any->orWhereNotNull($field);
+                }
+            })
             ->orderByDesc('loan_id')
             ->first();
     }

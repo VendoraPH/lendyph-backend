@@ -10,7 +10,10 @@ use Illuminate\Validation\Validator;
 /**
  * Filters for the scored member list (`BorrowerScoreFilters`). A
  * `branch_id` outside the caller's branches answers 403 in the controller.
- * `borrower_type` and `loan_product_id` aren't filters here and are ignored.
+ * `search` matches the member's name or code, case-insensitive, with %, _
+ * and \ matched literally (Borrower::scopeSearch(), without contact
+ * details). `borrower_type` and `loan_product_id` aren't filters here and
+ * are ignored.
  * `has_active_loan` and `past_due` are loan facts and need `loans:view`
  * (422 otherwise), as the row fields do.
  */
@@ -29,6 +32,7 @@ class ListBorrowerScoresRequest extends FormRequest
     public function rules(): array
     {
         return [
+            'search' => ['sometimes', 'nullable', 'string', 'max:100'],
             'branch_id' => ['sometimes', 'integer', 'min:1'],
             'risk_level' => ['sometimes', 'string', Rule::in(Portfolio::RISK_LEVELS)],
             'min_score' => ['sometimes', 'integer', 'min:0', 'max:100'],
