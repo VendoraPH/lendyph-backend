@@ -7,6 +7,7 @@ use App\Models\Loan;
 use App\Models\LoanApprovalStep;
 use App\Models\Role;
 use App\Models\User;
+use App\Services\LoanService;
 use Tests\TestCase;
 use Tests\Traits\PostsJournals;
 use Tests\Traits\SetupLendyPH;
@@ -25,7 +26,7 @@ class RestructureTermsRetakeTest extends TestCase
 {
     use PostsJournals, ReleasesLoans, SetupLendyPH;
 
-    private const PAID_DOWN = 'The source loan was paid down or adjusted after approval. Send the restructure back for approval again.';
+    private const PAID_DOWN = 'The source loan was paid down or adjusted after this restructure was approved. Void this restructure and create it again with the current balance.';
 
     protected function setUp(): void
     {
@@ -131,6 +132,18 @@ class RestructureTermsRetakeTest extends TestCase
             ->assertJsonValidationErrors(['principal_amount' => self::PAID_DOWN]);
 
         $this->assertSame($before, $this->releaseState());
+    }
+
+    public function test_the_refusal_is_worded_by_the_restructures_status(): void
+    {
+        // Release and its preview only reach the check on an approved loan,
+        // which can't be sent back: it is voided and created again.
+        $this->assertSame(self::PAID_DOWN, LoanService::sourceFellMessage('approved'));
+        // Still in review, it can be sent back.
+        $this->assertSame(
+            'The source loan was paid down or adjusted after approval. Send the restructure back for approval again.',
+            LoanService::sourceFellMessage('for_review'),
+        );
     }
 
     public function test_editing_a_restructure_with_the_same_principal_re_takes_moved_figures(): void

@@ -1888,9 +1888,21 @@ class LoanService
 
         if ($owed < $approved || self::toCentavos((float) $loan->principal_amount) > $owed) {
             throw ValidationException::withMessages([
-                'principal_amount' => ['The source loan was paid down or adjusted after approval. Send the restructure back for approval again.'],
+                'principal_amount' => [self::sourceFellMessage($loan->status)],
             ]);
         }
+    }
+
+    /**
+     * The refusal for a source that owes less than was approved, worded by
+     * the restructure's status: one still in review is sent back, an approved
+     * one can't be, so it is voided and created again.
+     */
+    public static function sourceFellMessage(string $status): string
+    {
+        return $status === 'approved'
+            ? 'The source loan was paid down or adjusted after this restructure was approved. Void this restructure and create it again with the current balance.'
+            : 'The source loan was paid down or adjusted after approval. Send the restructure back for approval again.';
     }
 
     /**

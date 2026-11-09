@@ -195,7 +195,7 @@ class InsuranceOwedRestructureTest extends TestCase
 
         $this->patchJson("/api/loans/{$new->id}/release")
             ->assertUnprocessable()
-            ->assertJsonValidationErrors(['principal_amount' => 'The source loan was paid down or adjusted after approval. Send the restructure back for approval again.']);
+            ->assertJsonValidationErrors(['principal_amount' => 'The source loan was paid down or adjusted after this restructure was approved. Void this restructure and create it again with the current balance.']);
 
         $this->assertContains($source->fresh()->status, ['released', 'ongoing']);
         $this->assertSame('approved', $new->fresh()->status);

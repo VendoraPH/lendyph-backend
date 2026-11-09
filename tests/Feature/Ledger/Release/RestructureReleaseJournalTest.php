@@ -25,7 +25,7 @@ class RestructureReleaseJournalTest extends TestCase
 {
     use PostsJournals, ReleasesLoans, SetupLendyPH;
 
-    private const PAID_DOWN = 'The source loan was paid down or adjusted after approval. Send the restructure back for approval again.';
+    private const PAID_DOWN = 'The source loan was paid down or adjusted after this restructure was approved. Void this restructure and create it again with the current balance.';
 
     protected function setUp(): void
     {
