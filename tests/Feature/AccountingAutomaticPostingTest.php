@@ -589,15 +589,15 @@ class AccountingAutomaticPostingTest extends TestCase
         $this->seedChartOfAccounts();
 
         $loan = $this->releaseLoanWithDeductions();
-        $provision = $this->postSimpleJournal('5140', '1110', 250_000, [
+        $writeOff = $this->postSimpleJournal('5140', '1110', 250_000, [
             'source' => 'credit_loss',
             'postable_type' => Loan::class,
             'postable_id' => $loan->id,
         ]);
 
-        $this->assertNotNull($provision);
-        $this->assertSame('credit_loss', $provision->source);
-        $this->assertNotSame($this->journalFor($loan, 'loan_release')->id, $provision->id);
+        $this->assertNotNull($writeOff);
+        $this->assertSame('credit_loss', $writeOff->source);
+        $this->assertNotSame($this->journalFor($loan, 'loan_release')->id, $writeOff->id);
         $this->assertSame(2, AccountingJournal::query()->where('postable_id', $loan->id)->count());
     }
 
