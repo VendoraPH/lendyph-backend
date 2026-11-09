@@ -164,6 +164,11 @@ final class AssessmentService
         $this->assertEditable(Loan::query()->select(['id', 'status'])->lockForUpdate()->findOrFail($loan->id));
 
         $profile = CreditApplicationProfile::query()->firstOrNew(['loan_id' => $loan->id]);
+
+        if (! $profile->exists && $fields === [] && $noticeAcknowledged !== true) {
+            return;
+        }
+
         $profile->fill($fields);
 
         if ($noticeAcknowledged === true) {

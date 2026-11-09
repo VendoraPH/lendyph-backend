@@ -94,9 +94,7 @@ final class PolicyFlags
                 $raise('income_verification_failed', 'The member\'s declared income could not be verified.', 'loan');
             }
 
-            $ownProfile = $data->profile !== null && (int) $data->profile->loan_id === (int) $data->applicationLoan->id;
-
-            if (! $ownProfile || $data->profile->notice_acknowledged_at === null) {
+            if (! $data->noticeAcknowledged) {
                 $raise('notice_not_recorded', 'The member\'s acknowledgement of the credit assessment notice is not recorded for this loan.', 'loan');
             }
         }

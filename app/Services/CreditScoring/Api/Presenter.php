@@ -321,7 +321,7 @@ final class Presenter
      *
      * @return array<string, mixed>
      */
-    public function decision(CreditDecision $decision, bool $details = true): array
+    public function decision(CreditDecision $decision, bool $details): array
     {
         $shape = [
             'id' => (int) $decision->id,
