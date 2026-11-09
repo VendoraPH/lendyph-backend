@@ -34,8 +34,12 @@ use LogicException;
  * 2. The 3050 Opening Balance Equity row: the serialisation row both paths
  *    queue on (see the CLI's post() for why a real row and not the gap).
  * 3. The screen's draft row, through `$whileLocked` (the CLI has none).
- * 4. The locking re-check for an `opening_balance` journal, current read.
- * 5. No closed month after the date (the later periods under a shared lock).
+ * 4. The periods, through lockThePeriods(): the month covering the date and
+ *    every later month, under a shared lock. Before any opening-journal lock:
+ *    a year-end close or reopen locks its months first and then inserts
+ *    journals, so a run that held the `opening_balance` gap while it waited
+ *    for the months could deadlock with it.
+ * 5. The locking re-check for an `opening_balance` journal, current read.
  * 6. JournalPoster::postImmediately().
  *
  * Each path refuses the second opening balance, ever.
@@ -64,10 +68,13 @@ class OpeningBalancePoster
      * `$attributes` carries the reference and description; the date, the
      * source and the (absent) branch are set here. `$whileLocked` runs once
      * the allowance and 3050 rows are held and before the re-check, which is
-     * where the screen locks and checks its draft.
+     * where the screen locks and checks its draft. It takes the period locks
+     * itself, right after the draft's and before any journal lock, and
+     * answers lockThePeriods()' refusal; without it, they are taken here.
      *
      * @param  list<array{account_id: int, debit: int, credit: int, description?: string|null}>  $lines
      * @param  array{reference?: string|null, description?: string|null}  $attributes
+     * @param  (Closure(): ?ValidationException)|null  $whileLocked
      */
     public function post(
         array $lines,
@@ -83,9 +90,7 @@ class OpeningBalancePoster
 
         $this->lockInOrder(array_column($lines, 'account_id'));
 
-        if ($whileLocked !== null) {
-            $whileLocked();
-        }
+        $periodRefusal = $whileLocked !== null ? $whileLocked() : $this->lockThePeriods($asOf);
 
         $racing = $this->lockedOpeningJournal();
 
@@ -98,10 +103,8 @@ class OpeningBalancePoster
             ]);
         }
 
-        $laterClosed = $this->laterClosedReason($asOf, lock: true);
-
-        if ($laterClosed !== null) {
-            throw ValidationException::withMessages(['as_of' => [$laterClosed]]);
+        if ($periodRefusal !== null) {
+            throw $periodRefusal;
         }
 
         return $this->poster->postImmediately(
@@ -182,8 +185,10 @@ class OpeningBalancePoster
                 ['reference' => self::REFERENCE, 'description' => 'Opening balances as of '.$asOf],
                 $draft,
                 $userId,
-                function () use ($draft, $editVersion, $readVersion, $lines, $asOf, &$locked): void {
-                    $locked = $this->assertFinalisable($draft->id, $editVersion, $readVersion, $lines, $asOf);
+                function () use ($draft, $editVersion, $readVersion, $lines, $asOf, &$locked): ?ValidationException {
+                    [$locked, $periodRefusal] = $this->assertFinalisable($draft->id, $editVersion, $readVersion, $lines, $asOf);
+
+                    return $periodRefusal;
                 },
             );
 
@@ -237,17 +242,22 @@ class OpeningBalancePoster
     }
 
     /**
-     * The draft, locked, and every reason it can't post now.
+     * The draft, locked, then the period locks, and every reason the draft
+     * can't post now. The periods' refusal is answered rather than thrown, so
+     * post() refuses with it after its own re-check, as before.
      *
      * @param  list<array{account_id: int, debit: int, credit: int}>  $lines
+     * @return array{0: AccountingOpeningBalance, 1: ValidationException|null}
      */
-    private function assertFinalisable(int $draftId, int $editVersion, int $readVersion, array $lines, string $asOf): AccountingOpeningBalance
+    private function assertFinalisable(int $draftId, int $editVersion, int $readVersion, array $lines, string $asOf): array
     {
         $locked = AccountingOpeningBalance::query()->whereKey($draftId)->lockForUpdate()->first();
 
         if ($locked === null) {
             throw self::conflict(self::STALE);
         }
+
+        $periodRefusal = $this->lockThePeriods($asOf);
 
         if ($locked->isFinalised()) {
             // A locking read by id, so it is current: this transaction's
@@ -277,13 +287,28 @@ class OpeningBalancePoster
             throw ValidationException::withMessages(['lines' => [$reason]]);
         }
 
+        return [$locked, $periodRefusal];
+    }
+
+    /**
+     * Step 4 of the order: takes the period locks for an opening balance
+     * dated `$asOf` (the covering month through PeriodGuard, then every later
+     * month, each under a shared lock) and answers why it can't be dated
+     * there, on `as_of`, or null. Answered, not thrown, so each caller keeps
+     * its own order of refusals while taking the locks before any
+     * opening-journal lock.
+     */
+    public function lockThePeriods(string $asOf): ?ValidationException
+    {
         try {
             $this->periods->assertOpen($asOf, 'The opening balances');
         } catch (ValidationException $e) {
-            throw ValidationException::withMessages(['as_of' => $e->errors()['date'] ?? $e->errors()]);
+            return ValidationException::withMessages(['as_of' => $e->errors()['date'] ?? $e->errors()]);
         }
 
-        return $locked;
+        $laterClosed = $this->laterClosedReason($asOf, lock: true);
+
+        return $laterClosed === null ? null : ValidationException::withMessages(['as_of' => [$laterClosed]]);
     }
 
     /**

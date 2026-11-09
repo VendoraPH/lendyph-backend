@@ -8,7 +8,9 @@ use App\Models\AccountingYearClose;
 use App\Models\AccountingYearCloseEntry;
 use App\Models\AuditLog;
 use App\Services\Accounting\TrialBalanceBuilder;
+use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Database\UniqueConstraintViolationException;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 use Tests\TestCase;
 use Tests\Traits\PostsJournals;
@@ -270,6 +272,41 @@ class YearEndCloseTest extends TestCase
         $changes = collect($this->getJson("/api/audit-logs/{$audit->id}")->assertOk()->json('data.changes'))->keyBy('field');
 
         $this->assertSame('₱69,200.50', $changes['net_surplus']['new']);
+    }
+
+    /**
+     * The books' coverage is checked before the close's transaction: with no
+     * journal yet, the close adds no month of 2025. A first journal into 2025
+     * posted in that moment used to let the close commit with no month closed,
+     * so 2025 kept taking postings. The close answers 409 instead, and the
+     * retry adds the twelve months and closes them.
+     */
+    public function test_a_close_racing_the_first_journal_into_the_year_answers_409_and_the_retry_closes_every_month(): void
+    {
+        $raced = false;
+
+        DB::listen(function (QueryExecuted $query) use (&$raced): void {
+            if ($raced || ! str_starts_with(strtolower($query->sql), 'select min(`date`)')) {
+                return;
+            }
+
+            $raced = true;
+            $this->postSimpleJournal('1010', '4010', 500000, ['date' => '2025-06-15', 'branch_id' => $this->branch->id]);
+        });
+
+        $this->closeYear()
+            ->assertStatus(409)
+            ->assertJsonPath('message', 'Another year-end close or reopen of 2025 was saved at the same time. Reload and try again.');
+
+        $this->assertTrue($raced, 'the journal never raced the close, so this test proved nothing');
+        $this->assertSame(0, AccountingYearClose::query()->count());
+        $this->assertSame(0, AccountingJournal::query()->where('source', 'closing')->count());
+
+        $this->closed();
+
+        $closedMonths = AccountingPeriod::query()->where('code', 'like', '2025-%')->where('status', 'closed')->pluck('id')->sort()->values()->all();
+        $this->assertCount(12, $closedMonths);
+        $this->assertSame($closedMonths, collect(AccountingYearClose::query()->sole()->periods_closed)->map(fn ($id): int => (int) $id)->sort()->values()->all());
     }
 
     public function test_the_close_needs_accounting_close_and_view_all(): void

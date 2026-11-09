@@ -95,7 +95,7 @@ class AccountingYearCloseController extends Controller
     #[OA\Get(
         path: '/api/accounting/year-closes/preview',
         summary: 'What closing a year would post and close',
-        description: '`{data: {year, as_of: "YYYY-12-31", net_surplus_account {id, code, name} or null, branches: [{branch {id, name} or null, lines: [{account_id, account_code, account_name, type, amount}], total_income, total_expenses, net_surplus}], total_income, total_expenses, net_surplus, periods_to_close: [{id, name}], draft_journals, can_close, blocking_reasons: [string]}}`. Centavos; a line\'s `amount` is the account\'s net for the year as it normally reads (income credit − debit, expense debit − credit). Branches with nothing to close are left out; named branches come in name order, the no-branch group last. Closing entries and their reversals are left out of the figures. Posts nothing; makes sure each month of an ended year has its period row.',
+        description: '`{data: {year, as_of: "YYYY-12-31", net_surplus_account {id, code, name} or null, branches: [{branch {id, name} or null, lines: [{account_id, account_code, account_name, type, amount}], total_income, total_expenses, net_surplus}], total_income, total_expenses, net_surplus, periods_to_close: [{id, name}], draft_journals, can_close, blocking_reasons: [string]}}`. Centavos; a line\'s `amount` is the account\'s net for the year as it normally reads (income credit − debit, expense debit − credit). Branches with nothing to close are left out; named branches come in name order, the no-branch group last. Closing entries and their reversals are left out of the figures. Posts nothing; makes sure each month of an ended year the books cover has its period row.',
         tags: ['Accounting'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'year', in: 'query', required: true, schema: new OA\Schema(type: 'integer'))],
@@ -120,7 +120,7 @@ class AccountingYearCloseController extends Controller
     #[OA\Post(
         path: '/api/accounting/year-closes',
         summary: 'Close a year',
-        description: 'Posts one `closing` journal per branch with income or expense in the year (plus one for journals with no branch), dated 31 December, moving each account\'s net to the `net_surplus` account, then closes every month of the year still open. Answers 201 with the row as in the list. 422 with every blocking reason on `year`; 409 when the year is already closed or another close is running.',
+        description: 'Posts one `closing` journal per branch with income or expense in the year (plus one for journals with no branch), dated 31 December, moving each account\'s net to the `net_surplus` account, then closes every month of the year still open. Answers 201 with the row as in the list. 422 with every blocking reason on `year`; 409 when the year is already closed, another close is running, or the year\'s first journal was posted as the close started (a retry closes every month).',
         tags: ['Accounting'],
         security: [['sanctum' => []]],
         requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent(required: ['year'], properties: [
@@ -129,7 +129,7 @@ class AccountingYearCloseController extends Controller
         responses: [
             new OA\Response(response: 201, description: 'The close'),
             new OA\Response(response: 403, description: 'Missing accounting:close or branches:view_all'),
-            new OA\Response(response: 409, description: 'Already closed, or a close is racing this one'),
+            new OA\Response(response: 409, description: 'Already closed, a close is racing this one, or the year\'s first journal raced it; retry'),
             new OA\Response(response: 422, description: 'The year cannot be closed yet (errors.year lists why)'),
         ],
     )]

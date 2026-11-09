@@ -190,7 +190,7 @@ class YearEndPreviewTest extends TestCase
 
         $preview = $this->preview();
         $this->assertSame(1, $preview['draft_journals']);
-        $this->assertSame(['1 draft journal is dated in 2025. Post or delete it first.'], $preview['blocking_reasons']);
+        $this->assertSame(['1 draft journal is dated in 2025. Post it or move it out of the year first.'], $preview['blocking_reasons']);
 
         $this->draftJournal($line, ['date' => '2025-12-31', 'branch_id' => null]);
         $this->draftJournal($line, ['date' => '2025-01-01', 'branch_id' => $this->far->id]);
@@ -199,7 +199,7 @@ class YearEndPreviewTest extends TestCase
 
         $preview = $this->preview();
         $this->assertSame(3, $preview['draft_journals']);
-        $this->assertSame(['3 draft journals are dated in 2025. Post or delete them first.'], $preview['blocking_reasons']);
+        $this->assertSame(['3 draft journals are dated in 2025. Post them or move them out of the year first.'], $preview['blocking_reasons']);
         $this->assertFalse($preview['can_close']);
     }
 
