@@ -8,7 +8,9 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 /**
  * Each member's current credit score, one row per member, so the score lists
  * read one row each. `checked_at` is the last recalculation; `calculated_at`
- * is when the current score row was written. Kept by the Recalculator only.
+ * is when the current score row was written. `flags_profile_id` is the
+ * application details the member's open flags were last raised from, set on
+ * every run. Kept by the Recalculator only.
  */
 class CreditScoreMember extends Model
 {
@@ -17,6 +19,7 @@ class CreditScoreMember extends Model
         'branch_id',
         'credit_score_id',
         'previous_credit_score_id',
+        'flags_profile_id',
         'status',
         'score_type',
         'score',
