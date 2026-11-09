@@ -12,6 +12,7 @@ use App\Models\LoanProduct;
 use App\Models\Role;
 use App\Models\User;
 use App\Services\AuditLogModules;
+use App\Services\PersonalDataKeys;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Http\Request;
@@ -240,9 +241,30 @@ class AuditLogResource extends JsonResource
         return is_int($value) || (is_string($value) && ctype_digit($value));
     }
 
+    /**
+     * A row's old and new values as $user may read them: without the personal
+     * fields of a member, co-maker or credit application row for a caller
+     * without `borrowers:view` (PersonalDataKeys). The list, the detail and the
+     * CSV all read them through here. The stored row is never changed.
+     *
+     * @return array{0: mixed, 1: mixed}
+     */
+    public static function valuesShownTo(AuditLog $log, ?User $user): array
+    {
+        if (PersonalDataKeys::auditReaderSeesThem($user)) {
+            return [$log->old_values, $log->new_values];
+        }
+
+        return array_map(
+            fn (mixed $values) => is_array($values) ? PersonalDataKeys::withoutThemForAuditTarget($log->auditable_type, $values) : $values,
+            [$log->old_values, $log->new_values],
+        );
+    }
+
     public function toArray(Request $request): array
     {
         $basename = $this->auditable_type ? class_basename($this->auditable_type) : null;
+        [$oldValues, $newValues] = self::valuesShownTo($this->resource, $request->user());
 
         return [
             'id' => $this->id,
@@ -261,12 +283,12 @@ class AuditLogResource extends JsonResource
                 'label' => $this->resolveAuditableLabel(),
             ] : null,
             // Structured diff of old vs new values
-            'changes' => $this->buildChanges(),
+            'changes' => $this->buildChanges($oldValues, $newValues),
             // Legacy fields kept for backward compat
             'auditable_type' => $basename,
             'auditable_id' => $this->auditable_id,
-            'old_values' => $this->old_values,
-            'new_values' => $this->new_values,
+            'old_values' => $oldValues,
+            'new_values' => $newValues,
             'ip_address' => $this->ip_address,
             'description' => $this->description,
             'created_at' => $this->created_at,
@@ -342,18 +364,19 @@ class AuditLogResource extends JsonResource
      * detail ($this->detailed()), else as JSON, unless the same yes or no, moment
      * or date was only written two ways, which isn't a change (two moments in
      * one minute show their seconds). Display only;
-     * old_values and new_values are returned as stored.
+     * old_values and new_values are returned as stored, less what the caller
+     * may not read (self::valuesShownTo()).
      *
      * @return list<array{field: string, old: string|null, new: string|null}>
      */
-    private function buildChanges(): array
+    private function buildChanges(mixed $oldValues, mixed $newValues): array
     {
         if ($this->action === 'created') {
             return [];
         }
 
-        $old = is_array($this->old_values) ? $this->old_values : [];
-        $new = is_array($this->new_values) ? $this->new_values : null;
+        $old = is_array($oldValues) ? $oldValues : [];
+        $new = is_array($newValues) ? $newValues : null;
 
         $changes = [];
 
