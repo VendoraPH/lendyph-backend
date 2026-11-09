@@ -13,8 +13,11 @@ use App\Models\Repayment;
 use App\Models\ShareCapitalLedger;
 use App\Services\Accounting\AccountMap;
 use App\Services\Accounting\AutomaticPoster;
+use App\Services\Accounting\JournalPoster;
 use App\Services\Accounting\PostingRules;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\ValidationException;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 use Tests\Traits\PostsJournals;
@@ -443,18 +446,29 @@ class PostingRulesNewTest extends TestCase
         $this->assertSame(['interest' => 0, 'penalty' => 0], $this->poster()->unrecognisedDeferral($new->fresh()));
     }
 
-    public function test_a_reduction_that_leaves_periods_open_keeps_the_deferral(): void
+    /**
+     * Since 2026-11-09 a reduction that leaves periods open clears only its
+     * share: ₱10,000.00 of ₱60,000.00 outstanding clears a sixth of the
+     * deferral (tests/Feature/Ledger/Deferral covers the rest).
+     */
+    public function test_a_reduction_that_leaves_periods_open_clears_only_its_share_of_the_deferral(): void
     {
         $source = $this->createReleasedLoan();
         $new = $this->restructureOf($this->createReleasedLoan(), $source, 5_000_000, 700_000, 300_000, 0);
         $this->seedChartOfAccounts();
         $this->poster()->restructureRelease($new, $source, $this->admin->id, 'cash');
-        $adjustment = $this->balanceAdjustmentOn($new, -100_000);
+        $id = $this->postJson("/api/loans/{$new->id}/adjustments", [
+            'adjustment_type' => 'balance_adjustment',
+            'new_values' => ['adjustment_amount' => -10_000],
+        ])->assertCreated()->json('data.id');
+        $this->patchJson("/api/loan-adjustments/{$id}/approve")->assertOk();
+        $this->patchJson("/api/loan-adjustments/{$id}/apply")->assertOk();
 
-        $journal = $this->poster()->balanceAdjustment($adjustment, -100_000, $this->admin->id);
+        $journal = $this->poster()->balanceAdjustment(LoanAdjustment::findOrFail($id), -1_000_000, $this->admin->id);
 
-        $this->assertSame(0, $this->sumOn($journal, '1210', 'debit'));
-        $this->assertSame(['interest' => 700_000, 'penalty' => 300_000], $this->poster()->unrecognisedDeferral($new->fresh()));
+        $this->assertSame(166_667, $this->sumOn($journal, '1210', 'debit'));
+        $this->assertSame(0, $this->described($journal, PostingRules::DEFERRAL_CLEARED_LINE, 'debit'));
+        $this->assertSame(['interest' => 583_333, 'penalty' => 250_000], $this->poster()->unrecognisedDeferral($new->fresh()));
     }
 
     // ── Share capital entries ──
@@ -666,6 +680,78 @@ class PostingRulesNewTest extends TestCase
         $this->pay($new);
 
         $this->assertSame(0, AccountingJournal::count());
+    }
+
+    /** A Loan key is a caller's mistake, so it is refused with or without books, as a missing transaction is. */
+    public function test_without_a_chart_a_provision_or_allowance_adjustment_keyed_on_a_loan_is_still_refused(): void
+    {
+        $loan = $this->createReleasedLoan();
+        $calls = [
+            'creditLossProvision' => fn () => $this->poster()->creditLossProvision($loan, '2500.00', $this->admin->id),
+            'allowanceAdjustment' => fn () => $this->poster()->allowanceAdjustment($loan, 300_000, null, '2026-11-07', $this->admin->id),
+        ];
+
+        foreach ($calls as $method => $call) {
+            try {
+                $call();
+                $this->fail("{$method}() accepted a loan key without books.");
+            } catch (CannotPostToTheBooksException $e) {
+                $this->assertStringContainsString('restructure write-off', $e->getMessage(), $method);
+            }
+        }
+    }
+
+    // ── The allowance lock order (JournalPoster) ──
+
+    /**
+     * A post takes the allowance lock only if the draft it read had an
+     * allowance line. If one appears before its journal lock (an edit landing
+     * in between), the lock order can no longer be kept, so it is refused
+     * rather than posted out of order.
+     */
+    public function test_a_draft_that_gains_an_allowance_line_while_it_is_being_posted_is_refused(): void
+    {
+        $this->seedChartOfAccounts();
+        $draft = $this->draftJournal([
+            ['account_id' => $this->account('5140'), 'debit' => 100_000, 'credit' => 0],
+            ['account_id' => $this->account('1010'), 'debit' => 0, 'credit' => 100_000],
+        ]);
+        $edited = false;
+
+        DB::connection()->beforeExecuting(function (string $query, array $bindings) use (&$edited, $draft): void {
+            $sql = strtolower($query);
+
+            if ($edited
+                || ! str_starts_with($sql, 'select * from `accounting_journals`')
+                || ! str_contains($sql, 'for update')
+                || (int) ($bindings[0] ?? 0) !== $draft->id) {
+                return;
+            }
+
+            $edited = true;
+
+            foreach ([[3, '1010', 50_000, 0], [4, '1200', 0, 50_000]] as [$lineNo, $code, $debit, $credit]) {
+                DB::table('accounting_journal_lines')->insert([
+                    'accounting_journal_id' => $draft->id,
+                    'accounting_account_id' => $this->account($code),
+                    'line_no' => $lineNo,
+                    'debit' => $debit,
+                    'credit' => $credit,
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
+            }
+        });
+
+        try {
+            app(JournalPoster::class)->post($draft, $this->admin->id);
+            $this->fail('A draft that gained an allowance line mid-post was posted.');
+        } catch (ValidationException $e) {
+            $this->assertTrue($edited, 'the draft was never edited mid-post, so this test proved nothing');
+            $this->assertStringContainsString('changed while it was being posted', $e->getMessage());
+        }
+
+        $this->assertSame('draft', $draft->fresh()->status);
     }
 
     public function test_an_unmapped_new_role_refuses_and_writes_nothing(): void

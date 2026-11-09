@@ -160,6 +160,22 @@ class TimezoneShift
         'accounting_journal_lines' => ['created_at', 'updated_at'],
         'accounting_journals' => ['created_at', 'posted_at', 'updated_at'],
         'borrower_submission_tokens' => ['created_at', 'expires_at', 'updated_at'],
+        // Added 2026-11-08 with credit scoring (Phase 2), well after the cutover
+        // completed (2026-08-06 on every deployment), so none of these tables can
+        // hold a row written by the old UTC application. Same reasoning as the
+        // csv_import_* tables below. `business_start_date` is a DATE, so it is
+        // not listed.
+        'credit_application_profiles' => ['created_at', 'notice_acknowledged_at', 'updated_at'],
+        'credit_decisions' => ['created_at', 'decided_at'],
+        'credit_policy_flags' => ['cleared_at', 'created_at', 'first_triggered_at', 'last_seen_at', 'updated_at'],
+        'credit_risk_alerts' => ['created_at', 'updated_at'],
+        'credit_score_dirty_members' => ['created_at', 'flagged_at', 'updated_at'],
+        'credit_score_factors' => ['created_at'],
+        'credit_score_members' => ['calculated_at', 'checked_at', 'created_at', 'updated_at'],
+        'credit_scorecard_revisions' => ['created_at', 'updated_at'],
+        'credit_scores' => ['calculated_at', 'created_at'],
+        'credit_scoring_cursors' => ['created_at', 'updated_at', 'watermark'],
+        'credit_scoring_settings' => ['created_at', 'updated_at'],
         // The CSV migration importer's own bookkeeping. These tables were created
         // on 2026-08-29, three weeks after the cutover completed (2026-08-06 on
         // every deployment), and the shift is one-shot — the `timezone_shifts`
@@ -194,6 +210,22 @@ class TimezoneShift
         // cannot hold a row written by the old UTC application. Same reasoning
         // as the csv_import_* tables above.
         'portfolio_daily_snapshots' => ['created_at'],
+        // Added 2026-11-08 with payment reminders (Phase 2), well after the
+        // cutover completed (2026-08-06 on every deployment), so none of these
+        // tables can hold a row written by the old UTC application. Same
+        // reasoning as the csv_import_* tables above. `due_date` and
+        // `fire_date` are DATEs and the send times are TIMEs, so neither is
+        // listed.
+        'borrower_notification_preferences' => ['created_at', 'email_invalid_at', 'email_verified_at', 'mobile_invalid_at', 'mobile_verified_at', 'updated_at'],
+        'reminder_branch_settings' => ['created_at', 'updated_at'],
+        'reminder_events' => ['created_at'],
+        'reminder_messages' => ['created_at', 'delivered_at', 'redacted_at', 'scheduled_at', 'sent_at', 'updated_at'],
+        'reminder_pauses' => ['created_at', 'paused_at', 'resumed_at', 'until', 'updated_at'],
+        'reminder_queue_items' => ['claimed_at', 'created_at', 'next_attempt_at', 'scheduled_at', 'sending_started_at', 'updated_at'],
+        'reminder_rules' => ['created_at', 'updated_at'],
+        'reminder_settings' => ['created_at', 'updated_at'],
+        'reminder_staff_notices' => ['created_at'],
+        'reminder_templates' => ['created_at', 'updated_at'],
         // Added 2026-10-01, well after the cutover completed (2026-08-06 on
         // every deployment), so this table cannot hold a row written by the old
         // UTC application. Same reasoning as the csv_import_* tables above.
