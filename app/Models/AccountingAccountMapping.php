@@ -81,6 +81,11 @@ class AccountingAccountMapping extends Model
         'documentary_stamp_tax_payable',
         'withholding_tax_payable',
         'other_taxes_payable',
+        'gcash_service_income',
+        'loan_adjustments',
+        'unearned_restructure_income',
+        'net_surplus',
+        'suspense',
     ];
 
     /**
@@ -186,6 +191,27 @@ class AccountingAccountMapping extends Model
         'documentary_stamp_tax_payable' => ['type' => 'liability'],
         'withholding_tax_payable' => ['type' => 'liability'],
         'other_taxes_payable' => ['type' => 'liability'],
+
+        /*
+         * Phase 2 (approved 2026-11-08; see PostingRules):
+         *
+         * - `gcash_service_income`: the charge on a Cash In or Cash Out is
+         *   earned when the transaction posts, so income.
+         * - `loan_adjustments`: a balance adjustment clears through here, an
+         *   asset that should read zero once each one is reviewed.
+         * - `unearned_restructure_income`: interest and penalty a restructure
+         *   capitalised into the new loan's principal and has not earned yet.
+         *   A CONTRA asset, like the allowance: it subtracts from the loans it
+         *   is carried in, and an ordinary asset here would add to them.
+         * - `net_surplus`: where the year-end close moves the result, equity.
+         * - `suspense`: money received that cannot be identified yet, owed
+         *   until it is, so a liability.
+         */
+        'gcash_service_income' => ['type' => 'income'],
+        'loan_adjustments' => ['type' => 'asset'],
+        'unearned_restructure_income' => ['type' => 'asset', 'is_contra' => true],
+        'net_surplus' => ['type' => 'equity'],
+        'suspense' => ['type' => 'liability'],
     ];
 
     protected $fillable = [

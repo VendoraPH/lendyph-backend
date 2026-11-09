@@ -221,6 +221,8 @@ DESC,
             $request->date,
             $request->user(),
             $request->description,
+            $request->input('method'),
+            $request->reference_number,
         );
 
         $entry->load('borrower', 'createdByUser');
@@ -259,6 +261,8 @@ DESC,
         $entries = $this->shareCapitalService->bulkManualEntries(
             $request->entries,
             $request->user(),
+            $request->input('method'),
+            $request->reference_number,
         );
 
         return response()->json([

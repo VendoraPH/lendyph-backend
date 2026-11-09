@@ -8,9 +8,9 @@ use App\Http\Resources\ShareCapitalLedgerResource;
 use App\Models\Borrower;
 use App\Models\ShareCapitalLedger;
 use App\Services\BranchAccess;
-use App\Services\GeneratedNumberWrite;
 use App\Services\LikePattern;
 use App\Services\ShareCapitalMemberService;
+use App\Services\ShareCapitalService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Http\Resources\Json\JsonResource;
@@ -157,25 +157,29 @@ class ShareCapitalLedgerController extends Controller
                     new OA\Property(property: 'description', type: 'string'),
                     new OA\Property(property: 'type', type: 'string', enum: ['credit', 'debit']),
                     new OA\Property(property: 'amount', type: 'number'),
+                    new OA\Property(property: 'method', type: 'string', enum: ['cash', 'gcash', 'maya', 'bank_transfer', 'online'], default: 'cash'),
+                    new OA\Property(property: 'reference_number', type: 'string', maxLength: 100, nullable: true, description: 'Required unless the method is cash.'),
                 ],
             ),
         ),
         responses: [
-            new OA\Response(response: 201, description: 'Ledger entry created'),
+            new OA\Response(response: 201, description: 'Ledger entry created, and posted Dr the method\'s account / Cr 3060 Share Capital for a credit, the reverse for a debit, when the organisation keeps books'),
             new OA\Response(response: 409, description: 'Kept colliding with other saves taking the next reference. Nothing was saved; submit again.'),
             new OA\Response(response: 422, description: 'Validation error. `borrower_id` must belong to a member — a borrower whose registration is still `pending` or was `rejected` is refused here, exactly as on `/pledges/{pledge}/entries`.'),
         ],
     )]
-    public function store(StoreShareCapitalLedgerRequest $request): JsonResponse
+    public function store(StoreShareCapitalLedgerRequest $request, ShareCapitalService $shareCapital): JsonResponse
     {
-        $entry = GeneratedNumberWrite::run(fn (): ShareCapitalLedger => ShareCapitalLedger::create([
-            'borrower_id' => $request->borrower_id,
-            'date' => $request->date,
-            'description' => $request->description,
-            'debit' => $request->type === 'debit' ? $request->amount : 0,
-            'credit' => $request->type === 'credit' ? $request->amount : 0,
-            'created_by' => $request->user()->id,
-        ]), GeneratedNumberWrite::SHARE_CAPITAL_CONFLICT);
+        $entry = $shareCapital->createEntry(
+            (int) $request->borrower_id,
+            $request->amount,
+            $request->type,
+            $request->date,
+            $request->user(),
+            $request->description,
+            $request->input('method'),
+            $request->reference_number,
+        );
 
         $entry->load('borrower', 'createdByUser');
 
