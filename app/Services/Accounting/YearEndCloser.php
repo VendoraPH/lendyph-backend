@@ -311,6 +311,37 @@ final class YearEndCloser
     }
 
     /**
+     * Refuses a manual reverse (the journal screen) of a closing journal or
+     * of the reversal of one.
+     *
+     * A closing entry is undone only by reopening its year, which reverses
+     * every entry of the close on 31 December, reopens its months and records
+     * why. Reversed by hand, the mirror could land in another year while the
+     * close still read "closed"; reversing a reopen's reversal would put a
+     * closing entry back with no close behind it. Neither field changes after
+     * posting, so there is nothing to lock.
+     *
+     * @throws ValidationException 422 on `journal`
+     */
+    public function assertNotPartOfAClose(AccountingJournal $journal): void
+    {
+        $closing = $journal->source === self::SOURCE
+            ? $journal
+            : ($journal->reverses_journal_id === null ? null : AccountingJournal::query()
+                ->whereKey($journal->reverses_journal_id)
+                ->where('source', self::SOURCE)
+                ->first());
+
+        if ($closing === null) {
+            return;
+        }
+
+        throw ValidationException::withMessages([
+            'journal' => ["This entry is part of the {$closing->date->year} year-end close. Reopen the year instead."],
+        ]);
+    }
+
+    /**
      * Posts one branch's closing journal and returns what the audit row keeps.
      *
      * Each account is moved by its net for the year in the opposite direction
