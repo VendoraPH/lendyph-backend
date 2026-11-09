@@ -247,6 +247,8 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::patch('/loans/{loan}/reject', [LoanController::class, 'reject']);
     Route::get('/loans/{loan}/release-preview', [LoanController::class, 'releasePreview']);
     Route::patch('/loans/{loan}/release', [LoanController::class, 'release']);
+    // An approved, unreleased restructure back to its approval chain (`loans:release`).
+    Route::patch('/loans/{loan}/send-back-approved', [LoanController::class, 'sendBackApproved'])->whereNumber('loan');
     // What a release would deduct, for anyone who can see the loan (`loans:view`).
     Route::get('/loans/{loan}/deductions-preview', [LoanController::class, 'deductionsPreview'])->whereNumber('loan');
     // The printables' print and PDF actions leave an audit row (`loans:view`).
