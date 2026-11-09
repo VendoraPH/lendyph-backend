@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Models\AccountingAccount;
 use App\Services\Accounting\CashFlowCategories;
+use App\Services\Accounting\ChartOfAccountsSeeder;
 use Tests\TestCase;
 use Tests\Traits\PostsJournals;
 use Tests\Traits\SetupLendyPH;
@@ -14,8 +15,8 @@ use Tests\Traits\SetupLendyPH;
  * The user asked to review these defaults, and the design answer to that is not
  * a settings screen nobody opens — it is that the statement prints ONE LINE PER
  * ACCOUNT under the heading it actually used. So several tests here assert that
- * "1110 Loans Receivable" is visible, by code and by name, under Investing
- * activities. A classification folded into a subtotal is one nobody can
+ * "1110 Loans Receivable" is visible, by code and by name, under the heading it
+ * was filed in (Operating activities since Phase 2, decision 9). A classification folded into a subtotal is one nobody can
  * disagree with, and a wrong one would look exactly like a right one.
  */
 class AccountingCashFlowTest extends TestCase
@@ -53,8 +54,8 @@ class AccountingCashFlowTest extends TestCase
 
     public function test_the_defaults_follow_the_stated_rule(): void
     {
-        // Loans receivable — an asset.
-        $this->assertSame('investing', $this->categoryOf('1110'));
+        // Loans receivable — a lender's core operation (Phase 2, decision 9).
+        $this->assertSame('operating', $this->categoryOf('1110'));
         $this->assertSame('investing', $this->categoryOf('1410'));
 
         // Share capital and members' money — equity and liabilities.
@@ -90,6 +91,10 @@ class AccountingCashFlowTest extends TestCase
     public function test_no_account_in_the_chart_departs_from_the_rule(): void
     {
         $departures = AccountingAccount::query()
+            // The one stated exception, seeded on purpose (Phase 2, decision 9):
+            // the loan accounts read operating, because lending is this
+            // organisation's operation. Listed by code so a new one fails here.
+            ->whereNotIn('code', ChartOfAccountsSeeder::OPERATING_LOAN_ACCOUNT_CODES)
             ->get(['code', 'name', 'type', 'cash_kind', 'cash_flow_category'])
             ->reject(fn (AccountingAccount $a): bool => $a->cash_flow_category
                 === CashFlowCategories::defaultFor($a->type, $a->cash_kind))
@@ -97,6 +102,10 @@ class AccountingCashFlowTest extends TestCase
             ->all();
 
         $this->assertSame([], array_values($departures));
+        $this->assertSame(['1110', '1120', '1150', '1160', '1180', '1200', '1210'], ChartOfAccountsSeeder::OPERATING_LOAN_ACCOUNT_CODES);
+        foreach (ChartOfAccountsSeeder::OPERATING_LOAN_ACCOUNT_CODES as $code) {
+            $this->assertSame('operating', $this->categoryOf($code), $code);
+        }
 
         // And the consequence worth naming out loud: Accounts Payable is
         // `financing`, which is the first classification an accountant should
@@ -122,21 +131,22 @@ class AccountingCashFlowTest extends TestCase
 
     public function test_a_classification_can_be_changed_and_the_report_follows(): void
     {
-        // Releasing a loan: cash out, receivable up.
+        // A hand-posted loan: cash out, receivable up. Seeded as operating
+        // (Phase 2, decision 9).
         $this->postSimpleJournal('1110', '1010', 5000000, ['date' => '2026-09-10']);
 
         $before = $this->report();
-        $this->assertArrayHasKey('1110', $this->sectionLines($before, 'investing'));
+        $this->assertArrayHasKey('1110', $this->sectionLines($before, 'operating'));
 
-        // An accountant decides that for a lender, lending IS the operation.
+        // An accountant who disagrees moves it back to investing.
         $this->putJson('/api/accounting/accounts/'.$this->account('1110'), [
-            'cash_flow_category' => 'operating',
-        ])->assertOk()->assertJsonPath('data.cash_flow_category', 'operating');
+            'cash_flow_category' => 'investing',
+        ])->assertOk()->assertJsonPath('data.cash_flow_category', 'investing');
 
         $after = $this->report();
 
-        $this->assertArrayHasKey('1110', $this->sectionLines($after, 'operating'));
-        $this->assertArrayNotHasKey('1110', $this->sectionLines($after, 'investing'));
+        $this->assertArrayHasKey('1110', $this->sectionLines($after, 'investing'));
+        $this->assertArrayNotHasKey('1110', $this->sectionLines($after, 'operating'));
     }
 
     public function test_an_unknown_classification_is_refused(): void
@@ -151,16 +161,16 @@ class AccountingCashFlowTest extends TestCase
     /**
      * Every account is named, with its code, under the heading it was filed in.
      *
-     * This IS the review mechanism. "Investing activities ₱(50,000)" says
+     * This IS the review mechanism. "Operating activities ₱(50,000)" says
      * nothing about whether the classification was right; "1110 Loans
      * Receivable ₱(50,000)" under the same heading lets someone see at a glance
-     * that loan releases are being treated as investing.
+     * how a hand-posted loan movement is being treated.
      */
     public function test_every_line_names_its_account_so_the_classification_is_visible(): void
     {
         $this->postSimpleJournal('1110', '1010', 5000000, ['date' => '2026-09-10']);
 
-        $line = $this->report()['investing']['lines'][0];
+        $line = $this->report()['operating']['lines'][0];
 
         $this->assertSame('1110', $line['account_code']);
         $this->assertSame('Current Loans Receivable', $line['label']);
@@ -218,7 +228,7 @@ class AccountingCashFlowTest extends TestCase
     public function test_the_sections_account_for_the_whole_change_in_cash(): void
     {
         $this->postSimpleJournal('1010', '3010', 10000000, ['date' => '2026-09-01']); // financing in
-        $this->postSimpleJournal('1110', '1010', 5000000, ['date' => '2026-09-05']);  // investing out
+        $this->postSimpleJournal('1110', '1010', 5000000, ['date' => '2026-09-05']);  // operating out (decision 9)
         $this->postSimpleJournal('1010', '4010', 1500050, ['date' => '2026-09-12']);  // operating in
         $this->postSimpleJournal('5030', '1010', 250000, ['date' => '2026-09-15']);   // operating out
 
@@ -230,8 +240,8 @@ class AccountingCashFlowTest extends TestCase
         $this->assertSame(0, $report['unexplained']);
         $this->assertTrue($report['is_reconciled']);
 
-        $this->assertSame(1250050, $report['operating']['total']);
-        $this->assertSame(-5000000, $report['investing']['total']);
+        $this->assertSame(1250050 - 5000000, $report['operating']['total']);
+        $this->assertSame(0, $report['investing']['total']);
         $this->assertSame(10000000, $report['financing']['total']);
     }
 
