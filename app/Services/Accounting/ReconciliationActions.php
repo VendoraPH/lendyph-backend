@@ -255,8 +255,10 @@ class ReconciliationActions
 
                 $this->assertInsideTheWindow($reconciliation, $line);
 
-                if (! $recordAnyway) {
-                    $this->assertNotAlreadyInTheBooks($reconciliation, $line);
+                $twin = $this->entryAlreadyInTheBooks($reconciliation, $line);
+
+                if ($twin !== null && ! $recordAnyway) {
+                    throw ValidationException::withMessages(['line' => [$twin['message']]]);
                 }
 
                 $reconciled = $this->requireMoneyAccount($reconciliation->accounting_account_id, 'account_id');
@@ -277,17 +279,28 @@ class ReconciliationActions
                     default => 'suspense entry',
                 };
 
+                $newValues = [
+                    'statement_line_id' => $line->id,
+                    'matched_journal_line_id' => $journalLineId,
+                    'recorded_as' => $type,
+                    'journal_id' => $journal->id,
+                ];
+                $description = "Statement line {$line->id} recorded as {$label} {$journal->journal_no}";
+
+                // Only a warning that was actually overridden is recorded: a
+                // `record_anyway` sent when nothing matched overrode nothing.
+                if ($twin !== null) {
+                    $newValues['record_anyway'] = true;
+                    $newValues['suggested_journal_no'] = $twin['journal_no'];
+                    $description .= ", recorded anyway although it matched {$twin['journal_no']}";
+                }
+
                 AuditLogService::log(
                     'updated',
                     $reconciliation,
                     ['statement_line_id' => $line->id, 'matched_journal_line_id' => null],
-                    [
-                        'statement_line_id' => $line->id,
-                        'matched_journal_line_id' => $journalLineId,
-                        'recorded_as' => $type,
-                        'journal_id' => $journal->id,
-                    ],
-                    "Statement line {$line->id} recorded as {$label} {$journal->journal_no}",
+                    $newValues,
+                    $description,
                     $userId,
                 );
 
@@ -304,6 +317,11 @@ class ReconciliationActions
             }
 
             if ($e->index === self::JOURNAL_NO_INDEX || GeneratedNumberWrite::isCollision($e)) {
+                // Reported before the 409: a retry usually succeeds, but a
+                // sequence that keeps colliding is broken, and the screen's
+                // "try again" would otherwise hide it.
+                report($e);
+
                 throw LoanWriteTransaction::conflict(self::COLLISION);
             }
 
@@ -342,30 +360,110 @@ class ReconciliationActions
     }
 
     /**
-     * Refuses to book a line the engine already pairs with an entry in the
-     * books, unless the caller says `record_anyway`.
+     * The entry already in the books that this statement line looks like, or
+     * null. The action refuses to book the line while there is one, unless the
+     * caller says `record_anyway`, and the override is audited.
      *
      * The commonest way to double-book money is to record, from the statement,
      * a deposit someone already posted: the books then hold it twice and the
      * difference moves the wrong way. Matching the existing entry is almost
      * always the right answer, so it is offered first.
+     *
+     * Two looks:
+     *
+     * 1. Inside the period, the engine's own suggestion. Its pairing is one to
+     *    one, so a ledger entry it gives to another statement line of the same
+     *    amount is not held against this one.
+     * 2. Just outside it: an Oct 30 deposit that clears the bank on Nov 2 sits
+     *    in October's books and November's statement, where the engine never
+     *    looks. {@see self::nearDateEntry()}.
+     *
+     * @return array{journal_no: string, message: string}|null
      */
-    private function assertNotAlreadyInTheBooks(AccountingReconciliation $reconciliation, AccountingReconciliationLine $line): void
+    private function entryAlreadyInTheBooks(AccountingReconciliation $reconciliation, AccountingReconciliationLine $line): ?array
     {
         $suggested = collect($this->matcher->present($reconciliation->fresh())['lines'])
             ->first(static fn (array $row): bool => $row['match'] === 'possible'
                 && (int) $row['statement_line_id'] === $line->id);
 
-        if ($suggested === null) {
-            return;
+        if ($suggested !== null) {
+            return [
+                'journal_no' => (string) $suggested['journal_no'],
+                'message' => "This statement line matches {$suggested['journal_no']} already in the books. Match it "
+                    .'instead, or record it anyway.',
+            ];
         }
 
-        throw ValidationException::withMessages([
-            'line' => [
-                "This statement line matches {$suggested['journal_no']} already in the books. Match it instead, "
-                .'or record it anyway.',
-            ],
-        ]);
+        $nearby = $this->nearDateEntry($reconciliation, $line);
+
+        if ($nearby === null) {
+            return null;
+        }
+
+        return [
+            'journal_no' => (string) $nearby->journal_no,
+            'message' => "This statement line matches {$nearby->journal_no}, dated {$nearby->date}, already in the "
+                .'books just outside this period. Check it is not the same money, or record it anyway.',
+        ];
+    }
+
+    /**
+     * A posted line on the reconciled account, dated outside the period but
+     * within {@see ReconciliationMatcher::DATE_WINDOW_DAYS} of the statement
+     * line, with the same signed amount or the same reference, that no
+     * statement line has matched. The nearest date wins, then the lowest id.
+     *
+     * Only outside the period: inside it the engine decides (see above).
+     * Posted only: a reversed entry and its reversal net to nothing, so they
+     * are not money the books already hold. One indexed read on the journal
+     * date, LIMIT 1.
+     *
+     * @return object{journal_no: string, date: string}|null
+     */
+    private function nearDateEntry(AccountingReconciliation $reconciliation, AccountingReconciliationLine $line): ?object
+    {
+        $date = $line->date->toDateString();
+        $from = $line->date->copy()->subDays(ReconciliationMatcher::DATE_WINDOW_DAYS)->toDateString();
+        $to = $line->date->copy()->addDays(ReconciliationMatcher::DATE_WINDOW_DAYS)->toDateString();
+        $reference = $line->external_reference;
+
+        $row = DB::table('accounting_journal_lines as l')
+            ->join('accounting_journals as j', 'j.id', '=', 'l.accounting_journal_id')
+            ->where('l.accounting_account_id', $reconciliation->accounting_account_id)
+            ->where('j.status', 'posted')
+            ->where('j.date', '>=', $from)
+            ->where('j.date', '<=', $to)
+            ->where(static fn ($outside) => $outside
+                ->where('j.date', '<', $reconciliation->start_date->toDateString())
+                ->orWhere('j.date', '>', $reconciliation->end_date->toDateString()))
+            ->where(static function ($same) use ($line, $reference): void {
+                // A money account is debit-normal and a journal line carries
+                // exactly one side (a CHECK constraint), so money in is a debit
+                // of the amount and money out a credit of it.
+                $same->where(static fn ($amount) => $line->amount > 0
+                    ? $amount->where('l.debit', $line->amount)->where('l.credit', 0)
+                    : $amount->where('l.credit', -$line->amount)->where('l.debit', 0));
+
+                if ($reference !== null && $reference !== '') {
+                    $same->orWhere('j.reference', $reference);
+                }
+            })
+            ->whereNotExists(static fn ($matched) => $matched
+                ->select(DB::raw(1))
+                ->from('accounting_reconciliation_lines as r')
+                ->whereColumn('r.matched_journal_line_id', 'l.id'))
+            ->orderByRaw('ABS(DATEDIFF(j.date, ?))', [$date])
+            ->orderBy('l.id')
+            ->select(['j.journal_no', 'j.date'])
+            ->first();
+
+        if ($row === null) {
+            return null;
+        }
+
+        $row->date = substr((string) $row->date, 0, 10);
+
+        return $row;
     }
 
     /** The suspense role's account, or the 422 the screen shows when it is unmapped. */

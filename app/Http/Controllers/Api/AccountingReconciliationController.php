@@ -10,6 +10,7 @@ use App\Models\AccountingReconciliationLine;
 use App\Services\Accounting\ReconciliationMatcher;
 use App\Services\Accounting\ResolvesPostingAccounts;
 use App\Services\BranchAccess;
+use App\Services\LoanWriteTransaction;
 use Carbon\CarbonImmutable;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\DB;
@@ -33,6 +34,8 @@ use OpenApi\Attributes as OA;
 class AccountingReconciliationController extends Controller
 {
     use ResolvesPostingAccounts;
+
+    public const ALREADY_MATCHED = 'This statement line is already matched. Unmatch it first.';
 
     public function __construct(private ReconciliationMatcher $matcher) {}
 
@@ -251,6 +254,7 @@ class AccountingReconciliationController extends Controller
         responses: [
             new OA\Response(response: 200, description: 'Updated reconciliation'),
             new OA\Response(response: 403, description: 'Missing accounting:reconcile or branches:view_all'),
+            new OA\Response(response: 409, description: 'The statement line is already matched to another ledger line; unmatch it first. Accept-suggestions skips such lines instead.'),
             new OA\Response(response: 422, description: 'A line belongs elsewhere, is outside the period, or is already claimed'),
         ],
     )]
@@ -260,7 +264,9 @@ class AccountingReconciliationController extends Controller
     ): JsonResponse {
         $this->authorize(BranchAccess::VIEW_ALL);
 
-        $pairings = $request->boolean('accept_suggestions')
+        $acceptingSuggestions = $request->boolean('accept_suggestions');
+
+        $pairings = $acceptingSuggestions
             // Re-derived here rather than taken from the request. What gets
             // written is then exactly what the books support at this instant,
             // not what a tab left open since this morning still remembers.
@@ -271,7 +277,7 @@ class AccountingReconciliationController extends Controller
                 ])
                 ->all();
 
-        DB::transaction(function () use ($pairings, $reconciliation): void {
+        DB::transaction(function () use ($pairings, $reconciliation, $acceptingSuggestions): void {
             foreach ($pairings as $lineId => $journalLineId) {
                 $line = AccountingReconciliationLine::query()
                     ->whereKey($lineId)
@@ -289,6 +295,23 @@ class AccountingReconciliationController extends Controller
                     $line->save();
 
                     continue;
+                }
+
+                // Read under the line's lock, so of two requests pairing the
+                // same line the second sees the first's match.
+                if ($line->matched_journal_line_id !== null) {
+                    // Suggestions were worked out before this transaction; a
+                    // line matched since then is skipped, never re-paired.
+                    if ($acceptingSuggestions) {
+                        continue;
+                    }
+
+                    // The same pairing sent again changes nothing.
+                    if ($line->matched_journal_line_id === $journalLineId) {
+                        continue;
+                    }
+
+                    throw LoanWriteTransaction::conflict(self::ALREADY_MATCHED);
                 }
 
                 $this->assertLedgerLineIsAvailable($reconciliation, $lineId, $journalLineId);

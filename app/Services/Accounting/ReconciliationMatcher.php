@@ -146,7 +146,7 @@ class ReconciliationMatcher
                 'statement_balance' => $reconciliation->statement_balance,
                 // `book_balance - statement_balance`, exactly as the type says.
                 'difference' => $difference,
-                'is_reconciled' => $difference === 0,
+                'is_reconciled' => $this->isReconciled($difference, $rows),
                 'matched_count' => $this->countOf($rows, 'matched'),
                 'possible_count' => $this->countOf($rows, 'possible'),
                 'unmatched_count' => $this->countOf($rows, 'unmatched'),
@@ -179,6 +179,33 @@ class ReconciliationMatcher
         }
 
         return $accepted;
+    }
+
+    /**
+     * Reconciled means the difference is ₱0.00 AND every statement line is
+     * matched: confirmed by a person, not merely suggested. A balance that
+     * agrees while a statement line has no counterpart in the books is two
+     * errors cancelling out (a −₱12.34 bank charge nobody booked against a
+     * ₱12.34 the books hold that the bank does not), not a reconciliation.
+     *
+     * Ledger lines with no statement line do not block it: a reconciliation
+     * entered as a closing balance only has no statement lines at all.
+     *
+     * @param  list<array<string, mixed>>  $rows
+     */
+    private function isReconciled(int $difference, array $rows): bool
+    {
+        if ($difference !== 0) {
+            return false;
+        }
+
+        foreach ($rows as $row) {
+            if ($row['statement_line_id'] !== null && $row['match'] !== 'matched') {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /** @param  list<array<string, mixed>>  $rows */
