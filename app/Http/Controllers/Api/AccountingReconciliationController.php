@@ -7,15 +7,19 @@ use App\Http\Requests\Accounting\MatchReconciliationRequest;
 use App\Http\Requests\Accounting\StoreReconciliationRequest;
 use App\Models\AccountingReconciliation;
 use App\Models\AccountingReconciliationLine;
+use App\Services\Accounting\ReconciliationActions;
 use App\Services\Accounting\ReconciliationMatcher;
 use App\Services\Accounting\ResolvesPostingAccounts;
 use App\Services\BranchAccess;
 use App\Services\LoanWriteTransaction;
 use Carbon\CarbonImmutable;
+use Illuminate\Database\DetectsConcurrencyErrors;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 use OpenApi\Attributes as OA;
+use PDOException;
 
 /**
  * Reconciling a money account against its statement.
@@ -33,16 +37,21 @@ use OpenApi\Attributes as OA;
  */
 class AccountingReconciliationController extends Controller
 {
-    use ResolvesPostingAccounts;
+    use DetectsConcurrencyErrors, ResolvesPostingAccounts;
 
     public const ALREADY_MATCHED = 'This statement line is already matched. Unmatch it first.';
+
+    public const CLAIMED_MEANWHILE = 'That ledger entry was just matched to another statement line. Reload and try again.';
+
+    /** The UNIQUE index on accounting_reconciliation_lines.matched_journal_line_id. */
+    private const MATCH_INDEX = 'acct_recon_lines_journal_line_unique';
 
     public function __construct(private ReconciliationMatcher $matcher) {}
 
     #[OA\Get(
         path: '/api/accounting/reconciliations',
         summary: 'List reconciliations',
-        description: 'One page of reconciliations, newest period first, each with its full worksheet of lines. Returns the raw Laravel paginator envelope ({data, links, meta}); the screen drains it. `book_balance` and `difference` are computed from the ledger on every read, never stored — so posting the entry that was missing CLOSES the difference instead of leaving a stale gap. `per_page` is clamped at 100.',
+        description: 'One page of reconciliations, newest period first, each with its full worksheet of lines. Returns the raw Laravel paginator envelope ({data, links, meta}); the screen drains it. `book_balance` and `difference` are computed from the ledger on every read, never stored — so posting the entry that was missing CLOSES the difference instead of leaving a stale gap. `per_page` is clamped at 100. `is_reconciled` is true only when `difference` is 0 and every statement line is matched (a `possible` row is not). The worksheet `lines` also hold outstanding items: posted entries, not reversals, dated up to 60 days before the period or 5 days after it, that no statement line has claimed; such a row carries `outside_period: true` and its own `date`. `unmatched_count` counts in-period rows only; `outstanding_count` counts unmatched outstanding items.',
         tags: ['Accounting'],
         security: [['sanctum' => []]],
         parameters: [
@@ -225,7 +234,7 @@ class AccountingReconciliationController extends Controller
     #[OA\Get(
         path: '/api/accounting/reconciliations/{id}',
         summary: 'Show a reconciliation',
-        description: 'The full worksheet: confirmed pairs, the engine\'s suggestions, and every line left over on either side.',
+        description: 'The full worksheet: confirmed pairs, the engine\'s suggestions, and every line left over on either side, plus outstanding items from up to 60 days before the period to 5 days after it (`outside_period: true`). Same shape as one row of the list.',
         tags: ['Accounting'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
@@ -246,7 +255,7 @@ class AccountingReconciliationController extends Controller
     #[OA\Post(
         path: '/api/accounting/reconciliations/{id}/match',
         summary: 'Confirm or undo pairings',
-        description: 'Either `{"matches":[{"line_id":1,"journal_line_id":2}]}` (a null `journal_line_id` UNMATCHES) or `{"accept_suggestions":true}`, which confirms every row currently marked `possible`. Suggestions are re-derived server-side, so a stale tab cannot write pairings the books no longer support. A ledger line may be claimed by only one statement line. Returns the whole reconciliation.',
+        description: 'Either `{"matches":[{"line_id":1,"journal_line_id":2}]}` (a null `journal_line_id` UNMATCHES) or `{"accept_suggestions":true}`, which confirms every row currently marked `possible`. Suggestions are re-derived server-side, so a stale tab cannot write pairings the books no longer support. A ledger line may be claimed by only one statement line, and must be posted. Besides the period\'s own lines, an outstanding item can be matched: a posted entry, not a reversal, dated up to 60 days before the period or 5 days after it, that no statement line has claimed. Returns the whole reconciliation.',
         tags: ['Accounting'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
@@ -254,8 +263,8 @@ class AccountingReconciliationController extends Controller
         responses: [
             new OA\Response(response: 200, description: 'Updated reconciliation'),
             new OA\Response(response: 403, description: 'Missing accounting:reconcile or branches:view_all'),
-            new OA\Response(response: 409, description: 'The statement line is already matched to another ledger line; unmatch it first. Accept-suggestions skips such lines instead.'),
-            new OA\Response(response: 422, description: 'A line belongs elsewhere, is outside the period, or is already claimed'),
+            new OA\Response(response: 409, description: 'The statement line is already matched to another ledger line (unmatch it first; accept-suggestions skips such lines instead), the ledger line was claimed at the same moment, or a lock collided'),
+            new OA\Response(response: 422, description: 'A line belongs elsewhere, the journal is not posted, the ledger line is outside the period and not an outstanding item (60 days before to 5 days after), or it is already claimed'),
         ],
     )]
     public function match(
@@ -277,64 +286,102 @@ class AccountingReconciliationController extends Controller
                 ])
                 ->all();
 
-        DB::transaction(function () use ($pairings, $reconciliation, $acceptingSuggestions): void {
-            foreach ($pairings as $lineId => $journalLineId) {
-                $line = AccountingReconciliationLine::query()
-                    ->whereKey($lineId)
+        try {
+            DB::transaction(function () use ($pairings, $reconciliation, $acceptingSuggestions): void {
+                // Every named statement line, locked in ONE read in id order
+                // before anything else, so two requests naming the same lines
+                // in different orders queue instead of deadlocking.
+                $lines = AccountingReconciliationLine::query()
+                    ->whereKey(array_keys($pairings))
+                    ->orderBy('id')
                     ->lockForUpdate()
-                    ->first();
+                    ->get()
+                    ->keyBy('id');
 
-                if ($line === null || $line->accounting_reconciliation_id !== $reconciliation->id) {
-                    throw ValidationException::withMessages([
-                        'matches' => ["Statement line {$lineId} does not belong to this reconciliation."],
-                    ]);
-                }
+                // Unmatches first, so one request can move a ledger line from
+                // one statement line to another. Then in id order.
+                ksort($pairings);
+                $ordered = array_filter($pairings, static fn (?int $journalLineId): bool => $journalLineId === null)
+                    + array_filter($pairings, static fn (?int $journalLineId): bool => $journalLineId !== null);
 
-                if ($journalLineId === null) {
-                    $line->matched_journal_line_id = null;
+                foreach ($ordered as $lineId => $journalLineId) {
+                    $line = $lines->get($lineId);
+
+                    if ($line === null || $line->accounting_reconciliation_id !== $reconciliation->id) {
+                        throw ValidationException::withMessages([
+                            'matches' => ["Statement line {$lineId} does not belong to this reconciliation."],
+                        ]);
+                    }
+
+                    if ($journalLineId === null) {
+                        $line->matched_journal_line_id = null;
+                        $line->save();
+
+                        continue;
+                    }
+
+                    // Read under the line's lock, so of two requests pairing the
+                    // same line the second sees the first's match.
+                    if ($line->matched_journal_line_id !== null) {
+                        // Suggestions were worked out before this transaction; a
+                        // line matched since then is skipped, never re-paired.
+                        if ($acceptingSuggestions) {
+                            continue;
+                        }
+
+                        // The same pairing sent again changes nothing.
+                        if ($line->matched_journal_line_id === $journalLineId) {
+                            continue;
+                        }
+
+                        throw LoanWriteTransaction::conflict(self::ALREADY_MATCHED);
+                    }
+
+                    $this->assertLedgerLineIsAvailable($reconciliation, $lineId, $journalLineId);
+
+                    $line->matched_journal_line_id = $journalLineId;
                     $line->save();
-
-                    continue;
                 }
-
-                // Read under the line's lock, so of two requests pairing the
-                // same line the second sees the first's match.
-                if ($line->matched_journal_line_id !== null) {
-                    // Suggestions were worked out before this transaction; a
-                    // line matched since then is skipped, never re-paired.
-                    if ($acceptingSuggestions) {
-                        continue;
-                    }
-
-                    // The same pairing sent again changes nothing.
-                    if ($line->matched_journal_line_id === $journalLineId) {
-                        continue;
-                    }
-
-                    throw LoanWriteTransaction::conflict(self::ALREADY_MATCHED);
-                }
-
-                $this->assertLedgerLineIsAvailable($reconciliation, $lineId, $journalLineId);
-
-                $line->matched_journal_line_id = $journalLineId;
-                $line->save();
+            });
+        } catch (UniqueConstraintViolationException $e) {
+            // The backstop: another request claimed the ledger line between
+            // this one's locked read and its write.
+            if ($e->index === self::MATCH_INDEX) {
+                throw LoanWriteTransaction::conflict(self::CLAIMED_MEANWHILE);
             }
-        });
+
+            throw $e;
+        } catch (PDOException $e) {
+            // Deadlocks and lock waits, mapped as ReconciliationActions does.
+            if (! $this->causedByConcurrencyError($e)) {
+                throw $e;
+            }
+
+            throw LoanWriteTransaction::conflict(ReconciliationActions::COLLISION);
+        }
 
         return response()->json(['data' => $this->matcher->present($reconciliation->refresh())]);
     }
 
     /**
-     * The ledger line has to be on THIS account, inside THIS period, and not
-     * already claimed by another statement line.
+     * The ledger line has to be posted, on THIS account, inside THIS period or
+     * an outstanding item of it, and not already claimed by another statement
+     * line.
      *
-     * The last of the three is the one that matters most. A ₱5,000 deposit that
+     * An outstanding item (the standard bank reconciliation rule) is a deposit
+     * in transit or an uncleared cheque: posted up to
+     * {@see ReconciliationMatcher::OUTSTANDING_DAYS_BEFORE} days before the
+     * period or {@see ReconciliationMatcher::DATE_WINDOW_DAYS} days after it,
+     * and not a reversal.
+     *
+     * The last check is the one that matters most. A ₱5,000 deposit that
      * appears twice on a statement could otherwise be matched twice to the
      * single ledger entry behind it, and the reconciliation would report itself
      * clean while one of the two deposits was genuinely missing from the books
      * — a green screen standing for the exact condition it exists to detect.
-     * The unique index on `matched_journal_line_id` is the backstop; this is
-     * what makes the refusal a message rather than a 500.
+     * It is read under a lock, and the unique index on
+     * `matched_journal_line_id` is the backstop; this is what makes the
+     * refusal a message rather than a 500.
      */
     private function assertLedgerLineIsAvailable(
         AccountingReconciliation $reconciliation,
@@ -344,12 +391,24 @@ class AccountingReconciliationController extends Controller
         $line = DB::table('accounting_journal_lines as l')
             ->join('accounting_journals as j', 'j.id', '=', 'l.accounting_journal_id')
             ->where('l.id', $journalLineId)
-            ->select(['l.accounting_account_id', 'j.date', 'j.status'])
+            ->select(['l.accounting_account_id', 'j.date', 'j.status', 'j.reverses_journal_id'])
             ->first();
 
         if ($line === null) {
             throw ValidationException::withMessages([
                 'matches' => ["Journal line {$journalLineId} does not exist."],
+            ]);
+        }
+
+        if ($line->status !== 'posted') {
+            throw ValidationException::withMessages([
+                'matches' => [
+                    $line->status === 'draft'
+                        ? "Journal line {$journalLineId} is a draft. Only posted entries are in the books, so post it "
+                            .'before matching it.'
+                        : "Journal line {$journalLineId} belongs to an entry that has been reversed, so it is no "
+                            .'longer in the books. Match the entry that replaced it.',
+                ],
             ]);
         }
 
@@ -363,20 +422,38 @@ class AccountingReconciliationController extends Controller
         }
 
         $date = substr((string) $line->date, 0, 10);
+        $inPeriod = $date >= $reconciliation->start_date->toDateString()
+            && $date <= $reconciliation->end_date->toDateString();
 
-        if ($date < $reconciliation->start_date->toDateString() || $date > $reconciliation->end_date->toDateString()) {
-            throw ValidationException::withMessages([
-                'matches' => [
-                    "Journal line {$journalLineId} is dated {$date}, outside the period being reconciled. "
-                    .'Matching it would leave a confirmed pair whose counterpart is not in the window, which '
-                    .'proves nothing.',
-                ],
-            ]);
+        if (! $inPeriod) {
+            [$from, $to] = ReconciliationMatcher::candidateDates($reconciliation);
+
+            if ($date < $from || $date > $to) {
+                throw ValidationException::withMessages([
+                    'matches' => [
+                        "Journal line {$journalLineId} is dated {$date}, outside the period being reconciled. An "
+                        .'entry from up to '.ReconciliationMatcher::OUTSTANDING_DAYS_BEFORE.' days before the period '
+                        .'or '.ReconciliationMatcher::DATE_WINDOW_DAYS.' days after it can be matched as an '
+                        .'outstanding item; this one is further away.',
+                    ],
+                ]);
+            }
+
+            if ($line->reverses_journal_id !== null) {
+                throw ValidationException::withMessages([
+                    'matches' => [
+                        "Journal line {$journalLineId} is a reversal dated {$date}, outside the period being "
+                        .'reconciled. A reversal and the entry it reverses cancel out, so neither is an '
+                        .'outstanding item.',
+                    ],
+                ]);
+            }
         }
 
         $claimedBy = AccountingReconciliationLine::query()
             ->where('matched_journal_line_id', $journalLineId)
             ->where('id', '!=', $statementLineId)
+            ->lockForUpdate()
             ->value('id');
 
         if ($claimedBy !== null) {

@@ -45,6 +45,10 @@ use Illuminate\Support\Facades\DB;
  *    transaction and a bug, and blurring that is how a reconciliation stops
  *    meaning anything.
  *
+ * Candidates are the period's own posted lines plus its outstanding items
+ * ({@see self::candidateDates()}); a reversed entry, or a line another
+ * reconciliation's statement line has claimed, is never offered.
+ *
  * A ledger line already claimed by a stronger pass is never offered again, and
  * where several candidates tie, the nearest date wins and then the lowest id —
  * a total order, so the same books produce the same suggestions every time.
@@ -76,6 +80,32 @@ class ReconciliationMatcher
      * wrong week, which is worse than no suggestion at all.
      */
     public const DATE_WINDOW_DAYS = 5;
+
+    /**
+     * Outstanding items, the standard bank reconciliation rule: a deposit in
+     * transit or an uncleared cheque is in the books before the bank shows
+     * it, so an entry dated up to this many days BEFORE the period can still
+     * be the counterpart of one of its statement lines. After the period, only
+     * the value-dating tolerance applies ({@see self::DATE_WINDOW_DAYS}).
+     */
+    public const OUTSTANDING_DAYS_BEFORE = 60;
+
+    /**
+     * The dates a ledger line may carry and still be matched in this
+     * reconciliation: the period itself, plus outstanding items from
+     * {@see self::OUTSTANDING_DAYS_BEFORE} days before it to
+     * {@see self::DATE_WINDOW_DAYS} days after it. Outside the period itself
+     * an entry must also be posted, not a reversal, and unclaimed.
+     *
+     * @return array{0: string, 1: string} first and last date, inclusive
+     */
+    public static function candidateDates(AccountingReconciliation $reconciliation): array
+    {
+        return [
+            $reconciliation->start_date->copy()->subDays(self::OUTSTANDING_DAYS_BEFORE)->toDateString(),
+            $reconciliation->end_date->copy()->addDays(self::DATE_WINDOW_DAYS)->toDateString(),
+        ];
+    }
 
     public function __construct(private TrialBalanceBuilder $trialBalance) {}
 
@@ -121,9 +151,7 @@ class ReconciliationMatcher
             $start = $reconciliation->start_date->toDateString();
             $end = $reconciliation->end_date->toDateString();
 
-            $window = ($ledger[$accountId] ?? new Collection)
-                ->filter(static fn (array $line): bool => $line['date'] >= $start && $line['date'] <= $end)
-                ->values();
+            $window = $this->candidatesFor($reconciliation, $ledger[$accountId] ?? new Collection);
 
             $rows = $this->pair($window, $reconciliation->lines);
 
@@ -149,13 +177,71 @@ class ReconciliationMatcher
                 'is_reconciled' => $this->isReconciled($difference, $rows),
                 'matched_count' => $this->countOf($rows, 'matched'),
                 'possible_count' => $this->countOf($rows, 'possible'),
-                'unmatched_count' => $this->countOf($rows, 'unmatched'),
+                // In-period rows only, as before outstanding items existed.
+                'unmatched_count' => count(array_filter(
+                    $rows,
+                    static fn (array $row): bool => $row['match'] === 'unmatched' && ! $row['outside_period'],
+                )),
+                // Entries dated outside the period that no statement line has
+                // matched yet: deposits in transit and uncleared cheques.
+                'outstanding_count' => count(array_filter(
+                    $rows,
+                    static fn (array $row): bool => $row['match'] === 'unmatched' && $row['outside_period'],
+                )),
                 'notes' => $reconciliation->notes,
                 'lines' => $rows,
             ];
         }
 
         return $presented;
+    }
+
+    /**
+     * The ledger lines this reconciliation works with, each marked
+     * `outside_period` and `suggestable`.
+     *
+     * - Inside the period: every posted or reversed line, as before. One a
+     *   statement line of ANOTHER reconciliation has claimed stays on the
+     *   worksheet (it is still an item of this period) but is never
+     *   suggested, and neither is a reversed entry: neither can be matched.
+     * - Outside it, within {@see self::candidateDates()}: only lines this
+     *   reconciliation already matched, or posted lines that are not a
+     *   reversal and that no statement line has claimed. A reversed entry and
+     *   its reversal net to nothing, so they are not outstanding.
+     *
+     * @param  Collection<int, array<string, mixed>>  $ledger
+     * @return Collection<int, array<string, mixed>>
+     */
+    private function candidatesFor(AccountingReconciliation $reconciliation, Collection $ledger): Collection
+    {
+        $start = $reconciliation->start_date->toDateString();
+        $end = $reconciliation->end_date->toDateString();
+        [$from, $to] = self::candidateDates($reconciliation);
+
+        return $ledger
+            ->map(static function (array $line) use ($reconciliation, $start, $end, $from, $to): ?array {
+                $claimedHere = $line['claimed_by'] === $reconciliation->id;
+                $claimedElsewhere = $line['claimed_by'] !== null && ! $claimedHere;
+                $inPeriod = $line['date'] >= $start && $line['date'] <= $end;
+
+                if (! $inPeriod) {
+                    $outstanding = $line['date'] >= $from && $line['date'] <= $to
+                        && $line['status'] === 'posted'
+                        && ! $line['is_reversal']
+                        && ! $claimedElsewhere;
+
+                    if (! $claimedHere && ! $outstanding) {
+                        return null;
+                    }
+                }
+
+                return $line + [
+                    'outside_period' => ! $inPeriod,
+                    'suggestable' => $line['status'] === 'posted' && ! $claimedElsewhere,
+                ];
+            })
+            ->filter()
+            ->values();
     }
 
     /**
@@ -233,11 +319,15 @@ class ReconciliationMatcher
     private function ledgerFor(Collection $reconciliations): array
     {
         $accountIds = $reconciliations->pluck('accounting_account_id')->unique()->values()->all();
-        $from = $reconciliations->min(fn (AccountingReconciliation $r): string => $r->start_date->toDateString());
-        $to = $reconciliations->max(fn (AccountingReconciliation $r): string => $r->end_date->toDateString());
+        // Wide enough for every reconciliation's outstanding items.
+        $from = $reconciliations->min(fn (AccountingReconciliation $r): string => self::candidateDates($r)[0]);
+        $to = $reconciliations->max(fn (AccountingReconciliation $r): string => self::candidateDates($r)[1]);
 
         return DB::table('accounting_journal_lines as l')
             ->join('accounting_journals as j', 'j.id', '=', 'l.accounting_journal_id')
+            // Which reconciliation, if any, has claimed the line. The UNIQUE
+            // index on `matched_journal_line_id` keeps this to one row.
+            ->leftJoin('accounting_reconciliation_lines as r', 'r.matched_journal_line_id', '=', 'l.id')
             ->whereIn('l.accounting_account_id', $accountIds)
             ->whereIn('j.status', AccountingJournal::HISTORICAL_STATUSES)
             // Plain comparisons on a DATE column, so the index on `j.date`
@@ -258,6 +348,9 @@ class ReconciliationMatcher
                 'j.journal_no',
                 'j.reference',
                 'j.description as journal_description',
+                'j.status',
+                'j.reverses_journal_id',
+                'r.accounting_reconciliation_id as claimed_by',
             ])
             ->get()
             ->map(static fn (object $row): array => [
@@ -274,6 +367,9 @@ class ReconciliationMatcher
                 'description' => (string) ($row->line_description ?: $row->journal_description),
                 'journal_no' => $row->journal_no,
                 'reference' => $row->reference,
+                'status' => (string) $row->status,
+                'is_reversal' => $row->reverses_journal_id !== null,
+                'claimed_by' => $row->claimed_by === null ? null : (int) $row->claimed_by,
             ])
             ->groupBy('account_id')
             ->all();
@@ -368,6 +464,10 @@ class ReconciliationMatcher
         $byAmount = [];
 
         foreach ($ledgerById as $lineId => $candidate) {
+            if (! $candidate['suggestable']) {
+                continue;
+            }
+
             if ($candidate['reference'] !== null && $candidate['reference'] !== '') {
                 // Lower-cased so the lookup is the case-insensitive comparison
                 // this used to do with strcasecmp().
@@ -393,8 +493,10 @@ class ReconciliationMatcher
                 return $byReference[mb_strtolower($reference)] ?? [];
             },
             // A matching reference is the bank naming the entry. No date test:
-            // that is the point of trusting it over pass 2.
-            static fn (): bool => true,
+            // that is the point of trusting it over pass 2. The same side,
+            // though: a returned cheque echoes the deposit's reference with the
+            // opposite sign, and it is not the deposit.
+            static fn (AccountingReconciliationLine $line, array $candidate): bool => ($line->amount > 0) === ($candidate['amount'] > 0),
         );
 
         // ── Pass 2: the same amount, a few days either side ──
@@ -426,6 +528,7 @@ class ReconciliationMatcher
                 'source' => 'statement',
                 'statement_line_id' => $line->id,
                 'journal_line_id' => null,
+                'outside_period' => false,
             ];
         }
 
@@ -448,6 +551,8 @@ class ReconciliationMatcher
                 'source' => 'ledger',
                 'statement_line_id' => null,
                 'journal_line_id' => $lineId,
+                // An outstanding item: dated outside the period, still unmatched.
+                'outside_period' => $candidate['outside_period'],
             ];
         }
 
@@ -549,6 +654,7 @@ class ReconciliationMatcher
             'source' => 'both',
             'statement_line_id' => $line->id,
             'journal_line_id' => $candidate['line_id'],
+            'outside_period' => $candidate['outside_period'],
         ];
     }
 
