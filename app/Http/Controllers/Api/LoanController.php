@@ -36,6 +36,7 @@ use App\Services\LoanListTotals;
 use App\Services\LoanReleaseFeeService;
 use App\Services\LoanService;
 use App\Services\PersistedScheduleFigures;
+use App\Services\Reminders\Api\ContactVisibility;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Exceptions\HttpResponseException;
@@ -1079,7 +1080,7 @@ DESC,
                         new OA\Property(
                             property: 'data',
                             type: 'object',
-                            description: 'The co-maker, as in GET /api/loans/{id} `co_makers`',
+                            description: 'The co-maker, as in GET /api/loans/{id} `co_makers`. The whole record needs `borrowers:view` and the member\'s own branch; otherwise only the name, code and relationship.',
                             properties: [
                                 new OA\Property(property: 'id', type: 'integer'),
                                 new OA\Property(property: 'co_maker_code', type: 'string', example: 'CMK-000012'),
@@ -1104,7 +1105,9 @@ DESC,
 
         return response()->json([
             'message' => 'Co-maker added to the loan.',
-            'data' => $request->user()->can('borrowers:view') ? new CoMakerResource($coMaker) : CoMakerResource::slim($coMaker),
+            'data' => app(ContactVisibility::class)->allows($request->user(), $loan->borrower?->branch_id)
+                ? new CoMakerResource($coMaker)
+                : CoMakerResource::slim($coMaker),
         ], 201);
     }
 
