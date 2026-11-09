@@ -8,6 +8,7 @@ use App\Http\Requests\Accounting\StoreAccountingAccountRequest;
 use App\Http\Requests\Accounting\UpdateAccountingAccountRequest;
 use App\Http\Resources\AccountingAccountResource;
 use App\Models\AccountingAccount;
+use App\Models\AccountingAccountMapping;
 use App\Services\Accounting\AccountRules;
 use App\Services\Accounting\ChartOfAccountsSeeder;
 use App\Services\Accounting\TrialBalanceBuilder;
@@ -352,7 +353,7 @@ class AccountingAccountController extends Controller
         $roles = $account->mappings()->pluck('role')->all();
 
         if ($roles !== []) {
-            $list = implode(', ', $roles);
+            $list = AccountingAccountMapping::labelList($roles);
 
             throw ValidationException::withMessages([
                 'account' => "{$account->code} {$account->name} is the account for {$list}. Point those roles somewhere else first.",
