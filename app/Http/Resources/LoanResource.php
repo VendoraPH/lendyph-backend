@@ -7,6 +7,7 @@ use App\Models\CoMaker;
 use App\Models\Loan;
 use App\Services\BranchAccess;
 use App\Services\CollateralSecurity;
+use App\Services\LoanLedgerService;
 use App\Services\LoanService;
 use App\Services\PersistedScheduleFigures;
 use App\Services\RepaymentService;
@@ -53,7 +54,7 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'overdue_amount', type: 'number'),
         new OA\Property(property: 'penalty_amount', type: 'number'),
         new OA\Property(property: 'total_payable', type: 'number', nullable: true, description: 'Principal, interest and penalty still owed on the periods, plus `insurance_owed`. Never includes the Share Capital Build-Up. Null before release, when nothing is owed yet (see `contract_total`).'),
-        new OA\Property(property: 'contract_total', type: 'number', nullable: true, description: 'Principal plus interest over the whole schedule, in whole centavos, never the Share Capital Build-Up or penalty. After release: the stored schedule\'s (equals `amortization_schedule_totals.principal` + `.interest`). Before release: the schedule GET /loans/{id}/amortization-preview builds, on GET /loans/{id} only; null on lists and wherever the periods (after release) or the collaterals (before release, the single-loan view) were not loaded.'),
+        new OA\Property(property: 'contract_total', type: 'number', nullable: true, description: 'Principal plus interest over the whole schedule, in whole centavos, never the Share Capital Build-Up or penalty. After release: the stored schedule\'s (equals `amortization_schedule_totals.principal` + `.interest`), except on a restructured source loan, whose restructure deleted its unpaid periods: there it is the original contract, every period it was released with (the Ledger\'s release line), on GET /loans/{id} only and null on lists. Before release: the schedule GET /loans/{id}/amortization-preview builds, on GET /loans/{id} only; null on lists and wherever the periods (after release) or the collaterals (before release, the single-loan view) were not loaded.'),
         new OA\Property(property: 'unitemised_deductions', type: 'number', description: '`total_deductions` less the itemised `deductions`, in whole centavos, signed: positive when the total is more than the items, negative when the items add up to more, 0 when they agree. The release voucher prints it as its own line.'),
         new OA\Property(property: 'amortization_schedule_totals', type: 'object', description: 'Only with `amortization_schedules`. Each column of the schedule added up in whole centavos.', properties: [
             new OA\Property(property: 'principal', type: 'number'),
@@ -532,6 +533,8 @@ class LoanResource extends JsonResource
             'penalty_amount' => $owed['penalty'] / 100,
             'total_payable' => $this->released_at !== null ? $owed['total'] / 100 : null,
             'insurance_owed' => (float) $this->insurance_remaining_balance,
+            // The Loans list's Auto-Pay column, as the full row carries it.
+            'auto_pay_enabled' => (bool) $this->auto_pay,
         ];
     }
 
@@ -580,20 +583,32 @@ class LoanResource extends JsonResource
     }
 
     /**
-     * Principal plus interest over the whole schedule, in whole centavos,
+     * Principal plus interest over the whole contract, in whole centavos,
      * never the Share Capital Build-Up (decision 7(a): SCB is not debt).
      *
      * After release, the stored schedule's (`$scheduleTotals`, null where the
-     * periods were not loaded). Before release, the schedule the pre-release
-     * amortization preview builds (LoanService::buildAmortizationPreview()),
-     * but only where `collaterals` is loaded: GET /loans/{id}, the same proxy
-     * `collateral_summary` uses. A list would otherwise build a schedule for
-     * every unreleased row on the page, so it gets null.
+     * periods were not loaded). A restructured source's rows no longer hold
+     * its contract (its restructure deleted the unpaid periods and shrank a
+     * part-paid one to what was collected), so its figure is the schedule it
+     * was released with, as its Ledger's release line holds it
+     * (LoanLedgerService::originalContractCentavos()). Before release, the
+     * schedule the pre-release amortization preview builds
+     * (LoanService::buildAmortizationPreview()).
+     *
+     * Both of those build a schedule, so only where `collaterals` is loaded:
+     * GET /loans/{id}, the same proxy `collateral_summary` uses. A list would
+     * otherwise build one for every such row on the page, so it gets null.
      *
      * @param  array<string, float|int>|null  $scheduleTotals  PersistedScheduleFigures::totals()
      */
     private function contractTotal(bool $isReleased, ?array $scheduleTotals): ?float
     {
+        if ($isReleased && $this->restructured_at !== null) {
+            return $this->relationLoaded('collaterals')
+                ? app(LoanLedgerService::class)->originalContractCentavos($this->resource) / 100
+                : null;
+        }
+
         if ($isReleased) {
             return $scheduleTotals === null
                 ? null

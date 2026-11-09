@@ -1193,11 +1193,12 @@ class LoanService
     /**
      * Lock the loan row, as the first statement of the transaction, and
      * refuse with a 409 unless it is still in `$expectedStatus`: draft for a
-     * submit, for_review for an approve or a reject. The caller checked that
-     * before the transaction opened, so a loan that has moved since was moved
-     * by another request. The route-bound model is refreshed from the locked
-     * row, so the write works from what is committed rather than from what
-     * the request read before the lock.
+     * submit, for_review for an approve or a reject, and the status it was
+     * read in for a void. The caller checked that before the transaction
+     * opened, so a loan that has moved since was moved by another request.
+     * The route-bound model is refreshed from the locked row, so the write
+     * works from what is committed rather than from what the request read
+     * before the lock.
      *
      * @throws HttpResponseException 409 when the loan was submitted, decided or otherwise moved since it was read
      */
@@ -1316,8 +1317,9 @@ class LoanService
      * them (lockAndGuardReleaseRows()), so a send-back and a release of the
      * same restructure queue up instead of deadlocking. The status is then
      * read again under the lock: a restructure sent back, released or voided
-     * since it was read is a 409, as is a lock wait timeout. Nothing is
-     * written then, and nobody is told: the notices wait for the commit.
+     * since it was read is a 409, as is a lock wait timeout or a deadlock.
+     * Nothing is written then, and nobody is told: the notices wait for the
+     * commit.
      */
     public function sendBackApproved(Loan $loan, User $user, string $reason): Loan
     {
@@ -2301,6 +2303,10 @@ class LoanService
      * written. So a void that read `approved` while a release ran can never
      * overwrite `released`. No collateral lock: a void moves a loan only
      * between statuses that pledge nothing (Loan::PLEDGING_STATUSES).
+     *
+     * What is left of its approval chain is cancelled in the same transaction,
+     * with an audit row (LoanApprovalChainService::cancelOpenSteps()), so a
+     * voided loan never reads as waiting on an approver.
      */
     public function voidLoan(Loan $loan): Loan
     {
@@ -2314,6 +2320,8 @@ class LoanService
             $this->lockLoanInStatus($loan, (string) $loan->status);
 
             $loan->update(['status' => 'void']);
+
+            app(LoanApprovalChainService::class)->cancelOpenSteps($loan, auth()->user());
 
             return $loan;
         });

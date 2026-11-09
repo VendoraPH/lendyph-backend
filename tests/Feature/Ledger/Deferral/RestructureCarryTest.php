@@ -222,7 +222,13 @@ class RestructureCarryTest extends TestCase
     {
         // ₱10,000.00 of S's ₱50,000.00: a fifth of D cleared, ₱6,666.66 left.
         $reduction = $this->journalFor($this->applyReduction($this->source, -1_000_000), 'adjustment');
+        // The reduction's share of D, by part: Dr 1210 / Cr 1180, never income.
+        $this->assertSame(116_667, $this->described($reduction, PostingRules::DEFERRED_INTEREST_CLEARED_LINE, 'debit'));
+        $this->assertSame(50_000, $this->described($reduction, PostingRules::DEFERRED_PENALTY_CLEARED_LINE, 'debit'));
         $this->assertSame(166_667, $this->sumOn($reduction, '1210', 'debit'));
+        $this->assertSame(166_667, $this->sumOn($reduction, '1180', 'credit'));
+        $this->assertSame(0, $this->sumOn($reduction, '4010', 'credit'));
+        $this->assertSame($reduction->total_debit, $reduction->total_credit);
         $left = $this->poster()->unrecognisedDeferral($this->source->fresh());
         $this->assertSame(['interest' => 466_666, 'penalty' => 200_000], $left);
 

@@ -30,7 +30,7 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'status_label', type: 'string', nullable: true, example: 'Credit Review', description: 'Label configured for this step (approval workflow `steps.*.status`), snapshotted at submit. A display label only; `status` is the progress state.'),
         new OA\Property(property: 'role', type: 'string', example: 'loan_processor'),
         new OA\Property(property: 'kind', type: 'string', enum: ['submit', 'approve', 'release']),
-        new OA\Property(property: 'status', type: 'string', enum: ['waiting', 'pending', 'approved', 'sent_back']),
+        new OA\Property(property: 'status', type: 'string', enum: ['waiting', 'pending', 'approved', 'sent_back', 'cancelled'], description: '`cancelled`: the step was still waiting or pending when the loan was voided'),
         new OA\Property(property: 'remarks', type: 'string', nullable: true),
         new OA\Property(property: 'acted_at', type: 'string', format: 'date-time', nullable: true),
         new OA\Property(property: 'acted_by', type: 'string', nullable: true, description: 'Display NAME of the actor, rendered directly by the UI'),
@@ -49,6 +49,9 @@ class LoanApprovalStep extends Model
     public const STATUS_APPROVED = 'approved';
 
     public const STATUS_SENT_BACK = 'sent_back';
+
+    /** An unfinished step of a loan that was voided (LoanApprovalChainService::cancelOpenSteps()). */
+    public const STATUS_CANCELLED = 'cancelled';
 
     public const KIND_SUBMIT = 'submit';
 

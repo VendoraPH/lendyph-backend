@@ -5,6 +5,7 @@ namespace Tests\Feature\Ledger\Release;
 use App\Models\AccountingJournal;
 use App\Models\AmortizationSchedule;
 use App\Models\AuditLog;
+use App\Models\Branch;
 use App\Services\LoanService;
 use Illuminate\Support\Facades\DB;
 use Tests\TestCase;
@@ -174,6 +175,33 @@ class RestructureReleaseJournalTest extends TestCase
         $this->getJson("/api/loans/{$new->id}/release-preview")
             ->assertUnprocessable()
             ->assertJsonValidationErrors(['principal_amount' => self::PAID_DOWN]);
+    }
+
+    /**
+     * A new loan in another branch than its source is refused through the
+     * release endpoint: a 422 on `errors.accounting`, nothing written, and the
+     * new loan stays unreleased. A member's branch can't change while a loan
+     * is collectible, so only an imported or hand-edited row gets here.
+     */
+    public function test_releasing_a_restructure_in_another_branch_than_its_source_answers_422_and_releases_nothing(): void
+    {
+        $this->seedChartOfAccounts();
+        $source = $this->createReleasedLoan();
+        $new = $this->approvedRestructureOf($source, 70800);
+        DB::table('loans')->where('id', $new->id)->update(['branch_id' => Branch::factory()->create()->id]);
+        $before = $this->releaseState();
+
+        $errors = $this->patchJson("/api/loans/{$new->id}/release")
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('accounting')
+            ->json('errors.accounting');
+
+        $this->assertStringContainsString('in a different branch from', implode(' ', $errors));
+        $this->assertSame($before, $this->releaseState());
+        $new->refresh();
+        $this->assertSame('approved', $new->status);
+        $this->assertNull($new->released_at);
+        $this->assertNotSame('restructured', $source->fresh()->status);
     }
 
     public function test_any_fall_in_what_the_source_owes_since_approval_refuses_the_release(): void

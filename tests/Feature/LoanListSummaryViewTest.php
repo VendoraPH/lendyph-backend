@@ -66,6 +66,21 @@ class LoanListSummaryViewTest extends TestCase
         $this->assertSame(['id' => $this->branch->id, 'name' => $this->branch->name], $row['branch']);
     }
 
+    /**
+     * The Loans list's Auto-Pay column reads `auto_pay_enabled`, so a summary
+     * row carries it as the full row does: a loan with Auto-Pay on never reads
+     * "Enable".
+     */
+    public function test_a_row_carries_auto_pay_enabled_as_the_full_row_does(): void
+    {
+        $on = $this->mixedLoan(['auto_pay' => true, 'cbs_reference' => 'CBS-1', 'auto_pay_enabled_at' => now()]);
+        $off = $this->mixedLoan();
+
+        $this->assertTrue($this->summaryRow($on)['auto_pay_enabled']);
+        $this->assertFalse($this->summaryRow($off)['auto_pay_enabled']);
+        $this->assertSame($this->fullRow($on)['auto_pay_enabled'], $this->summaryRow($on)['auto_pay_enabled']);
+    }
+
     public function test_every_figure_equals_the_full_rows(): void
     {
         $loans = [

@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Enums\PaymentMethod;
 use App\Models\Loan;
 use App\Models\PortfolioDailySnapshot;
 use App\Models\Repayment;
@@ -320,6 +321,15 @@ class DashboardService
     }
 
     /**
+     * The latest payments and releases, newest first, in words.
+     *
+     * A payment reads "Payment via <method>" with the method as the statement
+     * prints it (PaymentMethod::labelFor()). A release pays out its net
+     * proceeds. A restructure's release pays nothing out: it collects every
+     * deduction it withholds from the member (`total_deductions`, the amount
+     * its release journal collects), so it reads "Loan restructured" with
+     * that amount and its own type.
+     *
      * @param  list<int>|null  $branchIds
      */
     public function recentTransactions(?array $branchIds, int $limit = 10): array
@@ -333,7 +343,7 @@ class DashboardService
             ->map(fn ($r) => [
                 'type' => 'payment',
                 'borrower_name' => $r->loan?->borrower?->full_name,
-                'description' => 'Payment via '.ucwords(str_replace('_', ' ', $r->method)),
+                'description' => 'Payment via '.PaymentMethod::labelFor($r->method),
                 'amount' => (float) $r->amount_paid,
                 'date' => $r->payment_date?->format('M j, g:i A'),
                 'created_at' => $r->created_at,
@@ -346,10 +356,10 @@ class DashboardService
             ->take($limit)
             ->get()
             ->map(fn ($l) => [
-                'type' => 'release',
+                'type' => $l->isRestructure() ? 'restructure' : 'release',
                 'borrower_name' => $l->borrower?->full_name,
-                'description' => 'Loan released',
-                'amount' => (float) $l->net_proceeds,
+                'description' => $l->isRestructure() ? 'Loan restructured' : 'Loan released',
+                'amount' => (float) ($l->isRestructure() ? $l->total_deductions : $l->net_proceeds),
                 'date' => $l->released_at?->format('M j, g:i A'),
                 'created_at' => $l->released_at,
             ]);

@@ -11,7 +11,8 @@ use Illuminate\Support\Facades\Log;
 /**
  * Hands due reminders to their driver. Every minute, in the background, for
  * at most 50 seconds or 200 reminders (routes/console/reminders.php). The
- * drivers are log-only: nothing reaches a member.
+ * drivers are log-only: nothing reaches a member. A message only logged (test
+ * mode) is counted as "logged", apart from "sent".
  */
 #[Signature('reminders:dispatch')]
 #[Description('Hand due payment reminders to their (log-only) driver, after a final eligibility check')]
@@ -22,8 +23,8 @@ class DispatchReminders extends Command
         $totals = $dispatcher->run();
 
         $this->info(sprintf(
-            'Processed %d reminder(s): %d sent, %d retrying, %d failed, %d cancelled, %d skipped; %d left by a stopped run.',
-            $totals['processed'], $totals['sent'], $totals['retrying'], $totals['failed'], $totals['cancelled'], $totals['skipped'], $totals['recovered'],
+            'Processed %d reminder(s): %d sent, %d logged, %d retrying, %d failed, %d cancelled, %d skipped; %d left by a stopped run.',
+            $totals['processed'], $totals['sent'], $totals['logged'], $totals['retrying'], $totals['failed'], $totals['cancelled'], $totals['skipped'], $totals['recovered'],
         ));
 
         if ($totals['processed'] > 0 || $totals['recovered'] > 0) {
