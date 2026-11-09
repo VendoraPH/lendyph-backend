@@ -55,8 +55,11 @@ use Illuminate\Database\Eloquent\Collection as EloquentCollection;
  * A loan a restructure created is rebuilt with the restructure rule:
  * {@see AutomaticPoster::restructureReleasePosting()} against its release
  * journal (J1), and {@see AutomaticPoster::restructureWriteOffPosting()}
- * against the source loan's write-off (J2), on the principal written off
- * only: how J2 took it depends on balances at the moment it posted. An
+ * against the source loan's write-off (J2): its principal, the accounts it
+ * debits and the part taken from the source's deferral. How the rest was
+ * split between the allowance and expense depended on the allowance balance
+ * at the moment it posted, and is not compared. A write-off that can't be
+ * rebuilt is its own skip; its release journal is still compared. An
  * ordinary release is rebuilt with the method it was released by
  * (`release_method`, `cash` where none was recorded). A restructure released
  * before its split was stored cannot be rebuilt; it is skipped, and listed
@@ -101,6 +104,9 @@ class DiffLoanReleaseJournals extends Command
     /** @var list<list<string>> */
     private array $skipped = [];
 
+    /** @var list<list<string>> restructure write-offs (J2) that could not be rebuilt; their release was compared */
+    private array $writeOffsSkipped = [];
+
     /** @var array<string, array{loans: int, amount: int, role: string|null}> */
     private array $types = [];
 
@@ -140,7 +146,7 @@ class DiffLoanReleaseJournals extends Command
 
         $this->line('Deduction types with an account of their own are booked to it, so journals posted before that may differ by design.');
 
-        $this->line('A restructure is rebuilt with the restructure rule, and its write-off is compared on the principal written off only.');
+        $this->line('A restructure is rebuilt with the restructure rule. Its write-off is checked on the principal written off, the accounts it debits and the part taken from deferral; the allowance and expense split is not compared.');
 
         $this->newLine();
 
@@ -177,7 +183,7 @@ class DiffLoanReleaseJournals extends Command
                     ->where('postable_type', Loan::class)
                     ->whereIn('postable_id', $sourceIds)
                     ->select(['id', 'journal_no', 'postable_type', 'postable_id'])
-                    ->with('lines:id,accounting_journal_id,accounting_account_id,debit,credit')
+                    ->with('lines:id,accounting_journal_id,accounting_account_id,debit,credit,description')
                     ->get()
                     ->keyBy('postable_id');
 
@@ -241,7 +247,6 @@ class DiffLoanReleaseJournals extends Command
             $posting = $restructure
                 ? $poster->restructureReleasePosting($loan, $map, $method)
                 : $poster->releasePosting($loan, $map, $method);
-            $wouldWriteOff = $restructure ? $poster->restructureWriteOffPosting($loan, $source, $map) : null;
         } catch (CannotPostToTheBooksException $refused) {
             $this->skipped[] = [(string) $journal->journal_no, $reference, $refused->getMessage()];
 
@@ -252,7 +257,7 @@ class DiffLoanReleaseJournals extends Command
 
         $differs = $this->compareTotals((string) $journal->journal_no, $reference, $this->postedTotals($journal), $this->totalsByAccount($posting['lines']));
 
-        if ($restructure && $this->compareWriteOff($reference, $writeOff, $wouldWriteOff, $map)) {
+        if ($restructure && $this->compareWriteOff($loan, $source, $reference, $writeOff, $poster, $map)) {
             $differs = true;
         }
 
@@ -262,25 +267,80 @@ class DiffLoanReleaseJournals extends Command
     }
 
     /**
-     * J2 on the principal it writes off: the credit to loans receivable.
-     * How that was taken (the source's deferral, the allowance, then
-     * expense) depends on balances at the moment it posted, which J2 itself
-     * has since moved, so that split is not compared.
+     * J2 against what it must hold, or false when it can't be rebuilt (that
+     * is its own skip; the release journal has been compared already):
+     *
+     * - the credit to loans receivable is the principal written off;
+     * - its debits fall only on the unearned restructure account, the
+     *   allowance and credit loss expense, and add up to that principal;
+     * - the unearned restructure debit is what the source's deferral could
+     *   take: the lesser of the principal and the deferral as it stood just
+     *   before J2. That deferral is rebuilt from the source's own journals
+     *   ({@see AutomaticPoster::unrecognisedDeferral()}, which already counts
+     *   J2's marked line) with J2's marked line added back. The source is
+     *   closed by the restructure and its voids are refused, so nothing else
+     *   has moved it since.
+     *
+     * How the rest was split between the allowance and expense depended on
+     * the allowance balance at the moment J2 posted, which J2 itself has
+     * since moved, so that split is not compared.
      */
-    private function compareWriteOff(string $reference, ?AccountingJournal $writeOff, ?array $wouldWriteOff, AccountMap $map): bool
+    private function compareWriteOff(Loan $loan, Loan $source, string $reference, ?AccountingJournal $writeOff, AutomaticPoster $poster, AccountMap $map): bool
     {
-        $receivable = $map->accountFor('loans_receivable');
-        $principalOnly = static fn (array $totals): array => isset($totals[$receivable]) ? [$receivable => ['debit' => 0, 'credit' => $totals[$receivable]['credit']]] : [];
+        $journalNo = $writeOff === null ? self::NOTHING.' (no write-off journal)' : (string) $writeOff->journal_no;
+        $label = $reference.' (write-off)';
 
-        $posted = $writeOff === null ? [] : $principalOnly($this->postedTotals($writeOff));
-        $wouldBe = $wouldWriteOff === null ? [] : $principalOnly($this->totalsByAccount($wouldWriteOff['lines']));
+        try {
+            $wouldWriteOff = $poster->restructureWriteOffPosting($loan, $source, $map);
+            $deferralNow = $poster->unrecognisedDeferral($source);
+            $receivable = $map->accountFor('loans_receivable');
+            $unearned = $map->accountFor(PostingRules::UNEARNED_RESTRUCTURE_ROLE);
+        } catch (CannotPostToTheBooksException $refused) {
+            $this->writeOffsSkipped[] = [$journalNo, $label, $refused->getMessage()];
 
-        return $this->compareTotals(
-            $writeOff === null ? self::NOTHING.' (no write-off journal)' : (string) $writeOff->journal_no,
-            $reference.' (write-off)',
-            $posted,
-            $wouldBe,
+            return false;
+        }
+
+        $allowed = array_map(
+            static fn (string $role): int => $map->accountFor($role),
+            array_values(array_filter([PostingRules::UNEARNED_RESTRUCTURE_ROLE, 'allowance_credit_losses', 'credit_loss_expense'], $map->has(...))),
         );
+
+        $posted = $writeOff === null ? [] : $this->postedTotals($writeOff);
+        $writtenOff = $wouldWriteOff === null ? 0 : (int) collect($wouldWriteOff['lines'])
+            ->where('account_id', $receivable)
+            ->sum('credit');
+
+        $principal = static fn (array $totals): array => isset($totals[$receivable]) && $totals[$receivable]['credit'] !== 0
+            ? [$receivable => ['debit' => 0, 'credit' => $totals[$receivable]['credit']]]
+            : [];
+        $differs = $this->compareTotals($journalNo, $label, $principal($posted), $writtenOff === 0 ? [] : [$receivable => ['debit' => 0, 'credit' => $writtenOff]]);
+
+        foreach ($posted as $accountId => $totals) {
+            if ($totals['debit'] !== 0 && ! in_array($accountId, $allowed, true)) {
+                $differs = $this->compareTotals($journalNo, $label, [$accountId => ['debit' => $totals['debit'], 'credit' => 0]], []) || $differs;
+            }
+        }
+
+        $debits = array_sum(array_column($posted, 'debit'));
+
+        if ($writeOff !== null && $debits !== $writtenOff) {
+            $this->recordDifference($journalNo, $label, 'Debits in total', ['debit' => $debits, 'credit' => 0], ['debit' => $writtenOff, 'credit' => 0]);
+            $differs = true;
+        }
+
+        $markedBefore = $writeOff === null ? 0 : (int) $writeOff->lines
+            ->where('description', PostingRules::DEFERRAL_WRITTEN_OFF_LINE)
+            ->sum('debit');
+        $fromDeferral = min($writtenOff, $deferralNow['interest'] + $deferralNow['penalty'] + $markedBefore);
+        $postedUnearned = $posted[$unearned]['debit'] ?? 0;
+
+        if ($postedUnearned !== $fromDeferral) {
+            $this->recordDifference($journalNo, $label, $this->accountLabels[$unearned] ?? "account #{$unearned}", ['debit' => $postedUnearned, 'credit' => 0], ['debit' => $fromDeferral, 'credit' => 0]);
+            $differs = true;
+        }
+
+        return $differs;
     }
 
     /** @return array<int, array{debit: int, credit: int}> */
@@ -312,19 +372,28 @@ class DiffLoanReleaseJournals extends Command
             }
 
             $differs = true;
-            $this->absoluteDifference += abs($now['debit'] - $was['debit']) + abs($now['credit'] - $was['credit']);
-
-            $this->differences[] = [
-                $journalNo,
-                $reference,
-                $this->accountLabels[$accountId] ?? "account #{$accountId}",
-                $this->sides($was),
-                $this->sides($now),
-                $this->net(($now['debit'] - $now['credit']) - ($was['debit'] - $was['credit'])),
-            ];
+            $this->recordDifference($journalNo, $reference, $this->accountLabels[$accountId] ?? "account #{$accountId}", $was, $now);
         }
 
         return $differs;
+    }
+
+    /**
+     * @param  array{debit: int, credit: int}  $was
+     * @param  array{debit: int, credit: int}  $now
+     */
+    private function recordDifference(string $journalNo, string $reference, string $account, array $was, array $now): void
+    {
+        $this->absoluteDifference += abs($now['debit'] - $was['debit']) + abs($now['credit'] - $was['credit']);
+
+        $this->differences[] = [
+            $journalNo,
+            $reference,
+            $account,
+            $this->sides($was),
+            $this->sides($now),
+            $this->net(($now['debit'] - $now['credit']) - ($was['debit'] - $was['credit'])),
+        ];
     }
 
     /** Whether A1 stored the restructure's split on the loan at release. */
@@ -413,6 +482,15 @@ class DiffLoanReleaseJournals extends Command
         }
 
         $this->newLine();
+        $this->line('Restructure write-offs skipped (their release journal was compared)');
+
+        if ($this->writeOffsSkipped === []) {
+            $this->line('  None.');
+        } else {
+            $this->table(['Journal', 'Loan', 'Why'], $this->writeOffsSkipped);
+        }
+
+        $this->newLine();
         $this->line('Deduction types on these loans');
 
         if ($this->types === [] && $this->unusable === []) {
@@ -472,6 +550,7 @@ class DiffLoanReleaseJournals extends Command
             'Would differ:' => number_format($this->differing),
             'Matching:' => number_format($this->scanned - $this->differing - count($this->skipped)),
             'Skipped:' => number_format(count($this->skipped)),
+            'Write-offs skipped:' => number_format(count($this->writeOffsSkipped)),
             'Total absolute difference:' => Money::format($this->absoluteDifference),
         ] as $label => $value) {
             $this->line(sprintf('  %-28s %s', $label, $value));

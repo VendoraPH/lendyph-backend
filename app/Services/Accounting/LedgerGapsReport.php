@@ -13,6 +13,7 @@ use App\Models\Loan;
 use App\Models\LoanAdjustment;
 use App\Models\Repayment;
 use App\Models\ShareCapitalLedger;
+use Carbon\Carbon;
 use Illuminate\Database\Query\Builder;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
@@ -93,6 +94,22 @@ final class LedgerGapsReport
     /** ShareCapitalService::processAutoCredit()'s description. */
     private const AUTO_CREDIT_DESCRIPTION = 'Monthly pledge - auto-credit';
 
+    /** Whether a part's loan came in through the CSV importer (Loan::isImported()). */
+    private const IMPORTED_LOAN = '(l.external_loan_no IS NOT NULL OR l.imported_arrears_baseline IS NOT NULL)';
+
+    /** The day a paid Cash In posts on. */
+    private const CASH_IN_DATE = 'COALESCE(g.paid_at, g.transaction_date)';
+
+    /** Whether imported (CSV) loans' events are listed: all events, none of them, or only them. */
+    public const IMPORTED_FILTERS = ['include', 'exclude', 'only'];
+
+    /**
+     * `$chunkSize` is a constructor argument so a test can lower it through
+     * the container (`when(...)->needs('$chunkSize')`) and cross chunk
+     * boundaries with a handful of rows, as DiffLoanReleaseJournals does.
+     */
+    public function __construct(private readonly int $chunkSize = 500) {}
+
     public function booksKept(): bool
     {
         return AccountMap::chartExists();
@@ -101,7 +118,7 @@ final class LedgerGapsReport
     /**
      * One page of rows, ordered by date, then kind, then record.
      *
-     * @param  array{kind?: string|null, from?: string|null, to?: string|null}  $filters
+     * @param  array{kind?: string|null, from?: string|null, to?: string|null, imported?: string|null}  $filters
      * @param  int|list<int>|null  $branches
      * @return array{rows: list<array<string, mixed>>, total: int}
      */
@@ -119,28 +136,34 @@ final class LedgerGapsReport
     }
 
     /**
-     * Every row, read in chunks, for the command.
+     * Every row, a chunk at a time, for the command. Each chunk is read from
+     * the last (event_date, kind, record_id) the one before it ended on,
+     * never by OFFSET, so a large book costs the same per chunk at its end
+     * as at its start.
      *
-     * @param  array{kind?: string|null, from?: string|null, to?: string|null}  $filters
+     * @param  array{kind?: string|null, from?: string|null, to?: string|null, imported?: string|null}  $filters
      * @param  int|list<int>|null  $branches
-     * @return LazyCollection<int, array<string, mixed>>
+     * @return LazyCollection<int, list<array<string, mixed>>>
      */
-    public function rows(array $filters, int|array|null $branches = null, int $chunk = 500): LazyCollection
+    public function chunks(array $filters, int|array|null $branches = null): LazyCollection
     {
         if (! $this->booksKept()) {
             return LazyCollection::empty();
         }
 
-        return LazyCollection::make(function () use ($filters, $branches, $chunk) {
-            for ($page = 1; ; $page++) {
-                $rows = $this->ordered($this->query($filters, $branches))->forPage($page, $chunk)->get();
+        return LazyCollection::make(function () use ($filters, $branches) {
+            $last = null;
 
-                yield from $this->present($rows);
+            do {
+                $rows = $this->after($this->ordered($this->query($filters, $branches)), $last)
+                    ->limit($this->chunkSize)
+                    ->get();
 
-                if ($rows->count() < $chunk) {
-                    return;
+                if ($rows->isNotEmpty()) {
+                    yield $this->present($rows);
+                    $last = $rows->last();
                 }
-            }
+            } while ($rows->count() === $this->chunkSize);
         });
     }
 
@@ -148,7 +171,7 @@ final class LedgerGapsReport
      * The count and amount of every kind, and the overall count. Every kind
      * is present, ₱0.00 where nothing is missing.
      *
-     * @param  array{kind?: string|null, from?: string|null, to?: string|null}  $filters
+     * @param  array{kind?: string|null, from?: string|null, to?: string|null, imported?: string|null}  $filters
      * @param  int|list<int>|null  $branches
      * @return array{count: int, by_kind: array<string, array{count: int, amount: string}>}
      */
@@ -189,11 +212,13 @@ final class LedgerGapsReport
     }
 
     /**
-     * The union of every kind asked for, filtered by date and branch, as
-     * `kind, record_id, reference, event_date, branch_id, borrower_id,
-     * amount (centavos), posted, detail`.
+     * The union of every kind asked for, as `kind, record_id, reference,
+     * event_date, branch_id, borrower_id, amount (centavos), posted, detail,
+     * imported`. The date, branch and imported filters are applied inside
+     * each part, on that part's own columns, so each table is narrowed by its
+     * own indexes before the union is built.
      *
-     * @param  array{kind?: string|null, from?: string|null, to?: string|null}  $filters
+     * @param  array{kind?: string|null, from?: string|null, to?: string|null, imported?: string|null}  $filters
      * @param  int|list<int>|null  $branches
      */
     private function query(array $filters, int|array|null $branches): Builder
@@ -202,30 +227,82 @@ final class LedgerGapsReport
         $union = null;
 
         foreach ($kinds as $kind) {
-            $select = match ($kind) {
-                'release' => $this->selectRelease(),
-                'collection' => $this->selectCollection(),
-                'build_up' => $this->selectBuildUp(),
-                'restructure' => $this->selectRestructure(),
-                'adjustment' => $this->selectAdjustment(),
-                'share_capital' => $this->selectShareCapital(),
-                'cash_in' => $this->selectGCash('cash_in', 'paid', 'COALESCE(g.paid_at, g.transaction_date)'),
-                'cash_out' => $this->selectGCash('cash_out', 'completed', 'g.transaction_date'),
+            [$select, $date, $branch, $imported] = match ($kind) {
+                'release' => [$this->selectRelease(), ['l.released_at', true], 'l.branch_id', self::IMPORTED_LOAN],
+                'collection' => [$this->selectCollection(), ['r.payment_date', false], 'l.branch_id', self::IMPORTED_LOAN],
+                'build_up' => [$this->selectBuildUp(), ['r.payment_date', false], 'l.branch_id', self::IMPORTED_LOAN],
+                'restructure' => [$this->selectRestructure(), ['l.released_at', true], 'l.branch_id', self::IMPORTED_LOAN],
+                'adjustment' => [$this->selectAdjustment(), ['a.applied_at', true], 'l.branch_id', self::IMPORTED_LOAN],
+                'share_capital' => [$this->selectShareCapital(), ['s.date', false], 'b.branch_id', null],
+                'cash_in' => [$this->selectGCash('cash_in', 'paid', self::CASH_IN_DATE), [self::CASH_IN_DATE, true], 'b.branch_id', null],
+                'cash_out' => [$this->selectGCash('cash_out', 'completed', 'g.transaction_date'), ['g.transaction_date', true], 'b.branch_id', null],
             };
+
+            $this->narrow($select, $filters, $branches, $date[0], $date[1], $branch, $imported);
             $union = $union === null ? $select : $union->unionAll($select);
         }
 
-        return DB::query()
-            ->fromSub($union, 'gaps')
-            ->when(filled($filters['from'] ?? null), fn (Builder $q) => $q->where('event_date', '>=', $filters['from']))
-            ->when(filled($filters['to'] ?? null), fn (Builder $q) => $q->where('event_date', '<=', $filters['to']))
-            ->when(is_int($branches), fn (Builder $q) => $q->where('branch_id', $branches))
-            ->when(is_array($branches), fn (Builder $q) => $q->whereIn('branch_id', $branches));
+        return DB::query()->fromSub($union, 'gaps');
+    }
+
+    /**
+     * One part's filters on its own columns. A timestamp is bounded by its
+     * day, `[from 00:00, to + 1 day 00:00)`, rather than wrapped in DATE(),
+     * so its index still serves. A part with no loan is never imported.
+     *
+     * @param  array{from?: string|null, to?: string|null, imported?: string|null}  $filters
+     * @param  int|list<int>|null  $branches
+     */
+    private function narrow(Builder $part, array $filters, int|array|null $branches, string $dateColumn, bool $isTimestamp, string $branchColumn, ?string $imported): void
+    {
+        $from = $filters['from'] ?? null;
+        $to = $filters['to'] ?? null;
+
+        if (filled($from)) {
+            $part->whereRaw("{$dateColumn} >= ?", [$isTimestamp ? "{$from} 00:00:00" : $from]);
+        }
+
+        if (filled($to)) {
+            $isTimestamp
+                ? $part->whereRaw("{$dateColumn} < ?", [Carbon::parse($to)->addDay()->toDateString().' 00:00:00'])
+                : $part->whereRaw("{$dateColumn} <= ?", [$to]);
+        }
+
+        if (is_int($branches)) {
+            $part->where($branchColumn, $branches);
+        } elseif (is_array($branches)) {
+            $part->whereIn($branchColumn, $branches);
+        }
+
+        match ($filters['imported'] ?? 'include') {
+            'exclude' => $imported === null ? null : $part->whereRaw("NOT {$imported}"),
+            'only' => $imported === null ? $part->whereRaw('1 = 0') : $part->whereRaw($imported),
+            default => null,
+        };
+
+        $part->selectRaw(($imported ?? '0').' AS imported');
     }
 
     private function ordered(Builder $query): Builder
     {
         return $query->select('gaps.*')->orderBy('event_date')->orderBy('kind')->orderBy('record_id');
+    }
+
+    /**
+     * Rows strictly after `$last` in the (event_date, kind, record_id) order,
+     * where a row with no date sorts first, as MySQL sorts NULL.
+     */
+    private function after(Builder $query, ?object $last): Builder
+    {
+        if ($last === null) {
+            return $query;
+        }
+
+        $sameDateLater = fn (Builder $q) => $q->whereRaw('(kind, record_id) > (?, ?)', [$last->kind, (int) $last->record_id]);
+
+        return $last->event_date === null
+            ? $query->where(fn (Builder $q) => $q->whereNotNull('event_date')->orWhere(fn (Builder $undated) => $sameDateLater($undated->whereNull('event_date'))))
+            : $query->where(fn (Builder $q) => $q->where('event_date', '>', $last->event_date)->orWhere(fn (Builder $same) => $sameDateLater($same->where('event_date', $last->event_date))));
     }
 
     private function selectRelease(): Builder
@@ -253,6 +330,11 @@ final class LedgerGapsReport
             ->selectRaw("'none' AS posted, NULL AS detail");
     }
 
+    /**
+     * Only a payment with a stored overpayment: AutomaticPoster::buildCollection()
+     * credits a build-up out of the overpayment and nothing else, so a payment
+     * with none posts no build-up line under today's rule either, and is no gap.
+     */
     private function selectBuildUp(): Builder
     {
         $credited = DB::table('share_capital_ledger')
@@ -265,6 +347,7 @@ final class LedgerGapsReport
             ->join('loans as l', 'l.id', '=', 'r.loan_id')
             ->joinSub($credited, 'b', 'b.repayment_id', '=', 'r.id')
             ->where('r.status', 'posted')
+            ->where('r.overpayment', '>', 0)
             ->whereExists($this->journal(Repayment::class, 'r.id', 'loan_collection'))
             ->whereNotExists($this->journal(Repayment::class, 'r.id', 'loan_collection')
                 ->join('accounting_journal_lines as jl', 'jl.accounting_journal_id', '=', 'j.id')
@@ -384,6 +467,7 @@ final class LedgerGapsReport
                 'amount' => self::pesos((int) $row->amount),
                 'posted' => $row->posted,
                 'reason' => $this->reason($row->kind, $row->detail, $accounts),
+                'imported' => (bool) $row->imported,
             ];
         })->values()->all();
     }

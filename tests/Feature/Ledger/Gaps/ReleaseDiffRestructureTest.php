@@ -103,6 +103,84 @@ class ReleaseDiffRestructureTest extends TestCase
         $this->assertStringContainsString('₱5,000.00', $output);
     }
 
+    public function test_a_write_off_that_debited_a_wrong_account_differs(): void
+    {
+        $loan = $this->restructureOf($this->createReleasedLoan(), $source = $this->createReleasedLoan(), [6_000_000, 0, 0, 500_000]);
+        $this->seedChartOfAccounts();
+        $writeOff = $this->poster()->restructureRelease($loan, $source, $this->admin->id, 'cash')['write_off'];
+
+        DB::table('accounting_journal_lines')
+            ->where('accounting_journal_id', $writeOff->id)
+            ->where('accounting_account_id', $this->account('5140'))
+            ->update(['accounting_account_id' => $this->account('4010')]);
+
+        $output = $this->diff();
+
+        $this->assertMatchesRegularExpression('/Would differ:\s+1\b/', $output);
+        $this->assertMatchesRegularExpression('/'.preg_quote($writeOff->journal_no, '/').'.*4010/u', $output);
+    }
+
+    public function test_a_write_off_with_debits_that_dont_add_up_to_the_principal_differs(): void
+    {
+        $loan = $this->restructureOf($this->createReleasedLoan(), $source = $this->createReleasedLoan(), [6_000_000, 0, 0, 500_000]);
+        $this->seedChartOfAccounts();
+        $writeOff = $this->poster()->restructureRelease($loan, $source, $this->admin->id, 'cash')['write_off'];
+
+        DB::table('accounting_journal_lines')
+            ->where('accounting_journal_id', $writeOff->id)
+            ->where('accounting_account_id', $this->account('5140'))
+            ->update(['debit' => 400_000]);
+
+        $output = $this->diff();
+
+        $this->assertMatchesRegularExpression('/Would differ:\s+1\b/', $output);
+        $this->assertStringContainsString('Debits in total', $output);
+    }
+
+    /**
+     * A restructure of a restructure: J2 takes the principal it writes off
+     * from the source's own deferral first, rebuilt from the source's
+     * journals as it stood before J2.
+     */
+    public function test_a_write_off_is_checked_against_the_sources_deferral(): void
+    {
+        $source = $this->restructureOf($this->createReleasedLoan(), $first = $this->createReleasedLoan(), [5_000_000, 700_000, 300_000, 0]);
+        $loan = $this->restructureOf($this->createReleasedLoan(), $source, [6_000_000, 0, 0, 500_000]);
+        $this->seedChartOfAccounts();
+        $this->poster()->restructureRelease($source, $first, $this->admin->id, 'cash');
+        $writeOff = $this->poster()->restructureRelease($loan, $source->fresh(), $this->admin->id, 'cash')['write_off'];
+        $this->assertSame(500_000, (int) $writeOff->lines()->where('accounting_account_id', $this->account('1210'))->sum('debit'));
+
+        $matching = $this->diff();
+
+        $this->assertMatchesRegularExpression('/Journals scanned:\s+2\b/', $matching);
+        $this->assertMatchesRegularExpression('/Matching:\s+2\b/', $matching);
+
+        DB::table('accounting_journal_lines')
+            ->where('accounting_journal_id', $writeOff->id)
+            ->where('accounting_account_id', $this->account('1210'))
+            ->update(['accounting_account_id' => $this->account('1200')]);
+
+        $moved = $this->diff();
+
+        $this->assertMatchesRegularExpression('/Would differ:\s+1\b/', $moved);
+        $this->assertMatchesRegularExpression('/'.preg_quote($writeOff->journal_no, '/').'.*1210/u', $moved);
+    }
+
+    public function test_a_write_off_that_cannot_be_rebuilt_is_its_own_skip_and_the_release_is_still_compared(): void
+    {
+        $loan = $this->restructureOf($this->createReleasedLoan(), $source = $this->createReleasedLoan(), [6_000_000, 0, 0, 500_000]);
+        $this->seedChartOfAccounts();
+        $this->poster()->restructureRelease($loan, $source, $this->admin->id, 'cash');
+        DB::table('accounting_account_mappings')->where('role', 'allowance_credit_losses')->delete();
+
+        $output = $this->diff();
+
+        $this->assertMatchesRegularExpression('/Write-offs skipped:\s+1\b/', $output);
+        $this->assertMatchesRegularExpression('/Matching:\s+1\b/', $output);
+        $this->assertMatchesRegularExpression('/Skipped:\s+0\b/', $output);
+    }
+
     public function test_a_restructure_released_before_its_split_was_stored_is_skipped_for_the_gaps_report(): void
     {
         $loan = $this->restructureOf($this->createReleasedLoan(), $this->createReleasedLoan());

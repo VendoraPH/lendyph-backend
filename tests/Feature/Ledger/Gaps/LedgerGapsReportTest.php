@@ -222,6 +222,67 @@ class LedgerGapsReportTest extends TestCase
         $this->assertSame([], $this->rowsOf($after, 'cash_out'));
     }
 
+    /** AutomaticPoster::buildCollection() credits a build-up only out of a stored overpayment. */
+    public function test_a_build_up_row_on_a_payment_with_no_overpayment_is_not_listed(): void
+    {
+        $loan = $this->createReleasedLoan();
+        $this->seedChartOfAccounts();
+        $repayment = $this->pay($loan);
+        $this->assertSame(0.0, (float) $repayment->overpayment);
+        ShareCapitalLedger::factory()->create(['borrower_id' => $loan->borrower_id, 'repayment_id' => $repayment->id, 'credit' => 500, 'debit' => 0]);
+
+        $response = $this->gaps()->assertOk();
+
+        $this->assertSame([], $this->rowsOf($response, 'build_up'), 'Today\'s rule would post this payment exactly as it did, so it would be listed forever.');
+        $this->assertSame([], $this->rowsOf($response, 'collection'));
+    }
+
+    public function test_imported_loans_are_marked_and_can_be_left_out_or_shown_alone(): void
+    {
+        $imported = $this->createReleasedLoan();
+        $imported->update(['external_loan_no' => 'OLD-0001']);
+        $here = $this->createReleasedLoan();
+        $repayment = $this->pay($imported);
+        $this->seedChartOfAccounts();
+        $entry = ShareCapitalLedger::factory()->create(['borrower_id' => $here->borrower_id, 'credit' => 100, 'debit' => 0]);
+
+        $all = $this->gaps()->assertOk();
+        $this->assertTrue($this->rowsOf($all, 'release')[$imported->id]['imported']);
+        $this->assertStringContainsString('Imported', $this->rowsOf($all, 'release')[$imported->id]['reason']);
+        $this->assertTrue($this->rowsOf($all, 'collection')[$repayment->id]['imported']);
+        $this->assertFalse($this->rowsOf($all, 'release')[$here->id]['imported']);
+        $this->assertFalse($this->rowsOf($all, 'share_capital')[$entry->id]['imported']);
+        $this->assertSame($all->json('meta.totals'), $this->gaps(['imported' => 'include'])->json('meta.totals'));
+
+        $excluded = $this->gaps(['imported' => 'exclude'])->assertOk();
+        $this->assertSame([$here->id], array_keys($this->rowsOf($excluded, 'release')));
+        $this->assertSame([], $this->rowsOf($excluded, 'collection'));
+        $this->assertArrayHasKey($entry->id, $this->rowsOf($excluded, 'share_capital'));
+        $this->assertSame(2, $excluded->json('meta.totals.count'));
+
+        $only = $this->gaps(['imported' => 'only'])->assertOk();
+        $this->assertEqualsCanonicalizing(['release:'.$imported->id, 'collection:'.$repayment->id], collect($only->json('data'))->map(fn (array $row): string => "{$row['kind']}:{$row['record_id']}")->all());
+        $this->assertSame(['count' => 1, 'amount' => '60000.00'], $only->json('meta.totals.by_kind.release'));
+        $this->assertSame(['count' => 0, 'amount' => '0.00'], $only->json('meta.totals.by_kind.share_capital'));
+
+        $this->gaps(['imported' => 'sometimes'])->assertUnprocessable()->assertJsonValidationErrors('imported');
+    }
+
+    /** A timestamp is filtered by its Manila day: the last minute of `to` is in, the first of the next day out. */
+    public function test_dates_filter_a_timestamp_by_its_day(): void
+    {
+        $in = $this->createReleasedLoan();
+        $out = $this->createReleasedLoan();
+        DB::table('loans')->where('id', $in->id)->update(['released_at' => '2026-10-31 23:59:00']);
+        DB::table('loans')->where('id', $out->id)->update(['released_at' => '2026-11-01 00:00:00']);
+        $this->seedChartOfAccounts();
+
+        $october = $this->rowsOf($this->gaps(['kind' => 'release', 'from' => '2026-10-31', 'to' => '2026-10-31'])->assertOk(), 'release');
+
+        $this->assertSame([$in->id], array_keys($october));
+        $this->assertSame('2026-10-31', $october[$in->id]['date']);
+    }
+
     // ── Totals, paging and filters ──
 
     public function test_totals_equal_the_rows_and_cover_every_page(): void
@@ -341,6 +402,34 @@ class LedgerGapsReportTest extends TestCase
         $all = $this->gaps()->assertOk();
         $this->assertEqualsCanonicalizing([$here->id, $there->id], array_keys($this->rowsOf($all, 'share_capital')));
         $this->assertArrayHasKey($walkIn->id, $this->rowsOf($all, 'cash_out'));
+    }
+
+    /** A payment's branch is its loan's. */
+    public function test_a_branch_user_sees_only_the_collections_of_their_branches_loans(): void
+    {
+        $far = Branch::factory()->create(['name' => 'Far Branch', 'code' => 'FAR']);
+        $here = $this->createReleasedLoan();
+        $there = $this->createReleasedLoan();
+        $there->borrower->update(['branch_id' => $far->id]);
+        $there->update(['branch_id' => $far->id]);
+        $herePayment = $this->pay($here);
+        $therePayment = $this->pay($there->fresh());
+        $this->seedChartOfAccounts();
+
+        $role = Role::firstOrCreate(['name' => 'gap_reader', 'guard_name' => 'web']);
+        $role->syncPermissions(['accounting:view']);
+        $user = User::factory()->inBranches($this->branch)->create();
+        $user->assignRole($role);
+        $this->actingAs($user);
+
+        $response = $this->gaps(['kind' => 'collection'])->assertOk();
+
+        $this->assertSame([$herePayment->id], array_keys($this->rowsOf($response, 'collection')));
+        $this->assertSame(['count' => 1, 'amount' => '11800.00'], $response->json('meta.totals.by_kind.collection'));
+        $this->gaps(['kind' => 'collection', 'branch_id' => $far->id])->assertForbidden();
+
+        $this->actingAs($this->admin);
+        $this->assertSame([$therePayment->id], array_keys($this->rowsOf($this->gaps(['kind' => 'collection', 'branch_id' => $far->id]), 'collection')));
     }
 
     // ── It only reads ──

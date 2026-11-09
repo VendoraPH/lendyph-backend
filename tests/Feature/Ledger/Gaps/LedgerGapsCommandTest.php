@@ -6,8 +6,10 @@ use App\Models\Borrower;
 use App\Models\Branch;
 use App\Models\GCashTransaction;
 use App\Models\ShareCapitalLedger;
+use App\Services\Accounting\LedgerGapsReport;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Artisan;
+use Illuminate\Support\Facades\DB;
 use Tests\TestCase;
 use Tests\Traits\PostsJournals;
 use Tests\Traits\SetupLendyPH;
@@ -83,6 +85,53 @@ class LedgerGapsCommandTest extends TestCase
         $this->assertStringNotContainsString($september->reference, $output);
         $this->assertStringNotContainsString($cashIn->reference_no, $output);
         $this->assertMatchesRegularExpression('/Events listed:\s+1\b/', $output);
+    }
+
+    /**
+     * Chunks of two cross ties on the date (three releases with no release
+     * date, five entries on one day) and the move from no date to a date:
+     * every event prints once, and no chunk is read by OFFSET.
+     */
+    public function test_every_row_prints_once_across_chunks_read_from_the_last_key(): void
+    {
+        $this->app->when(LedgerGapsReport::class)->needs('$chunkSize')->give(2);
+        $undated = [$this->createReleasedLoan(), $this->createReleasedLoan(), $this->createReleasedLoan()];
+        DB::table('loans')->whereIn('id', array_map(fn ($loan) => $loan->id, $undated))->update(['released_at' => null]);
+        $this->seedChartOfAccounts();
+        $member = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+        $entries = ShareCapitalLedger::factory()->count(5)->create(['borrower_id' => $member->id, 'date' => '2026-10-04', 'credit' => 100, 'debit' => 0]);
+
+        $statements = [];
+        DB::listen(function ($query) use (&$statements): void {
+            $statements[] = $query->sql;
+        });
+
+        $output = $this->runCommand();
+
+        foreach ([...array_map(fn ($loan) => $loan->loan_account_number, $undated), ...$entries->pluck('reference')->all()] as $reference) {
+            $this->assertSame(1, substr_count($output, $reference), "{$reference} is not printed exactly once.");
+        }
+
+        $this->assertMatchesRegularExpression('/Events listed:\s+8\b/', $output);
+        $this->assertSame([], array_values(array_filter($statements, fn (string $sql): bool => preg_match('/\boffset\b/i', $sql) === 1)));
+    }
+
+    public function test_imported_loans_can_be_left_out_or_shown_alone(): void
+    {
+        $imported = $this->createReleasedLoan();
+        $imported->update(['external_loan_no' => 'OLD-0001']);
+        $here = $this->createReleasedLoan();
+        $this->seedChartOfAccounts();
+
+        $excluded = $this->runCommand(['--imported' => 'exclude']);
+        $this->assertStringContainsString($here->loan_account_number, $excluded);
+        $this->assertStringNotContainsString($imported->loan_account_number, $excluded);
+
+        $only = $this->runCommand(['--imported' => 'only']);
+        $this->assertStringContainsString($imported->loan_account_number, $only);
+        $this->assertStringNotContainsString($here->loan_account_number, $only);
+
+        $this->assertStringContainsString('imported', $this->runCommand(['--imported' => 'sometimes'], Command::FAILURE));
     }
 
     public function test_a_bad_kind_or_date_is_refused(): void

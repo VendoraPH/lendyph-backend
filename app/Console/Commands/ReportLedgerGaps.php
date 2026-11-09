@@ -19,12 +19,15 @@ use Illuminate\Console\Command;
  *
  * Every statement is a SELECT: no transaction is opened and nothing is
  * written, so it is safe to run on production as it is. It is a report, not
- * a fix: nothing is back-posted.
+ * a fix: nothing is back-posted. Rows are printed a chunk at a time as they
+ * are read ({@see LedgerGapsReport::chunks()}), so a large book is never
+ * held in memory.
  */
 #[Signature('accounting:ledger-gaps-report
     {--from= : Only events on or after this date (Y-m-d)}
     {--to= : Only events on or before this date (Y-m-d)}
-    {--kind= : Only one kind: release, collection, build_up, restructure, adjustment, share_capital, cash_in or cash_out}')]
+    {--kind= : Only one kind: release, collection, build_up, restructure, adjustment, share_capital, cash_in or cash_out}
+    {--imported=include : Events of loans imported by CSV: include, exclude or only}')]
 #[Description('List past events that posted nothing to the books, or posted differently from today\'s rules. Read only')]
 class ReportLedgerGaps extends Command
 {
@@ -47,10 +50,11 @@ class ReportLedgerGaps extends Command
             return self::SUCCESS;
         }
 
-        $rows = [];
+        $this->line('Events that posted nothing, or posted differently from today\'s rules');
+        $printed = false;
 
-        foreach ($report->rows($filters) as $row) {
-            $rows[] = [
+        foreach ($report->chunks($filters) as $chunk) {
+            $this->table(['Kind', 'Record', 'Date', 'Branch', 'Member', 'Amount', 'Posted', 'Imported', 'Why'], array_map(fn (array $row): array => [
                 $row['kind_label'],
                 (string) ($row['reference'] ?? "#{$row['record_id']}"),
                 $row['date'] ?? self::NOTHING,
@@ -58,16 +62,14 @@ class ReportLedgerGaps extends Command
                 $row['member'] === null ? self::NOTHING : "{$row['member']['name']} ({$row['member']['code']})",
                 Money::format($this->centavos($row['amount'])),
                 $row['posted'],
+                $row['imported'] ? 'yes' : 'no',
                 $row['reason'],
-            ];
+            ], $chunk));
+            $printed = true;
         }
 
-        $this->line('Events that posted nothing, or posted differently from today\'s rules');
-
-        if ($rows === []) {
+        if (! $printed) {
             $this->line('  None.');
-        } else {
-            $this->table(['Kind', 'Record', 'Date', 'Branch', 'Member', 'Amount', 'Posted', 'Why'], $rows);
         }
 
         $totals = $report->totals($filters, null);
@@ -92,7 +94,7 @@ class ReportLedgerGaps extends Command
      * The options as the report takes them, or null (after saying why) when
      * one is not usable.
      *
-     * @return array{kind: string|null, from: string|null, to: string|null}|null
+     * @return array{kind: string|null, imported: string, from: string|null, to: string|null}|null
      */
     private function filters(): ?array
     {
@@ -100,6 +102,14 @@ class ReportLedgerGaps extends Command
 
         if (filled($kind) && ! in_array($kind, LedgerGapsReport::KINDS, true)) {
             $this->error('Unknown --kind "'.$kind.'". Use one of: '.implode(', ', LedgerGapsReport::KINDS).'.');
+
+            return null;
+        }
+
+        $imported = (string) ($this->option('imported') ?? 'include');
+
+        if (! in_array($imported, LedgerGapsReport::IMPORTED_FILTERS, true)) {
+            $this->error('Unknown --imported "'.$imported.'". Use one of: '.implode(', ', LedgerGapsReport::IMPORTED_FILTERS).'.');
 
             return null;
         }
@@ -124,7 +134,7 @@ class ReportLedgerGaps extends Command
             return null;
         }
 
-        return ['kind' => filled($kind) ? (string) $kind : null, ...$dates];
+        return ['kind' => filled($kind) ? (string) $kind : null, 'imported' => $imported, ...$dates];
     }
 
     private function isDate(string $value): bool
