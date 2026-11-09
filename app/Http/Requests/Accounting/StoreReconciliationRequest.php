@@ -26,6 +26,15 @@ class StoreReconciliationRequest extends FormRequest
      */
     public const MAX_LINES = 1000;
 
+    /**
+     * The longest period one reconciliation covers, in days, both ends
+     * included: a quarter. Statements come monthly, and the worksheet reads
+     * the ledger from {@see ReconciliationMatcher::OUTSTANDING_DAYS_BEFORE}
+     * days before the start to the end, so an unbounded period would make
+     * every read of it unbounded too.
+     */
+    public const MAX_PERIOD_DAYS = 92;
+
     public function authorize(): bool
     {
         return $this->user()->can('accounting:reconcile');
@@ -75,6 +84,20 @@ class StoreReconciliationRequest extends FormRequest
     {
         $validator->after(function (Validator $v): void {
             if ($v->errors()->isNotEmpty()) {
+                return;
+            }
+
+            $from = (string) $this->input('start_date');
+            $to = (string) $this->input('end_date');
+            $days = (int) CarbonImmutable::parse($from)->diffInDays(CarbonImmutable::parse($to)) + 1;
+
+            if ($days > self::MAX_PERIOD_DAYS) {
+                $v->errors()->add(
+                    'end_date',
+                    'A reconciliation covers at most '.self::MAX_PERIOD_DAYS." days, and {$from} to {$to} is {$days} "
+                    .'days. Reconcile it a month or a quarter at a time.',
+                );
+
                 return;
             }
 

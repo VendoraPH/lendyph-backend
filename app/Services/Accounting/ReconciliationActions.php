@@ -128,6 +128,11 @@ class ReconciliationActions
         array $data,
         ?int $userId,
     ): array {
+        // Checked before the transaction, so the account lock in act() only
+        // ever takes money-account rows (never 1200, whose lock comes first
+        // wherever it is taken) and no read inside the transaction precedes it.
+        $this->requireMoneyAccount((int) $data['counter_account_id'], 'counter_account_id');
+
         return $this->act($reconciliation, $lineId, $userId, 'transfer', (bool) ($data['record_anyway'] ?? false), function (
             AccountingReconciliationLine $line,
             AccountingAccount $reconciled,
@@ -156,7 +161,7 @@ class ReconciliationActions
             ], $userId);
 
             return [$journal->id, $journal->id];
-        });
+        }, [$reconciliation->accounting_account_id, (int) $data['counter_account_id']]);
     }
 
     /**
@@ -221,7 +226,19 @@ class ReconciliationActions
      *
      * `$create` writes the record and returns [record id, journal id].
      *
+     * `$accountIds` are money-account rows locked, in id order and in one
+     * read, after the statement line and BEFORE the duplicate check. A
+     * transfer passes both of its accounts: the same transfer recorded at
+     * once from the bank's reconciliation and from the cash account's would
+     * otherwise pass two duplicate checks that each read the books before the
+     * other had written, and book the money twice. Locked, the second waits,
+     * then finds the first's entry and is refused like any other duplicate.
+     * Only locking reads come before this lock, so under REPEATABLE READ the
+     * duplicate check's snapshot is taken after the wait, and it sees the
+     * entry the first request committed.
+     *
      * @param  Closure(AccountingReconciliationLine, AccountingAccount): array{0: int, 1: int}  $create
+     * @param  list<int>  $accountIds
      * @return array{type: string, id: int, journal_id: int, journal_no: string}
      */
     private function act(
@@ -231,9 +248,10 @@ class ReconciliationActions
         string $type,
         bool $recordAnyway,
         Closure $create,
+        array $accountIds = [],
     ): array {
         try {
-            return DB::transaction(function () use ($reconciliation, $lineId, $userId, $type, $recordAnyway, $create): array {
+            return DB::transaction(function () use ($reconciliation, $lineId, $userId, $type, $recordAnyway, $create, $accountIds): array {
                 $line = AccountingReconciliationLine::query()
                     ->whereKey($lineId)
                     ->lockForUpdate()
@@ -254,6 +272,14 @@ class ReconciliationActions
                 }
 
                 $this->assertInsideTheWindow($reconciliation, $line);
+
+                if ($accountIds !== []) {
+                    AccountingAccount::query()
+                        ->whereKey(array_values(array_unique($accountIds)))
+                        ->orderBy('id')
+                        ->lockForUpdate()
+                        ->get();
+                }
 
                 $twin = $this->entryAlreadyInTheBooks($reconciliation, $line);
 
@@ -376,25 +402,35 @@ class ReconciliationActions
      * it gives to another statement line of the same amount is not held
      * against this one. Every leg of a reversal is an ordinary line, so a
      * bounced cheque and its void on the statement are both caught here, and
-     * a reference on the other side is never offered.
+     * a reference on the other side is never offered. An entry with the
+     * line's reference but another amount can't be matched, so it is named
+     * as an entry to correct ({@see ReconciliationMatcher::duplicateOf()}).
      *
      * @return array{journal_no: string, message: string}|null
      */
     private function entryAlreadyInTheBooks(AccountingReconciliation $reconciliation, AccountingReconciliationLine $line): ?array
     {
-        $suggested = collect($this->matcher->present($reconciliation->fresh())['lines'])
-            ->first(static fn (array $row): bool => $row['match'] === 'possible'
-                && (int) $row['statement_line_id'] === $line->id);
+        $twin = $this->matcher->duplicateOf($reconciliation, $line);
 
-        if ($suggested === null) {
+        if ($twin === null) {
             return null;
         }
 
-        $dated = $suggested['outside_period'] ? ", dated {$suggested['date']}," : '';
+        if ($twin['kind'] === 'reference') {
+            return [
+                'journal_no' => $twin['journal_no'],
+                'message' => "This statement line has the same reference as {$twin['journal_no']} already in the books, "
+                    .'which is '.ReconciliationMatcher::inWords($twin['amount'])." against the statement's "
+                    .ReconciliationMatcher::inWords($line->amount).'. Correct that entry rather than booking the money '
+                    .'twice, or record it anyway.',
+            ];
+        }
+
+        $dated = $twin['outside_period'] ? ", dated {$twin['date']}," : '';
 
         return [
-            'journal_no' => (string) $suggested['journal_no'],
-            'message' => "This statement line matches {$suggested['journal_no']}{$dated} already in the books. "
+            'journal_no' => $twin['journal_no'],
+            'message' => "This statement line matches {$twin['journal_no']}{$dated} already in the books. "
                 .'Match it instead, or record it anyway.',
         ];
     }
