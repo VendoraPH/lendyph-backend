@@ -7,11 +7,13 @@ use App\Models\AccountingAccountMapping;
 use App\Models\AccountingJournal;
 use App\Models\AccountingOpeningBalance;
 use App\Models\AccountingOpeningBalanceLine;
+use App\Models\AccountingPeriod;
 use App\Services\AuditLogService;
 use App\Services\LoanWriteTransaction;
 use Closure;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Http\Exceptions\HttpResponseException;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 use LogicException;
@@ -33,7 +35,8 @@ use LogicException;
  *    queue on (see the CLI's post() for why a real row and not the gap).
  * 3. The screen's draft row, through `$whileLocked` (the CLI has none).
  * 4. The locking re-check for an `opening_balance` journal, current read.
- * 5. JournalPoster::postImmediately().
+ * 5. No closed month after the date (the later periods under a shared lock).
+ * 6. JournalPoster::postImmediately().
  *
  * Each path refuses the second opening balance, ever.
  */
@@ -93,6 +96,12 @@ class OpeningBalancePoster
                     .$this->journalLabel($racing).'). Nothing was written.',
                 ],
             ]);
+        }
+
+        $laterClosed = $this->laterClosedReason($asOf, lock: true);
+
+        if ($laterClosed !== null) {
+            throw ValidationException::withMessages(['as_of' => [$laterClosed]]);
         }
 
         return $this->poster->postImmediately(
@@ -241,7 +250,13 @@ class OpeningBalancePoster
         }
 
         if ($locked->isFinalised()) {
-            $label = $locked->journal === null ? '' : ' ('.$this->journalLabel($locked->journal).')';
+            // A locking read by id, so it is current: this transaction's
+            // snapshot was taken before it queued behind the finalise that won.
+            $journal = $locked->accounting_journal_id === null ? null : AccountingJournal::query()
+                ->whereKey($locked->accounting_journal_id)
+                ->sharedLock()
+                ->first();
+            $label = $journal === null ? '' : ' ('.$this->journalLabel($journal).')';
 
             throw self::conflict("The opening balances have already been finalised{$label}.");
         }
@@ -269,6 +284,33 @@ class OpeningBalancePoster
         }
 
         return $locked;
+    }
+
+    /**
+     * Why `$asOf` can't take an opening balance because a later month is
+     * already closed, or null. PeriodGuard only refuses the month covering
+     * the date, and a month with no period row passes it; an opening balance
+     * dated before signed-off months would still change their closing
+     * figures. A year-end close closes all its months, so this covers closed
+     * years too. With `$lock`, the later periods are read under a shared
+     * lock, so a concurrent close waits for the posting to commit.
+     */
+    public function laterClosedReason(string $asOf, bool $lock = false): ?string
+    {
+        $periods = AccountingPeriod::query()->where('start_date', '>', $asOf);
+
+        if ($lock) {
+            $periods->sharedLock();
+        }
+
+        if (! $periods->get(['id', 'status'])->contains(fn (AccountingPeriod $period): bool => $period->isClosed())) {
+            return null;
+        }
+
+        return sprintf(
+            'Months after %s are already closed. Reopen them before recording opening balances.',
+            Carbon::createFromFormat('!Y-m-d', $asOf)->format('j F Y'),
+        );
     }
 
     /**

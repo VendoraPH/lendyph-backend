@@ -110,6 +110,12 @@ class AccountingOpeningBalanceController extends Controller
         $draft = AccountingOpeningBalance::query()->first();
 
         if ($draft === null) {
+            $posted = $this->poster->openingJournal();
+
+            if ($posted !== null) {
+                throw OpeningBalancePoster::conflict('An opening balance has already been posted ('.$this->poster->journalLabel($posted).').');
+            }
+
             throw ValidationException::withMessages(['lines' => ['Add at least two lines.']]);
         }
 
@@ -145,6 +151,12 @@ class AccountingOpeningBalanceController extends Controller
             throw OpeningBalancePoster::conflict('An opening balance has already been posted ('.$this->poster->journalLabel($posted).'); it can\'t be changed here.');
         }
 
+        if ($draft !== null && $editVersion === null) {
+            throw ValidationException::withMessages([
+                'edit_version' => ['Send the edit_version the opening balances were loaded at; a draft already exists.'],
+            ]);
+        }
+
         if ($editVersion !== null && $editVersion !== ($draft?->edit_version ?? 0)) {
             throw OpeningBalancePoster::conflict(OpeningBalancePoster::STALE);
         }
@@ -153,6 +165,12 @@ class AccountingOpeningBalanceController extends Controller
             $this->periods->assertOpen($asOf, 'The opening balances');
         } catch (ValidationException $e) {
             throw ValidationException::withMessages(['as_of' => $e->errors()['date'] ?? $e->errors()]);
+        }
+
+        $laterClosed = $this->poster->laterClosedReason($asOf, lock: true);
+
+        if ($laterClosed !== null) {
+            throw ValidationException::withMessages(['as_of' => [$laterClosed]]);
         }
 
         $old = $draft === null ? null : $this->summary($draft->as_of->toDateString(), $this->storedLines($draft));
@@ -181,11 +199,25 @@ class AccountingOpeningBalanceController extends Controller
         ], $lines));
 
         // `_centavos` names, so the Audit Trail reads them as pesos.
+        $codes = AccountingAccount::query()
+            ->whereKey(array_unique([...array_column($lines, 'account_id'), ...array_column($old['lines'] ?? [], 'account_id')]))
+            ->pluck('code', 'id');
+        // Each line by account code, so a save that moves money between
+        // accounts shows a difference even when the totals don't move.
         $figures = static fn (array $summary): array => [
             'as_of' => $summary['as_of'],
             'line_count' => $summary['line_count'],
             'total_debit_centavos' => $summary['total_debit'],
             'total_credit_centavos' => $summary['total_credit'],
+            'lines' => collect($summary['lines'])
+                ->map(static fn (array $line): array => [
+                    'account' => (string) $codes->get($line['account_id']),
+                    'debit_centavos' => $line['debit'],
+                    'credit_centavos' => $line['credit'],
+                ])
+                ->sortBy('account')
+                ->values()
+                ->all(),
         ];
 
         if ($old === null) {
@@ -397,11 +429,35 @@ class AccountingOpeningBalanceController extends Controller
             $reasons[] = $balance;
         }
 
+        $equity = AccountingAccount::query()->where('code', OpeningBalancePoster::OPENING_EQUITY_CODE)->exists();
+
+        if (! $equity) {
+            $reasons[] = 'The chart has no '.OpeningBalancePoster::OPENING_EQUITY_CODE.' Opening Balance Equity. Add it under 3000 Equity first.';
+        }
+
+        $unpostable = AccountingAccount::query()
+            ->whereKey(array_column($lines, 'account_id'))
+            ->where(static fn ($query) => $query->where('is_group', true)->orWhere('is_active', false))
+            ->orderBy('code')
+            ->get(['code', 'name', 'is_group', 'is_active']);
+
+        foreach ($unpostable as $account) {
+            $reasons[] = $account->is_group
+                ? "{$account->code} {$account->name} is a heading. Move its balance to the accounts under it."
+                : "{$account->code} {$account->name} is deactivated. Reactivate it or move its balance to another account.";
+        }
+
         if ($asOf !== null) {
             $period = AccountingPeriod::query()->covering($asOf)->first();
 
             if ($period?->isClosed()) {
                 $reasons[] = "{$period->name} is closed.";
+            }
+
+            $laterClosed = $this->poster->laterClosedReason($asOf);
+
+            if ($laterClosed !== null) {
+                $reasons[] = $laterClosed;
             }
         }
 

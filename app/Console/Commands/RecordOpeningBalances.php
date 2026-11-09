@@ -213,6 +213,15 @@ class RecordOpeningBalances extends Command
             return $this->refuseSecondRun($already);
         }
 
+        // Checked again under a lock inside the write, by OpeningBalancePoster.
+        if (($laterClosed = $poster->laterClosedReason($asOf)) !== null) {
+            return $this->refuse($laterClosed, [
+                'An opening balance dated before months that are signed off would change their',
+                'closing figures. Reopen those months on the Period Closing screen, or date the',
+                'balances after the last closed month.',
+            ]);
+        }
+
         $rows = $this->readRows($path);
 
         if ($rows === null) {
