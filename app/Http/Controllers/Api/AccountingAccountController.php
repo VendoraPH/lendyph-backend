@@ -10,6 +10,7 @@ use App\Http\Requests\Accounting\UpdateAccountingAccountRequest;
 use App\Http\Resources\AccountingAccountResource;
 use App\Models\AccountingAccount;
 use App\Models\AccountingAccountMapping;
+use App\Models\AccountingOpeningBalanceLine;
 use App\Services\Accounting\AccountRules;
 use App\Services\Accounting\ChartOfAccountsSeeder;
 use App\Services\Accounting\TrialBalanceBuilder;
@@ -332,7 +333,7 @@ class AccountingAccountController extends Controller
     #[OA\Delete(
         path: '/api/accounting/accounts/{id}',
         summary: 'Delete an account',
-        description: 'Refuses (422) when the account has children, when a posting role resolves to it, or when any journal line — draft or posted — references it. All three are restricted by foreign keys as well; these checks turn what would be a 500 into something a screen can render. An account with history can only be deactivated.',
+        description: 'Refuses (422) when the account has children, when a posting role resolves to it, when any journal line — draft or posted — references it, or when it is on the opening balances draft. All four are restricted by foreign keys as well; these checks turn what would be a 500 into something a screen can render. An account with history can only be deactivated.',
         tags: ['Accounting'],
         security: [['sanctum' => []]],
         parameters: [
@@ -341,7 +342,7 @@ class AccountingAccountController extends Controller
         responses: [
             new OA\Response(response: 200, description: 'Account deleted'),
             new OA\Response(response: 403, description: 'Missing chart_of_accounts:delete'),
-            new OA\Response(response: 422, description: 'Account has children, is referenced by a posting role, or has journal lines'),
+            new OA\Response(response: 422, description: 'Account has children, is referenced by a posting role, has journal lines, or is on the opening balances draft'),
         ],
     )]
     public function destroy(AccountingAccount $account): JsonResponse
@@ -381,6 +382,14 @@ class AccountingAccountController extends Controller
             // new history while keeping what it has.
             throw ValidationException::withMessages([
                 'account' => "{$account->code} {$account->name} has {$lines} journal line(s) against it and cannot be deleted. Deactivate it instead — an account with history keeps its history.",
+            ]);
+        }
+
+        // The opening balances draft's lines restrict the account too, so the
+        // DELETE would otherwise answer 500.
+        if (AccountingOpeningBalanceLine::query()->where('accounting_account_id', $account->id)->exists()) {
+            throw ValidationException::withMessages([
+                'account' => "{$account->code} {$account->name} is on the opening balance draft. Remove it there first.",
             ]);
         }
 
