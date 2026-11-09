@@ -106,10 +106,44 @@ class EquityChangesEarningsTest extends TestCase
 
         $this->assertSame(3500050, $retained['additions']);
         $this->assertSame(1500000, $earnings['beginning']);
+        // September's net income in, the year's result closed out.
+        $this->assertSame(2000050, $earnings['additions']);
+        $this->assertSame(3500050, $earnings['deductions']);
         $this->assertSame(0, $earnings['ending']);
-        $this->assertSame(1500000, $earnings['deductions']);
         $this->assertSame(50000000 + 3500050, $report['total_ending']);
         $this->assertSame($this->totalEquity(), $report['total_ending']);
+    }
+
+    public function test_a_closed_loss_reads_as_an_addition_back_to_earnings(): void
+    {
+        $this->postSimpleJournal('1010', '3010', 1000000, ['date' => '2026-08-01']);
+        $this->postSimpleJournal('5010', '1010', 400000, ['date' => '2026-09-05']);
+        $this->postSimpleJournal('3030', '5010', 400000, ['date' => '2026-09-30']);
+
+        $report = $this->changes();
+        $earnings = $this->earningsRow($report);
+
+        $this->assertSame(0, $earnings['beginning']);
+        $this->assertSame(400000, $earnings['additions'], 'the closed loss');
+        $this->assertSame(400000, $earnings['deductions'], 'the loss for the period');
+        $this->assertSame(0, $earnings['ending']);
+        $this->assertSame(400000, collect($report['rows'])->firstWhere('account_code', '3030')['deductions']);
+        $this->assertSame($this->totalEquity(), $report['total_ending']);
+    }
+
+    public function test_an_ordinary_posting_is_never_read_as_a_closing_entry(): void
+    {
+        // Share capital and income in one entry, with cash: not a closing.
+        $this->postJournal([
+            ['account_id' => $this->account('1010'), 'debit' => 300000, 'credit' => 0],
+            ['account_id' => $this->account('3060'), 'debit' => 0, 'credit' => 100000],
+            ['account_id' => $this->account('4010'), 'debit' => 0, 'credit' => 200000],
+        ], ['date' => '2026-09-10']);
+
+        $earnings = $this->earningsRow($this->changes());
+
+        $this->assertSame(200000, $earnings['additions']);
+        $this->assertSame(0, $earnings['deductions']);
     }
 
     public function test_with_no_income_or_expense_there_is_no_earnings_row(): void

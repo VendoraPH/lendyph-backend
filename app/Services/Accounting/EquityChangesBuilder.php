@@ -27,10 +27,11 @@ use Illuminate\Support\Facades\DB;
  * Income and expense accounts carry their balances until a closing entry
  * moves them into equity, so the last row is derived: "Earnings not yet
  * closed", with no account of its own (`kind: earnings`). It reads income less
- * expense cumulatively: `beginning` to the day before `from`, `ending` to
- * `to`, and the period's movement in `additions` (a profit) or `deductions`
- * (a loss). That makes `total_ending` the balance sheet's total equity at
- * `to`, the one equity figure (BalanceSheetBuilder::totalEquity()).
+ * expense cumulatively: `beginning` to the day before `from` and `ending` to
+ * `to`. The period's net income is in `additions` (a loss in `deductions`),
+ * and what a closing entry moved into equity is in `deductions`. That makes
+ * `total_ending` the balance sheet's total equity at `to`, the one equity
+ * figure (BalanceSheetBuilder::totalEquity()).
  *
  * A closing entry never counts a peso twice. It debits income and credits
  * expense to put the result into, say, 3030 Retained Earnings inside the same
@@ -92,7 +93,7 @@ class EquityChangesBuilder
             ];
         }
 
-        $earnings = $this->earningsRow($dayBefore, $to, $branchId);
+        $earnings = $this->earningsRow($from, $dayBefore, $to, $branchId);
 
         if ($earnings !== null) {
             $rows[] = $earnings;
@@ -108,20 +109,44 @@ class EquityChangesBuilder
     }
 
     /**
-     * The derived "Earnings not yet closed" row, or null when income and
-     * expense neither held a balance nor moved.
+     * The derived "Earnings not yet closed" row, or null when it would read
+     * four zeros.
      *
      * Income less expense is the sum of credits less debits over both types'
-     * lines, so one query gives the balance on both dates.
+     * lines, so one query gives the balance on both dates and the period's
+     * split:
+     * - `additions`: the period's net income (a loss goes to `deductions`);
+     * - `deductions`: what closing entries moved out of income and expense
+     *   into equity (a closed loss goes to `additions`).
+     * `beginning + additions - deductions` is `ending` either way.
+     *
+     * A closing entry is recognised by its shape, not its source: a journal
+     * dated in the period whose lines are all on income, expense and equity
+     * accounts, with at least one of each side. No other posting has that
+     * shape (every other one touches an asset or a liability), and a closing
+     * entry keyed by a source later is the same shape.
      *
      * @param  int|list<int>|null  $branchId
      * @return array<string, mixed>|null
      */
-    private function earningsRow(string $dayBefore, string $to, int|array|null $branchId): ?array
+    private function earningsRow(string $from, string $dayBefore, string $to, int|array|null $branchId): ?array
     {
+        $closings = DB::table('accounting_journal_lines as cl')
+            ->join('accounting_journals as cj', 'cj.id', '=', 'cl.accounting_journal_id')
+            ->join('accounting_accounts as ca', 'ca.id', '=', 'cl.accounting_account_id')
+            ->whereIn('cj.status', AccountingJournal::HISTORICAL_STATUSES)
+            ->where('cj.date', '>=', $from)
+            ->where('cj.date', '<=', $to)
+            ->groupBy('cl.accounting_journal_id')
+            ->havingRaw("sum(case when ca.type in ('income', 'expense', 'equity') then 0 else 1 end) = 0")
+            ->havingRaw("sum(case when ca.type = 'equity' then 1 else 0 end) > 0")
+            ->havingRaw("sum(case when ca.type in ('income', 'expense') then 1 else 0 end) > 0")
+            ->select('cl.accounting_journal_id');
+
         $sums = DB::table('accounting_journal_lines as l')
             ->join('accounting_journals as j', 'j.id', '=', 'l.accounting_journal_id')
             ->join('accounting_accounts as a', 'a.id', '=', 'l.accounting_account_id')
+            ->leftJoinSub($closings, 'closing', 'closing.accounting_journal_id', '=', 'l.accounting_journal_id')
             ->whereIn('a.type', ['income', 'expense'])
             ->where('a.is_group', false)
             ->whereIn('j.status', AccountingJournal::HISTORICAL_STATUSES)
@@ -131,6 +156,8 @@ class EquityChangesBuilder
             // unsigned, so `credit - debit` per line overflows on a debit.
             ->selectRaw('coalesce(sum(case when j.date <= ? then l.credit else 0 end), 0) as credits_before', [$dayBefore])
             ->selectRaw('coalesce(sum(case when j.date <= ? then l.debit else 0 end), 0) as debits_before', [$dayBefore])
+            ->selectRaw('coalesce(sum(case when closing.accounting_journal_id is not null then l.credit else 0 end), 0) as credits_closed')
+            ->selectRaw('coalesce(sum(case when closing.accounting_journal_id is not null then l.debit else 0 end), 0) as debits_closed')
             ->selectRaw('coalesce(sum(l.credit), 0) as credits')
             ->selectRaw('coalesce(sum(l.debit), 0) as debits')
             ->first();
@@ -138,9 +165,15 @@ class EquityChangesBuilder
         // MySQL returns SUM() as a DECIMAL string.
         $beginning = (int) $sums->credits_before - (int) $sums->debits_before;
         $ending = (int) $sums->credits - (int) $sums->debits;
-        $movement = $ending - $beginning;
+        // What closing entries took out of income less expense: positive when
+        // a profit was closed into equity.
+        $closed = (int) $sums->debits_closed - (int) $sums->credits_closed;
+        $netIncome = $ending - $beginning + $closed;
 
-        if ($beginning === 0 && $ending === 0 && $movement === 0) {
+        $additions = max($netIncome, 0) + max(-$closed, 0);
+        $deductions = max(-$netIncome, 0) + max($closed, 0);
+
+        if ($beginning === 0 && $additions === 0 && $deductions === 0 && $ending === 0) {
             return null;
         }
 
@@ -150,8 +183,8 @@ class EquityChangesBuilder
             'account_code' => null,
             'kind' => 'earnings',
             'beginning' => $beginning,
-            'additions' => max($movement, 0),
-            'deductions' => max(-$movement, 0),
+            'additions' => $additions,
+            'deductions' => $deductions,
             'ending' => $ending,
         ];
     }

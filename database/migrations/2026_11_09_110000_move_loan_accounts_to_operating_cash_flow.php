@@ -106,7 +106,8 @@ return new class extends Migration
 
     /**
      * The account mapped to `loans_receivable`, or every postable account
-     * under its heading (LoanReceivableAccounts::ids()).
+     * under its heading when that heading is not a root
+     * (LoanReceivableAccounts::ids()).
      *
      * @return list<int>
      */
@@ -119,9 +120,15 @@ return new class extends Migration
             return [];
         }
 
+        // A root heading ("1000 Assets") is a statement section, not a loan
+        // heading: under it the mapped account stands alone.
         $headingId = $mapped->parent_id === null
             ? null
-            : DB::table('accounting_accounts')->where('id', $mapped->parent_id)->where('is_group', true)->value('id');
+            : DB::table('accounting_accounts')
+                ->where('id', $mapped->parent_id)
+                ->where('is_group', true)
+                ->whereNotNull('parent_id')
+                ->value('id');
 
         if ($headingId === null) {
             return [(int) $mapped->id];

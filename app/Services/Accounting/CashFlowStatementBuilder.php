@@ -2,6 +2,7 @@
 
 namespace App\Services\Accounting;
 
+use App\Models\AccountingAccountMapping;
 use App\Models\AccountingJournal;
 use App\Models\Loan;
 use Carbon\CarbonImmutable;
@@ -39,7 +40,9 @@ use Illuminate\Support\Facades\DB;
  * Lending is this organisation's operation, so the loan accounts read
  * `operating`, and a release is not explained account by account. Each
  * `loan_release` journal (and the reversal of one) gives its cash lines to ONE
- * operating line instead:
+ * line instead, filed in the section of the account mapped to
+ * `loans_receivable` (operating unless an accountant moved it), so the loan
+ * book stays in one section with its collections:
  *
  * - `loan_releases`, "Loans released, net of amounts withheld": the net
  *   proceeds paid out on ordinary releases;
@@ -47,12 +50,12 @@ use Illuminate\Support\Facades\DB;
  *   restructure into a new loan pays nothing out and collects its deductions
  *   in cash (A0's J1).
  *
- * What a release withheld from the proceeds (fees, share capital, insurance,
- * notarial fees, taxes) moved no cash, so it is listed apart in `non_cash`,
- * by account, outside every section total: the credit lines of each release
- * whose cash nets to a payment out, other than money and loan receivable
- * accounts ({@see LoanReceivableAccounts}). A reversal of that release takes
- * its lines back out.
+ * What an ordinary release withheld from the proceeds (fees, share capital,
+ * insurance, notarial fees, taxes) moved no cash, so it is listed apart in
+ * `non_cash`, by account, outside every section total: its lines other than
+ * money and loan receivable accounts ({@see LoanReceivableAccounts}), even
+ * when it has no cash line at all. A reversal of that release takes its lines
+ * back out.
  *
  * ## The statement proves itself
  *
@@ -101,12 +104,13 @@ class CashFlowStatementBuilder
 
         $lines = $this->explanations($cashAccountIds, $from, $to, $branchId);
         $releases = $this->releaseLines($cashAccountIds, $from, $to, $branchId);
+        $loanBookSection = $this->loanBookSection();
 
         $sections = [];
         $sectionTotal = 0;
 
         foreach (CashFlowCategories::ACTIVITIES as $activity) {
-            $section = $this->section($activity, $lines, $activity === 'operating' ? $releases : []);
+            $section = $this->section($activity, $lines, $activity === $loanBookSection ? $releases : []);
             $sections[$activity] = $section;
             $sectionTotal += $section['total'];
         }
@@ -250,6 +254,23 @@ class CashFlowStatementBuilder
     }
 
     /**
+     * The section the release lines are filed under: the `cash_flow_category`
+     * of the account mapped to `loans_receivable`, so the loan book stays in
+     * one section with its collections whatever the accountant chose.
+     * Operating (the seeded default) when there is no mapping or the account
+     * reads no activity.
+     */
+    private function loanBookSection(): string
+    {
+        $accountId = AccountingAccountMapping::resolved()['loans_receivable'] ?? null;
+        $category = $accountId === null
+            ? null
+            : DB::table('accounting_accounts')->where('id', $accountId)->value('cash_flow_category');
+
+        return CashFlowCategories::isActivity($category) ? (string) $category : 'operating';
+    }
+
+    /**
      * The cash each kind of release moved: one figure per kind, from the
      * releases' (and their reversals') money lines, debit minus credit.
      *
@@ -303,32 +324,36 @@ class CashFlowStatementBuilder
 
     /**
      * What releases withheld from their proceeds, by account: credit minus
-     * debit on the lines of each release whose cash nets to a payment out
-     * (and of its reversal), other than money and loan receivable accounts.
+     * debit on the lines of each ordinary release (and of its reversal),
+     * other than money and loan receivable accounts.
      *
-     * A restructure collects its deductions in cash, so its cash nets the
-     * other way and nothing of it is here.
+     * A release with no cash line at all, because its deductions took the
+     * whole principal or it settled through an account with no `cash_kind`,
+     * still withheld them, so it is listed too. A restructure collects its
+     * deductions in cash and is never here, nor is any release whose cash
+     * nets to money coming in.
      *
      * @param  list<int>  $cashAccountIds
      * @return list<array{account_id: int, account_code: string, label: string, amount: int, kind: string}>
      */
     private function withheldAtRelease(array $cashAccountIds, string $from, string $to, int|array|null $branchId): array
     {
-        if ($cashAccountIds === []) {
-            return [];
-        }
-
-        $paidOut = DB::table('accounting_journal_lines as cl')
+        $collected = DB::table('accounting_journal_lines as cl')
             ->join('accounting_journals as cj', 'cj.id', '=', 'cl.accounting_journal_id')
             ->where('cj.source', self::RELEASE_SOURCE)
             ->whereIn('cl.accounting_account_id', $cashAccountIds)
             ->groupBy('cl.accounting_journal_id')
-            ->havingRaw('sum(cl.credit) > sum(cl.debit)')
+            ->havingRaw('sum(cl.debit) > sum(cl.credit)')
             ->select('cl.accounting_journal_id');
 
         return $this->releaseLinesInRange($from, $to, $branchId)
             ->join('accounting_accounts as a', 'a.id', '=', 'l.accounting_account_id')
-            ->whereIn(DB::raw('coalesce(rj.id, j.id)'), $paidOut)
+            ->leftJoin('loans as ln', function ($join): void {
+                $join->on('ln.id', '=', DB::raw('coalesce(rj.postable_id, j.postable_id)'))
+                    ->where(DB::raw('coalesce(rj.postable_type, j.postable_type)'), '=', Loan::class);
+            })
+            ->whereNull('ln.source_loan_id')
+            ->whereNotIn(DB::raw('coalesce(rj.id, j.id)'), $collected)
             ->whereNotIn('l.accounting_account_id', [...$cashAccountIds, ...LoanReceivableAccounts::ids()])
             ->groupBy('a.id', 'a.code', 'a.name')
             ->orderBy('a.code')
@@ -399,7 +424,7 @@ class CashFlowStatementBuilder
      * this period" is information and an absent heading looks like a bug.
      *
      * `$derived` are the lines with no account of their own (the releases,
-     * on operating), listed after the account lines.
+     * in the loan book's section), listed after the account lines.
      *
      * @param  list<array<string, mixed>>  $lines
      * @param  list<array<string, mixed>>  $derived

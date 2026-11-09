@@ -82,6 +82,24 @@ class CashFlowCategoryBackfillTest extends TestCase
         $this->assertSame('investing', DB::table('accounting_accounts')->where('code', '1410')->value('cash_flow_category'), 'other assets stay');
     }
 
+    public function test_a_receivable_mapped_under_the_root_heading_moves_that_account_alone(): void
+    {
+        $this->seedAnOldChart();
+        DB::table('accounting_account_mappings')->where('role', 'loans_receivable')->update(['accounting_account_id' => $this->account('1170')]);
+        $others = fn (): array => DB::table('accounting_accounts')
+            ->whereNotIn('code', ['1150', '1160', '1170', '1180', '1200', '1210'])
+            ->orderBy('code')->pluck('cash_flow_category', 'code')->all();
+        $before = $others();
+
+        $this->assertSame(['1150', '1160', '1170', '1180', '1200', '1210'], array_column(app(CashFlowCategoryBackfill::class)->run(true)['moved'], 'code'));
+
+        $this->migration()->up();
+
+        $this->assertSame('operating', DB::table('accounting_accounts')->where('code', '1170')->value('cash_flow_category'));
+        $this->assertSame($before, $others(), 'no other asset moves');
+        $this->assertCount(6, $this->systemRows());
+    }
+
     public function test_a_users_change_is_kept_and_the_skip_is_reported(): void
     {
         $this->seedAnOldChart();

@@ -212,9 +212,118 @@ class CashFlowLoansOperatingTest extends TestCase
         $this->seedChartOfAccounts();
         $this->assertEqualsCanonicalizing([$this->account('1110'), $this->account('1120')], LoanReceivableAccounts::ids());
 
+        // Mapped directly under the root heading 1000 Assets: that account
+        // alone, never every asset.
+        DB::table('accounting_account_mappings')->where('role', 'loans_receivable')->update(['accounting_account_id' => $this->account('1170')]);
+        $this->assertSame([$this->account('1170')], LoanReceivableAccounts::ids());
+
         // Mapped to an account with no heading above it: that account alone.
         $alone = AccountingAccount::create(['code' => '1190', 'name' => 'Microloans', 'type' => 'asset']);
         DB::table('accounting_account_mappings')->where('role', 'loans_receivable')->update(['accounting_account_id' => $alone->id]);
         $this->assertSame([$alone->id], LoanReceivableAccounts::ids());
+    }
+
+    public function test_a_receivable_mapped_under_the_root_heading_leaves_the_withheld_amounts_alone(): void
+    {
+        $this->seedChartOfAccounts();
+        DB::table('accounting_account_mappings')->where('role', 'loans_receivable')->update(['accounting_account_id' => $this->account('1170')]);
+        $journal = $this->releaseJournal($this->createReleasedLoan());
+        $withheld = $this->withheld($journal);
+
+        $report = $this->report();
+
+        // 1170 reads investing (the type default), so the release line follows it there.
+        $this->assertSame($this->cashOn($journal, '1010'), collect($report['investing']['lines'])->firstWhere('kind', 'loan_releases')['amount']);
+        $this->assertSame($withheld, collect($report['non_cash']['lines'])->pluck('amount', 'account_code')->sortKeys()->all());
+        $this->assertNotContains('1170', array_column($report['non_cash']['lines'], 'account_code'));
+        $this->assertReconciled($report);
+    }
+
+    public function test_the_release_lines_follow_the_loan_books_category(): void
+    {
+        $this->seedChartOfAccounts();
+        $loan = $this->createReleasedLoan();
+        $net = $this->cashOn($this->releaseJournal($loan), '1010');
+
+        $this->assertSame($net, $this->lineOfKind($this->report(), 'loan_releases')['amount'], 'operating by default');
+
+        $this->putJson('/api/accounting/accounts/'.$this->account('1110'), ['cash_flow_category' => 'investing'])->assertOk();
+        $this->postJson("/api/loans/{$loan->id}/repayments", [
+            'payment_date' => now()->toDateString(),
+            'amount_paid' => 11800,
+            'method' => 'cash',
+        ])->assertCreated();
+
+        $report = $this->report();
+        $investing = collect($report['investing']['lines']);
+
+        $this->assertNull($this->lineOfKind($report, 'loan_releases'));
+        $this->assertSame($net, $investing->firstWhere('kind', 'loan_releases')['amount']);
+        $this->assertGreaterThan(0, $investing->firstWhere('account_code', '1110')['amount'], 'collections in the same section');
+        $this->assertReconciled($report);
+    }
+
+    public function test_a_restructure_collection_follows_the_loan_books_category_too(): void
+    {
+        $source = $this->createReleasedLoan();
+        $new = $this->createReleasedLoan();
+        $new->update([
+            'source_loan_id' => $source->id,
+            'restructure_carried_principal' => '60000.00',
+            'restructure_capitalised_interest' => '0.00',
+            'restructure_capitalised_penalty' => '0.00',
+            'restructure_written_off_principal' => '0.00',
+        ]);
+        $this->seedChartOfAccounts();
+        $this->putJson('/api/accounting/accounts/'.$this->account('1110'), ['cash_flow_category' => 'investing'])->assertOk();
+
+        DB::transaction(fn () => app(AutomaticPoster::class)->restructureRelease($new->fresh(), $source, $this->admin->id, 'cash'));
+
+        $report = $this->report();
+
+        $this->assertSame('restructure_collections', collect($report['investing']['lines'])->pluck('kind')->first());
+        $this->assertSame([], $report['operating']['lines']);
+        $this->assertReconciled($report);
+    }
+
+    public function test_a_release_with_no_cash_line_still_lists_what_it_withheld(): void
+    {
+        $loan = $this->createReleasedLoan();
+        $this->seedChartOfAccounts();
+
+        // Deductions that took the whole principal: nothing was paid out.
+        $this->postJournal([
+            ['account_id' => $this->account('1110'), 'debit' => 6000000, 'credit' => 0],
+            ['account_id' => $this->account('4030'), 'debit' => 0, 'credit' => 5000000],
+            ['account_id' => $this->account('3060'), 'debit' => 0, 'credit' => 1000000],
+        ], ['date' => now()->toDateString(), 'source' => 'loan_release', 'postable_type' => $loan->getMorphClass(), 'postable_id' => $loan->id]);
+
+        $report = $this->report();
+
+        $this->assertSame(['3060' => 1000000, '4030' => 5000000], collect($report['non_cash']['lines'])->pluck('amount', 'account_code')->sortKeys()->all());
+        $this->assertSame(6000000, $report['non_cash']['total']);
+        $this->assertNull($this->lineOfKind($report, 'loan_releases'));
+        $this->assertSame(0, $report['net_change']);
+        $this->assertReconciled($report);
+    }
+
+    public function test_a_restructure_with_no_cash_line_withholds_nothing(): void
+    {
+        $source = $this->createReleasedLoan();
+        $new = $this->createReleasedLoan();
+        $new->update(['source_loan_id' => $source->id]);
+        $this->seedChartOfAccounts();
+
+        // Carried principal and capitalised interest, no deductions.
+        $this->postJournal([
+            ['account_id' => $this->account('1110'), 'debit' => 6000000, 'credit' => 0],
+            ['account_id' => $this->account('1110'), 'debit' => 0, 'credit' => 5000000],
+            ['account_id' => $this->account('1210'), 'debit' => 0, 'credit' => 1000000],
+        ], ['date' => now()->toDateString(), 'source' => 'loan_release', 'postable_type' => $new->getMorphClass(), 'postable_id' => $new->id]);
+
+        $report = $this->report();
+
+        $this->assertSame([], $report['non_cash']['lines']);
+        $this->assertSame(0, $report['non_cash']['total']);
     }
 }
