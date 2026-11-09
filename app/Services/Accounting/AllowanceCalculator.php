@@ -5,6 +5,7 @@ namespace App\Services\Accounting;
 use App\Models\AccountingJournal;
 use App\Models\Branch;
 use App\Services\ReportService;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -118,7 +119,10 @@ final class AllowanceCalculator
      * `allowance_credit_losses` maps to, credit − debit. `unassigned` is the
      * balance on journals with no branch, and `unassigned_latest_after` the
      * date of the latest no-branch journal with a 1200 line dated after
-     * `as_of` (null when there is none), whatever its balance. Zeros and null
+     * `as_of` and no later than today in Manila (null when there is none),
+     * whatever its balance. A no-branch entry dated in the future (a typo,
+     * and its reversal) is left out, so it never blocks every run until its
+     * date comes. Zeros and null
      * when there are no books or no allowance account.
      *
      * Without `$lock` (a preview) it is one plain read. With it, the caller
@@ -152,10 +156,11 @@ final class AllowanceCalculator
         $branches = [];
         $unassigned = 0;
         $unassignedLatestAfter = null;
+        $today = Carbon::today(config('app.timezone'))->toDateString();
 
         foreach ($byJournal as [$branchId, $balance, $date]) {
             if ($date > $asOf) {
-                if ($branchId === null && ($unassignedLatestAfter === null || $date > $unassignedLatestAfter)) {
+                if ($branchId === null && $date <= $today && ($unassignedLatestAfter === null || $date > $unassignedLatestAfter)) {
                     $unassignedLatestAfter = $date;
                 }
 

@@ -374,6 +374,23 @@ class AllowancePostingTest extends TestCase
         $this->postTheRun()->assertCreated();
     }
 
+    public function test_a_future_dated_no_branch_1200_entry_never_blocks_a_run(): void
+    {
+        $this->twoPastDueLoans();
+        // A move typed a year ahead, and its reversal: neither is in the books yet.
+        $typo = Carbon::today()->addYear()->toDateString();
+        $this->postSimpleJournal('1200', '3050', 70_000, ['branch_id' => null, 'date' => $typo]);
+        $this->postSimpleJournal('3050', '1200', 70_000, ['branch_id' => null, 'date' => $typo]);
+
+        $yesterday = $this->preview(Carbon::yesterday()->toDateString());
+        $this->assertTrue($yesterday['can_post'], implode(' ', $yesterday['blocking_reasons']));
+
+        $today = $this->preview();
+        $this->assertSame(0, $today['unassigned_balance']);
+        $this->assertTrue($today['can_post'], implode(' ', $today['blocking_reasons']));
+        $this->postTheRun()->assertCreated();
+    }
+
     public function test_the_later_posting_check_is_a_locking_read_taken_after_the_allowance_lock(): void
     {
         $this->twoPastDueLoans();

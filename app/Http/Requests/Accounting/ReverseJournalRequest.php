@@ -53,7 +53,8 @@ class ReverseJournalRequest extends FormRequest
 
     /**
      * Refuses a reversal dated before the entry it reverses, in words, once
-     * the date itself is valid.
+     * the date itself is valid. Both are compared as days in the app's time
+     * zone (Manila), so a date sent with an offset counts as its Manila day.
      *
      * @return list<callable(Validator): void>
      */
@@ -67,16 +68,38 @@ class ReverseJournalRequest extends FormRequest
                     return;
                 }
 
-                $reversalDate = Carbon::parse($this->input('date') ?: now()->toDateString())->startOfDay();
-                $entryDate = $journal->date->copy()->startOfDay();
+                $entryDay = $journal->date->toDateString();
 
-                if ($reversalDate->lt($entryDate)) {
+                if ($this->reversalDay() < $entryDay) {
                     $validator->errors()->add('date', sprintf(
                         'The reversal can\'t be dated before the entry it reverses (%1$s). Choose %1$s or later.',
-                        $entryDate->format('M j, Y'),
+                        Carbon::parse($entryDay)->format('M j, Y'),
                     ));
                 }
             },
         ];
+    }
+
+    /**
+     * The reversal lands on the day it was checked as: a date sent with an
+     * offset is stored as its Manila day, never the day at the sender's
+     * offset.
+     */
+    protected function passedValidation(): void
+    {
+        if (filled($this->input('date'))) {
+            $this->merge(['date' => $this->reversalDay()]);
+        }
+    }
+
+    /** The reversal's day in the app's time zone, "2026-09-15"; today when none is sent. */
+    private function reversalDay(): string
+    {
+        $timezone = config('app.timezone');
+        $date = $this->input('date');
+
+        return filled($date)
+            ? Carbon::parse($date, $timezone)->setTimezone($timezone)->toDateString()
+            : Carbon::now($timezone)->toDateString();
     }
 }

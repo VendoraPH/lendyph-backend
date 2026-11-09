@@ -237,6 +237,23 @@ class AccountingJournalReversalTest extends TestCase
         $this->postJson("/api/accounting/journals/{$original->id}/reverse", ['date' => '2026-09-15'])->assertCreated();
     }
 
+    public function test_a_reversal_date_with_an_offset_is_read_as_its_day_in_manila(): void
+    {
+        $original = $this->postSimpleJournal('5030', '1010', 350000, ['date' => '2026-09-15']);
+
+        // 00:30 in Tokyo is still Sep 14 in Manila: before the entry.
+        $this->postJson("/api/accounting/journals/{$original->id}/reverse", ['date' => '2026-09-15T00:30:00+09:00'])
+            ->assertStatus(422)
+            ->assertJsonPath('errors.date.0', 'The reversal can\'t be dated before the entry it reverses (Sep 15, 2026). Choose Sep 15, 2026 or later.');
+
+        // 17:00 on Sep 14 at UTC-8 is 09:00 on Sep 15 in Manila: the entry's own day.
+        $id = $this->postJson("/api/accounting/journals/{$original->id}/reverse", ['date' => '2026-09-14T17:00:00-08:00'])
+            ->assertCreated()
+            ->json('data.id');
+
+        $this->assertSame('2026-09-15', AccountingJournal::query()->findOrFail($id)->date->toDateString());
+    }
+
     public function test_the_default_date_is_refused_too_when_the_entry_is_dated_after_today(): void
     {
         $later = now()->addDays(5);
