@@ -8,6 +8,7 @@ use App\Models\Borrower;
 use App\Models\Loan;
 use App\Models\LoanApprovalStep;
 use App\Models\LoanProduct;
+use App\Models\User;
 use App\Services\LoanService;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
@@ -133,6 +134,40 @@ class LoanVoidCancelsApprovalStepsTest extends TestCase
 
         $this->assertSame([], $this->statuses($loan));
         $this->assertCount(0, $this->cancelledRows($loan));
+    }
+
+    /** A cancelled step can't be approved: its loan is no longer for approval (422), and nothing changes. */
+    public function test_approving_a_cancelled_step_answers_422_and_changes_nothing(): void
+    {
+        $loan = $this->loanForApproval();
+        $this->patchJson("/api/loans/{$loan->id}/void")->assertOk();
+        $step = $loan->approvalSteps()->where('step_id', 'manager')->sole();
+        $this->assertSame(LoanApprovalStep::STATUS_CANCELLED, $step->status);
+        $audit = AuditLog::count();
+
+        $this->patchJson("/api/loans/{$loan->id}/approval-steps/{$step->id}/approve", ['remarks' => 'ok'])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['status' => "Loan must be in 'for approval' status to act on its approval chain."]);
+
+        $this->assertSame(LoanApprovalStep::STATUS_CANCELLED, $step->fresh()->status);
+        $this->assertSame('void', $loan->fresh()->status);
+        $this->assertSame($audit, AuditLog::count());
+    }
+
+    /** `awaiting_me=1` lists a loan while it waits on the user's role, and leaves it out once voided. */
+    public function test_awaiting_me_leaves_out_a_voided_loan(): void
+    {
+        $loan = $this->loanForApproval();
+        $manager = User::factory()->inBranches($this->branch)->create();
+        $manager->assignRole('manager');
+        $awaiting = fn (): array => collect($this->actingAs($manager)->getJson('/api/loans?awaiting_me=1')->assertOk()->json('data'))
+            ->pluck('id')->all();
+
+        $this->assertSame([$loan->id], $awaiting());
+
+        $this->actingAs($this->admin)->patchJson("/api/loans/{$loan->id}/void")->assertOk();
+
+        $this->assertSame([], $awaiting());
     }
 
     /** A sent-back round is history: only the live round's steps are cancelled. */

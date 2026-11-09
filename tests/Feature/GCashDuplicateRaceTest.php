@@ -5,9 +5,13 @@ namespace Tests\Feature;
 use App\Models\Borrower;
 use App\Models\GCashTier;
 use App\Models\GCashTransaction;
+use App\Services\GCashService;
+use Exception;
 use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
+use PDOException;
+use ReflectionProperty;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
@@ -108,5 +112,37 @@ class GCashDuplicateRaceTest extends TestCase
             ->where('type', 'cash_in')
             ->where('amount', 1000)
             ->count(), 'two identical creates were both saved');
+    }
+
+    /**
+     * Two same-day creates can still deadlock, as before (on a day with no
+     * GCash row yet, or on the duplicate check, now a locking read). The one
+     * rolled back answers the worded 409 and saves nothing, so nothing is
+     * saved twice.
+     */
+    public function test_a_deadlock_on_the_duplicate_check_answers_the_worded_409_and_saves_nothing(): void
+    {
+        $fired = 0;
+        DB::connection()->beforeExecuting(function (string $query, array $bindings) use (&$fired): void {
+            if ($fired > 0 || ! str_contains($query, 'transaction_date') || ! str_contains($query, 'for update')) {
+                return;
+            }
+
+            $fired++;
+            $errorInfo = ['40001', 1213, 'Deadlock found when trying to get lock; try restarting transaction'];
+            $pdo = new PDOException("SQLSTATE[{$errorInfo[0]}]: General error: {$errorInfo[1]} {$errorInfo[2]}");
+            $pdo->errorInfo = $errorInfo;
+            (new ReflectionProperty(Exception::class, 'code'))->setValue($pdo, $errorInfo[0]);
+
+            throw new QueryException(DB::connection()->getName(), $query, $bindings, $pdo);
+        });
+        $before = GCashTransaction::count();
+
+        $this->postJson('/api/gcash/transactions', ['borrower_id' => $this->member->id, 'type' => 'cash_in', 'amount' => 1000])
+            ->assertStatus(409)
+            ->assertExactJson(['message' => GCashService::CREATE_CONFLICT]);
+
+        $this->assertSame(1, $fired);
+        $this->assertSame($before, GCashTransaction::count());
     }
 }

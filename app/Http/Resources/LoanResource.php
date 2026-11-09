@@ -583,29 +583,23 @@ class LoanResource extends JsonResource
     }
 
     /**
-     * Principal plus interest over the whole schedule, in whole centavos,
+     * Principal plus interest over the whole contract, in whole centavos,
      * never the Share Capital Build-Up (decision 7(a): SCB is not debt).
      *
      * After release, the stored schedule's (`$scheduleTotals`, null where the
-     * periods were not loaded). Before release, the schedule the pre-release
-     * amortization preview builds (LoanService::buildAmortizationPreview()),
-     * but only where `collaterals` is loaded: GET /loans/{id}, the same proxy
-     * `collateral_summary` uses. A list would otherwise build a schedule for
-     * every unreleased row on the page, so it gets null.
+     * periods were not loaded). A restructured source's rows no longer hold
+     * its contract (its restructure deleted the unpaid periods and shrank a
+     * part-paid one to what was collected), so its figure is the schedule it
+     * was released with, as its Ledger's release line holds it
+     * (LoanLedgerService::originalContractCentavos()). Before release, the
+     * schedule the pre-release amortization preview builds
+     * (LoanService::buildAmortizationPreview()).
+     *
+     * Both of those build a schedule, so only where `collaterals` is loaded:
+     * GET /loans/{id}, the same proxy `collateral_summary` uses. A list would
+     * otherwise build one for every such row on the page, so it gets null.
      *
      * @param  array<string, float|int>|null  $scheduleTotals  PersistedScheduleFigures::totals()
-     */
-    /**
-     * Principal plus interest over the whole contract, in whole centavos.
-     *
-     * After release, the stored schedule's. A restructured source's rows no
-     * longer hold its contract (its restructure deleted the unpaid periods and
-     * shrank a part-paid one to what was collected), so its figure is the
-     * schedule it was released with, as its Ledger's release line holds it
-     * (LoanLedgerService::originalContractCentavos()). That builds a schedule,
-     * so only on the single-loan view (the `collaterals` proxy); a list row
-     * has none. Before release, the schedule the amortization preview builds,
-     * on the single-loan view only.
      */
     private function contractTotal(bool $isReleased, ?array $scheduleTotals): ?float
     {
