@@ -3,6 +3,7 @@
 namespace App\Services\Accounting;
 
 use App\Models\AccountingAccount;
+use App\Models\AccountingAccountMapping;
 use App\Models\AccountingJournal;
 use App\Models\AccountingJournalLine;
 use App\Services\SequenceCode;
@@ -60,6 +61,9 @@ final class JournalPoster
      * @see PeriodGuard for why an absent period does NOT lock, and why the read
      *      takes a shared lock.
      */
+    /** The posting role whose account every allowance writer locks first. See lockTheAllowanceIfTouched(). */
+    private const ALLOWANCE_ROLE = 'allowance_credit_losses';
+
     public function __construct(private PeriodGuard $periods) {}
 
     /**
@@ -82,6 +86,8 @@ final class JournalPoster
     public function draft(array $attributes, array $lines, ?int $userId = null): AccountingJournal
     {
         return DB::transaction(function () use ($attributes, $lines, $userId): AccountingJournal {
+            $this->lockTheAllowanceIfTouched(array_column($lines, 'account_id'));
+
             // Checked on the DRAFT as well as on the post, so that someone
             // typing an entry into a month that was closed last week is told
             // now rather than after they have finished filling it in. The post
@@ -120,6 +126,11 @@ final class JournalPoster
     public function updateDraft(AccountingJournal $journal, array $attributes, ?array $lines = null): AccountingJournal
     {
         return DB::transaction(function () use ($journal, $attributes, $lines): AccountingJournal {
+            $this->lockTheAllowanceIfTouched([
+                ...$this->accountsOn($journal->id),
+                ...array_column($lines ?? [], 'account_id'),
+            ]);
+
             $fresh = $this->lock($journal->id);
 
             // Refused HERE, as a 422, rather than left to the model's guard —
@@ -184,6 +195,8 @@ final class JournalPoster
         bool $allowInactiveAccounts,
     ): AccountingJournal {
         return DB::transaction(function () use ($journal, $userId, $allowInactiveAccounts): AccountingJournal {
+            $allowanceLocked = $this->lockTheAllowanceIfTouched($this->accountsOn($journal->id));
+
             $fresh = $this->lock($journal->id);
 
             if ($fresh->status !== 'draft') {
@@ -221,6 +234,18 @@ final class JournalPoster
                 ->orderBy('line_no')
                 ->lockForUpdate()
                 ->get();
+
+            // The draft was read without a lock to decide on the allowance
+            // lock. An edit that landed since may have added an allowance
+            // line, and it is too late to take that lock now, behind the
+            // journal's: refused, so the order is never broken.
+            if (! $allowanceLocked && $this->touchesTheAllowance($lines->pluck('accounting_account_id')->all())) {
+                throw ValidationException::withMessages([
+                    'journal' => [
+                        ($fresh->journal_no ?: 'This entry').' changed while it was being posted. Reload it and post it again.',
+                    ],
+                ]);
+            }
 
             if ($lines->count() < 2) {
                 throw ValidationException::withMessages([
@@ -355,6 +380,10 @@ final class JournalPoster
         ?int $userId = null,
     ): AccountingJournal {
         return DB::transaction(function () use ($journal, $date, $reason, $userId): AccountingJournal {
+            // A posted entry's lines never change, so this read decides for
+            // the mirror too.
+            $this->lockTheAllowanceIfTouched($this->accountsOn($journal->id));
+
             $original = $this->lock($journal->id);
 
             if ($original->status === 'reversed' || $original->reversed_by_journal_id !== null) {
@@ -635,6 +664,72 @@ final class JournalPoster
             ->where('postable_id', $id)
             ->where('source', $source)
             ->first();
+    }
+
+    /**
+     * The allowance account row lock, taken before any journal or line lock
+     * by every write here that puts, rewrites or locks a line on the
+     * allowance for credit losses (the `allowance_credit_losses` role, 1200
+     * by default): draft(), updateDraft(), commit() and reverse().
+     *
+     * AutomaticPoster's restructure write-off (J2) takes this lock, then
+     * reads every allowance line and then their journals FOR UPDATE, because
+     * the balance it writes off against has to be the latest committed one.
+     * A post or reversal that locked its journal first and then reached for
+     * those lines waited on J2 while J2 waited on its journal: a deadlock,
+     * and a 500 for whichever request InnoDB rolled back. With one order for
+     * every writer, the account row first, they queue instead.
+     *
+     * Only when `$accountIds` includes the allowance account, so a posting
+     * that does not touch it never waits on one that does. Taking it again
+     * in the same transaction (a post inside postImmediately(), a reversal's
+     * mirror) is free. Returns whether it is held.
+     *
+     * @param  array<int, int|string|null>  $accountIds
+     */
+    private function lockTheAllowanceIfTouched(array $accountIds): bool
+    {
+        $allowance = $this->allowanceAccountId();
+
+        if ($allowance === null || ! in_array($allowance, array_map('intval', $accountIds), true)) {
+            return false;
+        }
+
+        AccountingAccount::query()->whereKey($allowance)->lockForUpdate()->first();
+
+        return true;
+    }
+
+    /** @param  array<int, int|string|null>  $accountIds */
+    private function touchesTheAllowance(array $accountIds): bool
+    {
+        $allowance = $this->allowanceAccountId();
+
+        return $allowance !== null && in_array($allowance, array_map('intval', $accountIds), true);
+    }
+
+    /** The account the allowance role is mapped to, or null with no chart or no mapping. */
+    private function allowanceAccountId(): ?int
+    {
+        $id = AccountingAccountMapping::query()
+            ->where('role', self::ALLOWANCE_ROLE)
+            ->value('accounting_account_id');
+
+        return $id === null ? null : (int) $id;
+    }
+
+    /**
+     * The accounts a journal's lines are on, read without a lock.
+     *
+     * @return list<int>
+     */
+    private function accountsOn(int $journalId): array
+    {
+        return AccountingJournalLine::query()
+            ->where('accounting_journal_id', $journalId)
+            ->pluck('accounting_account_id')
+            ->map(fn (mixed $id): int => (int) $id)
+            ->all();
     }
 
     private function lock(int $journalId): AccountingJournal

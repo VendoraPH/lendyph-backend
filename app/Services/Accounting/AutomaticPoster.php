@@ -820,10 +820,18 @@ final class AutomaticPoster
      * Two locking reads, lines by their account index and then their
      * journals by primary key, so InnoDB locks exactly the allowance's lines
      * and their journals, whatever plan a joined query would get. FOR UPDATE,
-     * not FOR SHARE: the write-off goes on to take the journal-number lock,
-     * an exclusive lock on the newest journal, and that may be one of these.
-     * Holding a shared lock on it and then asking for an exclusive one while
-     * another posting waits for it is InnoDB's textbook deadlock.
+     * not FOR SHARE, for one reason: the write-off goes on to take the
+     * journal-number lock, an exclusive lock on the newest journal, which may
+     * be one of these, and holding a shared lock there and then asking for an
+     * exclusive one while another posting waits for it is InnoDB's textbook
+     * deadlock. FOR UPDATE does NOT stop the other deadlock these reads open:
+     * a writer that locks its journal and then reaches for an allowance line
+     * would wait on this transaction while this one waits on its journal.
+     * What prevents that is the lock order every writer of allowance lines
+     * follows, the account row first: JournalPoster's draft, edit, post and
+     * reversal ({@see JournalPoster::lockTheAllowanceIfTouched()}), and here
+     * {@see self::lockTheAllowance()} in the write-off, allowance adjustments
+     * and provisions.
      *
      * Without `$lock` (a preview, which writes nothing) it is one plain read.
      */
@@ -832,7 +840,7 @@ final class AutomaticPoster
         $accountId = $map->accountFor('allowance_credit_losses');
 
         if ($lock) {
-            AccountingAccount::query()->whereKey($accountId)->lockForUpdate()->first();
+            $this->lockTheAllowance($map);
 
             $byJournal = DB::table('accounting_journal_lines')
                 ->where('accounting_account_id', $accountId)
@@ -1019,15 +1027,15 @@ final class AutomaticPoster
      */
     public function allowanceAdjustment(Model $postable, int $signedCentavos, ?int $branchId, string $date, int $userId): ?AccountingJournal
     {
+        $this->refuseTheWriteOffSlot($postable, 'An allowance adjustment', 'the allowance run that produced it');
+
         if (! $this->enabled()) {
             return null;
         }
 
-        $this->refuseTheWriteOffSlot($postable, 'An allowance adjustment', 'the allowance run that produced it');
-
         $map = AccountMap::resolve();
         $posting = PostingRules::allowanceAdjustment($signedCentavos, $map);
-        AccountingAccount::query()->whereKey($map->accountFor('allowance_credit_losses'))->lockForUpdate()->first();
+        $this->lockTheAllowance($map);
 
         return $this->write($posting, $postable, [
             'date' => $date,
@@ -1037,8 +1045,19 @@ final class AutomaticPoster
     }
 
     /**
+     * The allowance account row lock, before any journal or line lock: the
+     * order every writer of allowance lines follows (see
+     * {@see self::allowanceBalance()}). Held to the end of the transaction.
+     */
+    private function lockTheAllowance(AccountMap $map): void
+    {
+        AccountingAccount::query()->whereKey($map->accountFor('allowance_credit_losses'))->lockForUpdate()->first();
+    }
+
+    /**
      * A `credit_loss` journal keyed on a Loan is that loan's restructure
-     * write-off (J2). Anything else posted there would take the slot, and the
+     * write-off (J2). Refused before the books check, so a caller's mistake
+     * shows with or without a chart, as a missing transaction does. Anything else posted there would take the slot, and the
      * idempotency index would hand it back as the write-off, so J2 would
      * never post.
      */
@@ -1110,18 +1129,17 @@ final class AutomaticPoster
      */
     public function creditLossProvision(Model $postable, string|int|float $pesos, int $userId, array $context = []): ?AccountingJournal
     {
+        $this->refuseTheWriteOffSlot($postable, 'A credit loss provision', 'the provision row');
+
         if (! $this->enabled()) {
             return null;
         }
 
-        $this->refuseTheWriteOffSlot($postable, 'A credit loss provision', 'the provision row');
+        $map = AccountMap::resolve();
+        $posting = PostingRules::creditLossProvision($this->centavos($pesos, 'provision amount', $postable), $map);
+        $this->lockTheAllowance($map);
 
-        return $this->write(
-            PostingRules::creditLossProvision($this->centavos($pesos, 'provision amount', $postable), AccountMap::resolve()),
-            $postable,
-            $context,
-            $userId,
-        );
+        return $this->write($posting, $postable, $context, $userId);
     }
 
     /**
