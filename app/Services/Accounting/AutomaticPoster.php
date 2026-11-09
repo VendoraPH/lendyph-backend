@@ -438,7 +438,8 @@ final class AutomaticPoster
      */
     private function deferralFor(Loan $loan, Repayment $repayment): array
     {
-        $capitalised = $this->capitalised($loan);
+        $state = $this->deferralState($loan, (int) $repayment->getKey());
+        $capitalised = $state['capitalised'];
 
         if ($capitalised['interest'] + $capitalised['penalty'] === 0) {
             return ['interest' => 0, 'penalty' => 0];
@@ -450,30 +451,33 @@ final class AutomaticPoster
             ->pluck('principal_applied')
             ->sum(fn (mixed $principal): int => $this->centavos($principal, 'principal applied', $repayment));
 
-        $movements = $this->deferralMovements($loan, (int) $repayment->getKey());
-
         return PostingRules::deferralRecognition(
             capitalisedInterest: $capitalised['interest'],
             capitalisedPenalty: $capitalised['penalty'],
             principal: $this->centavos($loan->principal_amount, 'principal amount', $loan),
             principalPaid: (int) $paid,
             complete: ! $this->hasOpenPeriod($loan),
-            recognisedInterest: $movements['interest'],
-            recognisedPenalty: $movements['penalty'],
-            released: $movements['released'],
+            recognisedInterest: $state['recognised']['interest'],
+            recognisedPenalty: $state['recognised']['penalty'],
+            released: $state['released'],
+            takenInterest: $state['taken']['interest'],
+            takenPenalty: $state['taken']['penalty'],
         );
     }
 
     /**
-     * The interest and penalty a restructure capitalised into this loan and
-     * the books have not recognised yet, in centavos: the split stored on the
-     * loan, less what its collections recognised, less what a write-off (J2,
-     * when this loan is itself restructured) or a completing balance
-     * reduction took. Both zero for a loan no restructure created, or one
-     * released before the split was stored. Without books nothing has been
-     * recognised, so it is the whole split.
+     * The interest and penalty a restructure capitalised into this loan (or
+     * carried to it from its source's own deferral) that the books have not
+     * recognised yet, in centavos: the split stored on the loan plus what its
+     * J1 carried in, less what its collections recognised, less what a
+     * partial balance reduction cleared, less what was carried on to the loan
+     * that restructured it, less what a write-off (J2, when this loan is
+     * itself restructured) or a completing balance reduction took. Both zero
+     * for a loan no restructure created, or one released before the split
+     * was stored. Without books nothing has been recognised or carried, so it
+     * is the whole stored split.
      *
-     * Read from the loan's own posted journals by their marked lines
+     * Read from the posted journals by their marked lines
      * ({@see PostingRules::DEFERRAL_RECOGNISED_LINE}), so a reversed (voided)
      * collection counts for nothing.
      *
@@ -481,21 +485,77 @@ final class AutomaticPoster
      */
     public function unrecognisedDeferral(Loan $loan): array
     {
-        $capitalised = $this->capitalised($loan);
+        return $this->remainingOf($this->deferralState($loan));
+    }
 
-        if ($capitalised['interest'] + $capitalised['penalty'] === 0 || ! $this->enabled()) {
-            return $capitalised;
+    /**
+     * {@see self::unrecognisedDeferral()} of a restructure's source as it
+     * stood before that restructure: without the write-off (J2) on it and
+     * without what was carried off it to the new loan. A restructured loan
+     * takes no other posting, so this is the same before the release and
+     * after it, which is what lets the builders that write nothing produce
+     * exactly the J1 and J2 that were posted.
+     *
+     * @return array{interest: int, penalty: int}
+     */
+    private function deferralBeforeItsRestructure(Loan $source): array
+    {
+        return $this->remainingOf($this->deferralState($source, beforeItsRestructure: true));
+    }
+
+    /**
+     * @param  array{capitalised: array{interest: int, penalty: int}, recognised: array{interest: int, penalty: int}, taken: array{interest: int, penalty: int}, released: int}  $state
+     * @return array{interest: int, penalty: int}
+     */
+    private function remainingOf(array $state): array
+    {
+        return PostingRules::deferralRemaining(
+            $state['capitalised']['interest'],
+            $state['capitalised']['penalty'],
+            $state['recognised']['interest'],
+            $state['recognised']['penalty'],
+            $state['released'],
+            $state['taken']['interest'],
+            $state['taken']['penalty'],
+        );
+    }
+
+    /**
+     * Everything the books hold about a loan's deferral, in centavos:
+     *
+     * - `capitalised`: the split stored on the loan, plus what its J1
+     *   carried in from its source;
+     * - `recognised`: what its collections recognised (`$exceptRepaymentId`'s
+     *   left out);
+     * - `taken`: what was taken off by part, a partial reduction's share and
+     *   what was carried on to the loan that restructured it;
+     * - `released`: what a write-off (J2) or a completing reduction took.
+     *
+     * Without books, or on a loan no restructure created, only the stored
+     * split, untouched.
+     *
+     * @return array{capitalised: array{interest: int, penalty: int}, recognised: array{interest: int, penalty: int}, taken: array{interest: int, penalty: int}, released: int}
+     */
+    private function deferralState(Loan $loan, ?int $exceptRepaymentId = null, bool $beforeItsRestructure = false): array
+    {
+        $own = $this->capitalised($loan);
+        $none = ['interest' => 0, 'penalty' => 0];
+
+        if (! $this->enabled() || ($loan->source_loan_id === null && $own['interest'] + $own['penalty'] === 0)) {
+            return ['capitalised' => $own, 'recognised' => $none, 'taken' => $none, 'released' => 0];
         }
 
-        $movements = $this->deferralMovements($loan);
+        $movements = $this->deferralMovements($loan, $exceptRepaymentId, $beforeItsRestructure);
 
-        return PostingRules::deferralRemaining(
-            $capitalised['interest'],
-            $capitalised['penalty'],
-            $movements['interest'],
-            $movements['penalty'],
-            $movements['released'],
-        );
+        return [
+            'capitalised' => [
+                'interest' => $own['interest'] + $movements['carried_in_interest'],
+                'penalty' => $own['penalty'] + $movements['carried_in_penalty'],
+            ],
+            'recognised' => ['interest' => $movements['interest'], 'penalty' => $movements['penalty']],
+            'taken' => ['interest' => $movements['taken_interest'], 'penalty' => $movements['taken_penalty']],
+            'released' => $movements['released'],
+        ];
     }
 
     /**
@@ -515,48 +575,72 @@ final class AutomaticPoster
     }
 
     /**
-     * What the loan's posted journals did to its deferral, in centavos, read
-     * by the marked lines:
+     * What the posted journals did to a loan's deferral, in centavos, read by
+     * the marked lines, each from the one kind of document that writes it:
      *
      * - `interest`, `penalty`: recognised by its collections (the Repayment
      *   journals, `$exceptRepaymentId`'s left out);
      * - `released`: taken off by its write-off (J2, keyed on the loan) and by
-     *   a completing balance reduction (its LoanAdjustment journals).
+     *   a completing balance reduction (its LoanAdjustment journals);
+     * - `taken_interest`, `taken_penalty`: cleared by part by a partial
+     *   balance reduction, and carried off it in the J1 of the loan that
+     *   restructured it;
+     * - `carried_in_interest`, `carried_in_penalty`: carried onto it from its
+     *   source, in its own J1.
      *
-     * @return array{interest: int, penalty: int, released: int}
+     * With `$beforeItsRestructure`, the loan's own restructure is left out
+     * (its J2, and what its new loan's J1 carried off it).
+     *
+     * @return array{interest: int, penalty: int, released: int, taken_interest: int, taken_penalty: int, carried_in_interest: int, carried_in_penalty: int}
      */
-    private function deferralMovements(Loan $loan, ?int $exceptRepaymentId = null): array
+    private function deferralMovements(Loan $loan, ?int $exceptRepaymentId = null, bool $beforeItsRestructure = false): array
     {
         $repayments = Repayment::query()->where('loan_id', $loan->getKey())->select('id')->toBase();
         $adjustments = LoanAdjustment::query()->where('loan_id', $loan->getKey())->select('id')->toBase();
+        $restructuredInto = Loan::query()->where('source_loan_id', $loan->getKey())->select('id')->toBase();
+        $loanType = $loan->getMorphClass();
 
         $sums = DB::table('accounting_journal_lines as l')
             ->join('accounting_journals as j', 'j.id', '=', 'l.accounting_journal_id')
             ->where('j.status', 'posted')
-            ->whereIn('l.description', [
-                PostingRules::DEFERRED_INTEREST_LINE,
-                PostingRules::DEFERRED_PENALTY_LINE,
-                PostingRules::DEFERRAL_WRITTEN_OFF_LINE,
-                PostingRules::DEFERRAL_CLEARED_LINE,
-            ])
-            ->where(function (QueryBuilder $documents) use ($loan, $repayments, $adjustments, $exceptRepaymentId): void {
+            ->where(function (QueryBuilder $documents) use ($loan, $loanType, $repayments, $adjustments, $restructuredInto, $exceptRepaymentId, $beforeItsRestructure): void {
                 $documents
                     ->where(function (QueryBuilder $collections) use ($repayments, $exceptRepaymentId): void {
                         $collections->where('j.source', 'loan_collection')
                             ->where('j.postable_type', (new Repayment)->getMorphClass())
                             ->whereIn('j.postable_id', $repayments)
-                            ->when($exceptRepaymentId !== null, fn (QueryBuilder $q) => $q->where('j.postable_id', '!=', $exceptRepaymentId));
-                    })
-                    ->orWhere(function (QueryBuilder $writeOff) use ($loan): void {
-                        $writeOff->where('j.source', 'credit_loss')
-                            ->where('j.postable_type', $loan->getMorphClass())
-                            ->where('j.postable_id', $loan->getKey());
+                            ->when($exceptRepaymentId !== null, fn (QueryBuilder $q) => $q->where('j.postable_id', '!=', $exceptRepaymentId))
+                            ->whereIn('l.description', [PostingRules::DEFERRED_INTEREST_LINE, PostingRules::DEFERRED_PENALTY_LINE]);
                     })
                     ->orWhere(function (QueryBuilder $clearing) use ($adjustments): void {
                         $clearing->where('j.source', 'adjustment')
                             ->where('j.postable_type', (new LoanAdjustment)->getMorphClass())
-                            ->whereIn('j.postable_id', $adjustments);
-                    });
+                            ->whereIn('j.postable_id', $adjustments)
+                            ->whereIn('l.description', [
+                                PostingRules::DEFERRAL_CLEARED_LINE,
+                                PostingRules::DEFERRED_INTEREST_CLEARED_LINE,
+                                PostingRules::DEFERRED_PENALTY_CLEARED_LINE,
+                            ]);
+                    })
+                    ->orWhere(function (QueryBuilder $carriedIn) use ($loan, $loanType): void {
+                        $carriedIn->where('j.source', 'loan_release')
+                            ->where('j.postable_type', $loanType)
+                            ->where('j.postable_id', $loan->getKey())
+                            ->whereIn('l.description', [PostingRules::DEFERRED_INTEREST_CARRIED_IN_LINE, PostingRules::DEFERRED_PENALTY_CARRIED_IN_LINE]);
+                    })
+                    ->when(! $beforeItsRestructure, fn (QueryBuilder $q) => $q
+                        ->orWhere(function (QueryBuilder $writeOff) use ($loan, $loanType): void {
+                            $writeOff->where('j.source', 'credit_loss')
+                                ->where('j.postable_type', $loanType)
+                                ->where('j.postable_id', $loan->getKey())
+                                ->where('l.description', PostingRules::DEFERRAL_WRITTEN_OFF_LINE);
+                        })
+                        ->orWhere(function (QueryBuilder $carriedOut) use ($loanType, $restructuredInto): void {
+                            $carriedOut->where('j.source', 'loan_release')
+                                ->where('j.postable_type', $loanType)
+                                ->whereIn('j.postable_id', $restructuredInto)
+                                ->whereIn('l.description', [PostingRules::DEFERRED_INTEREST_CARRIED_OUT_LINE, PostingRules::DEFERRED_PENALTY_CARRIED_OUT_LINE]);
+                        }));
             })
             ->groupBy('l.description')
             ->selectRaw('l.description AS marker, COALESCE(SUM(l.debit), 0) AS debit, COALESCE(SUM(l.credit), 0) AS credit')
@@ -570,7 +654,27 @@ final class AutomaticPoster
             'interest' => $credit(PostingRules::DEFERRED_INTEREST_LINE),
             'penalty' => $credit(PostingRules::DEFERRED_PENALTY_LINE),
             'released' => $debit(PostingRules::DEFERRAL_WRITTEN_OFF_LINE) + $debit(PostingRules::DEFERRAL_CLEARED_LINE),
+            'taken_interest' => $debit(PostingRules::DEFERRED_INTEREST_CLEARED_LINE) + $debit(PostingRules::DEFERRED_INTEREST_CARRIED_OUT_LINE),
+            'taken_penalty' => $debit(PostingRules::DEFERRED_PENALTY_CLEARED_LINE) + $debit(PostingRules::DEFERRED_PENALTY_CARRIED_OUT_LINE),
+            'carried_in_interest' => $credit(PostingRules::DEFERRED_INTEREST_CARRIED_IN_LINE),
+            'carried_in_penalty' => $credit(PostingRules::DEFERRED_PENALTY_CARRIED_IN_LINE),
         ];
+    }
+
+    /**
+     * The principal still unpaid on the loan's open periods, in centavos,
+     * floored per period as every outstanding figure is
+     * ({@see AmortizationSchedule::remainingPrincipalSql()}).
+     */
+    private function unpaidPrincipal(Loan $loan): int
+    {
+        $pesos = AmortizationSchedule::query()
+            ->where('loan_id', $loan->getKey())
+            ->whereIn('status', AmortizationSchedule::UNPAID_STATUSES)
+            ->selectRaw('COALESCE(SUM('.AmortizationSchedule::remainingPrincipalSql().'), 0) AS unpaid')
+            ->value('unpaid');
+
+        return $this->centavos(is_numeric($pesos) ? (string) $pesos : '0', 'unpaid principal', $loan);
     }
 
     /** Whether the loan still has a period with something unpaid on it. */
@@ -623,7 +727,9 @@ final class AutomaticPoster
      * - `release`, J1, keyed on `$new` with source `loan_release`: the
      *   principal is owed, the source's principal is carried, the capitalised
      *   interest and penalty are deferred, and the deductions are collected
-     *   from the member through `$method`. Nothing is paid out.
+     *   from the member through `$method`. Nothing is paid out. The source's
+     *   own unrecognised deferral that J2 does not use moves to `$new`, by
+     *   part ({@see PostingRules::restructureCarry()}).
      * - `write_off`, J2, keyed on `$source` with source `credit_loss`, only
      *   when the split writes principal off: against the source's own
      *   unrecognised deferral first, then the allowance, then expense.
@@ -678,7 +784,7 @@ final class AutomaticPoster
 
         $map = AccountMap::resolve();
         $writeOff = $this->writeOffPosting($new, $source, $map, lock: true);
-        $release = $this->restructureReleasePosting($new, $map, $method);
+        $release = $this->releaseOfARestructure($new, $source, $map, $method);
         $this->warnAboutTaxFallbacks($new, $map);
 
         $date = $this->releaseDate($new);
@@ -712,7 +818,24 @@ final class AutomaticPoster
      */
     public function restructureReleasePosting(Loan $new, AccountMap $map, string $method): array
     {
+        return $this->releaseOfARestructure($new, $new->sourceLoan, $map, $method);
+    }
+
+    /**
+     * J1, with what the source's own deferral carries to the new loan: all
+     * of it less what J2 takes ({@see PostingRules::restructureCarry()}),
+     * read as it stood before this restructure, so it is the same before the
+     * release and after it.
+     *
+     * @return array{source: string, description: string, lines: list<array<string, mixed>>}
+     */
+    private function releaseOfARestructure(Loan $new, ?Loan $source, AccountMap $map, string $method): array
+    {
         $split = $this->storedSplit($new);
+        $deferral = $source === null || ! $this->enabled()
+            ? ['interest' => 0, 'penalty' => 0]
+            : $this->deferralBeforeItsRestructure($source);
+        $carry = PostingRules::restructureCarry($deferral['interest'], $deferral['penalty'], $split['written_off']);
 
         return PostingRules::restructureRelease(
             principal: $this->centavos($new->principal_amount, 'principal amount', $new),
@@ -724,7 +847,9 @@ final class AutomaticPoster
             map: $map,
             items: $this->deductionItems($new),
             loan: $this->releaseLabel($new),
-            source: $this->businessIdentifier($new->sourceLoan ?? $new),
+            source: $this->businessIdentifier($source ?? $new),
+            carriedInterest: $carry['interest'],
+            carriedPenalty: $carry['penalty'],
         );
     }
 
@@ -752,7 +877,7 @@ final class AutomaticPoster
             return null;
         }
 
-        $remaining = $this->unrecognisedDeferral($source);
+        $remaining = $this->deferralBeforeItsRestructure($source);
         $deferral = $remaining['interest'] + $remaining['penalty'];
         $allowance = $deferral >= $writtenOff ? 0 : $this->allowanceBalance($map, $lock);
 
@@ -878,10 +1003,18 @@ final class AutomaticPoster
      * `$signedCentavos` is the change to the principal balance: negative
      * reduces it (Dr loan adjustments / Cr loans receivable), positive
      * increases it (the mirror). It must equal the adjustment's own
-     * `adjustment_amount`. A reduction that leaves a restructured loan with
-     * no open period also clears the deferral it still holds
-     * (Dr unearned restructure / Cr loan adjustments), so call it after the
-     * adjustment has restated the periods.
+     * `adjustment_amount`. A reduction on a restructured loan still holding
+     * deferral also clears some of it (Dr unearned restructure / Cr loan
+     * adjustments), so call it after the adjustment has restated the
+     * periods:
+     *
+     * - all of it, when the reduction left no open period;
+     * - otherwise its share, by part: the deferral × the principal reduced ÷
+     *   the principal outstanding before the reduction (the open periods'
+     *   unpaid principal now, plus the reduction)
+     *   ({@see PostingRules::deferralShare()}).
+     *
+     * An increase clears nothing.
      *
      * @throws CannotPostToTheBooksException for another adjustment type, a stated amount that is missing or disagrees, or an unmapped role
      */
@@ -915,13 +1048,22 @@ final class AutomaticPoster
         /** @var Loan $loan */
         $loan = $adjustment->loan;
         $cleared = 0;
+        $share = ['interest' => 0, 'penalty' => 0];
 
-        if ($signedCentavos < 0 && $loan->source_loan_id !== null && ! $this->hasOpenPeriod($loan)) {
+        if ($signedCentavos < 0 && $loan->source_loan_id !== null) {
             $remaining = $this->unrecognisedDeferral($loan);
-            $cleared = $remaining['interest'] + $remaining['penalty'];
+
+            if (! $this->hasOpenPeriod($loan)) {
+                $cleared = $remaining['interest'] + $remaining['penalty'];
+            } elseif ($remaining['interest'] + $remaining['penalty'] > 0) {
+                $reduced = -$signedCentavos;
+                $share = PostingRules::deferralShare($remaining['interest'], $remaining['penalty'], $reduced, $this->unpaidPrincipal($loan) + $reduced);
+            }
         }
 
-        return $this->write(PostingRules::balanceAdjustment($signedCentavos, AccountMap::resolve(), $cleared), $adjustment, [
+        $posting = PostingRules::balanceAdjustment($signedCentavos, AccountMap::resolve(), $cleared, $share['interest'], $share['penalty']);
+
+        return $this->write($posting, $adjustment, [
             'date' => $adjustment->applied_at,
             'reference' => $number,
             'description' => $this->describe('Balance adjustment', $number),
@@ -1056,10 +1198,10 @@ final class AutomaticPoster
 
     /**
      * A `credit_loss` journal keyed on a Loan is that loan's restructure
-     * write-off (J2). Refused before the books check, so a caller's mistake
-     * shows with or without a chart, as a missing transaction does. Anything else posted there would take the slot, and the
-     * idempotency index would hand it back as the write-off, so J2 would
-     * never post.
+     * write-off (J2). Anything else posted there would take the slot, and
+     * the idempotency index would hand it back as the write-off, so J2 would
+     * never post. Refused before the books check, so a caller's mistake
+     * shows with or without a chart, as a missing transaction does.
      */
     private function refuseTheWriteOffSlot(Model $postable, string $what, string $keyOn): void
     {

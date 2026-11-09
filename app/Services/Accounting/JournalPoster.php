@@ -46,6 +46,9 @@ final class JournalPoster
     /** Keeps MAX_LINES * Money::maxCentavos() inside PHP_INT_MAX, so the sum is exact. */
     public const MAX_LINES = 500;
 
+    /** The posting role whose account every allowance writer locks first. See lockTheAllowanceIfTouched(). */
+    private const ALLOWANCE_ROLE = 'allowance_credit_losses';
+
     /**
      * The closed-period lock lives HERE, and that placement is the whole reason
      * it works.
@@ -61,9 +64,6 @@ final class JournalPoster
      * @see PeriodGuard for why an absent period does NOT lock, and why the read
      *      takes a shared lock.
      */
-    /** The posting role whose account every allowance writer locks first. See lockTheAllowanceIfTouched(). */
-    private const ALLOWANCE_ROLE = 'allowance_credit_losses';
-
     public function __construct(private PeriodGuard $periods) {}
 
     /**
@@ -126,12 +126,14 @@ final class JournalPoster
     public function updateDraft(AccountingJournal $journal, array $attributes, ?array $lines = null): AccountingJournal
     {
         return DB::transaction(function () use ($journal, $attributes, $lines): AccountingJournal {
+            $version = $this->editVersionOf($journal->id);
             $this->lockTheAllowanceIfTouched([
                 ...$this->accountsOn($journal->id),
                 ...array_column($lines ?? [], 'account_id'),
             ]);
 
             $fresh = $this->lock($journal->id);
+            $this->assertUnchangedSince($fresh, $version, 'edited', 'make the change again');
 
             // Refused HERE, as a 422, rather than left to the model's guard —
             // which throws a RuntimeException and would surface as a 500 on
@@ -166,6 +168,10 @@ final class JournalPoster
                 $this->writeLines($fresh, $lines);
             }
 
+            // Every edit moves the version, so a post, edit or reversal that
+            // read this draft before it can tell, under its journal lock.
+            DB::table('accounting_journals')->where('id', $fresh->id)->increment('edit_version');
+
             return $fresh->refresh();
         });
     }
@@ -195,9 +201,11 @@ final class JournalPoster
         bool $allowInactiveAccounts,
     ): AccountingJournal {
         return DB::transaction(function () use ($journal, $userId, $allowInactiveAccounts): AccountingJournal {
+            $version = $this->editVersionOf($journal->id);
             $allowanceLocked = $this->lockTheAllowanceIfTouched($this->accountsOn($journal->id));
 
             $fresh = $this->lock($journal->id);
+            $this->assertUnchangedSince($fresh, $version, 'posted', 'post it again');
 
             if ($fresh->status !== 'draft') {
                 throw ValidationException::withMessages([
@@ -235,10 +243,11 @@ final class JournalPoster
                 ->lockForUpdate()
                 ->get();
 
-            // The draft was read without a lock to decide on the allowance
-            // lock. An edit that landed since may have added an allowance
-            // line, and it is too late to take that lock now, behind the
-            // journal's: refused, so the order is never broken.
+            // The backstop behind the version check above, for a line written
+            // by anything other than updateDraft(): the draft was read
+            // without a lock to decide on the allowance lock, and it is too
+            // late to take that lock now, behind the journal's. Refused, so
+            // the order is never broken.
             if (! $allowanceLocked && $this->touchesTheAllowance($lines->pluck('accounting_account_id')->all())) {
                 throw ValidationException::withMessages([
                     'journal' => [
@@ -381,10 +390,13 @@ final class JournalPoster
     ): AccountingJournal {
         return DB::transaction(function () use ($journal, $date, $reason, $userId): AccountingJournal {
             // A posted entry's lines never change, so this read decides for
-            // the mirror too.
+            // the mirror too, unless the entry was still a draft when it was
+            // read and was edited before the lock: the version tells.
+            $version = $this->editVersionOf($journal->id);
             $this->lockTheAllowanceIfTouched($this->accountsOn($journal->id));
 
             $original = $this->lock($journal->id);
+            $this->assertUnchangedSince($original, $version, 'reversed', 'reverse it again');
 
             if ($original->status === 'reversed' || $original->reversed_by_journal_id !== null) {
                 throw ValidationException::withMessages([
@@ -689,9 +701,9 @@ final class JournalPoster
      */
     private function lockTheAllowanceIfTouched(array $accountIds): bool
     {
-        $allowance = $this->allowanceAccountId();
+        $allowance = $this->allowanceTouchedBy($accountIds);
 
-        if ($allowance === null || ! in_array($allowance, array_map('intval', $accountIds), true)) {
+        if ($allowance === null) {
             return false;
         }
 
@@ -703,9 +715,52 @@ final class JournalPoster
     /** @param  array<int, int|string|null>  $accountIds */
     private function touchesTheAllowance(array $accountIds): bool
     {
+        return $this->allowanceTouchedBy($accountIds) !== null;
+    }
+
+    /**
+     * The allowance account, when `$accountIds` includes it; otherwise null.
+     *
+     * @param  array<int, int|string|null>  $accountIds
+     */
+    private function allowanceTouchedBy(array $accountIds): ?int
+    {
         $allowance = $this->allowanceAccountId();
 
-        return $allowance !== null && in_array($allowance, array_map('intval', $accountIds), true);
+        return $allowance !== null && in_array($allowance, array_map('intval', $accountIds), true) ? $allowance : null;
+    }
+
+    /**
+     * A journal's `edit_version`, read without a lock: in the same snapshot
+     * as the unlocked read of its lines that decides on the allowance lock,
+     * so it is read first. Null when this transaction cannot see the row.
+     */
+    private function editVersionOf(int $journalId): ?int
+    {
+        $version = DB::table('accounting_journals')->where('id', $journalId)->value('edit_version');
+
+        return $version === null ? null : (int) $version;
+    }
+
+    /**
+     * Right after the journal lock, before any line lock: refuses (422) when
+     * an edit landed between the unlocked read and the lock. That read
+     * decided whether to take the allowance lock, and an edit may since have
+     * added an allowance line; taking that lock now, behind the journal's,
+     * would break the order every allowance writer keeps, and locking or
+     * rewriting its lines could deadlock with a restructure write-off.
+     */
+    private function assertUnchangedSince(AccountingJournal $locked, ?int $version, string $while, string $retry): void
+    {
+        if ($version !== null && (int) $locked->edit_version === $version) {
+            return;
+        }
+
+        throw ValidationException::withMessages([
+            'journal' => [
+                ($locked->journal_no ?: 'This entry')." changed while it was being {$while}. Reload it and {$retry}.",
+            ],
+        ]);
     }
 
     /** The account the allowance role is mapped to, or null with no chart or no mapping. */
