@@ -174,18 +174,52 @@ it('nulls the application\'s money figures for a caller without borrowers:view o
     $loan = $this->application($farMember, ['branch_id' => $this->mainBranch()->id]);
     $this->actingAs($this->headOffice())->putJson("/api/credit-scoring/loans/{$loan->id}/assessment", [
         'other_income' => 5000, 'business_income' => 3000, 'household_expenses' => 20000, 'outside_debt_payments' => 1000, 'outside_lenders_count' => 1,
+        'employment_status' => 'employed', 'business_start_date' => '2020-01-01', 'years_at_residence' => 6, 'verified_references_count' => 2, 'income_verification' => 'verified',
     ])->assertOk();
+    $personal = ['Job tenure or business age' => 'Years in the current job or business. Shown to staff who can read the member\'s details.',
+        'Years at residence' => 'Years at the current residence. Shown to staff who can read the member\'s details.',
+        'Membership tenure' => 'Membership tenure. Shown to staff who can read the member\'s details.'];
 
     foreach ([$this->full, $this->caller(['credit_scoring:view', 'loans:view'])] as $caller) {
         $data = $this->actingAs($caller)->getJson("/api/credit-scoring/loans/{$loan->id}/assessment")->assertOk()->json('data');
 
         expect($data['application_figures_hidden'])->toBeTrue()
-            ->and($data['application_profile'])->toMatchArray(['other_income' => null, 'business_income' => null, 'household_expenses' => null, 'outside_debt_payments' => null, 'outside_lenders_count' => 1]);
+            ->and($data['application_profile'])->toMatchArray([
+                'other_income' => null, 'business_income' => null, 'household_expenses' => null, 'outside_debt_payments' => null,
+                'outside_lenders_count' => null, 'employment_status' => null, 'business_start_date' => null, 'years_at_residence' => null,
+                'verified_references_count' => null, 'income_verification' => null, 'notice_version' => null,
+            ])
+            ->and(collect($data['score']['factors'])->pluck('detail', 'label')->only(array_keys($personal))->all())->toBe($personal);
     }
 
     $head = $this->actingAs($this->headOffice())->getJson("/api/credit-scoring/loans/{$loan->id}/assessment")->json('data');
     expect($head['application_figures_hidden'])->toBeFalse()
-        ->and($head['application_profile']['household_expenses'])->toBe('20000.00');
+        ->and($head['application_profile']['household_expenses'])->toBe('20000.00')
+        ->and($head['application_profile']['employment_status'])->toBe('employed')
+        ->and(collect($head['score']['factors'])->firstWhere('label', 'Years at residence')['detail'])->toBe('6.0 years at the current residence.')
+        ->and(collect($head['score']['factors'])->firstWhere('label', 'Membership tenure')['detail'])->toStartWith('Member since');
+});
+
+it('keeps the debt flags generic when the newest details sit on another branch\'s loan and the score is unchanged', function () {
+    $member = $this->scoredMember(null, ['monthly_income' => 10000]);
+    $details = ['outside_lenders_count' => 3, 'outside_debt_payments' => 6000];
+    CreditApplicationProfile::query()->create(['loan_id' => $this->application($member)->id] + $details);
+    $this->scoreNow($member);
+    $before = CreditScore::query()->where('borrower_id', $member->id)->count();
+    $flags = fn () => collect($this->actingAs($this->full)->getJson("/api/credit-scoring/borrowers/{$member->id}/policy-flags")->assertOk()->json('data'))->pluck('detail', 'label');
+    expect($flags()['Active loans above policy limit'])->toContain('4 active loans')
+        ->and($flags()['Debt service ratio above caution'])->toContain('60.00%');
+
+    // The same details on a newer loan in another branch: the score doesn't move.
+    CreditApplicationProfile::query()->create(['loan_id' => $this->application($member, ['branch_id' => $this->farBranch()->id])->id] + $details);
+    $this->scoreNow($member);
+
+    $current = CreditScore::query()->where('borrower_id', $member->id)->latest('id')->first();
+    $farProfile = CreditApplicationProfile::query()->latest('id')->first();
+    expect($current->data_used['application_profile_id'])->toBe($farProfile->id)
+        ->and(CreditScore::query()->where('borrower_id', $member->id)->count())->toBe($before + 1)
+        ->and($flags()['Active loans above policy limit'])->not->toContain('4 active loans')
+        ->and($flags()['Debt service ratio above caution'])->not->toContain('%,');
 });
 
 it('needs loans:view to save an assessment, as well as loans:update', function () {

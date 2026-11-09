@@ -253,15 +253,17 @@ it('gives up after 3 real seconds on a member being scored, answers 409, and lea
     $after->release();
 });
 
-it('refuses the save when an approval lands before the status is read again under the lock', function () {
+it('refuses the save when an approval lands inside the locked window, before the status is read again', function () {
     $loan = $this->application($this->member(['monthly_income' => 35000]));
     app()->instance(Recalculator::class, new class(app(Scorer::class), app(PolicyFlags::class)) extends Recalculator
     {
         public function assessLoanAfter(Loan $loan, string $reason, callable $write, int $waitSeconds): array
         {
-            DB::table('loans')->where('id', $loan->id)->update(['status' => 'approved']);
-
-            return parent::assessLoanAfter($loan, $reason, $write, $waitSeconds);
+            // Inside the member's lock and the save's transaction, just before the save re-reads the status.
+            return parent::assessLoanAfter($loan, $reason, function () use ($loan, $write) {
+                DB::table('loans')->where('id', $loan->id)->update(['status' => 'approved']);
+                $write();
+            }, $waitSeconds);
         }
     });
 

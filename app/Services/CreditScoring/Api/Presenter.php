@@ -26,7 +26,10 @@ use Carbon\CarbonInterface;
  * figures (CreditScope::seesFinancials()) gets no capacity block, a
  * `data_used` cut to its non-money keys, generic lines on the factors and
  * flags that print income, debt or amounts owed, and a recommendation
- * without the suggested maximum's amount; `financials_hidden` says so.
+ * without the suggested maximum's amount; `financials_hidden` says so. A
+ * caller who may not read the member's personal details (borrowers:view and
+ * the member's branch, round fz) gets generic job-tenure, residence and
+ * membership lines.
  */
 final class Presenter
 {
@@ -54,10 +57,15 @@ final class Presenter
         'past_due_amount' => 'Past due amount against the amount outstanding. The figures are shown to staff who can read the member\'s details and loans.',
     ];
 
-    /** @var array<string, bool> "viewer:member" => whether the viewer sees the figures behind the member's current score */
-    private array $memberFinancials = [];
+    /** Factor lines that print the member's personal details, and their stand-ins (round fz). */
+    private const PERSONAL_FACTOR_DETAILS = [
+        'tenure' => 'Years in the current job or business. Shown to staff who can read the member\'s details.',
+        'residence' => 'Years at the current residence. Shown to staff who can read the member\'s details.',
+        'membership_tenure' => 'Membership tenure. Shown to staff who can read the member\'s details.',
+    ];
 
-    private ?FactorTable $currentTable = null;
+    /** Request attribute prefix for the per-request memos (as BranchAccess::for() keeps its own). */
+    private const MEMO_PREFIX = 'credit_scoring.presenter.';
 
     public function __construct(private readonly CreditScope $scope) {}
 
@@ -74,6 +82,7 @@ final class Presenter
         }
 
         $financial = $this->scope->seesFinancials($viewer, $member, $score);
+        $personal = $this->scope->seesMemberDetails($viewer, $member);
         $categories = $score->category_scores ?? [];
         $labels = array_column($categories, 'label', 'key');
         $factors = $score->relationLoaded('factors') ? $score->factors : $score->factors()->get();
@@ -99,7 +108,11 @@ final class Presenter
             'factors' => $factors->where('has_data', true)->map(fn ($factor) => [
                 'id' => (int) $factor->id,
                 'label' => $factor->label,
-                'detail' => $financial ? $factor->detail : (self::FINANCIAL_FACTOR_DETAILS[$factor->factor_key] ?? $factor->detail),
+                'detail' => match (true) {
+                    ! $financial && isset(self::FINANCIAL_FACTOR_DETAILS[$factor->factor_key]) => self::FINANCIAL_FACTOR_DETAILS[$factor->factor_key],
+                    ! $personal && isset(self::PERSONAL_FACTOR_DETAILS[$factor->factor_key]) => self::PERSONAL_FACTOR_DETAILS[$factor->factor_key],
+                    default => $factor->detail,
+                },
                 'impact' => $factor->impact,
                 'category' => $labels[$factor->category_key] ?? $factor->category_key,
             ])->values()->all(),
@@ -318,21 +331,45 @@ final class Presenter
             return $flag->detail;
         }
 
-        $this->currentTable ??= FactorTable::fromRevision(CreditScoringSetting::current()->currentRevision()->firstOrFail());
+        $table = $this->memo('policy_rules', fn () => FactorTable::fromRevision(CreditScoringSetting::current()->currentRevision()->firstOrFail()));
 
-        return (string) ($this->currentTable->policyRule($flag->rule_key)['description'] ?? $flag->label);
+        return (string) ($table->policyRule($flag->rule_key)['description'] ?? $flag->label);
     }
 
     private function seesMemberFinancials(User $viewer, Borrower $member): bool
     {
-        $key = $viewer->getKey().':'.$member->getKey();
-
-        if (! array_key_exists($key, $this->memberFinancials)) {
+        return $this->memo("member_financials.{$viewer->getKey()}.{$member->getKey()}", function () use ($viewer, $member) {
             $scoreId = CreditScoreMember::query()->where('borrower_id', $member->id)->value('credit_score_id');
             $score = $scoreId === null ? null : CreditScore::query()->select(['id', 'data_used'])->find($scoreId);
-            $this->memberFinancials[$key] = $this->scope->seesFinancials($viewer, $member, $score);
+
+            return $this->scope->seesFinancials($viewer, $member, $score);
+        });
+    }
+
+    /**
+     * A value kept for the current request only, so a long-lived process
+     * never answers one request, or one caller, from another's memo. Without
+     * a request (console) it is worked out each time.
+     *
+     * @template TValue
+     *
+     * @param  callable(): TValue  $resolve
+     * @return TValue
+     */
+    private function memo(string $key, callable $resolve): mixed
+    {
+        $request = app()->bound('request') ? app('request') : null;
+
+        if ($request === null) {
+            return $resolve();
         }
 
-        return $this->memberFinancials[$key];
+        $key = self::MEMO_PREFIX.$key;
+
+        if (! $request->attributes->has($key)) {
+            $request->attributes->set($key, $resolve());
+        }
+
+        return $request->attributes->get($key);
     }
 }

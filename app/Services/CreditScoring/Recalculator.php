@@ -10,8 +10,10 @@ use App\Models\CreditScoreDirtyMember;
 use App\Models\CreditScoreMember;
 use App\Models\CreditScoringSetting;
 use App\Models\Loan;
+use App\Services\LoanWriteTransaction;
 use Carbon\Carbon;
 use Illuminate\Contracts\Cache\LockTimeoutException;
+use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 
@@ -19,7 +21,9 @@ use Illuminate\Support\Facades\DB;
  * Scores members and loan applications, and keeps the history.
  *
  * A history row (`credit_scores`) is written only when the status, score,
- * band, confidence or revision differs from the last one; otherwise only the
+ * band, confidence or revision differs from the last one, or the score was
+ * taken from other application details, so the current score always names
+ * the details its flags were raised from; otherwise only the
  * member's `checked_at` moves. A new score that dropped by the settings'
  * decline points (10) or more, or moved into a high band, writes an alert.
  * Policy flags are kept in step on every run.
@@ -39,6 +43,8 @@ class Recalculator
 
     private const LOCK_SECONDS = 60;
 
+    private const PROFILE_UNIQUE_INDEX = 'credit_application_profiles_loan_id_unique';
+
     private const LOCK_WAIT_SECONDS = 30;
 
     public function __construct(
@@ -57,7 +63,7 @@ class Recalculator
             [$settings, $table] = $this->rules();
             $data = MemberCreditData::load($borrowerId, null, $asOf);
             $result = $this->scorer->score($data, $settings, $table);
-            $current = CreditScoreMember::query()->with('creditScore:id,revision_id')->where('borrower_id', $borrowerId)->first();
+            $current = CreditScoreMember::query()->with('creditScore:id,revision_id,data_used')->where('borrower_id', $borrowerId)->first();
             $changed = $this->differs($result, $current?->creditScore, $current);
 
             if ($dryRun) {
@@ -123,21 +129,28 @@ class Recalculator
      * member's lock, waiting at most `$waitSeconds` for it: the assessment
      * screen saves the application details this way, so details the
      * assessment fails on are rolled back with it. The lock is taken outside
-     * the transaction, so other processes see it.
+     * the transaction, so other processes see it. The transaction is
+     * LoanWriteTransaction's: a lock wait timeout or deadlock on the loan row,
+     * or two first saves of the same details, answer 409 with nothing saved.
      *
      * @param  callable(): void  $write
      * @return array{borrower_id: int, changed: bool, status: string, score: int|null, previous_score: int|null, risk_level: string|null, confidence: string, credit_score_id: int|null}
      *
      * @throws LockTimeoutException when the member is still being scored after `$waitSeconds`
+     * @throws HttpResponseException 409 on a lock wait timeout, a deadlock or a details collision
      */
     public function assessLoanAfter(Loan $loan, string $reason, callable $write, int $waitSeconds): array
     {
         return Cache::lock($this->lockKey((int) $loan->borrower_id), self::LOCK_SECONDS)
-            ->block($waitSeconds, fn () => DB::transaction(function () use ($loan, $reason, $write) {
-                $write();
+            ->block($waitSeconds, fn () => LoanWriteTransaction::run(
+                function () use ($loan, $reason, $write) {
+                    $write();
 
-                return $this->assessUnlocked($loan, $reason, false, null);
-            }));
+                    return $this->assessUnlocked($loan, $reason, false, null);
+                },
+                self::PROFILE_UNIQUE_INDEX,
+                'This application was changed by someone else at the same time. Reload and try again.',
+            ));
     }
 
     /**
@@ -249,7 +262,8 @@ class Recalculator
             || $last->score !== $result['score']
             || $last->risk_level !== $result['risk_level']
             || $last->confidence !== $result['confidence']
-            || (int) $lastScore->revision_id !== $result['revision_id'];
+            || (int) $lastScore->revision_id !== $result['revision_id']
+            || ($lastScore->data_used['application_profile_id'] ?? null) !== ($result['data_used']['application_profile_id'] ?? null);
     }
 
     /**

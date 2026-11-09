@@ -13,7 +13,6 @@ use App\Models\User;
 use App\Services\CreditScoring\Recalculator;
 use Carbon\Carbon;
 use Illuminate\Contracts\Cache\LockTimeoutException;
-use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Validation\ValidationException;
 
 /**
@@ -21,9 +20,11 @@ use Illuminate\Validation\ValidationException;
  * latest assessment score with the capacity block, the member's and the
  * loan's open flags, and the loan's decisions.
  *
- * The application's money figures (income, expenses, outside debt) show
- * only to a caller who may read the member's details (`borrowers:view` and
- * the member's branch, round fz); `application_figures_hidden` says so.
+ * The application's details (income, expenses, outside debt and lenders,
+ * employment, business start, residence, references and income
+ * verification) show only to a caller who may read the member's details
+ * (`borrowers:view` and the member's branch, round fz);
+ * `application_figures_hidden` says so. The notice fields always show.
  *
  * Advisory only. Saving writes the application details
  * (credit_application_profiles) and, through the Recalculator, a score and
@@ -118,8 +119,9 @@ final class AssessmentService
      *
      * 422 once the loan is past approval (checked again under the lock), or
      * for a registration that isn't a member. 409 when the member is still
-     * being scored after LOCK_WAIT_SECONDS, and when two first saves of the
-     * same application collide; nothing is saved either way.
+     * being scored after LOCK_WAIT_SECONDS, and on a lock wait timeout, a
+     * deadlock or two first saves of the same application colliding
+     * (Recalculator::assessLoanAfter()); nothing is saved either way.
      *
      * @param  array<string, mixed>  $fields
      */
@@ -140,8 +142,6 @@ final class AssessmentService
             );
         } catch (LockTimeoutException) {
             abort(409, 'The member is being scored right now. Try again in a moment.');
-        } catch (UniqueConstraintViolationException) {
-            abort(409, 'These application details were just saved by someone else. Reload and try again.');
         }
     }
 
@@ -192,12 +192,12 @@ final class AssessmentService
             'business_income' => $figures ? $profile->business_income : null,
             'household_expenses' => $figures ? $profile->household_expenses : null,
             'outside_debt_payments' => $figures ? $profile->outside_debt_payments : null,
-            'outside_lenders_count' => $profile->outside_lenders_count,
-            'employment_status' => $profile->employment_status,
-            'business_start_date' => $profile->business_start_date?->toDateString(),
-            'years_at_residence' => $profile->years_at_residence,
-            'verified_references_count' => $profile->verified_references_count,
-            'income_verification' => $profile->income_verification,
+            'outside_lenders_count' => $figures ? $profile->outside_lenders_count : null,
+            'employment_status' => $figures ? $profile->employment_status : null,
+            'business_start_date' => $figures ? $profile->business_start_date?->toDateString() : null,
+            'years_at_residence' => $figures ? $profile->years_at_residence : null,
+            'verified_references_count' => $figures ? $profile->verified_references_count : null,
+            'income_verification' => $figures ? $profile->income_verification : null,
             'notice_version' => $profile->notice_version,
             'notice_acknowledged_at' => Presenter::time($profile->notice_acknowledged_at),
             'notice_acknowledged' => $profile->notice_acknowledged_at !== null && $profile->notice_version === $settings->notice_version,
