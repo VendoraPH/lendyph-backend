@@ -7,6 +7,7 @@ use App\Models\CreditDecision;
 use App\Models\CreditPolicyFlag;
 use App\Models\CreditRiskAlert;
 use App\Models\CreditScore;
+use App\Models\CreditScorecardRevision;
 use App\Models\CreditScoreMember;
 use App\Models\CreditScoringSetting;
 use App\Models\User;
@@ -19,19 +20,23 @@ use Carbon\CarbonInterface;
  * named by id, name and code only (round fz); times are ISO 8601 with their
  * offset; arrays are arrays, never null.
  *
- * Built for one caller: a score's data drops what they can't see
- * (CreditScope::dataUsed()), and a possible-duplicate flag reads its rule's
- * description for a caller without `branches:view_all`, since its detail
- * names the other member. A caller who may not read the member's financial
- * figures (CreditScope::seesFinancials()) gets no capacity block, a
- * `data_used` cut to its non-money keys, generic lines on the factors and
- * flags that print income, debt or amounts owed, and a recommendation
- * without the suggested maximum's amount; `financials_hidden` says so. A
- * caller who may not read the member's personal details (borrowers:view and
- * the member's branch, round fz) gets generic, neutral lines on the factors
- * that read them (tenure, residence, membership, income verification,
- * references, ID and mobile), a generic confidence reason and manual review
- * sentence, and the income verification flag as a generic policy check.
+ * Built for one caller:
+ * - A caller who may not read the member's details (`borrowers:view` and the
+ *   member's branch, round fz; CreditScope::seesMemberDetails()) gets a
+ *   summary only (`details_hidden: true`): the score, band, version, time and
+ *   previous score, and one generic recommendation. `category_breakdown`,
+ *   `factors` and `factors_without_data` are empty; `confidence`,
+ *   `confidence_reason`, `capacity` and `data_used` are left out. Nothing in
+ *   it can be read back to a factor, flag or figure.
+ * - Everyone else gets the whole score (`details_hidden: false`). A score's
+ *   data drops what they can't see (CreditScope::dataUsed()), and a
+ *   possible-duplicate flag reads its rule's description without
+ *   `branches:view_all`, since its detail names the other member. A caller
+ *   who may not read the member's financial figures
+ *   (CreditScope::seesFinancials()) gets no capacity block, a `data_used`
+ *   cut to its non-money keys, generic lines on the factors and flags that
+ *   print income, debt or amounts owed, and a recommendation without the
+ *   suggested maximum's amount; `financials_hidden` says so.
  */
 final class Presenter
 {
@@ -59,31 +64,11 @@ final class Presenter
         'past_due_amount' => 'Past due amount against the amount outstanding. The figures are shown to staff who can read the member\'s details and loans.',
     ];
 
-    /**
-     * Factor lines that read the member's personal or application details,
-     * and their stand-ins (round fz). For a caller who may not read them the
-     * line is generic and its impact neutral, so neither gives the value away.
-     */
-    private const PERSONAL_FACTOR_DETAILS = [
-        'tenure' => 'Years in the current job or business. Shown to staff who can read the member\'s details.',
-        'residence' => 'Years at the current residence. Shown to staff who can read the member\'s details.',
-        'membership_tenure' => 'Membership tenure. Shown to staff who can read the member\'s details.',
-        'income_verified' => 'Income verification. Shown to staff who can read the member\'s details.',
-        'verified_references' => 'Verified references. Shown to staff who can read the member\'s details.',
-        'valid_id' => 'Valid ID on file. Shown to staff who can read the member\'s details.',
-        'valid_mobile' => 'Mobile number on file. Shown to staff who can read the member\'s details.',
-    ];
+    /** The summary's recommendation while the member has an open hard flag. */
+    public const MANUAL_REVIEW = 'Manual review required.';
 
-    /** Flags whose label and detail read the member's application details. */
-    private const PERSONAL_FLAG_RULES = ['income_verification_failed'];
-
-    private const PERSONAL_FLAG_LABEL = 'Policy check';
-
-    private const PERSONAL_FLAG_DETAIL = 'A policy check needs review. Shown to staff who can read the member\'s details.';
-
-    private const PERSONAL_HIDDEN = 'Shown to staff who can read the member\'s details.';
-
-    private const MANUAL_REVIEW_GENERIC = 'Manual review required: a policy check needs review.';
+    /** The summary's recommendation for a score without enough data. */
+    private const INSUFFICIENT_DATA = 'Not enough data to score. Review the member\'s application and history manually.';
 
     /** Request attribute prefix for the per-request memos (as BranchAccess::for() keeps its own). */
     private const MEMO_PREFIX = 'credit_scoring.presenter.';
@@ -98,12 +83,17 @@ final class Presenter
      */
     public function score(User $viewer, Borrower $member, ?CreditScore $score): array
     {
+        $details = $this->scope->seesMemberDetails($viewer, $member);
+
         if ($score === null) {
-            return $this->notScored($member);
+            return $this->notScored($member, $details);
+        }
+
+        if (! $details) {
+            return $this->summary($member, $score);
         }
 
         $financial = $this->scope->seesFinancials($viewer, $member, $score);
-        $personal = $this->scope->seesMemberDetails($viewer, $member);
         $categories = $score->category_scores ?? [];
         $labels = array_column($categories, 'label', 'key');
         $factors = $score->relationLoaded('factors') ? $score->factors : $score->factors()->get();
@@ -129,33 +119,91 @@ final class Presenter
             'factors' => $factors->where('has_data', true)->map(fn ($factor) => [
                 'id' => (int) $factor->id,
                 'label' => $factor->label,
-                'detail' => match (true) {
-                    ! $financial && isset(self::FINANCIAL_FACTOR_DETAILS[$factor->factor_key]) => self::FINANCIAL_FACTOR_DETAILS[$factor->factor_key],
-                    ! $personal && isset(self::PERSONAL_FACTOR_DETAILS[$factor->factor_key]) => self::PERSONAL_FACTOR_DETAILS[$factor->factor_key],
-                    default => $factor->detail,
-                },
-                'impact' => ! $personal && isset(self::PERSONAL_FACTOR_DETAILS[$factor->factor_key]) ? 'neutral' : $factor->impact,
+                'detail' => ! $financial && isset(self::FINANCIAL_FACTOR_DETAILS[$factor->factor_key])
+                    ? self::FINANCIAL_FACTOR_DETAILS[$factor->factor_key]
+                    : $factor->detail,
+                'impact' => $factor->impact,
                 'category' => $labels[$factor->category_key] ?? $factor->category_key,
             ])->values()->all(),
-            'recommendation' => $this->recommendation($score->recommendation, $financial, $personal),
+            'recommendation' => $financial ? $score->recommendation : self::withoutAmounts($score->recommendation),
             'calculated_at' => self::time($score->calculated_at),
             'status' => $score->status,
             'limited_history' => (bool) $score->limited_history,
-            'confidence_reason' => $personal ? $score->confidence_reason : self::PERSONAL_HIDDEN,
+            'confidence_reason' => $score->confidence_reason,
             'validated' => (bool) $score->revision?->validated,
             'previous_score' => $score->previous_score,
             'context' => $score->context,
             'loan_id' => $score->loan_id === null ? null : (int) $score->loan_id,
-            'factors_without_data' => $factors->where('has_data', false)
-                ->reject(fn ($factor) => ! $personal && isset(self::PERSONAL_FACTOR_DETAILS[$factor->factor_key]))
-                ->map(fn ($factor) => [
-                    'label' => $factor->label,
-                    'category' => $labels[$factor->category_key] ?? $factor->category_key,
-                ])->values()->all(),
+            'factors_without_data' => $factors->where('has_data', false)->map(fn ($factor) => [
+                'label' => $factor->label,
+                'category' => $labels[$factor->category_key] ?? $factor->category_key,
+            ])->values()->all(),
             'capacity' => $financial ? $score->capacity : null,
             'data_used' => $this->dataUsed($viewer, $score, $financial),
             'financials_hidden' => ! $financial,
+            'details_hidden' => false,
         ];
+    }
+
+    /**
+     * The summary for a caller who may not read the member's details.
+     *
+     * @return array<string, mixed>
+     */
+    private function summary(Borrower $member, CreditScore $score): array
+    {
+        return [
+            'id' => (int) $score->id,
+            'borrower_id' => (int) $member->id,
+            'borrower_name' => $member->full_name,
+            'borrower_code' => $member->borrower_code,
+            'score_type' => $score->score_type,
+            'score' => $score->score,
+            'risk_level' => $score->risk_level,
+            'model_version' => $score->revision_version,
+            'category_breakdown' => [],
+            'factors' => [],
+            'recommendation' => $this->genericRecommendation($score),
+            'calculated_at' => self::time($score->calculated_at),
+            'status' => $score->status,
+            'limited_history' => (bool) $score->limited_history,
+            'validated' => (bool) $score->revision?->validated,
+            'previous_score' => $score->previous_score,
+            'context' => $score->context,
+            'loan_id' => $score->loan_id === null ? null : (int) $score->loan_id,
+            'factors_without_data' => [],
+            'financials_hidden' => true,
+            'details_hidden' => true,
+        ];
+    }
+
+    /**
+     * One generic sentence: "Manual review required." while the member (or,
+     * for an assessment, its loan) has an open hard flag, else the band's own
+     * advice from the score's revision, or the insufficient-data advice.
+     */
+    private function genericRecommendation(CreditScore $score): string
+    {
+        $hardFlag = CreditPolicyFlag::query()
+            ->open()
+            ->where('borrower_id', $score->borrower_id)
+            ->where('type', CreditPolicyFlag::HARD)
+            ->where(fn ($q) => $q->whereNull('loan_id')->when($score->loan_id !== null, fn ($q) => $q->orWhere('loan_id', $score->loan_id)))
+            ->exists();
+
+        if ($hardFlag) {
+            return self::MANUAL_REVIEW;
+        }
+
+        if ($score->risk_level === null) {
+            return self::INSUFFICIENT_DATA;
+        }
+
+        $bands = $this->memo(null, "risk_bands.{$score->revision_id}", fn () => collect(
+            CreditScorecardRevision::query()->whereKey($score->revision_id)->value('risk_bands') ?? [],
+        )->pluck('recommendation', 'key')->all());
+
+        return (string) ($bands[$score->risk_level] ?? self::INSUFFICIENT_DATA);
     }
 
     /**
@@ -228,8 +276,8 @@ final class Presenter
         return [
             'id' => (int) $flag->id,
             'type' => $flag->type,
-            'label' => $this->hidesPersonalFlag($viewer, $flag, $member) ? self::PERSONAL_FLAG_LABEL : $flag->label,
-            'detail' => $this->hidesPersonalFlag($viewer, $flag, $member) ? self::PERSONAL_FLAG_DETAIL : $this->flagDetail($viewer, $flag, $member),
+            'label' => $flag->label,
+            'detail' => $this->flagDetail($viewer, $flag, $member),
             'triggered_at' => self::time($flag->first_triggered_at),
             'loan_id' => $flag->loan_id === null ? null : (int) $flag->loan_id,
         ];
@@ -285,9 +333,9 @@ final class Presenter
     /**
      * @return array<string, mixed>
      */
-    private function notScored(Borrower $member): array
+    private function notScored(Borrower $member, bool $details): array
     {
-        return [
+        $shape = [
             'id' => null,
             'borrower_id' => (int) $member->id,
             'borrower_name' => $member->full_name,
@@ -311,8 +359,11 @@ final class Presenter
             'factors_without_data' => [],
             'capacity' => null,
             'data_used' => null,
-            'financials_hidden' => false,
+            'financials_hidden' => ! $details,
+            'details_hidden' => ! $details,
         ];
+
+        return $details ? $shape : array_diff_key($shape, array_flip(['confidence', 'confidence_reason', 'capacity', 'data_used']));
     }
 
     /**
@@ -323,24 +374,6 @@ final class Presenter
         $data = $this->scope->dataUsed($viewer, $score->data_used);
 
         return $data === null || $financial ? $data : array_intersect_key($data, array_flip(self::NON_MONEY_DATA_KEYS));
-    }
-
-    /**
-     * The recommendation as the caller may read it: without the suggested
-     * maximum's amount when the figures are hidden, and with the manual
-     * review sentence read generically when the member's details are, since
-     * it names the hard flags (income verification among them).
-     */
-    private function recommendation(string $recommendation, bool $financial, bool $personal): string
-    {
-        $text = $financial ? $recommendation : self::withoutAmounts($recommendation);
-
-        return $personal ? $text : (string) preg_replace('/Manual review required: [^.]*\./u', self::MANUAL_REVIEW_GENERIC, $text);
-    }
-
-    private function hidesPersonalFlag(User $viewer, CreditPolicyFlag $flag, Borrower $member): bool
-    {
-        return in_array($flag->rule_key, self::PERSONAL_FLAG_RULES, true) && ! $this->scope->seesMemberDetails($viewer, $member);
     }
 
     /**

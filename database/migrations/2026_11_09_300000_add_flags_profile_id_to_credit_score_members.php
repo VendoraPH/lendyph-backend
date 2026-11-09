@@ -11,6 +11,11 @@ use Illuminate\Support\Facades\Schema;
  * API checks a caller's access to the flags' figures against this, not the
  * score row's own details. Added empty: the next run fills it. Safe to run
  * twice; changes no existing value.
+ *
+ * A plain indexed id with no foreign key on purpose: a foreign key that set
+ * it to null when a draft's details were deleted would read as "no
+ * application details" and open the figures' gate. A dangling id finds no
+ * loan, so the gate stays shut.
  */
 return new class extends Migration
 {
@@ -18,8 +23,7 @@ return new class extends Migration
     {
         if (! Schema::hasColumn('credit_score_members', 'flags_profile_id')) {
             Schema::table('credit_score_members', function (Blueprint $table) {
-                $table->foreignId('flags_profile_id')->nullable()->after('previous_credit_score_id')
-                    ->constrained('credit_application_profiles')->nullOnDelete();
+                $table->unsignedBigInteger('flags_profile_id')->nullable()->after('previous_credit_score_id')->index();
             });
         }
     }
@@ -28,7 +32,8 @@ return new class extends Migration
     {
         if (Schema::hasColumn('credit_score_members', 'flags_profile_id')) {
             Schema::table('credit_score_members', function (Blueprint $table) {
-                $table->dropConstrainedForeignId('flags_profile_id');
+                $table->dropIndex(['flags_profile_id']);
+                $table->dropColumn('flags_profile_id');
             });
         }
     }

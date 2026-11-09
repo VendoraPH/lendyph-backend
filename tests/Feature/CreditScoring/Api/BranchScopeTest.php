@@ -128,8 +128,8 @@ it('reads a possible duplicate generically without branches:view_all', function 
     $flag = CreditPolicyFlag::query()->where('borrower_id', $this->near->id)->where('rule_key', 'possible_duplicate')->sole();
     expect($flag->detail)->toContain($twin->borrower_code);
 
-    $branchView = collect($this->actingAs($this->analyst)->getJson("/api/credit-scoring/borrowers/{$this->near->id}/policy-flags")->json('data'))->firstWhere('id', $flag->id);
-    $headView = collect($this->actingAs($this->headOffice())->getJson("/api/credit-scoring/borrowers/{$this->near->id}/policy-flags")->json('data'))->firstWhere('id', $flag->id);
+    $branchView = collect($this->actingAs($this->analyst)->getJson("/api/credit-scoring/borrowers/{$this->near->id}/policy-flags")->json('data.data'))->firstWhere('id', $flag->id);
+    $headView = collect($this->actingAs($this->headOffice())->getJson("/api/credit-scoring/borrowers/{$this->near->id}/policy-flags")->json('data.data'))->firstWhere('id', $flag->id);
 
     expect($branchView['detail'])->toBe('Another member record has the same name.')
         ->and($branchView['detail'])->not->toContain($twin->borrower_code)

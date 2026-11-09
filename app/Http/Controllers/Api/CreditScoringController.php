@@ -169,7 +169,7 @@ class CreditScoringController extends Controller
             new OA\Parameter(name: 'borrowerId', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
         ],
         responses: [
-            new OA\Response(response: 200, description: 'PolicyFlag[], [] for a clean member'),
+            new OA\Response(response: 200, description: '{data: PolicyFlag[], details_hidden}: [] for a clean member, and [] with details_hidden true for a caller who may not read the member\'s details'),
             new OA\Response(response: 403, description: 'Missing credit_scoring:view'),
             new OA\Response(response: 404, description: 'No such member, or a member in another branch'),
         ],
@@ -179,14 +179,21 @@ class CreditScoringController extends Controller
         $this->authorize('credit_scoring:view');
         $member = $this->scope->member($request->user(), $borrowerId);
 
-        return $this->ok($this->scope->openFlags($request->user())
-            ->where('borrower_id', $member->id)
-            ->orderByRaw("type = 'hard_flag' DESC")
-            ->orderByDesc('first_triggered_at')
-            ->orderByDesc('id')
-            ->get()
-            ->map(fn (CreditPolicyFlag $flag) => $this->presenter->flag($request->user(), $flag, $member))
-            ->all());
+        if (! $this->scope->seesMemberDetails($request->user(), $member)) {
+            return $this->ok(['data' => [], 'details_hidden' => true]);
+        }
+
+        return $this->ok([
+            'data' => $this->scope->openFlags($request->user())
+                ->where('borrower_id', $member->id)
+                ->orderByRaw("type = 'hard_flag' DESC")
+                ->orderByDesc('first_triggered_at')
+                ->orderByDesc('id')
+                ->get()
+                ->map(fn (CreditPolicyFlag $flag) => $this->presenter->flag($request->user(), $flag, $member))
+                ->all(),
+            'details_hidden' => false,
+        ]);
     }
 
     #[OA\Get(

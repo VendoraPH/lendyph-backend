@@ -56,7 +56,7 @@ function expectFinancialsHidden(array $score): void
         ->and($score['recommendation'])->not->toMatch('/suggested maximum payment of ₱/u');
 }
 
-it('hides the financial figures from a caller holding only credit_scoring:view', function () {
+it('hides the financial figures from a caller who may read the member but not loans', function () {
     $member = $this->scoredMember();
     $loan = $this->application($member);
     CreditApplicationProfile::query()->create(['loan_id' => $loan->id, 'household_expenses' => 15000, 'outside_debt_payments' => 2000]);
@@ -69,7 +69,7 @@ it('hides the financial figures from a caller holding only credit_scoring:view',
         ->and($full['capacity']['monthly_income'])->toBe('41000.00')
         ->and($full['data_used']['application_profile_id'])->not->toBeNull();
 
-    $narrow = $this->actingAs($this->caller(['credit_scoring:view']))->getJson("/api/credit-scoring/borrowers/{$member->id}")->assertOk()->json('data');
+    $narrow = $this->actingAs($this->caller(['credit_scoring:view', 'borrowers:view']))->getJson("/api/credit-scoring/borrowers/{$member->id}")->assertOk()->json('data');
     expectFinancialsHidden($narrow);
     expect($narrow['score'])->toBe($full['score'])
         ->and(collect($narrow['factors'])->firstWhere('label', 'Debt service ratio')['detail'])->toStartWith('Debt payments against monthly income.');
@@ -88,24 +88,6 @@ it('hides them when the application details came from a loan in another branch',
     $head = $this->actingAs($this->headOffice())->getJson("/api/credit-scoring/borrowers/{$member->id}")->json('data');
     expect($head['financials_hidden'])->toBeFalse()
         ->and($head['capacity']['household_expenses'])->toBe('15000.00');
-});
-
-it('hides the member\'s income on an assessment from a caller without the member\'s branch or borrowers:view', function () {
-    $member = $this->member(['branch_id' => $this->farBranch()->id, 'monthly_income' => 35000]);
-    $loan = $this->application($member, ['branch_id' => $this->mainBranch()->id]);
-    $saved = $this->actingAs($this->headOffice())->putJson("/api/credit-scoring/loans/{$loan->id}/assessment", [
-        'other_income' => 5000, 'household_expenses' => 33000, 'outside_debt_payments' => 5000,
-    ])->assertOk()->json('data');
-    expect($saved['capacity']['monthly_income'])->toBe('40000.00')
-        ->and($saved['score']['recommendation'])->toContain('suggested maximum payment of ₱');
-
-    foreach ([$this->full, $this->caller(['credit_scoring:view', 'loans:view'])] as $caller) {
-        $data = $this->actingAs($caller)->getJson("/api/credit-scoring/loans/{$loan->id}/assessment")->assertOk()->json('data');
-
-        expect($data['capacity'])->toBeNull()
-            ->and($data['application_profile']['household_expenses'])->toBeNull();
-        expectFinancialsHidden($data['score']);
-    }
 });
 
 it('refuses a weight or rate that isn\'t a plain decimal with 422, never 500', function (mixed $value) {
@@ -148,7 +130,7 @@ it('hides them from a caller who lacks only loans:view', function () {
         ->and($full['data_used'])->toHaveKeys(['outstanding', 'past_due_amount', 'lendy_monthly_payments']);
 });
 
-it('reads the debt flags generically when the figures are hidden, on the member and the assessment', function () {
+it('reads the debt flags generically when the figures are hidden, and in full with them', function () {
     $member = ($this->memberWithFigures)();
     $loan = Loan::query()->where('borrower_id', $member->id)->where('status', 'draft')->firstOrFail();
     $flag = fn (?int $loanId, string $key, string $detail) => CreditPolicyFlag::query()->create([
@@ -157,48 +139,15 @@ it('reads the debt flags generically when the figures are hidden, on the member 
     ]);
     $flag(null, 'too_many_active_loans', 'The member has 4 active loans, outside lenders included; the policy limit is 2.');
     $flag($loan->id, 'debt_service_above_caution', 'The debt service ratio is 52.10%, above the caution level of 40%.');
-    $narrow = $this->caller(['credit_scoring:view', 'loans:view']);
+    $noLoans = $this->caller(['credit_scoring:view', 'borrowers:view']);
 
-    $memberFlags = collect($this->actingAs($narrow)->getJson("/api/credit-scoring/borrowers/{$member->id}/policy-flags")->assertOk()->json('data'))->pluck('detail', 'label');
-    $assessmentFlags = collect($this->actingAs($narrow)->getJson("/api/credit-scoring/loans/{$loan->id}/assessment")->assertOk()->json('data.policy_flags'))->pluck('detail', 'label');
+    $memberFlags = collect($this->actingAs($noLoans)->getJson("/api/credit-scoring/borrowers/{$member->id}/policy-flags")->assertOk()->json('data.data'))->pluck('detail', 'label');
     $fullFlags = collect($this->actingAs($this->full)->getJson("/api/credit-scoring/loans/{$loan->id}/assessment")->json('data.policy_flags'))->pluck('detail', 'label');
 
     expect($memberFlags['too_many_active_loans'])->toBe('The member\'s active loans, outside lenders included, exceed the policy limit.')
-        ->and($assessmentFlags['too_many_active_loans'])->toBe($memberFlags['too_many_active_loans'])
-        ->and($assessmentFlags['debt_service_above_caution'])->toBe('Debt payments take more of the member\'s income than the caution level.')
+        ->and($memberFlags['debt_service_above_caution'])->toBe('Debt payments take more of the member\'s income than the caution level.')
         ->and($fullFlags['debt_service_above_caution'])->toContain('52.10%')
         ->and($fullFlags['too_many_active_loans'])->toContain('4 active loans');
-});
-
-it('nulls the application\'s money figures for a caller without borrowers:view or the member\'s branch', function () {
-    $farMember = $this->member(['branch_id' => $this->farBranch()->id, 'monthly_income' => 35000]);
-    $loan = $this->application($farMember, ['branch_id' => $this->mainBranch()->id]);
-    $this->actingAs($this->headOffice())->putJson("/api/credit-scoring/loans/{$loan->id}/assessment", [
-        'other_income' => 5000, 'business_income' => 3000, 'household_expenses' => 20000, 'outside_debt_payments' => 1000, 'outside_lenders_count' => 1,
-        'employment_status' => 'employed', 'business_start_date' => '2020-01-01', 'years_at_residence' => 6, 'verified_references_count' => 2, 'income_verification' => 'verified',
-    ])->assertOk();
-    $personal = ['Job tenure or business age' => 'Years in the current job or business. Shown to staff who can read the member\'s details.',
-        'Years at residence' => 'Years at the current residence. Shown to staff who can read the member\'s details.',
-        'Membership tenure' => 'Membership tenure. Shown to staff who can read the member\'s details.'];
-
-    foreach ([$this->full, $this->caller(['credit_scoring:view', 'loans:view'])] as $caller) {
-        $data = $this->actingAs($caller)->getJson("/api/credit-scoring/loans/{$loan->id}/assessment")->assertOk()->json('data');
-
-        expect($data['application_figures_hidden'])->toBeTrue()
-            ->and($data['application_profile'])->toMatchArray([
-                'other_income' => null, 'business_income' => null, 'household_expenses' => null, 'outside_debt_payments' => null,
-                'outside_lenders_count' => null, 'employment_status' => null, 'business_start_date' => null, 'years_at_residence' => null,
-                'verified_references_count' => null, 'income_verification' => null, 'notice_version' => null,
-            ])
-            ->and(collect($data['score']['factors'])->pluck('detail', 'label')->only(array_keys($personal))->all())->toBe($personal);
-    }
-
-    $head = $this->actingAs($this->headOffice())->getJson("/api/credit-scoring/loans/{$loan->id}/assessment")->json('data');
-    expect($head['application_figures_hidden'])->toBeFalse()
-        ->and($head['application_profile']['household_expenses'])->toBe('20000.00')
-        ->and($head['application_profile']['employment_status'])->toBe('employed')
-        ->and(collect($head['score']['factors'])->firstWhere('label', 'Years at residence')['detail'])->toBe('6.0 years at the current residence.')
-        ->and(collect($head['score']['factors'])->firstWhere('label', 'Membership tenure')['detail'])->toStartWith('Member since');
 });
 
 it('keeps the debt flags generic when the newest details sit on another branch\'s loan and the score is unchanged', function () {
@@ -207,7 +156,7 @@ it('keeps the debt flags generic when the newest details sit on another branch\'
     CreditApplicationProfile::query()->create(['loan_id' => $this->application($member)->id] + $details);
     $this->scoreNow($member);
     $before = CreditScore::query()->where('borrower_id', $member->id)->count();
-    $flags = fn () => collect($this->actingAs($this->full)->getJson("/api/credit-scoring/borrowers/{$member->id}/policy-flags")->assertOk()->json('data'))->pluck('detail', 'label');
+    $flags = fn () => collect($this->actingAs($this->full)->getJson("/api/credit-scoring/borrowers/{$member->id}/policy-flags")->assertOk()->json('data.data'))->pluck('detail', 'label');
     expect($flags()['Active loans above policy limit'])->toContain('4 active loans')
         ->and($flags()['Debt service ratio above caution'])->toContain('60.00%');
 
@@ -220,41 +169,6 @@ it('keeps the debt flags generic when the newest details sit on another branch\'
         ->and(CreditScoreMember::query()->where('borrower_id', $member->id)->value('flags_profile_id'))->toBe($farProfile->id)
         ->and($flags()['Active loans above policy limit'])->not->toContain('4 active loans')
         ->and($flags()['Debt service ratio above caution'])->not->toContain('%,');
-});
-
-it('reads every personal factor, the confidence reason, the recommendation and the income flag generically without the member\'s details', function () {
-    $farMember = $this->member(['branch_id' => $this->farBranch()->id, 'monthly_income' => 35000, 'date_hired' => '2019-03-01']);
-    $loan = $this->application($farMember, ['branch_id' => $this->mainBranch()->id]);
-    $head = $this->actingAs($this->headOffice())->putJson("/api/credit-scoring/loans/{$loan->id}/assessment", [
-        'household_expenses' => 20000, 'years_at_residence' => 6, 'verified_references_count' => 1, 'income_verification' => 'failed',
-    ])->assertOk()->json('data');
-    $personalKeys = ['Job tenure or business age', 'Years at residence', 'Membership tenure', 'Income verified', 'Two or more verified references', 'Valid ID on file', 'Valid mobile number'];
-    expect($head['score']['recommendation'])->toContain('Income verification failed')
-        ->and(collect($head['policy_flags'])->pluck('label'))->toContain('Income verification failed')
-        ->and(collect($head['score']['factors'])->firstWhere('label', 'Income verified')['detail'])->toBe('Income verification failed.');
-
-    foreach ([$this->full, $this->caller(['credit_scoring:view', 'loans:view'])] as $caller) {
-        $data = $this->actingAs($caller)->getJson("/api/credit-scoring/loans/{$loan->id}/assessment")->assertOk()->json('data');
-        $factors = collect($data['score']['factors'])->keyBy('label');
-        $everything = json_encode($data);
-
-        foreach ($personalKeys as $label) {
-            if ($factors->has($label)) {
-                expect($factors[$label]['impact'])->toBe('neutral', $label)
-                    ->and($factors[$label]['detail'])->toEndWith('Shown to staff who can read the member\'s details.', $label);
-            }
-        }
-
-        expect($factors->keys()->intersect(['Income verified', 'Two or more verified references', 'Years at residence', 'Job tenure or business age'])->count())->toBe(4)
-            ->and(collect($data['score']['factors_without_data'])->pluck('label')->intersect($personalKeys)->all())->toBe([])
-            ->and($data['score']['confidence_reason'])->toBe('Shown to staff who can read the member\'s details.')
-            ->and($data['score']['recommendation'])->toContain('Manual review required: a policy check needs review.')
-            ->and($everything)->not->toContain('Income verification failed')
-            ->and($everything)->not->toContain('could not be verified')
-            ->and($everything)->not->toContain('1 verified reference.')
-            ->and($everything)->not->toContain('Verified income')
-            ->and(collect($data['policy_flags'])->pluck('label'))->toContain('Policy check');
-    }
 });
 
 it('needs loans:view to save an assessment, as well as loans:update', function () {

@@ -26,7 +26,7 @@ uses(TestCase::class, CreditApiFixtures::class);
 
 const ASSESSMENT_KEYS = [
     'loan_id', 'loan_status', 'editable', 'borrower_id', 'borrower_name', 'borrower_code', 'notice_version', 'privacy_notice',
-    'application_profile', 'application_figures_hidden', 'score', 'capacity', 'policy_flags', 'decisions', 'decisions_total', 'employment_statuses',
+    'application_profile', 'application_figures_hidden', 'details_hidden', 'score', 'capacity', 'policy_flags', 'decisions', 'decisions_total', 'employment_statuses',
 ];
 
 const APPLICATION_PROFILE_KEYS = [

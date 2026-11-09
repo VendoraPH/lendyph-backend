@@ -20,11 +20,11 @@ use Illuminate\Validation\ValidationException;
  * latest assessment score with the capacity block, the member's and the
  * loan's open flags, and the loan's decisions.
  *
- * The application's details (income, expenses, outside debt and lenders,
- * employment, business start, residence, references and income
- * verification) show only to a caller who may read the member's details
- * (`borrowers:view` and the member's branch, round fz);
- * `application_figures_hidden` says so. The notice fields always show.
+ * A caller who may not read the member's details (`borrowers:view` and the
+ * member's branch, round fz) gets a summary (`details_hidden` and
+ * `application_figures_hidden` true): the application profile holds only
+ * its notice fields, the score is the Presenter's summary, `policy_flags` is
+ * empty and `capacity` is left out. The loan, notice and decisions stay.
  *
  * Advisory only. Saving writes the application details
  * (credit_application_profiles) and, through the Recalculator, a score and
@@ -71,7 +71,8 @@ final class AssessmentService
             ->orderByDesc('id')
             ->first();
 
-        return [
+        $details = $this->scope->seesMemberDetails($viewer, $member);
+        $assessment = [
             'loan_id' => (int) $loan->id,
             'loan_status' => $loan->status,
             'editable' => (bool) $loan->is_editable,
@@ -80,11 +81,12 @@ final class AssessmentService
             'borrower_code' => $member->borrower_code,
             'notice_version' => $settings->notice_version,
             'privacy_notice' => $settings->privacy_notice,
-            'application_profile' => $profile === null ? null : $this->profile($profile, $settings, $this->scope->seesMemberDetails($viewer, $member)),
-            'application_figures_hidden' => ! $this->scope->seesMemberDetails($viewer, $member),
+            'application_profile' => $profile === null ? null : $this->profile($profile, $settings, $details),
+            'application_figures_hidden' => ! $details,
+            'details_hidden' => ! $details,
             'score' => $score === null ? null : $this->presenter->score($viewer, $member, $score),
             'capacity' => $this->presenter->capacity($viewer, $member, $score),
-            'policy_flags' => CreditPolicyFlag::query()
+            'policy_flags' => ! $details ? [] : CreditPolicyFlag::query()
                 ->open()
                 ->where('borrower_id', $loan->borrower_id)
                 ->where(fn ($q) => $q->whereNull('loan_id')->orWhere('loan_id', $loan->id))
@@ -110,6 +112,8 @@ final class AssessmentService
                 self::EMPLOYMENT_STATUSES,
             ),
         ];
+
+        return $details ? $assessment : array_diff_key($assessment, ['capacity' => true]);
     }
 
     /**
@@ -187,20 +191,27 @@ final class AssessmentService
      */
     private function profile(CreditApplicationProfile $profile, CreditScoringSetting $settings, bool $figures): array
     {
-        return [
-            'other_income' => $figures ? $profile->other_income : null,
-            'business_income' => $figures ? $profile->business_income : null,
-            'household_expenses' => $figures ? $profile->household_expenses : null,
-            'outside_debt_payments' => $figures ? $profile->outside_debt_payments : null,
-            'outside_lenders_count' => $figures ? $profile->outside_lenders_count : null,
-            'employment_status' => $figures ? $profile->employment_status : null,
-            'business_start_date' => $figures ? $profile->business_start_date?->toDateString() : null,
-            'years_at_residence' => $figures ? $profile->years_at_residence : null,
-            'verified_references_count' => $figures ? $profile->verified_references_count : null,
-            'income_verification' => $figures ? $profile->income_verification : null,
+        $notice = [
             'notice_version' => $profile->notice_version,
             'notice_acknowledged_at' => Presenter::time($profile->notice_acknowledged_at),
             'notice_acknowledged' => $profile->notice_acknowledged_at !== null && $profile->notice_version === $settings->notice_version,
         ];
+
+        if (! $figures) {
+            return $notice;
+        }
+
+        return [
+            'other_income' => $profile->other_income,
+            'business_income' => $profile->business_income,
+            'household_expenses' => $profile->household_expenses,
+            'outside_debt_payments' => $profile->outside_debt_payments,
+            'outside_lenders_count' => $profile->outside_lenders_count,
+            'employment_status' => $profile->employment_status,
+            'business_start_date' => $profile->business_start_date?->toDateString(),
+            'years_at_residence' => $profile->years_at_residence,
+            'verified_references_count' => $profile->verified_references_count,
+            'income_verification' => $profile->income_verification,
+        ] + $notice;
     }
 }

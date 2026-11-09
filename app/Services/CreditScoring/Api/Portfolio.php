@@ -71,6 +71,10 @@ final class Portfolio
      *   flags first raised, both in the last 30 days (rolling).
      * - Affected members: in a high band, past due, or holding an open hard
      *   flag, lowest score first, at most 100, with the full count.
+     * - Flags are member details (round fz): a caller without
+     *   `borrowers:view` gets `new_hard_flags_30d` null and no member listed
+     *   for a flag alone. With it, every member they can see is one whose
+     *   details they may read (CreditScope::seesMemberDetails()).
      * - Alerts: the last 30 days, newest first, at most 100.
      *
      * @return array<string, mixed>
@@ -78,10 +82,11 @@ final class Portfolio
     public function riskMonitoring(User $user): array
     {
         $since = Carbon::now()->subDays(self::WINDOW_DAYS);
+        $readsFlags = $user->can('borrowers:view');
         $affected = $this->scope->currentScores($user)->where(fn (Builder $q) => $q
             ->whereIn('credit_score_members.risk_level', Recalculator::HIGH_RISK_BANDS)
             ->orWhere('credit_score_members.past_due', true)
-            ->orWhereIn('credit_score_members.borrower_id', $this->scope->openFlags($user)->where('type', CreditPolicyFlag::HARD)->select('borrower_id')));
+            ->when($readsFlags, fn (Builder $q) => $q->orWhereIn('credit_score_members.borrower_id', $this->scope->openFlags($user)->where('type', CreditPolicyFlag::HARD)->select('borrower_id'))));
 
         return [
             'summary' => [
@@ -93,7 +98,7 @@ final class Portfolio
                     ->whereNotNull('previous_score')
                     ->whereColumn('score', '<', 'previous_score')
                     ->count(),
-                'new_hard_flags_30d' => CreditPolicyFlag::query()
+                'new_hard_flags_30d' => ! $readsFlags ? null : CreditPolicyFlag::query()
                     ->where('type', CreditPolicyFlag::HARD)
                     ->where('first_triggered_at', '>=', $since)
                     ->whereIn('borrower_id', $this->scope->memberIds($user))

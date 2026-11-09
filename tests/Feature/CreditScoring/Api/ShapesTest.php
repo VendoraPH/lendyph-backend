@@ -21,7 +21,7 @@ const CREDIT_SCORE_KEYS = [
     'category_breakdown', 'factors', 'recommendation', 'calculated_at',
     // additions
     'borrower_code', 'status', 'limited_history', 'confidence_reason', 'validated', 'previous_score', 'context', 'loan_id',
-    'factors_without_data', 'capacity', 'data_used', 'financials_hidden',
+    'factors_without_data', 'capacity', 'data_used', 'financials_hidden', 'details_hidden',
 ];
 
 const BORROWER_SCORE_ROW_KEYS = [
@@ -200,7 +200,7 @@ it('shapes policy flags: active only, triggered when first seen', function () {
         'detail' => 'Cleared.', 'first_triggered_at' => now()->subDays(9), 'last_seen_at' => now()->subDays(2), 'cleared_at' => now()->subDay(),
     ]);
 
-    $flags = $this->actingAs($this->viewer)->getJson("/api/credit-scoring/borrowers/{$this->member->id}/policy-flags")->assertOk()->json('data');
+    $flags = $this->actingAs($this->viewer)->getJson("/api/credit-scoring/borrowers/{$this->member->id}/policy-flags")->assertOk()->json('data.data');
 
     expect($flags)->toHaveCount(1)
         ->and($flags[0]['id'])->toBe($open->id)
@@ -208,7 +208,7 @@ it('shapes policy flags: active only, triggered when first seen', function () {
     expectKeys($flags[0], POLICY_FLAG_KEYS);
 
     $none = $this->member();
-    expect($this->actingAs($this->viewer)->getJson("/api/credit-scoring/borrowers/{$none->id}/policy-flags")->assertOk()->json('data'))->toBe([]);
+    expect($this->actingAs($this->viewer)->getJson("/api/credit-scoring/borrowers/{$none->id}/policy-flags")->assertOk()->json('data.data'))->toBe([]);
 });
 
 it('shapes risk monitoring', function () {
