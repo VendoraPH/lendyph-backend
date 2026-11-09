@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Enums\TermUnit;
+use App\Exceptions\CannotPostToTheBooksException;
 use App\Models\AmortizationSchedule;
 use App\Models\Loan;
 use App\Models\LoanAdjustment;
@@ -1032,7 +1033,8 @@ class LoanAdjustmentService
      * `$userId` is who applied it, and posts a balance adjustment's journal
      * (applyBalanceAdjustment()). The controller passes the signed-in user;
      * a caller that passes none posts as the adjustment's approver, who
-     * held the same permission.
+     * held the same permission. With neither, a balance adjustment that would
+     * post is refused rather than posted as nobody.
      */
     public function applyAdjustment(LoanAdjustment $adjustment, ?int $userId = null): LoanAdjustment
     {
@@ -1047,7 +1049,7 @@ class LoanAdjustmentService
 
         return LoanWriteTransaction::run(function () use ($adjustment, $userId) {
             $loan = $this->lockAdjustmentRows($adjustment, 'approved');
-            $userId ??= (int) $adjustment->approved_by;
+            $userId ??= $adjustment->approved_by;
 
             // Set before the type is applied, so a balance adjustment's
             // journal is dated the moment the adjustment records.
@@ -1283,10 +1285,11 @@ class LoanAdjustmentService
      * decision 7): a reduction is Dr 1180 / Cr 1110 and an increase the
      * mirror, and a reduction that completes a restructured loan moves the
      * deferral it still holds. The poster reads the restated periods to tell
-     * whether the loan completed, so it runs last. A loan with nothing unpaid
-     * changes nothing and posts nothing; with no chart, nothing posts.
+     * whether the loan completed, so it runs last. A loan with nothing unpaid,
+     * or an adjustment of ₱0.00, moves no period and posts nothing; with no
+     * chart, nothing posts.
      */
-    private function applyBalanceAdjustment(LoanAdjustment $adjustment, Loan $loan, int $userId): void
+    private function applyBalanceAdjustment(LoanAdjustment $adjustment, Loan $loan, ?int $userId): void
     {
         $adjustmentAmount = (float) $adjustment->ownNewValues()['adjustment_amount'];
 
@@ -1356,7 +1359,22 @@ class LoanAdjustmentService
 
         $this->restateOpenRemainingBalances($loan);
 
-        app(AutomaticPoster::class)->balanceAdjustment($adjustment, $amount, $userId);
+        if ($amount === 0) {
+            return;
+        }
+
+        $poster = app(AutomaticPoster::class);
+
+        if ($userId === null) {
+            if ($poster->enabled()) {
+                throw CannotPostToTheBooksException::because(
+                    "{$adjustment->adjustment_number} has no approver and was applied by no one, so there is no user to post it as. Nothing has been saved.");
+            }
+
+            return;
+        }
+
+        $poster->balanceAdjustment($adjustment, $amount, $userId);
     }
 
     /**

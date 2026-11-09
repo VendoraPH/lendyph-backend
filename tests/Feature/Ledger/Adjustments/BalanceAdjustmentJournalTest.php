@@ -2,6 +2,8 @@
 
 namespace Tests\Feature\Ledger\Adjustments;
 
+use App\Exceptions\CannotPostToTheBooksException;
+use App\Models\AccountingAccountMapping;
 use App\Models\AccountingJournal;
 use App\Models\AmortizationSchedule;
 use App\Models\Loan;
@@ -225,6 +227,108 @@ class BalanceAdjustmentJournalTest extends TestCase
         $this->assertSame('applied', $waiver->status);
         $this->assertSame('applied', $extension->status);
         $this->assertSame($before, AccountingJournal::count());
+    }
+
+    public function test_a_zero_adjustment_by_amount_applies_and_posts_nothing(): void
+    {
+        $loan = $this->createReleasedLoan();
+        $this->seedChartOfAccounts();
+        $before = $this->periodFigures($loan);
+
+        $adjustment = $this->applyByAmount($loan, 0);
+
+        $this->assertSame('applied', $adjustment->status);
+        $this->assertSame($before, $this->periodFigures($loan));
+        $this->assertNull($this->adjustmentJournalOrNull($adjustment));
+    }
+
+    public function test_a_target_equal_to_the_unpaid_principal_applies_and_posts_nothing(): void
+    {
+        $loan = $this->createReleasedLoan();
+        $this->seedChartOfAccounts();
+
+        $id = $this->postJson("/api/loans/{$loan->id}/adjustments", [
+            'adjustment_type' => 'balance_adjustment',
+            'new_values' => ['target_principal_balance' => 60000],
+        ])->assertCreated()->json('data.id');
+        $this->assertEquals(0, LoanAdjustment::findOrFail($id)->new_values['adjustment_amount'], 'setup: the server works it out to zero');
+        $this->patchJson("/api/loan-adjustments/{$id}/approve")->assertOk();
+        $this->patchJson("/api/loan-adjustments/{$id}/apply")->assertOk();
+
+        $adjustment = LoanAdjustment::findOrFail($id);
+        $this->assertSame('applied', $adjustment->status);
+        $this->assertNull($this->adjustmentJournalOrNull($adjustment));
+    }
+
+    public function test_a_posting_that_fails_after_the_restate_rolls_every_period_write_back(): void
+    {
+        $loan = $this->createReleasedLoan();
+        // Every period's interest is paid, so the reduction below would also
+        // mark each period paid and complete the loan.
+        AmortizationSchedule::where('loan_id', $loan->id)->update(['interest_paid' => 1800, 'status' => 'partial']);
+        $this->seedChartOfAccounts();
+        $id = $this->requestAndApprove($loan, -60000);
+        // 1180 unmapped: the periods are restated, then the poster refuses
+        // the posting (an unmapped role fails closed).
+        AccountingAccountMapping::where('role', 'loan_adjustments')->delete();
+        $periods = $this->periodFigures($loan);
+
+        $this->patchJson("/api/loan-adjustments/{$id}/apply")
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('accounting');
+
+        $this->assertSame($periods, $this->periodFigures($loan));
+        $this->assertSame('released', $loan->fresh()->status);
+        $adjustment = LoanAdjustment::findOrFail($id);
+        $this->assertSame('approved', $adjustment->status);
+        $this->assertNull($adjustment->applied_at);
+        $this->assertSame(0, AccountingJournal::where('source', 'adjustment')->count());
+    }
+
+    public function test_with_no_approver_and_no_user_the_posting_is_refused_never_made_as_user_0(): void
+    {
+        $loan = $this->createReleasedLoan();
+        $this->seedChartOfAccounts();
+        $id = $this->requestAndApprove($loan, -1000);
+        LoanAdjustment::whereKey($id)->update(['approved_by' => null]);
+        $periods = $this->periodFigures($loan);
+
+        try {
+            app(LoanAdjustmentService::class)->applyAdjustment(LoanAdjustment::findOrFail($id));
+            $this->fail('A balance adjustment posted with no user to post it as.');
+        } catch (CannotPostToTheBooksException $e) {
+            $this->assertStringContainsString('no user to post it as', $e->getMessage());
+        }
+
+        $this->assertSame($periods, $this->periodFigures($loan));
+        $this->assertSame('approved', LoanAdjustment::findOrFail($id)->status);
+        $this->assertSame(0, AccountingJournal::where('source', 'adjustment')->count());
+    }
+
+    public function test_with_no_approver_no_user_and_no_chart_the_adjustment_still_applies(): void
+    {
+        $loan = $this->createReleasedLoan();
+        $id = $this->requestAndApprove($loan, -1000);
+        LoanAdjustment::whereKey($id)->update(['approved_by' => null]);
+
+        $adjustment = app(LoanAdjustmentService::class)->applyAdjustment(LoanAdjustment::findOrFail($id));
+
+        $this->assertSame('applied', $adjustment->status);
+        $this->assertSame(0, AccountingJournal::count());
+    }
+
+    /**
+     * Each period's principal due, remaining balance and status, in period order.
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function periodFigures(Loan $loan): array
+    {
+        return AmortizationSchedule::where('loan_id', $loan->id)
+            ->orderBy('period_number')
+            ->get(['principal_due', 'remaining_balance', 'status'])
+            ->map(fn (AmortizationSchedule $s): array => $s->only(['principal_due', 'remaining_balance', 'status']))
+            ->all();
     }
 
     private function applyByAmount(Loan $loan, float $amount): LoanAdjustment

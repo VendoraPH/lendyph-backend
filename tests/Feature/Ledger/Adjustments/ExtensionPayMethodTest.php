@@ -92,6 +92,7 @@ class ExtensionPayMethodTest extends TestCase
             ->json('errors.repayment.0');
 
         $this->assertStringContainsString("when the loan was extended ({$extension->adjustment_number})", $message);
+        $this->assertStringContainsString('collected the interest', $message);
         $this->assertStringContainsString('so it cannot be voided', $message);
 
         $this->assertSame('posted', $collection->fresh()->status);
