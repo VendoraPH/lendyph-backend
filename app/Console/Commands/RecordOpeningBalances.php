@@ -8,6 +8,7 @@ use App\Services\Accounting\AutomaticPoster;
 use App\Services\Accounting\ChartOfAccountsSeeder;
 use App\Services\Accounting\JournalPoster;
 use App\Services\Accounting\Money;
+use App\Services\Accounting\OpeningBalancePoster;
 use App\Services\AuditLogService;
 use App\Services\DeploymentIdentity;
 use Illuminate\Console\Attributes\Description;
@@ -122,7 +123,11 @@ class RecordOpeningBalances extends Command
      * on top of it. So the check runs before the preview AND again under a lock
      * inside the write transaction.
      *
-     * ## Everything goes through JournalPoster
+     * ## Everything goes through OpeningBalancePoster, then JournalPoster
+     *
+     * {@see OpeningBalancePoster} is the one path the CLI and the opening
+     * balances screen share: the allowance row lock (when a line is on it),
+     * the 3050 row lock, the locking re-check, then the post.
      *
      * Never a raw insert. The poster recomputes the totals from the persisted
      * lines, allocates the number, re-checks every account is still postable,
@@ -131,7 +136,7 @@ class RecordOpeningBalances extends Command
      * written around all of that would be the one entry in the books with no
      * proof it balances.
      */
-    public function handle(ChartOfAccountsSeeder $chart, JournalPoster $poster): int
+    public function handle(ChartOfAccountsSeeder $chart, OpeningBalancePoster $poster): int
     {
         $dryRun = (bool) $this->option('dry-run');
 
@@ -1022,82 +1027,44 @@ class RecordOpeningBalances extends Command
      *
      * @param  array{lines: list<array<string, mixed>>, plug: array{account_id: int, amount: int, side: string}|null, total_debit: int, total_credit: int}  $plan
      */
-    private function post(JournalPoster $poster, array $plan, string $asOf, string $path): AccountingJournal
+    private function post(OpeningBalancePoster $poster, array $plan, string $asOf, string $path): AccountingJournal
     {
         return DB::transaction(function () use ($poster, $plan, $asOf, $path): AccountingJournal {
             /*
-             * SERIALISE ON A ROW THAT EXISTS — and it has to be a real row.
+             * The locks, the re-check and the post, in OpeningBalancePoster:
              *
-             * The obvious way to make this once-only is to lock what we are
-             * looking for: `where('source', 'opening_balance')->lockForUpdate()`.
-             * That does not work, and the way it fails is worth spelling out
-             * because it looks like it works on a developer's machine.
-             *
-             * `source` is indexed but not unique, so on the first run that
-             * query matches NOTHING. A locking read over zero rows takes a GAP
-             * lock, and gap locks have two properties that defeat it:
-             *
-             *  - They do not conflict with each other. Two runs both take the
-             *    same gap, both then try to insert into it, and each blocks on
-             *    the other — a deadlock, not a refusal. One operator gets a
-             *    QueryException over the top of the preview.
-             *  - They do not exist at all under READ COMMITTED. Nothing in this
-             *    repo pins the isolation level, and RC is one line of my.cnf or
-             *    one managed-database parameter group away on any of ten boxes.
-             *    There, both runs read "none yet", both insert, and the co-op's
-             *    cash and portfolio are silently doubled in books that still
-             *    balance — the exact outcome this guard exists to prevent,
-             *    reached THROUGH the guard.
-             *
-             * So the lock is taken on the 3050 account row instead. It exists
-             * (plan() has already resolved it), an exclusive lock on a real row
-             * conflicts properly, and it behaves identically at both isolation
-             * levels. Two runs queue rather than race.
+             *  1. The allowance account row, when a line is on it. Every writer
+             *     of allowance lines takes it before any journal lock, so this
+             *     run and a restructure write-off (J2) queue instead of
+             *     deadlocking on the `source` gap the re-check takes.
+             *  2. SERIALISE ON A ROW THAT EXISTS: the 3050 account row. Locking
+             *     `where('source', 'opening_balance')` instead matches nothing
+             *     on the first run, and a locking read over zero rows takes a
+             *     GAP lock. Gap locks don't conflict with each other (two runs
+             *     both take it, both insert, and deadlock), and under READ
+             *     COMMITTED they don't exist at all (both runs commit, and the
+             *     co-op's cash and portfolio are silently doubled). An
+             *     exclusive lock on a real row behaves the same at both
+             *     isolation levels, so two runs queue rather than race.
+             *  3. THE SAME CHECK AS AT THE TOP, AND IT IS NOT REDUNDANT. The
+             *     check in handle() answers an operator re-running the command;
+             *     this one answers two operators on two shells, both past the
+             *     preview. The second arrives only after the first committed,
+             *     and a locking read is a current read, so it sees that journal
+             *     at either isolation level and refuses: "Another run posted an
+             *     opening balance while this one was waiting".
              */
-            $plugAccount = AccountingAccount::query()
-                ->where('code', self::PLUG_CODE)
-                ->lockForUpdate()
-                ->first();
-
-            if ($plugAccount === null) {
-                // Deleted between the preview and the confirmation. Cannot
-                // happen in practice; refused rather than assumed, because the
-                // alternative is posting without the lock this depends on.
-                throw ValidationException::withMessages([
-                    'account' => [self::PLUG_CODE.' Opening Balance Equity no longer exists. Nothing was written.'],
-                ]);
-            }
-
-            /*
-             * THE SAME CHECK AS AT THE TOP, AND IT IS NOT REDUNDANT.
-             *
-             * The check in handle() answers the ordinary case — an operator
-             * re-running the command. This one answers the case that check
-             * cannot: two operators on two shells, both past the preview, both
-             * about to post. The lock above means the second one arrives here
-             * only after the first has committed, and this is a LOCKING read,
-             * which is always a current read rather than the transaction's
-             * snapshot — so it sees that committed journal at READ COMMITTED
-             * and at REPEATABLE READ alike, and refuses.
-             */
-            $racing = AccountingJournal::query()
-                ->where('source', self::SOURCE)
-                ->lockForUpdate()
-                ->first();
-
-            if ($racing !== null) {
-                throw ValidationException::withMessages([
-                    'source' => [
-                        'Another run posted an opening balance while this one was waiting ('
-                        .($racing->journal_no ?: 'draft #'.$racing->id).'). Nothing was written.',
-                    ],
-                ]);
-            }
-
-            $journal = $poster->postImmediately(
+            $journal = $poster->post(
+                array_map(static fn (array $line): array => [
+                    'account_id' => $line['account_id'],
+                    'debit' => $line['debit'],
+                    'credit' => $line['credit'],
+                    'description' => $line['origin'] === 'COMPUTED PLUG'
+                        ? 'Computed plug — difference between the assets and liabilities carried in'
+                        : 'Opening balance',
+                ], $plan['lines']),
+                $asOf,
                 [
-                    'date' => $asOf,
-                    'source' => self::SOURCE,
                     // mb_substr, not substr. `reference` is VARCHAR(64) —
                     // SIXTY-FOUR CHARACTERS, not bytes — and cutting bytes
                     // through the middle of a multi-byte filename leaves a
@@ -1109,23 +1076,10 @@ class RecordOpeningBalances extends Command
                     // reason.
                     'reference' => mb_substr(basename($path), 0, self::MAX_REFERENCE),
                     'description' => 'Opening balances as of '.$asOf,
-                    // NULL on purpose. Opening balances belong to the
-                    // organisation, not to one of its branches — this is a
-                    // single-tenant-per-deployment application and the figures
-                    // arrive as one co-op's position. A branch-filtered trial
-                    // balance therefore does not show them, which is correct:
-                    // there is no honest branch to attribute the co-op's
-                    // founding cash to, and picking one would overstate it.
-                    'branch_id' => null,
                 ],
-                array_map(static fn (array $line): array => [
-                    'account_id' => $line['account_id'],
-                    'debit' => $line['debit'],
-                    'credit' => $line['credit'],
-                    'description' => $line['origin'] === 'COMPUTED PLUG'
-                        ? 'Computed plug — difference between the assets and liabilities carried in'
-                        : 'Opening balance',
-                ], $plan['lines']),
+                // No postable: the file is not a record. The source and the
+                // once-ever check are what identify this entry.
+                null,
                 // No user id: this runs on the console, where auth() resolves
                 // to nobody. The audit row below is the attribution, and says
                 // so honestly rather than claiming an operator it cannot verify.

@@ -143,6 +143,12 @@ class TimezoneShift
         // payment to the wrong day.
         'accounting_expense_payments' => ['created_at', 'updated_at'],
         'accounting_expenses' => ['created_at', 'updated_at'],
+        // Added 2026-11-09 with the opening balances screen (Phase 2), well
+        // after the cutover completed (2026-08-06 on every deployment), so
+        // neither table can hold a row written by the old UTC application.
+        // `as_of` is a DATE, so it is not listed.
+        'accounting_opening_balance_lines' => ['created_at', 'updated_at'],
+        'accounting_opening_balances' => ['created_at', 'finalised_at', 'updated_at'],
         // `closed_at` and `reopened_at` ARE real instants — the moments someone
         // signed a month off and took that back — and WOULD be shift candidates
         // on a table old enough to need it. This one is not.
