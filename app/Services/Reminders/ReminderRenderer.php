@@ -7,6 +7,7 @@ use App\Models\Loan;
 use App\Models\ReminderBranchSetting;
 use App\Models\ReminderSetting;
 use Carbon\CarbonInterface;
+use Illuminate\Support\Carbon;
 
 /**
  * Fills a template's `{{variables}}` for one loan and period.
@@ -72,6 +73,35 @@ final class ReminderRenderer
             'branch_name' => trim((string) $branch?->name),
             'branch_phone' => $this->firstFilled($override?->contact_phone, $branch?->contact_number, $branding?->organization_contact),
             'payment_method' => $this->firstFilled($override?->payment_instructions, $settings->payment_instructions),
+        ];
+    }
+
+    /**
+     * The values a template preview shows when there is no real loan to
+     * render: fixed sample labels (a ₱2,500.00 amount due Sep 15, 2026), never
+     * a figure worked out for anyone. The lender name, phone and payment
+     * method are the deployment's own, as a real reminder would read.
+     *
+     * @return array<string, string>
+     */
+    public function sampleVariables(string $channel, ReminderSetting $settings): array
+    {
+        $branding = $this->branding();
+        $amount = self::money(2500, $channel);
+
+        return [
+            'borrower_first_name' => 'Juan',
+            'borrower_full_name' => 'Juan Dela Cruz',
+            'loan_number' => 'LN-000123',
+            'installment_number' => '3',
+            'due_date' => self::date(Carbon::create(2026, 9, 15, 0, 0, 0, ReminderSetting::TIMEZONE)),
+            'amount_due' => $amount,
+            'remaining_balance' => $amount,
+            'days_overdue' => '0',
+            'lender_name' => $this->firstFilled($branding?->organization_name, config('app.name')),
+            'branch_name' => 'Main Branch',
+            'branch_phone' => $this->firstFilled($branding?->organization_contact, '0917 000 0000'),
+            'payment_method' => $this->firstFilled($settings->payment_instructions, 'Pay at any of our branches.'),
         ];
     }
 
