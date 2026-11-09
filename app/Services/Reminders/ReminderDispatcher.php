@@ -66,13 +66,17 @@ final class ReminderDispatcher
     ) {}
 
     /**
-     * @return array{recovered: int, processed: int, sent: int, retrying: int, failed: int, cancelled: int, skipped: int}
+     * `sent` counts messages handed to a driver that reaches the member with
+     * live sending on; `logged` counts those only logged (the message's
+     * `test_mode`), as the reminders dashboard counts them.
+     *
+     * @return array{recovered: int, processed: int, sent: int, logged: int, retrying: int, failed: int, cancelled: int, skipped: int}
      */
     public function run(): array
     {
         $deadline = microtime(true) + max(1, (int) config('reminders.dispatch.max_seconds', 50));
         $limit = max(1, (int) config('reminders.dispatch.max_messages', 200));
-        $totals = ['recovered' => $this->recoverStale(), 'processed' => 0, 'sent' => 0, 'retrying' => 0, 'failed' => 0, 'cancelled' => 0, 'skipped' => 0];
+        $totals = ['recovered' => $this->recoverStale(), 'processed' => 0, 'sent' => 0, 'logged' => 0, 'retrying' => 0, 'failed' => 0, 'cancelled' => 0, 'skipped' => 0];
 
         while ($totals['processed'] < $limit && microtime(true) < $deadline) {
             $batch = $this->claim(min(self::BATCH, $limit - $totals['processed']));
@@ -137,9 +141,11 @@ final class ReminderDispatcher
     }
 
     /**
-     * Sends or settles one claimed row.
+     * Sends or settles one claimed row. A message handed over in test mode
+     * (`test_mode`: live sending off, or a driver that reaches nobody) is
+     * `logged`, not `sent`; the row and the message still read "sent".
      *
-     * @return 'sent'|'retrying'|'failed'|'cancelled'|'skipped'|'waiting'|'lost'
+     * @return 'sent'|'logged'|'retrying'|'failed'|'cancelled'|'skipped'|'waiting'|'lost'
      */
     public function process(ReminderQueueItem $item): string
     {
@@ -382,7 +388,7 @@ final class ReminderDispatcher
             $this->guardedUpdate($item, ['status' => 'sent', 'reason_code' => null, 'reason' => null, 'next_attempt_at' => null] + $this->unclaimed(), mustHold: false);
             ReminderEvent::forItem('sent', $item, ReminderEligibility::channelLabel($item->channel).' to '.$item->recipient_masked, (int) $message->id);
 
-            return 'sent';
+            return $message->test_mode ? 'logged' : 'sent';
         }
 
         if ($result->outcome === DriverResult::TEMPORARY && $item->attempts < $settings->maxAttempts()) {

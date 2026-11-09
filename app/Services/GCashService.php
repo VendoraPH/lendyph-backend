@@ -37,6 +37,12 @@ class GCashService
      * charge, dated `transaction_date`. A pending Cash In posts nothing until
      * markPaid().
      *
+     * The reference lock (generateReferenceNo()) is the transaction's first
+     * statement, and the duplicate check runs under it as a locking read
+     * (Lead's call 5). So an identical create can't commit between the check
+     * and this insert, and the check reads what any create before it
+     * committed: two identical creates are never both saved.
+     *
      * A deadlock, a lock wait timeout or a collision on the reference number
      * answers 409 with nothing saved, never 500, and is not tried again: the
      * duplicate check would have to run again against whatever the other save
@@ -47,6 +53,9 @@ class GCashService
         $isPending = (bool) ($payload['is_pending'] ?? false);
 
         return LoanWriteTransaction::run(function () use ($payload, $actor, $isPending) {
+            $now = now();
+            $referenceNo = $this->generateReferenceNo($now);
+
             [
                 'type' => $type,
                 'amount' => $amount,
@@ -67,10 +76,8 @@ class GCashService
                 default => 'paid',
             };
 
-            $now = now();
-
             $tx = GCashTransaction::create([
-                'reference_no' => $this->generateReferenceNo($now),
+                'reference_no' => $referenceNo,
                 'transaction_date' => $now,
                 'type' => $type,
                 'amount' => $amount,
@@ -301,6 +308,10 @@ class GCashService
      * other walk-in's row also satisfies, and unrelated customers would block
      * each other at the window.
      *
+     * A locking read, run under the reference lock: it reads the latest
+     * committed rows whatever this transaction read before, and holds them
+     * until the insert.
+     *
      * @param  array{borrower_id?: int|null, gcash_non_member_id?: int|null}  $payload
      */
     private function detectDuplicate(array $payload, string $type, float $amount): ?GCashTransaction
@@ -315,6 +326,7 @@ class GCashService
             ->where('amount', $amount)
             ->where('transaction_date', '>=', now()->subSeconds(60))
             ->orderByDesc('id')
+            ->lockForUpdate()
             ->first();
     }
 }

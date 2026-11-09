@@ -450,6 +450,54 @@ class LoanApprovalChainService
         );
     }
 
+    /**
+     * Cancel what is left of the chain of a loan being voided (Lead's call 4):
+     * every `waiting` and `pending` step of the live round reads `cancelled`,
+     * stamped with who voided it and when, so a voided loan never reads as
+     * waiting on an approver and no step of it can be acted on. A step already
+     * signed off keeps its signature, and an earlier round is history.
+     *
+     * Each step's change writes its own audit row (Auditable), and one
+     * `loan_chain_cancelled` row against the loan names the steps cancelled
+     * (`steps_closed`, which the Audit Trail reads as step names). A loan with
+     * nothing unfinished writes nothing. Called from inside
+     * LoanService::voidLoan()'s transaction, after the loan row is locked.
+     */
+    public function cancelOpenSteps(Loan $loan, ?User $actor): void
+    {
+        $round = $this->currentRound($loan);
+
+        $open = $loan->approvalSteps()
+            ->where('round', $round)
+            ->whereIn('status', [LoanApprovalStep::STATUS_WAITING, LoanApprovalStep::STATUS_PENDING])
+            ->orderBy('step_order')
+            ->get();
+
+        if ($open->isEmpty()) {
+            return;
+        }
+
+        foreach ($open as $step) {
+            $step->update([
+                'status' => LoanApprovalStep::STATUS_CANCELLED,
+                'acted_by' => $actor?->id,
+                'acted_at' => now(),
+            ]);
+        }
+
+        AuditLogService::log(
+            action: 'loan_chain_cancelled',
+            auditable: $loan,
+            newValues: [
+                'round' => $round,
+                'steps_closed' => $open->pluck('step_id')->all(),
+            ],
+            description: "Approval chain on loan {$loan->application_number} was cancelled when the loan was voided "
+                ."({$open->count()} step(s) cancelled).",
+            userId: $actor?->id,
+        );
+    }
+
     public function markReleased(Loan $loan, User $releaser): void
     {
         $step = $loan->approvalSteps()
