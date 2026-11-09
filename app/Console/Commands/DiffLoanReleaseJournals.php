@@ -183,7 +183,7 @@ class DiffLoanReleaseJournals extends Command
                     ->where('postable_type', Loan::class)
                     ->whereIn('postable_id', $sourceIds)
                     ->select(['id', 'journal_no', 'postable_type', 'postable_id'])
-                    ->with('lines:id,accounting_journal_id,accounting_account_id,debit,credit,description')
+                    ->with('lines:id,accounting_journal_id,accounting_account_id,debit,credit')
                     ->get()
                     ->keyBy('postable_id');
 
@@ -275,11 +275,13 @@ class DiffLoanReleaseJournals extends Command
      *   allowance and credit loss expense, and add up to that principal;
      * - the unearned restructure debit is what the source's deferral could
      *   take: the lesser of the principal and the deferral as it stood just
-     *   before J2. That deferral is rebuilt from the source's own journals
-     *   ({@see AutomaticPoster::unrecognisedDeferral()}, which already counts
-     *   J2's marked line) with J2's marked line added back. The source is
-     *   closed by the restructure and its voids are refused, so nothing else
-     *   has moved it since.
+     *   before the restructure. The rebuild reads that deferral from the
+     *   source's own journals without its J2 and without what its new loan's
+     *   J1 carried off it, before any cap, so a J2 that took more than the
+     *   source ever held shows. The source is closed by the restructure and
+     *   its voids are refused, so nothing else has moved it since. A missing
+     *   or reversed J2 is already a difference on its principal, so this part
+     *   isn't compared again for it.
      *
      * How the rest was split between the allowance and expense depended on
      * the allowance balance at the moment J2 posted, which J2 itself has
@@ -292,7 +294,6 @@ class DiffLoanReleaseJournals extends Command
 
         try {
             $wouldWriteOff = $poster->restructureWriteOffPosting($loan, $source, $map);
-            $deferralNow = $poster->unrecognisedDeferral($source);
             $receivable = $map->accountFor('loans_receivable');
             $unearned = $map->accountFor(PostingRules::UNEARNED_RESTRUCTURE_ROLE);
         } catch (CannotPostToTheBooksException $refused) {
@@ -329,10 +330,11 @@ class DiffLoanReleaseJournals extends Command
             $differs = true;
         }
 
-        $markedBefore = $writeOff === null ? 0 : (int) $writeOff->lines
-            ->where('description', PostingRules::DEFERRAL_WRITTEN_OFF_LINE)
-            ->sum('debit');
-        $fromDeferral = min($writtenOff, $deferralNow['interest'] + $deferralNow['penalty'] + $markedBefore);
+        if ($writeOff === null) {
+            return $differs;
+        }
+
+        $fromDeferral = $wouldWriteOff === null ? 0 : $wouldWriteOff['parts']['from_deferral'];
         $postedUnearned = $posted[$unearned]['debit'] ?? 0;
 
         if ($postedUnearned !== $fromDeferral) {

@@ -33,7 +33,7 @@ use Illuminate\Support\LazyCollection;
  *   journal. A voided one that posted nothing moved no money on the books;
  * - `build_up`: a payment whose collection journal holds its share capital
  *   build-up as an overpayment instead of crediting share capital (no
- *   {@see self::BUILD_UP_LINE} line);
+ *   {@see PostingRules::BUILD_UP_LINE} line);
  * - `restructure`: a loan a restructure created whose release journal has
  *   neither the carried principal nor the capitalised line, so it posted as
  *   an ordinary release;
@@ -79,15 +79,6 @@ final class LedgerGapsReport
     ];
 
     public const PER_PAGE = 25;
-
-    /**
-     * The line PostingRules::loanCollection() credits a build-up on. A
-     * collection journal without it held the build-up as an overpayment.
-     */
-    public const BUILD_UP_LINE = 'Share capital build-up';
-
-    /** The lines PostingRules::restructureRelease() marks J1 with. */
-    public const RESTRUCTURE_LINE_PREFIXES = ['Principal carried from ', 'Interest and penalty capitalised from '];
 
     public const NO_BOOKS_NOTICE = 'No chart of accounts: this organisation keeps no books, so nothing was ever posted and nothing is listed.';
 
@@ -351,7 +342,7 @@ final class LedgerGapsReport
             ->whereExists($this->journal(Repayment::class, 'r.id', 'loan_collection'))
             ->whereNotExists($this->journal(Repayment::class, 'r.id', 'loan_collection')
                 ->join('accounting_journal_lines as jl', 'jl.accounting_journal_id', '=', 'j.id')
-                ->where('jl.description', self::BUILD_UP_LINE)
+                ->where('jl.description', PostingRules::BUILD_UP_LINE)
                 ->where('jl.credit', '>', 0))
             ->selectRaw("'build_up' AS kind, r.id AS record_id, r.receipt_number AS reference")
             ->selectRaw('r.payment_date AS event_date, l.branch_id, l.borrower_id')
@@ -368,7 +359,7 @@ final class LedgerGapsReport
             ->whereNotExists($this->journal(Loan::class, 'l.id', 'loan_release')
                 ->join('accounting_journal_lines as jl', 'jl.accounting_journal_id', '=', 'j.id')
                 ->where(function (Builder $lines): void {
-                    foreach (self::RESTRUCTURE_LINE_PREFIXES as $prefix) {
+                    foreach ([PostingRules::CARRIED_PRINCIPAL_LINE_PREFIX, PostingRules::CAPITALISED_LINE_PREFIX] as $prefix) {
                         $lines->orWhere('jl.description', 'like', $prefix.'%');
                     }
                 }))

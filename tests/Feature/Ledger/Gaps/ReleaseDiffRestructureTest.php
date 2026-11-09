@@ -3,6 +3,8 @@
 namespace Tests\Feature\Ledger\Gaps;
 
 use App\Models\AccountingJournal;
+use App\Services\Accounting\JournalPoster;
+use App\Services\Accounting\PostingRules;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
@@ -165,6 +167,76 @@ class ReleaseDiffRestructureTest extends TestCase
 
         $this->assertMatchesRegularExpression('/Would differ:\s+1\b/', $moved);
         $this->assertMatchesRegularExpression('/'.preg_quote($writeOff->journal_no, '/').'.*1210/u', $moved);
+    }
+
+    /**
+     * The source holds ₱2,000.00 of deferral and ₱5,000.00 is written off.
+     * A J2 whose marked 1210 line took all ₱5,000.00 (more than the source
+     * ever held) still adds up, and only the deferral read from before J2
+     * shows it.
+     */
+    public function test_a_write_off_that_took_more_than_the_sources_deferral_differs(): void
+    {
+        $source = $this->restructureOf($this->createReleasedLoan(), $first = $this->createReleasedLoan(), [5_800_000, 200_000, 0, 0]);
+        $loan = $this->restructureOf($this->createReleasedLoan(), $source, [6_000_000, 0, 0, 500_000]);
+        $this->seedChartOfAccounts();
+        $this->poster()->restructureRelease($source, $first, $this->admin->id, 'cash');
+        $writeOff = $this->poster()->restructureRelease($loan, $source->fresh(), $this->admin->id, 'cash')['write_off'];
+        $this->assertSame(200_000, (int) $writeOff->lines()->where('accounting_account_id', $this->account('1210'))->sum('debit'));
+        $this->assertMatchesRegularExpression('/Matching:\s+2\b/', $this->diff());
+
+        DB::table('accounting_journal_lines')->where('accounting_journal_id', $writeOff->id)
+            ->where('accounting_account_id', $this->account('5140'))
+            ->update(['accounting_account_id' => $this->account('1210'), 'description' => PostingRules::DEFERRAL_WRITTEN_OFF_LINE]);
+
+        $output = $this->diff();
+
+        $this->assertMatchesRegularExpression('/Would differ:\s+1\b/', $output);
+        $this->assertMatchesRegularExpression('/'.preg_quote($writeOff->journal_no, '/').'.*1210.*Dr ₱5,000\.00.*Dr ₱2,000\.00/u', $output);
+        $this->assertStringNotContainsString('Debits in total', $output);
+    }
+
+    /**
+     * A restructure of a restructure writing off less than the source's
+     * deferral carries the rest to the new loan: J1 holds equal Dr and Cr
+     * 1210 carry lines, and J1 and J2 both match their rebuild.
+     */
+    public function test_a_restructure_that_carries_the_rest_of_the_deferral_matches(): void
+    {
+        $source = $this->restructureOf($this->createReleasedLoan(), $first = $this->createReleasedLoan(), [5_000_000, 700_000, 300_000, 0]);
+        $loan = $this->restructureOf($this->createReleasedLoan(), $source, [6_000_000, 0, 0, 300_000]);
+        $this->seedChartOfAccounts();
+        $this->poster()->restructureRelease($source, $first, $this->admin->id, 'cash');
+        $result = $this->poster()->restructureRelease($loan, $source->fresh(), $this->admin->id, 'cash');
+
+        $carriedIn = (int) $result['release']->lines()->whereIn('description', [PostingRules::DEFERRED_INTEREST_CARRIED_IN_LINE, PostingRules::DEFERRED_PENALTY_CARRIED_IN_LINE])->sum('credit');
+        $carriedOut = (int) $result['release']->lines()->whereIn('description', [PostingRules::DEFERRED_INTEREST_CARRIED_OUT_LINE, PostingRules::DEFERRED_PENALTY_CARRIED_OUT_LINE])->sum('debit');
+        $this->assertSame(700_000, $carriedIn);
+        $this->assertSame($carriedIn, $carriedOut);
+        $this->assertSame(300_000, (int) $result['write_off']->lines()->where('accounting_account_id', $this->account('1210'))->sum('debit'));
+
+        $output = $this->diff();
+
+        $this->assertMatchesRegularExpression('/Journals scanned:\s+2\b/', $output);
+        $this->assertMatchesRegularExpression('/Matching:\s+2\b/', $output);
+        $this->assertSame([], $this->rowsOf($this->gaps()->assertOk(), 'restructure'));
+    }
+
+    /** A reversed J2 is one gap, counted once: its principal, not its deferral part again. */
+    public function test_a_reversed_write_off_is_counted_once(): void
+    {
+        $source = $this->restructureOf($this->createReleasedLoan(), $first = $this->createReleasedLoan(), [5_000_000, 700_000, 300_000, 0]);
+        $loan = $this->restructureOf($this->createReleasedLoan(), $source, [6_000_000, 0, 0, 300_000]);
+        $this->seedChartOfAccounts();
+        $this->poster()->restructureRelease($source, $first, $this->admin->id, 'cash');
+        $writeOff = $this->poster()->restructureRelease($loan, $source->fresh(), $this->admin->id, 'cash')['write_off'];
+        app(JournalPoster::class)->reverse($writeOff, now()->toDateString(), 'Test', $this->admin->id);
+
+        $output = $this->diff();
+
+        $this->assertMatchesRegularExpression('/Would differ:\s+1\b/', $output);
+        $this->assertStringContainsString('no write-off journal', $output);
+        $this->assertMatchesRegularExpression('/Total absolute difference:\s+₱3,000\.00/u', $output);
     }
 
     public function test_a_write_off_that_cannot_be_rebuilt_is_its_own_skip_and_the_release_is_still_compared(): void
