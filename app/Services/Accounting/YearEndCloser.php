@@ -50,11 +50,14 @@ use PDOException;
  *   the figures are read from is only taken at the first plain read, after
  *   the locks, so it holds every posting that got in before them.
  * - Then the previous year's close row (close, always) or this year's close
- *   row (reopen), FOR UPDATE. A close of 2026 and a reopen of 2025 queue on
- *   2025's row, so 2026 can never be closed on top of a 2025 that was
- *   reopened at the same moment. A reopen also reads the later closes with a
- *   locking read, so a later close being inserted waits for it, or it waits
- *   for that close and is refused.
+ *   row (reopen), FOR UPDATE, both through the UNIQUE `closed_year` entry. A
+ *   close of 2026 and a reopen of 2025 queue on 2025's entry, so 2026 can
+ *   never be closed on top of a 2025 that was reopened at the same moment.
+ *   The reopen takes that entry before it reads its row by id: locked by id
+ *   first, a close could take the entry and wait for the row while the
+ *   reopen, clearing `closed_year`, waited for the entry. A reopen also reads
+ *   the later closes with a locking read, so a later close being inserted
+ *   waits for it, or it waits for that close and is refused.
  * - No closing line is ever on the 1200 allowance account (income, expense
  *   and the equity net surplus account only), so neither the close nor the
  *   reversals of a reopen take the allowance lock that JournalPoster takes
@@ -94,9 +97,10 @@ final class YearEndCloser
     /**
      * What a close of `$year` would post and close, and why it can't run yet.
      *
-     * Makes sure every month of an ended year has its period row, the same
-     * idempotent provisioning the Period Closing screen does on read, so the
-     * months listed are exactly the ones the close closes. Posts nothing.
+     * Makes sure every month of an ended year the books cover has its period
+     * row (provision()), the same idempotent provisioning the Period Closing
+     * screen does on read, so the months listed are exactly the ones the
+     * close closes. A year before the books start gets none. Posts nothing.
      *
      * @return array<string, mixed> `YearClosePreview` in src/types/accounting.ts
      */
@@ -111,8 +115,10 @@ final class YearEndCloser
      * Closes `$year`. See the class docblock for what it posts and the locks.
      *
      * @throws ValidationException 422 on `year` with every blocking reason
-     * @throws HttpResponseException 409 when the year is already closed or a
-     *                               close is racing this one
+     * @throws HttpResponseException 409 when the year is already closed, a
+     *                               close is racing this one, or the first
+     *                               journal of an ended year raced its
+     *                               provisioning (a retry adds the months)
      */
     public function close(int $year, User $user): AccountingYearClose
     {
@@ -131,6 +137,14 @@ final class YearEndCloser
 
                 if (! $preview['can_close']) {
                     throw ValidationException::withMessages(['year' => $preview['blocking_reasons']]);
+                }
+
+                // The books' coverage was read before the transaction: a first
+                // journal posted into the year since then left its months
+                // without rows, and a close now would close none of them. The
+                // retry's provisioning adds them.
+                if ($this->hasEnded($year) && $periods->count() < 12) {
+                    throw $this->conflict($this->racedMessage($year));
                 }
 
                 $netSurplusAccountId = (int) $preview['net_surplus_account']['id'];
@@ -208,6 +222,9 @@ final class YearEndCloser
             return DB::transaction(function () use ($close, $reason, $user): AccountingYearClose {
                 $periods = $this->lockPeriods($close->year);
 
+                // Through the `closed_year` entry first, as a close of the
+                // next year takes it, then by id: see the class docblock.
+                AccountingYearClose::query()->where('closed_year', $close->year)->lockForUpdate()->first();
                 $fresh = AccountingYearClose::query()->whereKey($close->id)->lockForUpdate()->firstOrFail();
 
                 if (! $fresh->isClosed()) {
@@ -525,9 +542,9 @@ final class YearEndCloser
         }
 
         if ($drafts === 1) {
-            $reasons[] = "1 draft journal is dated in {$year}. Post or delete it first.";
+            $reasons[] = "1 draft journal is dated in {$year}. Post it or move it out of the year first.";
         } elseif ($drafts > 1) {
-            $reasons[] = "{$drafts} draft journals are dated in {$year}. Post or delete them first.";
+            $reasons[] = "{$drafts} draft journals are dated in {$year}. Post them or move them out of the year first.";
         }
 
         $december = $periods->firstWhere('code', "{$year}-12");
@@ -543,6 +560,9 @@ final class YearEndCloser
         } elseif ($account->is_group || ! $account->is_active) {
             $reasons[] = "The net surplus account, {$account->code} {$account->name}, can't take postings because it is "
                 .($account->is_group ? 'a heading' : 'inactive').'. '.self::SETTINGS_HINT;
+        } elseif (($reserved = AccountingAccountMapping::reservedAccountReason(self::NET_SURPLUS_ROLE, (string) $account->code, "{$account->code} {$account->name}")) !== null) {
+            // A chart mapped this way before the mapping refused it.
+            $reasons[] = $reserved.' '.self::SETTINGS_HINT;
         }
 
         return [...$reasons, ...$unpostable];
@@ -843,7 +863,7 @@ final class YearEndCloser
      */
     private function withConflictsAs409(int $year, Closure $callback): mixed
     {
-        $message = "Another year-end close or reopen of {$year} was saved at the same time. Reload and try again.";
+        $message = $this->racedMessage($year);
 
         try {
             return $callback();
@@ -860,6 +880,11 @@ final class YearEndCloser
 
             throw $this->conflict($message);
         }
+    }
+
+    private function racedMessage(int $year): string
+    {
+        return "Another year-end close or reopen of {$year} was saved at the same time. Reload and try again.";
     }
 
     private function conflict(string $message): HttpResponseException
