@@ -387,13 +387,21 @@ class AccountingAccountController extends Controller
     /**
      * The checks and the delete, in one transaction, in the opening balance
      * lock order (OpeningBalancePoster): the allowance and 3050 rows, then
-     * the draft, then its lines under a locking read, so a draft save that
-     * adds this account either commits first and is seen, or waits.
+     * the draft, then the account row, then the draft's lines under a
+     * locking read, so a draft save that adds this account either commits
+     * first and is seen, or waits. A deadlock or lock wait timeout that still
+     * happens answers 409 through LoanWriteTransaction::run(), never 500.
      */
     private function deleteUnused(AccountingAccount $account, string $label): void
     {
         $this->openingBalances->lockInOrder([$account->id], requireOpeningEquity: false);
         $draft = AccountingOpeningBalance::query()->lockForUpdate()->first();
+
+        // The account row itself, before the reference checks. Their shared
+        // reads lock gaps, so without this a first reference to the account
+        // (a journal line, a role mapping, a sub-account) could deadlock
+        // against the DELETE; with it, that reference waits its turn.
+        AccountingAccount::query()->whereKey($account->id)->lockForUpdate()->first();
         $onTheDraft = AccountingOpeningBalanceLine::query()
             ->where('accounting_account_id', $account->id)
             ->sharedLock()
