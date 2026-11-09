@@ -14,6 +14,7 @@ use App\Http\Requests\Loan\RejectLoanRequest;
 use App\Http\Requests\Loan\ReleaseLoanRequest;
 use App\Http\Requests\Loan\ReleasePreviewRequest;
 use App\Http\Requests\Loan\RestructureLoanRequest;
+use App\Http\Requests\Loan\SendBackApprovedLoanRequest;
 use App\Http\Requests\Loan\StoreLoanRequest;
 use App\Http\Requests\Loan\SubmitLoanRequest;
 use App\Http\Requests\Loan\UpdateLoanRequest;
@@ -870,6 +871,39 @@ DESC,
             'approvedByUser', 'releasedByUser', 'amortizationSchedules');
 
         return response()->json(['message' => 'Loan released successfully.', 'data' => new LoanResource($loan)]);
+    }
+
+    #[OA\Patch(
+        path: '/api/loans/{id}/send-back-approved',
+        summary: 'Send an approved restructure back for approval',
+        description: 'For an approved restructure that is not released yet, for example one whose source was paid down or adjusted after approval (the release then answers 422 on `principal_amount`). The loan goes back to `for_review` with its approval cleared; the release step of the current round is recorded as sent back with the reason, and a new round opens with the submit step pending and every other step waiting. The restructure is then re-submitted and approved again through its approval chain, and its figures are taken again from what the source owes on re-submit and on approval. Writes a `restructure_sent_back` audit row. The creator and the account officer are told it came back, and the submit step\'s role that it is theirs (in-app, staff only). `can_send_back_approved` on the loan says whether the caller may do this.',
+        tags: ['Loans'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
+        ],
+        requestBody: new OA\RequestBody(
+            required: true,
+            content: new OA\JsonContent(
+                required: ['reason'],
+                properties: [
+                    new OA\Property(property: 'reason', type: 'string', maxLength: 1000, description: 'Required, trimmed: why it is going back.'),
+                ],
+            ),
+        ),
+        responses: [
+            new OA\Response(response: 200, description: 'Restructure sent back; `data` is the loan, now `for_review`'),
+            new OA\Response(response: 403, description: 'Missing loans:release'),
+            new OA\Response(response: 404, description: 'No such loan, or outside the caller\'s branches'),
+            new OA\Response(response: 409, description: 'The restructure was sent back, released or voided since it was read, or another change to it or its source was saved at the same time; nothing was written and nobody was notified. Message: "Another change to this loan was saved at the same time. Reload and try again."'),
+            new OA\Response(response: 422, description: 'Missing or too long `reason`, or (on `status`) the loan is not a restructure or the restructure is not approved'),
+        ],
+    )]
+    public function sendBackApproved(SendBackApprovedLoanRequest $request, Loan $loan): JsonResponse
+    {
+        $this->loanService->sendBackApproved($loan, $request->user(), $request->reason());
+
+        return response()->json(['message' => 'Restructure sent back for approval.', 'data' => new LoanResource($loan)]);
     }
 
     #[OA\Get(
