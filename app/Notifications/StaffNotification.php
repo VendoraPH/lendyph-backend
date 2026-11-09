@@ -39,6 +39,12 @@ class StaffNotification extends Notification
 
     public const ADJUSTMENT_PENDING = 'adjustment_pending';
 
+    public const REMINDER_CONTACT_INVALID = 'reminder_contact_invalid';
+
+    public const REMINDER_FOLLOW_UP = 'reminder_follow_up';
+
+    public const REMINDER_FAILED = 'reminder_failed';
+
     /**
      * @param  string  $type  one of the constants above
      * @param  string  $title  plain English, shown in bold
