@@ -27,7 +27,7 @@ class RestructureTermsRetakeTest extends TestCase
 {
     use PostsJournals, ReleasesLoans, SetupLendyPH;
 
-    private const PAID_DOWN = 'The source loan was paid down or adjusted after this restructure was approved. Void this restructure and create it again with the current balance.';
+    private const PAID_DOWN = 'The source loan was paid down or adjusted after this restructure was approved. Send it back for approval so the figures can be taken again.';
 
     protected function setUp(): void
     {
@@ -138,7 +138,7 @@ class RestructureTermsRetakeTest extends TestCase
     public function test_the_refusal_is_worded_by_the_restructures_status(): void
     {
         // Release and its preview only reach the check on an approved loan,
-        // which can't be sent back: it is voided and created again.
+        // which is sent back with PATCH /loans/{loan}/send-back-approved.
         $this->assertSame(self::PAID_DOWN, LoanService::sourceFellMessage('approved'));
         // Still in review, it can be sent back.
         $this->assertSame(

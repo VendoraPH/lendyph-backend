@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use App\Services\BranchAccess;
+use App\Services\LikePattern;
 use App\Traits\Auditable;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Builder;
@@ -222,6 +223,25 @@ class AccountingExpense extends Model
             // label that says otherwise.
             default => $query->whereRaw('1 = 0'),
         };
+    }
+
+    /**
+     * Rows whose payee or reference contains `$term`, with `%`, `_` and `\`
+     * matched literally (LikePattern). A blank term matches every row.
+     */
+    public function scopeSearch(Builder $query, ?string $term): Builder
+    {
+        $term = trim((string) $term);
+
+        if ($term === '') {
+            return $query;
+        }
+
+        $like = LikePattern::contains($term);
+
+        return $query->where(fn (Builder $q): Builder => $q
+            ->where('payee', 'like', $like)
+            ->orWhere('reference', 'like', $like));
     }
 
     /**

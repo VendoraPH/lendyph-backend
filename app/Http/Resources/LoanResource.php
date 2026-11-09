@@ -104,6 +104,7 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'insurance_owed', type: 'number', description: 'Insurance premium the release left unpaid and still owed: interest-free, never principal, collected first from each payment (same figure as `insurance_remaining_balance`)'),
         new OA\Property(property: 'source_loan_id', type: 'integer', nullable: true, description: 'The loan this one was restructured out of'),
         new OA\Property(property: 'is_restructure', type: 'boolean', description: 'True when source_loan_id is set'),
+        new OA\Property(property: 'can_send_back_approved', type: 'boolean', description: 'True only for an approved restructure (not released yet) and a caller holding loans:release: the loan page may offer PATCH /api/loans/{id}/send-back-approved.'),
         new OA\Property(property: 'restructured_at', type: 'string', format: 'date-time', nullable: true, description: 'When this loan was closed because its balance moved to a restructure'),
         new OA\Property(property: 'restructured_balance', type: 'number', nullable: true, description: 'What was still owed on this loan when the restructure closed it'),
         new OA\Property(property: 'write_off_amount', type: 'number', nullable: true, description: 'On a source loan: the forgiveness approved, the approved balance (principal, interest and penalty) minus the new loan\'s principal, when the restructure took on less than the full balance. Not what the books wrote off: that is the new loan\'s `restructure_written_off_principal`.'),
@@ -371,6 +372,9 @@ class LoanResource extends JsonResource
             'collateral_summary' => $this->relationLoaded('collaterals') ? CollateralSecurity::ofLoan($this->resource, $request->user()) : null,
             'source_loan_id' => $this->source_loan_id,
             'is_restructure' => $this->isRestructure(),
+            'can_send_back_approved' => $this->isRestructure()
+                && $this->status === 'approved'
+                && (bool) $request->user()?->can('loans:release'),
             'restructured_at' => $this->restructured_at,
             'restructured_balance' => $this->restructured_balance !== null
                 ? (float) $this->restructured_balance

@@ -10,8 +10,7 @@ use Illuminate\Http\Resources\Json\JsonResource;
  *
  * Matched field for field against that interface and against the table in
  * `src/app/(app)/accounting/expenses/page.tsx`, which reads `date`, `payee`,
- * `expense_account_name`, `due_date`, `status`, `amount` and
- * `amount - amount_paid`.
+ * `expense_account_name`, `due_date`, `status`, `amount` and `amount_due`.
  *
  * ## Two things the screen depends on that are easy to get wrong
  *
@@ -46,6 +45,9 @@ class AccountingExpenseResource extends JsonResource
             // CENTAVOS, as integers.
             'amount' => (int) $this->amount,
             'amount_paid' => (int) $this->amount_paid,
+            // What is still owed (AccountingExpense::outstanding()), so the
+            // screen never subtracts.
+            'amount_due' => $this->outstanding(),
             'payment_account_id' => $this->payment_account_id,
             'branch_id' => $this->branch_id,
             'reference' => $this->reference,
