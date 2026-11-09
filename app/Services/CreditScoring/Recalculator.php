@@ -14,6 +14,7 @@ use App\Services\LoanWriteTransaction;
 use Carbon\Carbon;
 use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Http\Exceptions\HttpResponseException;
+use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 
@@ -171,7 +172,7 @@ class Recalculator
             ->where('context', CreditScore::CONTEXT_ASSESSMENT)
             ->orderByDesc('id')
             ->first();
-        $changed = $this->differs($result, $last, $last);
+        $changed = $this->differs($result, $last, $last, comparesData: true);
 
         if ($dryRun) {
             return $this->outcome($borrowerId, $changed, $result, $last?->score, $last?->id);
@@ -251,9 +252,16 @@ class Recalculator
     }
 
     /**
+     * Whether the result needs a new row: its score, band, confidence or
+     * revision moved. An assessment (`$comparesData`) also gets one when only
+     * its capacity or the data it used changed (an edited expense that leaves
+     * the score where it was), so the assessment never shows stale figures. A
+     * member's own score compares the score alone, so a change only in an
+     * application's details writes no member history row.
+     *
      * @param  array<string, mixed>  $result
      */
-    private function differs(array $result, ?CreditScore $lastScore, CreditScore|CreditScoreMember|null $last): bool
+    private function differs(array $result, ?CreditScore $lastScore, CreditScore|CreditScoreMember|null $last, bool $comparesData = false): bool
     {
         if ($last === null || $lastScore === null) {
             return true;
@@ -265,7 +273,42 @@ class Recalculator
             || $last->confidence !== $result['confidence']
             || (int) $lastScore->revision_id !== $result['revision_id']
             || (bool) $lastScore->limited_history !== $result['limited_history']
-            || $lastScore->confidence_reason !== mb_substr($result['confidence_reason'], 0, 500);
+            || $lastScore->confidence_reason !== mb_substr($result['confidence_reason'], 0, 500)
+            || ($comparesData && $this->dataDiffers($result, $lastScore));
+    }
+
+    /**
+     * Whether the capacity or the data used differ from the last row's,
+     * leaving out `as_of` (the day it was worked out), so a new day alone
+     * writes no row. Both sides are compared as a JSON column returns them,
+     * with object keys sorted, since MySQL keeps its own key order.
+     *
+     * @param  array<string, mixed>  $result
+     */
+    private function dataDiffers(array $result, CreditScore $lastScore): bool
+    {
+        return self::canonical($result['capacity']) !== self::canonical($lastScore->capacity)
+            || self::canonical(Arr::except($result['data_used'], ['as_of'])) !== self::canonical(Arr::except($lastScore->data_used ?? [], ['as_of']));
+    }
+
+    private static function canonical(mixed $value): mixed
+    {
+        return self::sortedKeys(json_decode(json_encode($value, JSON_THROW_ON_ERROR), true, flags: JSON_THROW_ON_ERROR));
+    }
+
+    private static function sortedKeys(mixed $value): mixed
+    {
+        if (! is_array($value)) {
+            return $value;
+        }
+
+        $value = array_map(self::sortedKeys(...), $value);
+
+        if (! array_is_list($value)) {
+            ksort($value);
+        }
+
+        return $value;
     }
 
     /**

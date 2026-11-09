@@ -16,13 +16,17 @@ class Document extends Model
     public const ORIGINAL_FILENAME_MAX_LENGTH = 255;
 
     /**
-     * An uploaded file's client-supplied name as it may be stored: valid UTF-8
-     * and within the column. A multipart filename can carry any bytes, and a
-     * raw one made the insert fail with a 500.
+     * An uploaded file's client-supplied name as it may be stored: valid UTF-8,
+     * with no control characters, and within the column. A multipart filename
+     * can carry any bytes: a raw one made the insert fail with a 500, and a
+     * control character (0x10, 0x13) made the signed link's download header
+     * throw, another 500.
      */
     public static function cleanOriginalFilename(string $name): string
     {
-        return mb_substr(mb_scrub($name, 'UTF-8'), 0, self::ORIGINAL_FILENAME_MAX_LENGTH, 'UTF-8');
+        $name = (string) preg_replace('/\p{Cc}/u', '', mb_scrub($name, 'UTF-8'));
+
+        return mb_substr($name, 0, self::ORIGINAL_FILENAME_MAX_LENGTH, 'UTF-8');
     }
 
     protected $fillable = [

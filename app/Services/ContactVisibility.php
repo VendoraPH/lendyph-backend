@@ -1,9 +1,8 @@
 <?php
 
-namespace App\Services\Reminders\Api;
+namespace App\Services;
 
 use App\Models\User;
-use App\Services\BranchAccess;
 
 /**
  * The round fz personal-data rule on the reminder screens (Arvin,
@@ -12,8 +11,8 @@ use App\Services\BranchAccess;
  * `borrowers:view` and the member's own branch. Without them:
  *
  * - a recipient and a message's `failure_reason` read null;
- * - a member pause's reason reads null, and a skip because of it reads only
- *   "Reminders are paused for this member";
+ * - a member's or a loan's pause reason reads null, and a skip because of it
+ *   reads only "Reminders are paused for this member" (or "for this loan");
  * - a skip for a contact a send proved bad reads only "Mobile number was
  *   marked invalid" (or the email's);
  * - a failure the provider worded reads null; the engine's own failure
@@ -22,6 +21,8 @@ use App\Services\BranchAccess;
 final class ContactVisibility
 {
     public const MEMBER_PAUSE = 'Reminders are paused for this member';
+
+    public const LOAN_PAUSE = 'Reminders are paused for this loan';
 
     /**
      * Failure codes whose reason the engine wrote itself, never a provider.
@@ -54,7 +55,7 @@ final class ContactVisibility
             return null;
         }
 
-        foreach ([self::MEMBER_PAUSE, ...self::FLAGGED_PREFIXES] as $prefix) {
+        foreach ([self::MEMBER_PAUSE, self::LOAN_PAUSE, ...self::FLAGGED_PREFIXES] as $prefix) {
             if (str_starts_with($reason, $prefix)) {
                 return $prefix;
             }

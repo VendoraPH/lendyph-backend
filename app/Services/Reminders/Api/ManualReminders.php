@@ -12,6 +12,7 @@ use App\Models\ReminderSetting;
 use App\Models\ReminderTemplate;
 use App\Models\User;
 use App\Services\AuditLogService;
+use App\Services\ContactVisibility;
 use App\Services\LoanWriteTransaction;
 use App\Services\Reminders\ContactHours;
 use App\Services\Reminders\EligibilityDecision;

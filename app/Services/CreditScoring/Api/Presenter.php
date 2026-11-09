@@ -319,14 +319,22 @@ final class Presenter
      * `$details` (a summary caller) `reason` and `remarks` are left out; the
      * decision, who made it and when stay.
      *
+     * `loan_account_number` names the decision's loan: its account number, or
+     * its application number before release (as ReminderFormat::loanNumber()
+     * does). It is null with no loan, and for a viewer without `loans:view` or
+     * outside the loan's branch, the gates the decisions list already applies.
+     * A list loads the loan with self::decisionRelations() first, so there is
+     * no query per row.
+     *
      * @return array<string, mixed>
      */
-    public function decision(CreditDecision $decision, bool $details): array
+    public function decision(CreditDecision $decision, bool $details, User $viewer): array
     {
         $shape = [
             'id' => (int) $decision->id,
             'borrower_id' => (int) $decision->borrower_id,
             'loan_id' => $decision->loan_id === null ? null : (int) $decision->loan_id,
+            'loan_account_number' => $this->decisionLoanNumber($decision, $viewer),
             'credit_score_id' => (int) $decision->credit_score_id,
             'decision' => $decision->decision,
             'reason' => $decision->reason,
@@ -337,6 +345,32 @@ final class Presenter
         ];
 
         return $details ? $shape : array_diff_key($shape, ['reason' => true, 'remarks' => true]);
+    }
+
+    /**
+     * What decision() reads besides the row: who decided, and the loan only
+     * when `$viewer` may see it (its branch), with its numbers alone.
+     *
+     * @return array<int|string, mixed>
+     */
+    public function decisionRelations(User $viewer): array
+    {
+        return [
+            'decidedByUser:id,first_name,last_name',
+            'loan' => fn ($query) => $query->visibleTo($viewer)->select(['loans.id', 'loans.loan_account_number', 'loans.application_number']),
+        ];
+    }
+
+    private function decisionLoanNumber(CreditDecision $decision, User $viewer): ?string
+    {
+        if ($decision->loan_id === null || ! $viewer->can('loans:view')) {
+            return null;
+        }
+
+        $decision->loadMissing($this->decisionRelations($viewer));
+        $loan = $decision->getRelation('loan');
+
+        return $loan === null ? null : ($loan->loan_account_number ?: $loan->application_number);
     }
 
     public static function time(?CarbonInterface $time): ?string

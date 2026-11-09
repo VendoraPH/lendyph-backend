@@ -63,6 +63,55 @@ class ValidIdService
     }
 
     /**
+     * Every refusal of a valid ID upload in words, so no Laravel default
+     * ("The front file field must…") reaches the screen.
+     */
+    public const MESSAGES = [
+        'type.required' => 'Choose the ID type.',
+        'type.string' => 'The ID type must be text.',
+        'type.max' => 'The ID type can be at most 100 characters.',
+        'custom_type_name.string' => 'The ID type\'s name must be text.',
+        'custom_type_name.max' => 'The ID type\'s name can be at most 100 characters.',
+        'custom_type_name.required_if' => 'Enter the ID type\'s name.',
+        'id_number.required' => 'Enter the ID number.',
+        'id_number.string' => 'The ID number must be text.',
+        'id_number.max' => 'The ID number can be at most 100 characters.',
+        'file.required_without' => 'Choose a picture of the ID.',
+        'file.file' => 'The ID didn\'t upload. Try again with a file of at most 10 MB.',
+        'file.uploaded' => 'The ID didn\'t upload. Try again with a file of at most 10 MB.',
+        'file.max' => 'The ID can be at most 10 MB.',
+        'file.mimes' => 'The ID must be a picture (JPG or PNG) or a PDF.',
+        'front_file.required_without' => 'Choose a picture of the ID\'s front.',
+        'front_file.file' => 'The ID\'s front didn\'t upload. Try again with a file of at most 10 MB.',
+        'front_file.uploaded' => 'The ID\'s front didn\'t upload. Try again with a file of at most 10 MB.',
+        'front_file.max' => 'The ID\'s front can be at most 10 MB.',
+        'front_file.mimes' => 'The ID\'s front must be a picture (JPG or PNG) or a PDF.',
+        'back_file.file' => 'The ID\'s back didn\'t upload. Try again with a file of at most 10 MB.',
+        'back_file.uploaded' => 'The ID\'s back didn\'t upload. Try again with a file of at most 10 MB.',
+        'back_file.max' => 'The ID\'s back can be at most 10 MB.',
+        'back_file.mimes' => 'The ID\'s back must be a picture (JPG or PNG) or a PDF.',
+    ];
+
+    /**
+     * The valid ID upload's rules: a member's ID needs its number, a
+     * co-maker's may leave it out. Each file stops at its first refusal
+     * (`bail`), so it answers one sentence.
+     *
+     * @return array<string, list<string>>
+     */
+    public static function rules(bool $forMember): array
+    {
+        return [
+            'type' => ['required', 'string', 'max:100'],
+            'custom_type_name' => ['nullable', 'string', 'max:100', 'required_if:type,others'],
+            'id_number' => [$forMember ? 'required' : 'nullable', 'string', 'max:100'],
+            'file' => ['bail', 'required_without:front_file', 'file', 'max:10240', 'mimes:jpg,jpeg,png,pdf'],
+            'front_file' => ['bail', 'required_without:file', 'file', 'max:10240', 'mimes:jpg,jpeg,png,pdf'],
+            'back_file' => ['bail', 'nullable', 'file', 'max:10240', 'mimes:jpg,jpeg,png,pdf'],
+        ];
+    }
+
+    /**
      * Validate a valid-ID upload and store it against $owner.
      *
      * Two request shapes, mutually exclusive: the legacy single `file`, stored
@@ -80,18 +129,11 @@ class ValidIdService
         // Mutual exclusion: legacy single-file shape vs new front/back shape
         if ($request->hasFile('file') && $request->hasFile('front_file')) {
             throw ValidationException::withMessages([
-                'file' => 'Use either `file` (legacy) or `front_file`/`back_file`, not both.',
+                'file' => 'Send one picture of the ID, or its front and back, not both.',
             ]);
         }
 
-        $request->validate([
-            'type' => ['required', 'string', 'max:100'],
-            'custom_type_name' => ['nullable', 'string', 'max:100', 'required_if:type,others'],
-            'id_number' => [$owner instanceof Borrower ? 'required' : 'nullable', 'string', 'max:100'],
-            'file' => ['required_without:front_file', 'file', 'max:10240', 'mimes:jpg,jpeg,png,pdf'],
-            'front_file' => ['required_without:file', 'file', 'max:10240', 'mimes:jpg,jpeg,png,pdf'],
-            'back_file' => ['nullable', 'file', 'max:10240', 'mimes:jpg,jpeg,png,pdf'],
-        ]);
+        $request->validate(self::rules($owner instanceof Borrower), self::MESSAGES);
 
         $type = $request->input('type');
         $customTypeName = $request->input('custom_type_name');

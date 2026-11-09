@@ -173,7 +173,9 @@ class AuthController extends Controller
         path: '/api/auth/me',
         summary: 'Current user',
         description: 'Get the authenticated user profile with roles and permissions. Reachable even while '
-            .'`data.must_change_password` is true — it is how a locked client finds out why it is locked.',
+            .'`data.must_change_password` is true — it is how a locked client finds out why it is locked. '
+            .'`data.role_details` lists the same roles as `data.roles`, each as `{key, display_name}` (the label, '
+            .'or the key in words when it has none); it is sent here only, for the caller\'s own roles.',
         tags: ['Auth'],
         security: [['sanctum' => []]],
         responses: [
@@ -186,7 +188,7 @@ class AuthController extends Controller
         $user = auth()->user();
         $user->load('branch', 'branches', 'roles', 'permissions');
 
-        return new UserResource($user);
+        return (new UserResource($user))->withRoleDetails();
     }
 
     #[OA\Patch(

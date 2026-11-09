@@ -97,13 +97,13 @@ final class AssessmentService
                 ->map(fn (CreditPolicyFlag $flag) => $this->presenter->flag($viewer, $flag, $member))
                 ->all(),
             'decisions' => CreditDecision::query()
-                ->with('decidedByUser:id,first_name,last_name')
+                ->with($this->presenter->decisionRelations($viewer))
                 ->where('loan_id', $loan->id)
                 ->orderByDesc('decided_at')
                 ->orderByDesc('id')
                 ->limit(self::DECISIONS_SHOWN)
                 ->get()
-                ->map(fn (CreditDecision $decision) => $this->presenter->decision($decision, $details))
+                ->map(fn (CreditDecision $decision) => $this->presenter->decision($decision, $details, $viewer))
                 ->all(),
             'decisions_total' => CreditDecision::query()->where('loan_id', $loan->id)->count(),
             'employment_statuses' => array_map(

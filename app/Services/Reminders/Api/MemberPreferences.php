@@ -6,6 +6,7 @@ use App\Http\Resources\Reminders\ReminderPauseResource;
 use App\Models\Borrower;
 use App\Models\BorrowerNotificationPreference;
 use App\Models\ReminderPause;
+use App\Services\ContactVisibility;
 use Illuminate\Http\Request;
 
 /**

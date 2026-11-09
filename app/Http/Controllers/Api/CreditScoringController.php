@@ -229,11 +229,11 @@ class CreditScoringController extends Controller
             ->where(fn ($q) => $q
                 ->where(fn ($memberLevel) => $memberLevel->whereNull('loan_id')->whereIn('credit_score_id', CreditScore::query()->where('context', CreditScore::CONTEXT_NIGHTLY)->select('id')))
                 ->when($request->user()->can('loans:view'), fn ($q) => $q->orWhereIn('loan_id', $this->scope->loanIds($request->user()))))
-            ->with('decidedByUser:id,first_name,last_name')
+            ->with($this->presenter->decisionRelations($request->user()))
             ->orderByDesc('decided_at')
             ->orderByDesc('id')
             ->paginate($this->perPage($request))
-            ->through(fn (CreditDecision $decision) => $this->presenter->decision($decision, $details));
+            ->through(fn (CreditDecision $decision) => $this->presenter->decision($decision, $details, $request->user()));
 
         return $this->ok($rows->toArray() + ['details_hidden' => ! $details]);
     }
@@ -377,6 +377,7 @@ class CreditScoringController extends Controller
         return $this->ok($this->presenter->decision(
             $recorder->record($request->user(), $member, $request->validated()),
             $this->scope->seesMemberDetails($request->user(), $member),
+            $request->user(),
         ), 201);
     }
 
