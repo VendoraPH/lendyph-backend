@@ -13,6 +13,7 @@ use App\Models\ReminderTemplate;
 use App\Notifications\StaffNotification;
 use App\Services\Reminders\Drivers\DriverResult;
 use App\Services\Reminders\ReminderDispatcher;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use RuntimeException;
@@ -524,7 +525,7 @@ class ReminderDispatchTest extends TestCase
         $this->assertCount(1, $claimed);
 
         // Its claim goes stale; run B releases it, reclaims it and sends it.
-        $this->at('2026-09-15 08:'.(1 + (int) config('reminders.dispatch.stale_claim_minutes')));
+        $this->travelTo(Carbon::parse('2026-09-15 08:00', 'Asia/Manila')->addMinutes(1 + (int) config('reminders.dispatch.stale_claim_minutes')));
         $this->dispatchReminders();
         $this->assertSame('sent', $this->item($loan, 'Due today')->status);
 

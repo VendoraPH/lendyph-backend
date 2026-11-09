@@ -2,7 +2,9 @@
 
 namespace Tests\Feature\Ledger\Deferral;
 
+use App\Exceptions\CannotPostToTheBooksException;
 use App\Models\AccountingJournal;
+use App\Models\Branch;
 use App\Models\Loan;
 use App\Services\Accounting\AccountMap;
 use App\Services\Accounting\PostingRules;
@@ -208,6 +210,76 @@ class RestructureCarryTest extends TestCase
         );
 
         $this->assertRecognisedToZero($new, 583_333, 250_000);
+    }
+
+    /**
+     * A partial reduction on S before it is restructured: its share stays off
+     * D, J2 writes off less than what is left, and only the rest carries. S
+     * ends at zero, N recognises its carry to zero, and the builders equal the
+     * lines posted.
+     */
+    public function test_a_partial_reduction_then_a_write_off_below_what_is_left_ends_at_zero(): void
+    {
+        // ₱10,000.00 of S's ₱50,000.00: a fifth of D cleared, ₱6,666.66 left.
+        $reduction = $this->journalFor($this->applyReduction($this->source, -1_000_000), 'adjustment');
+        $this->assertSame(166_667, $this->sumOn($reduction, '1210', 'debit'));
+        $left = $this->poster()->unrecognisedDeferral($this->source->fresh());
+        $this->assertSame(['interest' => 466_666, 'penalty' => 200_000], $left);
+
+        $new = $this->restructureOf($this->newBase, $this->source, 6_000_000, 0, 0, 300_000);
+        $map = AccountMap::resolve();
+        $releaseBefore = $this->builtLines($this->poster()->restructureReleasePosting($new, $map, 'cash'));
+        $writeOffBefore = $this->builtLines($this->poster()->restructureWriteOffPosting($new, $this->source->fresh(), $map));
+
+        $result = $this->release($new, $this->source);
+
+        $this->assertSame(300_000, $this->described($result['write_off'], PostingRules::DEFERRAL_WRITTEN_OFF_LINE, 'debit'));
+        $this->assertSame(0, $this->sumOn($result['write_off'], '5140', 'debit'));
+        $carry = PostingRules::restructureCarry($left['interest'], $left['penalty'], 300_000);
+        $this->assertSame(366_666, $carry['interest'] + $carry['penalty']);
+        $this->assertCarried($result['release'], $carry['interest'], $carry['penalty']);
+        $this->assertSame(['interest' => 0, 'penalty' => 0], $this->poster()->unrecognisedDeferral($this->source->fresh()));
+        $this->assertSame($carry, $this->poster()->unrecognisedDeferral($new->fresh()));
+        $this->assertSame(366_666, $this->unearnedBalance());
+
+        $this->assertSame($this->postedLines($result['release']), $releaseBefore, 'J1, built before the release');
+        $this->assertSame(
+            $this->postedLines($result['release']),
+            $this->builtLines($this->poster()->restructureReleasePosting($new->fresh(), $map, 'cash')),
+            'J1, built after the release',
+        );
+        $this->assertSame($this->postedLines($result['write_off']), $writeOffBefore, 'J2, built before the release');
+        $this->assertSame(
+            $this->postedLines($result['write_off']),
+            $this->builtLines($this->poster()->restructureWriteOffPosting($new->fresh(), $this->source->fresh(), $map)),
+            'J2, built after the release',
+        );
+
+        $this->assertRecognisedToZero($new, $carry['interest'], $carry['penalty']);
+    }
+
+    /**
+     * A new loan in another branch than its source is refused before anything
+     * posts: J1 and J2 would land in two branches. A member's branch can't
+     * change while a loan is collectible, so only an imported or hand-edited
+     * row gets here.
+     */
+    public function test_a_new_loan_in_another_branch_than_its_source_is_refused_and_posts_nothing(): void
+    {
+        $new = $this->restructureOf($this->newBase, $this->source, 6_000_000, 0, 0, 300_000);
+        $new->update(['branch_id' => Branch::factory()->create()->id]);
+        $journals = AccountingJournal::count();
+
+        try {
+            $this->release($new, $this->source);
+            $this->fail('A restructure across two branches was posted.');
+        } catch (CannotPostToTheBooksException $e) {
+            $this->assertStringContainsString('in a different branch from', $e->getMessage());
+            $this->assertStringContainsString('Nothing has been saved.', $e->getMessage());
+        }
+
+        $this->assertSame($journals, AccountingJournal::count());
+        $this->assertSame(['interest' => 583_333, 'penalty' => 250_000], $this->poster()->unrecognisedDeferral($this->source->fresh()));
     }
 
     /** J1 moved exactly this much off S and onto N, by part, on 1210. */

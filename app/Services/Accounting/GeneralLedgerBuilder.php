@@ -44,9 +44,18 @@ use Illuminate\Support\Facades\DB;
 final class GeneralLedgerBuilder
 {
     /**
-     * One page of `LedgerEntry`, in a length-aware paginator.
+     * One page of `LedgerEntry`, in a length-aware paginator, and the ledger's
+     * `meta`.
      *
-     * @return LengthAwarePaginator<int, array<string, mixed>>
+     * `$source` narrows the rows AFTER every running balance is worked out over
+     * all sources, so a filtered row still shows the account's true balance.
+     * `meta` comes from the same movements:
+     * - `opening_balance`: the account's balance before `from`, every source;
+     * - `closing_balance`: its balance at `to`, every source;
+     * - `total_debit` and `total_credit`: the matching rows over the whole
+     *   range, not the page.
+     *
+     * @return array{entries: LengthAwarePaginator<int, array<string, mixed>>, meta: array{opening_balance: int, closing_balance: int, total_debit: int, total_credit: int}}
      */
     public function build(
         AccountingAccount $account,
@@ -55,7 +64,8 @@ final class GeneralLedgerBuilder
         int|array|null $branchId,
         int $page,
         int $perPage,
-    ): LengthAwarePaginator {
+        ?string $source = null,
+    ): array {
         $opening = $this->openingBalance($account, $from, $branchId);
 
         $movements = $this->movements($account->id, $from, $to, $branchId);
@@ -69,6 +79,8 @@ final class GeneralLedgerBuilder
             $opening,
         );
 
+        $closing = $balances === [] ? $opening : $balances[array_key_last($balances)];
+
         $rows = $movements->values()->map(static fn (object $m, int $index): array => [
             'journal_id' => (int) $m->journal_id,
             'journal_no' => (string) ($m->journal_no ?? ''),
@@ -80,22 +92,37 @@ final class GeneralLedgerBuilder
             'debit' => (int) $m->debit,
             'credit' => (int) $m->credit,
             'running_balance' => $balances[$index],
-        ])->all();
+        ]);
+
+        // The filter, after the walk: a row's balance carries every source.
+        if ($source !== null) {
+            $rows = $rows->where('source', $source)->values();
+        }
+
+        $rows = $rows->all();
 
         // The slice, LAST — after every running balance is already final.
         $total = count($rows);
         $offset = ($page - 1) * $perPage;
 
-        return new LengthAwarePaginator(
-            array_slice($rows, $offset, $perPage),
-            $total,
-            $perPage,
-            $page,
-            [
-                'path' => Paginator::resolveCurrentPath(),
-                'query' => request()->query(),
+        return [
+            'entries' => new LengthAwarePaginator(
+                array_slice($rows, $offset, $perPage),
+                $total,
+                $perPage,
+                $page,
+                [
+                    'path' => Paginator::resolveCurrentPath(),
+                    'query' => request()->query(),
+                ],
+            ),
+            'meta' => [
+                'opening_balance' => $opening,
+                'closing_balance' => $closing,
+                'total_debit' => Money::sum(array_column($rows, 'debit')),
+                'total_credit' => Money::sum(array_column($rows, 'credit')),
             ],
-        );
+        ];
     }
 
     /**
