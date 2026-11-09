@@ -436,7 +436,7 @@ class ReconciliationFollowupsTest extends TestCase
         $this->assertTrue($row['outside_period']);
     }
 
-    public function test_an_in_period_pair_is_never_suggested_and_only_the_reversal_is_offered(): void
+    public function test_an_in_period_pair_is_never_suggested_but_both_legs_can_be_matched(): void
     {
         $deposit = $this->deposit(40000, '2026-09-05');
         $reversal = $this->reverse($deposit, '2026-09-10');
@@ -449,9 +449,79 @@ class ReconciliationFollowupsTest extends TestCase
         $shown = $this->show($reconciliation);
         $this->assertSame(0, $shown['possible_count']);
 
+        // A payment and its refund can both show on the statement, so each
+        // leg can be matched by hand.
         $ledger = collect($shown['lines'])->where('source', 'ledger')->keyBy('journal_line_id');
-        $this->assertFalse($ledger[$this->journalLineOn($deposit)]['matchable']);
+        $this->assertTrue($ledger[$this->journalLineOn($deposit)]['matchable']);
         $this->assertTrue($ledger[$this->journalLineOn($reversal)]['matchable']);
+    }
+
+    public function test_matchable_is_exactly_what_match_accepts(): void
+    {
+        $inTransit = $this->deposit(10000, '2026-08-10');           // outstanding, live
+        $voidedLater = $this->deposit(20000, '2026-09-05');         // reversed after the period
+        $this->reverse($voidedLater, '2026-10-03');
+        $bounced = $this->deposit(30000, '2026-09-06');             // a pair inside the period
+        $this->reverse($bounced, '2026-09-08');
+        $earlier = $this->deposit(40000, '2026-08-20');             // an earlier pair: the
+        $this->reverse($earlier, '2026-08-28');                     // reversal by hand only
+        $this->deposit(50000, '2026-09-15');                        // plain, in the period
+        $elsewhere = $this->deposit(60000, '2026-09-29');           // matched by October
+
+        $october = AccountingReconciliation::query()->findOrFail(
+            $this->postJson('/api/accounting/reconciliations', [
+                'account_id' => $this->account('1040'),
+                'start_date' => '2026-10-01',
+                'end_date' => '2026-10-31',
+                'statement_balance' => 0,
+                'lines' => [['date' => '2026-10-01', 'description' => 'Deposit', 'amount' => 60000]],
+            ])->assertCreated()->json('data.id'),
+        );
+        $this->postJson("/api/accounting/reconciliations/{$october->id}/match", ['matches' => [[
+            'line_id' => $this->statementLine($october)->id,
+            'journal_line_id' => $this->journalLineOn($elsewhere),
+        ]]])->assertOk();
+
+        $reconciliation = $this->reconciliationWith([
+            ['date' => '2026-09-30', 'description' => 'Unrelated', 'amount' => 1],
+        ]);
+        $line = $this->statementLine($reconciliation);
+        $url = "/api/accounting/reconciliations/{$reconciliation->id}/match";
+
+        $rows = collect($this->show($reconciliation)['lines'])->where('source', 'ledger')->values();
+        $this->assertCount(7, $rows);
+
+        $offered = [];
+
+        foreach ($rows as $row) {
+            $response = $this->postJson($url, ['matches' => [['line_id' => $line->id, 'journal_line_id' => $row['journal_line_id']]]]);
+
+            $this->assertSame(
+                $row['matchable'],
+                $response->status() === 200,
+                "Journal line {$row['journal_line_id']} ({$row['date']}): matchable says ".json_encode($row['matchable'])
+                ." but match answered {$response->status()}.",
+            );
+
+            if ($response->status() === 200) {
+                $this->postJson($url, ['matches' => [['line_id' => $line->id, 'journal_line_id' => null]]])->assertOk();
+            } else {
+                $response->assertStatus(422);
+            }
+
+            $offered[$row['journal_line_id']] = $row['matchable'];
+        }
+
+        $this->assertTrue($offered[$this->journalLineOn($inTransit)]);
+        $this->assertTrue($offered[$this->journalLineOn($voidedLater)]);
+        $this->assertTrue($offered[$this->journalLineOn($bounced)]);
+        $this->assertFalse($offered[$this->journalLineOn($elsewhere)]);
+
+        // Legs the worksheet does not list are refused too: the earlier
+        // reversed deposit was not in the books at the period end.
+        $this->assertArrayNotHasKey($this->journalLineOn($earlier), $offered);
+        $this->postJson($url, ['matches' => [['line_id' => $line->id, 'journal_line_id' => $this->journalLineOn($earlier)]]])
+            ->assertStatus(422);
     }
 
     // ── L4: the override is audited ──

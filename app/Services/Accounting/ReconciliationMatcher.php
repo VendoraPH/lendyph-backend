@@ -209,8 +209,8 @@ class ReconciliationMatcher
      * - Inside the period: every posted or reversed line. One a statement
      *   line of ANOTHER reconciliation has claimed stays on the worksheet (it
      *   is still an item of this period) but is neither suggested nor
-     *   matchable. Neither is a leg that was not live at the period end, and
-     *   a dropped reversal pair is never suggested.
+     *   matchable. A leg that was not live at the period end, or a dropped
+     *   reversal pair, is never suggested but can be matched by hand.
      * - Outside it, within {@see self::candidateDates()}: only lines this
      *   reconciliation already matched, or live lines no statement line has
      *   claimed, not part of a dropped pair.
@@ -243,7 +243,13 @@ class ReconciliationMatcher
                 return $line + [
                     'outside_period' => ! $inPeriod,
                     'suggestable' => $live && ! $dropped && ! $claimedElsewhere,
-                    'matchable' => $claimedHere || ($live && ! $claimedElsewhere),
+                    // Exactly what match() takes by hand: never a draft or a line
+                    // another reconciliation matched; inside the period any other
+                    // line (a payment and its refund can both be on the
+                    // statement); outside it, a live leg only.
+                    'matchable' => $claimedHere || (
+                        $line['status'] !== 'draft' && ! $claimedElsewhere && ($inPeriod || $live)
+                    ),
                 ];
             })
             ->filter()
@@ -638,7 +644,7 @@ class ReconciliationMatcher
                 'journal_line_id' => $lineId,
                 // An outstanding item: dated outside the period, still unmatched.
                 'outside_period' => $candidate['outside_period'],
-                // Whether the screen's picker should offer this ledger line.
+                // Whether match() would take this ledger line by hand.
                 'matchable' => $candidate['matchable'],
             ];
         }
