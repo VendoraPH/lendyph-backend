@@ -11,6 +11,8 @@ use Illuminate\Validation\Validator;
  * Filters for the scored member list (`BorrowerScoreFilters`). A
  * `branch_id` outside the caller's branches answers 403 in the controller.
  * `borrower_type` and `loan_product_id` aren't filters here and are ignored.
+ * `has_active_loan` and `past_due` are loan facts and need `loans:view`
+ * (422 otherwise), as the row fields do.
  */
 class ListBorrowerScoresRequest extends FormRequest
 {
@@ -42,6 +44,12 @@ class ListBorrowerScoresRequest extends FormRequest
     public function after(): array
     {
         return [function (Validator $validator) {
+            foreach (['has_active_loan', 'past_due'] as $field) {
+                if ($this->has($field) && ! $this->user()->can('loans:view')) {
+                    $validator->errors()->add($field, 'Filtering by past due or active loans needs permission to view loans.');
+                }
+            }
+
             if ($this->filled('min_score') && $this->filled('max_score') && (int) $this->input('max_score') < (int) $this->input('min_score')) {
                 $validator->errors()->add('max_score', 'The highest score can\'t be below the lowest.');
             }

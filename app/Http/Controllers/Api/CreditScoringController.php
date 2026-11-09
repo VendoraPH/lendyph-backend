@@ -102,7 +102,7 @@ class CreditScoringController extends Controller
             ->orderBy('credit_score_members.borrower_id')
             ->paginate($this->perPage($request));
 
-        return $this->page($rows, fn (CreditScoreMember $current) => $this->presenter->row($current));
+        return $this->page($rows, fn (CreditScoreMember $current) => $this->presenter->row($current, $request->user()));
     }
 
     #[OA\Get(
@@ -157,7 +157,7 @@ class CreditScoringController extends Controller
             ->orderByDesc('id')
             ->paginate($this->perPage($request));
 
-        return $this->page($rows, fn (CreditScore $score) => $this->presenter->history($score));
+        return $this->page($rows, fn (CreditScore $score) => $this->presenter->history($score, $request->user()));
     }
 
     #[OA\Get(
@@ -228,7 +228,7 @@ class CreditScoringController extends Controller
             ->orderByDesc('id')
             ->paginate($this->perPage($request));
 
-        return $this->page($rows, fn (CreditScore $score) => $this->presenter->history($score));
+        return $this->page($rows, fn (CreditScore $score) => $this->presenter->history($score, $request->user()));
     }
 
     #[OA\Get(
@@ -332,7 +332,10 @@ class CreditScoringController extends Controller
     {
         $member = $this->scope->member($request->user(), (int) $request->validated('borrower_id'));
 
-        return $this->ok($this->presenter->decision($recorder->record($request->user(), $member, $request->validated())), 201);
+        return $this->ok($this->presenter->decision(
+            $recorder->record($request->user(), $member, $request->validated()),
+            $this->scope->seesMemberDetails($request->user(), $member),
+        ), 201);
     }
 
     /**

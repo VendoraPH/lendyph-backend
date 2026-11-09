@@ -103,7 +103,7 @@ final class AssessmentService
                 ->orderByDesc('id')
                 ->limit(self::DECISIONS_SHOWN)
                 ->get()
-                ->map(fn (CreditDecision $decision) => $this->presenter->decision($decision))
+                ->map(fn (CreditDecision $decision) => $this->presenter->decision($decision, $details))
                 ->all(),
             'decisions_total' => CreditDecision::query()->where('loan_id', $loan->id)->count(),
             'employment_statuses' => array_map(
@@ -121,6 +121,9 @@ final class AssessmentService
      * application, in one transaction under the member's lock: details the
      * assessment fails on are rolled back with it.
      *
+     * 403 when the caller may not read the member's details (`borrowers:view`
+     * and the member's branch) and sends any application detail: a summary
+     * caller may only record the notice acknowledgement.
      * 422 once the loan is past approval (checked again under the lock), or
      * for a registration that isn't a member. 409 when the member is still
      * being scored after LOCK_WAIT_SECONDS, and on a lock wait timeout, a
@@ -131,6 +134,10 @@ final class AssessmentService
      */
     public function save(User $user, Loan $loan, array $fields, ?bool $noticeAcknowledged): void
     {
+        if ($fields !== [] && ! $this->scope->seesMemberDetails($user, Borrower::query()->select(CreditScope::MEMBER_COLUMNS)->findOrFail($loan->borrower_id))) {
+            abort(403, 'Saving application details needs permission to view the member\'s details in their branch.');
+        }
+
         $this->assertEditable($loan);
 
         if (! $this->recalculator->isScorable((int) $loan->borrower_id)) {

@@ -181,3 +181,71 @@ it('still gives a full-access caller everything', function () {
         ->and(collect($assessment['policy_flags'])->pluck('label'))->toContain('Income verification failed')
         ->and($assessment['score']['recommendation'])->toContain('Manual review required: ');
 });
+
+it('refuses a summary caller\'s save of application details with 403, changing nothing', function (string $who) {
+    [$caller, $loan] = $who === 'outside the member\'s branch'
+        ? [$this->branchAnalyst(), $this->farLoan]
+        : [$this->caller(['credit_scoring:view', 'loans:view', 'loans:update']), $this->nearLoan];
+    $profile = CreditApplicationProfile::query()->where('loan_id', $loan->id)->sole()->getAttributes();
+    $scores = CreditScore::query()->count();
+    $openFlags = CreditPolicyFlag::query()->open()->where('loan_id', $loan->id)->pluck('id')->all();
+
+    $this->actingAs($caller)->putJson("/api/credit-scoring/loans/{$loan->id}/assessment", ['income_verification' => null, 'household_expenses' => 1])
+        ->assertForbidden()
+        ->assertJsonPath('message', 'Saving application details needs permission to view the member\'s details in their branch.');
+
+    expect(CreditApplicationProfile::query()->where('loan_id', $loan->id)->sole()->getAttributes())->toBe($profile)
+        ->and(CreditScore::query()->count())->toBe($scores)
+        ->and($openFlags)->not->toBe([])
+        ->and(CreditPolicyFlag::query()->open()->where('loan_id', $loan->id)->pluck('id')->all())->toBe($openFlags);
+
+    // Recording the notice alone stays allowed.
+    $this->actingAs($caller)->putJson("/api/credit-scoring/loans/{$loan->id}/assessment", ['notice_acknowledged' => true])->assertOk();
+})->with(['outside the member\'s branch', 'without borrowers:view']);
+
+it('hides past due and active loans, and refuses those filters, without loans:view', function () {
+    $noLoans = $this->caller(['credit_scoring:view', 'borrowers:view']);
+    $this->actingAs($noLoans);
+
+    $rows = $this->getJson('/api/credit-scoring/borrowers')->assertOk()->json('data.data');
+    expect(collect($rows)->pluck('past_due')->unique()->all())->toBe([null])
+        ->and(collect($rows)->pluck('has_active_loan')->unique()->all())->toBe([null]);
+
+    foreach (['past_due', 'has_active_loan'] as $filter) {
+        $this->getJson("/api/credit-scoring/borrowers?{$filter}=1")
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors([$filter => 'Filtering by past due or active loans needs permission to view loans.']);
+    }
+
+    $affected = collect($this->getJson('/api/credit-scoring/risk-monitoring')->json('data.affected_borrowers'))->pluck('borrower_id');
+    $nearRow = CreditScoreMember::query()->where('borrower_id', $this->near->id)->sole();
+    expect($nearRow->past_due)->toBeTrue();
+    if (! in_array($nearRow->risk_level, ['high', 'very_high'], true)) {
+        expect($affected)->not->toContain($this->near->id);
+    }
+    expect(collect($this->actingAs($this->branchAnalyst())->getJson('/api/credit-scoring/risk-monitoring')->json('data.affected_borrowers'))->pluck('borrower_id'))->toContain($this->near->id);
+});
+
+it('shows a summary caller a decision without its reason or remarks, and history as "Recalculated"', function () {
+    $score = CreditScore::query()->where('loan_id', $this->nearLoan->id)->latest('id')->firstOrFail();
+    $this->actingAs($this->headOffice())->postJson('/api/credit-scoring/decisions', [
+        'borrower_id' => $this->near->id, 'credit_score_id' => $score->id, 'loan_id' => $this->nearLoan->id,
+        'decision' => 'decline', 'reason' => 'Income could not be verified', 'remarks' => 'Payslips missing.',
+    ])->assertCreated();
+    $summary = $this->caller(['credit_scoring:view', 'loans:view']);
+
+    $decision = $this->actingAs($summary)->getJson("/api/credit-scoring/loans/{$this->nearLoan->id}/assessment")->json('data.decisions.0');
+    $history = $this->actingAs($summary)->getJson("/api/credit-scoring/borrowers/{$this->near->id}/history")->json('data.data');
+    $portfolio = $this->actingAs($summary)->getJson('/api/credit-scoring/score-history')->json('data.data');
+    $recent = $this->actingAs($summary)->getJson('/api/credit-scoring/dashboard')->json('data.recent_score_changes');
+
+    expect($decision)->not->toHaveKeys(['reason', 'remarks'])
+        ->and($decision['decision'])->toBe('decline')
+        ->and($decision)->toHaveKeys(['decided_at', 'decided_by'])
+        ->and(collect([...$history, ...$portfolio, ...$recent])->pluck('reason')->unique()->values()->all())->toBe(['Recalculated']);
+
+    $full = $this->actingAs($this->headOffice())->getJson("/api/credit-scoring/loans/{$this->nearLoan->id}/assessment")->json('data.decisions.0');
+    expect($full['reason'])->toBe('Income could not be verified')
+        ->and($full['remarks'])->toBe('Payslips missing.')
+        ->and(collect($this->actingAs($this->headOffice())->getJson("/api/credit-scoring/borrowers/{$this->near->id}/history")->json('data.data'))->pluck('reason'))->not->toContain('Recalculated');
+});

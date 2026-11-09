@@ -58,7 +58,7 @@ final class Portfolio
                 ->orderByDesc('id')
                 ->limit(self::RECENT_CHANGES)
                 ->get()
-                ->map(fn (CreditScore $score) => $this->presenter->history($score))
+                ->map(fn (CreditScore $score) => $this->presenter->history($score, $user))
                 ->all(),
         ];
     }
@@ -71,6 +71,7 @@ final class Portfolio
      *   flags first raised, both in the last 30 days (rolling).
      * - Affected members: in a high band, past due, or holding an open hard
      *   flag, lowest score first, at most 100, with the full count.
+     * - Past due is a loan fact: without `loans:view` it lists no member.
      * - Flags are member details (round fz): a caller without
      *   `borrowers:view` gets `new_hard_flags_30d` null and no member listed
      *   for a flag alone. With it, every member they can see is one whose
@@ -85,7 +86,7 @@ final class Portfolio
         $readsFlags = $user->can('borrowers:view');
         $affected = $this->scope->currentScores($user)->where(fn (Builder $q) => $q
             ->whereIn('credit_score_members.risk_level', Recalculator::HIGH_RISK_BANDS)
-            ->orWhere('credit_score_members.past_due', true)
+            ->when($user->can('loans:view'), fn (Builder $q) => $q->orWhere('credit_score_members.past_due', true))
             ->when($readsFlags, fn (Builder $q) => $q->orWhereIn('credit_score_members.borrower_id', $this->scope->openFlags($user)->where('type', CreditPolicyFlag::HARD)->select('borrower_id'))));
 
         return [
@@ -113,7 +114,7 @@ final class Portfolio
                 ->orderBy('credit_score_members.borrower_id')
                 ->limit(self::MONITORING_CAP)
                 ->get()
-                ->map(fn (CreditScoreMember $current) => $this->presenter->row($current))
+                ->map(fn (CreditScoreMember $current) => $this->presenter->row($current, $user))
                 ->all(),
             'alerts' => CreditRiskAlert::query()
                 ->whereIn('borrower_id', $this->scope->memberIds($user))

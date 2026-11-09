@@ -67,6 +67,9 @@ final class Presenter
     /** The summary's recommendation while the member has an open hard flag. */
     public const MANUAL_REVIEW = 'Manual review required.';
 
+    /** A history row's reason as a summary caller reads it. */
+    public const RECALCULATED = 'Recalculated';
+
     /** The summary's recommendation for a score without enough data. */
     private const INSUFFICIENT_DATA = 'Not enough data to score. Review the member\'s application and history manually.';
 
@@ -219,12 +222,15 @@ final class Presenter
 
     /**
      * The `BorrowerScoreRow` shape, from a member's current score with the
-     * member's own (current) name and branch loaded.
+     * member's own (current) name and branch loaded. `has_active_loan` and
+     * `past_due` are loan facts: null without `loans:view`.
      *
      * @return array<string, mixed>
      */
-    public function row(CreditScoreMember $current): array
+    public function row(CreditScoreMember $current, User $viewer): array
     {
+        $loans = $viewer->can('loans:view');
+
         $member = $current->borrower;
 
         return [
@@ -236,20 +242,24 @@ final class Presenter
             'score' => $current->score,
             'risk_level' => $current->risk_level,
             'score_trend' => $current->trend,
-            'has_active_loan' => (bool) $current->has_active_loan,
-            'past_due' => (bool) $current->past_due,
+            'has_active_loan' => $loans ? (bool) $current->has_active_loan : null,
+            'past_due' => $loans ? (bool) $current->past_due : null,
             'calculated_at' => self::time($current->calculated_at),
             'status' => $current->status,
         ];
     }
 
     /**
-     * The `CreditScoreHistoryEntry` shape, with the member loaded.
+     * The `CreditScoreHistoryEntry` shape, with the member loaded. A caller
+     * who may not read the member's details reads the reason as
+     * "Recalculated": what changed is a member detail.
      *
      * @return array<string, mixed>
      */
-    public function history(CreditScore $score): array
+    public function history(CreditScore $score, User $viewer): array
     {
+        $details = $score->borrower !== null && $this->scope->seesMemberDetails($viewer, $score->borrower);
+
         return [
             'id' => (int) $score->id,
             'borrower_id' => (int) $score->borrower_id,
@@ -260,7 +270,7 @@ final class Presenter
             'score_type' => $score->score_type,
             'model_version' => $score->revision_version,
             'calculated_at' => self::time($score->calculated_at),
-            'reason' => $score->recalculation_reason,
+            'reason' => $details ? $score->recalculation_reason : self::RECALCULATED,
             'status' => $score->status,
             'previous_score' => $score->previous_score,
         ];
@@ -305,13 +315,15 @@ final class Presenter
     }
 
     /**
-     * The `CreditDecision` shape; `decided_by` is the person's name.
+     * The `CreditDecision` shape; `decided_by` is the person's name. Without
+     * `$details` (a summary caller) `reason` and `remarks` are left out; the
+     * decision, who made it and when stay.
      *
      * @return array<string, mixed>
      */
-    public function decision(CreditDecision $decision): array
+    public function decision(CreditDecision $decision, bool $details = true): array
     {
-        return [
+        $shape = [
             'id' => (int) $decision->id,
             'borrower_id' => (int) $decision->borrower_id,
             'loan_id' => $decision->loan_id === null ? null : (int) $decision->loan_id,
@@ -323,6 +335,8 @@ final class Presenter
             'decided_at' => self::time($decision->decided_at),
             'revision_version' => $decision->revision_version,
         ];
+
+        return $details ? $shape : array_diff_key($shape, ['reason' => true, 'remarks' => true]);
     }
 
     public static function time(?CarbonInterface $time): ?string
