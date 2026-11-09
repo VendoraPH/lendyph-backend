@@ -28,6 +28,11 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
  * The audit trail is a head-office control and records no branch, so every
  * endpoint here also requires `branches:view_all` (decision B2): a branch
  * user holding `audit_logs:view` or `audit_logs:export` gets 403.
+ *
+ * A caller without `borrowers:view` reads member, co-maker, contact
+ * preference and credit rows without their personal fields (credit rows also
+ * need `credit_scoring:view`), in the list, the detail and the CSV alike
+ * (AuditLogResource::valuesShownTo()).
  */
 class AuditLogController extends Controller
 {
@@ -133,8 +138,9 @@ class AuditLogController extends Controller
         $filters = $this->validatedFilters();
 
         $filename = 'audit-logs-'.now()->format('Ymd-His').'.csv';
+        $user = request()->user();
 
-        return response()->streamDownload(function () use ($filters) {
+        return response()->streamDownload(function () use ($filters, $user) {
             $handle = fopen('php://output', 'w');
 
             fputcsv($handle, [
@@ -156,8 +162,10 @@ class AuditLogController extends Controller
                 // timestamps split by a 500-row boundary repeats some rows in
                 // the CSV and drops others.
                 ->orderBy('id')
-                ->chunk(500, function ($chunk) use ($handle) {
+                ->chunk(500, function ($chunk) use ($handle, $user) {
                     foreach ($chunk as $log) {
+                        [$oldValues, $newValues] = AuditLogResource::valuesShownTo($log, $user);
+
                         fputcsv($handle, array_map(self::sanitizeCsvCell(...), [
                             $log->created_at?->toDateTimeString(),
                             ($log->user ?? $log->inferredActor())?->full_name ?? ($log->user_id ? "User #{$log->user_id}" : 'system'),
@@ -166,8 +174,8 @@ class AuditLogController extends Controller
                             $log->auditable_id,
                             $log->description,
                             $log->ip_address,
-                            $log->old_values ? json_encode($log->old_values) : '',
-                            $log->new_values ? json_encode($log->new_values) : '',
+                            $oldValues ? json_encode($oldValues) : '',
+                            $newValues ? json_encode($newValues) : '',
                         ]));
                     }
                 });

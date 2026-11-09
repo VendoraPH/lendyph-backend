@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Services\Accounting\OpeningBalancePoster;
 use App\Services\Accounting\PostingRules;
 use App\Traits\Auditable;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -366,6 +367,26 @@ class AccountingAccountMapping extends Model
         }
 
         return null;
+    }
+
+    /**
+     * Why `$role` can't resolve to the account with this code, beyond its
+     * shape, or null. One rule so far: net surplus never resolves to 3050
+     * Opening Balance Equity. The year's result would be mixed into the
+     * opening balances, and a close or reopen would lock 3050 after its
+     * months while an opening balance locks 3050 before them
+     * (OpeningBalancePoster's lock order). The caller adds what to do next.
+     *
+     * @param  string  $label  "3050 Opening Balance Equity", for the message.
+     */
+    public static function reservedAccountReason(string $role, string $code, string $label): ?string
+    {
+        if ($role !== 'net_surplus' || $code !== OpeningBalancePoster::OPENING_EQUITY_CODE) {
+            return null;
+        }
+
+        return self::label($role)." can't post to {$label}, the opening balance equity account: "
+            ."the year's result would be mixed into the opening balances.";
     }
 
     /**

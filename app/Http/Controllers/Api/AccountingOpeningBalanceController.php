@@ -13,7 +13,6 @@ use App\Models\AccountingPeriod;
 use App\Models\User;
 use App\Services\Accounting\Money;
 use App\Services\Accounting\OpeningBalancePoster;
-use App\Services\Accounting\PeriodGuard;
 use App\Services\AuditLogService;
 use App\Services\BranchAccess;
 use App\Services\LoanWriteTransaction;
@@ -38,7 +37,6 @@ class AccountingOpeningBalanceController extends Controller
 
     public function __construct(
         private OpeningBalancePoster $poster,
-        private PeriodGuard $periods,
     ) {}
 
     #[OA\Get(
@@ -130,8 +128,10 @@ class AccountingOpeningBalanceController extends Controller
     /**
      * The save itself, inside the transaction. The same lock order as the
      * finalise (the allowance row when a line is on it, then 3050, then the
-     * draft), so a save and a finalise queue rather than deadlock on the
-     * account rows the new lines' foreign keys read.
+     * draft, then the periods), so a save and a finalise queue rather than
+     * deadlock on the account rows the new lines' foreign keys read, and a
+     * year-end close or reopen, which locks its months first, queues too
+     * (OpeningBalancePoster::lockThePeriods()).
      *
      * @param  list<array{account_id: int, debit: int, credit: int}>  $lines
      */
@@ -140,6 +140,7 @@ class AccountingOpeningBalanceController extends Controller
         $this->poster->lockInOrder(array_column($lines, 'account_id'), requireOpeningEquity: false);
 
         $draft = AccountingOpeningBalance::query()->lockForUpdate()->first();
+        $periodRefusal = $this->poster->lockThePeriods($asOf);
 
         if ($draft?->isFinalised()) {
             throw OpeningBalancePoster::conflict('The opening balances have already been finalised; they can\'t be changed.');
@@ -161,16 +162,8 @@ class AccountingOpeningBalanceController extends Controller
             throw OpeningBalancePoster::conflict(OpeningBalancePoster::STALE);
         }
 
-        try {
-            $this->periods->assertOpen($asOf, 'The opening balances');
-        } catch (ValidationException $e) {
-            throw ValidationException::withMessages(['as_of' => $e->errors()['date'] ?? $e->errors()]);
-        }
-
-        $laterClosed = $this->poster->laterClosedReason($asOf, lock: true);
-
-        if ($laterClosed !== null) {
-            throw ValidationException::withMessages(['as_of' => [$laterClosed]]);
+        if ($periodRefusal !== null) {
+            throw $periodRefusal;
         }
 
         $old = $draft === null ? null : $this->summary($draft->as_of->toDateString(), $this->storedLines($draft));

@@ -25,13 +25,13 @@ Schedule::command('notifications:past-due')->dailyAt('00:20')->timezone('Asia/Ma
 Schedule::command('portfolio:snapshot')->dailyAt('23:55')->timezone('Asia/Manila');
 
 // Database backup daily at 2 AM, keep last 7
-Schedule::command('db:backup --keep=7')->dailyAt('02:00');
+Schedule::command('db:backup --keep=7')->dailyAt('02:00')->timezone('Asia/Manila');
 
 // Drop anonymous registrations that can never be completed, and submission
 // tokens well past their 15-minute life. Only touches pending submissions with
 // no valid ID — the ones with documents attached are the operator review queue,
 // not abandonment.
-Schedule::command('registrations:prune')->dailyAt('03:30');
+Schedule::command('registrations:prune')->dailyAt('03:30')->timezone('Asia/Manila');
 
 /*
  * Advance any in-flight CSV migration.
@@ -66,7 +66,7 @@ Schedule::command('imports:process')->everyMinute()->withoutOverlapping(10);
 // The month is counted from the run FINISHING, not from the upload — so a run an
 // admin abandoned holds its rows until `imports:process` writes it off at
 // --prune-days=14, and only then starts the 30. Worst case is ~44 days, not 30.
-Schedule::command('imports:redact-rows')->dailyAt('03:45');
+Schedule::command('imports:redact-rows')->dailyAt('03:45')->timezone('Asia/Manila');
 
 // Notification retention: read notifications after 90 days, any notification
 // after 365, in chunks. After the registration prune and the import redaction,

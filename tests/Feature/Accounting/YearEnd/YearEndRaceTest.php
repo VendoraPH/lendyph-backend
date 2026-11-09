@@ -3,6 +3,7 @@
 namespace Tests\Feature\Accounting\YearEnd;
 
 use App\Models\AccountingJournal;
+use App\Models\AccountingYearClose;
 use App\Services\Accounting\JournalPoster;
 use App\Services\Accounting\YearEndCloser;
 use Illuminate\Database\Events\QueryExecuted;
@@ -83,6 +84,61 @@ class YearEndRaceTest extends TestCase
 
         $this->assertSame('409', $outcome);
         $this->assertSame(3, AccountingJournal::query()->where('source', 'closing')->count());
+    }
+
+    /**
+     * A reopen of 2025 and a close of 2026, which locks 2025's row through
+     * its `closed_year` entry. The reopen used to lock its row by id first, so
+     * the close could take the `closed_year` entry and wait for the row while
+     * the reopen, clearing `closed_year`, waited for that entry: a deadlock.
+     * Now the reopen locks through `closed_year` first, the close waits on the
+     * entry holding nothing, and the reopen finishes.
+     */
+    public function test_a_close_of_the_next_year_reaching_for_the_row_a_reopen_holds_queues_behind_it(): void
+    {
+        $this->postTheYear();
+        $close = $this->closed();
+        DB::statement('SET SESSION innodb_lock_wait_timeout = 3');
+
+        $outcome = null;
+        $default = DB::getDefaultConnection();
+        $other = DB::connection(self::OTHER_CONNECTION);
+
+        DB::listen(function (QueryExecuted $query) use (&$outcome, $default, $other): void {
+            $sql = strtolower($query->sql);
+
+            if ($outcome !== null
+                || $query->connectionName !== $default
+                || DB::connection($default)->transactionLevel() === 0
+                || ! str_contains($sql, 'from `accounting_year_closes`')
+                || ! str_contains($sql, 'for update')) {
+                return;
+            }
+
+            // What a close of 2026 does with 2025's row (previousYearMustBeClosedFirst()).
+            $other->beginTransaction();
+
+            try {
+                AccountingYearClose::on(self::OTHER_CONNECTION)->where('closed_year', 2025)->lockForUpdate()->first();
+                $outcome = 'locked';
+            } catch (PDOException $e) {
+                $outcome = str_contains($e->getMessage(), 'Lock wait timeout') ? 'waited' : 'failed: '.$e->getMessage();
+            }
+        });
+
+        try {
+            $response = $this->reopenYear($close['id']);
+        } finally {
+            if ($other->transactionLevel() > 0) {
+                $other->rollBack();
+            }
+
+            DB::statement('SET SESSION innodb_lock_wait_timeout = 50');
+        }
+
+        $this->assertSame('waited', $outcome);
+        $response->assertOk();
+        $this->assertSame('reopened', AccountingYearClose::query()->findOrFail($close['id'])->status);
     }
 
     /**

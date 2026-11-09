@@ -292,7 +292,15 @@ class RecordOpeningBalances extends Command
              * deactivated in another tab, a second operator posting first.
              */
             $this->newLine();
-            $this->error('Refused by JournalPoster — nothing was written:');
+            // Headed by what refused it: the poster's own checks answer on
+            // `as_of` (a closed month), `source` (another run posted first)
+            // or `account` (no 3050); anything else is JournalPoster's.
+            $this->error(match (array_key_first($e->errors())) {
+                'as_of' => 'Refused: the as-of date falls in or before a closed month — nothing was written:',
+                'source' => 'Refused: another run posted an opening balance first — nothing was written:',
+                'account' => 'Refused: this chart has no 3050 Opening Balance Equity — nothing was written:',
+                default => 'Refused by JournalPoster — nothing was written:',
+            });
 
             foreach ($e->errors() as $messages) {
                 foreach ((array) $messages as $message) {

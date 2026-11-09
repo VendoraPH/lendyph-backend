@@ -26,6 +26,12 @@ class ImportRunStatusTest extends TestCase
     {
         parent::setUp();
 
+        // Rows are stored to the second. On a running clock, a second boundary
+        // between writing the run, writing a file and travelling moves the
+        // staleness test's figures by one second, so every row is written on
+        // one frozen instant.
+        $this->freezeTime();
+
         $this->seedAndLoginAsImportAdmin();
 
         $this->run = $this->makeImportRun(['phase' => 'importing_loans']);
