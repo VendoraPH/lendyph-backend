@@ -1399,7 +1399,7 @@ DESC,
         description: <<<'TXT'
         Read-only. Every field is optional; each section is computed from what was sent.
 
-        `collateral` is always present: `total_value` (each listed collateral valued by the server by `collateral_id` on the borrower's register: its `amount`, or for share capital its member's balance, at least 0; collateral the edited loan (`loan_id`) or the source loan (`source_loan_id`) already holds counts at the value it was pledged at, and on a restructure every pledge of the source counts, listed or not. A sent `snapshot_value` is ignored), `security_status` (`unsecured` with no principal or nothing pledged, `secured` when the total reaches the principal, else `partially_secured`) and `short_by` (the principal less the total, never below 0; 0 without a principal). GET /api/loans/{id} `collateral_summary` uses the same rule for a saved loan's pledges.
+        `collateral` is always present: `total_value` (each listed collateral valued by the server by `collateral_id` on the borrower's register: its `amount`, or for share capital its member's balance, at least 0; collateral the edited loan (`loan_id`) or the source loan (`source_loan_id`) already holds counts at the value it was pledged at, and on a restructure every pledge of the source counts, listed or not. With `loan_id` the edit's rules apply, as PUT /api/loans/{id} saves them: no `collaterals` (absent or null) counts the loan's held pledges at their stored value, `[]` counts nothing, and a list counts only its rows. A sent `snapshot_value` is ignored), `security_status` (`unsecured` with no principal or nothing pledged, `secured` when the total reaches the principal, else `partially_secured`) and `short_by` (the principal less the total, never below 0; 0 without a principal). GET /api/loans/{id} `collateral_summary` uses the same rule for a saved loan's pledges.
 
         `maturity_date` is where the loan would mature, as creating it would store it: null until `loan_product_id`, a `term` inside the product's term range, `frequency` and `start_date` are sent (the principal and the rate are not needed).
 
@@ -1411,7 +1411,7 @@ DESC,
 
         The restructure edit form sends `loan_id` and `source_loan_id` together: the edited loan must be the restructure of that source (else 422 on `loan_id`), the caller needs both loans:update and loans:restructure, each id is checked for the caller's branches, and collateral counts by the edit's rules (the listed rows only, held ones at their pledged value).
 
-        Listing collateral needs `collaterals:view`, and a share capital collateral (listed, or held by the source loan on a restructure) needs `share_capital:view`.
+        Listing collateral needs `collaterals:view`, and a share capital collateral (listed, held by the source loan on a restructure, or held by the edited loan when no list is sent) needs `share_capital:view`.
 
         The product's amount, rate and term ranges are not checked here; saving the loan enforces them.
         TXT,

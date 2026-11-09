@@ -2476,7 +2476,9 @@ class LoanService
      *   card uses too. Each is valued by its id, on the borrower's register,
      *   at what saving would pledge it at (previewPledgedCentavos()); a sent
      *   `snapshot_value` is ignored. With `loan_id` (the edit page) the
-     *   borrower is that loan's, and with `source_loan_id` the source's.
+     *   borrower is that loan's, and with `source_loan_id` the source's. With
+     *   `loan_id` and no `collaterals` (absent or null) the loan's held
+     *   pledges count at their stored value, as PUT /loans/{id} leaves them.
      * - `maturity_date`: where the loan would mature, by the code a create
      *   stores it with. Null until the product, a term inside its range, the
      *   frequency and the start date are known; the principal and the rate
@@ -2513,13 +2515,16 @@ class LoanService
         $source = $sourceLoanId === null ? null : $this->previewSource($sourceLoanId, $input['borrower_id'] ?? null);
         $borrowerId = $edited?->borrower_id ?? $source?->borrower_id ?? ($input['borrower_id'] ?? null);
         // An edit, a restructure's included, pledges what updateLoan() would
-        // leave: the listed rows, held ones at their pledged value. Only a new
+        // leave. No list (absent or null) leaves its pledges untouched, so
+        // every held one counts at its stored value; `[]` detaches them all;
+        // a list is the complete list, held rows at their pledged value. A new
         // restructure carries every pledge of its source (inheritCollaterals()).
+        $rows = $input['collaterals'] ?? null;
         $pledged = $this->previewPledgedCentavos(
-            $input['collaterals'] ?? [],
+            $rows ?? [],
             $borrowerId === null ? null : (int) $borrowerId,
             $edited ?? $source,
-            carriesEveryPledge: $source !== null && $edited === null,
+            carriesEveryPledge: $edited === null ? $source !== null : $rows === null,
         );
 
         $product = isset($input['loan_product_id']) ? LoanProduct::find($input['loan_product_id']) : null;

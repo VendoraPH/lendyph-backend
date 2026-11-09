@@ -2,7 +2,11 @@
 
 namespace Tests\Feature\BrowserMoneyRound;
 
+use App\Models\Borrower;
+use App\Models\Branch;
+use App\Models\Collateral;
 use App\Models\Loan;
+use App\Models\LoanProduct;
 use App\Models\User;
 use Tests\Feature\Ledger\Release\ReleasesLoans;
 use Tests\TestCase;
@@ -190,5 +194,63 @@ class RestructurePreviewProceedsTest extends TestCase
         $this->postJson('/api/loans/preview', $this->previewBody($source, 60000, ['loan_id' => $new->id]))
             ->assertUnprocessable()
             ->assertJsonValidationErrors(['status']);
+    }
+
+    public function test_a_combined_call_whose_source_is_in_another_branch_is_refused(): void
+    {
+        $source = $this->createReleasedLoan();
+        $draft = $this->draftRestructureOf($source, 70800);
+        $far = Branch::factory()->create(['name' => 'Far Branch', 'code' => 'FAR']);
+        $farLoan = Loan::factory()->create([
+            'branch_id' => $far->id,
+            'borrower_id' => Borrower::factory()->create(['branch_id' => $far->id]),
+            'loan_product_id' => LoanProduct::factory(),
+            'created_by' => $this->admin->id,
+        ]);
+
+        $user = User::factory()->inBranches($this->branch)->create();
+        $user->givePermissionTo(['loans:update', 'loans:restructure']);
+        $this->actingAs($user);
+
+        $this->postJson('/api/loans/preview', $this->previewBody($farLoan, 60000, ['loan_id' => $draft->id]))
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['source_loan_id'])
+            ->assertJsonMissingValidationErrors(['loan_id']);
+
+        // The same caller previews its own branch's pair.
+        $this->postJson('/api/loans/preview', $this->previewBody($source, 60000, ['loan_id' => $draft->id]))->assertOk();
+    }
+
+    /**
+     * The edit's collateral rules (PUT /loans/{id}): a list is the loan's
+     * complete list, so a held pledge left off it is detached and does not
+     * count; `[]` detaches every one; no list leaves them untouched.
+     */
+    public function test_a_combined_call_counts_collateral_by_the_edits_rules(): void
+    {
+        $source = $this->createReleasedLoan();
+        $draft = $this->draftRestructureOf($source, 70800);
+        $kept = Collateral::factory()->create(['borrower_id' => $draft->borrower_id, 'amount' => 30000]);
+        $dropped = Collateral::factory()->create(['borrower_id' => $draft->borrower_id, 'amount' => 10000]);
+        $this->postJson("/api/loans/{$draft->id}/collaterals", ['collateral_id' => $kept->id])->assertCreated();
+        $this->postJson("/api/loans/{$draft->id}/collaterals", ['collateral_id' => $dropped->id])->assertCreated();
+
+        $total = fn (array $extra): mixed => $this->postJson('/api/loans/preview', $this->previewBody($source, 60000, ['loan_id' => $draft->id, ...$extra]))
+            ->assertOk()->json('data.collateral.total_value');
+
+        $this->assertEquals(30000, $total(['collaterals' => [['collateral_id' => $kept->id]]]), 'a held pledge left off the list');
+        $this->assertEquals(0, $total(['collaterals' => []]), 'an empty list');
+        $this->assertEquals(40000, $total([]), 'no list: the held pledges');
+    }
+
+    public function test_a_combined_call_whose_source_is_no_longer_open_is_refused(): void
+    {
+        $source = $this->createReleasedLoan();
+        $draft = $this->draftRestructureOf($source, 70800);
+        Loan::whereKey($source->id)->update(['status' => 'completed']);
+
+        $this->postJson('/api/loans/preview', $this->previewBody($source, 60000, ['loan_id' => $draft->id]))
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['status' => 'Only released or ongoing loans can be restructured.']);
     }
 }
