@@ -5,6 +5,7 @@ namespace Tests\Feature\Accounting\YearEnd;
 use App\Models\AccountingAccount;
 use App\Models\AccountingAccountMapping;
 use App\Models\AccountingJournal;
+use App\Models\AccountingPeriod;
 use Carbon\CarbonImmutable;
 use Tests\TestCase;
 use Tests\Traits\PostsJournals;
@@ -256,6 +257,68 @@ class YearEndPreviewTest extends TestCase
             ["The net surplus account, 3030 Retained Earnings, can't take postings because it is inactive. Choose an equity account for it in Accounting → Settings → Default Accounts."],
             $this->preview()['blocking_reasons'],
         );
+    }
+
+    public function test_an_inactive_income_or_expense_account_holding_a_net_blocks_the_close(): void
+    {
+        $this->postTheYear();
+        $this->postSimpleJournal('1010', '4080', 1200000, ['date' => '2025-10-01']);
+        $this->postSimpleJournal('5040', '1010', 30000, ['date' => '2025-10-02', 'branch_id' => $this->far->id]);
+        AccountingAccount::query()->whereIn('id', [$this->account('4080'), $this->account('5040')])->update(['is_active' => false]);
+        // Inactive with nothing for the year: no reason.
+        AccountingAccount::query()->whereKey($this->account('4050'))->update(['is_active' => false]);
+
+        $preview = $this->preview();
+
+        $this->assertFalse($preview['can_close']);
+        $this->assertSame([
+            '4080 Other Fee Income is inactive and holds ₱12,000.00 for 2025. Reactivate it before closing.',
+            '5040 Internet is inactive and holds ₱300.00 for 2025. Reactivate it before closing.',
+        ], $preview['blocking_reasons']);
+
+        $this->closeYear()
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.year.0', '4080 Other Fee Income is inactive and holds ₱12,000.00 for 2025. Reactivate it before closing.')
+            ->assertJsonMissingPath('errors.lines');
+    }
+
+    public function test_an_income_account_turned_into_a_heading_while_holding_a_net_blocks_the_close(): void
+    {
+        $this->postTheYear();
+        $this->postSimpleJournal('1010', '4080', 1200000, ['date' => '2025-10-01']);
+        AccountingAccount::query()->whereKey($this->account('4080'))->update(['is_group' => true]);
+
+        $this->assertSame(
+            ['4080 Other Fee Income is a heading and holds ₱12,000.00 for 2025. Make it a postable account again before closing.'],
+            $this->preview()['blocking_reasons'],
+        );
+    }
+
+    public function test_a_year_before_the_books_start_is_refused_and_nothing_is_written(): void
+    {
+        $this->postTheYear();
+        $periods = AccountingPeriod::query()->count();
+
+        $preview = $this->preview(2019);
+
+        $this->assertFalse($preview['can_close']);
+        $this->assertSame(['The books start in 2025, so 2019 has nothing to close.'], $preview['blocking_reasons']);
+        $this->assertSame([], $preview['periods_to_close']);
+        $this->assertSame($periods, AccountingPeriod::query()->count(), 'no period row written');
+
+        $this->closeYear(2019)->assertUnprocessable()->assertJsonPath('errors.year.0', 'The books start in 2025, so 2019 has nothing to close.');
+        $this->assertSame($periods, AccountingPeriod::query()->count());
+    }
+
+    public function test_books_with_no_entries_have_no_year_to_close(): void
+    {
+        $periods = AccountingPeriod::query()->count();
+
+        $preview = $this->preview(2025);
+
+        $this->assertFalse($preview['can_close']);
+        $this->assertSame(['The books have no entries yet, so 2025 has nothing to close.'], $preview['blocking_reasons']);
+        $this->assertSame($periods, AccountingPeriod::query()->count(), 'no period row written');
     }
 
     public function test_a_closed_year_cannot_be_closed_again(): void

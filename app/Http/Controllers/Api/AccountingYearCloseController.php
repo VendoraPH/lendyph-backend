@@ -43,7 +43,7 @@ class AccountingYearCloseController extends Controller
     #[OA\Get(
         path: '/api/accounting/year-closes',
         summary: 'Year-end closes, newest year first',
-        description: 'The paginator envelope ({data, links, meta}), 25 rows a page (`per_page` at most 100), newest year first. Each row: `id`, `year`, `status` (`closed` or `reopened`), `net_surplus` (centavos, signed: a profit is positive), `net_surplus_account` {id, code, name}, `entries` [{branch {id, name} or null, journal {id, journal_no}, net_surplus}], `periods_closed` [{id, name}], `closed_at`, `closed_by` {id, name} or null, `reopened_at`, `reopened_by`, `reopen_reason`. Entries are filtered to the caller\'s branches (the no-branch entry with branches:view_all only) and `net_surplus` is their sum. `meta.totals.net_surplus` is the same sum over every row.',
+        description: 'The paginator envelope ({data, links, meta}), 25 rows a page (`per_page` at most 100), newest year first. Each row: `id`, `year`, `status` (`closed` or `reopened`), `net_surplus` (centavos, signed: a profit is positive), `net_surplus_account` {id, code, name}, `entries` [{branch {id, name} or null, journal {id, journal_no}, net_surplus}], `periods_closed` [{id, name}], `closed_at`, `closed_by` {id, name} or null, `reopened_at`, `reopened_by`, `reopen_reason`. Entries are filtered to the caller\'s branches (the no-branch entry with branches:view_all only) and `net_surplus` is their sum. `meta.totals.net_surplus` is the same sum over every row whose status is `closed` (a reopened close is left out).',
         tags: ['Accounting'],
         security: [['sanctum' => []]],
         parameters: [
@@ -76,7 +76,12 @@ class AccountingYearCloseController extends Controller
         $periodNames = $this->periodNames($closes->getCollection());
         $closes->through(fn (AccountingYearClose $close): array => $this->row($close, $visible, $periodNames));
 
+        // Closes that stand only: a reopened close and the later close of the
+        // same year would otherwise count one year's result twice.
         $totals = AccountingYearCloseEntry::query()
+            ->whereIn('accounting_year_close_id', AccountingYearClose::query()
+                ->where('status', AccountingYearClose::STATUS_CLOSED)
+                ->select('id'))
             ->when($visible !== null, fn ($query) => $query->whereIn('branch_id', $visible))
             ->pluck('net_surplus')
             ->map(fn ($amount): int => (int) $amount)

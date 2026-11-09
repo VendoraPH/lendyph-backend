@@ -49,10 +49,12 @@ use PDOException;
  *   month. Being first matters under REPEATABLE READ as well: the snapshot
  *   the figures are read from is only taken at the first plain read, after
  *   the locks, so it holds every posting that got in before them.
- * - Then the previous year's close row (close) or this year's close row
- *   (reopen), FOR UPDATE. A close of 2026 and a reopen of 2025 queue on 2025's
- *   row, so 2026 can never be closed on top of a 2025 that was reopened at the
- *   same moment.
+ * - Then the previous year's close row (close, always) or this year's close
+ *   row (reopen), FOR UPDATE. A close of 2026 and a reopen of 2025 queue on
+ *   2025's row, so 2026 can never be closed on top of a 2025 that was
+ *   reopened at the same moment. A reopen also reads the later closes with a
+ *   locking read, so a later close being inserted waits for it, or it waits
+ *   for that close and is refused.
  * - No closing line is ever on the 1200 allowance account (income, expense
  *   and the equity net surplus account only), so neither the close nor the
  *   reversals of a reopen take the allowance lock that JournalPoster takes
@@ -196,8 +198,9 @@ final class YearEndCloser
      * already closed before the close is not in `periods_closed`, so it stays
      * closed.
      *
-     * @throws ValidationException 422 on `close` when the row isn't closed or
-     *                             a later year is closed
+     * @throws ValidationException 422 on `close` when the row isn't closed, a
+     *                             later year is closed, or an account on a
+     *                             closing entry is now a heading
      */
     public function reopen(AccountingYearClose $close, string $reason, User $user): AccountingYearClose
     {
@@ -213,9 +216,13 @@ final class YearEndCloser
                     ]);
                 }
 
+                // A locking read: a close of a later year inserting its row
+                // now waits for this reopen, and one already inserted makes
+                // this read wait for it and then see it.
                 $laterYear = AccountingYearClose::query()
                     ->where('status', AccountingYearClose::STATUS_CLOSED)
                     ->where('year', '>', $fresh->year)
+                    ->lockForUpdate()
                     ->max('year');
 
                 if ($laterYear !== null) {
@@ -223,6 +230,15 @@ final class YearEndCloser
                         'close' => ["Only the latest closed year can be reopened. Reopen {$laterYear} first."],
                     ]);
                 }
+
+                $journals = AccountingJournal::query()
+                    ->whereIn('id', $fresh->entries()->whereNotNull('accounting_journal_id')->pluck('accounting_journal_id'))
+                    ->where('source', self::SOURCE)
+                    ->where('status', 'posted')
+                    ->orderBy('id')
+                    ->get();
+
+                $this->assertTheClosingEntriesCanBeReversed($fresh->year, $journals->pluck('id')->all());
 
                 $closedByTheClose = array_map('intval', $fresh->periods_closed ?? []);
                 $reopened = [];
@@ -234,12 +250,6 @@ final class YearEndCloser
                 }
 
                 $reversals = [];
-                $journals = AccountingJournal::query()
-                    ->whereIn('id', $fresh->entries()->whereNotNull('accounting_journal_id')->pluck('accounting_journal_id'))
-                    ->where('source', self::SOURCE)
-                    ->where('status', 'posted')
-                    ->orderBy('id')
-                    ->get();
 
                 foreach ($journals as $journal) {
                     $reversal = $this->poster->reverse($journal, "{$fresh->year}-12-31", $reason, $user->id);
@@ -276,6 +286,35 @@ final class YearEndCloser
                 return $fresh->refresh();
             });
         });
+    }
+
+    /**
+     * Refuses a reopen whose closing entries can't be reversed: JournalPoster
+     * reverses onto an inactive account (the entry is being undone, not
+     * added to) but never onto a heading, whose balance is its subtree's.
+     * Checked before anything is written, so the refusal is on `close`, in
+     * words, naming each account.
+     *
+     * @param  list<int>  $journalIds
+     */
+    private function assertTheClosingEntriesCanBeReversed(int $year, array $journalIds): void
+    {
+        $headings = DB::table('accounting_journal_lines as l')
+            ->join('accounting_accounts as a', 'a.id', '=', 'l.accounting_account_id')
+            ->whereIn('l.accounting_journal_id', $journalIds)
+            ->where('a.is_group', true)
+            ->distinct()
+            ->orderBy('a.code')
+            ->get(['a.code', 'a.name']);
+
+        if ($headings->isEmpty()) {
+            return;
+        }
+
+        throw ValidationException::withMessages([
+            'close' => $headings->map(fn (object $account): string => "{$account->code} {$account->name} is now a heading, so the "
+                ."closing entries of {$year} can't be reversed. Make it a postable account again before reopening.")->all(),
+        ]);
     }
 
     /**
@@ -416,7 +455,8 @@ final class YearEndCloser
     private function document(int $year, bool $lockingTheYearBefore): array
     {
         $account = $this->netSurplusAccount();
-        $branches = $this->groups($year);
+        $rows = $this->yearRows($year);
+        $branches = $this->groups($rows);
         $periods = $this->periodsOf($year);
         $drafts = AccountingJournal::query()
             ->where('status', 'draft')
@@ -424,7 +464,7 @@ final class YearEndCloser
             ->where('date', '<=', "{$year}-12-31")
             ->count();
 
-        $reasons = $this->blockingReasons($year, $account, $drafts, $periods, $lockingTheYearBefore);
+        $reasons = $this->blockingReasons($year, $account, $drafts, $periods, $this->unpostableAccounts($rows, $year), $lockingTheYearBefore);
         $totalIncome = Money::sum(array_column($branches, 'total_income'));
         $totalExpenses = Money::sum(array_column($branches, 'total_expenses'));
 
@@ -453,16 +493,24 @@ final class YearEndCloser
 
     /**
      * Every reason the close can't run, in words, in a fixed order. A year
-     * already closed has that one reason only: the others (December is
-     * closed, for one) follow from it and would only mislead.
+     * already closed, or one the books don't cover, has that one reason only:
+     * the others (December is closed, for one) follow from it and would only
+     * mislead.
      *
      * @param  Collection<int, AccountingPeriod>  $periods
+     * @param  list<string>  $unpostable  unpostableAccounts()
      * @return list<string>
      */
-    private function blockingReasons(int $year, ?AccountingAccount $account, int $drafts, Collection $periods, bool $lockingTheYearBefore): array
+    private function blockingReasons(int $year, ?AccountingAccount $account, int $drafts, Collection $periods, array $unpostable, bool $lockingTheYearBefore): array
     {
         if ($this->liveClose($year) !== null) {
             return ["{$year} is already closed."];
+        }
+
+        $notCovered = $this->notCoveredByTheBooks($year);
+
+        if ($notCovered !== null) {
+            return [$notCovered];
         }
 
         $reasons = [];
@@ -497,6 +545,67 @@ final class YearEndCloser
                 .($account->is_group ? 'a heading' : 'inactive').'. '.self::SETTINGS_HINT;
         }
 
+        return [...$reasons, ...$unpostable];
+    }
+
+    /**
+     * Why the books don't cover `$year`, or null when they do: from the year
+     * of the earliest journal (any status, the range PeriodCalendar
+     * provisions) on. A year before it has nothing to close, and its preview
+     * and close write nothing.
+     */
+    private function notCoveredByTheBooks(int $year): ?string
+    {
+        $earliest = AccountingJournal::query()->min('date');
+
+        if ($earliest === null) {
+            return "The books have no entries yet, so {$year} has nothing to close.";
+        }
+
+        $firstYear = (int) substr((string) $earliest, 0, 4);
+
+        return $year < $firstYear ? "The books start in {$firstYear}, so {$year} has nothing to close." : null;
+    }
+
+    /**
+     * An income or expense account the close would have to post to but
+     * can't: inactive, or turned into a heading, while a branch holds a net
+     * on it for the year. JournalPoster refuses both, so each is a blocking
+     * reason in words rather than a refusal on `lines` halfway through the
+     * close. The amount is the account's net for the year, as it normally
+     * reads.
+     *
+     * @param  Collection<int, object>  $rows  yearRows()
+     * @return list<string>
+     */
+    private function unpostableAccounts(Collection $rows, int $year): array
+    {
+        $reasons = [];
+
+        foreach ($rows->groupBy('account_id') as $accountRows) {
+            $first = $accountRows->first();
+
+            if (! $first->is_group && $first->is_active) {
+                continue;
+            }
+
+            $holdsANet = $accountRows->contains(fn (object $row): bool => (int) $row->debit !== (int) $row->credit);
+
+            if (! $holdsANet) {
+                continue;
+            }
+
+            $amount = Money::format(BalanceSheetBuilder::netFor([
+                'type' => (string) $first->type,
+                'debit' => Money::sum($accountRows->map(fn (object $row): int => (int) $row->debit)->all()),
+                'credit' => Money::sum($accountRows->map(fn (object $row): int => (int) $row->credit)->all()),
+            ]));
+
+            $reasons[] = $first->is_group
+                ? "{$first->account_code} {$first->account_name} is a heading and holds {$amount} for {$year}. Make it a postable account again before closing."
+                : "{$first->account_code} {$first->account_name} is inactive and holds {$amount} for {$year}. Reactivate it before closing.";
+        }
+
         return $reasons;
     }
 
@@ -505,38 +614,39 @@ final class YearEndCloser
      * year must be closed once anything is posted before this year (Lead's
      * call 6), so the first year of the books needs no earlier close.
      *
-     * Under the close's locks the previous year's close row is read FOR
-     * UPDATE, which a reopen of that year also takes (see the class docblock).
+     * Under the close's locks the previous year's close row is always read
+     * FOR UPDATE first, whatever was posted, which a reopen of that year also
+     * takes (see the class docblock).
      */
     private function previousYearMustBeClosedFirst(int $year, bool $locking): bool
     {
-        $postedBefore = AccountingJournal::query()
-            ->whereIn('status', AccountingJournal::HISTORICAL_STATUSES)
-            ->where('date', '<', "{$year}-01-01")
-            ->exists();
+        $previousClose = AccountingYearClose::query()
+            ->where('closed_year', $year - 1)
+            ->when($locking, fn ($query) => $query->lockForUpdate())
+            ->first();
 
-        if (! $postedBefore) {
+        if ($previousClose !== null) {
             return false;
         }
 
-        return AccountingYearClose::query()
-            ->where('closed_year', $year - 1)
-            ->when($locking, fn ($query) => $query->lockForUpdate())
-            ->first() === null;
+        return AccountingJournal::query()
+            ->whereIn('status', AccountingJournal::HISTORICAL_STATUSES)
+            ->where('date', '<', "{$year}-01-01")
+            ->exists();
     }
 
     /**
-     * The year's income and expense by branch: one grouped query on posted
-     * and reversed lines dated in the year, closing entries and their
-     * reversals left out, so a close after a reopen sees the year's real
-     * figures. Groups with nothing to close are left out. Named branches in
-     * name order, the journals with no branch last.
+     * The year's income and expense by branch and account: one grouped
+     * query on posted and reversed lines dated in the year, closing entries
+     * and their reversals left out, so a close after a reopen sees the year's
+     * real figures. Headings are kept here (unpostableAccounts() needs them)
+     * and left out of the groups, as the income statement leaves them out.
      *
-     * @return list<array{branch: array{id: int, name: string}|null, lines: list<array<string, mixed>>, total_income: int, total_expenses: int, net_surplus: int}>
+     * @return Collection<int, object>
      */
-    private function groups(int $year): array
+    private function yearRows(int $year): Collection
     {
-        $rows = DB::table('accounting_journal_lines as l')
+        return DB::table('accounting_journal_lines as l')
             ->join('accounting_journals as j', 'j.id', '=', 'l.accounting_journal_id')
             ->join('accounting_accounts as a', 'a.id', '=', 'l.accounting_account_id')
             ->whereIn('j.status', AccountingJournal::HISTORICAL_STATUSES)
@@ -544,8 +654,7 @@ final class YearEndCloser
             ->where('j.date', '<=', "{$year}-12-31")
             ->tap(fn (Builder $query) => IncomeStatementBuilder::withoutClosingEntries($query, 'j'))
             ->whereIn('a.type', ['income', 'expense'])
-            ->where('a.is_group', false)
-            ->groupBy('j.branch_id', 'a.id', 'a.code', 'a.name', 'a.type')
+            ->groupBy('j.branch_id', 'a.id', 'a.code', 'a.name', 'a.type', 'a.is_group', 'a.is_active')
             ->orderBy('a.code')
             ->select([
                 'j.branch_id',
@@ -553,10 +662,25 @@ final class YearEndCloser
                 'a.code as account_code',
                 'a.name as account_name',
                 'a.type',
+                'a.is_group',
+                'a.is_active',
                 DB::raw('sum(l.debit) as debit'),
                 DB::raw('sum(l.credit) as credit'),
             ])
             ->get();
+    }
+
+    /**
+     * The year's rows by branch, as the close posts them. Groups with nothing
+     * to close are left out. Named branches in name order, the journals with
+     * no branch last.
+     *
+     * @param  Collection<int, object>  $rows  yearRows()
+     * @return list<array{branch: array{id: int, name: string}|null, lines: list<array<string, mixed>>, total_income: int, total_expenses: int, net_surplus: int}>
+     */
+    private function groups(Collection $rows): array
+    {
+        $rows = $rows->reject(fn (object $row): bool => (bool) $row->is_group);
 
         $names = Branch::query()
             ->whereIn('id', $rows->pluck('branch_id')->filter()->unique()->values())
@@ -659,7 +783,8 @@ final class YearEndCloser
 
     /**
      * Period rows for the books' months (PeriodCalendar), and, once the year
-     * has ended, for each of its twelve months. A month with no row doesn't
+     * has ended, for each of its twelve months. Nothing for a year the books
+     * don't cover (notCoveredByTheBooks()). A month with no row doesn't
      * lock (PeriodGuard), so a close that left January without one would
      * leave it open to postings. Only missing rows are inserted, with
      * insertOrIgnore against the unique code, as PeriodCalendar does: an
@@ -667,6 +792,10 @@ final class YearEndCloser
      */
     private function provision(int $year): void
     {
+        if ($this->notCoveredByTheBooks($year) !== null) {
+            return;
+        }
+
         $this->calendar->ensureProvisioned();
 
         if (! $this->hasEnded($year)) {

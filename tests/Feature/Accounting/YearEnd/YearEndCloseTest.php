@@ -261,6 +261,17 @@ class YearEndCloseTest extends TestCase
         $this->assertSame(1, AuditLog::query()->where('auditable_type', AccountingYearClose::class)->count());
     }
 
+    public function test_the_audit_trail_reads_the_closes_net_surplus_in_pesos(): void
+    {
+        $this->postTheYear();
+        $this->closed();
+
+        $audit = AuditLog::query()->where('action', 'year_closed')->sole();
+        $changes = collect($this->getJson("/api/audit-logs/{$audit->id}")->assertOk()->json('data.changes'))->keyBy('field');
+
+        $this->assertSame('₱69,200.50', $changes['net_surplus']['new']);
+    }
+
     public function test_the_close_needs_accounting_close_and_view_all(): void
     {
         $this->postTheYear();
