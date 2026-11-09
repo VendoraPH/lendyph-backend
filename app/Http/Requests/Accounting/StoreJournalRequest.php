@@ -79,36 +79,26 @@ class StoreJournalRequest extends FormRequest
     }
 
     /**
-     * Once the date, branch and lines are valid: no branch, a line on the
-     * allowance, and a date after today in Manila is refused on `date`.
+     * Once the date and branch are valid: no branch, a line on the allowance,
+     * and a date after today in Manila is refused on `date`.
      */
     private function refuseAFutureNoBranchAllowanceDate(Validator $validator): void
     {
         $errors = $validator->errors();
-
-        if ($errors->has('date') || $errors->has('branch_id') || filled($this->input('branch_id'))) {
-            return;
-        }
-
-        $date = (string) $this->input('date');
-        $today = $this->todayInManila();
         $lines = $this->input('lines');
 
-        if ($date <= $today || ! is_array($lines)) {
+        if ($errors->has('date') || $errors->has('branch_id') || ! is_array($lines)) {
             return;
         }
 
-        $allowance = $this->allowanceAccountAmong(array_map(
-            static fn (mixed $line): mixed => is_array($line) ? ($line['account_id'] ?? null) : null,
-            $lines,
-        ));
+        $refusal = $this->futureNoBranchAllowanceRefusal(
+            $this->input('branch_id'),
+            (string) $this->input('date'),
+            array_map(static fn (mixed $line): mixed => is_array($line) ? ($line['account_id'] ?? null) : null, $lines),
+        );
 
-        if ($allowance !== null) {
-            $errors->add('date', sprintf(
-                'An entry with no branch that has a line on %1$s can\'t be dated after today (%2$s). Date it %2$s or earlier, or choose a branch.',
-                $this->accountInWords($allowance),
-                $this->dayInWords($today),
-            ));
+        if ($refusal !== null) {
+            $errors->add('date', $refusal);
         }
     }
 

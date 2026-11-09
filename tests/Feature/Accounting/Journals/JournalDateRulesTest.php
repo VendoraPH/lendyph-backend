@@ -29,7 +29,9 @@ class JournalDateRulesTest extends TestCase
 
     private const FUTURE_REFUSAL = 'An entry with no branch that has a line on 1200 Allowance for Credit Losses can\'t be dated after today ('.self::TODAY.'). Date it '.self::TODAY.' or earlier, or choose a branch.';
 
-    private const REVERSAL_REFUSAL = 'This entry has no branch and a line on 1200 Allowance for Credit Losses, so its reversal can\'t be dated after today ('.self::TODAY.'). Date it '.self::TODAY.' or earlier.';
+    private const REVERSAL_REFUSAL = 'This entry has no branch and a line on 1200 Allowance for Credit Losses, so its reversal can\'t be dated after today ('.self::TODAY.'). Date it from Nov 1, 2026 to '.self::TODAY.'.';
+
+    private const FUTURE_ENTRY_REVERSAL_REFUSAL = 'This entry has no branch, a line on 1200 Allowance for Credit Losses and a date after today ('.self::TODAY.'), so its reversal can only be dated on the entry\'s own date. Date it Dec 1, 2026.';
 
     protected function setUp(): void
     {
@@ -140,6 +142,87 @@ class JournalDateRulesTest extends TestCase
 
         // Today, the default, is allowed.
         $this->postJson("/api/accounting/journals/{$original->id}/reverse")->assertCreated();
+    }
+
+    public function test_before_the_entry_the_refusal_names_the_same_allowed_range(): void
+    {
+        $original = $this->postSimpleJournal('1200', '3050', 70_000, ['branch_id' => null, 'date' => '2026-11-01']);
+
+        $this->postJson("/api/accounting/journals/{$original->id}/reverse", ['date' => '2026-10-31'])
+            ->assertStatus(422)
+            ->assertJsonPath('errors.date.0', 'The reversal can\'t be dated before the entry it reverses (Nov 1, 2026). Date it from Nov 1, 2026 to '.self::TODAY.'.');
+
+        $today = $this->postSimpleJournal('1200', '3050', 70_000, ['branch_id' => null, 'date' => '2026-11-11']);
+
+        $this->postJson("/api/accounting/journals/{$today->id}/reverse", ['date' => '2026-11-12'])
+            ->assertStatus(422)
+            ->assertJsonPath('errors.date.0', 'This entry has no branch and a line on 1200 Allowance for Credit Losses, so its reversal can\'t be dated after today ('.self::TODAY.'). Date it '.self::TODAY.'.');
+    }
+
+    public function test_an_entry_already_posted_with_a_future_date_reverses_on_its_own_date(): void
+    {
+        // Posted before the rule existed: the poster itself never refused it.
+        $original = $this->postSimpleJournal('1200', '3050', 70_000, ['branch_id' => null, 'date' => '2026-12-01']);
+
+        // Today (the default), a day before it and a day after it all get the
+        // one message, which names the one day that satisfies both rules.
+        $this->postJson("/api/accounting/journals/{$original->id}/reverse")
+            ->assertStatus(422)
+            ->assertJsonPath('errors.date', [self::FUTURE_ENTRY_REVERSAL_REFUSAL]);
+
+        foreach (['2026-11-30', '2026-12-02'] as $date) {
+            $this->postJson("/api/accounting/journals/{$original->id}/reverse", ['date' => $date])
+                ->assertStatus(422)
+                ->assertJsonPath('errors.date', [self::FUTURE_ENTRY_REVERSAL_REFUSAL]);
+        }
+
+        $this->assertSame('posted', $original->fresh()->status);
+
+        // The pair cancels out on the entry's own date, so that one is allowed.
+        $id = $this->postJson("/api/accounting/journals/{$original->id}/reverse", ['date' => '2026-12-01'])
+            ->assertCreated()
+            ->json('data.id');
+
+        $this->assertSame('2026-12-01', AccountingJournal::query()->findOrFail($id)->date->toDateString());
+        $this->assertSame('reversed', $original->fresh()->status);
+    }
+
+    public function test_a_future_no_branch_allowance_draft_saved_before_the_rule_cant_be_posted(): void
+    {
+        // Saved through the poster, as a draft saved before this rule would be.
+        $draft = $this->draftJournal([
+            ['account_id' => $this->account('1200'), 'debit' => 70_000, 'credit' => 0],
+            ['account_id' => $this->account('3050'), 'debit' => 0, 'credit' => 70_000],
+        ], ['branch_id' => null, 'date' => '2026-11-12']);
+
+        $this->postJson("/api/accounting/journals/{$draft->id}/post")
+            ->assertStatus(422)
+            ->assertJsonPath('errors.date', [self::FUTURE_REFUSAL]);
+
+        $this->assertSame('draft', $draft->fresh()->status);
+
+        // Dated today, or given a branch, it posts.
+        $this->putJson("/api/accounting/journals/{$draft->id}", $this->entry('2026-11-11'))->assertOk();
+        $this->postJson("/api/accounting/journals/{$draft->id}/post")->assertOk()->assertJsonPath('data.status', 'posted');
+
+        $branched = $this->draftJournal([
+            ['account_id' => $this->account('1200'), 'debit' => 70_000, 'credit' => 0],
+            ['account_id' => $this->account('3050'), 'debit' => 0, 'credit' => 70_000],
+        ], ['date' => '2026-11-12']);
+        $this->postJson("/api/accounting/journals/{$branched->id}/post")->assertOk();
+    }
+
+    public function test_posting_still_needs_journals_post(): void
+    {
+        $draft = $this->draftJournal([
+            ['account_id' => $this->account('5030'), 'debit' => 100, 'credit' => 0],
+            ['account_id' => $this->account('1010'), 'debit' => 0, 'credit' => 100],
+        ]);
+
+        $this->actingAs($this->userWithNoRole());
+
+        $this->postJson("/api/accounting/journals/{$draft->id}/post")->assertForbidden();
+        $this->assertSame('draft', $draft->fresh()->status);
     }
 
     public function test_a_reversal_may_still_be_future_dated_with_a_branch_or_without_an_allowance_line(): void

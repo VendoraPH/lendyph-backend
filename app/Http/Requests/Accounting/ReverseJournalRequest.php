@@ -22,7 +22,11 @@ use Illuminate\Validation\Validator;
  * The reversal of an entry with no branch that has a line on the allowance
  * can't be dated after today in Manila either
  * ({@see RefusesFutureNoBranchAllowanceDates}): the mirror has the same branch
- * and lines as the entry.
+ * and lines as the entry. The entry's own date is always allowed, because the
+ * pair cancels out on that day; so an entry posted with a future date before
+ * the rule existed can still be reversed, on its own date. Every refusal of
+ * such an entry names the one range that satisfies both rules, so the two
+ * never contradict each other.
  *
  * Unlike a manual entry's, a reversal date may carry a time or an offset: it
  * is read, checked and stored as its Manila day (see passedValidation()).
@@ -62,9 +66,11 @@ class ReverseJournalRequest extends FormRequest
     }
 
     /**
-     * Refuses a reversal dated before the entry it reverses, in words, once
-     * the date itself is valid. Both are compared as days in the app's time
-     * zone (Manila), so a date sent with an offset counts as its Manila day.
+     * Refuses, in words, once the date itself is valid, a reversal dated
+     * before the entry it reverses, and one of a no-branch allowance entry
+     * dated after today (unless it is the entry's own date). All days are
+     * compared in the app's time zone (Manila), so a date sent with an offset
+     * counts as its Manila day.
      *
      * @return list<callable(Validator): void>
      */
@@ -78,46 +84,65 @@ class ReverseJournalRequest extends FormRequest
                     return;
                 }
 
-                $entryDay = $journal->date->toDateString();
+                $refusal = $this->dateRefusal($journal, $journal->date->toDateString(), $this->reversalDay());
 
-                if ($this->reversalDay() < $entryDay) {
-                    $validator->errors()->add('date', sprintf(
-                        'The reversal can\'t be dated before the entry it reverses (%1$s). Choose %1$s or later.',
-                        Carbon::parse($entryDay)->format('M j, Y'),
-                    ));
-
-                    return;
+                if ($refusal !== null) {
+                    $validator->errors()->add('date', $refusal);
                 }
-
-                $this->refuseAFutureNoBranchAllowanceDate($validator, $journal);
             },
         ];
     }
 
     /**
-     * An entry with no branch and a line on the allowance can't be reversed
-     * into a day after today in Manila; with a branch, or no allowance line, a
-     * future reversal is still allowed.
+     * Allowed: from the entry's own date on. For an entry with no branch and
+     * a line on the allowance, also no later than today, except the entry's
+     * own date, which is always allowed. Each refusal of that entry names the
+     * days that are allowed, so following one message never meets the other.
      */
-    private function refuseAFutureNoBranchAllowanceDate(Validator $validator, AccountingJournal $journal): void
+    private function dateRefusal(AccountingJournal $journal, string $entryDay, string $day): ?string
     {
         $today = $this->todayInManila();
 
-        if ($journal->branch_id !== null || $this->reversalDay() <= $today) {
-            return;
+        if ($day === $entryDay || ($day > $entryDay && $day <= $today)) {
+            return null;
         }
 
-        $allowance = $this->allowanceAccountAmong(
-            $journal->lines()->pluck('accounting_account_id')->all(),
-        );
+        $allowance = $journal->branch_id === null
+            ? $this->allowanceAccountAmong($journal->lines()->pluck('accounting_account_id')->all())
+            : null;
 
-        if ($allowance !== null) {
-            $validator->errors()->add('date', sprintf(
-                'This entry has no branch and a line on %1$s, so its reversal can\'t be dated after today (%2$s). Date it %2$s or earlier.',
-                $this->accountInWords($allowance),
+        if ($allowance === null) {
+            return $day < $entryDay
+                ? sprintf(
+                    'The reversal can\'t be dated before the entry it reverses (%1$s). Choose %1$s or later.',
+                    $this->dayInWords($entryDay),
+                )
+                : null;
+        }
+
+        $account = $this->accountInWords($allowance);
+
+        if ($entryDay > $today) {
+            return sprintf(
+                'This entry has no branch, a line on %1$s and a date after today (%2$s), so its reversal can only be dated on the entry\'s own date. Date it %3$s.',
+                $account,
                 $this->dayInWords($today),
-            ));
+                $this->dayInWords($entryDay),
+            );
         }
+
+        $allowed = $entryDay === $today
+            ? $this->dayInWords($today)
+            : 'from '.$this->dayInWords($entryDay).' to '.$this->dayInWords($today);
+
+        return $day < $entryDay
+            ? sprintf('The reversal can\'t be dated before the entry it reverses (%1$s). Date it %2$s.', $this->dayInWords($entryDay), $allowed)
+            : sprintf(
+                'This entry has no branch and a line on %1$s, so its reversal can\'t be dated after today (%2$s). Date it %3$s.',
+                $account,
+                $this->dayInWords($today),
+                $allowed,
+            );
     }
 
     /**

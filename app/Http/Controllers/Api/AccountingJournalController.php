@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\Accounting\PostJournalRequest;
 use App\Http\Requests\Accounting\PreviewJournalRequest;
 use App\Http\Requests\Accounting\ReverseJournalRequest;
 use App\Http\Requests\Accounting\StoreJournalRequest;
@@ -334,14 +335,12 @@ class AccountingJournalController extends Controller
         responses: [
             new OA\Response(response: 200, description: 'The posted entry, carrying its new journal_no'),
             new OA\Response(response: 403, description: 'Missing journals:post'),
-            new OA\Response(response: 422, description: 'Already posted, unbalanced, single-line, or referencing an unpostable account'),
+            new OA\Response(response: 422, description: 'Already posted, unbalanced, single-line, or referencing an unpostable account; or, in words on `errors.date`, a draft with no branch and a line on the allowance account dated after today in Manila (the same rule as create)'),
         ],
     )]
-    public function post(AccountingJournal $journal): JsonResponse
+    public function post(PostJournalRequest $request, AccountingJournal $journal): JsonResponse
     {
-        $this->authorize('journals:post');
-
-        $posted = $this->poster->post($journal, request()->user()?->id);
+        $posted = $this->poster->post($journal, $request->user()?->id);
 
         return $this->respond($posted);
     }
@@ -365,7 +364,7 @@ class AccountingJournalController extends Controller
         responses: [
             new OA\Response(response: 201, description: 'The posted reversing entry; its `reverses_journal_no` is the original\'s number'),
             new OA\Response(response: 403, description: 'Missing journals:reverse'),
-            new OA\Response(response: 422, description: 'In words: not posted, already reversed, or part of a year-end close; a reversal dated before the entry\'s own date, given or by default (`errors.date`); or, for an entry with no branch and a line on the allowance account, a reversal dated after today in Manila (`errors.date`)'),
+            new OA\Response(response: 422, description: 'In words: not posted, already reversed, or part of a year-end close; a reversal dated before the entry\'s own date, given or by default (`errors.date`); or, for an entry with no branch and a line on the allowance account, a reversal dated after today in Manila (`errors.date`; the entry\'s own date is always allowed, since the pair cancels out on it, and the message names the dates that are)'),
         ],
     )]
     public function reverse(ReverseJournalRequest $request, AccountingJournal $journal): JsonResponse
