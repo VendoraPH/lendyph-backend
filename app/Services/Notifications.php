@@ -41,7 +41,9 @@ use Throwable;
  * command calls inside its own per-loan transaction (see there).
  *
  * Staff only. Nothing here reaches a borrower: the database channel is the
- * only channel, and there is no mail or SMS.
+ * only channel, and there is no mail or SMS. The reminders notices
+ * (reminderContactInvalid(), reminderFollowUp(), reminderFailed()) tell staff
+ * about a member's reminders; they never contact the member.
  */
 final class Notifications
 {
@@ -280,6 +282,72 @@ final class Notifications
         );
     }
 
+    /**
+     * A reminder send proved the member's mobile number or email bad (an
+     * invalid number, a bounced or blocked address). Told to the loan's
+     * assigned officer, or its creator when it has none. The recipient is
+     * shown masked. For App\Services\Reminders\StaffNotices, which sends at
+     * once inside its once-only marker's transaction, so a failure here rolls
+     * the marker back.
+     */
+    public function reminderContactInvalid(Loan $loan, string $channel, string $maskedRecipient, string $reason): void
+    {
+        $what = $channel === 'email' ? 'email address' : 'mobile number';
+
+        $this->send(
+            $loan,
+            null,
+            fn (): Collection => $this->officerOrCreator($loan),
+            fn (): StaffNotification => new StaffNotification(
+                StaffNotification::REMINDER_CONTACT_INVALID,
+                'Member contact needs updating',
+                sprintf('%s for %s: the %s reminder to %s failed (%s). Update the member\'s %s; reminders to it have stopped.', $this->loanLabel($loan), $this->borrowerName($loan), $this->channelLabel($channel), $maskedRecipient, Str::limit($reason, 120), $what),
+                $this->loanUrl($loan),
+                ['loan_id' => (int) $loan->getKey(), 'borrower_id' => (int) $loan->borrower_id],
+            ),
+        );
+    }
+
+    /**
+     * A loan reached the long-past-due reminder (the 15-day rule by default):
+     * the loan officer follows up rather than the member getting more texts.
+     */
+    public function reminderFollowUp(Loan $loan, int $daysPastDue, float $amountDue): void
+    {
+        $this->send(
+            $loan,
+            null,
+            fn (): Collection => $this->usersById([$loan->account_officer_id]),
+            fn (): StaffNotification => new StaffNotification(
+                StaffNotification::REMINDER_FOLLOW_UP,
+                'Account requires follow up',
+                sprintf('%s for %s is %d days past due, with %s due.', $this->loanLabel($loan), $this->borrowerName($loan), $daysPastDue, $this->peso($amountDue)),
+                $this->loanUrl($loan),
+                ['loan_id' => (int) $loan->getKey()],
+            ),
+        );
+    }
+
+    /**
+     * A reminder could not be sent after every attempt, or its send was
+     * interrupted and it was not resent.
+     */
+    public function reminderFailed(Loan $loan, string $channel, ?string $maskedRecipient, string $reason): void
+    {
+        $this->send(
+            $loan,
+            null,
+            fn (): Collection => $this->officerOrCreator($loan),
+            fn (): StaffNotification => new StaffNotification(
+                StaffNotification::REMINDER_FAILED,
+                'Reminder could not be sent',
+                sprintf('The %s reminder for %s (%s)%s could not be sent: %s.', $this->channelLabel($channel), $this->loanLabel($loan), $this->borrowerName($loan), $maskedRecipient === null ? '' : ' to '.$maskedRecipient, rtrim(Str::limit($reason, 160), '.')),
+                $this->loanUrl($loan),
+                ['loan_id' => (int) $loan->getKey()],
+            ),
+        );
+    }
+
     private function adjustmentApplied(string $type, string $title, string $verb, Loan $loan, LoanAdjustment $adjustment, ?User $actor): void
     {
         $this->deliver(
@@ -368,6 +436,16 @@ final class Notifications
     }
 
     /**
+     * The loan's assigned officer, or the user who created it when it has none.
+     *
+     * @return Collection<int, User>
+     */
+    private function officerOrCreator(Loan $loan): Collection
+    {
+        return $this->usersById([$loan->account_officer_id ?? $loan->created_by]);
+    }
+
+    /**
      * @param  array<int, int|string|null>  $ids
      * @return Collection<int, User>
      */
@@ -452,6 +530,11 @@ final class Notifications
     private function loanUrl(Loan $loan): string
     {
         return '/loans/'.$loan->getKey();
+    }
+
+    private function channelLabel(string $channel): string
+    {
+        return $channel === 'email' ? 'email' : 'SMS';
     }
 
     private function peso(mixed $amount): string
