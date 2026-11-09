@@ -81,6 +81,8 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'loan_product_name', type: 'string', nullable: true),
         new OA\Property(property: 'account_officer_id', type: 'integer', nullable: true),
         new OA\Property(property: 'release_date', type: 'string', format: 'date', nullable: true),
+        new OA\Property(property: 'release_method', type: 'string', nullable: true, enum: ['cash', 'gcash', 'maya', 'bank_transfer', 'online'], description: 'How the release went out (a restructure: how its deductions were collected). Null for a loan released before it was recorded, which screens read as "Not recorded".'),
+        new OA\Property(property: 'release_reference', type: 'string', nullable: true, description: 'The release\'s reference number; null for a cash release without one and for loans released before it was recorded.'),
         new OA\Property(property: 'rejection_remarks', type: 'string', nullable: true),
         new OA\Property(property: 'insurance_premium_percentage', type: 'number', nullable: true),
         new OA\Property(property: 'insurance_premium_amount', type: 'number', nullable: true),
@@ -321,6 +323,8 @@ class LoanResource extends JsonResource
             'rejected_at' => $this->rejected_at,
             'released_at' => $this->released_at,
             'release_date' => $this->released_at?->toDateString(),
+            'release_method' => $this->release_method,
+            'release_reference' => $this->release_reference,
             'insurance_premium_percentage' => $this->insurance_premium_pct !== null
                 ? (float) $this->insurance_premium_pct
                 : null,

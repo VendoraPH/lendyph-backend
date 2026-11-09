@@ -1288,7 +1288,7 @@ class LoanService
         }, GeneratedNumberWrite::CO_MAKER_CONFLICT);
     }
 
-    public function release(Loan $loan, User $releaser, array $insurance = [], ?string $feeFingerprint = null): Loan
+    public function release(Loan $loan, User $releaser, array $insurance = [], ?string $feeFingerprint = null, string $method = 'cash', ?string $reference = null): Loan
     {
         $this->guardStatus($loan, 'approved', 'release');
 
@@ -1300,7 +1300,7 @@ class LoanService
         // A deadlock or lock wait timeout is a 409, not a 500. This is the
         // outermost transaction: LoanController::release() and the test
         // helpers are the only callers.
-        $released = LoanWriteTransaction::run(function () use ($loan, $releaser, $insurance, $feeFingerprint, $heldBefore) {
+        $released = LoanWriteTransaction::run(function () use ($loan, $releaser, $insurance, $feeFingerprint, $heldBefore, $method, $reference) {
             // THE FIRST STATEMENT IN THIS TRANSACTION, and it has to stay that
             // way. Under REPEATABLE READ the consistent snapshot is fixed by the
             // first plain SELECT, and neither a locking read nor DML moves it —
@@ -1343,6 +1343,8 @@ class LoanService
                 'loan_account_number' => $loanAccountNumber,
                 'released_by' => $releaser->id,
                 'released_at' => now(),
+                'release_method' => $method,
+                'release_reference' => $reference,
             ]);
 
             // The fee rules configured in Settings, charged here and nowhere
@@ -1451,8 +1453,18 @@ class LoanService
              * `released` loans without coming through here, and must not post a
              * journal for a disbursement that happened years ago under someone
              * else's books.
+             *
+             * A restructure posts J1 on this loan and, when principal is
+             * written off, J2 on its source, from the split
+             * closeRestructuredSource() stored. It has to be the FIRST
+             * journal posting in this transaction: it locks the allowance
+             * account row before any journal-number lock.
              */
-            app(AutomaticPoster::class)->loanRelease($loan, $releaser->id);
+            if ($lockedSource) {
+                app(AutomaticPoster::class)->restructureRelease($loan, $lockedSource, $releaser->id, $method);
+            } else {
+                app(AutomaticPoster::class)->loanRelease($loan, $releaser->id, $method);
+            }
 
             CollateralPledgeGuard::assertNoDoublePledge($lockedCollateralIds, $loan);
 
@@ -1566,6 +1578,8 @@ class LoanService
             }
         }
 
+        $this->assertSourceStillCoversPrincipal($loan, $source);
+
         return $source;
     }
 
@@ -1587,8 +1601,19 @@ class LoanService
         // Loan::PLEDGING_STATUSES, so it FREES a collateral rather than taking
         // one. CollateralPledgeGuard is deliberately not called from here.
         $previousStatus = $source->status;
-        $closingBalance = $this->totalOutstanding($source);
+        $parts = self::restructurableParts($source->amortizationSchedules()->reorder()->get());
+        $closingBalance = array_sum($parts) / 100;
         $carriedPremium = self::toCentavos((float) $source->insurance_remaining_balance);
+
+        // The split J1 and J2 post, from the live periods read before they are
+        // cleared. Stored on the new loan before anything posts.
+        $split = $this->restructureSplitOf($parts, $newLoan);
+        $newLoan->update([
+            'restructure_carried_principal' => self::pesos($split['carried_principal']),
+            'restructure_capitalised_interest' => self::pesos($split['capitalised_interest']),
+            'restructure_capitalised_penalty' => self::pesos($split['capitalised_penalty']),
+            'restructure_written_off_principal' => self::pesos($split['written_off_principal']),
+        ]);
 
         $this->clearOpenSchedules($source, $newLoan);
 
@@ -1664,6 +1689,111 @@ class LoanService
                 .($newLoan->loan_account_number ?? $newLoan->application_number)
                 .($writeOff > 0 ? ", ₱{$writeOff} written off ({$newLoan->restructure_remarks})" : ''),
         );
+    }
+
+    /**
+     * The unpaid principal, interest and penalty of a loan's open periods,
+     * each in whole centavos: restructurableCentavos() taken apart, over the
+     * same periods and by the same per-period rule, so the three always add
+     * up to it. What a restructure's split is worked out from.
+     *
+     * @param  iterable<AmortizationSchedule>  $schedules  the loan's periods
+     * @return array{principal: int, interest: int, penalty: int}
+     */
+    public static function restructurableParts(iterable $schedules): array
+    {
+        $owed = fn (mixed $due, mixed $paid): int => max(0, self::toCentavos((float) ($due ?? 0)) - self::toCentavos((float) ($paid ?? 0)));
+        $parts = ['principal' => 0, 'interest' => 0, 'penalty' => 0];
+
+        foreach ($schedules as $s) {
+            if (! in_array($s->status, ['pending', 'partial', 'overdue'], true)) {
+                continue;
+            }
+
+            $parts['principal'] += $owed($s->principal_due, $s->principal_paid);
+            $parts['interest'] += $owed($s->interest_due, $s->interest_paid);
+            $parts['penalty'] += $owed($s->penalty_amount, $s->penalty_paid);
+        }
+
+        return $parts;
+    }
+
+    /**
+     * GET /loans/{id}/release-preview's `restructure` block: what releasing
+     * this restructure would post, by the code the release posts it with
+     * (restructurableParts() of the source's live periods, then
+     * PostingRules::restructureSplit()), writing nothing. 2dp strings.
+     *
+     * `collected_now` is every deduction the release withholds, insurance
+     * included, which a restructure collects from the member; nothing is
+     * paid out.
+     *
+     * @return array{carried_principal: string, capitalised_interest: string, capitalised_penalty: string, written_off_principal: string, collected_now: string, paid_out: string}
+     *
+     * @throws ValidationException when the source is no longer open, or was paid down below the principal
+     */
+    public function restructureReleasePreview(Loan $loan, string $collectedNow): array
+    {
+        $source = $loan->sourceLoan()->first();
+
+        if (! $source || ! in_array($source->status, ['released', 'ongoing'], true)) {
+            throw ValidationException::withMessages([
+                'source_loan_id' => ['The loan being restructured is no longer open, so this restructure cannot be released.'],
+            ]);
+        }
+
+        $this->assertSourceStillCoversPrincipal($loan, $source);
+        $split = $this->restructureSplitOf(self::restructurableParts($source->amortizationSchedules()->reorder()->get()), $loan);
+
+        return [
+            'carried_principal' => self::pesos($split['carried_principal']),
+            'capitalised_interest' => self::pesos($split['capitalised_interest']),
+            'capitalised_penalty' => self::pesos($split['capitalised_penalty']),
+            'written_off_principal' => self::pesos($split['written_off_principal']),
+            'collected_now' => self::pesos(self::toCentavos((float) $collectedNow)),
+            'paid_out' => self::pesos(0),
+        ];
+    }
+
+    /**
+     * Refuse a restructure whose principal is now more than its source owes
+     * on its open periods: the source was paid down after approval, and a
+     * restructure pays nothing out, so it cannot carry more than is owed.
+     *
+     * @throws ValidationException 422 on `principal_amount`
+     */
+    private function assertSourceStillCoversPrincipal(Loan $loan, Loan $source): void
+    {
+        $owed = array_sum(self::restructurableParts($source->amortizationSchedules()->reorder()->get()));
+
+        if (self::toCentavos((float) $loan->principal_amount) > $owed) {
+            throw ValidationException::withMessages([
+                'principal_amount' => ['The source loan was paid down after approval. Send the restructure back for approval again.'],
+            ]);
+        }
+    }
+
+    /**
+     * The restructure split of `$loan`'s principal over its source's parts,
+     * in centavos (PostingRules::restructureSplit()).
+     *
+     * @param  array{principal: int, interest: int, penalty: int}  $parts
+     * @return array{carried_principal: int, capitalised_interest: int, capitalised_penalty: int, written_off_principal: int}
+     */
+    private function restructureSplitOf(array $parts, Loan $loan): array
+    {
+        return Accounting\PostingRules::restructureSplit(
+            $parts['principal'],
+            $parts['interest'],
+            $parts['penalty'],
+            self::toCentavos((float) $loan->principal_amount),
+        );
+    }
+
+    /** Whole centavos as the 2dp peso string a `decimal:2` column and the previews hold. */
+    private static function pesos(int $centavos): string
+    {
+        return sprintf('%s%d.%02d', $centavos < 0 ? '-' : '', intdiv(abs($centavos), 100), abs($centavos) % 100);
     }
 
     /**
