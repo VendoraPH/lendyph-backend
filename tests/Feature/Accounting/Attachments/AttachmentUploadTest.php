@@ -133,6 +133,13 @@ class AttachmentUploadTest extends TestCase
             ->assertJsonValidationErrors('file');
     }
 
+    public function test_a_pdf_named_with_another_extension_is_refused(): void
+    {
+        $this->upload($this->postedOn($this->branch), $this->pdf('receipt.bat'))
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('file');
+    }
+
     public function test_an_svg_is_refused(): void
     {
         $svg = '<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>';

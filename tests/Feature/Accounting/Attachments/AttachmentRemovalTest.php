@@ -144,6 +144,24 @@ class AttachmentRemovalTest extends TestCase
         $this->assertStringContainsString('Wrong supplier', json_encode($this->removalRow($expense)->new_values));
     }
 
+    public function test_a_caller_who_can_remove_nothing_gets_403_before_any_lookup(): void
+    {
+        $journal = $this->draftOn($this->branch);
+        $expense = $this->expenseOn($this->branch);
+        $journalAttachment = $this->attachmentOn($journal);
+        $expenseAttachment = $this->attachmentOn($expense);
+
+        $this->actingAs($this->branchUser(['journals:view', 'expenses:view', 'expenses:create']));
+
+        $this->remove($journal, $journalAttachment, ['reason' => 'x'])->assertForbidden();
+        $this->remove($expense, $expenseAttachment, ['reason' => 'x'])->assertForbidden();
+        $this->deleteJson('/api/accounting/journals/999999/attachments/999999', ['reason' => 'x'])->assertForbidden();
+        $this->deleteJson('/api/accounting/expenses/999999/attachments/999999', ['reason' => 'x'])->assertForbidden();
+
+        $this->assertModelExists($journalAttachment);
+        $this->assertModelExists($expenseAttachment);
+    }
+
     public function test_an_attachment_of_another_owner_answers_404(): void
     {
         $journal = $this->draftOn($this->branch);

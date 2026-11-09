@@ -14,7 +14,9 @@ use Illuminate\Foundation\Http\FormRequest;
  * The permission is checked first, then the owner is resolved with its own
  * branch rule (a hidden one answers 404), and only then is the file
  * validated. The limits are the member document limits (StoreDocumentRequest):
- * 10 MB, and jpg, jpeg, png, pdf, doc or docx judged by the file's content.
+ * 10 MB, and jpg, jpeg, png, pdf, doc or docx, judged by the file's content
+ * AND its name's extension: the name becomes the download name, so a PDF
+ * named `.bat` is refused too.
  * The 20-per-owner limit is checked under the owner's lock in the controller.
  */
 class StoreAttachmentRequest extends FormRequest
@@ -41,7 +43,7 @@ class StoreAttachmentRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'file' => ['required', 'file', 'max:10240', 'mimes:jpg,jpeg,png,pdf,doc,docx'],
+            'file' => ['required', 'file', 'max:10240', 'mimes:jpg,jpeg,png,pdf,doc,docx', 'extensions:jpg,jpeg,png,pdf,doc,docx'],
             'label' => ['nullable', 'string', 'max:255'],
         ];
     }
