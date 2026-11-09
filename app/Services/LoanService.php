@@ -984,7 +984,8 @@ class LoanService
      * from the latest committed rows whatever snapshot the transaction holds.
      * A principal now above what the source owes is refused, as on create.
      * When the figures fell, they are written with a
-     * `restructure_terms_retaken` audit row (new values only); when they
+     * `restructure_terms_retaken` audit row (new values only, `retaken_on`
+     * naming the moment); when they
      * didn't, nothing is written.
      *
      * @param  'submission'|'approval'|'edit'  $moment
@@ -993,13 +994,27 @@ class LoanService
      */
     public function retakeRestructureTerms(Loan $loan, string $moment, ?User $user = null): void
     {
-        if ($loan->source_loan_id === null || $loan->restructure_principal === null) {
+        if ($loan->source_loan_id === null) {
+            return;
+        }
+
+        // The stored figures as committed, by a locking read: the caller's
+        // copy may predate another edit that re-took them (lockEditableLoan()
+        // locks the row without refreshing it). The caller already holds this
+        // lock, so it waits for nothing.
+        $stored = Loan::whereKey($loan->getKey())->lockForUpdate()
+            ->first(['id', 'principal_amount', 'restructure_principal', 'restructure_outstanding', 'restructure_shortfall']);
+
+        // No approved snapshot to compare with: nothing to follow, and the
+        // release refuses terms without one.
+        if ($stored === null || $stored->restructure_principal === null
+            || $stored->restructure_outstanding === null || $stored->restructure_shortfall === null) {
             return;
         }
 
         $source = $this->lockSourceLoan($loan->source_loan_id);
         $schedules = $source->amortizationSchedules()->reorder()->lockForUpdate()->get();
-        $figures = $this->restructureFigures($source, (float) $loan->principal_amount, $schedules);
+        $figures = $this->restructureFigures($source, (float) $stored->principal_amount, $schedules);
 
         if ($figures['exceeds_balance']) {
             throw ValidationException::withMessages([
@@ -1007,10 +1022,10 @@ class LoanService
             ]);
         }
 
-        $before = [self::toCentavos((float) $loan->restructure_outstanding), self::toCentavos((float) $loan->restructure_shortfall)];
+        $before = [self::toCentavos((float) $stored->restructure_outstanding), self::toCentavos((float) $stored->restructure_shortfall)];
         $after = [self::toCentavos($figures['restructurable_balance']), self::toCentavos($figures['shortfall'])];
 
-        if ($loan->restructure_outstanding !== null && $loan->restructure_shortfall !== null && $after[0] >= $before[0]) {
+        if ($after[0] >= $before[0]) {
             return;
         }
 
@@ -1026,7 +1041,7 @@ class LoanService
                 'restructure_outstanding' => $figures['restructurable_balance'],
                 'restructure_shortfall' => $figures['shortfall'],
                 'source_loan_id' => $source->id,
-                'retaken_at' => $moment,
+                'retaken_on' => $moment,
             ],
             description: "Restructure {$loan->application_number} terms taken again at {$moment} from what the source owes now: "
                 .'outstanding '.Money::format($before[0]).' → '.Money::format($after[0])

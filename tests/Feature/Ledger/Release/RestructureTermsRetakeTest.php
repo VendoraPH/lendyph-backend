@@ -8,6 +8,7 @@ use App\Models\LoanApprovalStep;
 use App\Models\Role;
 use App\Models\User;
 use App\Services\LoanService;
+use Illuminate\Support\Facades\DB;
 use Tests\TestCase;
 use Tests\Traits\PostsJournals;
 use Tests\Traits\SetupLendyPH;
@@ -51,7 +52,7 @@ class RestructureTermsRetakeTest extends TestCase
         $this->assertSame(['59000.00', '9000.00'], [$new->restructure_outstanding, $new->restructure_shortfall]);
         $retaken = AuditLog::where('action', 'restructure_terms_retaken')->where('auditable_id', $new->id)->get();
         $this->assertCount(1, $retaken, 'figures that did not move again are not written again');
-        $this->assertSame('submission', $retaken->first()->new_values['retaken_at']);
+        $this->assertSame('submission', $retaken->first()->new_values['retaken_on']);
         $this->assertEqualsWithDelta(59000.0, (float) $retaken->first()->new_values['restructure_outstanding'], 0.001);
         $this->assertEqualsWithDelta(9000.0, (float) $retaken->first()->new_values['restructure_shortfall'], 0.001);
         $this->assertNull($retaken->first()->old_values);
@@ -110,7 +111,7 @@ class RestructureTermsRetakeTest extends TestCase
 
         $this->assertSame('approved', $new->fresh()->status);
         $this->assertSame('59000.00', $new->fresh()->restructure_outstanding);
-        $this->assertSame('approval', AuditLog::where('action', 'restructure_terms_retaken')->where('auditable_id', $new->id)->sole()->new_values['retaken_at']);
+        $this->assertSame('approval', AuditLog::where('action', 'restructure_terms_retaken')->where('auditable_id', $new->id)->sole()->new_values['retaken_on']);
         $this->patchJson("/api/loans/{$new->id}/release")->assertOk();
     }
 
@@ -155,7 +156,7 @@ class RestructureTermsRetakeTest extends TestCase
         $this->putJson("/api/loans/{$new->id}", ['principal_amount' => 50000])->assertOk();
 
         $this->assertSame(['59000.00', '9000.00'], [$new->fresh()->restructure_outstanding, $new->fresh()->restructure_shortfall]);
-        $this->assertSame('edit', AuditLog::where('action', 'restructure_terms_retaken')->where('auditable_id', $new->id)->sole()->new_values['retaken_at']);
+        $this->assertSame('edit', AuditLog::where('action', 'restructure_terms_retaken')->where('auditable_id', $new->id)->sole()->new_values['retaken_on']);
     }
 
     public function test_a_rise_from_penalty_during_review_is_not_taken_into_the_forgiveness(): void
@@ -170,6 +171,100 @@ class RestructureTermsRetakeTest extends TestCase
         $this->assertSame(0, AuditLog::where('action', 'restructure_terms_retaken')->count());
         $this->patchJson("/api/loans/{$new->id}/release")->assertOk();
         $this->assertSame('20800.00', $source->fresh()->write_off_amount);
+    }
+
+    public function test_a_direct_approval_with_no_chain_step_takes_the_figures_again(): void
+    {
+        $source = $this->createReleasedLoan();
+        $new = $this->submittedRestructureOf($source);
+        $this->payOn($source, 11800);
+
+        // The single-shot approve (admin exemption), by a second admin for dual control.
+        $this->actingAs($this->userWithRole('admin'))
+            ->patchJson("/api/loans/{$new->id}/approve", ['approval_remarks' => 'ok'])
+            ->assertOk();
+        $this->actingAs($this->admin);
+
+        $this->assertSame(['59000.00', '9000.00'], [$new->fresh()->restructure_outstanding, $new->fresh()->restructure_shortfall]);
+        $this->assertSame('approval', AuditLog::where('action', 'restructure_terms_retaken')->where('auditable_id', $new->id)->sole()->new_values['retaken_on']);
+        $this->patchJson("/api/loans/{$new->id}/release")->assertOk();
+    }
+
+    public function test_an_edit_with_no_principal_or_with_a_collateral_list_takes_the_figures_again(): void
+    {
+        foreach ([['purpose' => 'Working capital'], ['collaterals' => []]] as $edit) {
+            $source = $this->createReleasedLoan();
+            $new = $this->submittedRestructureOf($source);
+            $this->payOn($source, 11800);
+
+            $this->putJson("/api/loans/{$new->id}", $edit)->assertOk();
+
+            $this->assertSame(['59000.00', '9000.00'], [$new->fresh()->restructure_outstanding, $new->fresh()->restructure_shortfall], json_encode($edit));
+            $this->assertSame('edit', AuditLog::where('action', 'restructure_terms_retaken')->where('auditable_id', $new->id)->sole()->new_values['retaken_on']);
+        }
+    }
+
+    public function test_an_approval_after_the_source_fell_below_the_principal_is_refused_and_writes_nothing(): void
+    {
+        $source = $this->createReleasedLoan();
+        $new = $this->submittedRestructureOf($source);
+        $this->approveStepAs('manager', $new);
+        // Three periods paid: ₱35,400.00 owed, under the ₱50,000.00 principal.
+        $this->payOn($source, 35400);
+        $bod1 = $this->userWithRole('bod1');
+        $before = $this->releaseState();
+        $step = $this->pendingStep($new);
+
+        $this->actingAs($bod1)
+            ->patchJson("/api/loans/{$new->id}/approval-steps/{$step->id}/approve")
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['principal_amount' => "The restructured principal cannot exceed the loan's restructurable balance of ₱35,400.00."]);
+
+        $this->assertSame($before, $this->releaseState());
+        $this->assertSame('for_review', $new->fresh()->status);
+    }
+
+    public function test_a_penalty_rise_and_a_payment_in_the_same_review_take_the_net_fall(): void
+    {
+        $source = $this->createReleasedLoan();
+        $new = $this->submittedRestructureOf($source);
+        // ₱500.00 penalty on period 2, then period 1 paid: ₱59,500.00 owed.
+        $source->amortizationSchedules()->where('period_number', 2)->first()->update(['penalty_amount' => 500]);
+        $this->payOn($source, 11800);
+        $this->approveStepAs('manager', $new);
+        $this->approveStepAs('bod1', $new);
+
+        $this->assertSame(['59500.00', '9500.00'], [$new->fresh()->restructure_outstanding, $new->fresh()->restructure_shortfall]);
+        $this->patchJson("/api/loans/{$new->id}/release")->assertOk();
+        $this->assertSame('9500.00', $source->fresh()->write_off_amount);
+        $this->assertSame(['50000.00', '0.00', '0.00', '0.00'], $this->storedSplit($new));
+    }
+
+    public function test_the_audit_trail_reads_the_moment_in_words(): void
+    {
+        $source = $this->createReleasedLoan();
+        $new = $this->submittedRestructureOf($source);
+        $this->payOn($source, 11800);
+        $this->putJson("/api/loans/{$new->id}", ['purpose' => 'Working capital'])->assertOk();
+
+        $row = AuditLog::where('action', 'restructure_terms_retaken')->where('auditable_id', $new->id)->sole();
+        $changes = collect($this->getJson("/api/audit-logs/{$row->id}")->assertOk()->json('data.changes'))->keyBy('field');
+
+        $this->assertSame('Edit', $changes['retaken_on']['new']);
+        $this->assertSame('₱59,000.00', $changes['restructure_outstanding']['new']);
+    }
+
+    public function test_a_restructure_with_no_stored_figures_is_left_as_it_is(): void
+    {
+        $source = $this->createReleasedLoan();
+        $new = $this->submittedRestructureOf($source);
+        DB::table('loans')->where('id', $new->id)->update(['restructure_outstanding' => null]);
+        $this->payOn($source, 11800);
+
+        $this->putJson("/api/loans/{$new->id}", ['purpose' => 'Working capital'])->assertOk();
+
+        $this->assertNull($new->fresh()->restructure_outstanding);
+        $this->assertSame(0, AuditLog::where('action', 'restructure_terms_retaken')->count());
     }
 
     public function test_nothing_is_re_taken_or_written_when_the_source_has_not_moved(): void
