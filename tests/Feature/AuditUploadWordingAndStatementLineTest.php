@@ -5,6 +5,7 @@ use App\Models\AccountingReconciliationLine;
 use App\Models\AuditLog;
 use App\Models\Borrower;
 use App\Models\CoMaker;
+use App\Models\Loan;
 use App\Services\Accounting\ChartOfAccountsSeeder;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
@@ -44,6 +45,16 @@ it('names the member, co-maker or loan in words on a new upload row', function (
     $loan = $this->createReleasedLoan();
     $this->postJson("/api/loans/{$loan->id}/documents", ['file' => UploadedFile::fake()->create('letter.pdf', 10, 'application/pdf'), 'type' => 'policy_exception_letter'])->assertCreated();
     expect(latestUploadRow()->description)->toBe("Document 'policy_exception_letter' uploaded for loan {$loan->fresh()->loan_account_number}");
+});
+
+it('names a draft loan by its application number on a new upload row', function () {
+    $draft = Loan::factory()->create(['status' => 'draft', 'branch_id' => $this->branch->id]);
+    expect($draft->loan_account_number)->toBeNull()
+        ->and($draft->application_number)->not->toBeNull();
+
+    $this->postJson("/api/loans/{$draft->id}/documents", ['file' => UploadedFile::fake()->create('letter.pdf', 10, 'application/pdf'), 'type' => 'policy_exception_letter'])->assertCreated();
+
+    expect(latestUploadRow()->description)->toBe("Document 'policy_exception_letter' uploaded for loan {$draft->application_number}");
 });
 
 it('leaves a stored upload row as it was written', function () {

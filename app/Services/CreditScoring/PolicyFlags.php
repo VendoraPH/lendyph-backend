@@ -156,13 +156,18 @@ final class PolicyFlags
      * Close a loan application's open flags before the loan row is deleted.
      * The flags' `loan_id` is nulled when the loan goes, which would otherwise
      * leave them open as member-wide flags; closed, they are never read as
-     * the member's (Lead's call 11). They are marked `loan_deleted`, so counts
-     * of new flags can leave them out once their loan is gone.
+     * the member's (Lead's call 11). Every flag of the loan is marked
+     * `loan_deleted`, the ones already closed too (keeping when they closed),
+     * so counts of new flags can leave them all out once their loan is gone.
      */
     public function closeForDeletedLoan(int $loanId, Carbon $now): void
     {
         CreditPolicyFlag::query()->where('loan_id', $loanId)->open()->update([
             'cleared_at' => $now,
+            'cleared_reason' => CreditPolicyFlag::CLEARED_LOAN_DELETED,
+        ]);
+
+        CreditPolicyFlag::query()->where('loan_id', $loanId)->whereNull('cleared_reason')->update([
             'cleared_reason' => CreditPolicyFlag::CLEARED_LOAN_DELETED,
         ]);
     }

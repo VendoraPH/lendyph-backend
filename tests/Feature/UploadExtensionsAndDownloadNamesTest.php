@@ -136,6 +136,70 @@ it('opens a stored file whose saved name holds characters a header can\'t carry,
     'a control character' => ["scan\x01part\x1F.pdf", 'inline; filename=scanpart.pdf'],
     'a backslash' => ['C:\\Users\\scan.pdf', 'inline; filename="C:_Users_scan.pdf"'],
     'a percent sign' => ['100% paid.pdf', "inline; filename=\"100 paid.pdf\"; filename*=utf-8''100%25%20paid.pdf"],
-    'nothing a fallback can spell' => ["\u{1F600}\u{1F600}", "inline; filename=abc123.pdf; filename*=utf-8''%F0%9F%98%80%F0%9F%98%80"],
+    'nothing a fallback can spell' => ["\u{1F600}\u{1F600}", "inline; filename=abc123.pdf; filename*=utf-8''%F0%9F%98%80%F0%9F%98%80.pdf"],
     'only control characters' => ["\x01\x02", 'inline; filename=abc123.pdf'],
+    'a line break, quotes and a semicolon' => ["a\r\nSet-Cookie: x=1; \"b\".pdf", 'inline; filename="aSet-Cookie: x=1; \\"b\\".pdf"'],
+    'a risky extension over PDF bytes' => ['id.bat', 'inline; filename=id.pdf'],
+    'another risky extension' => ['ID.HTA', 'inline; filename=ID.pdf'],
+    'no extension' => ['scan', 'inline; filename=scan.pdf'],
+    'a trailing dot' => ['scan.', 'inline; filename=scan.pdf'],
+    'two extensions' => ['scan.pdf.exe', 'inline; filename=scan.pdf.pdf'],
+    'the same extension in capitals' => ['SCAN.PDF', 'inline; filename=SCAN.PDF'],
 ]);
+
+it('never sends a header the line break would have split', function () {
+    Storage::disk('private')->put('documents/payslip/borrower/1/abc123.pdf', ROUND3_PDF_BYTES);
+    $document = $this->member->documents()->create([
+        'type' => 'payslip',
+        'file_path' => 'documents/payslip/borrower/1/abc123.pdf',
+        'original_filename' => "a\r\nSet-Cookie: x=1.pdf",
+        'mime_type' => 'application/pdf',
+        'file_size' => strlen(ROUND3_PDF_BYTES),
+    ]);
+
+    $response = $this->get($document->url)->assertOk();
+
+    expect($response->headers->has('Set-Cookie'))->toBeFalse()
+        ->and($response->headers->get('Content-Disposition'))->not->toContain("\r")
+        ->and($response->headers->get('Content-Disposition'))->not->toContain("\n");
+});
+
+it('serves a JPEG saved with a .jfif name under the stored file\'s extension', function () {
+    Storage::disk('private')->put('documents/payslip/borrower/1/def456.jpg', 'jpeg-bytes');
+    $document = $this->member->documents()->create([
+        'type' => 'payslip',
+        'file_path' => 'documents/payslip/borrower/1/def456.jpg',
+        'original_filename' => 'scan.jfif',
+        'mime_type' => 'image/jpeg',
+        'file_size' => 10,
+    ]);
+
+    expect($this->get($document->url)->assertOk()->headers->get('Content-Disposition'))->toBe('inline; filename=scan.jpg');
+});
+
+it('serves a member photo, whose link sends no name, under its stored name', function () {
+    Storage::disk('private')->put("borrowers/photos/{$this->member->id}/ghi789.jpg", 'photo-bytes');
+    $this->member->update(['photo_path' => "borrowers/photos/{$this->member->id}/ghi789.jpg"]);
+
+    expect($this->get($this->member->fresh()->photo_url)->assertOk()->headers->get('Content-Disposition'))->toBe('inline; filename=ghi789.jpg');
+});
+
+it('refuses a valid ID by its name on the public registration path, in words', function () {
+    $this->app['auth']->forgetGuards();
+
+    $create = $this->postJson('/api/borrowers', [
+        'status' => 'pending', 'branch_id' => $this->branch->id,
+        'first_name' => 'Public', 'last_name' => 'Applicant', 'email' => 'public.applicant@example.com', 'contact_number' => '09171000099',
+        'birthdate' => '1990-05-12', 'civil_status' => 'single', 'gender' => 'female',
+        'address' => '12 Mabini St', 'city' => 'Butuan', 'province' => 'Agusan del Norte',
+    ])->assertCreated();
+
+    $this->postJson(
+        "/api/borrowers/{$create->json('data.id')}/valid-ids",
+        ['type' => 'umid', 'id_number' => 'CRN-001-002-003', 'front_file' => round3Upload('id.bat', ROUND3_PDF_BYTES)],
+        ['X-Submission-Token' => $create->json('data.submission_token')],
+    )->assertUnprocessable()
+        ->assertJsonPath('errors.front_file', ['The file name of the ID\'s front must end in .jpg, .jpeg, .jpe, .jfif, .png or .pdf.']);
+
+    expect(Document::query()->where('documentable_id', $create->json('data.id'))->count())->toBe(0);
+});

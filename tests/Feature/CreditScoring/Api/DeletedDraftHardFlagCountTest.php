@@ -60,3 +60,24 @@ it('leaves a deleted draft\'s hard flag out of the new hard flags count', functi
     $memberFlag->update(['cleared_at' => now()]);
     expect(newHardFlags30d($this))->toBe(1);
 });
+
+it('also marks a deleted draft\'s flag that had already closed, and leaves it out of the count', function () {
+    $draft = $this->application($this->subject);
+    $closedFlag = hardFlagFor($this->subject->id, $draft->id, 'debt_service_above_caution');
+    $closedFlag->update(['cleared_at' => now()->subHours(2)]);
+    $otherLoanFlag = hardFlagFor($this->subject->id, $this->application($this->subject)->id, 'debt_service_above_caution');
+
+    $this->actingAs($this->viewer);
+    expect(newHardFlags30d($this))->toBe(2);
+
+    Carbon::setTestNow(now()->addHour());
+    $this->actingAs($this->caller(['loans:view', 'loans:void']))->deleteJson("/api/loans/{$draft->id}")->assertOk();
+
+    $closedFlag->refresh();
+    expect($closedFlag->cleared_reason)->toBe(CreditPolicyFlag::CLEARED_LOAN_DELETED)
+        ->and($closedFlag->cleared_at?->toDateTimeString())->toBe(now()->subHours(3)->toDateTimeString())
+        ->and($otherLoanFlag->fresh()->cleared_reason)->toBeNull();
+
+    $this->actingAs($this->viewer);
+    expect(newHardFlags30d($this))->toBe(1);
+});
