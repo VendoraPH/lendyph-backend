@@ -31,6 +31,9 @@ class ReconcileLineToSuspenseRequest extends FormRequest
         return [
             // A note on both journal lines; 255 is the line column's width.
             'description' => ['nullable', 'string', 'max:255'],
+            // Go ahead even though the line matches an entry already in the
+            // books (otherwise a 422 on `line` offers that entry instead).
+            'record_anyway' => ['nullable', 'boolean'],
         ];
     }
 }

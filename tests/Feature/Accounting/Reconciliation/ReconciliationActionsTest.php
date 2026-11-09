@@ -7,6 +7,11 @@ use App\Models\AccountingExpense;
 use App\Models\AccountingJournal;
 use App\Models\AccountingPeriod;
 use App\Models\AuditLog;
+use Exception;
+use Illuminate\Database\UniqueConstraintViolationException;
+use Illuminate\Support\Facades\DB;
+use PDOException;
+use ReflectionProperty;
 use Tests\TestCase;
 use Tests\Traits\PostsJournals;
 use Tests\Traits\SetupLendyPH;
@@ -325,6 +330,76 @@ class ReconciliationActionsTest extends TestCase
             ->assertJsonValidationErrors('line');
 
         $this->assertSame($before, $this->journalCount());
+    }
+
+    public function test_a_line_the_books_already_hold_is_refused_unless_recorded_anyway(): void
+    {
+        $existing = $this->postSimpleJournal('1040', '3010', 75050, [
+            'date' => '2026-09-16',
+            'reference' => 'IBFT-88231',
+            'description' => 'Capital deposit',
+        ]);
+
+        $reconciliation = $this->reconciliationWith([
+            ['date' => '2026-09-16', 'description' => 'IBFT 88231', 'amount' => 75050, 'external_reference' => 'IBFT-88231'],
+        ]);
+        $line = $this->statementLine($reconciliation);
+        $before = $this->journalCount();
+
+        foreach (['suspense' => [], 'transfer' => ['counter_account_id' => $this->account('1010')]] as $action => $body) {
+            $this->act($action, $reconciliation, $line, $body)
+                ->assertStatus(422)
+                ->assertJsonPath(
+                    'errors.line.0',
+                    "This statement line matches {$existing->journal_no} already in the books. Match it instead, or record it anyway.",
+                );
+        }
+
+        $this->assertSame($before, $this->journalCount());
+        $this->assertNull($line->refresh()->matched_journal_line_id);
+
+        $journalId = $this->act('suspense', $reconciliation, $line, ['record_anyway' => true])
+            ->assertCreated()
+            ->json('created.journal_id');
+
+        $this->assertMatchedTo($line, $journalId);
+        $this->assertSame($before + 1, $this->journalCount());
+    }
+
+    public function test_the_journal_number_index_exists(): void
+    {
+        $this->assertNotEmpty(DB::select(
+            'SHOW INDEX FROM accounting_journals WHERE Key_name = ?',
+            ['accounting_journals_journal_no_unique'],
+        ));
+    }
+
+    public function test_a_journal_number_collision_answers_409_with_nothing_written(): void
+    {
+        $reconciliation = $this->reconciliationWith([
+            ['date' => '2026-09-16', 'description' => 'IBFT 88231', 'amount' => 75050],
+        ]);
+        $line = $this->statementLine($reconciliation);
+        $before = $this->journalCount();
+
+        DB::connection()->beforeExecuting(function (string $query, array $bindings): void {
+            if (str_starts_with($query, 'update `accounting_journals`') && str_contains($query, '`journal_no`')) {
+                $index = 'accounting_journals_journal_no_unique';
+                $pdo = new PDOException("SQLSTATE[23000]: Integrity constraint violation: 1062 Duplicate entry 'x' for key '{$index}'");
+                $pdo->errorInfo = ['23000', 1062, "Duplicate entry 'x' for key '{$index}'"];
+                (new ReflectionProperty(Exception::class, 'code'))->setValue($pdo, '23000');
+
+                throw (new UniqueConstraintViolationException(DB::connection()->getName(), $query, $bindings, $pdo))
+                    ->setIndex($index);
+            }
+        });
+
+        $this->act('suspense', $reconciliation, $line)
+            ->assertStatus(409)
+            ->assertJsonPath('message', 'Another change to this reconciliation was saved at the same time. Reload and try again.');
+
+        $this->assertSame($before, $this->journalCount());
+        $this->assertNull($line->refresh()->matched_journal_line_id);
     }
 
     public function test_a_line_from_another_reconciliation_answers_404(): void

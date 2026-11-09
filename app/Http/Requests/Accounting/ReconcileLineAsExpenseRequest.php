@@ -33,6 +33,9 @@ class ReconcileLineAsExpenseRequest extends FormRequest
             // 160, the column's width and the Expenses screen's own limit.
             'payee' => ['required', 'string', 'max:160'],
             'description' => ['nullable', 'string', 'max:500'],
+            // Go ahead even though the line matches an entry already in the
+            // books (otherwise a 422 on `line` offers that entry instead).
+            'record_anyway' => ['nullable', 'boolean'],
         ];
     }
 

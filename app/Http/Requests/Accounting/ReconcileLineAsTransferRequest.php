@@ -31,6 +31,9 @@ class ReconcileLineAsTransferRequest extends FormRequest
             // ReconciliationActions, so the 422 names this field.
             'counter_account_id' => ['required', 'integer', 'exists:accounting_accounts,id'],
             'description' => ['nullable', 'string', 'max:500'],
+            // Go ahead even though the line matches an entry already in the
+            // books (otherwise a 422 on `line` offers that entry instead).
+            'record_anyway' => ['nullable', 'boolean'],
         ];
     }
 }

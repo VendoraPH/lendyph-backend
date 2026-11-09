@@ -67,14 +67,18 @@ class ReconciliationActions
     /** The UNIQUE index on accounting_reconciliation_lines.matched_journal_line_id. */
     private const MATCH_INDEX = 'acct_recon_lines_journal_line_unique';
 
+    /** The UNIQUE index on accounting_journals.journal_no, which JournalPoster allocates. */
+    private const JOURNAL_NO_INDEX = 'accounting_journals_journal_no_unique';
+
     public function __construct(
         private ExpenseRecorder $expenses,
         private FundTransferRecorder $transfers,
         private JournalPoster $poster,
+        private ReconciliationMatcher $matcher,
     ) {}
 
     /**
-     * @param  array{expense_account_id: int, payee: string, description?: string|null}  $data
+     * @param  array{expense_account_id: int, payee: string, description?: string|null, record_anyway?: bool|null}  $data
      * @return array{type: string, id: int, journal_id: int, journal_no: string}
      */
     public function recordAsExpense(
@@ -83,7 +87,7 @@ class ReconciliationActions
         array $data,
         ?int $userId,
     ): array {
-        return $this->act($reconciliation, $lineId, $userId, 'expense', function (
+        return $this->act($reconciliation, $lineId, $userId, 'expense', (bool) ($data['record_anyway'] ?? false), function (
             AccountingReconciliationLine $line,
             AccountingAccount $reconciled,
         ) use ($data, $userId): array {
@@ -115,7 +119,7 @@ class ReconciliationActions
      * Money in moves from the counter account into the reconciled one; money
      * out moves the other way.
      *
-     * @param  array{counter_account_id: int, description?: string|null}  $data
+     * @param  array{counter_account_id: int, description?: string|null, record_anyway?: bool|null}  $data
      * @return array{type: string, id: int, journal_id: int, journal_no: string}
      */
     public function recordAsTransfer(
@@ -124,7 +128,7 @@ class ReconciliationActions
         array $data,
         ?int $userId,
     ): array {
-        return $this->act($reconciliation, $lineId, $userId, 'transfer', function (
+        return $this->act($reconciliation, $lineId, $userId, 'transfer', (bool) ($data['record_anyway'] ?? false), function (
             AccountingReconciliationLine $line,
             AccountingAccount $reconciled,
         ) use ($data, $userId): array {
@@ -160,7 +164,7 @@ class ReconciliationActions
      * reconciled. Source `bank_transaction` on a bank account and
      * `cash_transaction` on any other money account.
      *
-     * @param  array{description?: string|null}  $data
+     * @param  array{description?: string|null, record_anyway?: bool|null}  $data
      * @return array{type: string, id: int, journal_id: int, journal_no: string}
      */
     public function recordToSuspense(
@@ -169,7 +173,7 @@ class ReconciliationActions
         array $data,
         ?int $userId,
     ): array {
-        return $this->act($reconciliation, $lineId, $userId, 'journal', function (
+        return $this->act($reconciliation, $lineId, $userId, 'journal', (bool) ($data['record_anyway'] ?? false), function (
             AccountingReconciliationLine $line,
             AccountingAccount $reconciled,
         ) use ($reconciliation, $data, $userId): array {
@@ -225,10 +229,11 @@ class ReconciliationActions
         int $lineId,
         ?int $userId,
         string $type,
+        bool $recordAnyway,
         Closure $create,
     ): array {
         try {
-            return DB::transaction(function () use ($reconciliation, $lineId, $userId, $type, $create): array {
+            return DB::transaction(function () use ($reconciliation, $lineId, $userId, $type, $recordAnyway, $create): array {
                 $line = AccountingReconciliationLine::query()
                     ->whereKey($lineId)
                     ->lockForUpdate()
@@ -249,6 +254,10 @@ class ReconciliationActions
                 }
 
                 $this->assertInsideTheWindow($reconciliation, $line);
+
+                if (! $recordAnyway) {
+                    $this->assertNotAlreadyInTheBooks($reconciliation, $line);
+                }
 
                 $reconciled = $this->requireMoneyAccount($reconciliation->accounting_account_id, 'account_id');
 
@@ -294,7 +303,7 @@ class ReconciliationActions
                 throw LoanWriteTransaction::conflict(self::ALREADY_MATCHED);
             }
 
-            if (GeneratedNumberWrite::isCollision($e)) {
+            if ($e->index === self::JOURNAL_NO_INDEX || GeneratedNumberWrite::isCollision($e)) {
                 throw LoanWriteTransaction::conflict(self::COLLISION);
             }
 
@@ -330,6 +339,33 @@ class ReconciliationActions
                 ],
             ]);
         }
+    }
+
+    /**
+     * Refuses to book a line the engine already pairs with an entry in the
+     * books, unless the caller says `record_anyway`.
+     *
+     * The commonest way to double-book money is to record, from the statement,
+     * a deposit someone already posted: the books then hold it twice and the
+     * difference moves the wrong way. Matching the existing entry is almost
+     * always the right answer, so it is offered first.
+     */
+    private function assertNotAlreadyInTheBooks(AccountingReconciliation $reconciliation, AccountingReconciliationLine $line): void
+    {
+        $suggested = collect($this->matcher->present($reconciliation->fresh())['lines'])
+            ->first(static fn (array $row): bool => $row['match'] === 'possible'
+                && (int) $row['statement_line_id'] === $line->id);
+
+        if ($suggested === null) {
+            return;
+        }
+
+        throw ValidationException::withMessages([
+            'line' => [
+                "This statement line matches {$suggested['journal_no']} already in the books. Match it instead, "
+                .'or record it anyway.',
+            ],
+        ]);
     }
 
     /** The suspense role's account, or the 422 the screen shows when it is unmapped. */

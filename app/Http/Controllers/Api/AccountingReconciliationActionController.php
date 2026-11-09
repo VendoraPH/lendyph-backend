@@ -50,6 +50,7 @@ class AccountingReconciliationActionController extends Controller
                 new OA\Property(property: 'expense_account_id', type: 'integer'),
                 new OA\Property(property: 'payee', type: 'string', maxLength: 160),
                 new OA\Property(property: 'description', type: 'string', maxLength: 500, nullable: true),
+                new OA\Property(property: 'record_anyway', type: 'boolean', nullable: true, description: 'Record even though the line matches an entry already in the books.'),
             ],
         )),
         responses: [
@@ -57,7 +58,7 @@ class AccountingReconciliationActionController extends Controller
             new OA\Response(response: 403, description: 'Missing accounting:reconcile, branches:view_all or expenses:create'),
             new OA\Response(response: 404, description: 'The line does not belong to this reconciliation'),
             new OA\Response(response: 409, description: 'This statement line is already matched'),
-            new OA\Response(response: 422, description: 'Money in, a closed period, the line outside the reconciliation\'s dates, or a wrong account'),
+            new OA\Response(response: 422, description: 'Money in, a line the books already hold (unless record_anyway), a closed period, the line outside the reconciliation\'s dates, or a wrong account'),
         ],
     )]
     public function expense(ReconcileLineAsExpenseRequest $request, AccountingReconciliation $reconciliation, int $line): JsonResponse
@@ -82,6 +83,7 @@ class AccountingReconciliationActionController extends Controller
             properties: [
                 new OA\Property(property: 'counter_account_id', type: 'integer'),
                 new OA\Property(property: 'description', type: 'string', maxLength: 500, nullable: true),
+                new OA\Property(property: 'record_anyway', type: 'boolean', nullable: true, description: 'Record even though the line matches an entry already in the books.'),
             ],
         )),
         responses: [
@@ -89,7 +91,7 @@ class AccountingReconciliationActionController extends Controller
             new OA\Response(response: 403, description: 'Missing accounting:reconcile, branches:view_all or cash_accounts:transfer'),
             new OA\Response(response: 404, description: 'The line does not belong to this reconciliation'),
             new OA\Response(response: 409, description: 'This statement line is already matched'),
-            new OA\Response(response: 422, description: 'A closed period, the line outside the reconciliation\'s dates, or a wrong counter account'),
+            new OA\Response(response: 422, description: 'A line the books already hold (unless record_anyway), a closed period, the line outside the reconciliation\'s dates, or a wrong counter account'),
         ],
     )]
     public function transfer(ReconcileLineAsTransferRequest $request, AccountingReconciliation $reconciliation, int $line): JsonResponse
@@ -112,6 +114,7 @@ class AccountingReconciliationActionController extends Controller
         requestBody: new OA\RequestBody(required: false, content: new OA\JsonContent(
             properties: [
                 new OA\Property(property: 'description', type: 'string', maxLength: 255, nullable: true),
+                new OA\Property(property: 'record_anyway', type: 'boolean', nullable: true, description: 'Record even though the line matches an entry already in the books.'),
             ],
         )),
         responses: [
@@ -119,7 +122,7 @@ class AccountingReconciliationActionController extends Controller
             new OA\Response(response: 403, description: 'Missing accounting:reconcile, branches:view_all, journals:create or journals:post'),
             new OA\Response(response: 404, description: 'The line does not belong to this reconciliation'),
             new OA\Response(response: 409, description: 'This statement line is already matched'),
-            new OA\Response(response: 422, description: 'A closed period, the line outside the reconciliation\'s dates, or no Suspense account mapped'),
+            new OA\Response(response: 422, description: 'A line the books already hold (unless record_anyway), a closed period, the line outside the reconciliation\'s dates, or no Suspense account mapped'),
         ],
     )]
     public function suspense(ReconcileLineToSuspenseRequest $request, AccountingReconciliation $reconciliation, int $line): JsonResponse
