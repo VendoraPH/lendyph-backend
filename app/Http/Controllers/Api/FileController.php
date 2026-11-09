@@ -8,6 +8,8 @@ use App\Models\Document;
 use App\Services\SignedFileLink;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
+use Symfony\Component\HttpFoundation\HeaderUtils;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
 /**
@@ -84,10 +86,40 @@ class FileController extends Controller
 
         // Inline so the browser renders it in an <img> or preview pane rather
         // than downloading it.
-        return $disk->response($path, $downloadName, [
+        return $disk->response($path, null, [
             // These are personal identity documents — never let a shared cache
             // hold on to one.
             'Cache-Control' => 'private, max-age=0, no-store',
+            'Content-Disposition' => self::inlineDisposition($downloadName, basename($path)),
         ]);
+    }
+
+    /**
+     * The Content-Disposition for a stored file, whatever its saved name
+     * holds.
+     *
+     * Names saved before uploads were cleaned can hold control characters,
+     * and any name can hold a backslash or nothing an ASCII fallback can
+     * spell; each of those made Symfony throw, so the link answered 500. The
+     * name is cleaned the way new uploads are (Document::cleanOriginalFilename),
+     * path separators become `_`, and the ASCII fallback keeps only printable
+     * characters other than `%`. A name left empty falls back to the stored
+     * file's own name, which is always plain ASCII.
+     */
+    private static function inlineDisposition(?string $name, string $storedName): string
+    {
+        $name = str_replace(['/', '\\'], '_', Document::cleanOriginalFilename((string) $name));
+
+        if (trim($name) === '') {
+            $name = $storedName;
+        }
+
+        $fallback = trim((string) preg_replace('/[^\x20-\x7E]|%/', '', Str::ascii($name)));
+
+        if ($fallback === '' || trim($fallback, '._- ') === '') {
+            $fallback = $storedName;
+        }
+
+        return HeaderUtils::makeDisposition(HeaderUtils::DISPOSITION_INLINE, $name, $fallback);
     }
 }

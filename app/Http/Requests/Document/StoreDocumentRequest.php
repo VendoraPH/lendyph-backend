@@ -60,7 +60,7 @@ class StoreDocumentRequest extends FormRequest
             'file.uploaded' => 'The file didn\'t upload. Try again with a file of at most 10 MB.',
             'file.max' => 'The file can be at most 10 MB.',
             'file.mimes' => 'The file must be a picture (JPG or PNG), a PDF or a Word document.',
-            'file.extensions' => 'The file\'s name must end in .jpg, .jpeg, .png, .pdf, .doc or .docx.',
+            'file.extensions' => 'The file\'s name must end in .jpg, .jpeg, .jpe, .jfif, .png, .pdf, .doc or .docx.',
             'type.required' => 'Choose the document type.',
             'type.string' => 'The document type must be text.',
             'type.max' => 'The document type can be at most 50 characters.',

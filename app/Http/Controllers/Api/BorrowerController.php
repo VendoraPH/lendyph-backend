@@ -890,8 +890,15 @@ DESC,
             $this->authorize('borrowers:update');
         }
 
+        // Every refusal in words, one sentence (`bail`), never Laravel's
+        // default ("The photo field must be an image.").
         $request->validate([
-            'photo' => ['required', 'image', 'max:5120'],
+            'photo' => ['bail', 'required', 'image', 'max:5120'],
+        ], [
+            'photo.required' => 'Choose a photo to upload.',
+            'photo.uploaded' => 'The photo didn\'t upload. Try again with a picture of at most 5 MB.',
+            'photo.image' => 'The photo must be a picture, such as a JPG or PNG.',
+            'photo.max' => 'The photo can be at most 5 MB.',
         ]);
 
         // Store the new photo BEFORE touching the old one so a failed upload
