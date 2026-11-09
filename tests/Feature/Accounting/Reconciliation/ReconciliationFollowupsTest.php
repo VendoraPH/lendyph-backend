@@ -151,19 +151,130 @@ class ReconciliationFollowupsTest extends TestCase
         $this->act('suspense', $reconciliation, $this->statementLine($reconciliation))->assertCreated();
     }
 
-    public function test_a_reversed_pair_before_the_period_that_nothing_on_the_statement_touches_is_left_out(): void
+    public function test_a_reversed_pair_before_the_period_is_listed_but_not_counted_as_outstanding(): void
     {
         $original = $this->deposit(75050, '2026-08-29');
-        $this->reverse($original, '2026-08-31');
+        $reversal = $this->reverse($original, '2026-08-31');
 
         $reconciliation = $this->reconciliationWith([
             ['date' => '2026-09-15', 'description' => 'Something else', 'amount' => 12300],
         ]);
 
-        // It nets to ₱0.00 and nothing in September relates to it: noise.
+        // Both legs stay on the worksheet and can be picked; the pair nets to
+        // ₱0.00, so it is not an outstanding item.
         $shown = $this->show($reconciliation);
-        $this->assertSame([], array_values(array_filter($shown['lines'], static fn (array $row): bool => $row['date'] < '2026-09-01')));
+        $earlier = collect($shown['lines'])->filter(static fn (array $row): bool => $row['date'] < '2026-09-01')->values();
+        $this->assertSame(
+            [$this->journalLineOn($original), $this->journalLineOn($reversal)],
+            $earlier->pluck('journal_line_id')->all(),
+        );
+        $this->assertSame([true, true], $earlier->pluck('matchable')->all());
         $this->assertSame(0, $shown['outstanding_count']);
+    }
+
+    public function test_a_pair_shown_on_the_statement_days_later_is_listed_matchable_and_reconciles(): void
+    {
+        $deposit = $this->deposit(500000, '2026-08-20');
+        $reversal = $this->reverse($deposit, '2026-08-28');
+
+        // Neither date is within 5 days, so neither leg is suggested.
+        $reconciliation = $this->reconciliationWith([
+            ['date' => '2026-09-03', 'description' => 'Deposit', 'amount' => 500000],
+            ['date' => '2026-09-04', 'description' => 'Returned deposit', 'amount' => -500000],
+        ]);
+        $deposited = $this->statementLine($reconciliation, 0);
+        $returned = $this->statementLine($reconciliation, 1);
+
+        $shown = $this->show($reconciliation);
+        $this->assertSame(0, $shown['possible_count']);
+        $ledger = collect($shown['lines'])->where('source', 'ledger')->keyBy('journal_line_id');
+        $this->assertTrue($ledger[$this->journalLineOn($deposit)]['matchable']);
+        $this->assertTrue($ledger[$this->journalLineOn($reversal)]['matchable']);
+        $this->assertFalse($shown['is_reconciled']);
+
+        $matched = $this->postJson("/api/accounting/reconciliations/{$reconciliation->id}/match", ['matches' => [
+            ['line_id' => $deposited->id, 'journal_line_id' => $this->journalLineOn($deposit)],
+            ['line_id' => $returned->id, 'journal_line_id' => $this->journalLineOn($reversal)],
+        ]])->assertOk()->json('data');
+
+        $this->assertSame(0, $matched['difference']);
+        $this->assertSame(2, $matched['matched_count']);
+        $this->assertTrue($matched['is_reconciled']);
+    }
+
+    public function test_the_outstanding_count_reads_reversal_links_as_of_the_period_end(): void
+    {
+        $a = $this->deposit(500000, '2026-08-10');
+        $b = $this->reverse($a, '2026-08-20');
+        $in = $this->deposit(70000, '2026-08-25'); // a real deposit in transit
+
+        $reconciliation = $this->reconciliationWith([
+            ['date' => '2026-09-15', 'description' => 'Something else', 'amount' => 12300],
+        ]);
+
+        $this->assertSame(1, $this->show($reconciliation)['outstanding_count']);
+
+        // In October someone reverses the reversal. On Sep 30 A and B still
+        // netted to nothing, so September's count does not change.
+        $this->reverse($b, '2026-10-15');
+
+        $shown = $this->show($reconciliation);
+        $this->assertSame(1, $shown['outstanding_count']);
+        $this->assertSame(
+            [$this->journalLineOn($a), $this->journalLineOn($b), $this->journalLineOn($in)],
+            collect($shown['lines'])->filter(static fn (array $row): bool => $row['date'] < '2026-09-01')->pluck('journal_line_id')->values()->all(),
+        );
+    }
+
+    public function test_a_reversal_dated_after_the_period_end_leaves_the_entry_outstanding(): void
+    {
+        $deposit = $this->deposit(500000, '2026-08-25');
+        $this->reverse($deposit, '2026-10-02');
+
+        $reconciliation = $this->reconciliationWith([
+            ['date' => '2026-09-15', 'description' => 'Something else', 'amount' => 12300],
+        ]);
+
+        // On Sep 30 the deposit was in the books and not on the statement.
+        $this->assertSame(1, $this->show($reconciliation)['outstanding_count']);
+    }
+
+    public function test_a_journal_with_two_lines_on_the_account_lists_and_matches_each_line(): void
+    {
+        $journal = $this->postJournal([
+            ['account_id' => $this->account('1040'), 'debit' => 300000, 'credit' => 0],
+            ['account_id' => $this->account('1040'), 'debit' => 200000, 'credit' => 0],
+            ['account_id' => $this->account('3010'), 'debit' => 0, 'credit' => 500000],
+        ], ['date' => '2026-08-20']);
+        $reversal = $this->reverse($journal, '2026-08-28');
+        $lineIds = fn (AccountingJournal $j): array => AccountingJournalLine::query()
+            ->where('accounting_journal_id', $j->id)
+            ->where('accounting_account_id', $this->account('1040'))
+            ->orderBy('id')->pluck('id')->all();
+
+        $reconciliation = $this->reconciliationWith([
+            ['date' => '2026-09-03', 'description' => 'Deposit', 'amount' => 300000],
+            ['date' => '2026-09-04', 'description' => 'Returned deposit', 'amount' => -300000],
+        ]);
+
+        $shown = $this->show($reconciliation);
+        $ledger = collect($shown['lines'])->where('source', 'ledger');
+        $this->assertCount(4, $ledger);
+        $this->assertSame([true, true, true, true], $ledger->pluck('matchable')->values()->all());
+        $this->assertSame(0, $shown['outstanding_count']);
+
+        $matched = $this->postJson("/api/accounting/reconciliations/{$reconciliation->id}/match", ['matches' => [
+            ['line_id' => $this->statementLine($reconciliation, 0)->id, 'journal_line_id' => $lineIds($journal)[0]],
+            ['line_id' => $this->statementLine($reconciliation, 1)->id, 'journal_line_id' => $lineIds($reversal)[0]],
+        ]])->assertOk()->json('data');
+
+        // Each line is its own row: the other two stay listed and matchable,
+        // and as their journals are now matched they count as outstanding.
+        $this->assertSame(2, $matched['matched_count']);
+        $rest = collect($matched['lines'])->where('source', 'ledger');
+        $this->assertSame([$lineIds($journal)[1], $lineIds($reversal)[1]], $rest->pluck('journal_line_id')->values()->all());
+        $this->assertSame([true, true], $rest->pluck('matchable')->values()->all());
+        $this->assertSame(2, $matched['outstanding_count']);
     }
 
     public function test_an_entry_more_than_five_days_away_is_not_a_duplicate(): void
@@ -514,7 +625,7 @@ class ReconciliationFollowupsTest extends TestCase
         $url = "/api/accounting/reconciliations/{$reconciliation->id}/match";
 
         $rows = collect($this->show($reconciliation)['lines'])->where('source', 'ledger')->values();
-        $this->assertCount(7, $rows);
+        $this->assertCount(9, $rows);
 
         $offered = [];
 
@@ -542,9 +653,7 @@ class ReconciliationFollowupsTest extends TestCase
         $this->assertTrue($offered[$this->journalLineOn($bounced)]);
         $this->assertFalse($offered[$this->journalLineOn($elsewhere)]);
 
-        // The earlier pair nets to ₱0.00 and nothing on the statement touches
-        // it, so the worksheet leaves both legs out.
-        $this->assertArrayNotHasKey($this->journalLineOn($earlier), $offered);
+        $this->assertTrue($offered[$this->journalLineOn($earlier)]);
     }
 
     // ── L4: the override is audited ──

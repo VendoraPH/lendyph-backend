@@ -157,7 +157,6 @@ class ReconciliationMatcher
             $window = $this->candidatesFor($reconciliation, $ledger[$accountId] ?? new Collection);
 
             $rows = $this->pair($window, $reconciliation->lines);
-            $rows = $this->withoutNettedPairs($rows, $window, $partners, $reconciliation);
             $rows = $this->withMatchable($rows, $window, $reconciliation);
 
             // The book balance is the account's balance AS OF the period end —
@@ -187,15 +186,7 @@ class ReconciliationMatcher
                     $rows,
                     static fn (array $row): bool => $row['match'] === 'unmatched' && ! $row['outside_period'],
                 )),
-                // Entries dated BEFORE the period that no statement line has
-                // matched yet: deposits in transit and uncleared cheques. An
-                // entry dated after the period is listed only as a value-dating
-                // candidate and counts in neither figure.
-                'outstanding_count' => count(array_filter(
-                    $rows,
-                    static fn (array $row): bool => $row['match'] === 'unmatched' && $row['outside_period']
-                        && $row['date'] < $start,
-                )),
+                'outstanding_count' => $this->outstandingCount($rows, $window, $partners, $reconciliation),
                 'notes' => $reconciliation->notes,
                 'lines' => $rows,
             ];
@@ -210,9 +201,10 @@ class ReconciliationMatcher
      *
      * Every leg of a reversal (the reversed entry, the reversal, a reversal
      * of a reversal) is an ordinary ledger line here: a bounced cheque and
-     * its void can both be on the statement, and each must be suggested and
-     * seen by the duplicate check like any other line. A reversed pair nets
-     * to ₱0.00, and books-only rows don't block Reconciled.
+     * its void can both be on the statement, and each must be listed,
+     * suggested, matchable and seen by the duplicate check like any other
+     * line. No row is ever left off the worksheet. A reversed pair nets to
+     * ₱0.00, and books-only rows don't block Reconciled.
      *
      * - Inside the period: every posted or reversed line. One a statement
      *   line of ANOTHER reconciliation has claimed stays on the worksheet (it
@@ -321,24 +313,31 @@ class ReconciliationMatcher
     }
 
     /**
-     * Leaves out of the outstanding items a simple reversal pair dated before
-     * the period that nothing here touches: an entry and the one reversal of
-     * it, both dated before `start_date`, neither matched by any statement
-     * line nor paired on this worksheet. It nets to ₱0.00 and is noise.
+     * Entries dated BEFORE the period that no statement line has matched yet:
+     * deposits in transit and uncleared cheques. An entry dated after the
+     * period is listed only as a value-dating candidate and counts in neither
+     * this nor `unmatched_count`.
      *
-     * Only books-only rows dated before the period are ever left out, so
-     * suggestions, matching and the duplicate check never depend on reversal
-     * links. A chain (a reversal of a reversal) is kept whole: it doesn't
-     * net to zero, and showing it never hides money.
+     * A reversal pair that nets to ₱0.00 as of `end_date` isn't outstanding
+     * and is left out of the count, never off the worksheet: both legs stay
+     * listed and matchable. It nets to zero when the entry and its one
+     * reversal are both dated on or before `end_date`, neither is matched by
+     * any statement line, and neither is suggested here. Only reversal links
+     * dated on or before `end_date` are read, so a later reversal of a
+     * reversal never changes a closed month's count. A chain as of
+     * `end_date` is counted: it doesn't net to zero.
+     *
+     * Matched and suggested are judged per journal, so a journal with two
+     * lines on the account counts once either of its lines is matched.
      *
      * @param  list<array<string, mixed>>  $rows
      * @param  Collection<int, array<string, mixed>>  $window
      * @param  array<int, array<string, mixed>>  $partners  journal id => facts, from {@see self::reversalPartnersFor()}
-     * @return list<array<string, mixed>>
      */
-    private function withoutNettedPairs(array $rows, Collection $window, array $partners, AccountingReconciliation $reconciliation): array
+    private function outstandingCount(array $rows, Collection $window, array $partners, AccountingReconciliation $reconciliation): int
     {
         $start = $reconciliation->start_date->toDateString();
+        $end = $reconciliation->end_date->toDateString();
         $accountId = $reconciliation->accounting_account_id;
         $byId = $window->keyBy('line_id');
 
@@ -350,47 +349,65 @@ class ReconciliationMatcher
             }
         }
 
-        return array_values(array_filter($rows, static function (array $row) use ($byId, $partners, $pairedJournals, $start, $accountId): bool {
+        // The links of a journal that existed on the period end.
+        $linksAsOfEnd = static function (?int $reverses, ?string $reversesDate, ?int $reversedBy, ?string $reversedByDate) use ($end): array {
+            $links = [];
+
+            if ($reverses !== null && $reversesDate !== null && $reversesDate <= $end) {
+                $links[] = $reverses;
+            }
+
+            if ($reversedBy !== null && $reversedByDate !== null && $reversedByDate <= $end) {
+                $links[] = $reversedBy;
+            }
+
+            return $links;
+        };
+
+        $count = 0;
+
+        foreach ($rows as $row) {
             if ($row['source'] !== 'ledger' || $row['date'] >= $start) {
-                return true;
+                continue;
             }
 
             $line = $byId->get($row['journal_line_id']);
+            $links = $linksAsOfEnd(
+                $line['reverses_journal_id'],
+                $partners[$line['reverses_journal_id']]['date'] ?? null,
+                $line['reversed_by_journal_id'],
+                $partners[$line['reversed_by_journal_id']]['date'] ?? null,
+            );
 
-            $isOriginal = $line['reversed_by_journal_id'] !== null && $line['reverses_journal_id'] === null;
-            $isReversal = $line['reverses_journal_id'] !== null && $line['reversed_by_journal_id'] === null;
+            $partner = count($links) === 1 ? ($partners[$links[0]] ?? null) : null;
 
-            if (! $isOriginal && ! $isReversal) {
-                return true;
-            }
-
-            $partnerId = $isOriginal ? $line['reversed_by_journal_id'] : $line['reverses_journal_id'];
-            $partner = $partners[$partnerId] ?? null;
-
-            if ($partner === null) {
-                return true;
-            }
-
-            // The partner must link back to this entry alone: a chain is kept.
-            $simple = $isOriginal ? $partner['reversed_by_journal_id'] === null : $partner['reverses_journal_id'] === null;
-
-            $netsToNothing = $simple
-                && $partner['date'] < $start
+            $netsToNothing = $partner !== null
+                && $linksAsOfEnd(
+                    $partner['reverses_journal_id'],
+                    $partner['reverses_date'],
+                    $partner['reversed_by_journal_id'],
+                    $partner['reversed_by_date'],
+                ) === [$line['journal_id']]
                 && ! ($partner['claimed_accounts'][$accountId] ?? false)
-                && ! isset($pairedJournals[$partnerId]);
+                && ! isset($pairedJournals[$links[0]]);
 
-            return ! $netsToNothing;
-        }));
+            if (! $netsToNothing) {
+                $count++;
+            }
+        }
+
+        return $count;
     }
 
     /**
-     * The other leg of each simple reversal among the page's ledger lines: its
-     * date, its own reversal links, and on which accounts a statement line has
-     * claimed one of its lines. One query, and none when there is no reversal.
+     * The other leg of each reversal among the page's ledger lines: its date,
+     * its own reversal links and their dates, and on which accounts a
+     * statement line has claimed one of its lines. One query, and none when
+     * there is no reversal. Read only for `outstanding_count`.
      *
      * @param  Collection<int, AccountingReconciliation>  $reconciliations
      * @param  array<int, Collection<int, array<string, mixed>>>  $ledger
-     * @return array<int, array{date: string, reverses_journal_id: int|null, reversed_by_journal_id: int|null, claimed_accounts: array<int, bool>}>
+     * @return array<int, array{date: string, reverses_journal_id: int|null, reversed_by_journal_id: int|null, reverses_date: string|null, reversed_by_date: string|null, claimed_accounts: array<int, bool>}>
      */
     private function reversalPartnersFor(Collection $reconciliations, array $ledger): array
     {
@@ -415,6 +432,10 @@ class ReconciliationMatcher
         $partners = [];
 
         $rows = DB::table('accounting_journals as pj')
+            // The dates of the partner's own links, so links can be read as of
+            // a period end.
+            ->leftJoin('accounting_journals as pa', 'pa.id', '=', 'pj.reverses_journal_id')
+            ->leftJoin('accounting_journals as pb', 'pb.id', '=', 'pj.reversed_by_journal_id')
             ->leftJoin('accounting_journal_lines as pl', static function ($join) use ($accountIds): void {
                 $join->on('pl.accounting_journal_id', '=', 'pj.id')->whereIn('pl.accounting_account_id', $accountIds);
             })
@@ -425,6 +446,8 @@ class ReconciliationMatcher
                 'pj.date',
                 'pj.reverses_journal_id',
                 'pj.reversed_by_journal_id',
+                'pa.date as reverses_date',
+                'pb.date as reversed_by_date',
                 'pl.accounting_account_id as account_id',
                 'pr.id as claimed_by_line',
             ])
@@ -437,6 +460,8 @@ class ReconciliationMatcher
                 'date' => substr((string) $row->date, 0, 10),
                 'reverses_journal_id' => $row->reverses_journal_id === null ? null : (int) $row->reverses_journal_id,
                 'reversed_by_journal_id' => $row->reversed_by_journal_id === null ? null : (int) $row->reversed_by_journal_id,
+                'reverses_date' => $row->reverses_date === null ? null : substr((string) $row->reverses_date, 0, 10),
+                'reversed_by_date' => $row->reversed_by_date === null ? null : substr((string) $row->reversed_by_date, 0, 10),
                 'claimed_accounts' => [],
             ];
 
