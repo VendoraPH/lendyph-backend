@@ -6,10 +6,22 @@ use App\Models\AutoCreditRun;
 use App\Models\ShareCapitalLedger;
 use App\Models\ShareCapitalPledge;
 use App\Models\User;
+use App\Services\Accounting\AutomaticPoster;
 use Illuminate\Database\Eloquent\Collection;
 
 class ShareCapitalService
 {
+    /**
+     * How a standalone entry's money can move: the Record Payment methods
+     * (StoreRepaymentRequest). Each posts to its own settlement account.
+     */
+    public const ENTRY_METHODS = ['cash', 'gcash', 'maya', 'bank_transfer', 'online'];
+
+    /** The settlement accounts an auto-credit run can be picked through. */
+    public const AUTO_CREDIT_METHODS = ['cash', 'gcash', 'maya', 'bank_transfer'];
+
+    public function __construct(private AutomaticPoster $poster) {}
+
     /**
      * Post one credit per eligible pledge and record the run.
      *
@@ -19,9 +31,18 @@ class ShareCapitalService
      * this scope the run would post real share_capital_ledger credits for
      * somebody who is not a member — and now that the pledge list hides those
      * rows, the flag would not even be visible to switch back off.
+     *
+     * Each member's credit posts as a contribution, one journal per row,
+     * through the settlement account picked on the run (`$method`, the bank by
+     * default, as auto-pay settles), in the run's transaction: a run that
+     * fails leaves no row and no journal.
      */
-    public function processAutoCredit(User $user, ?User $scopeTo = null): AutoCreditRun
-    {
+    public function processAutoCredit(
+        User $user,
+        ?User $scopeTo = null,
+        string $method = 'bank_transfer',
+        ?string $referenceNumber = null,
+    ): AutoCreditRun {
         $eligiblePledges = ShareCapitalPledge::with('borrower')
             ->forMembers()
             ->when($scopeTo !== null, fn ($q) => $q->whereHas('borrower', fn ($b) => $b->visibleTo($scopeTo)))
@@ -32,22 +53,31 @@ class ShareCapitalService
         // Never tried again. The pledges were read before this transaction, so
         // a retry after another run committed would credit each pledge twice.
         // The loser of a collision answers 409 and posts nothing.
-        return LoanWriteTransaction::run(function () use ($eligiblePledges, $user) {
+        return LoanWriteTransaction::run(function () use ($eligiblePledges, $user, $method, $referenceNumber) {
             $today = now()->toDateString();
             $totalAmount = 0.0;
+
+            $rows = [];
 
             foreach ($eligiblePledges as $pledge) {
                 $totalAmount += (float) $pledge->amount;
 
-                ShareCapitalLedger::create([
+                $rows[] = ShareCapitalLedger::create([
                     'borrower_id' => $pledge->borrower_id,
                     'date' => $today,
                     'description' => 'Monthly pledge - auto-credit',
                     'debit' => 0,
                     'credit' => $pledge->amount,
+                    'method' => $method,
+                    'reference_number' => $referenceNumber,
                     'created_by' => $user->id,
                 ]);
             }
+
+            // Every row first, then the journals: the journal-number lock is
+            // taken by the first posting and held to commit, so posting last
+            // keeps it for the shortest time.
+            $this->postEntries($rows);
 
             return AutoCreditRun::create([
                 'total_amount' => round($totalAmount, 2),
@@ -118,6 +148,9 @@ class ShareCapitalService
         ];
     }
 
+    /**
+     * One entry on a pledge's member, posted in the row's own transaction.
+     */
     public function createManualEntry(
         ShareCapitalPledge $pledge,
         float $amount,
@@ -125,39 +158,123 @@ class ShareCapitalService
         string $date,
         User $user,
         ?string $description = null,
+        string $method = 'cash',
+        ?string $referenceNumber = null,
     ): ShareCapitalLedger {
-        return GeneratedNumberWrite::run(fn (): ShareCapitalLedger => ShareCapitalLedger::create([
-            'borrower_id' => $pledge->borrower_id,
-            'date' => $date,
-            'description' => $description ?? ('Manual '.$type.' entry'),
-            'debit' => $type === 'debit' ? $amount : 0,
-            'credit' => $type === 'credit' ? $amount : 0,
-            'created_by' => $user->id,
-        ]), GeneratedNumberWrite::SHARE_CAPITAL_CONFLICT);
+        return $this->createEntry(
+            $pledge->borrower_id,
+            $amount,
+            $type,
+            $date,
+            $user,
+            $description ?? ('Manual '.$type.' entry'),
+            $method,
+            $referenceNumber,
+        );
     }
 
-    public function bulkManualEntries(array $entries, User $user): Collection
+    /**
+     * One standalone entry for a member: the row and its journal (Dr the
+     * method's account / Cr 3060 for a credit, the reverse for a debit) in one
+     * transaction, so a refused posting leaves no row. Tried again on a
+     * reference collision (GeneratedNumberWrite), which is safe here: each try
+     * starts only after the one before it was fully rolled back.
+     */
+    public function createEntry(
+        int $borrowerId,
+        float|string $amount,
+        string $type,
+        string $date,
+        User $user,
+        string $description,
+        string $method = 'cash',
+        ?string $referenceNumber = null,
+    ): ShareCapitalLedger {
+        return GeneratedNumberWrite::run(function () use ($borrowerId, $amount, $type, $date, $user, $description, $method, $referenceNumber): ShareCapitalLedger {
+            $row = ShareCapitalLedger::create($this->entryAttributes($borrowerId, $amount, $type, $date, $user, $description, $method, $referenceNumber));
+            $this->postEntries([$row]);
+
+            return $row;
+        }, GeneratedNumberWrite::SHARE_CAPITAL_CONFLICT);
+    }
+
+    /**
+     * A standalone row's attributes.
+     *
+     * @return array<string, mixed>
+     */
+    private function entryAttributes(
+        int $borrowerId,
+        float|string $amount,
+        string $type,
+        string $date,
+        User $user,
+        string $description,
+        string $method,
+        ?string $referenceNumber,
+    ): array {
+        return [
+            'borrower_id' => $borrowerId,
+            'date' => $date,
+            'description' => $description,
+            'debit' => $type === 'debit' ? $amount : 0,
+            'credit' => $type === 'credit' ? $amount : 0,
+            'method' => $method,
+            'reference_number' => $referenceNumber,
+            'created_by' => $user->id,
+        ];
+    }
+
+    /**
+     * Entries for many pledges, all through one method and reference, one
+     * journal per row.
+     *
+     * @param  list<array{pledge_id: int, amount: float|int|string, type: string, date: string, description?: string|null}>  $entries
+     */
+    public function bulkManualEntries(array $entries, User $user, string $method = 'cash', ?string $referenceNumber = null): Collection
     {
         // Never tried again, as processAutoCredit() isn't: a retry could post the
         // whole batch a second time when the same batch was submitted twice. The
-        // loser of a collision answers 409 and posts nothing.
-        return LoanWriteTransaction::run(function () use ($entries, $user) {
+        // loser of a collision answers 409 and posts nothing: no row and no
+        // journal, since both are written in this one transaction.
+        return LoanWriteTransaction::run(function () use ($entries, $user, $method, $referenceNumber) {
             $results = new Collection;
 
             foreach ($entries as $entry) {
                 $pledge = ShareCapitalPledge::findOrFail($entry['pledge_id']);
 
-                $results->push($this->createManualEntry(
-                    $pledge,
+                $results->push(ShareCapitalLedger::create($this->entryAttributes(
+                    $pledge->borrower_id,
                     (float) $entry['amount'],
                     $entry['type'],
                     $entry['date'],
                     $user,
-                    $entry['description'] ?? null,
-                ));
+                    $entry['description'] ?? ('Manual '.$entry['type'].' entry'),
+                    $method,
+                    $referenceNumber,
+                )));
             }
+
+            // As processAutoCredit(): the rows first, then their journals.
+            $this->postEntries($results->all());
 
             return $results;
         }, GeneratedNumberWrite::SHARE_CAPITAL_REFERENCE_INDEX, GeneratedNumberWrite::SHARE_CAPITAL_CONFLICT);
+    }
+
+    /**
+     * Posts each standalone row, one journal per row, through its own method.
+     * The caller holds the transaction, so a refused posting takes every row
+     * with it. Only for rows with no `repayment_id` or `loan_id`: those are
+     * already in their payment's or release's journal, and the poster refuses
+     * them.
+     *
+     * @param  list<ShareCapitalLedger>  $rows
+     */
+    private function postEntries(array $rows): void
+    {
+        foreach ($rows as $row) {
+            $this->poster->shareCapitalEntry($row, (string) $row->method, (int) $row->created_by);
+        }
     }
 }
