@@ -255,8 +255,10 @@ class ReconciliationActions
 
                 $this->assertInsideTheWindow($reconciliation, $line);
 
-                if (! $recordAnyway) {
-                    $this->assertNotAlreadyInTheBooks($reconciliation, $line);
+                $twin = $this->entryAlreadyInTheBooks($reconciliation, $line);
+
+                if ($twin !== null && ! $recordAnyway) {
+                    throw ValidationException::withMessages(['line' => [$twin['message']]]);
                 }
 
                 $reconciled = $this->requireMoneyAccount($reconciliation->accounting_account_id, 'account_id');
@@ -277,17 +279,28 @@ class ReconciliationActions
                     default => 'suspense entry',
                 };
 
+                $newValues = [
+                    'statement_line_id' => $line->id,
+                    'matched_journal_line_id' => $journalLineId,
+                    'recorded_as' => $type,
+                    'journal_id' => $journal->id,
+                ];
+                $description = "Statement line {$line->id} recorded as {$label} {$journal->journal_no}";
+
+                // Only a warning that was actually overridden is recorded: a
+                // `record_anyway` sent when nothing matched overrode nothing.
+                if ($twin !== null) {
+                    $newValues['record_anyway'] = true;
+                    $newValues['suggested_journal_no'] = $twin['journal_no'];
+                    $description .= ", recorded anyway although it matched {$twin['journal_no']}";
+                }
+
                 AuditLogService::log(
                     'updated',
                     $reconciliation,
                     ['statement_line_id' => $line->id, 'matched_journal_line_id' => null],
-                    [
-                        'statement_line_id' => $line->id,
-                        'matched_journal_line_id' => $journalLineId,
-                        'recorded_as' => $type,
-                        'journal_id' => $journal->id,
-                    ],
-                    "Statement line {$line->id} recorded as {$label} {$journal->journal_no}",
+                    $newValues,
+                    $description,
                     $userId,
                 );
 
@@ -304,6 +317,11 @@ class ReconciliationActions
             }
 
             if ($e->index === self::JOURNAL_NO_INDEX || GeneratedNumberWrite::isCollision($e)) {
+                // Reported before the 409: a retry usually succeeds, but a
+                // sequence that keeps colliding is broken, and the screen's
+                // "try again" would otherwise hide it.
+                report($e);
+
                 throw LoanWriteTransaction::conflict(self::COLLISION);
             }
 
@@ -342,30 +360,43 @@ class ReconciliationActions
     }
 
     /**
-     * Refuses to book a line the engine already pairs with an entry in the
-     * books, unless the caller says `record_anyway`.
+     * The entry already in the books that this statement line looks like, or
+     * null. The action refuses to book the line while there is one, unless the
+     * caller says `record_anyway`, and the override is audited.
      *
      * The commonest way to double-book money is to record, from the statement,
      * a deposit someone already posted: the books then hold it twice and the
      * difference moves the wrong way. Matching the existing entry is almost
      * always the right answer, so it is offered first.
+     *
+     * The engine's own suggestion decides, and it covers outstanding items: an
+     * Oct 30 deposit that clears the bank on Nov 2 is offered to November's
+     * statement line ({@see ReconciliationMatcher::candidateDates()}), so
+     * "Match it instead" can be done. Its pairing is one to one, so an entry
+     * it gives to another statement line of the same amount is not held
+     * against this one. Every leg of a reversal is an ordinary line, so a
+     * bounced cheque and its void on the statement are both caught here, and
+     * a reference on the other side is never offered.
+     *
+     * @return array{journal_no: string, message: string}|null
      */
-    private function assertNotAlreadyInTheBooks(AccountingReconciliation $reconciliation, AccountingReconciliationLine $line): void
+    private function entryAlreadyInTheBooks(AccountingReconciliation $reconciliation, AccountingReconciliationLine $line): ?array
     {
         $suggested = collect($this->matcher->present($reconciliation->fresh())['lines'])
             ->first(static fn (array $row): bool => $row['match'] === 'possible'
                 && (int) $row['statement_line_id'] === $line->id);
 
         if ($suggested === null) {
-            return;
+            return null;
         }
 
-        throw ValidationException::withMessages([
-            'line' => [
-                "This statement line matches {$suggested['journal_no']} already in the books. Match it instead, "
-                .'or record it anyway.',
-            ],
-        ]);
+        $dated = $suggested['outside_period'] ? ", dated {$suggested['date']}," : '';
+
+        return [
+            'journal_no' => (string) $suggested['journal_no'],
+            'message' => "This statement line matches {$suggested['journal_no']}{$dated} already in the books. "
+                .'Match it instead, or record it anyway.',
+        ];
     }
 
     /** The suspense role's account, or the 422 the screen shows when it is unmapped. */
