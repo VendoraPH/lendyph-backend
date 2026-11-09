@@ -12,6 +12,7 @@ use App\Models\AmortizationSchedule;
 use App\Models\Borrower;
 use App\Models\Loan;
 use App\Services\BranchAccess;
+use App\Services\Reminders\Api\ContactVisibility;
 use App\Services\ReportService;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
@@ -172,7 +173,7 @@ class ReportController extends Controller
     #[OA\Get(
         path: '/api/reports/statement-of-account/{loan}',
         summary: 'Statement of Account',
-        description: 'All transactions, schedule, and balance for a specific loan. Each `amortization_schedule` row also carries the demand letter\'s arrears: `remaining` (`principal`, `interest`, `penalty` still owed, never below 0), `amount_due` (their sum), `days_overdue` (whole days past the due date, today in Asia/Manila; 0 when not yet due) and `is_overdue` (due before today with something still owed). `total_demanded` is every `is_overdue` row\'s `amount_due` plus, when there are any, the insurance premium still owed (a payment takes it first), and `demand_totals` (`principal`, `interest`, `penalty`, `amount_due`) the columns over those rows, with `insurance_owed` the premium included in `total_demanded`. `as_of` is today in the app timezone. `loan.status_label` is "Past Due" when a released or ongoing loan has a Past Due amount above 0, otherwise the app\'s label, and `loan.has_build_up` says whether the loan has a Share Capital Build-Up. `amortization_schedule[].total_due` and `schedule_totals.total_due` include penalty; `build_up_due` is the period\'s build-up and `total_payment` adds it. `total_paid` is the period\'s principal, interest and penalty paid, so `total_due` less `total_paid` is its `amount_remaining`, and `amount_paid` stays principal and interest. `schedule_note` is set when an applied balance adjustment, restructure or term extension restated the schedule, or an extension replaced a period; a row an extension closed or added carries its own `note`, null otherwise. `schedule_totals.balance` is the rows\' `amount_remaining` added up. `transactions[]` lists the loan\'s Ledger rows in its order, each with `kind` (the Ledger\'s), `type` (`release`, `charge`, `payment` or `adjustment`), `description` (alias `particulars`), `debit`, `credit` and `voided`: the release first (a debit of principal and interest), then, when the loan had a premium owed, `kind` `insurance_debit` (a debit of what is still owed plus what was collected), penalty charges, payments, waivers, extension interest and adjustments. A voided payment stays listed with `voided` true, its receipt\'s `amount_paid`, null `debit` and `credit` and zero parts, so it moves no balance and no total; its void has no line of its own. Each line has `payment_method` (label), `reference_number`, `principal_applied`, `interest_applied`, `penalty_applied`, `insurance_applied`, `build_up_applied`, `overpayment_applied` (the excess not credited to build-up, also totalled in `transaction_totals`; positive lowers the balance and negative raises it, except build-up and the overpayment, which lower none; on every line that is not voided credit minus debit equals its principal, interest, penalty and premium, and a payment\'s `amount_paid`, the full receipt, is its `credit` plus build-up and overpayment). `transaction_totals.debit` less `transaction_totals.credit` is `summary.outstanding_balance`, and `principal_balance`, closing on GET /loans/{id}/ledger `closing.principal`; `balance` is its alias for one release. `running_balance` keeps principal plus premium. A line that is not a payment has `amount_paid` 0 and its figure in `credit` when it lowered what is owed, `debit` when it raised it, and `transaction_totals.credit` is not `summary.total_paid`, which is the money received. `loan` also carries `product_name`, `released_at`, `member_address`, `branch_name`, `account_officer_name`, `payment_frequency`, `interest_type`, `term_label`, `rate_label` and `extensions_count`. `summary` also carries `principal_paid`, `interest_paid`, `penalty_paid`, `insurance_paid`, `build_up_paid` and `overpayment_paid` (the excess a payment could not credit), which add up to `total_paid`; `insurance_owed`, inside `outstanding_balance`, and `overdue_amount`: the principal, interest and penalty still unpaid on late periods (past the due date plus the loan\'s grace), equal to GET /loans/{id}/summary `overdue_amount`. Each schedule row also carries `amount_remaining`, its principal, interest and penalty still owed. Totals in whole centavos.',
+        description: 'All transactions, schedule, and balance for a specific loan. Each `amortization_schedule` row also carries the demand letter\'s arrears: `remaining` (`principal`, `interest`, `penalty` still owed, never below 0), `amount_due` (their sum), `days_overdue` (whole days past the due date, today in Asia/Manila; 0 when not yet due) and `is_overdue` (due before today with something still owed). `total_demanded` is every `is_overdue` row\'s `amount_due` plus, when there are any, the insurance premium still owed (a payment takes it first), and `demand_totals` (`principal`, `interest`, `penalty`, `amount_due`) the columns over those rows, with `insurance_owed` the premium included in `total_demanded`. `as_of` is today in the app timezone. `loan.status_label` is "Past Due" when a released or ongoing loan has a Past Due amount above 0, otherwise the app\'s label, and `loan.has_build_up` says whether the loan has a Share Capital Build-Up. `amortization_schedule[].total_due` and `schedule_totals.total_due` include penalty; `build_up_due` is the period\'s build-up and `total_payment` adds it. `total_paid` is the period\'s principal, interest and penalty paid, so `total_due` less `total_paid` is its `amount_remaining`, and `amount_paid` stays principal and interest. `schedule_note` is set when an applied balance adjustment, restructure or term extension restated the schedule, or an extension replaced a period; a row an extension closed or added carries its own `note`, null otherwise. `schedule_totals.balance` is the rows\' `amount_remaining` added up. `transactions[]` lists the loan\'s Ledger rows in its order, each with `kind` (the Ledger\'s), `type` (`release`, `charge`, `payment` or `adjustment`), `description` (alias `particulars`), `debit`, `credit` and `voided`: the release first (a debit of principal and interest), then, when the loan had a premium owed, `kind` `insurance_debit` (a debit of what is still owed plus what was collected), penalty charges, payments, waivers, extension interest and adjustments. A voided payment stays listed with `voided` true, its receipt\'s `amount_paid`, null `debit` and `credit` and zero parts, so it moves no balance and no total; its void has no line of its own. Each line has `payment_method` (label), `reference_number`, `principal_applied`, `interest_applied`, `penalty_applied`, `insurance_applied`, `build_up_applied`, `overpayment_applied` (the excess not credited to build-up, also totalled in `transaction_totals`; positive lowers the balance and negative raises it, except build-up and the overpayment, which lower none; on every line that is not voided credit minus debit equals its principal, interest, penalty and premium, and a payment\'s `amount_paid`, the full receipt, is its `credit` plus build-up and overpayment). `transaction_totals.debit` less `transaction_totals.credit` is `summary.outstanding_balance`, and `principal_balance`, closing on GET /loans/{id}/ledger `closing.principal`; `balance` is its alias for one release. `running_balance` keeps principal plus premium. A line that is not a payment has `amount_paid` 0 and its figure in `credit` when it lowered what is owed, `debit` when it raised it, and `transaction_totals.credit` is not `summary.total_paid`, which is the money received. `loan` also carries `product_name`, `released_at`, `member_address`, `branch_name`, `account_officer_name`, `payment_frequency`, `interest_type`, `term_label`, `rate_label` and `extensions_count`. `summary` also carries `principal_paid`, `interest_paid`, `penalty_paid`, `insurance_paid`, `build_up_paid` and `overpayment_paid` (the excess a payment could not credit), which add up to `total_paid`; `insurance_owed`, inside `outstanding_balance`, and `overdue_amount`: the principal, interest and penalty still unpaid on late periods (past the due date plus the loan\'s grace), equal to GET /loans/{id}/summary `overdue_amount`. Each schedule row also carries `amount_remaining`, its principal, interest and penalty still owed. Totals in whole centavos. `loan.member_address` and `borrower.address` are null for a caller without `borrowers:view` or who cannot see the member\'s branch.',
         tags: ['Reports'],
         security: [['sanctum' => []]],
         parameters: [
@@ -188,14 +189,14 @@ class ReportController extends Controller
         $this->authorize('reports:view');
 
         return response()->json([
-            'data' => $this->reportService->statementOfAccount($loan),
+            'data' => $this->withoutMemberContact($this->reportService->statementOfAccount($loan), $loan->borrower?->branch_id),
         ]);
     }
 
     #[OA\Get(
         path: '/api/reports/subsidiary-ledger/{borrower}',
         summary: 'Subsidiary Ledger',
-        description: 'All loans with balances and payment history for a member. Each loan row\'s `total_outstanding` is everything still owed (the periods\' unpaid principal, interest and penalty plus the insurance premium owed) and `outstanding_principal` is the unpaid principal only, both in whole centavos and equal to GET /loans/{id}/summary. `outstanding_balance` is deprecated (unpaid principal plus premium owed, never interest or penalty); read `total_outstanding` or `outstanding_principal` instead. `display_status` is `past_due` for a released or ongoing loan past grace, else its status (`status` is unchanged). `overdue_amount` is what the loan\'s late periods (unpaid and past grace) still owe, the Past Due Loans report\'s per-loan figure and GET /loans/{id}/summary `overdue_amount`. `loans_totals` adds up the `loans` table\'s columns (`principal_amount`, `total_paid`, `outstanding_balance`, `total_outstanding`, `outstanding_principal`, `overdue_amount` in whole centavos, `payments_count` as a count). `totals.total_outstanding` equals `loans_totals.total_outstanding`.',
+        description: 'All loans with balances and payment history for a member. Each loan row\'s `total_outstanding` is everything still owed (the periods\' unpaid principal, interest and penalty plus the insurance premium owed) and `outstanding_principal` is the unpaid principal only, both in whole centavos and equal to GET /loans/{id}/summary. `outstanding_balance` is deprecated (unpaid principal plus premium owed, never interest or penalty); read `total_outstanding` or `outstanding_principal` instead. `display_status` is `past_due` for a released or ongoing loan past grace, else its status (`status` is unchanged). `overdue_amount` is what the loan\'s late periods (unpaid and past grace) still owe, the Past Due Loans report\'s per-loan figure and GET /loans/{id}/summary `overdue_amount`. `loans_totals` adds up the `loans` table\'s columns (`principal_amount`, `total_paid`, `outstanding_balance`, `total_outstanding`, `outstanding_principal`, `overdue_amount` in whole centavos, `payments_count` as a count). `totals.total_outstanding` equals `loans_totals.total_outstanding`. For a caller without `borrowers:view`, `borrower.address` is null and `borrower.contact_number` is left out.',
         tags: ['Reports'],
         security: [['sanctum' => []]],
         parameters: [
@@ -213,7 +214,7 @@ class ReportController extends Controller
         $this->authorize('reports:view');
 
         return response()->json([
-            'data' => $this->withoutMemberContact($this->reportService->subsidiaryLedger($borrower, $this->reportFilters())),
+            'data' => $this->withoutMemberContact($this->reportService->subsidiaryLedger($borrower, $this->reportFilters()), $borrower->branch_id),
         ]);
     }
 
@@ -810,7 +811,7 @@ class ReportController extends Controller
     #[OA\Get(
         path: '/api/reports/share-capital-statement/{borrower}',
         summary: 'Share Capital Statement',
-        description: 'One member\'s complete share capital ledger with a running balance (`entries[].running_balance`), opening and closing balances and period totals (`totals.credits`, `totals.debits`, also as `total_credit` and `total_debit` beside `closing_balance`). Unpaginated: this feeds a printable certificate.',
+        description: 'One member\'s complete share capital ledger with a running balance (`entries[].running_balance`), opening and closing balances and period totals (`totals.credits`, `totals.debits`, also as `total_credit` and `total_debit` beside `closing_balance`). Unpaginated: this feeds a printable certificate. For a caller without `borrowers:view`, `borrower.address` is null and `borrower.contact_number` is left out.',
         tags: ['Reports'],
         security: [['sanctum' => []]],
         parameters: [
@@ -828,7 +829,7 @@ class ReportController extends Controller
         $this->authorize('reports:view');
 
         return response()->json([
-            'data' => $this->withoutMemberContact($this->reportService->shareCapitalStatement($borrower, $this->reportFilters())),
+            'data' => $this->withoutMemberContact($this->reportService->shareCapitalStatement($borrower, $this->reportFilters()), $borrower->branch_id),
         ]);
     }
 
@@ -988,16 +989,29 @@ class ReportController extends Controller
     }
 
     /**
-     * A report's member block, without the contact number for a caller who
-     * doesn't hold `borrowers:view`.
+     * A report's member block as the caller may read it, by the round fz
+     * personal-data rule (ContactVisibility: `borrowers:view` and the member's
+     * own branch). Without it the contact number is left out, and the member's
+     * address (`borrower.address`, and the Statement of Account's
+     * `loan.member_address`) reads null.
      *
      * @param  array<string, mixed>  $report
      * @return array<string, mixed>
      */
-    private function withoutMemberContact(array $report): array
+    private function withoutMemberContact(array $report, ?int $memberBranchId): array
     {
-        if (! request()->user()->can('borrowers:view')) {
-            unset($report['borrower']['contact_number']);
+        if (app(ContactVisibility::class)->allows(request()->user(), $memberBranchId)) {
+            return $report;
+        }
+
+        unset($report['borrower']['contact_number']);
+
+        if (array_key_exists('address', $report['borrower'] ?? [])) {
+            $report['borrower']['address'] = null;
+        }
+
+        if (array_key_exists('member_address', $report['loan'] ?? [])) {
+            $report['loan']['member_address'] = null;
         }
 
         return $report;
