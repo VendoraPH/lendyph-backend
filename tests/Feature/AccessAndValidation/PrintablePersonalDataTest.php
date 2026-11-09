@@ -12,7 +12,9 @@ use Tests\Traits\SetupLendyPH;
 /**
  * The disclosure and promissory note answer to `loans:view`, so their payloads
  * carry only what the printed documents use (the frontend's disclosure.ts and
- * promissory-note.ts templates), never the rest of a person's record.
+ * promissory-note.ts templates), never the rest of a person's record. The
+ * note's addresses also need member access (`borrowers:view` and the member's
+ * branch), which the manager here lacks.
  */
 class PrintablePersonalDataTest extends TestCase
 {
@@ -49,15 +51,20 @@ class PrintablePersonalDataTest extends TestCase
         $data = $this->getJson("/api/loans/{$this->loan->id}/promissory-note")->assertOk()->json('data');
 
         $this->assertEqualsCanonicalizing(['borrower_code', 'full_name', 'address'], array_keys($data['borrower']));
-        $this->assertSame('12 Mabini St', $data['borrower']['address']);
+        $this->assertNull($data['borrower']['address']);
         $this->assertSame($this->loan->borrower->full_name, $data['borrower']['full_name']);
 
         $this->assertEqualsCanonicalizing(
             ['co_maker_code', 'full_name', 'address', 'relationship_to_borrower'],
             array_keys($data['co_makers'][0]),
         );
-        $this->assertSame('9 Rizal Ave', $data['co_makers'][0]['address']);
+        $this->assertNull($data['co_makers'][0]['address']);
         $this->assertSame('Sister', $data['co_makers'][0]['relationship_to_borrower']);
+
+        $this->actingAs($this->admin);
+        $full = $this->getJson("/api/loans/{$this->loan->id}/promissory-note")->assertOk()->json('data');
+        $this->assertSame('12 Mabini St', $full['borrower']['address']);
+        $this->assertSame('9 Rizal Ave', $full['co_makers'][0]['address']);
     }
 
     public function test_the_disclosure_sends_only_what_it_prints(): void
@@ -87,6 +94,7 @@ class PrintablePersonalDataTest extends TestCase
     {
         Borrower::whereKey($this->loan->borrower_id)->update(['address' => null, 'street_address' => '44 Luna St']);
 
+        $this->actingAs($this->admin);
         $this->getJson("/api/loans/{$this->loan->id}/promissory-note")
             ->assertOk()
             ->assertJsonPath('data.borrower.address', '44 Luna St');

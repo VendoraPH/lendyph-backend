@@ -3,6 +3,7 @@
 namespace App\Services\Accounting;
 
 use App\Models\AccountingJournal;
+use Illuminate\Database\Query\Builder;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -11,11 +12,20 @@ use Illuminate\Support\Facades\DB;
  *
  * Each income and expense account's movement on posted and reversed journals
  * dated `from` to `to`, read from the journal lines in ONE grouped query
- * rather than as the difference of two trial balances. The figures are the
- * same (StatementEndpointsTest proves it), and the query is the one place a
- * filter on the journal belongs: the year-end close can leave its closing
- * entries out with one `where` on `source`, which no difference of balances
- * could do.
+ * rather than as the difference of two trial balances. On books with no
+ * closing entry the figures are the same (StatementEndpointsTest proves it),
+ * and the query is the one place a filter on the journal belongs.
+ *
+ * ## Closing entries are left out
+ *
+ * A year-end close (YearEndCloser) posts `closing` journals on 31 December
+ * that empty every income and expense account into net surplus, and a
+ * reopened year reverses them. Neither is income or expense of the year, so
+ * {@see self::withoutClosingEntries()} drops both: a closed year's statement
+ * reads exactly as it did before the close, and so do the accounting
+ * dashboard's period figures and trend, which come from build(). The trial
+ * balance and the balance sheet still count them, which is how the result
+ * reaches net surplus.
  *
  * Lines are netted in their normal direction (credit minus debit for income,
  * debit minus credit for expenses), in code order, and a line that nets to
@@ -92,7 +102,8 @@ final class IncomeStatementBuilder
      * Debits and credits per income and expense account over the range.
      *
      * The same status rule as the trial balance: posted AND reversed lines
-     * count (a reversal and its original net out), drafts don't.
+     * count (a reversal and its original net out), drafts don't. Closing
+     * entries and their reversals don't either (see the class docblock).
      *
      * @param  int|list<int>|null  $branchId
      * @return list<array{account_id: int, account_code: string, account_name: string, type: string, debit: int, credit: int}>
@@ -107,6 +118,7 @@ final class IncomeStatementBuilder
             ->where('j.date', '>=', $from)
             ->where('j.date', '<=', $to)
             ->when($branchId !== null, fn ($q) => $q->whereIn('j.branch_id', (array) $branchId))
+            ->tap(fn (Builder $q) => self::withoutClosingEntries($q, 'j'))
             ->whereIn('a.type', ['income', 'expense'])
             ->where('a.is_group', false)
             ->groupBy('a.id', 'a.code', 'a.name', 'a.type')
@@ -130,5 +142,22 @@ final class IncomeStatementBuilder
                 'credit' => (int) $row->credit,
             ])
             ->all();
+    }
+
+    /**
+     * Leaves out `closing` journals and the reversals of them, on a query
+     * that joins `accounting_journals` as `$journal`. Shared with the
+     * year-end close, whose preview reads the year's real figures the same
+     * way, so a close after a reopen sees what the first one saw.
+     */
+    public static function withoutClosingEntries(Builder $query, string $journal): Builder
+    {
+        return $query
+            ->where("{$journal}.source", '!=', YearEndCloser::SOURCE)
+            ->whereNotExists(fn (Builder $closing) => $closing
+                ->selectRaw('1')
+                ->from('accounting_journals as closing_journal')
+                ->whereColumn('closing_journal.id', "{$journal}.reverses_journal_id")
+                ->where('closing_journal.source', YearEndCloser::SOURCE));
     }
 }

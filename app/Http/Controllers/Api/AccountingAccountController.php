@@ -4,11 +4,13 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Api\Traits\ScopesBranchFilter;
 use App\Http\Controllers\Controller;
+use App\Http\Requests\Accounting\SeedChartRequest;
 use App\Http\Requests\Accounting\StoreAccountingAccountRequest;
 use App\Http\Requests\Accounting\UpdateAccountingAccountRequest;
 use App\Http\Resources\AccountingAccountResource;
 use App\Models\AccountingAccount;
 use App\Models\AccountingAccountMapping;
+use App\Models\AccountingOpeningBalanceLine;
 use App\Services\Accounting\AccountRules;
 use App\Services\Accounting\ChartOfAccountsSeeder;
 use App\Services\Accounting\TrialBalanceBuilder;
@@ -244,21 +246,26 @@ class AccountingAccountController extends Controller
 
     #[OA\Post(
         path: '/api/accounting/accounts/seed',
-        summary: 'Seed the default chart of accounts',
-        description: 'One-time. Creates the default chart and its posting defaults, and returns the whole chart in code order as a flat `{data: Account[]}` — NOT a paginator. Refuses with 409 if any account already exists, because merging would resurrect accounts an administrator removed and re-point roles they changed.',
+        summary: 'Seed the chart of accounts from a template',
+        description: 'One-time. Creates the chart of the chosen template and its posting defaults, and returns the whole chart in code order as a flat `{data: Account[]}` — NOT a paginator. `lending_company` (the default) is the standard chart; `cooperative` adds 2050 Savings Deposits, 2060 Time Deposits, 2070 Interest on Share Capital Payable, 2080 Patronage Refund Payable, the 3070 Statutory Funds heading with 3071–3074 under it, and 3080 Undivided Net Surplus, where `net_surplus` posts. Refuses with 409 if any account already exists, because merging would resurrect accounts an administrator removed and re-point roles they changed.',
         tags: ['Accounting'],
         security: [['sanctum' => []]],
+        requestBody: new OA\RequestBody(
+            required: false,
+            content: new OA\JsonContent(properties: [
+                new OA\Property(property: 'template', type: 'string', enum: ['lending_company', 'cooperative'], nullable: true, description: 'Absent or null: lending_company.'),
+            ]),
+        ),
         responses: [
             new OA\Response(response: 201, description: 'The seeded chart'),
             new OA\Response(response: 403, description: 'Missing chart_of_accounts:create'),
             new OA\Response(response: 409, description: 'A chart of accounts already exists'),
+            new OA\Response(response: 422, description: 'An unknown template'),
         ],
     )]
-    public function seed(ChartOfAccountsSeeder $seeder): JsonResponse
+    public function seed(SeedChartRequest $request, ChartOfAccountsSeeder $seeder): JsonResponse
     {
-        $this->authorize('chart_of_accounts:create');
-
-        $accounts = $seeder->seed(request()->user()?->id);
+        $accounts = $seeder->seed($request->user()?->id, $request->template());
 
         // Every count is zero on a chart that was created a moment ago. Loaded
         // anyway so the field is PRESENT and says so, rather than absent and
@@ -326,7 +333,7 @@ class AccountingAccountController extends Controller
     #[OA\Delete(
         path: '/api/accounting/accounts/{id}',
         summary: 'Delete an account',
-        description: 'Refuses (422) when the account has children, when a posting role resolves to it, or when any journal line — draft or posted — references it. All three are restricted by foreign keys as well; these checks turn what would be a 500 into something a screen can render. An account with history can only be deactivated.',
+        description: 'Refuses (422) when the account has children, when a posting role resolves to it, when any journal line — draft or posted — references it, or when it is on the opening balances draft. All four are restricted by foreign keys as well; these checks turn what would be a 500 into something a screen can render. An account with history can only be deactivated.',
         tags: ['Accounting'],
         security: [['sanctum' => []]],
         parameters: [
@@ -335,7 +342,7 @@ class AccountingAccountController extends Controller
         responses: [
             new OA\Response(response: 200, description: 'Account deleted'),
             new OA\Response(response: 403, description: 'Missing chart_of_accounts:delete'),
-            new OA\Response(response: 422, description: 'Account has children, is referenced by a posting role, or has journal lines'),
+            new OA\Response(response: 422, description: 'Account has children, is referenced by a posting role, has journal lines, or is on the opening balances draft'),
         ],
     )]
     public function destroy(AccountingAccount $account): JsonResponse
@@ -375,6 +382,14 @@ class AccountingAccountController extends Controller
             // new history while keeping what it has.
             throw ValidationException::withMessages([
                 'account' => "{$account->code} {$account->name} has {$lines} journal line(s) against it and cannot be deleted. Deactivate it instead — an account with history keeps its history.",
+            ]);
+        }
+
+        // The opening balances draft's lines restrict the account too, so the
+        // DELETE would otherwise answer 500.
+        if (AccountingOpeningBalanceLine::query()->where('accounting_account_id', $account->id)->exists()) {
+            throw ValidationException::withMessages([
+                'account' => "{$account->code} {$account->name} is on the opening balance draft. Remove it there first.",
             ]);
         }
 

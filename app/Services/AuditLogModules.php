@@ -9,6 +9,7 @@ use App\Models\AccountingExpense;
 use App\Models\AccountingExpensePayment;
 use App\Models\AccountingJournal;
 use App\Models\AccountingJournalLine;
+use App\Models\AccountingOpeningBalance;
 use App\Models\AccountingPeriod;
 use App\Models\AccountingReconciliation;
 use App\Models\AccountingReconciliationLine;
@@ -120,6 +121,7 @@ class AuditLogModules
         AccountingReconciliationLine::class => 'accounting',
         AccountingYearClose::class => 'accounting',
         AccountingAllowancePosting::class => 'accounting',
+        AccountingOpeningBalance::class => 'accounting',
         GCashTransaction::class => 'gcash',
         GCashNonMember::class => 'gcash',
         GCashTier::class => 'gcash',
