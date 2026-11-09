@@ -162,4 +162,24 @@ class GCashJournalTest extends TestCase
         $this->assertSame('2026-11-06 00:30:00', $tx->fresh()->paid_at->toDateTimeString());
         $this->assertSame('2026-11-06', $this->journalOn($tx, 'cash_in')->date->toDateString());
     }
+
+    /**
+     * Two creates that read the same newest reference number: the second's
+     * insert hits the unique index and answers 409, with nothing of it saved
+     * and nothing posted. Nothing retries, so nothing can post twice.
+     */
+    public function test_a_reference_number_taken_at_the_same_moment_answers_409_and_saves_nothing(): void
+    {
+        $first = $this->record(['type' => 'cash_out', 'amount' => 1000]);
+        GCashTransaction::creating(function (GCashTransaction $tx) use ($first): void {
+            $tx->reference_no = $first->reference_no;
+        });
+
+        $this->postJson('/api/gcash/transactions', ['type' => 'cash_out', 'amount' => 2000, 'borrower_id' => $this->member->id])
+            ->assertStatus(409)
+            ->assertExactJson(['message' => GCashService::CREATE_CONFLICT]);
+
+        $this->assertSame([$first->id], GCashTransaction::pluck('id')->all());
+        $this->assertSame(1, $this->gcashJournalCount());
+    }
 }

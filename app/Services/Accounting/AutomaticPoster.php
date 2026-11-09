@@ -761,7 +761,7 @@ final class AutomaticPoster
      * @param  string  $method  how the member paid the deductions, in the lending vocabulary
      * @return array{release: AccountingJournal|null, write_off: AccountingJournal|null}
      *
-     * @throws CannotPostToTheBooksException when the split is missing or does not reconcile, or a role is unmapped
+     * @throws CannotPostToTheBooksException when the split is missing or does not reconcile, the two loans are in different branches, or a role is unmapped
      * @throws LogicException when called outside a transaction
      */
     public function restructureRelease(Loan $new, Loan $source, int $userId, string $method): array
@@ -780,6 +780,15 @@ final class AutomaticPoster
             throw CannotPostToTheBooksException::because(
                 "{$this->releaseLabel($new)} is not a restructure of {$this->businessIdentifier($source)}, so its release "
                 .'cannot be posted against it. Nothing has been saved.');
+        }
+
+        // J1 posts in the new loan's branch and J2 in the source's, so the
+        // two must be one branch. A member's branch can't change while a loan
+        // is collectible, so only an imported or hand-edited row differs.
+        if ((int) $new->branch_id !== (int) $source->branch_id) {
+            throw CannotPostToTheBooksException::because(
+                "{$this->releaseLabel($new)} is in a different branch from {$this->businessIdentifier($source)}, the loan it "
+                .'restructures, so its release and write-off would post to two branches. Nothing has been saved.');
         }
 
         $map = AccountMap::resolve();
