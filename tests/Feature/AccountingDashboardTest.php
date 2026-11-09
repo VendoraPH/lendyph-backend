@@ -73,7 +73,10 @@ class AccountingDashboardTest extends TestCase
 
         $this->assertSame(10000000, $dashboard['total_assets']);
         $this->assertSame(300000, $dashboard['total_liabilities']);
-        $this->assertSame(10000000, $dashboard['total_equity']);
+        // The balance sheet's equity: posted equity plus earnings not yet
+        // closed, so the ₱3,000.00 expense reduces it.
+        $this->assertSame(10000000 - 300000, $dashboard['total_equity']);
+        $this->assertSame($dashboard['total_liabilities'] + $dashboard['total_equity'], $dashboard['total_assets']);
         $this->assertTrue($dashboard['is_balanced']);
     }
 
