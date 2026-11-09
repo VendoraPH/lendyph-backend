@@ -6,9 +6,11 @@ use App\Models\AccountingAccount;
 use App\Models\AccountingAccountMapping;
 use App\Models\AccountingJournal;
 use App\Models\AccountingJournalLine;
+use App\Models\AccountingPeriod;
 use App\Models\AuditLog;
 use App\Services\Accounting\JournalPoster;
 use App\Services\Accounting\TrialBalanceBuilder;
+use Carbon\CarbonImmutable;
 use Illuminate\Console\Command;
 use Illuminate\Database\Events\TransactionBeginning;
 use Illuminate\Support\Facades\Artisan;
@@ -835,5 +837,21 @@ class AccountingOpeningBalancesTest extends TestCase
         $this->assertArrayHasKey('env', $entry->new_values['deployment']);
         $this->assertArrayHasKey('branch', $entry->new_values['deployment']);
         $this->assertSame('console', $entry->ip_address);
+    }
+
+    public function test_a_closed_month_on_the_as_of_date_is_refused_under_its_own_heading(): void
+    {
+        AccountingPeriod::query()->create(AccountingPeriod::attributesForMonth(CarbonImmutable::parse(self::AS_OF)) + [
+            'status' => 'closed',
+            'closed_by' => $this->admin->id,
+            'closed_at' => now(),
+        ]);
+
+        $output = $this->runCommand(['--file' => $this->canonicalCsv(), '--as-of' => self::AS_OF], Command::FAILURE);
+
+        $this->assertStringContainsString('Refused: the as-of date falls in or before a closed month — nothing was written:', $output);
+        $this->assertStringContainsString('The opening balances is dated 2026-08-31, which falls in', $output);
+        $this->assertStringNotContainsString('JournalPoster', $output);
+        $this->assertSame(0, AccountingJournal::query()->count());
     }
 }

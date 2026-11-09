@@ -248,6 +248,28 @@ class YearEndPreviewTest extends TestCase
         );
     }
 
+    /**
+     * A chart mapped this way before the mapping refused it: the close would
+     * post the year's result into the opening balances, and would lock 3050
+     * after its months while an opening balance locks 3050 before them.
+     */
+    public function test_a_net_surplus_role_on_the_opening_balance_equity_account_blocks_the_close(): void
+    {
+        $this->postTheYear();
+        AccountingAccountMapping::query()->where('role', 'net_surplus')->update(['accounting_account_id' => $this->account('3050')]);
+
+        $preview = $this->preview();
+
+        $this->assertSame('3050', $preview['net_surplus_account']['code']);
+        $this->assertFalse($preview['can_close']);
+        $this->assertSame(
+            ["Retained earnings or net surplus can't post to 3050 Opening Balance Equity, the opening balance equity account: the year's result would be mixed into the opening balances. Choose an equity account for it in Accounting → Settings → Default Accounts."],
+            $preview['blocking_reasons'],
+        );
+        $this->closeYear()->assertUnprocessable()->assertJsonPath('errors.year', $preview['blocking_reasons']);
+        $this->assertSame(0, AccountingJournal::query()->where('source', 'closing')->count());
+    }
+
     public function test_an_inactive_net_surplus_account_blocks_the_close(): void
     {
         $this->postTheYear();

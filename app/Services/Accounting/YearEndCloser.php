@@ -560,6 +560,9 @@ final class YearEndCloser
         } elseif ($account->is_group || ! $account->is_active) {
             $reasons[] = "The net surplus account, {$account->code} {$account->name}, can't take postings because it is "
                 .($account->is_group ? 'a heading' : 'inactive').'. '.self::SETTINGS_HINT;
+        } elseif (($reserved = AccountingAccountMapping::reservedAccountReason(self::NET_SURPLUS_ROLE, (string) $account->code, "{$account->code} {$account->name}")) !== null) {
+            // A chart mapped this way before the mapping refused it.
+            $reasons[] = $reserved.' '.self::SETTINGS_HINT;
         }
 
         return [...$reasons, ...$unpostable];
