@@ -8,8 +8,8 @@
  * Arguments: `post` or `reverse`, the journal id, a marker file path, and a
  * pause in microseconds. Once the write has locked its journal row, it writes
  * the marker and holds that lock for the pause, so the test can start the
- * write-off inside exactly that window. Prints `ok JE-…` and exits 0, or
- * prints the exception and exits 1.
+ * write-off inside exactly that window. Prints `ok JE-… at <microtime>`
+ * (when the write finished) and exits 0, or prints the exception and exits 1.
  *
  * Its database comes from the environment the test passes (DB_DATABASE is
  * the test's own, which differs per parallel worker).
@@ -53,7 +53,7 @@ try {
         ? $poster->reverse($journal, $journal->date->toDateString(), 'Lock order test')
         : $poster->post($journal);
 
-    fwrite(STDOUT, "ok {$result->journal_no}");
+    fwrite(STDOUT, sprintf('ok %s at %.6F', $result->journal_no, microtime(true)));
     exit(0);
 } catch (Throwable $e) {
     fwrite(STDOUT, $e::class.': '.$e->getMessage());
