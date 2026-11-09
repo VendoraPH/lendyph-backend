@@ -5,12 +5,14 @@ use App\Models\CreditDecision;
 use App\Models\CreditScore;
 use App\Models\Loan;
 use App\Models\LoanProduct;
+use App\Services\CreditScoring\Api\AssessmentService;
 use App\Services\CreditScoring\Centavos;
 use App\Services\CreditScoring\PolicyFlags;
 use App\Services\CreditScoring\Recalculator;
 use App\Services\CreditScoring\Scorer;
 use App\Services\LoanService;
 use Illuminate\Contracts\Cache\LockTimeoutException;
+use Illuminate\Support\Facades\Cache;
 use Tests\Feature\CreditScoring\Api\CreditApiFixtures;
 use Tests\TestCase;
 
@@ -23,7 +25,7 @@ uses(TestCase::class, CreditApiFixtures::class);
 
 const ASSESSMENT_KEYS = [
     'loan_id', 'loan_status', 'editable', 'borrower_id', 'borrower_name', 'borrower_code', 'notice_version', 'privacy_notice',
-    'application_profile', 'score', 'capacity', 'policy_flags', 'decisions',
+    'application_profile', 'score', 'capacity', 'policy_flags', 'decisions', 'decisions_total', 'employment_statuses',
 ];
 
 const APPLICATION_PROFILE_KEYS = [
@@ -150,22 +152,109 @@ it('validates the application details', function (array $body, string $field) {
 })->with([
     'negative income' => [['other_income' => -1], 'other_income'],
     'three decimals' => [['household_expenses' => 10.005], 'household_expenses'],
+    'above ₱9,999,999,999.99' => [['business_income' => 10000000000], 'business_income'],
     'unknown verification' => [['income_verification' => 'maybe'], 'income_verification'],
     'future business' => [['business_start_date' => '2030-01-01'], 'business_start_date'],
     'fractional references' => [['verified_references_count' => 1.5], 'verified_references_count'],
 ]);
 
-it('answers 409 when the member is being scored and the lock times out', function () {
+/**
+ * The member's lock as a stand-in: it records how long the save offered to
+ * wait and times out without running the save. A real wait can't be timed
+ * here, because Lock::block() measures it with Carbon::now(), which the
+ * pinned test clock never moves.
+ */
+function timingOutRecalculator(stdClass $seen): Recalculator
+{
+    return new class(app(Scorer::class), app(PolicyFlags::class), $seen) extends Recalculator
+    {
+        public function __construct(Scorer $scorer, PolicyFlags $flags, private readonly stdClass $seen)
+        {
+            parent::__construct($scorer, $flags);
+        }
+
+        public function assessLoanAfter(Loan $loan, string $reason, callable $write, int $waitSeconds): array
+        {
+            $this->seen->waitSeconds = $waitSeconds;
+
+            throw new LockTimeoutException;
+        }
+    };
+}
+
+it('answers 409 when the member is still being scored after 3 seconds, saving nothing', function () {
+    $loan = $this->application($this->member(['monthly_income' => 35000]));
+    $seen = new stdClass;
+    app()->instance(Recalculator::class, timingOutRecalculator($seen));
+
+    $this->actingAs($this->officer)->putJson("/api/credit-scoring/loans/{$loan->id}/assessment", ['household_expenses' => 1000])->assertConflict();
+
+    expect($seen->waitSeconds)->toBe(AssessmentService::LOCK_WAIT_SECONDS)
+        ->and(AssessmentService::LOCK_WAIT_SECONDS)->toBe(3)
+        ->and(CreditApplicationProfile::query()->count())->toBe(0);
+});
+
+it('takes the member\'s lock outside the transaction and saves nothing while another holder has it', function () {
+    $member = $this->member(['monthly_income' => 35000]);
+    $loan = $this->application($member);
+    $held = Cache::lock("credit-scoring:member:{$member->id}", 60);
+    expect($held->get())->toBeTrue();
+
+    try {
+        expect(fn () => app(Recalculator::class)->assessLoanAfter($loan, 'Assessment saved', fn () => throw new LogicException('The save ran without the lock.'), 0))
+            ->toThrow(LockTimeoutException::class);
+    } finally {
+        $held->release();
+    }
+
+    expect(CreditScore::query()->count())->toBe(0);
+});
+
+it('rolls the saved details back when the assessment fails', function () {
     $loan = $this->application($this->member(['monthly_income' => 35000]));
     app()->instance(Recalculator::class, new class(app(Scorer::class), app(PolicyFlags::class)) extends Recalculator
     {
-        public function assessLoan(Loan $loan, string $reason, bool $dryRun = false, ?Carbon\Carbon $asOf = null): array
+        protected function assessUnlocked(Loan $loan, string $reason, bool $dryRun, ?Carbon\Carbon $asOf): array
         {
-            throw new LockTimeoutException;
+            throw new RuntimeException('The assessment failed.');
         }
     });
 
-    $this->actingAs($this->officer)->putJson("/api/credit-scoring/loans/{$loan->id}/assessment", [])->assertConflict();
+    $this->actingAs($this->officer)->putJson("/api/credit-scoring/loans/{$loan->id}/assessment", ['household_expenses' => 1000, 'notice_acknowledged' => true])
+        ->assertServerError();
+
+    expect(CreditApplicationProfile::query()->count())->toBe(0)
+        ->and(CreditScore::query()->count())->toBe(0);
+});
+
+it('lists the employment statuses with their labels, and refuses any other', function () {
+    $loan = $this->application($this->member(['monthly_income' => 35000]));
+
+    $data = $this->actingAs($this->officer)->putJson("/api/credit-scoring/loans/{$loan->id}/assessment", ['employment_status' => 'self_employed'])->assertOk()->json('data');
+
+    expect($data['application_profile']['employment_status'])->toBe('self_employed')
+        ->and(collect($data['employment_statuses'])->pluck('label', 'value')->all())->toBe(AssessmentService::EMPLOYMENT_STATUSES);
+    $this->actingAs($this->officer)->putJson("/api/credit-scoring/loans/{$loan->id}/assessment", ['employment_status' => 'Freelancer'])
+        ->assertUnprocessable()->assertJsonValidationErrors('employment_status');
+});
+
+it('lists the latest 50 decisions, with the full count', function () {
+    $member = $this->member(['monthly_income' => 35000]);
+    $loan = $this->application($member);
+    $scoreId = $this->actingAs($this->officer)->putJson("/api/credit-scoring/loans/{$loan->id}/assessment", [])->json('data.score.id');
+
+    foreach (range(1, 52) as $i) {
+        CreditDecision::query()->create([
+            'borrower_id' => $member->id, 'loan_id' => $loan->id, 'credit_score_id' => $scoreId, 'decision' => 'hold', 'reason' => "Decision {$i}",
+            'score_snapshot' => [], 'recommendation_snapshot' => 'Advice', 'revision_version' => '1.0', 'decided_by' => $this->officer->id, 'decided_at' => now()->addMinutes($i),
+        ]);
+    }
+
+    $data = $this->actingAs($this->officer)->getJson("/api/credit-scoring/loans/{$loan->id}/assessment")->json('data');
+
+    expect($data['decisions'])->toHaveCount(50)
+        ->and($data['decisions_total'])->toBe(52)
+        ->and($data['decisions'][0]['reason'])->toBe('Decision 52');
 });
 
 it('lists the loan\'s decisions and its own flags', function () {

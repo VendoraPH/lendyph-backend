@@ -15,7 +15,8 @@ use OpenApi\Attributes as OA;
  * `{loan}` binds only loans the caller's branches can see, so another
  * branch's loan answers 404. The application details hold income and
  * expenses, so reading them needs `loans:view` as well as
- * `credit_scoring:view`; saving needs `loans:update`.
+ * `credit_scoring:view`; saving needs `loans:update` too. The member's own
+ * income shows only to a caller who may read the member (Presenter).
  */
 class CreditAssessmentController extends Controller
 {
@@ -53,7 +54,7 @@ class CreditAssessmentController extends Controller
         ],
         responses: [
             new OA\Response(response: 200, description: 'The assessment after the save'),
-            new OA\Response(response: 403, description: 'Missing credit_scoring:view or loans:update'),
+            new OA\Response(response: 403, description: 'Missing credit_scoring:view, loans:view or loans:update'),
             new OA\Response(response: 404, description: 'No such loan, or a loan in another branch'),
             new OA\Response(response: 409, description: 'The member is being scored; try again'),
             new OA\Response(response: 422, description: 'A loan past approval, or a bad detail'),

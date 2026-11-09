@@ -22,13 +22,25 @@ use Carbon\CarbonInterface;
  * Built for one caller: a score's data drops what they can't see
  * (CreditScope::dataUsed()), and a possible-duplicate flag reads its rule's
  * description for a caller without `branches:view_all`, since its detail
- * names the other member.
+ * names the other member. A caller who may not read the member's financial
+ * figures (CreditScope::seesFinancials()) gets no capacity block, no
+ * application details id, generic lines on the factors that print income or
+ * debt, and a recommendation without the suggested maximum's amount;
+ * `financials_hidden` says so.
  */
 final class Presenter
 {
     public const NOT_SCORED = 'not_scored';
 
     private const GENERIC_FLAG_RULES = ['possible_duplicate'];
+
+    /** Factor lines that print the member's income or debt, and their stand-ins. */
+    private const FINANCIAL_FACTOR_DETAILS = [
+        'debt_service_ratio' => 'Debt payments against monthly income. The figures are shown to staff who can read the member\'s details and loans.',
+        'payment_cover' => 'Disposable income against the proposed payment. The figures are shown to staff who can read the member\'s details and loans.',
+        'debt_to_income' => 'Debt against annual income. The figures are shown to staff who can read the member\'s details and loans.',
+        'active_loans' => 'Active loans, outside lenders included. The figures are shown to staff who can read the member\'s details and loans.',
+    ];
 
     private ?FactorTable $currentTable = null;
 
@@ -46,6 +58,7 @@ final class Presenter
             return $this->notScored($member);
         }
 
+        $financial = $this->scope->seesFinancials($viewer, $member, $score);
         $categories = $score->category_scores ?? [];
         $labels = array_column($categories, 'label', 'key');
         $factors = $score->relationLoaded('factors') ? $score->factors : $score->factors()->get();
@@ -71,11 +84,11 @@ final class Presenter
             'factors' => $factors->where('has_data', true)->map(fn ($factor) => [
                 'id' => (int) $factor->id,
                 'label' => $factor->label,
-                'detail' => $factor->detail,
+                'detail' => $financial ? $factor->detail : (self::FINANCIAL_FACTOR_DETAILS[$factor->factor_key] ?? $factor->detail),
                 'impact' => $factor->impact,
                 'category' => $labels[$factor->category_key] ?? $factor->category_key,
             ])->values()->all(),
-            'recommendation' => $score->recommendation,
+            'recommendation' => $financial ? $score->recommendation : self::withoutAmounts($score->recommendation),
             'calculated_at' => self::time($score->calculated_at),
             'status' => $score->status,
             'limited_history' => (bool) $score->limited_history,
@@ -88,9 +101,21 @@ final class Presenter
                 'label' => $factor->label,
                 'category' => $labels[$factor->category_key] ?? $factor->category_key,
             ])->values()->all(),
-            'capacity' => $score->capacity,
-            'data_used' => $this->scope->dataUsed($viewer, $score->data_used),
+            'capacity' => $financial ? $score->capacity : null,
+            'data_used' => $this->dataUsed($viewer, $score, $financial),
+            'financials_hidden' => ! $financial,
         ];
+    }
+
+    /**
+     * The score's capacity block, or null for a caller who may not read the
+     * member's financial figures.
+     *
+     * @return array<string, mixed>|null
+     */
+    public function capacity(User $viewer, Borrower $member, ?CreditScore $score): ?array
+    {
+        return $score !== null && $this->scope->seesFinancials($viewer, $member, $score) ? $score->capacity : null;
     }
 
     /**
@@ -235,7 +260,26 @@ final class Presenter
             'factors_without_data' => [],
             'capacity' => null,
             'data_used' => null,
+            'financials_hidden' => false,
         ];
+    }
+
+    /**
+     * @return array<string, mixed>|null
+     */
+    private function dataUsed(User $viewer, CreditScore $score, bool $financial): ?array
+    {
+        $data = $this->scope->dataUsed($viewer, $score->data_used);
+
+        return $data === null || $financial ? $data : array_merge($data, ['capacity' => null, 'application_profile_id' => null]);
+    }
+
+    /**
+     * The recommendation without the suggested maximum payment's amount.
+     */
+    private static function withoutAmounts(string $recommendation): string
+    {
+        return (string) preg_replace('/(The proposed payment is above the suggested maximum payment) of ₱[\d,]+\.\d{2}\./u', '$1.', $recommendation);
     }
 
     private function flagDetail(User $viewer, CreditPolicyFlag $flag): string

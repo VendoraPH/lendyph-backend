@@ -46,7 +46,7 @@ function creditScoringEndpoints(): array
         'PUT settings' => ['PUT', '/api/credit-scoring/settings', ['credit_scoring:settings']],
         'POST decisions' => ['POST', '/api/credit-scoring/decisions', ['credit_scoring:override']],
         'GET loan assessment' => ['GET', '/api/credit-scoring/loans/{loan}/assessment', ['credit_scoring:view', 'loans:view']],
-        'PUT loan assessment' => ['PUT', '/api/credit-scoring/loans/{loan}/assessment', ['credit_scoring:view', 'loans:update']],
+        'PUT loan assessment' => ['PUT', '/api/credit-scoring/loans/{loan}/assessment', ['credit_scoring:view', 'loans:view', 'loans:update']],
     ];
 }
 

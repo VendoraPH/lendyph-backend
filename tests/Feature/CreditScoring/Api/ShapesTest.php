@@ -21,7 +21,7 @@ const CREDIT_SCORE_KEYS = [
     'category_breakdown', 'factors', 'recommendation', 'calculated_at',
     // additions
     'borrower_code', 'status', 'limited_history', 'confidence_reason', 'validated', 'previous_score', 'context', 'loan_id',
-    'factors_without_data', 'capacity', 'data_used',
+    'factors_without_data', 'capacity', 'data_used', 'financials_hidden',
 ];
 
 const BORROWER_SCORE_ROW_KEYS = [

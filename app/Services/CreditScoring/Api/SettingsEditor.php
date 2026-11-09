@@ -6,6 +6,7 @@ use App\Models\CreditScoringSetting;
 use App\Models\User;
 use App\Services\CreditScoring\Decimal;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\ValidationException;
 
 /**
  * The Credit Scoring Settings screen: the privacy notice and the six policy
@@ -54,7 +55,9 @@ final class SettingsEditor
     }
 
     /**
-     * Save the validated fields that differ from the stored ones.
+     * Save the validated fields that differ from the stored ones. The
+     * manageable level is checked against the caution level again under the
+     * row lock, so two saves can't leave it above.
      *
      * @param  array<string, mixed>  $values
      */
@@ -83,6 +86,13 @@ final class SettingsEditor
             if (array_key_exists('privacy_notice', $values) && $values['privacy_notice'] !== $settings->privacy_notice) {
                 $changes['privacy_notice'] = $values['privacy_notice'];
                 $changes['notice_version'] = self::nextMinor((string) $settings->notice_version);
+            }
+
+            $manageable = Decimal::scaled($changes['dsr_manageable_max'] ?? (string) $settings->dsr_manageable_max, self::RATE_PLACES);
+            $caution = Decimal::scaled($changes['dsr_caution_max'] ?? (string) $settings->dsr_caution_max, self::RATE_PLACES);
+
+            if ($manageable > $caution) {
+                throw ValidationException::withMessages(['dsr_manageable_max' => 'The manageable debt service level can\'t be above the caution level.']);
             }
 
             if ($changes !== []) {

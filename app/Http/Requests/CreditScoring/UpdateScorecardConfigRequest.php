@@ -8,6 +8,7 @@ use App\Services\CreditScoring\Api\ScorecardEditor;
 use App\Services\CreditScoring\FactorTable;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Validator;
+use UnexpectedValueException;
 
 /**
  * The whole `ScorecardConfig` from the Scorecard Configuration screen.
@@ -111,7 +112,19 @@ class UpdateScorecardConfigRequest extends FormRequest
             return;
         }
 
-        $total = array_sum(array_map(fn (array $c) => FactorTable::hundredths($c['weight_percent']), $this->input('categories')));
+        $total = 0;
+
+        foreach ($this->input('categories') as $index => $category) {
+            try {
+                $total += FactorTable::hundredths($category['weight_percent']);
+            } catch (UnexpectedValueException) {
+                $validator->errors()->add("categories.{$index}.weight_percent", 'The weight must be a plain number with at most two decimals, such as 35 or 16.67.');
+            }
+        }
+
+        if ($validator->errors()->isNotEmpty()) {
+            return;
+        }
 
         if ($total !== ScorecardEditor::TOTAL_HUNDREDTHS) {
             $validator->errors()->add('categories', 'The category weights must total exactly 100.00%; they total '.number_format($total / 100, 2).'%.');

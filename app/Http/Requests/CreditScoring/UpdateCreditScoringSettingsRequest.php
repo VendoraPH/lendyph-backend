@@ -7,6 +7,7 @@ use App\Services\CreditScoring\Api\SettingsEditor;
 use App\Services\CreditScoring\Decimal;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Validator;
+use UnexpectedValueException;
 
 /**
  * `Partial<CreditScoringSettings>` from the Settings screen.
@@ -63,10 +64,17 @@ class UpdateCreditScoringSettingsRequest extends FormRequest
             }
 
             $settings = CreditScoringSetting::current();
-            $manageable = $this->has('dsr_manageable_max') ? Decimal::scaled($this->input('dsr_manageable_max'), 4) : SettingsEditor::rate($settings, 'dsr_manageable_max');
-            $caution = $this->has('dsr_caution_max') ? Decimal::scaled($this->input('dsr_caution_max'), 4) : SettingsEditor::rate($settings, 'dsr_caution_max');
+            $rates = [];
 
-            if ($manageable > $caution) {
+            foreach (SettingsEditor::RATES as $field) {
+                try {
+                    $rates[$field] = $this->has($field) ? Decimal::scaled($this->input($field), 4) : SettingsEditor::rate($settings, $field);
+                } catch (UnexpectedValueException) {
+                    $validator->errors()->add($field, 'The rate must be a plain number with at most four decimals, such as 30 or 32.5.');
+                }
+            }
+
+            if ($validator->errors()->isEmpty() && $rates['dsr_manageable_max'] > $rates['dsr_caution_max']) {
                 $validator->errors()->add('dsr_manageable_max', 'The manageable debt service level can\'t be above the caution level.');
             }
         }];

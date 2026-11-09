@@ -29,8 +29,9 @@ use Throwable;
  * carries on; the command then exits with a failure. The member backs off:
  * `flagged_at` moves to now plus 2^attempts minutes (at most 60), and a tick
  * reads only flags whose `flagged_at` has come, so failing members never
- * crowd out a new change. A new change makes the member due again, and the
- * attempts still count. After MAX_ATTEMPTS failures the minute job leaves
+ * crowd out a new change. A new change while a member is backed off keeps
+ * their retry time (ChangeScanner::flag() keeps the later `flagged_at`), and
+ * the attempts still count. After MAX_ATTEMPTS failures the minute job leaves
  * the member to the nightly run, which clears the flag once it scores them.
  * Advisory only: no loan is ever written.
  */

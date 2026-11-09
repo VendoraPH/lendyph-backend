@@ -3,6 +3,7 @@
 namespace App\Services\CreditScoring\Api;
 
 use App\Models\Borrower;
+use App\Models\CreditApplicationProfile;
 use App\Models\CreditPolicyFlag;
 use App\Models\CreditScore;
 use App\Models\CreditScoreMember;
@@ -103,6 +104,33 @@ final class CreditScope
             ->open()
             ->whereIn('borrower_id', $this->memberIds($user))
             ->where(fn ($q) => $q->whereNull('loan_id')->orWhereIn('loan_id', $this->loanIds($user)));
+    }
+
+    /**
+     * Whether the caller may read a score's financial figures: the member's
+     * income, expenses and debt payments, and what is worked out from them
+     * (capacity and the factor lines that print them). They come from the
+     * member record and from an application's details, so the caller needs
+     * `loans:view` and `borrowers:view`, the member's branch, and the loan
+     * the application details came from (the engine can take them from any
+     * of the member's loans, in any branch).
+     */
+    public function seesFinancials(User $user, Borrower $member, ?CreditScore $score): bool
+    {
+        if (! $user->can('loans:view') || ! $user->can('borrowers:view')
+            || ! $this->access->canSee($user, $member->branch_id === null ? null : (int) $member->branch_id)) {
+            return false;
+        }
+
+        $profileId = $score?->data_used['application_profile_id'] ?? null;
+
+        if ($profileId === null) {
+            return true;
+        }
+
+        $loanId = CreditApplicationProfile::query()->whereKey((int) $profileId)->value('loan_id');
+
+        return $loanId !== null && Loan::query()->visibleTo($user)->whereKey($loanId)->exists();
     }
 
     public function seesEveryBranch(User $user): bool

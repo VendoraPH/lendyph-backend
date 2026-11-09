@@ -28,6 +28,23 @@ use Illuminate\Validation\ValidationException;
  */
 final class AssessmentService
 {
+    /** The employment statuses an application can record, with their labels. */
+    public const EMPLOYMENT_STATUSES = [
+        'employed' => 'Employed',
+        'self_employed' => 'Self-employed',
+        'business_owner' => 'Business owner',
+        'overseas_worker' => 'Overseas Filipino worker',
+        'retired' => 'Retired',
+        'not_employed' => 'Not employed',
+        'other' => 'Other',
+    ];
+
+    /** How many of the loan's decisions the assessment lists, newest first. */
+    public const DECISIONS_SHOWN = 50;
+
+    /** How long a save waits for a member being scored before answering 409. */
+    public const LOCK_WAIT_SECONDS = 3;
+
     public function __construct(
         private readonly Presenter $presenter,
         private readonly Recalculator $recalculator,
@@ -59,7 +76,7 @@ final class AssessmentService
             'privacy_notice' => $settings->privacy_notice,
             'application_profile' => $profile === null ? null : $this->profile($profile, $settings),
             'score' => $score === null ? null : $this->presenter->score($viewer, $member, $score),
-            'capacity' => $score?->capacity,
+            'capacity' => $this->presenter->capacity($viewer, $member, $score),
             'policy_flags' => CreditPolicyFlag::query()
                 ->open()
                 ->where('borrower_id', $loan->borrower_id)
@@ -75,30 +92,59 @@ final class AssessmentService
                 ->where('loan_id', $loan->id)
                 ->orderByDesc('decided_at')
                 ->orderByDesc('id')
+                ->limit(self::DECISIONS_SHOWN)
                 ->get()
                 ->map(fn (CreditDecision $decision) => $this->presenter->decision($decision))
                 ->all(),
+            'decisions_total' => CreditDecision::query()->where('loan_id', $loan->id)->count(),
+            'employment_statuses' => array_map(
+                fn (string $value, string $label) => ['value' => $value, 'label' => $label],
+                array_keys(self::EMPLOYMENT_STATUSES),
+                self::EMPLOYMENT_STATUSES,
+            ),
         ];
     }
 
     /**
-     * Save the sent details and the notice acknowledgement, then assess the
-     * application. 422 once the loan is past approval, or for a registration
-     * that isn't a member. 409 when two first saves of the same application
-     * collide, and when the member is being scored and the wait for them
-     * runs out (the details stay saved and are scored by the next run).
+     * Save the sent details and the notice acknowledgement, and assess the
+     * application, in one transaction under the member's lock: details the
+     * assessment fails on are rolled back with it.
+     *
+     * 422 once the loan is past approval (checked again under the lock), or
+     * for a registration that isn't a member. 409 when the member is still
+     * being scored after LOCK_WAIT_SECONDS, and when two first saves of the
+     * same application collide; nothing is saved either way.
      *
      * @param  array<string, mixed>  $fields
      */
     public function save(User $user, Loan $loan, array $fields, ?bool $noticeAcknowledged): void
     {
-        if (! $loan->is_editable) {
-            throw ValidationException::withMessages(['loan' => 'Only a draft or for-approval loan\'s credit assessment can be saved.']);
-        }
+        $this->assertEditable($loan);
 
         if (! $this->recalculator->isScorable((int) $loan->borrower_id)) {
             throw ValidationException::withMessages(['loan' => 'Only a member\'s loan can be assessed; this registration is not approved.']);
         }
+
+        try {
+            $this->recalculator->assessLoanAfter(
+                $loan,
+                'Assessment saved',
+                fn () => $this->writeProfile($user, $loan, $fields, $noticeAcknowledged),
+                self::LOCK_WAIT_SECONDS,
+            );
+        } catch (LockTimeoutException) {
+            abort(409, 'The member is being scored right now. Try again in a moment.');
+        } catch (UniqueConstraintViolationException) {
+            abort(409, 'These application details were just saved by someone else. Reload and try again.');
+        }
+    }
+
+    /**
+     * @param  array<string, mixed>  $fields
+     */
+    private function writeProfile(User $user, Loan $loan, array $fields, ?bool $noticeAcknowledged): void
+    {
+        $this->assertEditable(Loan::query()->select(['id', 'status'])->findOrFail($loan->id));
 
         $profile = CreditApplicationProfile::query()->firstOrNew(['loan_id' => $loan->id]);
         $profile->fill($fields);
@@ -119,18 +165,14 @@ final class AssessmentService
 
         if ($profile->isDirty()) {
             $profile->updated_by = $user->id;
-
-            try {
-                $profile->save();
-            } catch (UniqueConstraintViolationException) {
-                abort(409, 'These application details were just saved by someone else. Reload and try again.');
-            }
+            $profile->save();
         }
+    }
 
-        try {
-            $this->recalculator->assessLoan($loan, 'Assessment saved');
-        } catch (LockTimeoutException) {
-            abort(409, 'The member is being scored right now. Try again in a moment.');
+    private function assertEditable(Loan $loan): void
+    {
+        if (! $loan->is_editable) {
+            throw ValidationException::withMessages(['loan' => 'Only a draft or for-approval loan\'s credit assessment can be saved.']);
         }
     }
 
