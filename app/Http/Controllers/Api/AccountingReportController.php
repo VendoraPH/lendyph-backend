@@ -70,7 +70,7 @@ class AccountingReportController extends Controller
         responses: [
             new OA\Response(response: 200, description: 'Paginated ledger entries'),
             new OA\Response(response: 403, description: 'Missing accounting:view'),
-            new OA\Response(response: 422, description: 'Missing or unknown account_id, or an unknown source'),
+            new OA\Response(response: 422, description: 'Missing or unknown account_id, an unknown source, or a to before from'),
         ],
     )]
     public function generalLedger(): AnonymousResourceCollection
@@ -80,7 +80,7 @@ class AccountingReportController extends Controller
         $filters = request()->validate([
             'account_id' => ['required', 'integer', 'exists:accounting_accounts,id'],
             'from' => ['nullable', 'date'],
-            'to' => ['nullable', 'date'],
+            'to' => ['nullable', 'date', Rule::when(filled(request()->input('from')), ['after_or_equal:from'])],
             'source' => ['nullable', 'string', Rule::in(AccountingJournal::SOURCES)],
             'branch_id' => ['nullable', 'integer'],
             'page' => ['nullable', 'integer', 'min:1'],

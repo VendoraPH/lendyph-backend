@@ -9,8 +9,8 @@ use Illuminate\Support\Collection;
 /**
  * The books' loans receivable position at a date, from one trial balance.
  *
- * - `gross`: the loans-receivable accounts (the account mapped to
- *   `loans_receivable`, or every postable account under its heading).
+ * - `gross`: the loans-receivable accounts, {@see LoanReceivableAccounts}
+ *   (the rule the Cash Flow statement uses too).
  * - `allowance`: `allowance_credit_losses` (1200), credit normal, so a
  *   provision reads positive.
  * - `unearned_income`: `unearned_restructure_income` (1210), credit normal:
@@ -47,7 +47,7 @@ final class ReceivablePosition
         $signed = self::signedByAccount($rows, $chart);
 
         $gross = 0;
-        foreach (self::receivableAccountIds($chart, $mapping) as $accountId) {
+        foreach (LoanReceivableAccounts::ids() as $accountId) {
             $gross += $signed[$accountId] ?? 0;
         }
 
@@ -75,13 +75,15 @@ final class ReceivablePosition
     }
 
     /**
-     * Trial-balance rows re-signed into each account's own normal direction.
+     * Trial-balance rows re-signed into each account's own normal direction,
+     * keyed by account id. The one copy: the dashboard's cash figures read it
+     * too.
      *
      * @param  list<array<string, mixed>>  $rows
      * @param  Collection<int, AccountingAccount>  $chart
      * @return array<int, int>
      */
-    private static function signedByAccount(array $rows, Collection $chart): array
+    public static function signedByAccount(array $rows, Collection $chart): array
     {
         $signed = [];
 
@@ -100,40 +102,5 @@ final class ReceivablePosition
         }
 
         return $signed;
-    }
-
-    /**
-     * The gross receivable is the WHOLE receivable group, not just the account
-     * the `loans_receivable` role points at: moving a loan from current to past
-     * due is a journal between two sibling accounts (1110 -> 1120), so counting
-     * only the mapped one would shrink the portfolio every time a member fell
-     * behind. A mapped account with no group heading above it counts alone.
-     *
-     * @param  Collection<int, AccountingAccount>  $chart
-     * @param  array<string, int>  $mapping
-     * @return list<int>
-     */
-    private static function receivableAccountIds(Collection $chart, array $mapping): array
-    {
-        $mappedId = $mapping['loans_receivable'] ?? null;
-        $mapped = $mappedId === null ? null : $chart->get($mappedId);
-
-        if ($mapped === null) {
-            return [];
-        }
-
-        $parent = $mapped->parent_id === null ? null : $chart->get($mapped->parent_id);
-
-        if ($parent === null || ! $parent->is_group) {
-            return [(int) $mapped->id];
-        }
-
-        return $chart
-            ->where('parent_id', $parent->id)
-            ->where('is_group', false)
-            ->pluck('id')
-            ->map(static fn ($id): int => (int) $id)
-            ->values()
-            ->all();
     }
 }

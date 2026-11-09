@@ -21,9 +21,14 @@ use Illuminate\Support\Facades\DB;
  *   `is_balanced`) come from {@see TrialBalanceBuilder}, and the receivable
  *   figures from {@see ReceivablePosition} over the same rows, so the cards
  *   can't disagree with the trial balance or the balance sheet built from it.
- * - The period and the 12-month trend are grouped queries on the same lines
- *   the trial balance reads (posted and reversed journals, postable accounts),
- *   one query per figure set, never one per month.
+ * - `total_equity` is {@see BalanceSheetBuilder::totalEquity()} over the same
+ *   rows (posted equity plus earnings not yet closed), the balance sheet's own
+ *   figure, so assets equal liabilities plus equity on the dashboard too.
+ * - The period, month to date and each month's profit are
+ *   {@see IncomeStatementBuilder::build()} for that range, the income
+ *   statement's own figures, so whatever the statement leaves out (the
+ *   year-end closing entries) the dashboard leaves out too. Month-end cash is
+ *   one query grouped by month.
  * - `past_due` reads the LOAN records by the grace rule
  *   ({@see PortfolioOutstanding}, the Past Due Loans page's figure). Loan
  *   records keep no history, so it is always as of today, and says so.
@@ -42,6 +47,7 @@ final class AccountingDashboardBuilder
 
     public function __construct(
         private TrialBalanceBuilder $trialBalance,
+        private IncomeStatementBuilder $incomeStatement,
         private PortfolioOutstanding $portfolio,
     ) {}
 
@@ -53,22 +59,21 @@ final class AccountingDashboardBuilder
     {
         $trialBalance = $this->trialBalance->build($asOf, $branchId);
         $asOfDate = CarbonImmutable::parse($asOf)->startOfDay();
-        $from ??= $asOfDate->startOfMonth()->toDateString();
-
-        // Month-to-date is a DIFFERENCE between two positions, not a third
-        // query. Income and expense accounts accumulate from the start of the
-        // year, so "this month" is where they stand now less where they stood
-        // at the close of last month — both read from the same builder, so the
-        // subtraction cannot drift from the statement it appears beside.
-        $priorMonthEnd = $asOfDate->startOfMonth()->subDay()->toDateString();
-        $priorMonth = $this->trialBalance->build($priorMonthEnd, $branchId);
+        $monthStart = $asOfDate->startOfMonth()->toDateString();
+        $from ??= $monthStart;
 
         $chart = AccountingAccount::query()->get()->keyBy('id');
-        $signed = $this->signedByAccount($trialBalance['rows'], $chart);
+        $signed = ReceivablePosition::signedByAccount($trialBalance['rows'], $chart);
         $receivables = ReceivablePosition::fromTrialBalance($trialBalance['rows'], $chart);
 
-        $incomeMtd = $this->totalFor($trialBalance['rows'], 'income') - $this->totalFor($priorMonth['rows'], 'income');
-        $expensesMtd = $this->totalFor($trialBalance['rows'], 'expense') - $this->totalFor($priorMonth['rows'], 'expense');
+        $months = $this->months($asOfDate, $asOf, $branchId);
+
+        // Month to date is the last month's statement: the first of as_of's
+        // month to as_of. The period reuses it when it covers the same range.
+        $monthToDate = $months[array_key_last($months)];
+        $period = $from === $monthStart
+            ? ['from' => $from, 'to' => $monthToDate['to'], 'income' => $monthToDate['income'], 'expenses' => $monthToDate['expenses'], 'net_income' => $monthToDate['net_income']]
+            : $this->period($from, $asOf, $branchId);
 
         $currentPeriod = $this->currentPeriod($asOfDate->toDateString());
 
@@ -85,18 +90,21 @@ final class AccountingDashboardBuilder
             'adjustments_clearing_needs_review' => $receivables['adjustments_clearing'] !== 0,
             'total_assets' => $this->totalFor($trialBalance['rows'], 'asset'),
             'total_liabilities' => $this->totalFor($trialBalance['rows'], 'liability'),
-            'total_equity' => $this->totalFor($trialBalance['rows'], 'equity'),
-            'income_mtd' => $incomeMtd,
-            'expenses_mtd' => $expensesMtd,
-            'net_income_mtd' => $incomeMtd - $expensesMtd,
+            'total_equity' => BalanceSheetBuilder::totalEquity($trialBalance['rows']),
+            'income_mtd' => $monthToDate['income'],
+            'expenses_mtd' => $monthToDate['expenses'],
+            'net_income_mtd' => $monthToDate['net_income'],
             'unposted_journals' => $this->draftCount($branchId),
             'is_balanced' => $trialBalance['is_balanced'],
             'open_period' => $currentPeriod !== null && $currentPeriod['status'] === 'open' ? $currentPeriod['name'] : null,
             'current_period' => $currentPeriod,
-            'period' => $this->period($from, $asOf, $branchId),
+            'period' => $period,
             'cash_accounts' => $this->cashAccounts($signed, $chart),
             'past_due' => $this->pastDue($branchId),
-            'months' => $this->months($asOfDate, $asOf, $branchId),
+            'months' => array_map(
+                static fn (array $month): array => array_diff_key($month, ['to' => true]),
+                $months,
+            ),
             'recent_journals' => $this->recentJournals($asOf, $branchId),
         ];
     }
@@ -116,50 +124,15 @@ final class AccountingDashboardBuilder
      */
     private function totalFor(array $rows, string $type): int
     {
-        $debitNormal = $type === 'asset' || $type === 'expense';
         $total = 0;
 
         foreach ($rows as $row) {
-            if ($row['type'] !== $type) {
-                continue;
+            if ($row['type'] === $type) {
+                $total += BalanceSheetBuilder::netFor($row);
             }
-
-            $total += $debitNormal
-                ? (int) $row['debit'] - (int) $row['credit']
-                : (int) $row['credit'] - (int) $row['debit'];
         }
 
         return $total;
-    }
-
-    /**
-     * Trial-balance rows re-signed into each account's own normal direction.
-     *
-     * Derived from the rows rather than by calling
-     * {@see TrialBalanceBuilder::signedBalances()}, which would run the same
-     * aggregate a second time for figures already in hand.
-     *
-     * @param  list<array<string, mixed>>  $rows
-     * @param  Collection<int, AccountingAccount>  $chart
-     * @return array<int, int>
-     */
-    private function signedByAccount(array $rows, Collection $chart): array
-    {
-        $signed = [];
-
-        foreach ($rows as $row) {
-            $account = $chart->get($row['account_id']);
-
-            if ($account === null) {
-                continue;
-            }
-
-            $signed[(int) $row['account_id']] = $account->normal_balance === 'debit'
-                ? (int) $row['debit'] - (int) $row['credit']
-                : (int) $row['credit'] - (int) $row['debit'];
-        }
-
-        return $signed;
     }
 
     /**
@@ -217,58 +190,41 @@ final class AccountingDashboardBuilder
     }
 
     /**
-     * Income, expenses and net income from `$from` to `$to`, inclusive.
+     * Income, expenses and net income from `$from` to `$to`, inclusive: the
+     * income statement's totals for the same range.
      *
      * @param  int|list<int>|null  $branchId
      * @return array{from: string, to: string, income: int, expenses: int, net_income: int}
      */
     private function period(string $from, string $to, int|array|null $branchId): array
     {
-        $byType = $this->lines($branchId)
-            ->whereIn('a.type', ['income', 'expense'])
-            ->where('j.date', '>=', $from)
-            ->where('j.date', '<=', $to)
-            ->groupBy('a.type')
-            ->select(['a.type', DB::raw('sum(l.debit) as debit'), DB::raw('sum(l.credit) as credit')])
-            ->get()
-            ->keyBy('type');
-
-        $income = $this->movementFor($byType->get('income'), 'income');
-        $expenses = $this->movementFor($byType->get('expense'), 'expense');
+        $statement = $this->incomeStatement->build($from, $to, $branchId);
 
         return [
             'from' => $from,
             'to' => CarbonImmutable::parse($to)->toDateString(),
-            'income' => $income,
-            'expenses' => $expenses,
-            'net_income' => $income - $expenses,
+            'income' => (int) $statement['total_income'],
+            'expenses' => (int) $statement['total_expenses'],
+            'net_income' => (int) $statement['net_income'],
         ];
     }
 
     /**
      * The 12 months ending with as_of's month, oldest first.
      *
-     * Income and expenses come from one query grouped by month and account
-     * type; month-end cash from one query grouped by month over the money
-     * accounts, accumulated here, so the months before the window carry in as
-     * the opening cash. The last month stops at as_of, the same cut-off as the
-     * cash cards.
+     * Each month's income and expenses are the income statement for that
+     * month (one small grouped query each, on the dated index), so a month
+     * never counts what the statement leaves out. Month-end cash is one query
+     * grouped by month over the money accounts, accumulated here, so the months
+     * before the window carry in as the opening cash. The last month stops at
+     * as_of, the same cut-off as the cash cards.
      *
      * @param  int|list<int>|null  $branchId
-     * @return list<array{month: string, income: int, expenses: int, net_income: int, cash: int}>
+     * @return list<array{month: string, income: int, expenses: int, net_income: int, cash: int, to: string}>
      */
     private function months(CarbonImmutable $asOfDate, string $asOf, int|array|null $branchId): array
     {
         $firstMonth = $asOfDate->startOfMonth()->subMonthsNoOverflow(self::TREND_MONTHS - 1);
-
-        $profit = $this->lines($branchId)
-            ->whereIn('a.type', ['income', 'expense'])
-            ->where('j.date', '>=', $firstMonth->toDateString())
-            ->where('j.date', '<=', $asOf)
-            ->groupByRaw("DATE_FORMAT(j.date, '%Y-%m'), a.type")
-            ->selectRaw("DATE_FORMAT(j.date, '%Y-%m') as month, a.type, sum(l.debit) as debit, sum(l.credit) as credit")
-            ->get()
-            ->groupBy('month');
 
         // The two columns are summed apart and signed here: they're unsigned,
         // so MySQL refuses a subtraction inside the aggregate that goes below 0.
@@ -295,18 +251,19 @@ final class AccountingDashboardBuilder
         $months = [];
 
         for ($offset = 0; $offset < self::TREND_MONTHS; $offset++) {
-            $key = $firstMonth->addMonthsNoOverflow($offset)->format('Y-m');
-            $rows = ($profit->get($key) ?? collect())->keyBy('type');
-            $income = $this->movementFor($rows->get('income'), 'income');
-            $expenses = $this->movementFor($rows->get('expense'), 'expense');
+            $month = $firstMonth->addMonthsNoOverflow($offset);
+            $key = $month->format('Y-m');
+            $to = $offset === self::TREND_MONTHS - 1 ? $asOfDate->toDateString() : $month->endOfMonth()->toDateString();
+            $profit = $this->period($month->toDateString(), $to, $branchId);
             $cash += $cashByMonth[$key] ?? 0;
 
             $months[] = [
                 'month' => $key,
-                'income' => $income,
-                'expenses' => $expenses,
-                'net_income' => $income - $expenses,
+                'income' => $profit['income'],
+                'expenses' => $profit['expenses'],
+                'net_income' => $profit['net_income'],
                 'cash' => $cash,
+                'to' => $to,
             ];
         }
 
@@ -402,18 +359,6 @@ final class AccountingDashboardBuilder
             ->whereIn('j.status', AccountingJournal::HISTORICAL_STATUSES)
             ->where('a.is_group', false)
             ->when($branchId !== null, fn ($q) => $q->whereIn('j.branch_id', (array) $branchId));
-    }
-
-    /** A grouped income or expense row, signed the way its section reads. */
-    private function movementFor(?object $row, string $type): int
-    {
-        if ($row === null) {
-            return 0;
-        }
-
-        return $type === 'expense'
-            ? (int) $row->debit - (int) $row->credit
-            : (int) $row->credit - (int) $row->debit;
     }
 
     /**
