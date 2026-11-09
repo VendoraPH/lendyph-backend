@@ -2479,6 +2479,9 @@ class LoanService
      *   borrower is that loan's, and with `source_loan_id` the source's. With
      *   `loan_id` and no `collaterals` (absent or null) the loan's held
      *   pledges count at their stored value, as PUT /loans/{id} leaves them.
+     *   When one of them is share capital and `$viewer` lacks
+     *   `share_capital:view`, the section is withheld instead
+     *   (withheldCollateral()): its figures would reveal the balance.
      * - `maturity_date`: where the loan would mature, by the code a create
      *   stores it with. Null until the product, a term inside its range, the
      *   frequency and the start date are known; the principal and the rate
@@ -2503,11 +2506,11 @@ class LoanService
      * Money is added in whole centavos, never as peso floats. Writes nothing.
      *
      * @param  array{loan_id?: int|null, source_loan_id?: int|null, borrower_id?: int|null, loan_product_id?: int|null, principal_amount?: float|int|string|null, interest_rate?: float|int|string|null, term?: int|null, frequency?: string|null, start_date?: string|null, scb_amount?: float|int|string|null, collaterals?: list<array{collateral_id: int}>|null, deductions?: list<array{name: string, amount: float|int|string, type: string}>|null}  $input
-     * @return array{collateral: array{total_value: float|int, security_status: string, short_by: float|int}, maturity_date: string|null, deductions: array<string, mixed>|null, amortization: array<string, mixed>|null, restructure?: array{restructurable_balance: float, principal: float, shortfall: float, remarks_required: bool, write_off_permission_required: bool, collected_now: string|null, paid_out: string}}
+     * @return array{collateral: array{total_value: float|int|null, security_status: string|null, short_by: float|int|null, value_unknown?: true}, maturity_date: string|null, deductions: array<string, mixed>|null, amortization: array<string, mixed>|null, restructure?: array{restructurable_balance: float, principal: float, shortfall: float, remarks_required: bool, write_off_permission_required: bool, collected_now: string|null, paid_out: string}}
      *
      * @throws ValidationException when the edited loan cannot be edited or does not restructure the source sent with it, the source cannot be restructured, or a collateral is not on the borrower's register
      */
-    public function formPreview(array $input): array
+    public function formPreview(array $input, ?User $viewer = null): array
     {
         $principal = $this->toCentavos((float) ($input['principal_amount'] ?? 0));
         $sourceLoanId = isset($input['source_loan_id']) ? (int) $input['source_loan_id'] : null;
@@ -2531,7 +2534,9 @@ class LoanService
         $maturity = $this->formMaturity($product, $input);
 
         $preview = [
-            'collateral' => CollateralSecurity::summary($principal, $pledged),
+            'collateral' => $rows === null && $edited !== null && self::withholdsHeldShareCapital($edited, $viewer)
+                ? self::withheldCollateral()
+                : CollateralSecurity::summary($principal, $pledged),
             'maturity_date' => $maturity?->toDateString(),
             'deductions' => $product === null || $principal <= 0 ? null : $this->formDeductions($product, $input, $principal, $maturity, $edited?->term_unit),
             'amortization' => $product === null || $maturity === null ? null : $this->formSchedule($product, $input, $principal, $maturity),
@@ -2551,6 +2556,33 @@ class LoanService
         }
 
         return $preview;
+    }
+
+    /**
+     * Whether the edited loan holds a share capital pledge `$viewer` may not
+     * see (no `share_capital:view`), so an edit preview with no list, which
+     * counts its held pledges, must not show their total.
+     */
+    private static function withholdsHeldShareCapital(Loan $edited, ?User $viewer): bool
+    {
+        if ($viewer?->can('share_capital:view')) {
+            return false;
+        }
+
+        return $edited->collaterals()->with('collateralType')->get()
+            ->contains(fn (Collateral $collateral): bool => CollateralValuation::isShareCapital($collateral));
+    }
+
+    /**
+     * The preview's `collateral` section when its figures would reveal a share
+     * capital balance: every figure built from the total is null, and
+     * `value_unknown` says why, as the loan's collaterals card does.
+     *
+     * @return array{total_value: null, security_status: null, short_by: null, value_unknown: true}
+     */
+    private static function withheldCollateral(): array
+    {
+        return ['total_value' => null, 'security_status' => null, 'short_by' => null, 'value_unknown' => true];
     }
 
     /**

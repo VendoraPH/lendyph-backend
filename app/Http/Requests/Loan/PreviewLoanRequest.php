@@ -38,8 +38,10 @@ use Illuminate\Validation\Validator;
  * else's register is refused. Listing collateral needs `collaterals:view`, and
  * a share capital collateral, valued at its member's balance, needs
  * `share_capital:view` too (see after()). With `loan_id` and no
- * `collaterals` list, the loan's held pledges count, as PUT /loans/{id}
- * leaves them untouched, so a held share capital pledge needs it as well.
+ * `collaterals` list the loan's held pledges count, as PUT /loans/{id} leaves
+ * them untouched; a held share capital pledge is not refused then, the
+ * preview withholds the collateral figures instead (LoanService::formPreview()),
+ * so the edit page's preview keeps working.
  */
 class PreviewLoanRequest extends FormRequest
 {
@@ -127,8 +129,8 @@ class PreviewLoanRequest extends FormRequest
      *  - A share capital collateral needs `share_capital:view`: its value is
      *    the member's balance, so the preview's total would show what the
      *    permission hides. On a restructure that includes the source loan's
-     *    pledges, which count whether listed or not, and on an edit with no
-     *    list the edited loan's held pledges, which count then.
+     *    pledges, which count whether listed or not. (An edit with no list
+     *    is withheld rather than refused: LoanService::formPreview().)
      *
      * @return array<int, \Closure(Validator): void>
      */
@@ -159,9 +161,8 @@ class PreviewLoanRequest extends FormRequest
     }
 
     /**
-     * Adds an error for each listed share capital collateral, one on
-     * `source_loan_id` when the source loan holds one that is not listed, and
-     * one on `loan_id` when the edited loan holds one and no list was sent.
+     * Adds an error for each listed share capital collateral, and one on
+     * `source_loan_id` when the source loan holds one that is not listed.
      *
      * @param  list<mixed>  $rows
      */
@@ -169,10 +170,8 @@ class PreviewLoanRequest extends FormRequest
     {
         $listedIds = array_map(static fn (array $row): int => (int) $row['collateral_id'], $rows);
         $sourceIds = $this->heldCollateralIds('source_loan_id');
-        // No list: an edit leaves the loan's pledges untouched, so they count.
-        $editedIds = $this->input('collaterals') === null ? $this->heldCollateralIds('loan_id') : [];
 
-        $ids = array_values(array_unique([...$listedIds, ...$sourceIds, ...$editedIds]));
+        $ids = array_values(array_unique([...$listedIds, ...$sourceIds]));
 
         if ($ids === []) {
             return;
@@ -198,13 +197,6 @@ class PreviewLoanRequest extends FormRequest
             $validator->errors()->add(
                 'source_loan_id',
                 'This loan is secured by share capital; previewing its restructure needs the Share Capital: View permission.',
-            );
-        }
-
-        if (array_intersect($editedIds, $shareCapitalIds) !== []) {
-            $validator->errors()->add(
-                'loan_id',
-                'This loan is secured by share capital; previewing it needs the Share Capital: View permission.',
             );
         }
     }

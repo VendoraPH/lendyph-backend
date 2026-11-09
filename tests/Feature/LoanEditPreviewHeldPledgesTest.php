@@ -98,29 +98,62 @@ class LoanEditPreviewHeldPledgesTest extends TestCase
         $this->assertEquals(50000, $this->previewTotal($loan, ['collaterals' => [['collateral_id' => $held->id], ['collateral_id' => $added->id]]]));
     }
 
-    public function test_with_no_list_a_held_share_capital_pledge_needs_share_capital_view(): void
+    /**
+     * With no list a held share capital pledge's value would reach the total,
+     * so a caller without `share_capital:view` gets the collateral section as
+     * the loan card withholds it: `value_unknown`, and no total, status or
+     * shortfall. Never a refusal, so the edit page's preview still works, and
+     * every other figure is the same as for a caller who can see it.
+     */
+    public function test_with_no_list_a_held_share_capital_pledge_is_withheld_from_a_caller_who_cannot_see_it(): void
     {
         $loan = $this->draftLoan();
-        ShareCapitalLedger::factory()->create(['borrower_id' => $loan->borrower_id, 'credit' => 5000, 'debit' => 0]);
+        ShareCapitalLedger::factory()->create(['borrower_id' => $loan->borrower_id, 'credit' => 4321.87, 'debit' => 0]);
         $shareCapital = Collateral::factory()->create([
             'borrower_id' => $loan->borrower_id,
             'collateral_type_id' => CollateralType::where('source', 'share_capital')->firstOrFail()->id,
             'amount' => 999999,
         ]);
         $this->postJson("/api/loans/{$loan->id}/collaterals", ['collateral_id' => $shareCapital->id])->assertCreated();
+        $this->pledge($loan, 2000);
+
+        $body = [
+            'loan_id' => $loan->id,
+            'loan_product_id' => $loan->loan_product_id,
+            'principal_amount' => 100000,
+            'interest_rate' => 3.0,
+            'term' => 6,
+            'frequency' => 'monthly',
+            'start_date' => now()->toDateString(),
+        ];
+        $full = $this->postJson('/api/loans/preview', $body)->assertOk()->json('data');
+        $this->assertEquals(6321.87, $full['collateral']['total_value'], 'setup: the balance plus ₱2,000.00');
 
         $user = User::factory()->create();
         $user->givePermissionTo(['loans:update', 'collaterals:view']);
         $this->actingAs($user);
 
-        $this->postJson('/api/loans/preview', ['loan_id' => $loan->id, 'principal_amount' => 100000])
-            ->assertUnprocessable()
-            ->assertJsonValidationErrors(['loan_id' => 'This loan is secured by share capital; previewing it needs the Share Capital: View permission.']);
+        $response = $this->postJson('/api/loans/preview', $body)->assertOk();
+
+        $this->assertSame(
+            ['total_value' => null, 'security_status' => null, 'short_by' => null, 'value_unknown' => true],
+            $response->json('data.collateral'),
+        );
+        foreach (['4321.87', '4321', '6321.87', '6321', '93678.13', '93678'] as $figure) {
+            $this->assertStringNotContainsString($figure, $response->getContent(), "{$figure} must not appear");
+        }
+        $this->assertNotNull($full['amortization']);
+        $this->assertNotNull($full['deductions']);
+        $this->assertSame(
+            collect($full)->except('collateral')->all(),
+            collect($response->json('data'))->except('collateral')->all(),
+            'every other figure is unchanged',
+        );
 
         // An empty list counts nothing, so it reveals nothing.
         $this->assertEquals(0, $this->previewTotal($loan, ['collaterals' => []]));
 
         $user->givePermissionTo('share_capital:view');
-        $this->assertEquals(5000, $this->previewTotal($loan));
+        $this->assertSame($full['collateral'], $this->postJson('/api/loans/preview', $body)->assertOk()->json('data.collateral'));
     }
 }
