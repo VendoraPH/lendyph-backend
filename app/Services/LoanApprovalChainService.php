@@ -132,6 +132,12 @@ class LoanApprovalChainService
         return LoanWriteTransaction::run(function () use ($loan, $step, $user, $remarks) {
             [$loan, $step] = $this->lockAndGuard($loan, $step, $user);
 
+            // Re-submitting after a send-back: a restructure's figures are
+            // taken again from what its source owes now.
+            if ($step->kind === LoanApprovalStep::KIND_SUBMIT) {
+                $this->loanService->retakeRestructureTerms($loan, 'submission', $user);
+            }
+
             $step->update([
                 'status' => LoanApprovalStep::STATUS_APPROVED,
                 'acted_by' => $user->id,
@@ -293,6 +299,80 @@ class LoanApprovalChainService
 
             return $newRound;
         });
+    }
+
+    /**
+     * Reopen the chain of an approved restructure that is going back for
+     * approval. Called only from inside LoanService::sendBackApproved()'s
+     * transaction, which holds the restructure's and its source's row locks
+     * and has already moved the loan back to `for_review`.
+     *
+     * Mirrors sendBack(), from the release step: that step is frozen as
+     * `sent_back` with who, when and why, and round N+1 opens with the submit
+     * step pending and every other step waiting. Nobody's sign-off carries
+     * over, so the restructure is re-submitted and approved again, and its
+     * figures are taken again at each of those steps. A restructure with no
+     * chain on record gets round 1 from the configured chain, submit pending.
+     *
+     * The creator and the officer hear that it came back, and the submit
+     * step's role that it is theirs, after the commit (Notifications).
+     *
+     * @return Collection<int, LoanApprovalStep> the new round
+     */
+    public function reopenApprovedRestructure(Loan $loan, User $user, string $reason): Collection
+    {
+        $round = $loan->approvalSteps()->max('round');
+        $currentRound = $round === null
+            ? collect()
+            : $loan->approvalSteps()->where('round', $round)->orderBy('step_order')->get();
+
+        $template = $currentRound->isEmpty()
+            ? collect($this->chainFor($loan))->map(fn (array $step, int $order): array => [
+                'step_order' => $order,
+                'step_id' => $step['id'],
+                'name' => $step['name'],
+                'status_label' => $step['status'] ?? null,
+                'role' => $step['role'],
+                'kind' => $step['kind'],
+            ])
+            : $currentRound->map(fn (LoanApprovalStep $step): array => $step->only([
+                'step_order', 'step_id', 'name', 'status_label', 'role', 'kind',
+            ]));
+
+        $submit = $template->firstWhere('kind', LoanApprovalStep::KIND_SUBMIT) ?? $template->sortBy('step_order')->first();
+        $targetStepOrder = (int) $submit['step_order'];
+
+        $currentRound
+            ->first(fn (LoanApprovalStep $step): bool => $step->kind === LoanApprovalStep::KIND_RELEASE
+                && $step->status !== LoanApprovalStep::STATUS_APPROVED)
+            ?->update([
+                'status' => LoanApprovalStep::STATUS_SENT_BACK,
+                'acted_by' => $user->id,
+                'acted_at' => now(),
+                'remarks' => $reason,
+                'sent_back_to_step_order' => $targetStepOrder,
+            ]);
+
+        $nextRound = $round === null ? 1 : (int) $round + 1;
+
+        foreach ($template as $step) {
+            LoanApprovalStep::create([
+                ...$step,
+                'loan_id' => $loan->id,
+                'round' => $nextRound,
+                'status' => (int) $step['step_order'] === $targetStepOrder
+                    ? LoanApprovalStep::STATUS_PENDING
+                    : LoanApprovalStep::STATUS_WAITING,
+            ]);
+        }
+
+        $newRound = $loan->approvalSteps()->where('round', $nextRound)->orderBy('step_order')->get();
+
+        $target = $newRound->firstWhere('step_order', $targetStepOrder);
+        $toldSentBack = $this->notifications->loanSentBack($loan, $target, $user, $reason);
+        $this->notifyApprovalNeeded($loan, $target, $user, $toldSentBack);
+
+        return $newRound;
     }
 
     /**

@@ -8,17 +8,21 @@ use App\Models\ReminderEvent;
 use App\Models\ReminderMessage;
 use App\Models\ReminderQueueItem;
 use App\Models\ReminderSetting;
+use App\Notifications\StaffNotification;
 use App\Services\Reminders\AllowList;
 use App\Services\Reminders\Drivers\DriverResolver;
 use App\Services\Reminders\Drivers\DriverResult;
 use App\Services\Reminders\Drivers\LogDriver;
 use App\Services\Reminders\Drivers\UnavailableDriver;
+use App\Services\Reminders\ReminderDispatcher;
 use Illuminate\Console\Scheduling\Event;
 use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Log;
 use LogicException;
+use PHPUnit\Framework\Attributes\DataProvider;
+use RuntimeException;
 use Tests\TestCase;
 
 /**
@@ -44,8 +48,13 @@ class ReminderSafetyTest extends TestCase
                 app_path('Console/Commands/PlanReminders.php'),
                 app_path('Console/Commands/DispatchReminders.php'),
                 app_path('Console/Commands/RedactReminderMessages.php'),
-            ]);
-        $this->assertGreaterThan(20, $files->count());
+                app_path('Notifications/StaffNotification.php'),
+            ])
+            ->merge(File::glob(app_path('Http/Controllers/Api/Reminder*Controller.php')))
+            ->merge(collect(File::allFiles(app_path('Http/Requests/Reminders')))->map(fn ($file) => $file->getPathname()))
+            ->merge(collect(File::allFiles(app_path('Http/Resources/Reminders')))->map(fn ($file) => $file->getPathname()));
+        $this->assertGreaterThan(40, $files->count());
+        $this->assertNotEmpty(File::glob(app_path('Services/Reminders/Api/*.php')));
 
         $forbidden = [
             'Http facade' => '/\bHttp::|Facades\\\\Http\b/',
@@ -53,11 +62,15 @@ class ReminderSafetyTest extends TestCase
             'Mail facade' => '/\bMail::|Facades\\\\Mail\b|Symfony\\\\Component\\\\Mailer/',
             'mail()' => '/(?<![\w>:$])mail\s*\(/i',
             'on-demand notification' => '/Notification::route/',
-            'notify()' => '/->notify\s*\(/',
+            'Notification::send' => '/Notification::send(Now)?\s*\(/',
+            'notify()' => '/->notify(Now)?\s*\(/',
+            'SOAP' => '/SoapClient/i',
+            'stream contexts' => '/stream_context_create/i',
             'Guzzle' => '/guzzle/i',
             'curl' => '/\bcurl/i',
             'sockets' => '/\bsocket_|fsockopen|stream_socket_client/i',
             'URL streams' => '/\b(fopen|file_get_contents|file|readfile|copy)\s*\(\s*[\'"](https?|ftp|ssl|tls):/i',
+            'fopen of a variable' => '/\bfopen\s*\(\s*\$/i',
             'processes' => '/Facades\\\\Process|Component\\\\Process|\bProcess::|(?<![\w>:$])(exec|shell_exec|system|passthru|proc_open|popen)\s*\(/',
         ];
         foreach ($files as $path) {
@@ -300,5 +313,124 @@ class ReminderSafetyTest extends TestCase
         $redact = $events->get('reminders:redact-messages');
         $this->assertSame('15 4 * * *', $redact->expression);
         $this->assertSame('Asia/Manila', $redact->timezone);
+    }
+
+    public function test_staff_notifications_stay_in_the_database(): void
+    {
+        $this->assertSame(['database'], (new StaffNotification(StaffNotification::REMINDER_FAILED, 'Title', 'Body', '/loans/1'))->via($this->admin));
+    }
+
+    /**
+     * @return array<string, array{0: DriverResult}>
+     */
+    public static function outcomesAfterALostClaim(): array
+    {
+        return [
+            'sent' => [DriverResult::sent('late-ref')],
+            'temporary' => [DriverResult::temporaryFailure('timeout', 'Provider timed out')],
+            'permanent' => [DriverResult::permanentFailure('invalid_number', 'Invalid mobile number')],
+        ];
+    }
+
+    #[DataProvider('outcomesAfterALostClaim')]
+    public function test_a_claim_lost_after_the_attempt_started_records_nothing_false_and_sends_no_second_notice(DriverResult $result): void
+    {
+        $this->at('2026-09-15 07:00');
+        $loan = $this->loanDue('2026-09-15');
+        $this->rule('Due today')->update(['channels' => ['sms']]);
+        $this->plan();
+        $this->driver->willReturn('sms', $result);
+
+        // While run A is inside the driver call, its claim goes stale and
+        // another run's recoverStale() fails the row and its message.
+        $recovered = false;
+        ReminderMessage::saving(function (ReminderMessage $message) use (&$recovered) {
+            if ($recovered || $message->status !== 'pending' || (int) $message->attempts !== 1) {
+                return;
+            }
+            $recovered = true;
+            $this->travel(1 + (int) config('reminders.dispatch.stale_claim_minutes'))->minutes();
+            app(ReminderDispatcher::class)->recoverStale();
+        });
+
+        $this->at('2026-09-15 08:00');
+        $stalled = app(ReminderDispatcher::class);
+        $outcome = $stalled->process($stalled->claim(1)->sole());
+
+        $this->assertTrue($recovered);
+        $this->assertSame('lost', $outcome);
+        $item = ReminderQueueItem::query()->where('loan_id', $loan->id)->where('channel', 'sms')->whereDate('fire_date', '2026-09-15')->sole();
+        $this->assertSame(['failed', 'interrupted'], [$item->status, $item->reason_code]);
+        $this->assertSame('failed', ReminderMessage::query()->where('queue_item_id', $item->id)->sole()->status);
+        $this->assertSame(0, ReminderEvent::query()->where('queue_item_id', $item->id)->where('kind', 'sent')->count());
+        $this->assertSame(1, DB::table('reminder_staff_notices')->count());
+        $this->assertNull(BorrowerNotificationPreference::query()->where('borrower_id', $loan->borrower_id)->value('mobile_invalid_value'));
+    }
+
+    public function test_a_row_whose_message_was_already_handed_over_is_finished_not_left_claimed(): void
+    {
+        $this->at('2026-09-15 07:00');
+        $loan = $this->loanDue('2026-09-15');
+        $this->rule('Due today')->update(['channels' => ['sms']]);
+        $this->plan();
+        $item = ReminderQueueItem::query()->where('loan_id', $loan->id)->whereDate('fire_date', '2026-09-15')->sole();
+        ReminderMessage::query()->create([
+            'queue_item_id' => $item->id, 'loan_id' => $loan->id, 'borrower_id' => $loan->borrower_id, 'channel' => 'sms',
+            'recipient_masked' => '63917*****01', 'provider' => 'fake', 'status' => 'sent', 'send_date' => '2026-09-15',
+        ]);
+
+        $this->at('2026-09-15 08:00');
+        $this->dispatchReminders();
+
+        $item->refresh();
+        $this->assertSame(['failed', 'already_handed_over'], [$item->status, $item->reason_code]);
+        $this->assertNull($item->claim_token);
+        $this->assertCount(0, $this->driver->calls);
+    }
+
+    public function test_a_failure_while_failing_a_row_releases_the_rest_of_the_batch_instead_of_aborting(): void
+    {
+        $this->at('2026-09-15 07:00');
+        $bad = $this->loanDue('2026-09-15');
+        $good = $this->loanDue('2026-09-15');
+        $this->rule('Due today')->update(['channels' => ['sms']]);
+        $this->plan();
+        $databaseGone = false;
+        ReminderMessage::saving(function (ReminderMessage $message) use ($bad, &$databaseGone) {
+            if ((int) $message->loan_id === $bad->id) {
+                $databaseGone = true;
+                throw new RuntimeException('server has gone away');
+            }
+        });
+        ReminderQueueItem::retrieved(function () use (&$databaseGone) {
+            if ($databaseGone) {
+                throw new RuntimeException('server has gone away');
+            }
+        });
+
+        $this->at('2026-09-15 08:00');
+        $totals = app(ReminderDispatcher::class)->run();
+        $databaseGone = false;
+
+        $this->assertSame(0, $totals['sent']);
+        $this->assertCount(0, $this->driver->calls);
+        $goodItem = ReminderQueueItem::query()->where('loan_id', $good->id)->whereDate('fire_date', '2026-09-15')->sole();
+        $this->assertSame('scheduled', $goodItem->status);
+        $this->assertNull($goodItem->claim_token);
+    }
+
+    public function test_a_row_whose_rule_was_deleted_is_skipped_with_its_own_reason(): void
+    {
+        $this->at('2026-09-15 07:00');
+        $loan = $this->loanDue('2026-09-15');
+        $this->rule('Due today')->update(['channels' => ['sms']]);
+        $this->plan();
+        $this->rule('Due today')->delete();
+
+        $this->at('2026-09-15 08:00');
+        $this->dispatchReminders();
+
+        $item = ReminderQueueItem::query()->where('loan_id', $loan->id)->whereDate('fire_date', '2026-09-15')->sole();
+        $this->assertSame(['skipped', 'rule_deleted', 'The reminder rule was deleted'], [$item->status, $item->reason_code, $item->reason]);
     }
 }

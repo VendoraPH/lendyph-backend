@@ -35,20 +35,33 @@ use Illuminate\Support\Facades\DB;
  * changes:
  *
  * 1. **3040 Current Year Earnings is a group here** and postable there.
- *    `statements.ts` ALSO derives 3040 as a synthetic balance-sheet line from
- *    the period's net income, so anything posted to the real account would be
- *    counted twice on the same statement — once as the posting, once as the
- *    derivation. It stays in the chart because year-end closing needs somewhere
- *    to move the result to; it must not accept ordinary entries in the meantime.
+ *    BalanceSheetBuilder derives the year's earnings as a balance-sheet line
+ *    of its own (no account code), so anything posted to a real "Current Year
+ *    Earnings" account would be counted twice on the same statement — once as
+ *    the posting, once as the derivation. It stays in the chart because
+ *    year-end closing needs somewhere to move the result to; it must not
+ *    accept ordinary entries in the meantime.
  * 2. **3050 Opening Balance Equity does not exist there.** The opening-balance
  *    backfill needs a named plug for the difference between the assets and
  *    liabilities an organisation arrives with. Folding it into 3030 Retained
  *    Earnings hides it permanently, in the one account nobody ever reconciles.
- *    Deliberately NOT 3045: `statements.ts` already uses that code for its
- *    synthetic prior-period earnings line.
+ *
+ * The loan accounts in {@see self::OPERATING_LOAN_ACCOUNT_CODES} are seeded
+ * with `cash_flow_category` operating (Phase 2, decision 9); every other
+ * account gets CashFlowCategories::defaultFor() from the model's saving hook.
  */
 final class ChartOfAccountsSeeder
 {
+    /**
+     * The loan book: principal (1110, 1120), the receivables beside it (1150,
+     * 1160), adjustments clearing (1180), the allowance (1200) and the
+     * restructure deferral (1210). Seeded as operating, because lending is
+     * this organisation's operation (Phase 2, decision 9).
+     *
+     * @var list<string>
+     */
+    public const OPERATING_LOAN_ACCOUNT_CODES = ['1110', '1120', '1150', '1160', '1180', '1200', '1210'];
+
     /**
      * The seed rows, parents before children so ids resolve in one pass.
      *
@@ -88,9 +101,18 @@ final class ChartOfAccountsSeeder
         ['code' => '1160', 'name' => 'Penalty Receivable', 'type' => 'asset', 'parent' => '1000'],
         ['code' => '1170', 'name' => 'Other Receivables', 'type' => 'asset', 'parent' => '1000'],
 
+        // Where a balance adjustment clears (Phase 2, decision 7). Reads zero
+        // once each adjustment is reviewed; any balance here is flagged.
+        ['code' => '1180', 'name' => 'Loan Adjustments Clearing', 'type' => 'asset', 'parent' => '1000'],
+
         // Credit-balanced asset: it REDUCES loans receivable. Net Loans
         // Receivable is gross minus this, which is why `is_contra` has to be set.
         ['code' => '1200', 'name' => 'Allowance for Credit Losses', 'type' => 'asset', 'parent' => '1000', 'is_contra' => true],
+
+        // Interest and penalty a restructure capitalised into the new loan's
+        // principal, not yet earned (Phase 2, decision 2). A contra asset like
+        // 1200, and under 1000, not 1100, so the portfolio heading never sums it.
+        ['code' => '1210', 'name' => 'Unearned Interest and Penalty – Restructured Loans', 'type' => 'asset', 'parent' => '1000', 'is_contra' => true],
 
         ['code' => '1300', 'name' => 'Prepaid Expenses', 'type' => 'asset', 'parent' => '1000'],
 
@@ -126,6 +148,9 @@ final class ChartOfAccountsSeeder
 
         ['code' => '2300', 'name' => 'Other Liabilities', 'type' => 'liability', 'parent' => '2000'],
 
+        // Money received that cannot be identified yet, held until it is.
+        ['code' => '2390', 'name' => 'Suspense Account', 'type' => 'liability', 'parent' => '2000'],
+
         // ── Equity ──
         // A cooperative replaces these with Share Capital, Statutory Funds,
         // Reserve Fund and Undivided Net Surplus. Left as the corporate default;
@@ -159,6 +184,8 @@ final class ChartOfAccountsSeeder
         // Fees from the Settings fee catalog charged at release, such as a
         // Credit Investigation Fee (accountant-confirmed 2026-10-03).
         ['code' => '4080', 'name' => 'Other Fee Income', 'type' => 'income', 'parent' => '4000'],
+        // The charge on a GCash Cash In or Cash Out (Phase 2, decision 6).
+        ['code' => '4090', 'name' => 'GCash Service Income', 'type' => 'income', 'parent' => '4000'],
 
         // ── Expenses ──
         ['code' => '5000', 'name' => 'Expenses', 'type' => 'expense', 'is_group' => true],
@@ -224,6 +251,15 @@ final class ChartOfAccountsSeeder
         'documentary_stamp_tax_payable' => '2230',
         'withholding_tax_payable' => '2210',
         'other_taxes_payable' => '2220',
+        // Phase 2 (approved 2026-11-08). Charts seeded before these existed
+        // get them from the 2026_11_08_100000 migration. `net_surplus` is the
+        // corporate 3030 Retained Earnings until the cooperative template
+        // brings its own account.
+        'gcash_service_income' => '4090',
+        'loan_adjustments' => '1180',
+        'unearned_restructure_income' => '1210',
+        'net_surplus' => '3030',
+        'suspense' => '2390',
     ];
 
     /** Whether this organisation already has a chart. */
@@ -309,6 +345,8 @@ final class ChartOfAccountsSeeder
                         'is_group' => $seed['is_group'] ?? false,
                         'is_active' => true,
                         'cash_kind' => $seed['cash_kind'] ?? null,
+                        // Null lets the saving hook apply the default rule.
+                        'cash_flow_category' => in_array($seed['code'], self::OPERATING_LOAN_ACCOUNT_CODES, true) ? 'operating' : null,
                         // Parents always precede their children in CHART, so one
                         // pass is enough and a missing parent is a broken
                         // constant rather than an ordering accident.

@@ -16,12 +16,20 @@ class ExtendLoanRequest extends FormRequest
      * extension now collects the interest itself, so a silent default of 'pay'
      * would double-charge the partial-payment flow, which posts the cashier's
      * own repayment immediately before extending. Every caller states intent.
+     *
+     * On 'pay', `method` and `reference_number` say how the member paid the
+     * collection, as on Record Payment (StoreRepaymentRequest): the reference
+     * is required unless the method is cash, and cash is the default. On
+     * 'defer' nothing is collected, so both are left out of the validated
+     * data and never refuse the request.
      */
     public function rules(): array
     {
         return [
             'remarks' => ['nullable', 'string', 'max:1000'],
             'interest_option' => ['required', 'in:pay,defer'],
+            'method' => ['exclude_unless:interest_option,pay', 'sometimes', 'in:cash,gcash,maya,bank_transfer,online'],
+            'reference_number' => ['exclude_unless:interest_option,pay', 'nullable', 'string', 'max:100', 'required_unless:method,cash'],
         ];
     }
 
@@ -33,5 +41,12 @@ class ExtendLoanRequest extends FormRequest
         return [
             'interest_option.required' => 'Choose whether to pay or defer the outstanding interest.',
         ];
+    }
+
+    protected function prepareForValidation(): void
+    {
+        if (! $this->has('method')) {
+            $this->merge(['method' => 'cash']);
+        }
     }
 }

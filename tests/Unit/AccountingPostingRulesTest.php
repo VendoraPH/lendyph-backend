@@ -54,7 +54,38 @@ class AccountingPostingRulesTest extends TestCase
             'documentary_stamp_tax_payable' => 2230,
             'withholding_tax_payable' => 2210,
             'other_taxes_payable' => 2220,
+            'gcash_service_income' => 4090,
+            'loan_adjustments' => 1180,
+            'unearned_restructure_income' => 1210,
+            'net_surplus' => 3030,
+            'suspense' => 2390,
         ]);
+    }
+
+    /**
+     * A posting's lines without their descriptions, for exact comparison.
+     *
+     * @param  array{lines: list<array<string, mixed>>}  $posting
+     * @return list<array{account_id: int, debit: int, credit: int}>
+     */
+    private function linesOf(array $posting): array
+    {
+        return array_map(
+            static fn (array $line): array => ['account_id' => $line['account_id'], 'debit' => $line['debit'], 'credit' => $line['credit']],
+            $posting['lines'],
+        );
+    }
+
+    /** The amount on the line carrying a description, for the lines a role shares with another. */
+    private function amountDescribed(array $posting, string $description, string $side): int
+    {
+        foreach ($posting['lines'] as $line) {
+            if (($line['description'] ?? null) === $description) {
+                return $line[$side];
+            }
+        }
+
+        return 0;
     }
 
     /**
@@ -951,6 +982,746 @@ class AccountingPostingRulesTest extends TestCase
         $this->assertBalancedAndNonEmpty($settle);
         $this->assertSame(120_000, $this->amountOn($settle, 2010, 'debit'));
         $this->assertSame(0, $this->amountOn($settle, 5020, 'debit'));
+    }
+
+    // ── loan_collection: share capital build-up (Phase 2, decision 5) ──
+
+    /**
+     * A build-up payment's extra is the member's share capital, so it is
+     * credited to 3060 Share Capital, not held on 2300 as an overpayment.
+     */
+    public function test_a_build_up_payment_credits_share_capital_not_other_liabilities(): void
+    {
+        $posting = PostingRules::loanCollection(
+            received: 1_255_000,
+            principal: 1_000_000,
+            interest: 180_000,
+            penalty: 0,
+            fees: 0,
+            overpayment: 75_000,
+            method: 'cash',
+            map: $this->map(),
+            shareCapital: 75_000,
+        );
+
+        $this->assertBalancedAndNonEmpty($posting);
+        $this->assertSame(1_255_000, $this->amountOn($posting, 1010, 'debit'));
+        $this->assertSame(75_000, $this->amountOn($posting, 3060, 'credit'));
+        $this->assertSame(0, $this->amountOn($posting, 2300, 'credit'));
+    }
+
+    public function test_an_overpayment_beyond_the_build_up_stays_on_other_liabilities(): void
+    {
+        $posting = PostingRules::loanCollection(
+            received: 1_280_000,
+            principal: 1_000_000,
+            interest: 180_000,
+            penalty: 0,
+            fees: 0,
+            overpayment: 100_000,
+            method: 'cash',
+            map: $this->map(),
+            shareCapital: 75_000,
+        );
+
+        $this->assertBalancedAndNonEmpty($posting);
+        $this->assertSame(75_000, $this->amountOn($posting, 3060, 'credit'));
+        $this->assertSame(25_000, $this->amountOn($posting, 2300, 'credit'));
+    }
+
+    public function test_a_build_up_larger_than_the_overpayment_is_refused(): void
+    {
+        $this->expectException(CannotPostToTheBooksException::class);
+        $this->expectExceptionMessageMatches('/share capital/');
+
+        PostingRules::loanCollection(
+            received: 1_255_000,
+            principal: 1_000_000,
+            interest: 180_000,
+            penalty: 0,
+            fees: 0,
+            overpayment: 75_000,
+            method: 'cash',
+            map: $this->map(),
+            shareCapital: 75_001,
+        );
+    }
+
+    // ── Restructure into a new loan (Phase 2, decisions 2 and 3) ──
+
+    /** UP ₱40,000, UI ₱5,000, UPen ₱2,000, P ₱46,000: all principal carried, interest first. */
+    public function test_a_restructure_split_carries_principal_then_capitalises_interest_before_penalty(): void
+    {
+        $this->assertSame([
+            'carried_principal' => 4_000_000,
+            'capitalised_interest' => 500_000,
+            'capitalised_penalty' => 100_000,
+            'written_off_principal' => 0,
+        ], PostingRules::restructureSplit(4_000_000, 500_000, 200_000, 4_600_000));
+    }
+
+    /** CP = P: a new principal below the unpaid principal capitalises nothing and writes off the rest. */
+    public function test_a_restructure_split_below_the_unpaid_principal_writes_the_difference_off(): void
+    {
+        $this->assertSame([
+            'carried_principal' => 4_500_000,
+            'capitalised_interest' => 0,
+            'capitalised_penalty' => 0,
+            'written_off_principal' => 500_000,
+        ], PostingRules::restructureSplit(5_000_000, 300_000, 100_000, 4_500_000));
+    }
+
+    /** WP = 0 and C = 0: a new principal equal to the unpaid principal. */
+    public function test_a_restructure_split_at_exactly_the_unpaid_principal_carries_it_all(): void
+    {
+        $this->assertSame([
+            'carried_principal' => 5_000_000,
+            'capitalised_interest' => 0,
+            'capitalised_penalty' => 0,
+            'written_off_principal' => 0,
+        ], PostingRules::restructureSplit(5_000_000, 300_000, 100_000, 5_000_000));
+    }
+
+    public function test_a_restructure_split_above_everything_owed_is_refused(): void
+    {
+        $this->expectException(CannotPostToTheBooksException::class);
+        $this->expectExceptionMessageMatches('/more than/');
+
+        PostingRules::restructureSplit(5_000_000, 300_000, 100_000, 5_400_001);
+    }
+
+    /**
+     * J1: Dr 1110 P / Dr m D / Cr 1110 CP / Cr 1210 C / Cr each deduction's
+     * role. No cash line for principal: nothing is paid out.
+     */
+    public function test_a_restructure_release_carries_principal_and_defers_the_capitalised_part(): void
+    {
+        $posting = PostingRules::restructureRelease(
+            principal: 4_600_000,
+            carried: 4_000_000,
+            capitalisedInterest: 500_000,
+            capitalisedPenalty: 100_000,
+            deductions: 50_000,
+            method: 'cash',
+            map: $this->map(),
+            items: [['name' => 'Processing Fee', 'amount' => 50_000]],
+            loan: 'LA-000020',
+            source: 'LN-000010',
+        );
+
+        $this->assertBalancedAndNonEmpty($posting);
+        $this->assertSame('loan_release', $posting['source']);
+        $this->assertSame([
+            ['account_id' => 1110, 'debit' => 4_600_000, 'credit' => 0],
+            ['account_id' => 1010, 'debit' => 50_000, 'credit' => 0],
+            ['account_id' => 1110, 'debit' => 0, 'credit' => 4_000_000],
+            ['account_id' => 1210, 'debit' => 0, 'credit' => 600_000],
+            ['account_id' => 4030, 'debit' => 0, 'credit' => 50_000],
+        ], $this->linesOf($posting));
+        $this->assertSame('Principal carried from LN-000010', $posting['lines'][2]['description']);
+    }
+
+    /** CP = P with nothing withheld: the principal only moves loans; no cash, no deferral. */
+    public function test_a_restructure_release_that_only_carries_principal_needs_no_other_account(): void
+    {
+        $posting = PostingRules::restructureRelease(
+            principal: 4_500_000,
+            carried: 4_500_000,
+            capitalisedInterest: 0,
+            capitalisedPenalty: 0,
+            deductions: 0,
+            method: 'cash',
+            map: AccountMap::fromArray(['loans_receivable' => 1110]),
+        );
+
+        $this->assertBalancedAndNonEmpty($posting);
+        $this->assertSame([
+            ['account_id' => 1110, 'debit' => 4_500_000, 'credit' => 0],
+            ['account_id' => 1110, 'debit' => 0, 'credit' => 4_500_000],
+        ], $this->linesOf($posting));
+    }
+
+    public function test_a_restructure_release_collects_its_deductions_through_the_method_given(): void
+    {
+        $posting = PostingRules::restructureRelease(4_600_000, 4_000_000, 500_000, 100_000, 50_000, 'bank', $this->map());
+
+        $this->assertSame(50_000, $this->amountOn($posting, 1040, 'debit'));
+        $this->assertSame(0, $this->amountOn($posting, 1010, 'debit'));
+    }
+
+    public function test_a_restructure_release_whose_split_does_not_add_up_to_the_principal_is_refused(): void
+    {
+        $this->expectException(CannotPostToTheBooksException::class);
+        $this->expectExceptionMessageMatches('/does not reconcile/');
+
+        PostingRules::restructureRelease(4_600_000, 4_000_000, 500_000, 99_999, 0, 'cash', $this->map());
+    }
+
+    /** J2 with no deferral on the source: the allowance first, then expense. */
+    public function test_a_restructure_write_off_uses_the_allowance_before_expense(): void
+    {
+        $posting = PostingRules::restructureWriteOff(500_000, 0, 200_000, $this->map());
+
+        $this->assertBalancedAndNonEmpty($posting);
+        $this->assertSame('credit_loss', $posting['source']);
+        $this->assertSame([
+            ['account_id' => 1200, 'debit' => 200_000, 'credit' => 0],
+            ['account_id' => 5140, 'debit' => 300_000, 'credit' => 0],
+            ['account_id' => 1110, 'debit' => 0, 'credit' => 500_000],
+        ], $this->linesOf($posting));
+    }
+
+    /** A restructure of a restructure: the source's own unrecognised deferral is written off first. */
+    public function test_a_restructure_write_off_takes_the_sources_own_deferral_first(): void
+    {
+        $posting = PostingRules::restructureWriteOff(500_000, 150_000, 1_000_000, $this->map());
+
+        $this->assertBalancedAndNonEmpty($posting);
+        $this->assertSame([
+            ['account_id' => 1210, 'debit' => 150_000, 'credit' => 0],
+            ['account_id' => 1200, 'debit' => 350_000, 'credit' => 0],
+            ['account_id' => 1110, 'debit' => 0, 'credit' => 500_000],
+        ], $this->linesOf($posting));
+        $this->assertSame(PostingRules::DEFERRAL_WRITTEN_OFF_LINE, $posting['lines'][0]['description']);
+    }
+
+    public function test_a_restructure_write_off_smaller_than_the_deferral_needs_no_allowance(): void
+    {
+        $posting = PostingRules::restructureWriteOff(
+            500_000,
+            800_000,
+            1_000_000,
+            AccountMap::fromArray(['loans_receivable' => 1110, 'unearned_restructure_income' => 1210]),
+        );
+
+        $this->assertSame([
+            ['account_id' => 1210, 'debit' => 500_000, 'credit' => 0],
+            ['account_id' => 1110, 'debit' => 0, 'credit' => 500_000],
+        ], $this->linesOf($posting));
+    }
+
+    /** An allowance carrying a debit balance has nothing to absorb a loss with. */
+    public function test_a_restructure_write_off_against_an_allowance_in_debit_is_all_expense(): void
+    {
+        $posting = PostingRules::restructureWriteOff(500_000, 0, -40_000, $this->map());
+
+        $this->assertSame([
+            ['account_id' => 5140, 'debit' => 500_000, 'credit' => 0],
+            ['account_id' => 1110, 'debit' => 0, 'credit' => 500_000],
+        ], $this->linesOf($posting));
+    }
+
+    // ── Deferral recognition on the new loan's collections ──
+
+    /**
+     * ₱7,000 interest and ₱3,000 penalty capitalised into a ₱60,000 loan,
+     * collected ₱10,000 of principal at a time: each collection recognises
+     * its share, the cumulative figure is never off by more than rounding, and
+     * the last one finishes exactly at the capitalised amounts.
+     */
+    public function test_deferral_is_recognised_in_proportion_and_finishes_exactly(): void
+    {
+        $interest = 0;
+        $penalty = 0;
+        $steps = [];
+
+        for ($k = 1; $k <= 6; $k++) {
+            $x = PostingRules::deferralRecognition(700_000, 300_000, 6_000_000, $k * 1_000_000, $k === 6, $interest, $penalty);
+            $steps[] = [$x['interest'], $x['penalty']];
+            $interest += $x['interest'];
+            $penalty += $x['penalty'];
+        }
+
+        $this->assertSame([
+            [116_667, 50_000],
+            [116_666, 50_000],
+            [116_667, 50_000],
+            [116_667, 50_000],
+            [116_666, 50_000],
+            [116_667, 50_000],
+        ], $steps);
+        $this->assertSame([700_000, 300_000], [$interest, $penalty]);
+        $this->assertSame(
+            ['interest' => 0, 'penalty' => 0],
+            PostingRules::deferralRecognition(700_000, 300_000, 6_000_000, 6_000_000, true, $interest, $penalty),
+            'nothing is left to recognise once it has all been recognised',
+        );
+    }
+
+    /** Once no period is open, all the rest is recognised, whatever principal was collected. */
+    public function test_deferral_is_recognised_in_full_when_the_loan_has_no_open_period(): void
+    {
+        $this->assertSame(
+            ['interest' => 583_333, 'penalty' => 250_000],
+            PostingRules::deferralRecognition(700_000, 300_000, 6_000_000, 4_000_000, true, 116_667, 50_000),
+        );
+    }
+
+    /** After a voided collection's recognition is reversed, the next one catches up to the target. */
+    public function test_deferral_after_a_void_catches_up_to_the_principal_collected(): void
+    {
+        // Two collections recognised 116,667 + 50,000 and 116,666 + 50,000;
+        // the second was voided, so only the first stands. Principal paid is
+        // back to ₱20,000 with the next payment.
+        $this->assertSame(
+            ['interest' => 116_666, 'penalty' => 50_000],
+            PostingRules::deferralRecognition(700_000, 300_000, 6_000_000, 2_000_000, false, 116_667, 50_000),
+        );
+    }
+
+    public function test_a_loan_with_nothing_capitalised_recognises_nothing(): void
+    {
+        $this->assertSame(
+            ['interest' => 0, 'penalty' => 0],
+            PostingRules::deferralRecognition(0, 0, 6_000_000, 3_000_000, false, 0, 0),
+        );
+    }
+
+    /** Exact at sizes where `capitalised × principal paid` passes PHP's integer range. */
+    public function test_deferral_proportion_is_exact_for_large_figures(): void
+    {
+        // ₱100,000,000.00 capitalised in a ₱500,000,000.00 loan, ₱123,456,789.01 collected:
+        // 10,000,000,000 × 12,345,678,901 ÷ 50,000,000,000 = 2,469,135,780.2.
+        $x = PostingRules::deferralRecognition(10_000_000_000, 0, 50_000_000_000, 12_345_678_901, false, 0, 0);
+
+        $this->assertSame(['interest' => 2_469_135_780, 'penalty' => 0], $x);
+    }
+
+    /** What remains after recognition and after a write-off or clearing that took part of it. */
+    public function test_the_remaining_deferral_splits_a_release_in_the_ratio_still_owed(): void
+    {
+        $this->assertSame(['interest' => 583_333, 'penalty' => 250_000], PostingRules::deferralRemaining(700_000, 300_000, 116_667, 50_000, 0));
+        $this->assertSame(['interest' => 0, 'penalty' => 0], PostingRules::deferralRemaining(700_000, 300_000, 116_667, 50_000, 833_333));
+        $this->assertSame(['interest' => 291_667, 'penalty' => 125_000], PostingRules::deferralRemaining(700_000, 300_000, 116_667, 50_000, 416_666));
+    }
+
+    /** Dr 1210 / Cr 4010 and 4020, as their own lines beside the collection's own interest and penalty. */
+    public function test_a_collection_on_a_restructured_loan_recognises_its_deferral(): void
+    {
+        $posting = PostingRules::loanCollection(
+            received: 1_180_000,
+            principal: 1_000_000,
+            interest: 180_000,
+            penalty: 0,
+            fees: 0,
+            overpayment: 0,
+            method: 'cash',
+            map: $this->map(),
+            deferredInterest: 116_667,
+            deferredPenalty: 50_000,
+        );
+
+        $this->assertBalancedAndNonEmpty($posting);
+        $this->assertSame(166_667, $this->amountOn($posting, 1210, 'debit'));
+        $this->assertSame(166_667, $this->amountDescribed($posting, PostingRules::DEFERRAL_RECOGNISED_LINE, 'debit'));
+        $this->assertSame(116_667, $this->amountDescribed($posting, PostingRules::DEFERRED_INTEREST_LINE, 'credit'));
+        $this->assertSame(50_000, $this->amountDescribed($posting, PostingRules::DEFERRED_PENALTY_LINE, 'credit'));
+        // The collection's own interest is still its own line.
+        $this->assertSame(180_000, $this->amountOn($posting, 4010, 'credit'));
+    }
+
+    // ── Balance adjustments (decision 7) ──
+
+    public function test_a_balance_reduction_clears_through_loan_adjustments(): void
+    {
+        $posting = PostingRules::balanceAdjustment(-250_000, $this->map());
+
+        $this->assertBalancedAndNonEmpty($posting);
+        $this->assertSame('adjustment', $posting['source']);
+        $this->assertSame([
+            ['account_id' => 1180, 'debit' => 250_000, 'credit' => 0],
+            ['account_id' => 1110, 'debit' => 0, 'credit' => 250_000],
+        ], $this->linesOf($posting));
+    }
+
+    public function test_a_balance_increase_is_the_mirror(): void
+    {
+        $posting = PostingRules::balanceAdjustment(250_000, $this->map());
+
+        $this->assertBalancedAndNonEmpty($posting);
+        $this->assertSame([
+            ['account_id' => 1110, 'debit' => 250_000, 'credit' => 0],
+            ['account_id' => 1180, 'debit' => 0, 'credit' => 250_000],
+        ], $this->linesOf($posting));
+    }
+
+    /** A reduction that completes a restructured loan moves the deferral it still holds out of 1210. */
+    public function test_a_reduction_that_completes_a_loan_clears_its_remaining_deferral(): void
+    {
+        $posting = PostingRules::balanceAdjustment(-1_000_000, $this->map(), deferralCleared: 166_667);
+
+        $this->assertBalancedAndNonEmpty($posting);
+        $this->assertSame([
+            ['account_id' => 1180, 'debit' => 1_000_000, 'credit' => 0],
+            ['account_id' => 1110, 'debit' => 0, 'credit' => 1_000_000],
+            ['account_id' => 1210, 'debit' => 166_667, 'credit' => 0],
+            ['account_id' => 1180, 'debit' => 0, 'credit' => 166_667],
+        ], $this->linesOf($posting));
+        $this->assertSame(PostingRules::DEFERRAL_CLEARED_LINE, $posting['lines'][2]['description']);
+    }
+
+    public function test_an_increase_never_clears_a_deferral(): void
+    {
+        $this->expectException(CannotPostToTheBooksException::class);
+
+        PostingRules::balanceAdjustment(250_000, $this->map(), deferralCleared: 1);
+    }
+
+    public function test_a_zero_balance_adjustment_is_refused(): void
+    {
+        $this->expectException(CannotPostToTheBooksException::class);
+        $this->expectExceptionMessageMatches('/greater than zero/');
+
+        PostingRules::balanceAdjustment(0, $this->map());
+    }
+
+    // ── A source's deferral carried to the new loan ──
+
+    /**
+     * S holds ₱5,833.33 interest and ₱2,500.00 penalty unrecognised. J2 uses
+     * it first against the principal written off; the rest carries, split in
+     * the ratio still owed.
+     */
+    public function test_with_nothing_written_off_the_whole_deferral_carries(): void
+    {
+        $this->assertSame(['interest' => 583_333, 'penalty' => 250_000], PostingRules::restructureCarry(583_333, 250_000, 0));
+    }
+
+    public function test_a_write_off_smaller_than_the_deferral_carries_the_rest(): void
+    {
+        // J2 takes ₱3,000.00: 210,000 of interest and 90,000 of penalty.
+        $this->assertSame(['interest' => 373_333, 'penalty' => 160_000], PostingRules::restructureCarry(583_333, 250_000, 300_000));
+    }
+
+    public function test_a_write_off_at_or_above_the_deferral_carries_nothing(): void
+    {
+        $this->assertSame(['interest' => 0, 'penalty' => 0], PostingRules::restructureCarry(583_333, 250_000, 833_333));
+        $this->assertSame(['interest' => 0, 'penalty' => 0], PostingRules::restructureCarry(583_333, 250_000, 900_000));
+        $this->assertSame(['interest' => 0, 'penalty' => 0], PostingRules::restructureCarry(0, 0, 0));
+    }
+
+    /**
+     * J1 moves the carried deferral between the two loans on 1210, by part:
+     * off S on its own marked debits, onto N on its own marked credits.
+     */
+    public function test_a_restructure_release_moves_the_carried_deferral_by_part(): void
+    {
+        $posting = PostingRules::restructureRelease(
+            principal: 6_000_000,
+            carried: 5_000_000,
+            capitalisedInterest: 700_000,
+            capitalisedPenalty: 300_000,
+            deductions: 0,
+            method: 'cash',
+            map: $this->map(),
+            source: 'LN-000010',
+            carriedInterest: 373_333,
+            carriedPenalty: 160_000,
+        );
+
+        $this->assertBalancedAndNonEmpty($posting);
+        $this->assertSame([
+            ['account_id' => 1110, 'debit' => 6_000_000, 'credit' => 0],
+            ['account_id' => 1110, 'debit' => 0, 'credit' => 5_000_000],
+            ['account_id' => 1210, 'debit' => 0, 'credit' => 1_000_000],
+            ['account_id' => 1210, 'debit' => 373_333, 'credit' => 0],
+            ['account_id' => 1210, 'debit' => 160_000, 'credit' => 0],
+            ['account_id' => 1210, 'debit' => 0, 'credit' => 373_333],
+            ['account_id' => 1210, 'debit' => 0, 'credit' => 160_000],
+        ], $this->linesOf($posting));
+        $this->assertSame(373_333, $this->amountDescribed($posting, PostingRules::DEFERRED_INTEREST_CARRIED_OUT_LINE, 'debit'));
+        $this->assertSame(160_000, $this->amountDescribed($posting, PostingRules::DEFERRED_PENALTY_CARRIED_OUT_LINE, 'debit'));
+        $this->assertSame(373_333, $this->amountDescribed($posting, PostingRules::DEFERRED_INTEREST_CARRIED_IN_LINE, 'credit'));
+        $this->assertSame(160_000, $this->amountDescribed($posting, PostingRules::DEFERRED_PENALTY_CARRIED_IN_LINE, 'credit'));
+    }
+
+    public function test_a_restructure_release_with_nothing_carried_has_no_carry_lines(): void
+    {
+        $posting = PostingRules::restructureRelease(4_600_000, 4_000_000, 500_000, 100_000, 0, 'cash', $this->map());
+
+        $this->assertSame([], array_values(array_filter(
+            $this->linesOf($posting),
+            static fn (array $line): bool => $line['account_id'] === 1210 && $line['debit'] > 0,
+        )));
+    }
+
+    public function test_a_negative_carry_is_refused(): void
+    {
+        $this->expectException(CannotPostToTheBooksException::class);
+
+        PostingRules::restructureRelease(4_600_000, 4_600_000, 0, 0, 0, 'cash', $this->map(), carriedInterest: -1);
+    }
+
+    /** The carried part is recognised with N's own: the parts finish exactly at their sums. */
+    public function test_a_carried_deferral_is_recognised_with_the_new_loans_own_and_finishes_exactly(): void
+    {
+        // N's own ₱6,000.00 / ₱4,000.00 plus ₱5,833.33 / ₱2,500.00 carried.
+        [$interestTotal, $penaltyTotal] = [600_000 + 583_333, 400_000 + 250_000];
+        $interest = 0;
+        $penalty = 0;
+
+        for ($k = 1; $k <= 6; $k++) {
+            $x = PostingRules::deferralRecognition($interestTotal, $penaltyTotal, 6_000_000, $k * 1_000_000, $k === 6, $interest, $penalty);
+            $interest += $x['interest'];
+            $penalty += $x['penalty'];
+            $this->assertLessThanOrEqual($interestTotal, $interest);
+            $this->assertLessThanOrEqual($penaltyTotal, $penalty);
+        }
+
+        $this->assertSame([$interestTotal, $penaltyTotal], [$interest, $penalty]);
+    }
+
+    // ── A balance reduction clears its share of the deferral ──
+
+    /** Share = deferral × principal reduced ÷ principal outstanding before, split in the ratio still owed. */
+    public function test_a_partial_reduction_clears_its_share_of_the_deferral(): void
+    {
+        $this->assertSame(['interest' => 116_667, 'penalty' => 50_000], PostingRules::deferralShare(583_333, 250_000, 1_000_000, 5_000_000));
+    }
+
+    public function test_reducing_all_the_principal_outstanding_clears_all_of_it(): void
+    {
+        $this->assertSame(['interest' => 583_333, 'penalty' => 250_000], PostingRules::deferralShare(583_333, 250_000, 5_000_000, 5_000_000));
+    }
+
+    public function test_a_loan_with_no_deferral_left_clears_nothing(): void
+    {
+        $this->assertSame(['interest' => 0, 'penalty' => 0], PostingRules::deferralShare(0, 0, 1_000_000, 5_000_000));
+    }
+
+    public function test_a_share_is_exact_for_large_figures(): void
+    {
+        // ₱100,000,000.00 of deferral, ₱123,456,789.01 reduced of ₱500,000,000.00.
+        $this->assertSame(['interest' => 2_469_135_780, 'penalty' => 0], PostingRules::deferralShare(10_000_000_000, 0, 12_345_678_901, 50_000_000_000));
+    }
+
+    public function test_a_reduction_above_the_principal_outstanding_is_refused(): void
+    {
+        $this->expectException(CannotPostToTheBooksException::class);
+
+        PostingRules::deferralShare(583_333, 250_000, 5_000_001, 5_000_000);
+    }
+
+    public function test_a_partial_reduction_posts_its_share_by_part_through_loan_adjustments(): void
+    {
+        $posting = PostingRules::balanceAdjustment(-1_000_000, $this->map(), interestCleared: 116_667, penaltyCleared: 50_000);
+
+        $this->assertBalancedAndNonEmpty($posting);
+        $this->assertSame([
+            ['account_id' => 1180, 'debit' => 1_000_000, 'credit' => 0],
+            ['account_id' => 1110, 'debit' => 0, 'credit' => 1_000_000],
+            ['account_id' => 1210, 'debit' => 116_667, 'credit' => 0],
+            ['account_id' => 1210, 'debit' => 50_000, 'credit' => 0],
+            ['account_id' => 1180, 'debit' => 0, 'credit' => 166_667],
+        ], $this->linesOf($posting));
+        $this->assertSame(116_667, $this->amountDescribed($posting, PostingRules::DEFERRED_INTEREST_CLEARED_LINE, 'debit'));
+        $this->assertSame(50_000, $this->amountDescribed($posting, PostingRules::DEFERRED_PENALTY_CLEARED_LINE, 'debit'));
+    }
+
+    public function test_an_increase_never_clears_a_share(): void
+    {
+        $this->expectException(CannotPostToTheBooksException::class);
+
+        PostingRules::balanceAdjustment(250_000, $this->map(), penaltyCleared: 1);
+    }
+
+    public function test_a_reduction_clears_either_the_rest_or_a_share_never_both(): void
+    {
+        $this->expectException(CannotPostToTheBooksException::class);
+
+        PostingRules::balanceAdjustment(-250_000, $this->map(), deferralCleared: 10, interestCleared: 10);
+    }
+
+    /** What a share or a carry took by part comes off that part, before any lump is split. */
+    public function test_the_remaining_deferral_takes_off_what_was_cleared_or_carried_by_part(): void
+    {
+        $this->assertSame(
+            ['interest' => 466_666, 'penalty' => 200_000],
+            PostingRules::deferralRemaining(700_000, 300_000, 116_667, 50_000, 0, takenInterest: 116_667, takenPenalty: 50_000),
+        );
+        $this->assertSame(
+            ['interest' => 0, 'penalty' => 0],
+            PostingRules::deferralRemaining(700_000, 300_000, 116_667, 50_000, 666_666, takenInterest: 116_667, takenPenalty: 50_000),
+        );
+    }
+
+    /**
+     * ₱60,000 principal holding ₱7,000 / ₱3,000. ₱10,000 is collected, then
+     * ₱10,000 reduced (of ₱50,000 outstanding), then the other ₱40,000
+     * collected. Recognised plus cleared is exactly the deferral, by part, and
+     * no step ever recognises past what is left.
+     */
+    public function test_recognition_after_a_partial_reduction_targets_only_what_is_left_and_ends_at_zero(): void
+    {
+        $first = PostingRules::deferralRecognition(700_000, 300_000, 6_000_000, 1_000_000, false, 0, 0);
+        $remaining = PostingRules::deferralRemaining(700_000, 300_000, $first['interest'], $first['penalty'], 0);
+        $share = PostingRules::deferralShare($remaining['interest'], $remaining['penalty'], 1_000_000, 5_000_000);
+        $interest = $first['interest'];
+        $penalty = $first['penalty'];
+
+        for ($paid = 2_000_000; $paid <= 5_000_000; $paid += 1_000_000) {
+            $x = PostingRules::deferralRecognition(
+                700_000, 300_000, 6_000_000, $paid, $paid === 5_000_000, $interest, $penalty,
+                takenInterest: $share['interest'], takenPenalty: $share['penalty'],
+            );
+            $interest += $x['interest'];
+            $penalty += $x['penalty'];
+            $this->assertLessThanOrEqual(700_000, $interest + $share['interest']);
+            $this->assertLessThanOrEqual(300_000, $penalty + $share['penalty']);
+        }
+
+        $this->assertSame(700_000, $interest + $share['interest']);
+        $this->assertSame(300_000, $penalty + $share['penalty']);
+    }
+
+    // ── Share capital entries (decision 5) ──
+
+    public function test_a_share_capital_credit_is_money_in_to_share_capital(): void
+    {
+        $posting = PostingRules::shareCapitalEntry(500_000, 0, 'cash', $this->map());
+
+        $this->assertBalancedAndNonEmpty($posting);
+        $this->assertSame('share_capital', $posting['source']);
+        $this->assertSame([
+            ['account_id' => 1010, 'debit' => 500_000, 'credit' => 0],
+            ['account_id' => 3060, 'debit' => 0, 'credit' => 500_000],
+        ], $this->linesOf($posting));
+    }
+
+    public function test_a_share_capital_debit_is_money_out_of_share_capital(): void
+    {
+        $posting = PostingRules::shareCapitalEntry(0, 200_000, 'bank', $this->map());
+
+        $this->assertSame([
+            ['account_id' => 3060, 'debit' => 200_000, 'credit' => 0],
+            ['account_id' => 1040, 'debit' => 0, 'credit' => 200_000],
+        ], $this->linesOf($posting));
+    }
+
+    /** @return array<string, array{int, int}> */
+    public static function unpostableShareCapitalRows(): array
+    {
+        return ['both sides' => [100, 100], 'neither side' => [0, 0], 'negative' => [-100, 0]];
+    }
+
+    #[DataProvider('unpostableShareCapitalRows')]
+    public function test_a_share_capital_row_on_both_sides_or_neither_is_refused(int $credit, int $debit): void
+    {
+        $this->expectException(CannotPostToTheBooksException::class);
+
+        PostingRules::shareCapitalEntry($credit, $debit, 'cash', $this->map());
+    }
+
+    // ── GCash (decision 6) ──
+
+    public function test_a_cash_in_takes_cash_sends_gcash_and_earns_the_charge(): void
+    {
+        $posting = PostingRules::gcashTransaction('cash_in', 500_000, 2_000, $this->map());
+
+        $this->assertBalancedAndNonEmpty($posting);
+        $this->assertSame('cash_in', $posting['source']);
+        $this->assertSame([
+            ['account_id' => 1010, 'debit' => 502_000, 'credit' => 0],
+            ['account_id' => 1020, 'debit' => 0, 'credit' => 500_000],
+            ['account_id' => 4090, 'debit' => 0, 'credit' => 2_000],
+        ], $this->linesOf($posting));
+    }
+
+    public function test_a_cash_out_takes_gcash_pays_cash_less_the_charge(): void
+    {
+        $posting = PostingRules::gcashTransaction('cash_out', 500_000, 2_000, $this->map());
+
+        $this->assertBalancedAndNonEmpty($posting);
+        $this->assertSame('cash_out', $posting['source']);
+        $this->assertSame([
+            ['account_id' => 1020, 'debit' => 500_000, 'credit' => 0],
+            ['account_id' => 1010, 'debit' => 0, 'credit' => 498_000],
+            ['account_id' => 4090, 'debit' => 0, 'credit' => 2_000],
+        ], $this->linesOf($posting));
+    }
+
+    /** A ₱0.00 charge has no income line, and needs no income account. */
+    public function test_a_gcash_transaction_without_a_charge_has_no_income_line(): void
+    {
+        $map = AccountMap::fromArray(['cash' => 1010, 'gcash' => 1020]);
+
+        foreach (['cash_in', 'cash_out'] as $type) {
+            $posting = PostingRules::gcashTransaction($type, 500_000, 0, $map);
+
+            $this->assertBalancedAndNonEmpty($posting);
+            $this->assertCount(2, $posting['lines'], $type);
+        }
+    }
+
+    public function test_a_cash_out_whose_charge_is_the_whole_amount_is_refused(): void
+    {
+        $this->expectException(CannotPostToTheBooksException::class);
+
+        PostingRules::gcashTransaction('cash_out', 2_000, 2_000, $this->map());
+    }
+
+    public function test_an_unknown_gcash_type_is_refused(): void
+    {
+        $this->expectException(CannotPostToTheBooksException::class);
+
+        PostingRules::gcashTransaction('refund', 500_000, 0, $this->map());
+    }
+
+    // ── Allowance (decision 12) ──
+
+    public function test_a_positive_allowance_adjustment_provides_and_a_negative_one_releases(): void
+    {
+        $up = PostingRules::allowanceAdjustment(300_000, $this->map());
+        $down = PostingRules::allowanceAdjustment(-300_000, $this->map());
+
+        $this->assertBalancedAndNonEmpty($up);
+        $this->assertSame('credit_loss', $up['source']);
+        $this->assertSame([
+            ['account_id' => 5140, 'debit' => 300_000, 'credit' => 0],
+            ['account_id' => 1200, 'debit' => 0, 'credit' => 300_000],
+        ], $this->linesOf($up));
+        $this->assertSame([
+            ['account_id' => 1200, 'debit' => 300_000, 'credit' => 0],
+            ['account_id' => 5140, 'debit' => 0, 'credit' => 300_000],
+        ], $this->linesOf($down));
+    }
+
+    public function test_a_zero_allowance_adjustment_is_refused(): void
+    {
+        $this->expectException(CannotPostToTheBooksException::class);
+
+        PostingRules::allowanceAdjustment(0, $this->map());
+    }
+
+    /**
+     * Posted journals carry these exact strings and a loan's deferral is read
+     * back by them, so a reworded constant would recognise it twice.
+     */
+    public function test_the_deferral_line_markers_never_change(): void
+    {
+        $this->assertSame('Unearned interest and penalty recognised', PostingRules::DEFERRAL_RECOGNISED_LINE);
+        $this->assertSame('Restructured interest recognised', PostingRules::DEFERRED_INTEREST_LINE);
+        $this->assertSame('Restructured penalty recognised', PostingRules::DEFERRED_PENALTY_LINE);
+        $this->assertSame('Unearned interest and penalty written off', PostingRules::DEFERRAL_WRITTEN_OFF_LINE);
+        $this->assertSame('Unearned interest and penalty cleared', PostingRules::DEFERRAL_CLEARED_LINE);
+        $this->assertSame('Unearned interest cleared', PostingRules::DEFERRED_INTEREST_CLEARED_LINE);
+        $this->assertSame('Unearned penalty cleared', PostingRules::DEFERRED_PENALTY_CLEARED_LINE);
+        $this->assertSame('Unearned interest carried to the new loan', PostingRules::DEFERRED_INTEREST_CARRIED_OUT_LINE);
+        $this->assertSame('Unearned penalty carried to the new loan', PostingRules::DEFERRED_PENALTY_CARRIED_OUT_LINE);
+        $this->assertSame('Unearned interest carried from the source loan', PostingRules::DEFERRED_INTEREST_CARRIED_IN_LINE);
+        $this->assertSame('Unearned penalty carried from the source loan', PostingRules::DEFERRED_PENALTY_CARRIED_IN_LINE);
+    }
+
+    /** Every role the new rules ask for is a declared posting role with a shape. */
+    public function test_every_new_role_is_declared_with_a_shape(): void
+    {
+        foreach (['gcash_service_income', 'loan_adjustments', 'unearned_restructure_income', 'net_surplus', 'suspense'] as $role) {
+            $this->assertContains($role, AccountingAccountMapping::ROLES);
+            $this->assertArrayHasKey($role, AccountingAccountMapping::ROLE_SHAPES);
+        }
+
+        $this->assertSame(['type' => 'asset', 'is_contra' => true], AccountingAccountMapping::ROLE_SHAPES['unearned_restructure_income']);
+        $this->assertSame(array_values(AccountingAccountMapping::ROLES), array_keys(AccountingAccountMapping::ROLE_SHAPES));
     }
 
     // ── Failing closed ──

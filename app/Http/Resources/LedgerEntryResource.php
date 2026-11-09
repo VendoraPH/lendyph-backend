@@ -14,6 +14,9 @@ use Illuminate\Http\Resources\Json\JsonResource;
  * from, so there is no row in any table this could be a resource FOR. It exists
  * so the ledger answers with the same `{data, links, meta}` envelope as every
  * other list in the module, and so the centavo fields are cast in one place.
+ * The controller adds the ledger's own figures to `meta` through
+ * `additional()`: `opening_balance`, `closing_balance`, `total_debit` and
+ * `total_credit`, beside the paginator's keys.
  *
  * @property array<string, mixed> $resource
  */

@@ -579,19 +579,25 @@ class AccountingAutomaticPostingTest extends TestCase
      * A different SOURCE against the same document is allowed, and must be.
      *
      * One loan legitimately raises several entries over its life — the release,
-     * and later a provision against it. Keying idempotency on the document
-     * alone would make the second one impossible.
+     * and later, when a restructure writes part of its principal off, that
+     * write-off (`credit_loss`). Keying idempotency on the document alone would
+     * make the second one impossible. Posted directly: a provision is keyed on
+     * its own row, and AutomaticPoster refuses one keyed on a loan.
      */
     public function test_a_different_source_against_the_same_loan_is_a_separate_entry(): void
     {
         $this->seedChartOfAccounts();
 
         $loan = $this->releaseLoanWithDeductions();
-        $provision = app(AutomaticPoster::class)->creditLossProvision($loan, '2500.00', $this->admin->id);
+        $writeOff = $this->postSimpleJournal('5140', '1110', 250_000, [
+            'source' => 'credit_loss',
+            'postable_type' => Loan::class,
+            'postable_id' => $loan->id,
+        ]);
 
-        $this->assertNotNull($provision);
-        $this->assertSame('credit_loss', $provision->source);
-        $this->assertNotSame($this->journalFor($loan, 'loan_release')->id, $provision->id);
+        $this->assertNotNull($writeOff);
+        $this->assertSame('credit_loss', $writeOff->source);
+        $this->assertNotSame($this->journalFor($loan, 'loan_release')->id, $writeOff->id);
         $this->assertSame(2, AccountingJournal::query()->where('postable_id', $loan->id)->count());
     }
 
