@@ -3,7 +3,9 @@
 namespace App\Services\Accounting;
 
 use App\Models\AccountingJournal;
+use App\Models\Loan;
 use Carbon\CarbonImmutable;
+use Illuminate\Database\Query\Builder;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -32,6 +34,26 @@ use Illuminate\Support\Facades\DB;
  * a source or a use of it. That falls out of the method rather than being
  * special-cased, which is why `cash` exists as a category.
  *
+ * ## Loans are operating activities (Phase 2, decision 9)
+ *
+ * Lending is this organisation's operation, so the loan accounts read
+ * `operating`, and a release is not explained account by account. Each
+ * `loan_release` journal (and the reversal of one) gives its cash lines to ONE
+ * operating line instead:
+ *
+ * - `loan_releases`, "Loans released, net of amounts withheld": the net
+ *   proceeds paid out on ordinary releases;
+ * - `restructure_collections`, "Deductions collected on restructures": a
+ *   restructure into a new loan pays nothing out and collects its deductions
+ *   in cash (A0's J1).
+ *
+ * What a release withheld from the proceeds (fees, share capital, insurance,
+ * notarial fees, taxes) moved no cash, so it is listed apart in `non_cash`,
+ * by account, outside every section total: the credit lines of each release
+ * whose cash nets to a payment out, other than money and loan receivable
+ * accounts ({@see LoanReceivableAccounts}). A reversal of that release takes
+ * its lines back out.
+ *
  * ## The statement proves itself
  *
  * `net_change` is computed independently, from the cash accounts' own opening
@@ -45,6 +67,19 @@ use Illuminate\Support\Facades\DB;
  */
 class CashFlowStatementBuilder
 {
+    public const LOAN_RELEASES = 'loan_releases';
+
+    public const RESTRUCTURE_COLLECTIONS = 'restructure_collections';
+
+    public const DERIVED_LABELS = [
+        self::LOAN_RELEASES => 'Loans released, net of amounts withheld',
+        self::RESTRUCTURE_COLLECTIONS => 'Deductions collected on restructures',
+    ];
+
+    public const NON_CASH_LABEL = 'Withheld at release (non-cash)';
+
+    private const RELEASE_SOURCE = 'loan_release';
+
     public function __construct(private TrialBalanceBuilder $trialBalance) {}
 
     /**
@@ -65,15 +100,18 @@ class CashFlowStatementBuilder
         $netChange = $closingCash - $openingCash;
 
         $lines = $this->explanations($cashAccountIds, $from, $to, $branchId);
+        $releases = $this->releaseLines($cashAccountIds, $from, $to, $branchId);
 
         $sections = [];
         $sectionTotal = 0;
 
         foreach (CashFlowCategories::ACTIVITIES as $activity) {
-            $section = $this->section($activity, $lines);
+            $section = $this->section($activity, $lines, $activity === 'operating' ? $releases : []);
             $sections[$activity] = $section;
             $sectionTotal += $section['total'];
         }
+
+        $withheld = $this->withheldAtRelease($cashAccountIds, $from, $to, $branchId);
 
         return [
             'from' => $from,
@@ -87,6 +125,12 @@ class CashFlowStatementBuilder
             'net_change' => $netChange,
             'opening_cash' => $openingCash,
             'closing_cash' => $closingCash,
+            // Outside every section and every total: it moved no cash.
+            'non_cash' => [
+                'label' => self::NON_CASH_LABEL,
+                'lines' => $withheld,
+                'total' => Money::sum(array_column($withheld, 'amount')),
+            ],
             // Beyond the TypeScript interface, and deliberately. If the
             // sections ever stop adding up to the movement in cash, that is a
             // fact about the books that has to be visible rather than a
@@ -165,15 +209,12 @@ class CashFlowStatementBuilder
             ->select('accounting_journal_id')
             ->whereIn('accounting_account_id', $cashAccountIds);
 
-        return DB::table('accounting_journal_lines as l')
-            ->join('accounting_journals as j', 'j.id', '=', 'l.accounting_journal_id')
+        return $this->linesInRange($from, $to, $branchId)
             ->join('accounting_accounts as a', 'a.id', '=', 'l.accounting_account_id')
-            ->whereIn('j.status', AccountingJournal::HISTORICAL_STATUSES)
-            // Plain comparisons on a DATE column so its index stays usable.
-            ->where('j.date', '>=', $from)
-            ->where('j.date', '<=', $to)
-            ->when($branchId !== null, fn ($q) => $q->whereIn('j.branch_id', (array) $branchId))
             ->whereIn('l.accounting_journal_id', $touchedCash)
+            // Releases are explained by releaseLines(), as one line each kind.
+            ->where(fn ($q) => $q->where('j.source', '<>', self::RELEASE_SOURCE)
+                ->where(fn ($q) => $q->whereNull('rj.id')->orWhere('rj.source', '<>', self::RELEASE_SOURCE)))
             // The cash lines are the movement, not the explanation of it.
             ->whereNotIn('l.accounting_account_id', $cashAccountIds)
             ->groupBy('a.id', 'a.code', 'a.name', 'a.cash_flow_category')
@@ -209,22 +250,162 @@ class CashFlowStatementBuilder
     }
 
     /**
+     * The cash each kind of release moved: one figure per kind, from the
+     * releases' (and their reversals') money lines, debit minus credit.
+     *
+     * The kind is the loan's: a restructure has a `source_loan_id`. A
+     * reversal has no document of its own, so it reads the one on the
+     * journal it reverses.
+     *
+     * @param  list<int>  $cashAccountIds
+     * @return list<array{account_id: null, account_code: null, label: string, amount: int, kind: string}>
+     */
+    private function releaseLines(array $cashAccountIds, string $from, string $to, int|array|null $branchId): array
+    {
+        if ($cashAccountIds === []) {
+            return [];
+        }
+
+        $amounts = $this->releaseLinesInRange($from, $to, $branchId)
+            ->leftJoin('loans as ln', function ($join): void {
+                $join->on('ln.id', '=', DB::raw('coalesce(rj.postable_id, j.postable_id)'))
+                    ->where(DB::raw('coalesce(rj.postable_type, j.postable_type)'), '=', Loan::class);
+            })
+            ->whereIn('l.accounting_account_id', $cashAccountIds)
+            ->selectRaw('case when ln.source_loan_id is null then ? else ? end as kind', [self::LOAN_RELEASES, self::RESTRUCTURE_COLLECTIONS])
+            ->selectRaw('sum(l.debit) as debits')
+            ->selectRaw('sum(l.credit) as credits')
+            ->groupBy('kind')
+            ->get()
+            // MySQL returns SUM() as a DECIMAL string.
+            ->mapWithKeys(static fn (object $row): array => [(string) $row->kind => (int) $row->debits - (int) $row->credits]);
+
+        $lines = [];
+
+        foreach (self::DERIVED_LABELS as $kind => $label) {
+            $amount = $amounts->get($kind, 0);
+
+            if ($amount === 0) {
+                continue;
+            }
+
+            $lines[] = [
+                'account_id' => null,
+                'account_code' => null,
+                'label' => $label,
+                'amount' => $amount,
+                'kind' => $kind,
+            ];
+        }
+
+        return $lines;
+    }
+
+    /**
+     * What releases withheld from their proceeds, by account: credit minus
+     * debit on the lines of each release whose cash nets to a payment out
+     * (and of its reversal), other than money and loan receivable accounts.
+     *
+     * A restructure collects its deductions in cash, so its cash nets the
+     * other way and nothing of it is here.
+     *
+     * @param  list<int>  $cashAccountIds
+     * @return list<array{account_id: int, account_code: string, label: string, amount: int, kind: string}>
+     */
+    private function withheldAtRelease(array $cashAccountIds, string $from, string $to, int|array|null $branchId): array
+    {
+        if ($cashAccountIds === []) {
+            return [];
+        }
+
+        $paidOut = DB::table('accounting_journal_lines as cl')
+            ->join('accounting_journals as cj', 'cj.id', '=', 'cl.accounting_journal_id')
+            ->where('cj.source', self::RELEASE_SOURCE)
+            ->whereIn('cl.accounting_account_id', $cashAccountIds)
+            ->groupBy('cl.accounting_journal_id')
+            ->havingRaw('sum(cl.credit) > sum(cl.debit)')
+            ->select('cl.accounting_journal_id');
+
+        return $this->releaseLinesInRange($from, $to, $branchId)
+            ->join('accounting_accounts as a', 'a.id', '=', 'l.accounting_account_id')
+            ->whereIn(DB::raw('coalesce(rj.id, j.id)'), $paidOut)
+            ->whereNotIn('l.accounting_account_id', [...$cashAccountIds, ...LoanReceivableAccounts::ids()])
+            ->groupBy('a.id', 'a.code', 'a.name')
+            ->orderBy('a.code')
+            ->select([
+                'a.id as account_id',
+                'a.code as account_code',
+                'a.name as account_name',
+                DB::raw('sum(l.credit) as credits'),
+                DB::raw('sum(l.debit) as debits'),
+            ])
+            ->get()
+            ->map(static fn (object $row): array => [
+                'account_id' => (int) $row->account_id,
+                'account_code' => (string) $row->account_code,
+                'label' => (string) $row->account_name,
+                'amount' => (int) $row->credits - (int) $row->debits,
+                'kind' => 'account',
+            ])
+            ->reject(static fn (array $line): bool => $line['amount'] === 0)
+            ->values()
+            ->all();
+    }
+
+    /**
+     * Lines of journals that count, dated in the range and in the branch
+     * scope, with the journal each one reverses (`rj`, null for most).
+     *
+     * `HISTORICAL_STATUSES` counts posted AND reversed, because a reversal is
+     * itself a pair of lines and dropping the reversed original would leave
+     * the reversal explaining a movement that no longer appears.
+     *
+     * @param  int|list<int>|null  $branchId
+     */
+    private function linesInRange(string $from, string $to, int|array|null $branchId): Builder
+    {
+        return DB::table('accounting_journal_lines as l')
+            ->join('accounting_journals as j', 'j.id', '=', 'l.accounting_journal_id')
+            ->leftJoin('accounting_journals as rj', 'rj.id', '=', 'j.reverses_journal_id')
+            ->whereIn('j.status', AccountingJournal::HISTORICAL_STATUSES)
+            // Plain comparisons on a DATE column so its index stays usable.
+            ->where('j.date', '>=', $from)
+            ->where('j.date', '<=', $to)
+            ->when($branchId !== null, fn ($q) => $q->whereIn('j.branch_id', (array) $branchId));
+    }
+
+    /**
+     * linesInRange(), narrowed to releases and the reversals of releases.
+     *
+     * @param  int|list<int>|null  $branchId
+     */
+    private function releaseLinesInRange(string $from, string $to, int|array|null $branchId): Builder
+    {
+        return $this->linesInRange($from, $to, $branchId)
+            ->where(fn ($q) => $q->where('j.source', self::RELEASE_SOURCE)->orWhere('rj.source', self::RELEASE_SOURCE));
+    }
+
+    /**
      * One section, with a line per account.
      *
      * A line per account rather than a single subtotal is the whole point.
      * "Investing activities ₱(2,400,000)" tells a reader nothing about whether
-     * the classification was right; "1110 Loans Receivable ₱(2,400,000)" under
-     * the same heading lets them see immediately that loan releases are being
-     * treated as investing, and go and change it if they disagree.
+     * the classification was right; "1410 Office Equipment ₱(2,400,000)" under
+     * the same heading lets them see immediately how a purchase is being
+     * treated, and go and change it if they disagree.
      *
      * Accounts that netted to zero are dropped — they explain nothing about
      * cash — but a zero-total SECTION is kept, because "no financing activity
      * this period" is information and an absent heading looks like a bug.
      *
+     * `$derived` are the lines with no account of their own (the releases,
+     * on operating), listed after the account lines.
+     *
      * @param  list<array<string, mixed>>  $lines
+     * @param  list<array<string, mixed>>  $derived
      * @return array{label: string, lines: list<array<string, mixed>>, total: int}
      */
-    private function section(string $activity, array $lines): array
+    private function section(string $activity, array $lines, array $derived = []): array
     {
         $rows = [];
 
@@ -241,8 +422,11 @@ class CashFlowStatementBuilder
                 // is readable at a glance.
                 'label' => $line['account_name'],
                 'amount' => $line['amount'],
+                'kind' => 'account',
             ];
         }
+
+        array_push($rows, ...$derived);
 
         return [
             'label' => CashFlowCategories::SECTION_LABELS[$activity],

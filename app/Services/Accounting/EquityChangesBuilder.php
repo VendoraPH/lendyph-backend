@@ -10,8 +10,7 @@ use Illuminate\Support\Facades\DB;
  * How equity moved over a period, component by component.
  *
  * Needs an opening balance and the movements between it and the close, which a
- * single trial balance does not carry — which is why this comes from the server
- * rather than being regrouped client-side the way the balance sheet is.
+ * single trial balance does not carry.
  *
  * ## Signs, and why `is_contra` never appears in this file
  *
@@ -23,18 +22,20 @@ use Illuminate\Support\Facades\DB;
  * `is_contra` would be a second place for the sign to be wrong, and one
  * arithmetic that handles both is one place it cannot be.
  *
- * ## What is deliberately NOT here: profit for the period
+ * ## Earnings not yet closed
  *
- * A statement of changes in equity usually opens with net income. It is absent
- * because nothing in this ledger says it belongs to equity yet: income and
- * expense accounts carry their own balances until somebody posts a closing
- * entry, and when they do, that entry appears below as an addition to Retained
- * Earnings like any other. Synthesising a "profit for the period" row would
- * double-count for every organisation that DOES close its books, and there is
- * no way to tell from a balance which kind of organisation this is.
+ * Income and expense accounts carry their balances until a closing entry
+ * moves them into equity, so the last row is derived: "Earnings not yet
+ * closed", with no account of its own (`kind: earnings`). It reads income less
+ * expense cumulatively: `beginning` to the day before `from`, `ending` to
+ * `to`, and the period's movement in `additions` (a profit) or `deductions`
+ * (a loss). That makes `total_ending` the balance sheet's total equity at
+ * `to`, the one equity figure (BalanceSheetBuilder::totalEquity()).
  *
- * So every row here is a ledger fact. The limitation is stated on the endpoint
- * rather than papered over with a figure nobody posted.
+ * A closing entry never counts a peso twice. It debits income and credits
+ * expense to put the result into, say, 3030 Retained Earnings inside the same
+ * period: 3030 shows it as an addition, and the earnings row shows the same
+ * amount leaving, as a deduction, so the total is unchanged.
  *
  * MONEY IS IN CENTAVOS.
  */
@@ -78,17 +79,23 @@ class EquityChangesBuilder
             }
 
             $rows[] = [
-                // `label` is the only field the table renders, and it is also
-                // its React key — so the code is prefixed to keep it unique
-                // even if two accounts were given the same name.
+                // The code is prefixed to keep the label unique even if two
+                // accounts were given the same name.
                 'label' => $account['code'].' '.$account['name'],
                 'account_id' => $id,
                 'account_code' => $account['code'],
+                'kind' => 'account',
                 'beginning' => $beginning,
                 'additions' => $additions,
                 'deductions' => $deductions,
                 'ending' => $ending,
             ];
+        }
+
+        $earnings = $this->earningsRow($dayBefore, $to, $branchId);
+
+        if ($earnings !== null) {
+            $rows[] = $earnings;
         }
 
         return [
@@ -97,6 +104,55 @@ class EquityChangesBuilder
             'rows' => $rows,
             'total_beginning' => Money::sum(array_column($rows, 'beginning')),
             'total_ending' => Money::sum(array_column($rows, 'ending')),
+        ];
+    }
+
+    /**
+     * The derived "Earnings not yet closed" row, or null when income and
+     * expense neither held a balance nor moved.
+     *
+     * Income less expense is the sum of credits less debits over both types'
+     * lines, so one query gives the balance on both dates.
+     *
+     * @param  int|list<int>|null  $branchId
+     * @return array<string, mixed>|null
+     */
+    private function earningsRow(string $dayBefore, string $to, int|array|null $branchId): ?array
+    {
+        $sums = DB::table('accounting_journal_lines as l')
+            ->join('accounting_journals as j', 'j.id', '=', 'l.accounting_journal_id')
+            ->join('accounting_accounts as a', 'a.id', '=', 'l.accounting_account_id')
+            ->whereIn('a.type', ['income', 'expense'])
+            ->where('a.is_group', false)
+            ->whereIn('j.status', AccountingJournal::HISTORICAL_STATUSES)
+            ->where('j.date', '<=', $to)
+            ->when($branchId !== null, fn ($q) => $q->whereIn('j.branch_id', (array) $branchId))
+            // Summed apart and subtracted in PHP: the line columns are
+            // unsigned, so `credit - debit` per line overflows on a debit.
+            ->selectRaw('coalesce(sum(case when j.date <= ? then l.credit else 0 end), 0) as credits_before', [$dayBefore])
+            ->selectRaw('coalesce(sum(case when j.date <= ? then l.debit else 0 end), 0) as debits_before', [$dayBefore])
+            ->selectRaw('coalesce(sum(l.credit), 0) as credits')
+            ->selectRaw('coalesce(sum(l.debit), 0) as debits')
+            ->first();
+
+        // MySQL returns SUM() as a DECIMAL string.
+        $beginning = (int) $sums->credits_before - (int) $sums->debits_before;
+        $ending = (int) $sums->credits - (int) $sums->debits;
+        $movement = $ending - $beginning;
+
+        if ($beginning === 0 && $ending === 0 && $movement === 0) {
+            return null;
+        }
+
+        return [
+            'label' => 'Earnings not yet closed',
+            'account_id' => null,
+            'account_code' => null,
+            'kind' => 'earnings',
+            'beginning' => $beginning,
+            'additions' => max($movement, 0),
+            'deductions' => max(-$movement, 0),
+            'ending' => $ending,
         ];
     }
 
