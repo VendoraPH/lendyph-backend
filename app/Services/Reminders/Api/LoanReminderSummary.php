@@ -125,7 +125,8 @@ final class LoanReminderSummary
     /**
      * The event's detail as the caller may read it. Without the member's
      * details, a hand-over's detail (it names the masked recipient) and a
-     * member pause's text read null, and a skip for it is cut to its words.
+     * member's or this loan's pause text read null, and a skip for either is
+     * cut to its words. Only those two kinds of pause reach this timeline.
      */
     private function detail(ReminderEvent $event, string $kind, bool $contact): ?string
     {
@@ -133,8 +134,7 @@ final class LoanReminderSummary
             return $event->detail;
         }
 
-        if (in_array($kind, ['sent', 'manual_sent', 'delivered'], true)
-            || (in_array($kind, ['paused', 'resumed'], true) && $event->loan_id === null)) {
+        if (in_array($kind, ['sent', 'manual_sent', 'delivered', 'paused', 'resumed'], true)) {
             return null;
         }
 

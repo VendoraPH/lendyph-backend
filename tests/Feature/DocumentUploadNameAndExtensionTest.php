@@ -61,6 +61,22 @@ it('still takes the same PDF named .pdf, in any letter case', function (string $
     ])->assertCreated();
 })->with(['receipt.pdf', 'RECEIPT.PDF']);
 
+it('takes a JPEG saved as .jfif or .jpe, and stores it with the extension its bytes read as', function (string $name) {
+    $image = UploadedFile::fake()->image('photo.jpg');
+    $path = tempnam(sys_get_temp_dir(), 'upload');
+    file_put_contents($path, file_get_contents($image->getPathname()));
+
+    $this->postJson("/api/borrowers/{$this->member->id}/documents", [
+        'file' => new UploadedFile($path, $name, null, null, true),
+        'type' => 'payslip',
+    ])->assertCreated();
+
+    $document = Document::query()->latest('id')->firstOrFail();
+
+    expect($document->original_filename)->toBe($name)
+        ->and(pathinfo($document->file_path, PATHINFO_EXTENSION))->toBeIn(['jpg', 'jpeg']);
+})->with(['photo.jfif', 'photo.jpe', 'PHOTO.JFIF']);
+
 it('opens a document whose uploaded name held control characters through its signed link', function () {
     $this->postJson("/api/borrowers/{$this->member->id}/documents", [
         'file' => uploadedPdfNamed("scan\x10part\x13.pdf"),

@@ -22,8 +22,10 @@ class StoreDocumentRequest extends FormRequest
     {
         return [
             // `mimes` reads the bytes; `extensions` the file's own name, so a
-            // PDF named receipt.bat is refused rather than stored as .bat.
-            'file' => ['required', 'file', 'max:10240', 'mimes:jpg,jpeg,png,pdf,doc,docx', 'extensions:jpg,jpeg,png,pdf,doc,docx'],
+            // PDF named receipt.bat is refused. `jpe` and `jfif` are JPEG
+            // names Windows often saves; the stored file takes the extension
+            // its bytes read as.
+            'file' => ['required', 'file', 'max:10240', 'mimes:jpg,jpeg,png,pdf,doc,docx', 'extensions:jpg,jpeg,jpe,jfif,png,pdf,doc,docx'],
             // The type becomes part of the stored path, so letters, digits,
             // spaces, `_` and `-` only.
             'type' => [
