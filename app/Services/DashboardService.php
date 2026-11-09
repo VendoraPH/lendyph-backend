@@ -338,6 +338,9 @@ class DashboardService
      * Each source is read in that same order, so its first `$limit` rows are
      * the ones the merge can need.
      *
+     * A payment row's `date` is paymentRowDate(); a release row's is its
+     * release time.
+     *
      * @param  list<int>|null  $branchIds
      */
     public function recentTransactions(?array $branchIds, int $limit = 10): array
@@ -355,7 +358,7 @@ class DashboardService
                 'borrower_name' => $r->loan?->borrower?->full_name,
                 'description' => 'Payment via '.PaymentMethod::labelFor($r->method),
                 'amount' => (float) $r->amount_paid,
-                'date' => $r->payment_date?->format('M j, g:i A'),
+                'date' => self::paymentRowDate($r),
                 'sort' => [$r->payment_date?->toDateString(), $r->created_at?->format('Y-m-d H:i:s'), $r->id],
             ]);
 
@@ -382,6 +385,28 @@ class DashboardService
             ->map(fn ($item) => collect($item)->except('sort')->toArray());
 
         return ['data' => $merged->toArray()];
+    }
+
+    /**
+     * A payment row's date in words. `payment_date` holds no time, so it shows
+     * the time the payment was recorded ("Nov 10, 2:05 PM") only when that was
+     * on the payment date itself, in Manila (timestamps are stored in Manila
+     * time). A payment recorded on another day, or with no recorded time,
+     * shows its payment date alone ("Nov 9"), never a made-up "12:00 AM".
+     */
+    private static function paymentRowDate(Repayment $repayment): ?string
+    {
+        $paidOn = $repayment->payment_date;
+
+        if ($paidOn === null) {
+            return null;
+        }
+
+        $recordedAt = $repayment->created_at?->copy()->setTimezone('Asia/Manila');
+
+        return $recordedAt !== null && $recordedAt->toDateString() === $paidOn->toDateString()
+            ? $recordedAt->format('M j, g:i A')
+            : $paidOn->format('M j');
     }
 
     /**
