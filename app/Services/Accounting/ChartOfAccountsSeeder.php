@@ -88,9 +88,18 @@ final class ChartOfAccountsSeeder
         ['code' => '1160', 'name' => 'Penalty Receivable', 'type' => 'asset', 'parent' => '1000'],
         ['code' => '1170', 'name' => 'Other Receivables', 'type' => 'asset', 'parent' => '1000'],
 
+        // Where a balance adjustment clears (Phase 2, decision 7). Reads zero
+        // once each adjustment is reviewed; any balance here is flagged.
+        ['code' => '1180', 'name' => 'Loan Adjustments Clearing', 'type' => 'asset', 'parent' => '1000'],
+
         // Credit-balanced asset: it REDUCES loans receivable. Net Loans
         // Receivable is gross minus this, which is why `is_contra` has to be set.
         ['code' => '1200', 'name' => 'Allowance for Credit Losses', 'type' => 'asset', 'parent' => '1000', 'is_contra' => true],
+
+        // Interest and penalty a restructure capitalised into the new loan's
+        // principal, not yet earned (Phase 2, decision 2). A contra asset like
+        // 1200, and under 1000, not 1100, so the portfolio heading never sums it.
+        ['code' => '1210', 'name' => 'Unearned Interest and Penalty – Restructured Loans', 'type' => 'asset', 'parent' => '1000', 'is_contra' => true],
 
         ['code' => '1300', 'name' => 'Prepaid Expenses', 'type' => 'asset', 'parent' => '1000'],
 
@@ -126,6 +135,9 @@ final class ChartOfAccountsSeeder
 
         ['code' => '2300', 'name' => 'Other Liabilities', 'type' => 'liability', 'parent' => '2000'],
 
+        // Money received that cannot be identified yet, held until it is.
+        ['code' => '2390', 'name' => 'Suspense Account', 'type' => 'liability', 'parent' => '2000'],
+
         // ── Equity ──
         // A cooperative replaces these with Share Capital, Statutory Funds,
         // Reserve Fund and Undivided Net Surplus. Left as the corporate default;
@@ -159,6 +171,8 @@ final class ChartOfAccountsSeeder
         // Fees from the Settings fee catalog charged at release, such as a
         // Credit Investigation Fee (accountant-confirmed 2026-10-03).
         ['code' => '4080', 'name' => 'Other Fee Income', 'type' => 'income', 'parent' => '4000'],
+        // The charge on a GCash Cash In or Cash Out (Phase 2, decision 6).
+        ['code' => '4090', 'name' => 'GCash Service Income', 'type' => 'income', 'parent' => '4000'],
 
         // ── Expenses ──
         ['code' => '5000', 'name' => 'Expenses', 'type' => 'expense', 'is_group' => true],
@@ -224,6 +238,15 @@ final class ChartOfAccountsSeeder
         'documentary_stamp_tax_payable' => '2230',
         'withholding_tax_payable' => '2210',
         'other_taxes_payable' => '2220',
+        // Phase 2 (approved 2026-11-08). Charts seeded before these existed
+        // get them from the 2026_11_08_100000 migration. `net_surplus` is the
+        // corporate 3030 Retained Earnings until the cooperative template
+        // brings its own account.
+        'gcash_service_income' => '4090',
+        'loan_adjustments' => '1180',
+        'unearned_restructure_income' => '1210',
+        'net_surplus' => '3030',
+        'suspense' => '2390',
     ];
 
     /** Whether this organisation already has a chart. */

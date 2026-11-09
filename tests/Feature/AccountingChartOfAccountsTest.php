@@ -53,7 +53,9 @@ class AccountingChartOfAccountsTest extends TestCase
         '1150' => ['Interest Receivable', 'asset', '1000', false, false, null],
         '1160' => ['Penalty Receivable', 'asset', '1000', false, false, null],
         '1170' => ['Other Receivables', 'asset', '1000', false, false, null],
+        '1180' => ['Loan Adjustments Clearing', 'asset', '1000', false, false, null],
         '1200' => ['Allowance for Credit Losses', 'asset', '1000', false, true, null],
+        '1210' => ['Unearned Interest and Penalty – Restructured Loans', 'asset', '1000', false, true, null],
         '1300' => ['Prepaid Expenses', 'asset', '1000', false, false, null],
         '1400' => ['Property and Equipment', 'asset', '1000', true, false, null],
         '1410' => ['Office Equipment', 'asset', '1400', false, false, null],
@@ -71,6 +73,7 @@ class AccountingChartOfAccountsTest extends TestCase
         '2220' => ['Other Taxes Payable', 'liability', '2200', false, false, null],
         '2230' => ['Documentary Stamp Tax Payable', 'liability', '2200', false, false, null],
         '2300' => ['Other Liabilities', 'liability', '2000', false, false, null],
+        '2390' => ['Suspense Account', 'liability', '2000', false, false, null],
         '3000' => ['Equity', 'equity', null, true, false, null],
         '3010' => ['Capital', 'equity', '3000', false, false, null],
         '3020' => ['Additional Capital', 'equity', '3000', false, false, null],
@@ -89,6 +92,7 @@ class AccountingChartOfAccountsTest extends TestCase
         '4060' => ['Other Lending Income', 'income', '4000', false, false, null],
         '4070' => ['Other Income', 'income', '4000', false, false, null],
         '4080' => ['Other Fee Income', 'income', '4000', false, false, null],
+        '4090' => ['GCash Service Income', 'income', '4000', false, false, null],
         '5000' => ['Expenses', 'expense', null, true, false, null],
         '5010' => ['Salaries and Wages', 'expense', '5000', false, false, null],
         '5020' => ['Rent', 'expense', '5000', false, false, null],
@@ -175,13 +179,20 @@ class AccountingChartOfAccountsTest extends TestCase
         );
     }
 
-    public function test_the_contra_accounts_are_exactly_the_allowance_and_accumulated_depreciation(): void
+    /**
+     * 1210 holds interest and penalty a restructure capitalised into the new
+     * loan's principal and has not yet earned: it subtracts from the loans
+     * above it, and it hangs off 1000, not 1100, so the portfolio heading
+     * never sums it in.
+     */
+    public function test_the_contra_accounts_are_exactly_the_allowance_unearned_restructure_income_and_accumulated_depreciation(): void
     {
         $this->seedChart()->assertCreated();
 
         $contra = AccountingAccount::query()->where('is_contra', true)->inCodeOrder()->pluck('code')->all();
 
-        $this->assertSame(['1200', '1490'], $contra);
+        $this->assertSame(['1200', '1210', '1490'], $contra);
+        $this->assertSame('1000', $this->parentCodeOf('1210'));
     }
 
     /**
@@ -194,6 +205,7 @@ class AccountingChartOfAccountsTest extends TestCase
         $this->seedChart()->assertCreated();
 
         $this->assertSame('credit', $this->account('1200')->normal_balance);
+        $this->assertSame('credit', $this->account('1210')->normal_balance);
         $this->assertSame('credit', $this->account('1490')->normal_balance);
 
         // And the plain accounts around them are unaffected.
@@ -386,18 +398,18 @@ class AccountingChartOfAccountsTest extends TestCase
         $this->seedChart()->assertCreated();
 
         $response = $this->postJson('/api/accounting/accounts', [
-            'code' => '1180',
+            'code' => '1185',
             'name' => 'Advances to Officers',
             'type' => 'asset',
             'parent_id' => $this->id('1000'),
         ])->assertCreated();
 
-        $response->assertJsonPath('data.code', '1180')
+        $response->assertJsonPath('data.code', '1185')
             ->assertJsonPath('data.normal_balance', 'debit')
             ->assertJsonPath('data.is_group', false)
             ->assertJsonPath('data.is_active', true);
 
-        $this->assertSame($this->admin->id, AccountingAccount::query()->where('code', '1180')->value('created_by'));
+        $this->assertSame($this->admin->id, AccountingAccount::query()->where('code', '1185')->value('created_by'));
     }
 
     public function test_a_duplicate_code_is_refused(): void
@@ -492,7 +504,7 @@ class AccountingChartOfAccountsTest extends TestCase
         $this->seedChart()->assertCreated();
 
         $this->postJson('/api/accounting/accounts', [
-            'code' => '1210',
+            'code' => '1215',
             'name' => 'Allowance for Something Else',
             'type' => 'asset',
             'is_contra' => true,
@@ -501,7 +513,7 @@ class AccountingChartOfAccountsTest extends TestCase
             'parent_id' => $this->id('1000'),
         ])->assertCreated()->assertJsonPath('data.normal_balance', 'credit');
 
-        $this->assertSame('credit', AccountingAccount::query()->where('code', '1210')->value('normal_balance'));
+        $this->assertSame('credit', AccountingAccount::query()->where('code', '1215')->value('normal_balance'));
     }
 
     /**
