@@ -112,7 +112,7 @@ class ReconciliationActions
             ], $userId);
 
             return [$expense->id, (int) $expense->journal_id];
-        });
+        }, [$reconciliation->accounting_account_id]);
     }
 
     /**
@@ -128,9 +128,10 @@ class ReconciliationActions
         array $data,
         ?int $userId,
     ): array {
-        // Checked before the transaction, so the account lock in act() only
-        // ever takes money-account rows (never 1200, whose lock comes first
-        // wherever it is taken) and no read inside the transaction precedes it.
+        // Checked before the transaction, so the account lock in act() takes
+        // money-account rows only (never 1200, whose lock comes first wherever
+        // it is taken) and no plain read inside the transaction precedes it.
+        // It doesn't rule out a deadlock: see act().
         $this->requireMoneyAccount((int) $data['counter_account_id'], 'counter_account_id');
 
         return $this->act($reconciliation, $lineId, $userId, 'transfer', (bool) ($data['record_anyway'] ?? false), function (
@@ -217,7 +218,7 @@ class ReconciliationActions
             );
 
             return [$journal->id, $journal->id];
-        });
+        }, [$reconciliation->accounting_account_id]);
     }
 
     /**
@@ -227,15 +228,24 @@ class ReconciliationActions
      * `$create` writes the record and returns [record id, journal id].
      *
      * `$accountIds` are money-account rows locked, in id order and in one
-     * read, after the statement line and BEFORE the duplicate check. A
-     * transfer passes both of its accounts: the same transfer recorded at
-     * once from the bank's reconciliation and from the cash account's would
-     * otherwise pass two duplicate checks that each read the books before the
-     * other had written, and book the money twice. Locked, the second waits,
-     * then finds the first's entry and is refused like any other duplicate.
-     * Only locking reads come before this lock, so under REPEATABLE READ the
-     * duplicate check's snapshot is taken after the wait, and it sees the
-     * entry the first request committed.
+     * read, after the statement line and BEFORE the duplicate check. Every
+     * action passes the reconciled account, and a transfer its counter
+     * account too: the same money recorded at once from the bank's
+     * reconciliation and the cash account's (as a transfer on one side and a
+     * transfer, expense or suspense entry on the other) would otherwise pass
+     * two duplicate checks that each read the books before the other had
+     * written, and book the money twice. Locked, the second waits, then finds
+     * the first's entry and is refused like any other duplicate. Only locking
+     * reads come before this lock, so under REPEATABLE READ the duplicate
+     * check's snapshot is taken after the wait, and it sees the entry the
+     * first request committed.
+     *
+     * The lock order doesn't make a deadlock impossible. Inserting a journal
+     * line takes a shared lock on its account row (the foreign key), in the
+     * order the poster writes the lines, so a posting elsewhere that holds one
+     * of these accounts can deadlock with this action. MySQL then rolls one
+     * of the two back; here that answers 409 ({@see self::COLLISION}) with
+     * nothing written, and the person tries again.
      *
      * @param  Closure(AccountingReconciliationLine, AccountingAccount): array{0: int, 1: int}  $create
      * @param  list<int>  $accountIds

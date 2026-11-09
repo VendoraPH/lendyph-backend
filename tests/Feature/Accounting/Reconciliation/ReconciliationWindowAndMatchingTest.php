@@ -129,14 +129,62 @@ class ReconciliationWindowAndMatchingTest extends TestCase
         $reconciliation = $this->reconciliationWith([
             ['date' => '2026-09-14', 'description' => 'Cash deposit', 'amount' => 200000],
         ]);
-        $line = $this->statementLine($reconciliation);
-        $ids = [$this->account('1040'), $this->account('1010')];
-        sort($ids);
+
+        $this->assertAccountLockBeforeTheDuplicateCheck(
+            $reconciliation,
+            'transfer',
+            ['counter_account_id' => $this->account('1010')],
+            [$this->account('1040'), $this->account('1010')],
+        );
+    }
+
+    public function test_an_expense_locks_the_reconciled_account_before_the_duplicate_check(): void
+    {
+        // The other side of a transfer recorded as an expense or suspense entry
+        // at the same moment must queue on the same row.
+        $reconciliation = $this->reconciliationWith([
+            ['date' => '2026-09-14', 'description' => 'Bank charge', 'amount' => -5000],
+        ]);
+
+        $this->assertAccountLockBeforeTheDuplicateCheck(
+            $reconciliation,
+            'expense',
+            ['expense_account_id' => $this->account('5070'), 'payee' => 'Bank'],
+            [$this->account('1040')],
+        );
+    }
+
+    public function test_a_suspense_entry_locks_the_reconciled_account_before_the_duplicate_check(): void
+    {
+        $reconciliation = $this->reconciliationWith([
+            ['date' => '2026-09-14', 'description' => 'Unidentified', 'amount' => 12300],
+        ]);
+
+        $this->assertAccountLockBeforeTheDuplicateCheck($reconciliation, 'suspense', [], [$this->account('1040')]);
+    }
+
+    /**
+     * The action locks the statement line, then exactly these money accounts
+     * in one read in id order, and reads the books only after that. Every
+     * query between the two locks is itself a locking read: a plain read
+     * there would fix the REPEATABLE READ snapshot before the wait, and the
+     * duplicate check would miss an entry committed meanwhile.
+     *
+     * @param  array<string, mixed>  $body
+     * @param  list<int>  $accountIds
+     */
+    private function assertAccountLockBeforeTheDuplicateCheck(
+        AccountingReconciliation $reconciliation,
+        string $action,
+        array $body,
+        array $accountIds,
+    ): void {
+        sort($accountIds);
 
         DB::enableQueryLog();
         DB::flushQueryLog();
 
-        $this->act('transfer', $reconciliation, $line, ['counter_account_id' => $this->account('1010')])->assertCreated();
+        $this->act($action, $reconciliation, $this->statementLine($reconciliation), $body)->assertCreated();
 
         $log = DB::getQueryLog();
         DB::disableQueryLog();
@@ -151,15 +199,23 @@ class ReconciliationWindowAndMatchingTest extends TestCase
         $this->assertNotNull($accountLock, 'The money accounts were not locked.');
         $this->assertNotNull($ledgerRead, 'The duplicate check read no ledger lines.');
         $this->assertLessThan($accountLock, $lineLock, 'The statement line is locked first.');
-        $this->assertLessThan($ledgerRead, $accountLock, 'Both accounts are locked before the duplicate check reads the books.');
+        $this->assertLessThan($ledgerRead, $accountLock, 'The accounts are locked before the duplicate check reads the books.');
 
-        // One read, both accounts, locked in id order. Integer keys are
+        for ($i = $lineLock; $i <= $accountLock; $i++) {
+            $this->assertStringEndsWith(
+                'for update',
+                $log[$i]['query'],
+                "A plain read came between the statement-line lock and the account lock: {$log[$i]['query']}",
+            );
+        }
+
+        // One read, these accounts, locked in id order. Integer keys are
         // written into the SQL rather than bound.
         $this->assertStringContainsString('order by `id` asc', $log[$accountLock]['query']);
         $this->assertSame(1, preg_match('/in \(([\d, ]+)\)/', $log[$accountLock]['query'], $in));
         $locked = array_map('intval', explode(',', $in[1]));
         sort($locked);
-        $this->assertSame($ids, $locked);
+        $this->assertSame($accountIds, $locked);
     }
 
     public function test_the_other_side_of_a_recorded_transfer_is_caught_as_already_in_the_books(): void
