@@ -17,6 +17,12 @@ use Carbon\Carbon;
  *   history belongs to the cooperative's old books;
  * - periods with nothing due.
  *
+ * A loan restructured into a new loan stops being late on the restructure
+ * date: an unpaid period on it is late only up to that date, and one due on
+ * or after it isn't matured. Loans restructured before closed periods were
+ * marked (`closed_by_loan_id`) still hold such periods open. Without a
+ * restructure date, its unpaid periods are left out.
+ *
  * A paid period's date is the payment date of the allocation that completed
  * its principal and interest. A period paid with no allocation that proves
  * when, or whose completing allocation is a payment from before allocations
@@ -61,6 +67,7 @@ final class PaymentHistory
         foreach ($data->periods as $period) {
             $loan = $loans->get($period->loan_id);
             $due = Carbon::parse($period->due_date)->startOfDay();
+            $loanAsOf = self::lateUntil($loan, $asOf);
             $baseline = $loan->imported_arrears_baseline !== null ? Carbon::parse($loan->imported_arrears_baseline) : null;
             $owedCentavos = Centavos::of($period->principal_due) + Centavos::of($period->interest_due);
             $paidCentavos = Centavos::of($period->principal_paid) + Centavos::of($period->interest_paid);
@@ -68,12 +75,13 @@ final class PaymentHistory
             if ($period->closed_by_adjustment_id !== null || $period->closed_by_loan_id !== null
                 || ! AmortizationSchedule::isPenalisable($baseline, $due)
                 || $owedCentavos <= 0
-                || $due->gt($asOf)) {
+                || ($loanAsOf === null && $paidCentavos < $owedCentavos)
+                || $due->gt($loanAsOf ?? $asOf)) {
                 continue;
             }
 
             $grace = max(0, (int) $loan->grace_period_days);
-            $pastGrace = $due->lt(AmortizationSchedule::pastGraceCutoff($grace, $asOf));
+            $pastGrace = $due->lt(AmortizationSchedule::pastGraceCutoff($grace, $loanAsOf ?? $asOf));
             $fullyPaid = $paidCentavos >= $owedCentavos;
 
             if (! $fullyPaid && ! $pastGrace) {
@@ -81,7 +89,7 @@ final class PaymentHistory
             }
 
             if (! $fullyPaid) {
-                $daysLate = (int) $due->diffInDays($asOf);
+                $daysLate = (int) $due->diffInDays($loanAsOf);
                 $outcomes[] = ['loan_id' => (int) $loan->id, 'due_date' => $due->toDateString(), 'on_time' => false, 'days_late' => $daysLate, 'legacy' => false];
 
                 if (in_array($loan->status, Loan::COLLECTIBLE_STATUSES, true)) {
@@ -127,7 +135,8 @@ final class PaymentHistory
             cleanCompletedLoans: $clean,
             defaultedLoans: $data->loans->where('status', 'defaulted')->count(),
             writtenOffLoans: $data->loans->filter(fn (object $loan) => (float) $loan->write_off_amount > 0)->count(),
-            restructuredLoans: $data->loans->where('status', 'restructured')->count(),
+            restructuredLoans: $data->loans->where('status', 'restructured')->pluck('id')->map(fn ($id) => (int) $id)
+                ->merge($data->inPlaceRestructuredLoanIds)->unique()->count(),
             everReleasedLoans: $data->loans->count(),
         );
     }
@@ -135,6 +144,19 @@ final class PaymentHistory
     public function hasHistory(): bool
     {
         return $this->maturedCount > 0;
+    }
+
+    /**
+     * The date lateness is measured to on this loan: the as-of date, or a
+     * restructured loan's restructure date (null when it has none).
+     */
+    private static function lateUntil(object $loan, Carbon $asOf): ?Carbon
+    {
+        if ($loan->status !== 'restructured') {
+            return $asOf;
+        }
+
+        return $loan->restructured_at === null ? null : Carbon::parse($loan->restructured_at)->startOfDay()->min($asOf);
     }
 
     /**

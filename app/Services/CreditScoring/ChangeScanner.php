@@ -13,10 +13,14 @@ use Illuminate\Support\Facades\DB;
  * payments, loans, schedule rows (penalties and lateness), members and
  * application details.
  *
- * Each scan reads rows updated after the watermark and up to a few seconds
- * ago (LAG_SECONDS), so a row written in the same second as the scan is
- * picked up by the next one rather than skipped. The first scan of a table
- * only sets its watermark: the nightly run scores everyone anyway.
+ * Each scan reads rows updated up to a few seconds ago (LAG_SECONDS), from
+ * an overlap window before the watermark (OVERLAP_SECONDS). A transaction
+ * stamps `updated_at` when it writes a row, not when it commits, so a long
+ * one (an import batch, a bulk penalty run) can commit rows stamped before
+ * the last scan; the overlap rescans them. Flagging a member twice is
+ * harmless. The cursors move and the members are flagged in one transaction,
+ * so a failed scan moves nothing. The first scan of a table only sets its
+ * watermark: the nightly run scores everyone anyway.
  *
  * Read only on the watched tables; it writes only the cursors and the
  * flagged members.
@@ -25,6 +29,8 @@ final class ChangeScanner
 {
     public const LAG_SECONDS = 5;
 
+    public const OVERLAP_SECONDS = 120;
+
     /**
      * Flag every member changed since the last scan.
      *
@@ -32,24 +38,21 @@ final class ChangeScanner
      */
     public function scan(?Carbon $now = null): int
     {
-        $upper = ($now ?? Carbon::now())->copy()->subSeconds(self::LAG_SECONDS);
+        $now ??= Carbon::now();
+        $upper = $now->copy()->subSeconds(self::LAG_SECONDS);
         $flagged = [];
+        $cursors = [];
 
         foreach ($this->sources() as $source => [$query, $column, $borrowerColumn, $reason]) {
             $cursor = CreditScoringCursor::query()->firstOrCreate(['source' => $source]);
+            $cursors[] = $cursor;
 
-            if ($cursor->watermark === null) {
-                $cursor->update(['watermark' => $upper]);
-
-                continue;
-            }
-
-            if ($upper->lte($cursor->watermark)) {
+            if ($cursor->watermark === null || $upper->lte($cursor->watermark)) {
                 continue;
             }
 
             $ids = $query()
-                ->where($column, '>', $cursor->watermark)
+                ->where($column, '>', $cursor->watermark->copy()->subSeconds(self::OVERLAP_SECONDS))
                 ->where($column, '<=', $upper)
                 ->distinct()
                 ->pluck($borrowerColumn);
@@ -57,11 +60,17 @@ final class ChangeScanner
             foreach ($ids as $id) {
                 $flagged[(int) $id] ??= $reason;
             }
-
-            $cursor->update(['watermark' => $upper]);
         }
 
-        $this->flag($flagged, $now ?? Carbon::now());
+        DB::transaction(function () use ($cursors, $upper, $flagged, $now) {
+            foreach ($cursors as $cursor) {
+                if ($cursor->watermark === null || $upper->gt($cursor->watermark)) {
+                    $cursor->update(['watermark' => $upper]);
+                }
+            }
+
+            $this->flag($flagged, $now);
+        });
 
         return count($flagged);
     }

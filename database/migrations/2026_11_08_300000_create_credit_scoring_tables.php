@@ -1,6 +1,5 @@
 <?php
 
-use App\Services\CreditScoring\ScorecardV1;
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\DB;
@@ -21,11 +20,576 @@ use Illuminate\Support\Facades\Schema;
  *   changed since.
  *
  * Seeds revision 1.0 (the task's weights, unvalidated) and the one settings
- * row. New tables only, so nothing existing is changed and no audit row is
- * due. Every step is guarded, so the migration runs safely twice.
+ * row. Revision 1.0 is a literal copied into this file, so a later change to
+ * App\Services\CreditScoring\ScorecardV1 can never change what this
+ * migration seeds; a test checks the two still agree. New tables only, so
+ * nothing existing is changed and no audit row is due. Every step is
+ * guarded, so the migration runs safely twice.
+ *
+ * `credit_decisions.borrower_id` restricts deleting a member who has a
+ * decision, as `loans` does: the delete fails before anything cascades and
+ * the purge's transaction rolls back whole. A member with scores but no
+ * decision is deleted with them.
  */
 return new class extends Migration
 {
+    public const REVISION_1_0 = <<<'JSON'
+{
+    "version": "1.0",
+    "engine_version": "1.0.0",
+    "notes": "Starting weights from the Credit Scoring task. Unvalidated: not yet tested against Lendy's own loan outcomes.",
+    "categories": [
+        {
+            "key": "repayment",
+            "label": "Repayment Behaviour",
+            "weight_percent": 35,
+            "description": "How the member has paid Lendy loans: on-time rate, lateness, current arrears, defaults and restructures."
+        },
+        {
+            "key": "capacity",
+            "label": "Payment Capacity",
+            "weight_percent": 25,
+            "description": "Whether the member can afford the payments: debt service ratio and disposable income cover."
+        },
+        {
+            "key": "exposure",
+            "label": "Credit Exposure",
+            "weight_percent": 15,
+            "description": "Existing obligations: past due amount, active loans and debt against annual income."
+        },
+        {
+            "key": "stability",
+            "label": "Stability",
+            "weight_percent": 10,
+            "description": "Job tenure or business age, and years at the current residence."
+        },
+        {
+            "key": "relationship",
+            "label": "Lendy Relationship",
+            "weight_percent": 10,
+            "description": "Membership tenure and loans completed with Lendy."
+        },
+        {
+            "key": "application",
+            "label": "Application Quality",
+            "weight_percent": 5,
+            "description": "Whether the lending information on file is complete and verified."
+        }
+    ],
+    "factors": [
+        {
+            "id": 1,
+            "key": "on_time_rate",
+            "category_key": "repayment",
+            "label": "On-time payment rate",
+            "points": 15,
+            "rule": "at_least",
+            "bands": [
+                {
+                    "threshold": 95,
+                    "points": 15
+                },
+                {
+                    "threshold": 90,
+                    "points": 12
+                },
+                {
+                    "threshold": 80,
+                    "points": 8
+                },
+                {
+                    "threshold": 70,
+                    "points": 4
+                }
+            ],
+            "otherwise": 0,
+            "is_active": true
+        },
+        {
+            "id": 2,
+            "key": "worst_days_late",
+            "category_key": "repayment",
+            "label": "Worst days late in the last 24 months",
+            "points": 8,
+            "rule": "at_most",
+            "bands": [
+                {
+                    "threshold": 0,
+                    "points": 8
+                },
+                {
+                    "threshold": 7,
+                    "points": 6
+                },
+                {
+                    "threshold": 30,
+                    "points": 3
+                },
+                {
+                    "threshold": 60,
+                    "points": 1
+                }
+            ],
+            "otherwise": 0,
+            "is_active": true
+        },
+        {
+            "id": 3,
+            "key": "days_past_due",
+            "category_key": "repayment",
+            "label": "Days past due now",
+            "points": 7,
+            "rule": "at_most",
+            "bands": [
+                {
+                    "threshold": 0,
+                    "points": 7
+                },
+                {
+                    "threshold": 7,
+                    "points": 4
+                },
+                {
+                    "threshold": 30,
+                    "points": 2
+                }
+            ],
+            "otherwise": 0,
+            "is_active": true
+        },
+        {
+            "id": 4,
+            "key": "defaults_restructures",
+            "category_key": "repayment",
+            "label": "Defaults and restructures",
+            "points": 5,
+            "rule": "at_most",
+            "bands": [
+                {
+                    "threshold": 0,
+                    "points": 5
+                },
+                {
+                    "threshold": 1,
+                    "points": 3
+                }
+            ],
+            "otherwise": 1,
+            "is_active": true,
+            "default_points": 0
+        },
+        {
+            "id": 5,
+            "key": "debt_service_ratio",
+            "category_key": "capacity",
+            "label": "Debt service ratio",
+            "points": 15,
+            "rule": "at_most",
+            "bands": [
+                {
+                    "threshold": 20,
+                    "points": 15
+                },
+                {
+                    "threshold": 30,
+                    "points": 12
+                },
+                {
+                    "threshold": 40,
+                    "points": 8
+                },
+                {
+                    "threshold": 50,
+                    "points": 4
+                }
+            ],
+            "otherwise": 0,
+            "is_active": true
+        },
+        {
+            "id": 6,
+            "key": "payment_cover",
+            "category_key": "capacity",
+            "label": "Payment cover",
+            "points": 10,
+            "rule": "at_least",
+            "bands": [
+                {
+                    "threshold": 3,
+                    "points": 10
+                },
+                {
+                    "threshold": 2,
+                    "points": 7
+                },
+                {
+                    "threshold": 1.5,
+                    "points": 5
+                },
+                {
+                    "threshold": 1,
+                    "points": 2
+                }
+            ],
+            "otherwise": 0,
+            "is_active": true
+        },
+        {
+            "id": 7,
+            "key": "past_due_amount",
+            "category_key": "exposure",
+            "label": "Past due amount",
+            "points": 6,
+            "rule": "at_most",
+            "bands": [
+                {
+                    "threshold": 0,
+                    "points": 6
+                },
+                {
+                    "threshold": 10,
+                    "points": 3
+                }
+            ],
+            "otherwise": 0,
+            "is_active": true
+        },
+        {
+            "id": 8,
+            "key": "active_loans",
+            "category_key": "exposure",
+            "label": "Active loans",
+            "points": 4,
+            "rule": "at_most",
+            "bands": [
+                {
+                    "threshold": 1,
+                    "points": 4
+                },
+                {
+                    "threshold": 2,
+                    "points": 2
+                }
+            ],
+            "otherwise": 0,
+            "is_active": true
+        },
+        {
+            "id": 9,
+            "key": "debt_to_income",
+            "category_key": "exposure",
+            "label": "Debt against annual income",
+            "points": 5,
+            "rule": "at_most",
+            "bands": [
+                {
+                    "threshold": 25,
+                    "points": 5
+                },
+                {
+                    "threshold": 50,
+                    "points": 3
+                },
+                {
+                    "threshold": 100,
+                    "points": 1
+                }
+            ],
+            "otherwise": 0,
+            "is_active": true
+        },
+        {
+            "id": 10,
+            "key": "tenure",
+            "category_key": "stability",
+            "label": "Job tenure or business age",
+            "points": 6,
+            "rule": "at_least",
+            "bands": [
+                {
+                    "threshold": 5,
+                    "points": 6
+                },
+                {
+                    "threshold": 2,
+                    "points": 4
+                },
+                {
+                    "threshold": 1,
+                    "points": 2
+                }
+            ],
+            "otherwise": 1,
+            "is_active": true
+        },
+        {
+            "id": 11,
+            "key": "residence",
+            "category_key": "stability",
+            "label": "Years at residence",
+            "points": 4,
+            "rule": "at_least",
+            "bands": [
+                {
+                    "threshold": 5,
+                    "points": 4
+                },
+                {
+                    "threshold": 2,
+                    "points": 3
+                },
+                {
+                    "threshold": 1,
+                    "points": 1
+                }
+            ],
+            "otherwise": 0,
+            "is_active": true
+        },
+        {
+            "id": 12,
+            "key": "membership_tenure",
+            "category_key": "relationship",
+            "label": "Membership tenure",
+            "points": 4,
+            "rule": "at_least",
+            "bands": [
+                {
+                    "threshold": 3,
+                    "points": 4
+                },
+                {
+                    "threshold": 1,
+                    "points": 3
+                }
+            ],
+            "otherwise": 1,
+            "is_active": true
+        },
+        {
+            "id": 13,
+            "key": "completed_loans",
+            "category_key": "relationship",
+            "label": "Completed loans",
+            "points": 4,
+            "rule": "at_least",
+            "bands": [
+                {
+                    "threshold": 3,
+                    "points": 4
+                },
+                {
+                    "threshold": 2,
+                    "points": 3
+                },
+                {
+                    "threshold": 1,
+                    "points": 2
+                }
+            ],
+            "otherwise": 0,
+            "is_active": true
+        },
+        {
+            "id": 14,
+            "key": "clean_completed_loans",
+            "category_key": "relationship",
+            "label": "Completed loans never more than 7 days late",
+            "points": 2,
+            "rule": "at_least",
+            "bands": [
+                {
+                    "threshold": 2,
+                    "points": 2
+                },
+                {
+                    "threshold": 1,
+                    "points": 1
+                }
+            ],
+            "otherwise": 0,
+            "is_active": true
+        },
+        {
+            "id": 15,
+            "key": "valid_id",
+            "category_key": "application",
+            "label": "Valid ID on file",
+            "points": 2,
+            "rule": "at_least",
+            "bands": [
+                {
+                    "threshold": 1,
+                    "points": 2
+                }
+            ],
+            "otherwise": 0,
+            "is_active": true
+        },
+        {
+            "id": 16,
+            "key": "valid_mobile",
+            "category_key": "application",
+            "label": "Valid mobile number",
+            "points": 1,
+            "rule": "at_least",
+            "bands": [
+                {
+                    "threshold": 1,
+                    "points": 1
+                }
+            ],
+            "otherwise": 0,
+            "is_active": true
+        },
+        {
+            "id": 17,
+            "key": "income_verified",
+            "category_key": "application",
+            "label": "Income verified",
+            "points": 1,
+            "rule": "at_least",
+            "bands": [
+                {
+                    "threshold": 1,
+                    "points": 1
+                }
+            ],
+            "otherwise": 0,
+            "is_active": true
+        },
+        {
+            "id": 18,
+            "key": "verified_references",
+            "category_key": "application",
+            "label": "Two or more verified references",
+            "points": 1,
+            "rule": "at_least",
+            "bands": [
+                {
+                    "threshold": 2,
+                    "points": 1
+                }
+            ],
+            "otherwise": 0,
+            "is_active": true
+        }
+    ],
+    "risk_bands": [
+        {
+            "key": "very_low",
+            "label": "Very Low Risk",
+            "min_score": 90,
+            "recommendation": "Suitable for standard loan assessment."
+        },
+        {
+            "key": "low",
+            "label": "Low Risk",
+            "min_score": 80,
+            "recommendation": "Suitable for standard loan assessment."
+        },
+        {
+            "key": "moderate",
+            "label": "Moderate Risk",
+            "min_score": 70,
+            "recommendation": "Review the member's income and existing obligations before approval."
+        },
+        {
+            "key": "elevated",
+            "label": "Elevated Risk",
+            "min_score": 60,
+            "recommendation": "Additional assessment needed. Manual review recommended."
+        },
+        {
+            "key": "high",
+            "label": "High Risk",
+            "min_score": 40,
+            "recommendation": "High repayment risk. Review carefully before approving additional credit."
+        },
+        {
+            "key": "very_high",
+            "label": "Very High Risk",
+            "min_score": 0,
+            "recommendation": "Serious repayment risk. Review carefully before approving additional credit."
+        }
+    ],
+    "policy_rules": [
+        {
+            "id": 1,
+            "key": "past_due_over_limit",
+            "type": "hard_flag",
+            "label": "Loan more than 30 days past due",
+            "description": "The member has a loan more than 30 days past due. Manual review required.",
+            "is_active": true
+        },
+        {
+            "id": 2,
+            "key": "existing_default",
+            "type": "hard_flag",
+            "label": "Defaulted loan",
+            "description": "The member has a defaulted loan.",
+            "is_active": true
+        },
+        {
+            "id": 3,
+            "key": "previous_write_off",
+            "type": "hard_flag",
+            "label": "Previous write-off",
+            "description": "Part of a previous loan of the member was written off.",
+            "is_active": true
+        },
+        {
+            "id": 4,
+            "key": "income_verification_failed",
+            "type": "hard_flag",
+            "label": "Income verification failed",
+            "description": "The member's declared income could not be verified.",
+            "is_active": true
+        },
+        {
+            "id": 5,
+            "key": "past_due",
+            "type": "soft_flag",
+            "label": "Loan past due",
+            "description": "The member has a loan 1 to 30 days past due.",
+            "is_active": true
+        },
+        {
+            "id": 6,
+            "key": "too_many_active_loans",
+            "type": "soft_flag",
+            "label": "Active loans above policy limit",
+            "description": "The member's active loans, outside lenders included, exceed the policy limit.",
+            "is_active": true
+        },
+        {
+            "id": 7,
+            "key": "possible_duplicate",
+            "type": "soft_flag",
+            "label": "Possible duplicate member record",
+            "description": "Another member record has the same name.",
+            "is_active": true
+        },
+        {
+            "id": 8,
+            "key": "debt_service_above_caution",
+            "type": "soft_flag",
+            "label": "Debt service ratio above caution",
+            "description": "Debt payments take more of the member's income than the caution level.",
+            "is_active": true
+        },
+        {
+            "id": 9,
+            "key": "notice_not_recorded",
+            "type": "soft_flag",
+            "label": "Credit assessment notice not recorded",
+            "description": "The member's acknowledgement of the credit assessment notice is not recorded for this loan.",
+            "is_active": true
+        }
+    ]
+}
+JSON;
+
     public function up(): void
     {
         if (! Schema::hasTable('credit_scorecard_revisions')) {
@@ -162,6 +726,7 @@ return new class extends Migration
                 $table->foreignId('borrower_id')->unique()->constrained('borrowers')->cascadeOnDelete();
                 $table->string('reason', 100);
                 $table->dateTime('flagged_at');
+                $table->unsignedInteger('attempts')->default(0);
                 $table->timestamps();
 
                 $table->index('flagged_at');
@@ -199,7 +764,7 @@ return new class extends Migration
         if (! Schema::hasTable('credit_decisions')) {
             Schema::create('credit_decisions', function (Blueprint $table) {
                 $table->id();
-                $table->foreignId('borrower_id')->constrained('borrowers')->cascadeOnDelete();
+                $table->foreignId('borrower_id')->constrained('borrowers')->restrictOnDelete();
                 $table->foreignId('loan_id')->nullable()->constrained('loans')->nullOnDelete();
                 $table->foreignId('credit_score_id')->constrained('credit_scores')->restrictOnDelete();
                 $table->enum('decision', ['approve', 'decline', 'refer', 'hold']);
@@ -262,16 +827,18 @@ return new class extends Migration
     {
         $now = now();
 
-        if (! DB::table('credit_scorecard_revisions')->where('version', ScorecardV1::VERSION)->exists()) {
+        $revision = json_decode(self::REVISION_1_0, true, flags: JSON_THROW_ON_ERROR);
+
+        if (! DB::table('credit_scorecard_revisions')->where('version', $revision['version'])->exists()) {
             DB::table('credit_scorecard_revisions')->insert([
-                'version' => ScorecardV1::VERSION,
-                'engine_version' => ScorecardV1::ENGINE_VERSION,
-                'categories' => json_encode(ScorecardV1::categories()),
-                'factors' => json_encode(ScorecardV1::factors()),
-                'risk_bands' => json_encode(ScorecardV1::riskBands()),
-                'policy_rules' => json_encode(ScorecardV1::policyRules()),
+                'version' => $revision['version'],
+                'engine_version' => $revision['engine_version'],
+                'categories' => json_encode($revision['categories']),
+                'factors' => json_encode($revision['factors']),
+                'risk_bands' => json_encode($revision['risk_bands']),
+                'policy_rules' => json_encode($revision['policy_rules']),
                 'validated' => false,
-                'notes' => ScorecardV1::NOTES,
+                'notes' => $revision['notes'],
                 'created_by' => null,
                 'created_at' => $now,
                 'updated_at' => $now,
@@ -280,7 +847,7 @@ return new class extends Migration
 
         if (! DB::table('credit_scoring_settings')->exists()) {
             DB::table('credit_scoring_settings')->insert([
-                'current_revision_id' => DB::table('credit_scorecard_revisions')->where('version', ScorecardV1::VERSION)->value('id'),
+                'current_revision_id' => DB::table('credit_scorecard_revisions')->where('version', $revision['version'])->value('id'),
                 'dsr_manageable_max' => 30,
                 'dsr_caution_max' => 40,
                 'capacity_share' => 40,

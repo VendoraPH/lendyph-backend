@@ -11,6 +11,8 @@ use Illuminate\Console\Attributes\Description;
 use Illuminate\Console\Attributes\Signature;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use Throwable;
 
 /**
  * The nightly credit scoring run (00:45 Manila, routes/console/credit-scoring.php):
@@ -23,7 +25,9 @@ use Illuminate\Support\Facades\DB;
  * the run began. Advisory only: no loan is ever written.
  *
  * `--dry-run` calculates and compares and writes nothing, listing what would
- * change. `--borrower=` scores one member.
+ * change. `--borrower=` scores one member. A member whose scoring fails is
+ * logged by id only and counted, and the run carries on; it then exits with
+ * a failure. Their change flag stays, so the minute job retries them.
  */
 #[Signature('credit-scoring:recalculate
     {--dry-run : Calculate and list what would change, writing nothing}
@@ -45,7 +49,7 @@ class RecalculateCreditScores extends Command
             return self::FAILURE;
         }
 
-        $counts = ['members' => 0, 'changed' => 0, 'insufficient_data' => 0, 'assessments' => 0, 'assessments_changed' => 0];
+        $counts = ['members' => 0, 'changed' => 0, 'insufficient_data' => 0, 'assessments' => 0, 'assessments_changed' => 0, 'failed' => 0];
 
         DB::table('borrowers')
             ->whereNotIn('status', Borrower::NON_MEMBER_STATUSES)
@@ -54,36 +58,18 @@ class RecalculateCreditScores extends Command
             ->chunkById(self::CHUNK, function ($members) use ($recalculator, $dryRun, $startedAt, &$counts) {
                 foreach ($members as $member) {
                     $borrowerId = (int) $member->id;
-                    $outcome = $recalculator->scoreMember($borrowerId, 'Nightly review', $dryRun);
-                    $counts['members']++;
-                    $counts['changed'] += $outcome['changed'] ? 1 : 0;
-                    $counts['insufficient_data'] += $outcome['status'] === 'insufficient_data' ? 1 : 0;
 
-                    if ($outcome['changed'] && ($dryRun || $this->output->isVerbose())) {
-                        $this->line(sprintf(
-                            '  member %d: %s -> %s (%s, %s confidence)',
-                            $borrowerId,
-                            $outcome['previous_score'] ?? 'none',
-                            $outcome['score'] ?? 'insufficient data',
-                            $outcome['risk_level'] ?? 'no band',
-                            $outcome['confidence'],
-                        ));
-                    }
-
-                    foreach ($recalculator->openAssessedLoans($borrowerId) as $loan) {
-                        $assessment = $recalculator->assessLoan($loan, 'Nightly review', $dryRun);
-                        $counts['assessments']++;
-                        $counts['assessments_changed'] += $assessment['changed'] ? 1 : 0;
-                    }
-
-                    if (! $dryRun) {
-                        $recalculator->clearDirty($borrowerId, $startedAt);
+                    try {
+                        $this->scoreOne($recalculator, $borrowerId, $dryRun, $startedAt, $counts);
+                    } catch (Throwable) {
+                        $counts['failed']++;
+                        Log::warning('Credit scoring failed for a member.', ['borrower_id' => $borrowerId]);
                     }
                 }
             });
 
         $this->info(sprintf(
-            '%s %d member(s): %d %s, %d with insufficient data; %d loan assessment(s), %d %s.',
+            '%s %d member(s): %d %s, %d with insufficient data; %d loan assessment(s), %d %s; %d failed.',
             $dryRun ? 'Dry run, nothing written. Checked' : 'Scored',
             $counts['members'],
             $counts['changed'],
@@ -92,8 +78,43 @@ class RecalculateCreditScores extends Command
             $counts['assessments'],
             $counts['assessments_changed'],
             $dryRun ? 'would change' : 'changed',
+            $counts['failed'],
         ));
 
-        return self::SUCCESS;
+        return $counts['failed'] > 0 ? self::FAILURE : self::SUCCESS;
+    }
+
+    /**
+     * One member's score and open assessments.
+     *
+     * @param  array<string, int>  $counts
+     */
+    private function scoreOne(Recalculator $recalculator, int $borrowerId, bool $dryRun, Carbon $startedAt, array &$counts): void
+    {
+        $outcome = $recalculator->scoreMember($borrowerId, 'Nightly review', $dryRun);
+        $counts['members']++;
+        $counts['changed'] += $outcome['changed'] ? 1 : 0;
+        $counts['insufficient_data'] += $outcome['status'] === 'insufficient_data' ? 1 : 0;
+
+        if ($outcome['changed'] && ($dryRun || $this->output->isVerbose())) {
+            $this->line(sprintf(
+                '  member %d: %s -> %s (%s, %s confidence)',
+                $borrowerId,
+                $outcome['previous_score'] ?? 'none',
+                $outcome['score'] ?? 'insufficient data',
+                $outcome['risk_level'] ?? 'no band',
+                $outcome['confidence'],
+            ));
+        }
+
+        foreach ($recalculator->openAssessedLoans($borrowerId) as $loan) {
+            $assessment = $recalculator->assessLoan($loan, 'Nightly review', $dryRun);
+            $counts['assessments']++;
+            $counts['assessments_changed'] += $assessment['changed'] ? 1 : 0;
+        }
+
+        if (! $dryRun) {
+            $recalculator->clearDirty($borrowerId, $startedAt);
+        }
     }
 }

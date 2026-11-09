@@ -3,6 +3,8 @@
 use App\Models\Branch;
 use App\Models\CreditApplicationProfile;
 use App\Models\CreditPolicyFlag;
+use App\Models\LoanAdjustment;
+use App\Models\User;
 use App\Services\CreditScoring\Recalculator;
 use Tests\Feature\CreditScoring\Engine\CreditFixtures;
 use Tests\TestCase;
@@ -19,18 +21,20 @@ it('scores a thin file on the factors it has, scaled, as Limited History with lo
 
     $result = $this->scoreOf($member);
 
-    // Earned 15+8+7+5 (repayment) + 6+4 (exposure) + 1+0+0 (relationship)
-    // + 0+1 (application) = 47 of the 58 points with data.
+    // Earned 15+8+7+5 (repayment) + 6+4 (exposure) + 1 (membership; no
+    // completed loan is no data) + 0+1 (application) = 47 of the 52 points
+    // with data.
     expect($result['status'])->toBe('scored')
-        ->and($result['score'])->toBe((int) round(100 * 47 / 58))
-        ->and($result['score'])->toBe(81)
-        ->and($result['risk_level'])->toBe('low')
+        ->and($result['score'])->toBe((int) round(100 * 47 / 52))
+        ->and($result['score'])->toBe(90)
+        ->and($result['risk_level'])->toBe('very_low')
         ->and($result['score_type'])->toBe('behavioral')
         ->and($result['confidence'])->toBe('low')
         ->and($result['limited_history'])->toBeTrue()
         ->and($this->factorOf($result, 'debt_service_ratio')['has_data'])->toBeFalse()
         ->and($this->factorOf($result, 'debt_service_ratio')['points_earned'])->toBe(0)
-        ->and(collect($result['categories'])->firstWhere('key', 'capacity'))->toMatchArray(['has_data' => false, 'points_possible' => 0]);
+        ->and(collect($result['categories'])->firstWhere('key', 'capacity'))->toMatchArray(['has_data' => false, 'points_possible' => 0])
+        ->and($this->factorOf($result, 'completed_loans')['has_data'])->toBeFalse();
 });
 
 it('answers insufficient data with no repayment and no capacity data', function () {
@@ -180,4 +184,82 @@ it('raises a soft flag for a possible duplicate member record', function () {
     $flags = collect($this->scoreOf($member)['flags']);
 
     expect($flags->firstWhere('rule_key', 'possible_duplicate'))->toMatchArray(['type' => 'soft_flag', 'scope' => 'member']);
+});
+
+it('leaves the completed-loan factors out for a first-time member, who never scores below a member with no loan', function () {
+    $newcomer = $this->member(['monthly_income' => 40000]);
+    $borrowerNow = $this->member(['monthly_income' => 40000]);
+    $loan = $this->releasedLoan($borrowerNow);
+    $this->paidMonthly($loan, '2026-08-01', 3);
+    $this->period($loan, 4, '2026-12-01');
+
+    $without = $this->scoreOf($newcomer);
+    $with = $this->scoreOf($borrowerNow);
+
+    expect($this->factorOf($with, 'completed_loans')['has_data'])->toBeFalse()
+        ->and($this->factorOf($with, 'clean_completed_loans')['has_data'])->toBeFalse()
+        ->and($with['score'])->toBeGreaterThanOrEqual($without['score']);
+});
+
+it('scores zero completed loans when one of the member\'s loans ended badly', function () {
+    $member = $this->member();
+    $loan = $this->releasedLoan($member, ['status' => 'defaulted']);
+    $this->period($loan, 1, '2026-09-01');
+
+    $result = $this->scoreOf($member);
+
+    expect($this->factorOf($result, 'completed_loans'))->toMatchArray(['has_data' => true, 'points_earned' => 0])
+        ->and($this->factorOf($result, 'clean_completed_loans'))->toMatchArray(['has_data' => true, 'points_earned' => 0]);
+});
+
+it('stops counting lateness on a restructured loan at the restructure date', function () {
+    $member = $this->member();
+    $source = $this->releasedLoan($member, ['status' => 'restructured', 'restructured_at' => '2026-09-01 10:00:00']);
+    $this->period($source, 1, '2026-08-20');
+    $this->period($source, 2, '2026-10-01');
+
+    $result = $this->scoreOf($member);
+
+    expect($result['data_used']['matured_periods'])->toBe(1)
+        ->and($result['data_used']['worst_days_late_24m'])->toBe(12)
+        ->and($result['data_used']['days_past_due'])->toBe(0);
+});
+
+it('counts an in-place restructure as a restructure', function () {
+    $member = $this->member();
+    $loan = $this->releasedLoan($member);
+    $this->paidPeriod($loan, 1, '2026-10-01', '2026-10-01');
+    LoanAdjustment::factory()->create([
+        'loan_id' => $loan->id,
+        'adjustment_type' => 'restructure',
+        'status' => 'applied',
+        'applied_at' => '2026-10-15 10:00:00',
+        'new_values' => ['interest_rate' => 2],
+        'adjusted_by' => User::query()->value('id'),
+    ]);
+    LoanAdjustment::factory()->create([
+        'loan_id' => $loan->id,
+        'adjustment_type' => 'restructure',
+        'status' => 'pending',
+        'adjusted_by' => User::query()->value('id'),
+    ]);
+
+    $result = $this->scoreOf($member);
+
+    expect($result['data_used']['restructured_loans'])->toBe(1)
+        ->and($this->factorOf($result, 'defaults_restructures')['points_earned'])->toBe(3)
+        ->and($this->factorOf($result, 'completed_loans')['has_data'])->toBeTrue();
+});
+
+it('counts unpaid past-due principal and interest as this month\'s debt', function () {
+    $member = $this->member(['monthly_income' => 40000]);
+    $loan = $this->releasedLoan($member, ['maturity_date' => '2026-09-01']);
+    $this->period($loan, 1, '2026-08-01', ['principal_paid' => 500, 'interest_paid' => 100, 'status' => 'partial']);
+    $this->period($loan, 2, '2026-09-01');
+
+    $result = $this->scoreOf($member);
+
+    expect($result['data_used']['lendy_monthly_payments'])->toBe('1600.00')
+        ->and($result['capacity']['existing_debt_payments'])->toBe('1600.00')
+        ->and($result['capacity']['debt_service_ratio'])->toBe('4.00');
 });

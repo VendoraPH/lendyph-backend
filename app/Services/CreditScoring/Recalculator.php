@@ -29,7 +29,7 @@ use Illuminate\Support\Facades\DB;
  * Each member is scored under a per-member cache lock, so the nightly run
  * and the minute job never both write the same change.
  */
-final class Recalculator
+class Recalculator
 {
     public const HIGH_RISK_BANDS = ['high', 'very_high'];
 

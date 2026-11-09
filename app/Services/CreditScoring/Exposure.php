@@ -14,7 +14,9 @@ use Carbon\Carbon;
  *
  * The monthly payment of a loan is its highest calendar-month total of the
  * instalments still open from the current month on, the same measure as the
- * proposed loan's payment (Capacity).
+ * proposed loan's payment (Capacity). Principal and interest still unpaid on
+ * periods due before this month are owed now, so they count in this month's
+ * total; a loan past its maturity owes all of it this month.
  */
 final class Exposure
 {
@@ -61,6 +63,7 @@ final class Exposure
     private static function monthlyDebt(MemberCreditData $data, array $loanIds): int
     {
         $monthStart = $data->asOf->copy()->startOfMonth();
+        $thisMonth = $monthStart->format('Y-m');
         $total = 0;
 
         foreach ($loanIds as $loanId) {
@@ -71,8 +74,13 @@ final class Exposure
                 $paid = Centavos::of($period->principal_paid) + Centavos::of($period->interest_paid);
                 $due = Carbon::parse($period->due_date);
 
-                if ($period->closed_by_adjustment_id !== null || $period->closed_by_loan_id !== null
-                    || $paid >= $owed || $due->lt($monthStart)) {
+                if ($period->closed_by_adjustment_id !== null || $period->closed_by_loan_id !== null || $paid >= $owed) {
+                    continue;
+                }
+
+                if ($due->lt($monthStart)) {
+                    $months[$thisMonth] = ($months[$thisMonth] ?? 0) + $owed - $paid;
+
                     continue;
                 }
 

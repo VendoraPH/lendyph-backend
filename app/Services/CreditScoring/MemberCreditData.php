@@ -20,6 +20,8 @@ use Illuminate\Support\Facades\DB;
  *
  * - `loans`: every ever-released loan (released, ongoing, completed,
  *   defaulted, restructured).
+ * - `inPlaceRestructuredLoanIds`: those of them restructured in place (an
+ *   applied restructure adjustment), which keep their own status.
  * - `periods`: their schedule rows, each with `allocations`, the principal
  *   and interest each posted payment put on it, in payment order.
  * - `profile`: the application loan's own details, else the member's most
@@ -32,11 +34,13 @@ final class MemberCreditData
     /**
      * @param  Collection<int, object>  $loans
      * @param  Collection<int, object>  $periods
+     * @param  list<int>  $inPlaceRestructuredLoanIds
      */
     public function __construct(
         public readonly object $member,
         public readonly Collection $loans,
         public readonly Collection $periods,
+        public readonly array $inPlaceRestructuredLoanIds,
         public readonly bool $hasValidId,
         public readonly ?CreditApplicationProfile $profile,
         public readonly ?Loan $applicationLoan,
@@ -62,12 +66,21 @@ final class MemberCreditData
             ->whereIn('status', Loan::EVER_RELEASED_STATUSES)
             ->select([
                 'id', 'status', 'branch_id', 'principal_amount', 'source_loan_id', 'write_off_amount',
-                'imported_arrears_baseline', 'grace_period_days', 'released_at',
+                'imported_arrears_baseline', 'grace_period_days', 'released_at', 'restructured_at',
             ])
             ->orderBy('id')
             ->get();
 
         $periods = self::periodsFor($loans->pluck('id')->all());
+
+        $inPlaceRestructured = DB::table('loan_adjustments')
+            ->whereIn('loan_id', $loans->pluck('id')->all())
+            ->where('adjustment_type', 'restructure')
+            ->where('status', 'applied')
+            ->distinct()
+            ->pluck('loan_id')
+            ->map(fn ($id) => (int) $id)
+            ->all();
 
         $hasValidId = DB::table('documents')
             ->where('documentable_type', Borrower::class)
@@ -79,6 +92,7 @@ final class MemberCreditData
             $member,
             $loans,
             $periods,
+            $inPlaceRestructured,
             $hasValidId,
             self::profileFor($borrowerId, $applicationLoan),
             $applicationLoan,

@@ -115,3 +115,22 @@ it('scores every factor band', function (string $key, int|float $value, int $poi
     'two references' => ['verified_references', 2, 1],
     'one reference' => ['verified_references', 1, 0],
 ]);
+
+it('seeds revision 1.0 from the migration\'s own literal, which equals ScorecardV1', function () {
+    $migration = require base_path('database/migrations/2026_11_08_300000_create_credit_scoring_tables.php');
+    $literal = json_decode((new ReflectionClass($migration))->getConstant('REVISION_1_0'), true, flags: JSON_THROW_ON_ERROR);
+
+    expect($literal)->toBe([
+        'version' => ScorecardV1::VERSION,
+        'engine_version' => ScorecardV1::ENGINE_VERSION,
+        'notes' => ScorecardV1::NOTES,
+        'categories' => ScorecardV1::categories(),
+        'factors' => ScorecardV1::factors(),
+        'risk_bands' => ScorecardV1::riskBands(),
+        'policy_rules' => ScorecardV1::policyRules(),
+    ]);
+
+    $seeded = CreditScorecardRevision::query()->where('version', '1.0')->firstOrFail();
+    expect($seeded->factors)->toEqual($literal['factors'])
+        ->and($seeded->policy_rules)->toEqual($literal['policy_rules']);
+});

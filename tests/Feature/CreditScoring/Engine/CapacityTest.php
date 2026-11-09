@@ -1,5 +1,6 @@
 <?php
 
+use App\Models\Borrower;
 use App\Models\CreditApplicationProfile;
 use App\Models\CreditScore;
 use App\Models\CreditScoringSetting;
@@ -8,6 +9,7 @@ use App\Models\LoanProduct;
 use App\Models\User;
 use App\Services\CreditScoring\Capacity;
 use App\Services\CreditScoring\Recalculator;
+use App\Services\LoanService;
 use Tests\Feature\CreditScoring\Engine\CreditFixtures;
 use Tests\TestCase;
 
@@ -99,4 +101,55 @@ it('assesses a loan application from its previewed schedule and declared details
     $factors = $score->factors->keyBy('factor_key');
     expect($factors['debt_service_ratio']->points_earned)->toBe(12)
         ->and($factors['payment_cover']->points_earned)->toBe(10);
+});
+
+it('bands the ratio on the same two decimals it shows', function () {
+    $capacity = Capacity::calculate(1_000_000, null, 300_049, null, CreditScoringSetting::current());
+
+    expect($capacity->debtServiceRatioText())->toBe('30.00')
+        ->and($capacity->assessment)->toBe(Capacity::MANAGEABLE)
+        ->and($capacity->debtServiceRatio)->toBe(30.0);
+});
+
+function singlePaymentApplication(Borrower $member, int $term, string $termUnit): Loan
+{
+    $product = LoanProduct::factory()->create(['interest_rate' => 1, 'term' => $term, 'frequency' => 'upon_maturity']);
+
+    return Loan::factory()->create([
+        'borrower_id' => $member->id,
+        'branch_id' => $member->branch_id,
+        'loan_product_id' => $product->id,
+        'status' => 'draft',
+        'principal_amount' => 30000,
+        'interest_rate' => 1,
+        'interest_method' => 'straight',
+        'term' => $term,
+        'term_unit' => $termUnit,
+        'frequency' => 'upon_maturity',
+        'start_date' => '2026-11-10',
+        'maturity_date' => $termUnit === 'months' ? Carbon\Carbon::parse('2026-11-10')->addMonthsNoOverflow($term)->toDateString() : Carbon\Carbon::parse('2026-11-10')->addDays($term)->toDateString(),
+        'created_by' => User::query()->value('id'),
+    ])->fresh();
+}
+
+it('spreads a single payment over its term in months for capacity, and says so', function () {
+    $loan = singlePaymentApplication($this->member(['monthly_income' => 40000]), 3, 'months');
+    $total = collect(app(LoanService::class)->buildAmortizationPreview($loan))->sum('total_due');
+
+    $result = $this->scoreOf($loan->borrower, $loan);
+
+    expect($result['capacity']['proposed_payment'])->toBe(number_format(round($total / 3, 2), 2, '.', ''))
+        ->and($result['capacity']['proposed_payment_basis'])->toContain('over 3 months')
+        ->and($this->factorOf($result, 'debt_service_ratio')['detail'])->toContain('monthly equivalent');
+});
+
+it('keeps a one-month single payment whole, and a days term spread over its 30-day months', function () {
+    $oneMonth = singlePaymentApplication($this->member(['monthly_income' => 40000]), 1, 'months');
+    $days = singlePaymentApplication($this->member(['monthly_income' => 40000]), 90, 'days');
+    $short = singlePaymentApplication($this->member(['monthly_income' => 40000]), 15, 'days');
+    $preview = fn (Loan $loan) => collect(app(LoanService::class)->buildAmortizationPreview($loan))->sum('total_due');
+
+    expect($this->scoreOf($oneMonth->borrower, $oneMonth)['capacity']['proposed_payment'])->toBe(number_format($preview($oneMonth), 2, '.', ''))
+        ->and($this->scoreOf($days->borrower, $days)['capacity']['proposed_payment'])->toBe(number_format(round($preview($days) / 3, 2), 2, '.', ''))
+        ->and($this->scoreOf($short->borrower, $short)['capacity']['proposed_payment'])->toBe(number_format($preview($short), 2, '.', ''));
 });

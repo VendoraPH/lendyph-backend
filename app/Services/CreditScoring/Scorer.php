@@ -111,6 +111,11 @@ final class Scorer
      * Each factor's raw value and explanation, or null where there is no
      * data for it.
      *
+     * No completed loan is no data for the two completed-loan factors, so a
+     * first-time member partway through a loan scales like a member with no
+     * loan, unless one of the member's loans ended badly (defaulted, written
+     * off or restructured), when zero completed loans scores zero.
+     *
      * @return array<string, array<string, mixed>|null>
      */
     private function rawValues(MemberCreditData $data, PaymentHistory $history, Exposure $exposure, Capacity $capacity): array
@@ -130,6 +135,7 @@ final class Scorer
         $memberSince = Carbon::parse($data->member->approved_at ?? $data->member->created_at);
         $membershipYears = $this->yearsBetween($memberSince, $asOf);
         $troubled = $history->defaultedLoans + $history->writtenOffLoans + $history->restructuredLoans > 0;
+        $hasCompletionData = $history->completedLoans > 0 || $troubled;
         $mobile = PhilippineMobile::normalise($data->member->contact_number) !== null;
 
         return [
@@ -163,12 +169,13 @@ final class Scorer
             'debt_service_ratio' => $dsr === null ? null : [
                 'value' => $dsr,
                 'detail' => "Debt payments take {$capacity->debtServiceRatioText()}% of monthly income ("
-                    .Centavos::format($capacity->existingDebtCentavos + ($capacity->proposedPaymentCentavos ?? 0)).' of '.Centavos::format($income).').',
+                    .Centavos::format($capacity->existingDebtCentavos + ($capacity->proposedPaymentCentavos ?? 0)).' of '.Centavos::format($income).')'
+                    .($capacity->proposedPaymentBasis === null ? '.' : "; the proposed payment is {$capacity->proposedPaymentBasis}."),
             ],
             'payment_cover' => $cover === null ? null : [
                 'value' => $cover,
-                'detail' => sprintf('Disposable income of %s covers the proposed payment of %s %s times.',
-                    Centavos::format($capacity->disposableCentavos), Centavos::format($capacity->proposedPaymentCentavos), number_format($cover, 2)),
+                'detail' => sprintf('Disposable income of %s covers the proposed payment of %s %s times; the proposed payment is %s.',
+                    Centavos::format($capacity->disposableCentavos), Centavos::format($capacity->proposedPaymentCentavos), number_format($cover, 2), $capacity->proposedPaymentBasis),
             ],
             'past_due_amount' => [
                 'value' => $exposure->pastDuePercent(),
@@ -199,11 +206,11 @@ final class Scorer
                 'value' => $membershipYears,
                 'detail' => sprintf('Member since %s (%s years).', $memberSince->format('F Y'), number_format($membershipYears, 1)),
             ],
-            'completed_loans' => $history->everReleasedLoans === 0 ? null : [
+            'completed_loans' => ! $hasCompletionData ? null : [
                 'value' => $history->completedLoans,
                 'detail' => $history->completedLoans === 1 ? '1 loan completed.' : "{$history->completedLoans} loans completed.",
             ],
-            'clean_completed_loans' => $history->everReleasedLoans === 0 ? null : [
+            'clean_completed_loans' => ! $hasCompletionData ? null : [
                 'value' => $history->cleanCompletedLoans,
                 'detail' => $history->cleanCompletedLoans === 1
                     ? '1 completed loan was never more than 7 days late.'

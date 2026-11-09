@@ -9,8 +9,12 @@ use App\Models\Loan;
 use App\Models\LoanProduct;
 use App\Models\User;
 use App\Services\CreditScoring\ChangeScanner;
+use App\Services\CreditScoring\PolicyFlags;
+use App\Services\CreditScoring\Recalculator;
+use App\Services\CreditScoring\Scorer;
 use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Tests\Feature\CreditScoring\Engine\CreditFixtures;
 use Tests\TestCase;
 
@@ -46,7 +50,7 @@ beforeEach(function () {
 });
 
 /**
- * Every column of every loan, schedule row and payment.
+ * Every column of every loan, schedule row, payment, member and adjustment.
  *
  * @return array<string, mixed>
  */
@@ -56,6 +60,8 @@ function lendingRows(): array
         'loans' => DB::table('loans')->orderBy('id')->get()->map(fn ($row) => (array) $row)->all(),
         'amortization_schedules' => DB::table('amortization_schedules')->orderBy('id')->get()->map(fn ($row) => (array) $row)->all(),
         'repayments' => DB::table('repayments')->orderBy('id')->get()->map(fn ($row) => (array) $row)->all(),
+        'borrowers' => DB::table('borrowers')->orderBy('id')->get()->map(fn ($row) => (array) $row)->all(),
+        'loan_adjustments' => DB::table('loan_adjustments')->orderBy('id')->get()->map(fn ($row) => (array) $row)->all(),
     ];
 }
 
@@ -101,16 +107,20 @@ it('leaves every loan, schedule and payment row identical through every command'
 
     $this->artisan('credit-scoring:recalculate --dry-run')->assertSuccessful();
     $this->artisan('credit-scoring:recalculate')->assertSuccessful();
-    $this->travel(1)->minutes();
+    $this->travel(5)->minutes();
     app(ChangeScanner::class)->scan();
+
+    expect(lendingRows())->toBe($before);
+
     $this->travel(1)->minutes();
     $this->member1->update(['monthly_income' => 5000]);
+    $changed = lendingRows();
     $this->travel(10)->seconds();
     $this->artisan('credit-scoring:process-changes')->assertSuccessful();
     $this->artisan('credit-scoring:recalculate')->assertSuccessful();
 
     expect(CreditScore::query()->where('recalculation_reason', 'Member details changed')->exists())->toBeTrue()
-        ->and(lendingRows())->toBe($before);
+        ->and(lendingRows())->toBe($changed);
 });
 
 it('schedules the nightly run at 00:45 Manila and the minute job every minute in the background', function () {
@@ -126,4 +136,31 @@ it('schedules the nightly run at 00:45 Manila and the minute job every minute in
         ->and($minute->expression)->toBe('* * * * *')
         ->and($minute->runInBackground)->toBeTrue()
         ->and($minute->withoutOverlapping)->toBeTrue();
+});
+
+it('carries on past a member whose nightly scoring fails, logging only their id', function () {
+    app()->instance(Recalculator::class, new class(app(Scorer::class), app(PolicyFlags::class), $this->member1->id) extends Recalculator
+    {
+        public function __construct(Scorer $scorer, PolicyFlags $flags, private readonly int $failingId)
+        {
+            parent::__construct($scorer, $flags);
+        }
+
+        public function scoreMember(int $borrowerId, string $reason, bool $dryRun = false, ?Carbon\Carbon $asOf = null): array
+        {
+            if ($borrowerId === $this->failingId) {
+                throw new RuntimeException('Scoring failed for a test member.');
+            }
+
+            return parent::scoreMember($borrowerId, $reason, $dryRun, $asOf);
+        }
+    });
+    Log::spy();
+
+    $this->artisan('credit-scoring:recalculate')
+        ->expectsOutputToContain('1 failed')
+        ->assertFailed();
+
+    expect(CreditScoreMember::query()->pluck('borrower_id')->all())->toBe([$this->member2->id]);
+    Log::shouldHaveReceived('warning')->with('Credit scoring failed for a member.', ['borrower_id' => $this->member1->id]);
 });
