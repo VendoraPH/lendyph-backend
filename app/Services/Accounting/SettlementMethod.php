@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Services\Accounting;
 
+use App\Enums\PaymentMethod;
 use App\Exceptions\CannotPostToTheBooksException;
 use App\Models\AccountingAccountMapping;
 
@@ -60,7 +61,8 @@ final class SettlementMethod
     ];
 
     /**
-     * The settlement role a `repayments.method` value posts through.
+     * The settlement role a `repayments.method` value posts through. An
+     * unknown method is named in words ("Wire Cheque"), never by its key.
      *
      * @throws CannotPostToTheBooksException when the method has no declared role
      */
@@ -70,7 +72,8 @@ final class SettlementMethod
 
         if ($role === null) {
             throw CannotPostToTheBooksException::because(
-                "There is no accounting settlement account defined for the payment method \"{$method}\", so "
+                'There is no accounting settlement account defined for the payment method '
+                .(PaymentMethod::labelFor($method) ?? 'with no name').', so '
                 .'this transaction cannot be posted to the books and has NOT been recorded. Posting it to the '
                 .'wrong account would balance, appear on every statement, and only ever be caught by counting '
                 .'the cash.');

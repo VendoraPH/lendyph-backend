@@ -111,7 +111,8 @@ class AccountingReconciliationTest extends TestCase
     {
         $reconciliation = $this->create(['start_date' => '2026-09-01', 'end_date' => '2026-09-25']);
 
-        $this->assertSame('2026-09-01 – 2026-09-25', $reconciliation['period']);
+        // In words since follow-up round 3 (Lead's call 9).
+        $this->assertSame('Sep 1 – Sep 25, 2026', $reconciliation['period']);
     }
 
     public function test_one_account_cannot_have_two_reconciliations_for_the_same_period(): void
