@@ -2,10 +2,13 @@
 
 namespace App\Http\Requests\Loan;
 
+use App\Http\Requests\Concerns\ReferenceNumberMessages;
 use Illuminate\Foundation\Http\FormRequest;
 
 class ExtendLoanRequest extends FormRequest
 {
+    use ReferenceNumberMessages;
+
     public function authorize(): bool
     {
         return $this->user()->can('loans:extend');
@@ -39,6 +42,7 @@ class ExtendLoanRequest extends FormRequest
     public function messages(): array
     {
         return [
+            ...$this->referenceNumberMessages(),
             'interest_option.required' => 'Choose whether to pay or defer the outstanding interest.',
         ];
     }

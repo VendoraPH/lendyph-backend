@@ -2,12 +2,15 @@
 
 namespace App\Http\Requests\ShareCapital;
 
+use App\Http\Requests\Concerns\ReferenceNumberMessages;
 use App\Services\ShareCapitalService;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
 class ShareCapitalManualEntryRequest extends FormRequest
 {
+    use ReferenceNumberMessages;
+
     public function authorize(): bool
     {
         return $this->user()->can('share_capital:create');
@@ -34,6 +37,14 @@ class ShareCapitalManualEntryRequest extends FormRequest
             'method' => ['sometimes', Rule::in(ShareCapitalService::ENTRY_METHODS)],
             'reference_number' => ['nullable', 'string', 'max:100', 'required_unless:method,cash'],
         ];
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    public function messages(): array
+    {
+        return $this->referenceNumberMessages();
     }
 
     /**

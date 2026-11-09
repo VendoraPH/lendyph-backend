@@ -229,11 +229,11 @@ class YearEndCloseTest extends TestCase
 
         $this->closeYear()
             ->assertUnprocessable()
-            ->assertJsonPath('errors.year', ['December 2025 is closed. Reopen it so the closing entries can be dated 31 December.']);
+            ->assertJsonPath('errors.year', ['December 2025 is closed. Reopen it so the closing entries can be dated Dec 31, 2025.']);
 
         $this->closeYear(2026)
             ->assertUnprocessable()
-            ->assertJsonPath('errors.year.0', '2026 ends on 31 December 2026; it can be closed from 1 January 2027.');
+            ->assertJsonPath('errors.year.0', '2026 ends on Dec 31, 2026; it can be closed from Jan 1, 2027.');
 
         $this->assertSame(0, AccountingYearClose::query()->count());
         $this->assertSame(0, AccountingJournal::query()->where('source', 'closing')->count());

@@ -18,6 +18,7 @@ use Illuminate\Console\ConfirmableTrait;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 
 #[Signature('accounting:opening-balances
@@ -316,10 +317,10 @@ class RecordOpeningBalances extends Command
             'Posted %s — %s of opening balances as of %s.',
             $journal->journal_no,
             Money::format((int) $journal->total_debit),
-            $asOf,
+            OpeningBalancePoster::dateInWords($asOf),
         ));
         $this->line('These now appear in the trial balance, the general ledger and every statement');
-        $this->line('built on them, dated '.$asOf.'. Re-running this command will be refused.');
+        $this->line('built on them, dated '.OpeningBalancePoster::dateInWords($asOf).'. Re-running this command will be refused.');
 
         if ($plan['plug'] !== null) {
             $this->newLine();
@@ -464,7 +465,7 @@ class RecordOpeningBalances extends Command
                 }
 
                 if (count($cells) !== 3) {
-                    $this->refuse(sprintf('Line %d has %d column(s), not 3.', $lineNo, count($cells)), [
+                    $this->refuse(sprintf('Line %d has %d %s, not 3.', $lineNo, count($cells), Str::plural('column', count($cells))), [
                         'Every row is: account code, debit, credit. A file of a different width is a',
                         'different report, or a column was inserted — and read positionally it would put',
                         'somebody\'s balance in the wrong column of the wrong account.',
@@ -572,8 +573,10 @@ class RecordOpeningBalances extends Command
         if ($skipped !== []) {
             $this->newLine();
             $this->warn(sprintf(
-                '%d account(s) carried no balance and were left out: %s',
+                '%d %s no balance and %s left out: %s',
                 count($skipped),
+                count($skipped) === 1 ? 'account carried' : 'accounts carried',
+                count($skipped) === 1 ? 'was' : 'were',
                 implode(', ', $skipped),
             ));
         }
@@ -1097,7 +1100,7 @@ class RecordOpeningBalances extends Command
                     // JournalPoster::reversalDescription() makes, for the same
                     // reason.
                     'reference' => mb_substr(basename($path), 0, self::MAX_REFERENCE),
-                    'description' => 'Opening balances as of '.$asOf,
+                    'description' => 'Opening balances as of '.OpeningBalancePoster::dateInWords($asOf),
                 ],
                 // No postable: the file is not a record. The source and the
                 // once-ever check are what identify this entry.
@@ -1148,7 +1151,7 @@ class RecordOpeningBalances extends Command
                     // entry — but the whole point of this row is that it holds
                     // what landed rather than what was intended.
                     Money::format((int) $journal->total_debit),
-                    $asOf,
+                    OpeningBalancePoster::dateInWords($asOf),
                 ),
                 // Not request()->ip(). Laravel synthesises a console request
                 // whose default makes that the literal 127.0.0.1, so the row
@@ -1181,7 +1184,7 @@ class RecordOpeningBalances extends Command
         $this->line(sprintf('  When   : %s %s', now()->format('Y-m-d H:i:s'), config('app.timezone')));
         $this->line(sprintf('  Where  : %s (%s)', config('app.name'), config('app.env')));
         $this->line(sprintf('  File   : %s', $path));
-        $this->line(sprintf('  As of  : %s — the entry is dated this day', $asOf));
+        $this->line(sprintf('  As of  : %s — the entry is dated this day', OpeningBalancePoster::dateInWords($asOf)));
     }
 
     /**
@@ -1223,6 +1226,12 @@ class RecordOpeningBalances extends Command
         $this->newLine();
         $this->table(['Code', 'Account', 'Debit', 'Credit', 'From'], $rows);
 
+        // Lead's call 3: never a refusal, but printed before the confirmation
+        // so the operator sees it while the run can still be cancelled.
+        foreach (OpeningBalancePoster::contraWarnings($plan['lines']) as $warning) {
+            $this->warn('  WARNING: '.$warning);
+        }
+
         if ($plan['plug'] === null) {
             $this->line('  The file balances on its own — no '.self::PLUG_CODE.' plug was computed.');
 
@@ -1248,9 +1257,10 @@ class RecordOpeningBalances extends Command
         $this->newLine();
         $this->warn('  THIS HAPPENS ONCE');
         $this->line(sprintf(
-            '  %s of opening balances across %d account(s) goes onto the books, and this',
+            '  %s of opening balances across %d %s goes onto the books, and this',
             Money::format($plan['total_debit']),
             count($plan['lines']),
+            Str::plural('account', count($plan['lines'])),
         ));
         $this->line('  command will refuse to run again on this deployment. A posted journal cannot be');
         $this->line('  edited or deleted — correcting it means a reversing entry, which leaves both');

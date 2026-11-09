@@ -61,6 +61,47 @@ trait ValidatesAccountShape
             $this->assertHistoryKeepsItsSign($validator, $existing, $type, $isContra);
             $this->assertMappedRolesStillFit($validator, $existing, $type, $isContra, $cashKind);
             $this->assertMappedRolesKeepTheirPlace($validator, $existing, $parentId);
+            $this->assertMappedRolesKeepAnAllowedCode($validator, $existing, $code);
+        }
+    }
+
+    /** "an asset code", "an income code", for the code-and-type message. */
+    private function codeKindInWords(string $type): string
+    {
+        return in_array($type[0] ?? '', ['a', 'e', 'i', 'o', 'u'], true) ? "an {$type} code" : "a {$type} code";
+    }
+
+    /**
+     * An account a role resolves to can't take a code that role may never
+     * post to: the net surplus account renamed to 3050 would mix the year's
+     * result into the opening balances, which the settings screen already
+     * refuses from the other side
+     * ({@see AccountingAccountMapping::reservedAccountReason()}). Only a code
+     * that actually changes is checked, so the account's other edits keep
+     * working.
+     */
+    private function assertMappedRolesKeepAnAllowedCode(
+        Validator $validator,
+        AccountingAccount $existing,
+        string $code,
+    ): void {
+        if ($code === (string) $existing->code) {
+            return;
+        }
+
+        $label = "{$existing->code} {$existing->name}";
+
+        foreach ($existing->mappings()->pluck('role') as $role) {
+            if (AccountingAccountMapping::reservedAccountReason($role, $code, $label) === null) {
+                continue;
+            }
+
+            $validator->errors()->add(
+                'code',
+                "{$label} is the account for ".AccountingAccountMapping::label($role).", and {$code} is the opening "
+                ."balance equity code: the year's result would be mixed into the opening balances. Keep another "
+                .'code, or point that role somewhere else first.',
+            );
         }
     }
 
@@ -93,7 +134,7 @@ trait ValidatesAccountShape
         if ($implied !== $type) {
             $validator->errors()->add(
                 'code',
-                "Account code {$code} is a {$implied} code and cannot be typed as {$type}. The leading digit decides which statement this account reports on.",
+                "Account code {$code} is ".$this->codeKindInWords($implied).", so it can't be ".AccountingAccountMapping::typeInWords($type).'. The leading digit decides which statement this account reports on.',
             );
         }
     }
@@ -137,7 +178,8 @@ trait ValidatesAccountShape
         if ($parent->type !== $type) {
             $validator->errors()->add(
                 'parent_id',
-                "{$parent->code} {$parent->name} is a {$parent->type} account, so a {$type} account cannot sit under it.",
+                "{$parent->code} {$parent->name} is ".AccountingAccountMapping::typeInWords((string) $parent->type).', so '
+                .AccountingAccountMapping::typeInWords($type).' cannot sit under it.',
             );
         }
 
@@ -206,8 +248,9 @@ trait ValidatesAccountShape
         if ($type !== 'asset' && $cashKind !== null && $cashKind !== '') {
             $validator->errors()->add(
                 'cash_kind',
-                "A {$type} account cannot be a money account. `cash_kind` puts a balance into the Cash & Bank "
-                .'screen and the dashboard cash figures, which would report this balance as money on hand.',
+                ucfirst(AccountingAccountMapping::typeInWords($type)).' cannot be a money account. A money account\'s '
+                .'balance goes into the Cash & Bank screen and the dashboard cash figures, which would report this '
+                .'balance as money on hand.',
             );
         }
     }
@@ -452,7 +495,7 @@ trait ValidatesAccountShape
 
         $field = $typeChanged ? 'type' : 'is_contra';
         $what = $typeChanged
-            ? "re-classify it from {$existing->type} to {$type}"
+            ? 're-classify it from '.AccountingAccountMapping::typeInWords((string) $existing->type).' to '.AccountingAccountMapping::typeInWords($type)
             : ($isContra ? 'make it a contra account' : 'stop it being a contra account');
 
         $validator->errors()->add(

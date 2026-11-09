@@ -534,7 +534,7 @@ final class YearEndCloser
         $next = $year + 1;
 
         if (! $this->hasEnded($year)) {
-            $reasons[] = "{$year} ends on 31 December {$year}; it can be closed from 1 January {$next}.";
+            $reasons[] = "{$year} ends on Dec 31, {$year}; it can be closed from Jan 1, {$next}.";
         }
 
         if ($this->previousYearMustBeClosedFirst($year, $lockingTheYearBefore)) {
@@ -550,7 +550,7 @@ final class YearEndCloser
         $december = $periods->firstWhere('code', "{$year}-12");
 
         if ($december !== null && $december->isClosed()) {
-            $reasons[] = "December {$year} is closed. Reopen it so the closing entries can be dated 31 December.";
+            $reasons[] = "December {$year} is closed. Reopen it so the closing entries can be dated Dec 31, {$year}.";
         }
 
         if ($account === null) {

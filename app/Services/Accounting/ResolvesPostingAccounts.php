@@ -43,10 +43,12 @@ trait ResolvesPostingAccounts
             ->where('role', $role)
             ->value('accounting_account_id');
 
+        $roleLabel = AccountingAccountMapping::label($role);
+
         if ($accountId === null) {
             throw ValidationException::withMessages([
                 'account_mapping' => [
-                    "{$what} has to post to the {$role} account, and no account is mapped to that role yet. "
+                    "{$what} has to post to the {$roleLabel} account, and no account is mapped to that role yet. "
                     .'Set it under Accounting → Settings → Default Accounts first. Nothing has been recorded.',
                 ],
             ]);
@@ -61,7 +63,7 @@ trait ResolvesPostingAccounts
             // line pointing at an account that does not exist.
             throw ValidationException::withMessages([
                 'account_mapping' => [
-                    "The {$role} role points at an account that no longer exists. Re-point it under "
+                    "The {$roleLabel} role points at an account that no longer exists. Re-point it under "
                     .'Accounting → Settings → Default Accounts. Nothing has been recorded.',
                 ],
             ]);

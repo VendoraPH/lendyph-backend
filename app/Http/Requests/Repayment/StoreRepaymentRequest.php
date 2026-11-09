@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests\Repayment;
 
+use App\Http\Requests\Concerns\ReferenceNumberMessages;
 use App\Models\Loan;
 use Carbon\Exceptions\InvalidFormatException;
 use Closure;
@@ -10,6 +11,8 @@ use Illuminate\Support\Carbon;
 
 class StoreRepaymentRequest extends FormRequest
 {
+    use ReferenceNumberMessages;
+
     public function authorize(): bool
     {
         return $this->user()->can('payments:create');
@@ -65,6 +68,14 @@ class StoreRepaymentRequest extends FormRequest
                 $fail("The payment date can't be before the loan's release date ({$releaseDay}).");
             }
         };
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    public function messages(): array
+    {
+        return $this->referenceNumberMessages();
     }
 
     protected function prepareForValidation(): void

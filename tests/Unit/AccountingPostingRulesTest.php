@@ -1738,7 +1738,7 @@ class AccountingPostingRulesTest extends TestCase
         $incomplete = AccountMap::fromArray(['loans_receivable' => 1110, 'cash' => 1010]);
 
         $this->expectException(CannotPostToTheBooksException::class);
-        $this->expectExceptionMessageMatches('/processing_fee_income/');
+        $this->expectExceptionMessageMatches('/the Processing fee income account/');
 
         PostingRules::loanRelease(5_000_000, 4_876_544, 123_456, 'cash', $incomplete);
     }

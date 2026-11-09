@@ -232,12 +232,13 @@ class AccountingLoanReleaseDiffCommandTest extends TestCase
 
         $output = $this->runCommand();
 
-        $this->assertMatchesRegularExpression('/processing fee\s*\|\s*2\s*\|\s*₱2,000\.00\s*\|\s*processing_fee_income → 4030/u', $output);
+        $this->assertStringContainsString('— booked to Processing fee income as before.', $output);
+        $this->assertMatchesRegularExpression('/processing fee\s*\|\s*2\s*\|\s*₱2,000\.00\s*\|\s*Processing fee income → 4030/u', $output);
 
         foreach ([
-            'service fee' => ['₱1,000\.00', 'service_fee_income → 4040'],
-            'notarial fee' => ['₱500\.00', 'notarial_fees_payable → 2030'],
-            'insurance premium' => ['₱600\.00', 'insurance_premium_payable → 2040'],
+            'service fee' => ['₱1,000\.00', 'Service fee income → 4040'],
+            'notarial fee' => ['₱500\.00', 'Notarial fees payable → 2030'],
+            'insurance premium' => ['₱600\.00', 'Insurance premium payable → 2040'],
         ] as $type => [$total, $mapping]) {
             $this->assertMatchesRegularExpression("/{$type}\s*\|\s*2\s*\|\s*{$total}\s*\|\s*{$mapping}/u", $output);
         }
@@ -267,6 +268,7 @@ class AccountingLoanReleaseDiffCommandTest extends TestCase
         $this->assertMatchesRegularExpression('/Would differ:\s+0\b/', $output);
 
         // Only the loan that was compared counts towards the deduction types.
+        $this->assertStringContainsString('— booked to Processing fee income as before.', $output);
         $this->assertMatchesRegularExpression('/processing fee\s*\|\s*1\s*\|\s*₱1,000\.00\s*\|/u', $output);
     }
 
@@ -384,6 +386,7 @@ class AccountingLoanReleaseDiffCommandTest extends TestCase
         $this->assertMatchesRegularExpression('/Would differ:\s+1\b/', $output);
         $this->assertMatchesRegularExpression('/Matching:\s+4\b/', $output);
         $this->assertStringContainsString($last->journal_no, $output);
+        $this->assertStringContainsString('— booked to Processing fee income as before.', $output);
         $this->assertMatchesRegularExpression('/processing fee\s*\|\s*5\s*\|\s*₱5,000\.00\s*\|/u', $output);
     }
 

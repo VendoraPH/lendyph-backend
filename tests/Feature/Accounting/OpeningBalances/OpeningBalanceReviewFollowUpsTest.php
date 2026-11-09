@@ -19,7 +19,7 @@ class OpeningBalanceReviewFollowUpsTest extends TestCase
 {
     use OpeningBalanceTestHelpers;
 
-    private const LATER_CLOSED = 'Months after 31 August 2026 are already closed. Reopen them before recording opening balances.';
+    private const LATER_CLOSED = 'Months after Aug 31, 2026 are already closed. Reopen them before recording opening balances.';
 
     protected function setUp(): void
     {

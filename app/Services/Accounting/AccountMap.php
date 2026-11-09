@@ -102,7 +102,7 @@ final class AccountMap
 
         if ($id === null) {
             throw CannotPostToTheBooksException::because(
-                "This transaction posts to the \"{$role}\" account, which has not been set. Open Accounting "
+                'This transaction posts to the '.AccountingAccountMapping::label($role).' account, which has not been set. Open Accounting '
                 .'→ Settings → Default Accounts and choose one, then try again. Nothing has been saved: a '
                 .'transaction that moved money without an entry in the books would leave the two disagreeing '
                 .'with nothing to point at the difference.');
