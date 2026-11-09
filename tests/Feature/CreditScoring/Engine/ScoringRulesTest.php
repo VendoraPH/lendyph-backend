@@ -6,6 +6,7 @@ use App\Models\CreditPolicyFlag;
 use App\Models\LoanAdjustment;
 use App\Models\User;
 use App\Services\CreditScoring\Recalculator;
+use Illuminate\Support\Facades\DB;
 use Tests\Feature\CreditScoring\Engine\CreditFixtures;
 use Tests\TestCase;
 
@@ -262,4 +263,46 @@ it('counts unpaid past-due principal and interest as this month\'s debt', functi
     expect($result['data_used']['lendy_monthly_payments'])->toBe('1600.00')
         ->and($result['capacity']['existing_debt_payments'])->toBe('1600.00')
         ->and($result['capacity']['debt_service_ratio'])->toBe('4.00');
+});
+
+it('counts a period due on the restructure date only when it was paid', function () {
+    $paid = $this->member();
+    $paidSource = $this->releasedLoan($paid, ['status' => 'restructured', 'restructured_at' => '2026-09-01 10:00:00']);
+    $this->paidPeriod($paidSource, 1, '2026-09-01', '2026-09-01');
+
+    $unpaid = $this->member();
+    $unpaidSource = $this->releasedLoan($unpaid, ['status' => 'restructured', 'restructured_at' => '2026-09-01 10:00:00']);
+    $this->period($unpaidSource, 1, '2026-09-01');
+
+    $paidResult = $this->scoreOf($paid);
+    $unpaidResult = $this->scoreOf($unpaid);
+
+    expect($paidResult['data_used']['matured_periods'])->toBe(1)
+        ->and($paidResult['data_used']['on_time_periods'])->toBe(1)
+        ->and($unpaidResult['data_used']['matured_periods'])->toBe(0)
+        ->and($unpaidResult['data_used']['days_past_due'])->toBe(0);
+});
+
+it('counts only the unpaid principal and interest of this month\'s and later periods as monthly debt', function () {
+    $member = $this->member(['monthly_income' => 40000]);
+    $loan = $this->releasedLoan($member, ['maturity_date' => '2026-12-20']);
+    $this->period($loan, 1, '2026-11-20', [
+        'principal_paid' => 400,
+        'penalty_amount' => 50,
+        'total_due' => 1150,
+        'status' => 'partial',
+    ]);
+    $this->period($loan, 2, '2026-12-20');
+
+    $result = $this->scoreOf($member);
+
+    // November owes ₱1,100.00 less the ₱400.00 paid; December's whole ₱1,100.00 is the higher month.
+    expect($result['data_used']['lendy_monthly_payments'])->toBe('1100.00');
+
+    $this->period($loan, 3, '2026-12-25', ['principal_paid' => 1000, 'interest_paid' => 100, 'status' => 'paid']);
+    DB::table('amortization_schedules')->where('loan_id', $loan->id)->where('period_number', 2)
+        ->update(['principal_paid' => 900, 'penalty_amount' => 300, 'total_due' => 1400]);
+
+    // November ₱700.00 against December ₱200.00 unpaid: penalty never counts.
+    expect($this->scoreOf($member)['data_used']['lendy_monthly_payments'])->toBe('700.00');
 });

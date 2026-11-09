@@ -7,6 +7,7 @@ use App\Services\LoanListTotals;
 use App\Services\LoanService;
 use App\Support\PhilippineMobile;
 use Carbon\Carbon;
+use OverflowException;
 
 /**
  * The Lendy Credit Score: an internal, advisory 0 to 100 risk score with the
@@ -15,7 +16,10 @@ use Carbon\Carbon;
  * - Each active factor of the revision is scored from the member's data. A
  *   factor without data is left out: it earns nothing and counts in nothing.
  * - Score = round(100 x points earned / points possible), over the factors
- *   with data, so a thin file is scaled rather than penalised.
+ *   with data, so a thin file is scaled rather than penalised. Each factor's
+ *   points, earned and possible alike, count its category's weight / the
+ *   category's factor points (1 everywhere in revision 1.0), worked in
+ *   integers and rounded half up.
  * - A score needs Repayment Behaviour or Payment Capacity data; without
  *   either the result is `insufficient_data`.
  * - Never used: the member's date of birth, sex, marital status, home, family
@@ -79,10 +83,7 @@ final class Scorer
 
         $categories = $this->categories($table, $factors);
         $scorable = collect($categories)->whereIn('key', ['repayment', 'capacity'])->contains('has_data', true);
-        $earned = array_sum(array_column(array_filter($factors, fn ($f) => $f['has_data']), 'points_earned'));
-        $possible = array_sum(array_column(array_filter($factors, fn ($f) => $f['has_data']), 'points_possible'));
-
-        $score = $scorable && $possible > 0 ? intdiv(200 * $earned + $possible, 2 * $possible) : null;
+        $score = $scorable ? $this->weightedScore($table, $categories) : null;
         $band = $score === null ? null : $table->bandFor($score);
         $flags = $this->policyFlags->evaluate($data, $history, $exposure, $capacity, $settings, $table);
 
@@ -105,6 +106,52 @@ final class Scorer
             'has_active_loan' => $exposure->activeLoans > 0,
             'past_due' => $history->daysPastDueNow > 0,
         ];
+    }
+
+    /**
+     * round(100 x weighted earned / weighted possible) over the categories
+     * with data, where a category's points count weight / its factor points.
+     * Every term is brought over the least common multiple of the factor
+     * points, so the sum is exact in integers; null when nothing weighs.
+     *
+     * @param  list<array<string, mixed>>  $categories
+     */
+    private function weightedScore(FactorTable $table, array $categories): ?int
+    {
+        $terms = [];
+
+        foreach ($categories as $category) {
+            $points = $table->categoryFactorPoints($category['key']);
+
+            if ($category['has_data'] && $points > 0) {
+                $terms[] = [(int) $category['points_earned'], (int) $category['points_possible'], FactorTable::hundredths($category['weight_percent']), $points];
+            }
+        }
+
+        $common = array_reduce(array_column($terms, 3), fn (int $lcm, int $points) => intdiv($lcm * $points, self::gcd($lcm, $points)), 1);
+        $earned = 0;
+        $possible = 0;
+
+        foreach ($terms as [$termEarned, $termPossible, $weight, $points]) {
+            $scale = $weight * intdiv($common, $points);
+            $earned += $termEarned * $scale;
+            $possible += $termPossible * $scale;
+        }
+
+        if (! is_int($earned) || ! is_int($possible) || ! is_int(200 * $earned + $possible)) {
+            throw new OverflowException('The weighted score is too large to work out exactly.');
+        }
+
+        return $possible > 0 ? intdiv(200 * $earned + $possible, 2 * $possible) : null;
+    }
+
+    private static function gcd(int $a, int $b): int
+    {
+        while ($b !== 0) {
+            [$a, $b] = [$b, $a % $b];
+        }
+
+        return $a;
     }
 
     /**

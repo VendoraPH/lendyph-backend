@@ -138,7 +138,7 @@ it('schedules the nightly run at 00:45 Manila and the minute job every minute in
         ->and($minute->withoutOverlapping)->toBeTrue();
 });
 
-it('carries on past a member whose nightly scoring fails, logging only their id', function () {
+it('carries on past a member whose nightly scoring fails, logging only their id and flagging them for a retry', function () {
     app()->instance(Recalculator::class, new class(app(Scorer::class), app(PolicyFlags::class), $this->member1->id) extends Recalculator
     {
         public function __construct(Scorer $scorer, PolicyFlags $flags, private readonly int $failingId)
@@ -161,6 +161,26 @@ it('carries on past a member whose nightly scoring fails, logging only their id'
         ->expectsOutputToContain('1 failed')
         ->assertFailed();
 
-    expect(CreditScoreMember::query()->pluck('borrower_id')->all())->toBe([$this->member2->id]);
+    expect(CreditScoreMember::query()->pluck('borrower_id')->all())->toBe([$this->member2->id])
+        ->and(CreditScoreDirtyMember::query()->where('borrower_id', $this->member1->id)->value('reason'))->toBe('Nightly scoring failed')
+        ->and(CreditScoreDirtyMember::query()->where('borrower_id', $this->member2->id)->exists())->toBeFalse();
     Log::shouldHaveReceived('warning')->with('Credit scoring failed for a member.', ['borrower_id' => $this->member1->id]);
+});
+
+it('drops a backed-off change flag once the nightly run scores the member', function () {
+    app(ChangeScanner::class)->flag([$this->member1->id => 'Loan changed'], now()->subHour());
+    CreditScoreDirtyMember::query()->where('borrower_id', $this->member1->id)->update(['attempts' => 3, 'flagged_at' => now()->addMinutes(8)]);
+
+    $this->artisan('credit-scoring:recalculate')->assertSuccessful();
+
+    expect(CreditScoreDirtyMember::query()->count())->toBe(0);
+});
+
+it('keeps a backed-off flag that a change raised again after the nightly run began', function () {
+    app(ChangeScanner::class)->flag([$this->member1->id => 'Loan changed'], now()->subHour());
+    CreditScoreDirtyMember::query()->where('borrower_id', $this->member1->id)->update(['attempts' => 3, 'flagged_at' => now()->addMinutes(8), 'updated_at' => now()->addMinute()]);
+
+    app(Recalculator::class)->clearDirty($this->member1->id, now());
+
+    expect(CreditScoreDirtyMember::query()->where('borrower_id', $this->member1->id)->exists())->toBeTrue();
 });
