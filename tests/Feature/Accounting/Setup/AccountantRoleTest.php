@@ -5,6 +5,7 @@ namespace Tests\Feature\Accounting\Setup;
 use App\Models\AccountingPeriod;
 use App\Models\AuditLog;
 use App\Models\Role;
+use App\Rules\UniqueRoleDisplayName;
 use Database\Seeders\RoleAndPermissionSeeder;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
@@ -216,7 +217,20 @@ class AccountantRoleTest extends TestCase
         $this->assertSame($audits, AuditLog::query()->count(), 'A second run names the kept role once only.');
     }
 
-    public function test_a_display_name_another_role_already_reads_as_is_left_empty_and_audited(): void
+    public function test_the_two_labels_never_read_as_each_other(): void
+    {
+        $this->assertSame(['Accountant', 'Accountant (Books)'], RoleAndPermissionSeeder::ACCOUNTANT_DISPLAY_NAMES);
+        $this->assertNotSame(
+            UniqueRoleDisplayName::normalise('Accountant'),
+            UniqueRoleDisplayName::normalise('Accountant (Books)'),
+        );
+        $this->assertFalse(UniqueRoleDisplayName::readsAsAnotherRole(
+            [(object) ['id' => 1, 'name' => 'accountant', 'display_name' => null]],
+            'Accountant (Books)',
+        ));
+    }
+
+    public function test_a_display_name_another_role_already_reads_as_takes_the_second_label(): void
     {
         $this->forgetRoleAndPermission();
         Role::findByName('general_bookkeeper')->update(['display_name' => '  ACCOUNTANT ']);
@@ -227,14 +241,65 @@ class AccountantRoleTest extends TestCase
         app(PermissionRegistrar::class)->forgetCachedPermissions();
 
         $role = Role::findByName('accountant');
-        $this->assertNull($role->display_name);
+        $this->assertSame('Accountant (Books)', $role->display_name);
+        $this->assertNotSame(
+            UniqueRoleDisplayName::normalise('  ACCOUNTANT '),
+            UniqueRoleDisplayName::normalise($role->display_name),
+        );
         $this->assertSame($this->sorted(RoleAndPermissionSeeder::ACCOUNTANT_PERMISSIONS), $this->grants('accountant'));
 
         $created = AuditLog::query()->where('id', '>', $before)->where('action', 'created')->where('auditable_id', $role->id)->sole();
         $this->assertNull($created->user_id);
-        $this->assertNull($created->new_values['display_name']);
-        $this->assertStringContainsString('display name "Accountant" was left empty', (string) $created->description);
+        $this->assertSame('Accountant (Books)', $created->new_values['display_name']);
+        $this->assertStringContainsString('"Accountant" is already read by role', (string) $created->description);
         $this->assertStringContainsString('(general_bookkeeper)', (string) $created->description);
+    }
+
+    public function test_when_both_labels_clash_the_role_is_not_created_and_that_is_audited_once(): void
+    {
+        $this->forgetRoleAndPermission();
+        Role::findByName('general_bookkeeper')->update(['display_name' => 'Accountant']);
+        Role::findByName('manager')->update(['display_name' => 'Accountant (books)']);
+        Auth::logout();
+        $before = AuditLog::query()->max('id') ?? 0;
+
+        $this->migration()->up();
+        app(PermissionRegistrar::class)->forgetCachedPermissions();
+
+        $this->assertFalse(DB::table('roles')->where('name', 'accountant')->exists());
+        $this->assertContains('accounting:allowance', $this->grants('admin'));
+
+        $rows = AuditLog::query()->where('id', '>', $before)->get();
+        $skipped = $rows->where('action', 'role_not_created_by_migration')->sole();
+        $this->assertNull($skipped->user_id);
+        $this->assertSame(0, $rows->where('action', 'created')->count());
+        $this->assertStringContainsString('(general_bookkeeper)', (string) $skipped->description);
+        $this->assertStringContainsString('(manager)', (string) $skipped->description);
+        $this->assertStringContainsString(self::MIGRATION, (string) $skipped->description);
+
+        $audits = AuditLog::query()->count();
+        $this->migration()->up();
+        $this->assertSame($audits, AuditLog::query()->count(), 'A second run records the skip once only.');
+        $this->assertFalse(DB::table('roles')->where('name', 'accountant')->exists());
+    }
+
+    public function test_the_seeder_fills_a_blank_display_name_with_a_label_no_other_role_reads_as(): void
+    {
+        Role::findByName('general_bookkeeper')->update(['display_name' => 'Accountant']);
+        Role::findByName('accountant')->update(['display_name' => null]);
+
+        $this->seed(RoleAndPermissionSeeder::class);
+
+        $this->assertSame('Accountant (Books)', Role::findByName('accountant')->fresh()->display_name);
+    }
+
+    public function test_the_seeder_keeps_an_edited_display_name(): void
+    {
+        Role::findByName('accountant')->update(['display_name' => 'Head Accountant']);
+
+        $this->seed(RoleAndPermissionSeeder::class);
+
+        $this->assertSame('Head Accountant', Role::findByName('accountant')->fresh()->display_name);
     }
 
     // ── What an Accountant can do ──

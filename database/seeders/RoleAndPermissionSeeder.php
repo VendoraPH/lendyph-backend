@@ -3,6 +3,7 @@
 namespace Database\Seeders;
 
 use App\Models\Role;
+use App\Rules\UniqueRoleDisplayName;
 use App\Services\AuditLogService;
 use App\Services\BranchAccess;
 use Illuminate\Database\Seeder;
@@ -17,6 +18,16 @@ class RoleAndPermissionSeeder extends Seeder
      * 2026_11_02_210000_add_branches_view_all_permission.
      */
     public const BOARD_ROLE_PATTERN = '/^bod(\d+$|_)/';
+
+    /**
+     * The Accountant's display name, in order of preference: the second when
+     * another role already reads as the first (UniqueRoleDisplayName), so
+     * Users never lists two roles reading "Accountant". Mirrors the
+     * 2026_11_09_120000 migration.
+     *
+     * @var list<string>
+     */
+    public const ACCOUNTANT_DISPLAY_NAMES = ['Accountant', 'Accountant (Books)'];
 
     /**
      * The Accountant keeps the books (Phase 2, accounting round C): every
@@ -368,15 +379,23 @@ class RoleAndPermissionSeeder extends Seeder
         ]);
 
         // Accountant: self::ACCOUNTANT_PERMISSIONS. Unlike the older system
-        // roles it comes with a display name, "Accountant", set only while it
-        // has none, so a label edited in User Roles survives a re-seed.
+        // roles it comes with a display name, set only while it has none, so a
+        // label edited in User Roles survives a re-seed: the first of
+        // self::ACCOUNTANT_DISPLAY_NAMES no other role reads as. When both
+        // are taken it stays blank, for an admin to name.
         $accountant = Role::updateOrCreate(
             ['name' => 'accountant', 'guard_name' => $guard],
             ['is_system' => true, 'is_active' => true, 'description' => $systemRoleAttrs['accountant']['description']],
         );
 
         if (blank($accountant->display_name)) {
-            $accountant->update(['display_name' => 'Accountant']);
+            $others = Role::query()->get(['id', 'name', 'display_name']);
+            $label = collect(self::ACCOUNTANT_DISPLAY_NAMES)
+                ->first(fn (string $label) => ! UniqueRoleDisplayName::readsAsAnotherRole($others, $label, $accountant->id));
+
+            if ($label !== null) {
+                $accountant->update(['display_name' => $label]);
+            }
         }
 
         $accountant->syncPermissions(self::ACCOUNTANT_PERMISSIONS);

@@ -20,8 +20,9 @@ use Spatie\Permission\PermissionRegistrar;
  *   display name, description and permission list, and one system audit row
  *   (`created`, the list in its new values). The display name gets the
  *   check a role save gets (UniqueRoleDisplayName): when another role
- *   already reads as "Accountant", the role is created with no display name
- *   and its audit row says so. INSERT-only, as in
+ *   already reads as "Accountant" it is "Accountant (Books)", and the audit
+ *   row says why; when both are taken the role is not created, and one
+ *   system audit row (`role_not_created_by_migration`) says so. INSERT-only, as in
  *   2026_09_16_110001_add_approval_chain_roles: a role an admin already built
  *   under that key is left exactly as it is, permissions included, with one
  *   system audit row naming it (`role_kept_by_migration`). Nobody is given
@@ -49,6 +50,11 @@ return new class extends Migration
     private const ROLE_TYPE = 'App\Models\Role';
 
     private const KEPT_ACTION = 'role_kept_by_migration';
+
+    private const NOT_CREATED_ACTION = 'role_not_created_by_migration';
+
+    /** In order of preference; RoleAndPermissionSeeder::ACCOUNTANT_DISPLAY_NAMES. */
+    private const DISPLAY_NAMES = ['Accountant', 'Accountant (Books)'];
 
     private const ROLE_ATTRIBUTES = [
         'display_name' => 'Accountant',
@@ -142,11 +148,31 @@ return new class extends Migration
             return;
         }
 
+        $clashes = [];
+        $label = null;
+
+        foreach (self::DISPLAY_NAMES as $candidate) {
+            $clash = $this->roleReadingAs($candidate);
+
+            if ($clash === null) {
+                $label = $candidate;
+
+                break;
+            }
+
+            $clashes[$candidate] = $clash;
+        }
+
+        if ($label === null) {
+            $this->recordTheRoleNotCreated($clashes);
+
+            return;
+        }
+
         $this->ensurePermissions(self::ACCOUNTANT_PERMISSIONS, $guard);
 
         $now = now();
-        $clash = $this->roleReadingAs(self::ROLE_ATTRIBUTES['display_name']);
-        $attributes = [...self::ROLE_ATTRIBUTES, 'display_name' => $clash === null ? self::ROLE_ATTRIBUTES['display_name'] : null];
+        $attributes = [...self::ROLE_ATTRIBUTES, 'display_name' => $label];
 
         $roleId = DB::table('roles')->insertGetId([
             'name' => self::ROLE,
@@ -187,27 +213,83 @@ return new class extends Migration
             'user_agent' => null,
             'description' => sprintf(
                 'System change: Role %s (%s) created by migration %s with %d permissions. No user is given it; the owner assigns it.%s',
-                json_encode($attributes['display_name'] ?? self::ROLE, JSON_UNESCAPED_UNICODE),
+                json_encode($label, JSON_UNESCAPED_UNICODE),
                 self::ROLE,
                 self::NAME,
                 count($permissions),
-                $clash === null ? '' : sprintf(
-                    ' Its display name "%s" was left empty: role %s (%s) already reads as it. Set one in Settings > User Roles.',
-                    self::ROLE_ATTRIBUTES['display_name'],
-                    json_encode($clash->display_name ?? $clash->name, JSON_UNESCAPED_UNICODE),
-                    $clash->name,
-                ),
+                $clashes === [] ? '' : ' Its display name is '.json_encode($label, JSON_UNESCAPED_UNICODE).' because '.$this->describeClashes($clashes).'.',
             ),
             'created_at' => $now,
         ]);
 
-        if ($clash !== null) {
-            Log::warning('The Accountant role was created with no display name; another role already reads as "Accountant".', [
+        if ($clashes !== []) {
+            Log::warning('The Accountant role was created with its second display name; another role already reads as "Accountant".', [
                 'migration' => self::NAME,
                 'role_id' => $roleId,
-                'clashing_role' => $clash->name,
+                'display_name' => $label,
             ]);
         }
+    }
+
+    /**
+     * @param  array<string, object>  $clashes  label => the role already reading as it
+     */
+    private function describeClashes(array $clashes): string
+    {
+        $parts = [];
+
+        foreach ($clashes as $label => $role) {
+            $parts[] = sprintf(
+                '"%s" is already read by role %s (%s)',
+                $label,
+                json_encode(filled($role->display_name) ? trim((string) $role->display_name) : $role->name, JSON_UNESCAPED_UNICODE),
+                $role->name,
+            );
+        }
+
+        return implode(' and ', $parts);
+    }
+
+    /**
+     * Every label is taken: the role is not created, so Users never lists two
+     * roles reading alike, and one system audit row says so. A re-run while
+     * they are still taken writes no second row.
+     *
+     * @param  array<string, object>  $clashes
+     */
+    private function recordTheRoleNotCreated(array $clashes): void
+    {
+        $recorded = DB::table('audit_logs')
+            ->where('action', self::NOT_CREATED_ACTION)
+            ->where('description', 'like', '%'.self::NAME.'%')
+            ->exists();
+
+        if ($recorded) {
+            return;
+        }
+
+        DB::table('audit_logs')->insert([
+            'user_id' => null,
+            'action' => self::NOT_CREATED_ACTION,
+            'auditable_type' => null,
+            'auditable_id' => null,
+            'old_values' => null,
+            'new_values' => json_encode(['name' => self::ROLE, 'display_names' => self::DISPLAY_NAMES], JSON_UNESCAPED_UNICODE),
+            'ip_address' => null,
+            'user_agent' => null,
+            'description' => sprintf(
+                'System change: migration %s did not create the Accountant role (%s): %s. Rename one of those roles and ask for the Accountant role to be added.',
+                self::NAME,
+                self::ROLE,
+                $this->describeClashes($clashes),
+            ),
+            'created_at' => now(),
+        ]);
+
+        Log::warning('The Accountant role was not created; both of its display names are already taken.', [
+            'migration' => self::NAME,
+            'clashing_roles' => array_map(fn (object $role) => $role->name, $clashes),
+        ]);
     }
 
     /**
