@@ -19,11 +19,16 @@ final class MemberContact
         return $channel === 'email' ? $this->email($member, $preference) : $this->mobile($member, $preference);
     }
 
+    /**
+     * The address with its local part cut to two characters, or to one when
+     * it has three or fewer, so a short address isn't all but given away
+     * (a two-letter local part keeps only its first letter).
+     */
     public static function maskEmail(string $email): string
     {
         [$local, $domain] = array_pad(explode('@', $email, 2), 2, '');
 
-        return mb_substr($local, 0, 2).'***@'.$domain;
+        return mb_substr($local, 0, mb_strlen($local) <= 3 ? 1 : 2).'***@'.$domain;
     }
 
     private function mobile(Borrower $member, ?BorrowerNotificationPreference $preference): ContactCheck
