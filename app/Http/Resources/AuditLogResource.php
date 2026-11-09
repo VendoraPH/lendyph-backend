@@ -4,6 +4,7 @@ namespace App\Http\Resources;
 
 use App\Models\AccountingJournal;
 use App\Models\AccountingJournalLine;
+use App\Models\AccountingReconciliationLine;
 use App\Models\AuditLog;
 use App\Models\Branch;
 use App\Models\Collateral;
@@ -347,6 +348,10 @@ class AuditLogResource extends JsonResource
             return $model->auditLabel();
         }
 
+        if ($model instanceof AccountingReconciliationLine) {
+            return self::statementLineLabel($model);
+        }
+
         // Prefer the most human-friendly attribute available on the related model.
         foreach (['full_name', 'name', 'application_number', 'loan_account_number', 'receipt_number', 'borrower_code', 'code', 'title', 'journal_no', 'reference'] as $attr) {
             if (isset($model->{$attr}) && $model->{$attr} !== null && $model->{$attr} !== '') {
@@ -355,6 +360,20 @@ class AuditLogResource extends JsonResource
         }
 
         return $this->fallbackLabel();
+    }
+
+    /**
+     * A statement line by its own date and amount ("Statement line, Sep 3,
+     * 2026, ₱1,500.00"; money out reads -₱). It has no name or number, and
+     * the class-and-id fallback only repeated the type and id the detail
+     * already shows beneath the label.
+     */
+    private static function statementLineLabel(AccountingReconciliationLine $line): string
+    {
+        $centavos = (int) $line->amount;
+        $amount = ($centavos < 0 ? '-' : '').'₱'.number_format(abs($centavos) / 100, 2);
+
+        return "Statement line, {$line->date->format('M j, Y')}, {$amount}";
     }
 
     /**

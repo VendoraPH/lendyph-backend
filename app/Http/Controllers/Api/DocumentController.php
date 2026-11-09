@@ -233,11 +233,25 @@ class DocumentController extends Controller implements HasMiddleware
             throw $e;
         }
 
-        AuditLogService::log('uploaded', $parent, description: "Document '{$type}' uploaded for {$modelType} #{$parent->id}");
+        AuditLogService::log('uploaded', $parent, description: "Document '{$type}' uploaded for ".self::parentInWords($parent));
 
         return (new DocumentResource($document))
             ->response()
             ->setStatusCode(201);
+    }
+
+    /**
+     * The parent as the audit row names it: "Member #7", "Co-maker #3", or a
+     * loan by its number ("loan LN-000004", the application number before
+     * release). Rows already stored keep their own words.
+     */
+    private static function parentInWords(Model $parent): string
+    {
+        return match (true) {
+            $parent instanceof Loan => 'loan '.($parent->loan_account_number ?? $parent->application_number ?? "#{$parent->id}"),
+            $parent instanceof CoMaker => "Co-maker #{$parent->id}",
+            default => "Member #{$parent->id}",
+        };
     }
 
     #[OA\Get(
