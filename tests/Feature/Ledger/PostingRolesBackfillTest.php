@@ -60,8 +60,11 @@ class PostingRolesBackfillTest extends TestCase
         ], $this->mappingsOf(self::ROLES));
 
         $this->assertAccount('4090', 'GCash Service Income', 'income', '4000', false, 'credit', 'operating');
-        $this->assertAccount('1180', 'Loan Adjustments Clearing', 'asset', '1000', false, 'debit', 'investing');
-        $this->assertAccount('1210', 'Unearned Interest and Penalty – Restructured Loans', 'asset', '1000', true, 'credit', 'investing');
+        // A fresh chart seeds the loan accounts as operating (Phase 2,
+        // decision 9); the migration above adds them as investing and the
+        // 2026_11_09_110000 migration then moves them.
+        $this->assertAccount('1180', 'Loan Adjustments Clearing', 'asset', '1000', false, 'debit', 'operating');
+        $this->assertAccount('1210', 'Unearned Interest and Penalty – Restructured Loans', 'asset', '1000', true, 'credit', 'operating');
         $this->assertAccount('2390', 'Suspense Account', 'liability', '2000', false, 'credit', 'financing');
     }
 

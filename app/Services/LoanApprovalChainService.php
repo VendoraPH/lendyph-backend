@@ -132,6 +132,12 @@ class LoanApprovalChainService
         return LoanWriteTransaction::run(function () use ($loan, $step, $user, $remarks) {
             [$loan, $step] = $this->lockAndGuard($loan, $step, $user);
 
+            // Re-submitting after a send-back: a restructure's figures are
+            // taken again from what its source owes now.
+            if ($step->kind === LoanApprovalStep::KIND_SUBMIT) {
+                $this->loanService->retakeRestructureTerms($loan, 'submission', $user);
+            }
+
             $step->update([
                 'status' => LoanApprovalStep::STATUS_APPROVED,
                 'acted_by' => $user->id,

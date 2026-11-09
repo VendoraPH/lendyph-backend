@@ -615,11 +615,15 @@ class LoanService
      * Compared in centavos so a 2dp float never rounds a genuine overshoot
      * into an accepted amount, or an exact match into a rejection.
      *
+     * `$schedules` are the source's periods when the caller has read them
+     * itself (retakeRestructureTerms() reads them with a locking read).
+     *
+     * @param  iterable<AmortizationSchedule>|null  $schedules
      * @return array{restructurable_balance: float, principal: float, shortfall: float, exceeds_balance: bool, remarks_required: bool, write_off_permission_required: bool}
      *
      * @throws ValidationException when the source cannot be restructured at all
      */
-    private function restructureFigures(Loan $sourceLoan, float $principal): array
+    private function restructureFigures(Loan $sourceLoan, float $principal, ?iterable $schedules = null): array
     {
         if (! in_array($sourceLoan->status, ['released', 'ongoing'], true)) {
             throw ValidationException::withMessages([
@@ -627,7 +631,9 @@ class LoanService
             ]);
         }
 
-        $outstanding = $this->totalOutstanding($sourceLoan);
+        $outstanding = $schedules === null
+            ? $this->totalOutstanding($sourceLoan)
+            : self::restructurableCentavos($schedules) / 100;
 
         if ($outstanding <= 0) {
             throw ValidationException::withMessages([
@@ -897,13 +903,23 @@ class LoanService
      */
     private function guardRestructurePrincipalEdit(Loan $loan, array $validated, ?User $user): array
     {
-        if ($loan->source_loan_id === null || ! array_key_exists('principal_amount', $validated)) {
+        if ($loan->source_loan_id === null) {
+            return $validated;
+        }
+
+        if (! array_key_exists('principal_amount', $validated)) {
+            $this->retakeRestructureTerms($loan, 'edit', $user);
+
             return $validated;
         }
 
         $principal = round((float) $validated['principal_amount'], 2);
 
+        // The same principal: the terms stand, but what the source owes may
+        // have moved since they were taken.
         if ($this->toCentavos($principal) === $this->toCentavos((float) $loan->principal_amount)) {
+            $this->retakeRestructureTerms($loan, 'edit', $user);
+
             return $validated;
         }
 
@@ -949,6 +965,92 @@ class LoanService
     }
 
     /**
+     * Take a restructure's approved snapshot again when what its source owes
+     * has FALLEN: `restructure_outstanding` (the source's open periods' unpaid
+     * principal, interest and penalty) and `restructure_shortfall` (how far
+     * the principal falls short of it). Called when the restructure is
+     * submitted or re-submitted, approved, and edited, so a payment, waiver or
+     * adjustment during review is what the approvers sign off. The release
+     * refuses any fall after the last of these (assertSourceStillCoversApproval()).
+     *
+     * A rise (penalty accrued since) is left alone, as the release leaves it:
+     * taking it would forgive debt nobody signed off, and it stays in the
+     * release's drift log. Following a fall only, the shortfall can only
+     * shrink, so a re-take never forgives more than was approved and needs no
+     * fresh remarks or `loans:write_off`.
+     *
+     * The caller holds the restructure's row lock. The source row is locked
+     * here, and its periods are read with a locking read, which InnoDB answers
+     * from the latest committed rows whatever snapshot the transaction holds.
+     * A principal now above what the source owes is refused, as on create.
+     * When the figures fell, they are written with a
+     * `restructure_terms_retaken` audit row (new values only, `retaken_on`
+     * naming the moment); when they
+     * didn't, nothing is written.
+     *
+     * @param  'submission'|'approval'|'edit'  $moment
+     *
+     * @throws ValidationException 422 when the source cannot be restructured at this principal any more
+     */
+    public function retakeRestructureTerms(Loan $loan, string $moment, ?User $user = null): void
+    {
+        if ($loan->source_loan_id === null) {
+            return;
+        }
+
+        // The stored figures as committed, by a locking read: the caller's
+        // copy may predate another edit that re-took them (lockEditableLoan()
+        // locks the row without refreshing it). The caller already holds this
+        // lock, so it waits for nothing.
+        $stored = Loan::whereKey($loan->getKey())->lockForUpdate()
+            ->first(['id', 'principal_amount', 'restructure_principal', 'restructure_outstanding', 'restructure_shortfall']);
+
+        // No approved snapshot to compare with: nothing to follow, and the
+        // release refuses terms without one.
+        if ($stored === null || $stored->restructure_principal === null
+            || $stored->restructure_outstanding === null || $stored->restructure_shortfall === null) {
+            return;
+        }
+
+        $source = $this->lockSourceLoan($loan->source_loan_id);
+        $schedules = $source->amortizationSchedules()->reorder()->lockForUpdate()->get();
+        $figures = $this->restructureFigures($source, (float) $stored->principal_amount, $schedules);
+
+        if ($figures['exceeds_balance']) {
+            throw ValidationException::withMessages([
+                'principal_amount' => ["The restructured principal cannot exceed the loan's restructurable balance of ₱".number_format($figures['restructurable_balance'], 2).'.'],
+            ]);
+        }
+
+        $before = [self::toCentavos((float) $stored->restructure_outstanding), self::toCentavos((float) $stored->restructure_shortfall)];
+        $after = [self::toCentavos($figures['restructurable_balance']), self::toCentavos($figures['shortfall'])];
+
+        if ($after[0] >= $before[0]) {
+            return;
+        }
+
+        $loan->update([
+            'restructure_outstanding' => $figures['restructurable_balance'],
+            'restructure_shortfall' => $figures['shortfall'],
+        ]);
+
+        AuditLogService::log(
+            action: 'restructure_terms_retaken',
+            auditable: $loan,
+            newValues: [
+                'restructure_outstanding' => $figures['restructurable_balance'],
+                'restructure_shortfall' => $figures['shortfall'],
+                'source_loan_id' => $source->id,
+                'retaken_on' => $moment,
+            ],
+            description: "Restructure {$loan->application_number} terms taken again at {$moment} from what the source owes now: "
+                .'outstanding '.Money::format($before[0]).' → '.Money::format($after[0])
+                .', shortfall '.Money::format($before[1]).' → '.Money::format($after[1]),
+            userId: $user?->id,
+        );
+    }
+
+    /**
      * `draft -> for_review`, and the point at which the loan's approval chain
      * comes into existence.
      *
@@ -978,6 +1080,7 @@ class LoanService
 
         return LoanWriteTransaction::run(function () use ($loan, $submitter): Loan {
             $this->lockLoanInStatus($loan, 'draft');
+            $this->retakeRestructureTerms($loan, 'submission', $submitter ?? auth()->user());
 
             $loan->update(['status' => 'for_review']);
 
@@ -1032,6 +1135,7 @@ class LoanService
     public function approveLocked(Loan $loan, User $approver, ?string $remarks): Loan
     {
         $this->guardApproval($loan, $approver);
+        $this->retakeRestructureTerms($loan, 'approval', $approver);
 
         $loan->update([
             'status' => 'approved',
@@ -1288,7 +1392,7 @@ class LoanService
         }, GeneratedNumberWrite::CO_MAKER_CONFLICT);
     }
 
-    public function release(Loan $loan, User $releaser, array $insurance = [], ?string $feeFingerprint = null): Loan
+    public function release(Loan $loan, User $releaser, array $insurance = [], ?string $feeFingerprint = null, string $method = 'cash', ?string $reference = null): Loan
     {
         $this->guardStatus($loan, 'approved', 'release');
 
@@ -1300,7 +1404,7 @@ class LoanService
         // A deadlock or lock wait timeout is a 409, not a 500. This is the
         // outermost transaction: LoanController::release() and the test
         // helpers are the only callers.
-        $released = LoanWriteTransaction::run(function () use ($loan, $releaser, $insurance, $feeFingerprint, $heldBefore) {
+        $released = LoanWriteTransaction::run(function () use ($loan, $releaser, $insurance, $feeFingerprint, $heldBefore, $method, $reference) {
             // THE FIRST STATEMENT IN THIS TRANSACTION, and it has to stay that
             // way. Under REPEATABLE READ the consistent snapshot is fixed by the
             // first plain SELECT, and neither a locking read nor DML moves it —
@@ -1343,6 +1447,8 @@ class LoanService
                 'loan_account_number' => $loanAccountNumber,
                 'released_by' => $releaser->id,
                 'released_at' => now(),
+                'release_method' => $method,
+                'release_reference' => $reference,
             ]);
 
             // The fee rules configured in Settings, charged here and nowhere
@@ -1451,8 +1557,18 @@ class LoanService
              * `released` loans without coming through here, and must not post a
              * journal for a disbursement that happened years ago under someone
              * else's books.
+             *
+             * A restructure posts J1 on this loan and, when principal is
+             * written off, J2 on its source, from the split
+             * closeRestructuredSource() stored. It has to be the FIRST
+             * journal posting in this transaction: it locks the allowance
+             * account row before any journal-number lock.
              */
-            app(AutomaticPoster::class)->loanRelease($loan, $releaser->id);
+            if ($lockedSource) {
+                app(AutomaticPoster::class)->restructureRelease($loan, $lockedSource, $releaser->id, $method);
+            } else {
+                app(AutomaticPoster::class)->loanRelease($loan, $releaser->id, $method);
+            }
 
             CollateralPledgeGuard::assertNoDoublePledge($lockedCollateralIds, $loan);
 
@@ -1524,6 +1640,28 @@ class LoanService
 
         $source = $locked->get($loan->source_loan_id);
 
+        $this->assertRestructureReleasable($loan, $source);
+
+        return $source;
+    }
+
+    /**
+     * Refuse to release a restructure unless its source is still open and
+     * what was approved still holds. The one rule the release (under the loan
+     * locks, lockAndGuardReleaseRows()) and its preview (restructureReleasePreview())
+     * apply, so the preview never shows a block the release would refuse.
+     *
+     * Catches a source already closed by a different restructure, terms with
+     * no approved snapshot, a principal edited after sign-off, terms approved
+     * while the premium owed still counted as balance, and any fall in what
+     * the source owes since approval (a payment, waiver or adjustment). A rise
+     * from penalty accrued since is accepted, and closeRestructuredSource()
+     * logs it as drift.
+     *
+     * @throws ValidationException 422 when the restructure must be re-approved, or its source is closed
+     */
+    private function assertRestructureReleasable(Loan $loan, ?Loan $source): void
+    {
         if (! $source || ! in_array($source->status, ['released', 'ongoing'], true)) {
             throw ValidationException::withMessages([
                 'source_loan_id' => ['The loan being restructured is no longer open, so this restructure cannot be released.'],
@@ -1558,6 +1696,7 @@ class LoanService
         if ($source->owesInsurancePremium()) {
             $periodsOwe = $this->toCentavos($this->totalOutstanding($source));
 
+            // The outstanding half is also caught by the fall check below; kept here for its clearer message.
             if ($this->toCentavos((float) $loan->restructure_principal) > $periodsOwe
                 || $this->toCentavos((float) $loan->restructure_outstanding) > $periodsOwe) {
                 throw ValidationException::withMessages([
@@ -1566,7 +1705,7 @@ class LoanService
             }
         }
 
-        return $source;
+        $this->assertSourceStillCoversApproval($loan, $source);
     }
 
     /**
@@ -1587,8 +1726,19 @@ class LoanService
         // Loan::PLEDGING_STATUSES, so it FREES a collateral rather than taking
         // one. CollateralPledgeGuard is deliberately not called from here.
         $previousStatus = $source->status;
-        $closingBalance = $this->totalOutstanding($source);
+        $parts = self::restructurableParts($source->amortizationSchedules()->reorder()->get());
+        $closingBalance = array_sum($parts) / 100;
         $carriedPremium = self::toCentavos((float) $source->insurance_remaining_balance);
+
+        // The split J1 and J2 post, from the live periods read before they are
+        // cleared. Stored on the new loan before anything posts.
+        $split = $this->restructureSplitOf($parts, $newLoan);
+        $newLoan->update([
+            'restructure_carried_principal' => self::pesos($split['carried_principal']),
+            'restructure_capitalised_interest' => self::pesos($split['capitalised_interest']),
+            'restructure_capitalised_penalty' => self::pesos($split['capitalised_penalty']),
+            'restructure_written_off_principal' => self::pesos($split['written_off_principal']),
+        ]);
 
         $this->clearOpenSchedules($source, $newLoan);
 
@@ -1659,11 +1809,138 @@ class LoanService
                 // The event destroys debt, so it carries the stated reason.
                 'remarks' => $newLoan->restructure_remarks,
                 'closed_by' => $releaser->id,
+                // The split the books post (J1, J2), stored on the new loan.
+                // `write_off_amount` above is the forgiveness approved
+                // (principal, interest and penalty); the books write off
+                // principal only.
+                'restructure_carried_principal' => $split['carried_principal'] / 100,
+                'restructure_capitalised_interest' => $split['capitalised_interest'] / 100,
+                'restructure_capitalised_penalty' => $split['capitalised_penalty'] / 100,
+                'restructure_written_off_principal' => $split['written_off_principal'] / 100,
             ],
-            description: "Loan closed as restructured — ₱{$closingBalance} moved to loan "
+            description: 'Loan closed as restructured — '.Money::format(self::toCentavos($closingBalance)).' moved to loan '
                 .($newLoan->loan_account_number ?? $newLoan->application_number)
-                .($writeOff > 0 ? ", ₱{$writeOff} written off ({$newLoan->restructure_remarks})" : ''),
+                .($writeOff > 0 || $split['written_off_principal'] > 0
+                    ? ', '.Money::format(self::toCentavos($writeOff)).' forgiven (approved), '
+                        .Money::format($split['written_off_principal']).' principal written off in the books'
+                        .(blank($newLoan->restructure_remarks) ? '' : " ({$newLoan->restructure_remarks})")
+                    : ''),
         );
+    }
+
+    /**
+     * The unpaid principal, interest and penalty of a loan's open periods,
+     * each in whole centavos: restructurableCentavos() taken apart, over the
+     * same periods and by the same per-period rule, so the three always add
+     * up to it. What a restructure's split is worked out from.
+     *
+     * @param  iterable<AmortizationSchedule>  $schedules  the loan's periods
+     * @return array{principal: int, interest: int, penalty: int}
+     */
+    public static function restructurableParts(iterable $schedules): array
+    {
+        $owed = fn (mixed $due, mixed $paid): int => max(0, self::toCentavos((float) ($due ?? 0)) - self::toCentavos((float) ($paid ?? 0)));
+        $parts = ['principal' => 0, 'interest' => 0, 'penalty' => 0];
+
+        foreach ($schedules as $s) {
+            if (! in_array($s->status, ['pending', 'partial', 'overdue'], true)) {
+                continue;
+            }
+
+            $parts['principal'] += $owed($s->principal_due, $s->principal_paid);
+            $parts['interest'] += $owed($s->interest_due, $s->interest_paid);
+            $parts['penalty'] += $owed($s->penalty_amount, $s->penalty_paid);
+        }
+
+        return $parts;
+    }
+
+    /**
+     * GET /loans/{id}/release-preview's `restructure` block: what releasing
+     * this restructure would post, by the code the release posts it with
+     * (restructurableParts() of the source's live periods, then
+     * PostingRules::restructureSplit()), writing nothing. 2dp strings.
+     *
+     * `collected_now` is every deduction the release withholds, insurance
+     * included, which a restructure collects from the member; nothing is
+     * paid out.
+     *
+     * @return array{carried_principal: string, capitalised_interest: string, capitalised_penalty: string, written_off_principal: string, collected_now: string, paid_out: string}
+     *
+     * @throws ValidationException whenever the release would refuse it (assertRestructureReleasable())
+     */
+    public function restructureReleasePreview(Loan $loan, string $collectedNow): array
+    {
+        $source = $loan->sourceLoan()->first();
+
+        $this->assertRestructureReleasable($loan, $source);
+        $split = $this->restructureSplitOf(self::restructurableParts($source->amortizationSchedules()->reorder()->get()), $loan);
+
+        return [
+            'carried_principal' => self::pesos($split['carried_principal']),
+            'capitalised_interest' => self::pesos($split['capitalised_interest']),
+            'capitalised_penalty' => self::pesos($split['capitalised_penalty']),
+            'written_off_principal' => self::pesos($split['written_off_principal']),
+            'collected_now' => self::pesos(self::toCentavos((float) $collectedNow)),
+            'paid_out' => self::pesos(0),
+        ];
+    }
+
+    /**
+     * Refuse a restructure when what its source owes on its open periods has
+     * fallen since approval (below `restructure_outstanding`, the approved
+     * snapshot), or below the new principal: the source was paid down,
+     * waived or adjusted after sign-off, so the forgiveness approved no longer
+     * matches, and a restructure pays nothing out. Staff send it back for
+     * approval. A rise (penalty accrued since) is accepted.
+     *
+     * @throws ValidationException 422 on `principal_amount`
+     */
+    private function assertSourceStillCoversApproval(Loan $loan, Loan $source): void
+    {
+        $owed = array_sum(self::restructurableParts($source->amortizationSchedules()->reorder()->get()));
+        $approved = $loan->restructure_outstanding === null ? 0 : self::toCentavos((float) $loan->restructure_outstanding);
+
+        if ($owed < $approved || self::toCentavos((float) $loan->principal_amount) > $owed) {
+            throw ValidationException::withMessages([
+                'principal_amount' => [self::sourceFellMessage($loan->status)],
+            ]);
+        }
+    }
+
+    /**
+     * The refusal for a source that owes less than was approved, worded by
+     * the restructure's status: one still in review is sent back, an approved
+     * one can't be, so it is voided and created again.
+     */
+    public static function sourceFellMessage(string $status): string
+    {
+        return $status === 'approved'
+            ? 'The source loan was paid down or adjusted after this restructure was approved. Void this restructure and create it again with the current balance.'
+            : 'The source loan was paid down or adjusted after approval. Send the restructure back for approval again.';
+    }
+
+    /**
+     * The restructure split of `$loan`'s principal over its source's parts,
+     * in centavos (PostingRules::restructureSplit()).
+     *
+     * @param  array{principal: int, interest: int, penalty: int}  $parts
+     * @return array{carried_principal: int, capitalised_interest: int, capitalised_penalty: int, written_off_principal: int}
+     */
+    private function restructureSplitOf(array $parts, Loan $loan): array
+    {
+        return Accounting\PostingRules::restructureSplit(
+            $parts['principal'],
+            $parts['interest'],
+            $parts['penalty'],
+            self::toCentavos((float) $loan->principal_amount),
+        );
+    }
+
+    /** Whole centavos as the 2dp peso string a `decimal:2` column and the previews hold. */
+    private static function pesos(int $centavos): string
+    {
+        return sprintf('%s%d.%02d', $centavos < 0 ? '-' : '', intdiv(abs($centavos), 100), abs($centavos) % 100);
     }
 
     /**

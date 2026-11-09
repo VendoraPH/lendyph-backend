@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use LogicException;
 
 /**
@@ -34,6 +35,16 @@ class ReminderEvent extends Model
         return [
             'created_at' => 'datetime',
         ];
+    }
+
+    public function queueItem(): BelongsTo
+    {
+        return $this->belongsTo(ReminderQueueItem::class, 'queue_item_id');
+    }
+
+    public function message(): BelongsTo
+    {
+        return $this->belongsTo(ReminderMessage::class, 'message_id');
     }
 
     /**
