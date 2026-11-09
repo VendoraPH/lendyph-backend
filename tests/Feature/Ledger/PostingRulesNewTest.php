@@ -446,18 +446,29 @@ class PostingRulesNewTest extends TestCase
         $this->assertSame(['interest' => 0, 'penalty' => 0], $this->poster()->unrecognisedDeferral($new->fresh()));
     }
 
-    public function test_a_reduction_that_leaves_periods_open_keeps_the_deferral(): void
+    /**
+     * Since 2026-11-09 a reduction that leaves periods open clears only its
+     * share: ₱10,000.00 of ₱60,000.00 outstanding clears a sixth of the
+     * deferral (tests/Feature/Ledger/Deferral covers the rest).
+     */
+    public function test_a_reduction_that_leaves_periods_open_clears_only_its_share_of_the_deferral(): void
     {
         $source = $this->createReleasedLoan();
         $new = $this->restructureOf($this->createReleasedLoan(), $source, 5_000_000, 700_000, 300_000, 0);
         $this->seedChartOfAccounts();
         $this->poster()->restructureRelease($new, $source, $this->admin->id, 'cash');
-        $adjustment = $this->balanceAdjustmentOn($new, -100_000);
+        $id = $this->postJson("/api/loans/{$new->id}/adjustments", [
+            'adjustment_type' => 'balance_adjustment',
+            'new_values' => ['adjustment_amount' => -10_000],
+        ])->assertCreated()->json('data.id');
+        $this->patchJson("/api/loan-adjustments/{$id}/approve")->assertOk();
+        $this->patchJson("/api/loan-adjustments/{$id}/apply")->assertOk();
 
-        $journal = $this->poster()->balanceAdjustment($adjustment, -100_000, $this->admin->id);
+        $journal = $this->poster()->balanceAdjustment(LoanAdjustment::findOrFail($id), -1_000_000, $this->admin->id);
 
-        $this->assertSame(0, $this->sumOn($journal, '1210', 'debit'));
-        $this->assertSame(['interest' => 700_000, 'penalty' => 300_000], $this->poster()->unrecognisedDeferral($new->fresh()));
+        $this->assertSame(166_667, $this->sumOn($journal, '1210', 'debit'));
+        $this->assertSame(0, $this->described($journal, PostingRules::DEFERRAL_CLEARED_LINE, 'debit'));
+        $this->assertSame(['interest' => 583_333, 'penalty' => 250_000], $this->poster()->unrecognisedDeferral($new->fresh()));
     }
 
     // ── Share capital entries ──
