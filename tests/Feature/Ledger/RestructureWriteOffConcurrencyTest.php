@@ -6,6 +6,8 @@ use App\Models\AccountingJournal;
 use App\Models\Loan;
 use App\Models\ShareCapitalLedger;
 use App\Services\Accounting\AutomaticPoster;
+use App\Services\Accounting\JournalPoster;
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 use LogicException;
 use Tests\TestCase;
@@ -83,6 +85,53 @@ class RestructureWriteOffConcurrencyTest extends TestCase
         $this->assertSame(300_000, $this->sumOn($writeOff, '1200', 'debit'));
         $this->assertSame(0, $this->sumOn($writeOff, '5140', 'debit'));
         $this->assertSame(300_000, $this->sumOn($writeOff, '1110', 'credit'));
+    }
+
+    /**
+     * While J2's transaction is open, a bookkeeper's post of an allowance
+     * draft on the other connection waits for it (and, with a one-second
+     * lock wait here, gives up) instead of slipping in. Once J2 commits, the
+     * same post goes through.
+     */
+    public function test_a_bookkeeper_post_on_the_allowance_waits_for_the_write_off_and_never_slips_in(): void
+    {
+        $source = $this->createReleasedLoan();
+        $new = $this->restructureWritingOff($this->createReleasedLoan(), $source, 300_000);
+        $this->seedChartOfAccounts();
+        $this->postSimpleJournal('5140', '1200', 300_000);
+        // A ₱1,000.00 release of the allowance, drafted earlier.
+        $draft = $this->draftJournal([
+            ['account_id' => $this->account('1200'), 'debit' => 100_000, 'credit' => 0],
+            ['account_id' => $this->account('5140'), 'debit' => 0, 'credit' => 100_000],
+        ]);
+        $outcome = null;
+
+        $writeOff = DB::transaction(function () use ($source, $new, $draft, &$outcome): AccountingJournal {
+            $writeOff = app(AutomaticPoster::class)->restructureRelease($new, $source, $this->admin->id, 'cash')['write_off'];
+
+            $outcome = $this->onTheOtherConnection(function () use ($draft): string {
+                try {
+                    app(JournalPoster::class)->post(AccountingJournal::query()->findOrFail($draft->id), $this->admin->id);
+
+                    return 'posted';
+                } catch (QueryException $e) {
+                    if (($e->errorInfo[1] ?? null) === 1205) {
+                        return 'waited';
+                    }
+
+                    throw $e;
+                }
+            });
+
+            return $writeOff;
+        });
+
+        $this->assertSame('waited', $outcome);
+        $this->assertSame(300_000, $this->sumOn($writeOff, '1200', 'debit'));
+        $this->assertSame(0, $this->sumOn($writeOff, '5140', 'debit'));
+        $this->assertSame('draft', $draft->fresh()->status);
+
+        $this->assertSame('posted', app(JournalPoster::class)->post($draft->fresh(), $this->admin->id)->status);
     }
 
     /**
