@@ -36,7 +36,7 @@ const HISTORY_ENTRY_KEYS = [
 
 const POLICY_FLAG_KEYS = ['id', 'type', 'label', 'detail', 'triggered_at', 'loan_id'];
 
-const DECISION_KEYS = ['id', 'borrower_id', 'credit_score_id', 'decision', 'reason', 'remarks', 'decided_by', 'decided_at', 'loan_id', 'revision_version'];
+const DECISION_KEYS = ['id', 'borrower_id', 'credit_score_id', 'decision', 'reason', 'remarks', 'decided_by', 'decided_at', 'loan_id', 'loan_account_number', 'revision_version'];
 
 const RISK_ALERT_KEYS = ['id', 'borrower_id', 'borrower_name', 'message', 'previous_score', 'current_score', 'severity', 'created_at', 'borrower_code', 'kind'];
 

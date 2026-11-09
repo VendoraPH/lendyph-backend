@@ -30,13 +30,14 @@ use App\Services\AutoPayService;
 use App\Services\BranchAccess;
 use App\Services\CollateralAttacher;
 use App\Services\CollateralWriteTransaction;
+use App\Services\ContactVisibility;
+use App\Services\CreditScoring\PolicyFlags;
 use App\Services\LikePattern;
 use App\Services\LoanAdjustmentService;
 use App\Services\LoanListTotals;
 use App\Services\LoanReleaseFeeService;
 use App\Services\LoanService;
 use App\Services\PersistedScheduleFigures;
-use App\Services\Reminders\Api\ContactVisibility;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Exceptions\HttpResponseException;
@@ -743,6 +744,10 @@ DESC,
             }
 
             CollateralAttacher::detachAllLocked($locked, $collaterals->keys()->all(), request()->user());
+
+            // The draft's credit flags are closed with it, never left to
+            // become the member's own when the delete nulls their loan.
+            app(PolicyFlags::class)->closeForDeletedLoan((int) $locked->getKey(), Carbon::now());
 
             $locked->delete();
         });

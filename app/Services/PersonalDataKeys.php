@@ -7,13 +7,13 @@ use App\Models\BorrowerNotificationPreference;
 use App\Models\CoMaker;
 use App\Models\CreditApplicationProfile;
 use App\Models\CreditDecision;
+use App\Models\ReminderPause;
 use App\Models\User;
-use App\Services\Reminders\Api\ContactVisibility;
 use Illuminate\Support\Arr;
 
 /**
- * The personal fields of a member, a co-maker and a member's credit
- * application, by the round fz personal-data rule: they need `borrowers:view`
+ * The personal fields of a member, a co-maker, a member's credit
+ * application and a reminder pause, by the round fz personal-data rule: they need `borrowers:view`
  * and the member's own branch (ContactVisibility). One list for every place
  * that leaves them out: a co-maker shown slim (CoMakerResource::slim()) and the
  * Audit Trail's list, detail and CSV, whose rows store the whole record.
@@ -69,6 +69,16 @@ final class PersonalDataKeys
     ];
 
     /**
+     * What staff wrote about why reminders were paused: on a member's or a
+     * loan's pause it is often about the member (hospital, a death in the
+     * family). The reminder screens hide a member pause's reason the same way
+     * (ReminderPauseResource). An update's new values hold only what changed,
+     * so the row can't always tell whose pause it was: every pause's reason is
+     * left out.
+     */
+    public const REMINDER_PAUSE = ['reason'];
+
+    /**
      * The fields each kind of audit target leaves out.
      */
     private const LEFT_OUT_BY_AUDIT_TARGET = [
@@ -76,6 +86,7 @@ final class PersonalDataKeys
         BorrowerNotificationPreference::class => self::NOTIFICATION_PREFERENCE,
         CreditDecision::class => self::CREDIT_DECISION,
         CreditApplicationProfile::class => self::CREDIT_APPLICATION_PROFILE,
+        ReminderPause::class => self::REMINDER_PAUSE,
     ];
 
     /**

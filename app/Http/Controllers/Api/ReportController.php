@@ -12,7 +12,7 @@ use App\Models\AmortizationSchedule;
 use App\Models\Borrower;
 use App\Models\Loan;
 use App\Services\BranchAccess;
-use App\Services\Reminders\Api\ContactVisibility;
+use App\Services\ContactVisibility;
 use App\Services\ReportService;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;

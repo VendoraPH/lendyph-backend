@@ -32,6 +32,9 @@ use Illuminate\Support\Facades\DB;
  *   loan, so one that records only the notice never hides earlier details.
  * - `noticeAcknowledged`: whether the application loan's own profile
  *   records the member's acknowledgement of the credit assessment notice.
+ * - `noticeVersion`: the notice version that acknowledgement was given
+ *   under, or null without one. PolicyFlags compares it with the current
+ *   version, so an acknowledgement of an earlier notice raises the flag.
  * - `applicationLoan`: the loan being assessed, if any; it is never part of
  *   `loans`, which holds released loans only.
  */
@@ -52,6 +55,7 @@ final class MemberCreditData
         public readonly ?Loan $applicationLoan,
         public readonly Carbon $asOf,
         public readonly bool $noticeAcknowledged = false,
+        public readonly ?string $noticeVersion = null,
     ) {}
 
     public static function load(int $borrowerId, ?Loan $applicationLoan = null, ?Carbon $asOf = null): self
@@ -107,6 +111,7 @@ final class MemberCreditData
             $applicationLoan,
             $asOf,
             $own?->notice_acknowledged_at !== null,
+            $own?->notice_acknowledged_at === null ? null : $own->notice_version,
         );
     }
 

@@ -21,7 +21,9 @@ class StoreDocumentRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'file' => ['required', 'file', 'max:10240', 'mimes:jpg,jpeg,png,pdf,doc,docx'],
+            // `mimes` reads the bytes; `extensions` the file's own name, so a
+            // PDF named receipt.bat is refused rather than stored as .bat.
+            'file' => ['required', 'file', 'max:10240', 'mimes:jpg,jpeg,png,pdf,doc,docx', 'extensions:jpg,jpeg,png,pdf,doc,docx'],
             // The type becomes part of the stored path, so letters, digits,
             // spaces, `_` and `-` only.
             'type' => [

@@ -10,6 +10,7 @@ use App\Models\ReminderPause;
 use App\Models\ReminderQueueItem;
 use App\Models\ReminderRule;
 use App\Models\ReminderTemplate;
+use App\Services\ContactVisibility;
 use App\Services\Reminders\FireDate;
 use App\Services\Reminders\ReminderClock;
 use App\Services\Reminders\ReminderEligibility;

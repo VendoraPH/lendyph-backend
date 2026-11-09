@@ -2,6 +2,8 @@
 
 namespace App\Http\Resources;
 
+use App\Models\AccountingJournal;
+use App\Models\AccountingJournalLine;
 use App\Models\AuditLog;
 use App\Models\Branch;
 use App\Models\Collateral;
@@ -66,6 +68,18 @@ class AuditLogResource extends JsonResource
     private const COLLATERAL_KEYS = ['collateral_id', 'inherited_collateral_ids'];
 
     /**
+     * Change-list fields that hold a journal's id: read by the journal's
+     * number ("JE-000014"), else its reference, never by its database id.
+     */
+    private const JOURNAL_KEYS = ['journal_id', 'accounting_journal_id', 'reverses_journal_id', 'reversed_by_journal_id'];
+
+    /**
+     * Change-list fields that hold a journal line's id: read as its journal's
+     * number and the line's own number ("JE-000027 line 2").
+     */
+    private const JOURNAL_LINE_KEYS = ['matched_journal_line_id'];
+
+    /**
      * A loan product's columns stored as a percentage, checked against the
      * request rules (`max:100`) and LoanService::productFeeDeductions(), which
      * charges the three fees as percentages. Read as a percent, never rounded.
@@ -124,8 +138,9 @@ class AuditLogResource extends JsonResource
     private const TIMESTAMP_WITH_SECONDS = 'M j, Y, g:i:s A';
 
     /**
-     * Load, in ONE query each, the users, roles, branches, loan products and
-     * approval steps these rows' old and new values name, and hand the sets to
+     * Load, in ONE query each, the users, roles, branches, loan products,
+     * loans, collaterals, journals, journal lines and approval steps these
+     * rows' old and new values name, and hand the sets to
      * every row so the change list can show names instead of ids and keys
      * without a query per row.
      *
@@ -139,6 +154,8 @@ class AuditLogResource extends JsonResource
         $branchIds = self::changeIds($logs, self::BRANCH_KEYS);
         $productIds = self::changeIds($logs, self::PRODUCT_KEYS);
         $collateralIds = self::changeIds($logs, self::COLLATERAL_KEYS);
+        $journalIds = self::changeIds($logs, self::JOURNAL_KEYS);
+        $journalLineIds = self::changeIds($logs, self::JOURNAL_LINE_KEYS);
         $loanIds = $logs->flatMap(fn (AuditLog $log) => self::changeIds(collect([$log]), self::loanKeysOf($log)))->unique()->values();
         $roleKeys = self::changeValues($logs, ['role', ...self::STEP_KEYS])->filter(fn ($key) => is_string($key))->unique()->values();
         $stepLoanIds = $logs
@@ -178,6 +195,20 @@ class AuditLogResource extends JsonResource
                 ->mapWithKeys(fn (Collateral $collateral) => [$collateral->id => collect([$collateral->type_name, $collateral->detail_value])
                     ->filter(fn ($part) => filled($part))->implode(': ') ?: "Collateral #{$collateral->id}"]);
 
+        $journals = $journalIds->isEmpty()
+            ? collect()
+            : AccountingJournal::query()->whereIn('id', $journalIds)->get(['id', 'journal_no', 'reference'])
+                ->mapWithKeys(fn (AccountingJournal $journal) => [$journal->id => self::journalName($journal->journal_no, $journal->reference)])
+                ->filter();
+
+        $journalLines = $journalLineIds->isEmpty()
+            ? collect()
+            : AccountingJournalLine::query()
+                ->join('accounting_journals', 'accounting_journals.id', '=', 'accounting_journal_lines.accounting_journal_id')
+                ->whereIn('accounting_journal_lines.id', $journalLineIds)
+                ->get(['accounting_journal_lines.id', 'accounting_journal_lines.accounting_journal_id', 'accounting_journal_lines.line_no', 'accounting_journals.journal_no', 'accounting_journals.reference'])
+                ->mapWithKeys(fn (AccountingJournalLine $line) => [$line->id => (self::journalName($line->journal_no, $line->reference) ?? "Journal #{$line->accounting_journal_id}")." line {$line->line_no}"]);
+
         // Keyed by loan and step id; a later round's snapshot wins.
         $steps = $stepLoanIds->isEmpty()
             ? collect()
@@ -191,7 +222,18 @@ class AuditLogResource extends JsonResource
             ->setRelation('changeProducts', $products)
             ->setRelation('changeSteps', $steps)
             ->setRelation('changeLoans', $loans)
-            ->setRelation('changeCollaterals', $collaterals));
+            ->setRelation('changeCollaterals', $collaterals)
+            ->setRelation('changeJournals', $journals)
+            ->setRelation('changeJournalLines', $journalLines));
+    }
+
+    /**
+     * A journal as people know it: its number once posted, else its
+     * reference, else null (the caller then reads it by id in words).
+     */
+    private static function journalName(?string $number, ?string $reference): ?string
+    {
+        return filled($number) ? $number : (filled($reference) ? $reference : null);
     }
 
     /**
@@ -243,7 +285,8 @@ class AuditLogResource extends JsonResource
 
     /**
      * A row's old and new values as $user may read them: without the personal
-     * fields of a member, co-maker, contact preference or credit row for a
+     * fields of a member, co-maker, contact preference, reminder pause or
+     * credit row for a
      * caller without `borrowers:view` (and, for credit rows,
      * `credit_scoring:view`) (PersonalDataKeys). The list, the detail and the
      * CSV all read them through here. The stored row is never changed.
@@ -429,7 +472,8 @@ class AuditLogResource extends JsonResource
 
     /**
      * A value in plain words: a user, branch, role, product, loan, collateral
-     * or approval step by name, a fee's value by its row's type, a product's
+     * or approval step by name, a journal or journal line by the journal's
+     * number, a fee's value by its row's type, a product's
      * rate as a percent, a boolean as Yes or No, a
      * timestamp in Manila time, a date as its date, money in pesos and an enum
      * key in words. Anything else, a status and a permission included, as
@@ -463,8 +507,10 @@ class AuditLogResource extends JsonResource
             && (is_string($value) || (is_array($value) && $value !== [] && array_all($value, fn (mixed $item): bool => is_string($item))));
         $isLoan = preg_match(self::LOAN_KEY, $field) === 1;
         $isCollateral = in_array($field, self::COLLATERAL_KEYS, true);
+        $isJournal = in_array($field, self::JOURNAL_KEYS, true);
+        $isJournalLine = in_array($field, self::JOURNAL_LINE_KEYS, true);
 
-        if (! $isUser && ! $isBranch && ! $isRole && ! $isProduct && ! $isStep && ! $isLoan && ! $isCollateral) {
+        if (! $isUser && ! $isBranch && ! $isRole && ! $isProduct && ! $isStep && ! $isLoan && ! $isCollateral && ! $isJournal && ! $isJournalLine) {
             return null;
         }
 
@@ -482,6 +528,14 @@ class AuditLogResource extends JsonResource
 
         if ($isCollateral) {
             return $this->idsByName($value, 'changeCollaterals', 'Collateral');
+        }
+
+        if ($isJournal) {
+            return $this->idsByName($value, 'changeJournals', 'Journal');
+        }
+
+        if ($isJournalLine) {
+            return $this->idsByName($value, 'changeJournalLines', 'Journal line');
         }
 
         if ($isProduct) {

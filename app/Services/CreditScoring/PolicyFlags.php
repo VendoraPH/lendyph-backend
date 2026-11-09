@@ -16,7 +16,7 @@ use Carbon\Carbon;
  * loan 1 to 30 days past due, active loans (outside lenders included) above
  * the settings' limit, a possible duplicate member record, a debt service
  * ratio above the caution level, and an application whose credit assessment
- * notice isn't recorded.
+ * notice isn't recorded under the current notice version.
  *
  * `scope` says where a flag lives: `member` flags describe the member and
  * are kept by the member's own score; `loan` flags come from one
@@ -96,6 +96,8 @@ final class PolicyFlags
 
             if (! $data->noticeAcknowledged) {
                 $raise('notice_not_recorded', 'The member\'s acknowledgement of the credit assessment notice is not recorded for this loan.', 'loan');
+            } elseif ($data->noticeVersion !== $settings->notice_version) {
+                $raise('notice_not_recorded', "The member acknowledged an earlier version of the credit assessment notice ({$data->noticeVersion}); the current version ({$settings->notice_version}) is not recorded for this loan.", 'loan');
             }
         }
 
@@ -108,26 +110,30 @@ final class PolicyFlags
      * longer raised is cleared. A cleared flag is never reopened; the
      * condition coming back opens a new one.
      *
+     * Open flags are kept by rule and loan. Should two open flags ever share
+     * them, the earliest is the one seen again and the others are cleared, so
+     * none is left open with nothing keeping it in step.
+     *
      * @param  list<array{rule_key: string, type: string, label: string, detail: string, scope: string}>  $raised
      */
     public function sync(int $borrowerId, ?int $loanId, array $raised, Carbon $now): void
     {
         $scope = $loanId === null ? 'member' : 'loan';
-        $raised = collect($raised)->where('scope', $scope)->keyBy('rule_key');
+        $raised = collect($raised)->where('scope', $scope)->keyBy(fn (array $flag) => self::key($flag['rule_key'], $loanId));
 
         $open = CreditPolicyFlag::query()
             ->where('borrower_id', $borrowerId)
             ->when($loanId === null, fn ($q) => $q->whereNull('loan_id'), fn ($q) => $q->where('loan_id', $loanId))
             ->open()
+            ->orderBy('first_triggered_at')
+            ->orderBy('id')
             ->get()
-            ->keyBy('rule_key');
+            ->groupBy(fn (CreditPolicyFlag $flag) => self::key($flag->rule_key, $flag->loan_id === null ? null : (int) $flag->loan_id));
 
-        foreach ($open as $key => $flag) {
-            if ($raised->has($key)) {
-                $flag->update(['detail' => $raised[$key]['detail'], 'label' => $raised[$key]['label'], 'last_seen_at' => $now]);
-            } else {
-                $flag->update(['cleared_at' => $now]);
-            }
+        foreach ($open as $key => $flags) {
+            $kept = $raised->has($key) ? $flags->shift() : null;
+            $kept?->update(['detail' => $raised[$key]['detail'], 'label' => $raised[$key]['label'], 'last_seen_at' => $now]);
+            $flags->each(fn (CreditPolicyFlag $flag) => $flag->update(['cleared_at' => $now]));
         }
 
         foreach ($raised as $key => $flag) {
@@ -135,7 +141,7 @@ final class PolicyFlags
                 CreditPolicyFlag::create([
                     'borrower_id' => $borrowerId,
                     'loan_id' => $loanId,
-                    'rule_key' => $key,
+                    'rule_key' => $flag['rule_key'],
                     'type' => $flag['type'],
                     'label' => $flag['label'],
                     'detail' => $flag['detail'],
@@ -144,6 +150,22 @@ final class PolicyFlags
                 ]);
             }
         }
+    }
+
+    /**
+     * Close a loan application's open flags before the loan row is deleted.
+     * The flags' `loan_id` is nulled when the loan goes, which would otherwise
+     * leave them open as member-wide flags; closed, they are never read as
+     * the member's (Lead's call 11).
+     */
+    public function closeForDeletedLoan(int $loanId, Carbon $now): void
+    {
+        CreditPolicyFlag::query()->where('loan_id', $loanId)->open()->update(['cleared_at' => $now]);
+    }
+
+    private static function key(string $ruleKey, ?int $loanId): string
+    {
+        return $ruleKey.'|'.($loanId ?? 'member');
     }
 
     private static function percent(string|float|int $value): string

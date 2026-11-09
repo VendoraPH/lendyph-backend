@@ -3,7 +3,7 @@
 namespace App\Http\Resources\Reminders;
 
 use App\Models\ReminderPause;
-use App\Services\Reminders\Api\ContactVisibility;
+use App\Services\ContactVisibility;
 use App\Services\Reminders\Api\ReminderFormat;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;

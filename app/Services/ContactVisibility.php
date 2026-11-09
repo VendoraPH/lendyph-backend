@@ -1,9 +1,8 @@
 <?php
 
-namespace App\Services\Reminders\Api;
+namespace App\Services;
 
 use App\Models\User;
-use App\Services\BranchAccess;
 
 /**
  * The round fz personal-data rule on the reminder screens (Arvin,
