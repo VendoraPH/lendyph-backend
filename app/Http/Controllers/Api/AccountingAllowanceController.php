@@ -71,9 +71,9 @@ class AccountingAllowanceController extends Controller
         )),
         responses: [
             new OA\Response(response: 201, description: 'The run'),
-            new OA\Response(response: 403, description: 'Missing accounting:allowance or branches:view_all'),
+            new OA\Response(response: 403, description: 'Missing accounting:view, accounting:allowance or branches:view_all'),
             new OA\Response(response: 409, description: '"The figures changed since the preview; review them again", or another allowance write at the same time'),
-            new OA\Response(response: 422, description: 'Nothing changes, the period is closed, the date is in the future, or the books or a default account aren\'t set up'),
+            new OA\Response(response: 422, description: 'In words, with dates as "Nov 9, 2026": nothing changes; the period is closed; the date is in the future; an allowance was already posted as of a later date (`errors.as_of`); 1200 holds a balance on journals with no branch, or has a no-branch entry dated after `as_of` (`errors.allowance`; move it with one entry per branch, or post as of that date or later); or the books or a default account aren\'t set up'),
         ],
     )]
     public function store(PostAllowanceRequest $request): JsonResponse

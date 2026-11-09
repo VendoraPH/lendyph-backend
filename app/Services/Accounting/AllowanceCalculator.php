@@ -5,6 +5,7 @@ namespace App\Services\Accounting;
 use App\Models\AccountingJournal;
 use App\Models\Branch;
 use App\Services\ReportService;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -18,9 +19,10 @@ use Illuminate\Support\Facades\DB;
  *   posting and the report count the same loans.
  * - The rates are {@see ReportService::PROVISION_RATES}, the one source;
  *   91–120 and over 120 days both take its `over_90` rate. They are used
- *   exactly, as fractions of integers, and each bucket's required
- *   amount is rounded half up to the centavo once. A branch's required
- *   amount is the sum of its buckets.
+ *   exactly, as reduced fractions of integers, and each bucket's required
+ *   amount is rounded half up to the centavo once, with no rate too precise
+ *   to work out ({@see self::requiredAt()}). A branch's required amount is
+ *   the sum of its buckets.
  * - Money is integer centavos throughout.
  */
 final class AllowanceCalculator
@@ -115,8 +117,13 @@ final class AllowanceCalculator
      * Each branch's 1200 balance on `as_of`, as a positive credit: the
      * posted and reversed journals dated on or before it, on the account
      * `allowance_credit_losses` maps to, credit − debit. `unassigned` is the
-     * balance on journals with no branch. Zeros when there are no books or
-     * no allowance account.
+     * balance on journals with no branch, and `unassigned_latest_after` the
+     * date of the latest no-branch journal with a 1200 line dated after
+     * `as_of` and no later than today in Manila (null when there is none),
+     * whatever its balance. A no-branch entry dated in the future (a typo,
+     * and its reversal) is left out, so it never blocks every run until its
+     * date comes. Zeros and null
+     * when there are no books or no allowance account.
      *
      * Without `$lock` (a preview) it is one plain read. With it, the caller
      * already holds the allowance account row lock, and the balance comes
@@ -127,11 +134,11 @@ final class AllowanceCalculator
      * predate the lock and miss a write-off committed since; a locking read
      * answers from the latest committed rows.
      *
-     * @return array{branches: array<int, int>, unassigned: int}
+     * @return array{branches: array<int, int>, unassigned: int, unassigned_latest_after: string|null}
      */
     public function balances(string $asOf, bool $lock = false): array
     {
-        $none = ['branches' => [], 'unassigned' => 0];
+        $none = ['branches' => [], 'unassigned' => 0, 'unassigned_latest_after' => null];
 
         if (! AccountMap::chartExists()) {
             return $none;
@@ -144,12 +151,22 @@ final class AllowanceCalculator
         }
 
         $accountId = $map->accountFor('allowance_credit_losses');
-        $byBranch = $lock ? $this->lockedBalances($accountId, $asOf) : $this->plainBalances($accountId, $asOf);
+        $byJournal = $lock ? $this->lockedBalances($accountId) : $this->plainBalances($accountId);
 
         $branches = [];
         $unassigned = 0;
+        $unassignedLatestAfter = null;
+        $today = Carbon::today(config('app.timezone'))->toDateString();
 
-        foreach ($byBranch as [$branchId, $balance]) {
+        foreach ($byJournal as [$branchId, $balance, $date]) {
+            if ($date > $asOf) {
+                if ($branchId === null && $date <= $today && ($unassignedLatestAfter === null || $date > $unassignedLatestAfter)) {
+                    $unassignedLatestAfter = $date;
+                }
+
+                continue;
+            }
+
             if ($branchId === null) {
                 $unassigned += $balance;
             } else {
@@ -159,7 +176,7 @@ final class AllowanceCalculator
 
         ksort($branches);
 
-        return ['branches' => $branches, 'unassigned' => $unassigned];
+        return ['branches' => $branches, 'unassigned' => $unassigned, 'unassigned_latest_after' => $unassignedLatestAfter];
     }
 
     /**
@@ -253,28 +270,89 @@ final class AllowanceCalculator
         ];
     }
 
-    /**
-     * `$principal` centavos at a bucket's rate, exactly, then rounded half
-     * up to the centavo, in integers: with the rate as `num / den`,
-     * `intdiv(2 × p × num + den, 2 × den)` is p × rate + ½ rounded down,
-     * which is half up for p ≥ 0. The principal is never negative
-     * (LoanListTotals floors each period at zero).
-     *
-     * @throws \LogicException when the product would not fit in an integer
-     */
+    /** `$principal` centavos at a bucket's rate: {@see self::requiredAt()}. */
     public static function requiredFor(int $principal, string $bucket): int
+    {
+        return self::requiredAt($principal, self::decimal(self::RATE_KEYS[$bucket]));
+    }
+
+    /**
+     * `$principal` centavos at `$rate` (a decimal string, "0.05"), exactly,
+     * then rounded half up to the centavo, in integers only.
+     *
+     * With the rate as the reduced fraction `num / den` and the principal
+     * split as `p = q × den + r` (0 ≤ r < den), p × rate = q × num + r × num
+     * / den, so the result is `q × num + intdiv(2 × r × num + den, 2 × den)`:
+     * the whole part needs no rounding, and the remainder's share is rounded
+     * half up once. The remainder's product is worked out by halving and
+     * doubling ({@see self::mulDiv()}), so it never overflows, however many
+     * decimals the rate has. The principal is never negative (LoanListTotals
+     * floors each period at zero).
+     *
+     * @throws \LogicException only when the result itself is too large for an integer
+     */
+    public static function requiredAt(int $principal, string $rate): int
     {
         if ($principal <= 0) {
             return 0;
         }
 
-        [$numerator, $denominator] = self::fraction(self::RATE_KEYS[$bucket]);
+        [$numerator, $denominator] = self::fraction($rate);
+        $whole = intdiv($principal, $denominator);
+        $remainder = $principal % $denominator;
 
-        if ($numerator > 0 && $principal > intdiv(PHP_INT_MAX - $denominator, 2 * $numerator)) {
-            throw new \LogicException("Allowance: {$principal} centavos at the {$bucket} rate is too large to work out exactly.");
+        if ($numerator > 0 && $whole > intdiv(PHP_INT_MAX, $numerator)) {
+            throw new \LogicException("Allowance: {$principal} centavos at a rate of {$rate} is too large to work out exactly.");
         }
 
-        return intdiv(2 * $principal * $numerator + $denominator, 2 * $denominator);
+        // r × num ÷ den, rounded half up: the quotient, plus one when twice
+        // the remainder reaches den (2 × left < 2 × den, so it never overflows).
+        [$share, $left] = self::mulDiv($remainder, $numerator, $denominator);
+
+        return $whole * $numerator + $share + ($left * 2 >= $denominator ? 1 : 0);
+    }
+
+    /**
+     * `a × b` divided by `c`, as quotient and remainder, for 0 ≤ a < c and
+     * b ≥ 0, without ever forming `a × b`: b is read bit by bit while `a`
+     * doubles modulo c (the long multiplication in binary), so no step goes
+     * above 2 × c. The quotient is below b.
+     *
+     * @return array{0: int, 1: int} quotient, remainder
+     */
+    private static function mulDiv(int $a, int $b, int $c): array
+    {
+        $quotient = 0;
+        $remainder = 0;
+        // a × 2^k, kept as (aQuotient × c + aRemainder) while k grows.
+        $aQuotient = 0;
+        $aRemainder = $a;
+
+        while ($b > 0) {
+            if (($b & 1) === 1) {
+                $quotient += $aQuotient;
+                $remainder += $aRemainder;
+
+                if ($remainder >= $c) {
+                    $remainder -= $c;
+                    $quotient++;
+                }
+            }
+
+            $b >>= 1;
+
+            if ($b > 0) {
+                $aQuotient *= 2;
+                $aRemainder *= 2;
+
+                if ($aRemainder >= $c) {
+                    $aRemainder -= $c;
+                    $aQuotient++;
+                }
+            }
+        }
+
+        return [$quotient, $remainder];
     }
 
     /**
@@ -317,16 +395,29 @@ final class AllowanceCalculator
     }
 
     /**
-     * A rate as an exact fraction of integers: "0.05" is 5 / 100.
+     * A decimal rate as an exact fraction of integers, reduced: "0.05" is
+     * 1 / 20, "0.5" is 1 / 2 and "1" is 1 / 1.
      *
      * @return array{0: int, 1: int} numerator, denominator
      */
-    private static function fraction(string $key): array
+    private static function fraction(string $rate): array
     {
-        [$whole, $decimals] = explode('.', self::decimal($key));
+        [$whole, $decimals] = array_pad(explode('.', $rate, 2), 2, '');
         $decimals = rtrim($decimals, '0');
+        $numerator = (int) ($whole.$decimals);
+        $denominator = 10 ** strlen($decimals);
+        $divisor = self::gcd($numerator, $denominator);
 
-        return [(int) ($whole.$decimals), 10 ** strlen($decimals)];
+        return [intdiv($numerator, $divisor), intdiv($denominator, $divisor)];
+    }
+
+    private static function gcd(int $a, int $b): int
+    {
+        while ($b !== 0) {
+            [$a, $b] = [$b, $a % $b];
+        }
+
+        return max($a, 1);
     }
 
     /**
@@ -344,26 +435,33 @@ final class AllowanceCalculator
     }
 
     /**
-     * @return list<array{0: int|null, 1: int}> [branch id, balance] per branch
+     * Every date, so the caller sees journals dated after `as_of` too.
+     *
+     * @return list<array{0: int|null, 1: int, 2: string}> [branch id, balance, date] per branch and date
      */
-    private function plainBalances(int $accountId, string $asOf): array
+    private function plainBalances(int $accountId): array
     {
         return DB::table('accounting_journal_lines as l')
             ->join('accounting_journals as j', 'j.id', '=', 'l.accounting_journal_id')
             ->whereIn('j.status', AccountingJournal::HISTORICAL_STATUSES)
             ->where('l.accounting_account_id', $accountId)
-            ->where('j.date', '<=', $asOf)
-            ->groupBy('j.branch_id')
-            ->selectRaw('j.branch_id, COALESCE(SUM(l.credit), 0) - COALESCE(SUM(l.debit), 0) AS balance')
+            ->groupBy('j.branch_id', 'j.date')
+            ->selectRaw('j.branch_id, j.date, COALESCE(SUM(l.credit), 0) - COALESCE(SUM(l.debit), 0) AS balance')
             ->get()
-            ->map(fn (object $row): array => [$row->branch_id === null ? null : (int) $row->branch_id, (int) $row->balance])
+            ->map(fn (object $row): array => [
+                $row->branch_id === null ? null : (int) $row->branch_id,
+                (int) $row->balance,
+                substr((string) $row->date, 0, 10),
+            ])
             ->all();
     }
 
     /**
-     * @return list<array{0: int|null, 1: int}> [branch id, balance] per journal
+     * Every date, so the caller sees journals dated after `as_of` too.
+     *
+     * @return list<array{0: int|null, 1: int, 2: string}> [branch id, balance, date] per journal
      */
-    private function lockedBalances(int $accountId, string $asOf): array
+    private function lockedBalances(int $accountId): array
     {
         $byJournal = DB::table('accounting_journal_lines')
             ->where('accounting_account_id', $accountId)
@@ -381,10 +479,10 @@ final class AllowanceCalculator
             ->whereIn('status', AccountingJournal::HISTORICAL_STATUSES)
             ->lockForUpdate()
             ->get(['id', 'branch_id', 'date'])
-            ->filter(fn (object $journal): bool => substr((string) $journal->date, 0, 10) <= $asOf)
             ->map(fn (object $journal): array => [
                 $journal->branch_id === null ? null : (int) $journal->branch_id,
                 (int) $byJournal[(int) $journal->id],
+                substr((string) $journal->date, 0, 10),
             ])
             ->values()
             ->all();

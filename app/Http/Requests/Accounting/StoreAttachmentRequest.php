@@ -48,6 +48,27 @@ class StoreAttachmentRequest extends FormRequest
         ];
     }
 
+    /**
+     * Every refusal in words, so no Laravel default ("The file field must…")
+     * reaches the screen. The 20-per-owner count is refused in words by the
+     * controller.
+     *
+     * @return array<string, string>
+     */
+    public function messages(): array
+    {
+        return [
+            'file.required' => 'Choose a file to attach.',
+            'file.file' => 'The file didn\'t upload. Try again with a file of at most 10 MB.',
+            'file.uploaded' => 'The file didn\'t upload. Try again with a file of at most 10 MB.',
+            'file.max' => 'The file can be at most 10 MB.',
+            'file.mimes' => 'The file must be a picture (JPG or PNG), a PDF or a Word document.',
+            'file.extensions' => 'The file\'s name must end in .jpg, .jpeg, .png, .pdf, .doc or .docx.',
+            'label.string' => 'The label must be text.',
+            'label.max' => 'The label can be at most 255 characters.',
+        ];
+    }
+
     /** The journal or expense, resolved in authorize(). */
     public function owner(): AccountingJournal|AccountingExpense
     {

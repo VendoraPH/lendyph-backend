@@ -14,12 +14,13 @@ use Illuminate\Http\Resources\Json\JsonResource;
  *
  * ## Two things the screen depends on that are easy to get wrong
  *
- * 1. **`amount` and `amount_paid` are INTEGERS of centavos.** The page computes
- *    `sumCentavos(filtered.map(r => r.amount - r.amount_paid))` and renders it
- *    as "Outstanding" in headline type. A `decimal:2` cast would serialise as
- *    the string "15000.50"; `"15000.50" - "0"` is 15000.5 in JavaScript, which
- *    formats as ₱150.01 — a hundredfold error that looks like a plausible
- *    figure. The model casts both to `integer` and this emits them as such.
+ * 1. **`amount`, `amount_paid` and `amount_due` are INTEGERS of centavos.** A
+ *    `decimal:2` cast would serialise as the string "15000.50", which the
+ *    screen's centavo formatter would show as ₱150.01 — a hundredfold error
+ *    that looks like a plausible figure. The model casts them to `integer` and
+ *    this emits them as such. The page's "Outstanding" figure is the list's
+ *    `meta.totals.amount_due`, summed on the server over every matching
+ *    expense; the screen adds nothing up.
  * 2. **`status` is derived, not stored.** The column holds only the settlement
  *    state; `overdue` is a function of `due_date` against today. See
  *    AccountingExpense::status().

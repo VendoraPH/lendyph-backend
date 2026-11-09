@@ -84,11 +84,10 @@ class AccountingExpenseController extends Controller
             'search' => ['nullable', 'string', 'max:100'],
         ]);
 
-        // The same clamp every list endpoint in this file applies, and the one
-        // `MAX_PER_PAGE` in `src/lib/paginate.ts` is written against. Asking for
+        // The same clamp every list endpoint in this file applies. Asking for
         // more is not an error and not a warning — it is simply fewer rows in a
-        // response shaped exactly like a complete one, which is why the screen
-        // drains pages instead of asking for a big number.
+        // response shaped exactly like a complete one. The screen pages on the
+        // server and reads its figures from `meta.totals` and `meta.stats`.
         $perPage = min((int) ($filters['per_page'] ?? 15), 100);
 
         app(BranchAccess::class)->authorizeBranchFilter(request()->user(), $filters['branch_id'] ?? null);

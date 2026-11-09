@@ -40,6 +40,11 @@ class JournalRegisterTotalsTest extends TestCase
         $this->assertSame([$percent->id], $this->ids('search=%25'));
         $this->assertSame([], $this->ids('search='.urlencode('\\')));
         $this->assertSame([$plain->id], $this->ids('search='.urlencode($plain->journal_no)));
+
+        // A literal backslash: only `A\B` is found, never `AB`.
+        $backslash = $this->postSimpleJournal('5030', '1010', 5000, ['description' => 'Supplies A\\B']);
+        $this->postSimpleJournal('5030', '1010', 6000, ['description' => 'Supplies AB']);
+        $this->assertSame([$backslash->id], $this->ids('search='.urlencode('A\\B')));
     }
 
     public function test_totals_cover_every_matching_journal_not_only_the_page(): void
