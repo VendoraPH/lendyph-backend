@@ -1042,6 +1042,11 @@ class RecordOpeningBalances extends Command
     /**
      * Draft, post and record it — all inside one transaction.
      *
+     * The poster takes its locks in the global order: the 1200 allowance row
+     * (when a line is on it), then 3050, then the months after as_of, and only
+     * then the opening-balance journal, so it can't deadlock with a year close
+     * or reopen.
+     *
      * @param  array{lines: list<array<string, mixed>>, plug: array{account_id: int, amount: int, side: string}|null, total_debit: int, total_credit: int}  $plan
      */
     private function post(OpeningBalancePoster $poster, array $plan, string $asOf, string $path): AccountingJournal
