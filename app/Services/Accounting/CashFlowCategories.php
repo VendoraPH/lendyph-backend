@@ -10,20 +10,20 @@ namespace App\Services\Accounting;
  * Operating, investing or financing is a judgement about what the money was
  * FOR, and the ledger does not record it. Releasing a loan is investing for
  * almost any business and is the core operation of a lender; a member's deposit
- * is financing here and revenue somewhere else. That is the whole reason the
- * cash flow statement is the one statement the frontend cannot regroup out of
- * the trial balance — see the docblock on `CashFlowReport` in
- * `src/app/(app)/accounting/statements/_components/cash-flow-report.tsx`, which
- * says the same thing from the other side.
+ * is financing here and revenue somewhere else. So the classification lives
+ * on the account, where an accountant can change it.
  *
- * ## The default is one sentence
+ * ## The default is one sentence, with one seeded exception
  *
  * Income and expense are what the business DOES; everything else it owns is
  * investing; everything it owes or was given is financing; and cash itself is
  * not an activity at all, because cash is the thing the statement explains.
  *
- * Stated as a rule rather than a table of sixty accounts on purpose. A reviewer
- * can check a rule. Nobody checks a table.
+ * The exception is the loan book (Phase 2, decision 9): releasing and
+ * collecting loans is this organisation's operation, so the seeded loan
+ * accounts (ChartOfAccountsSeeder::OPERATING_LOAN_ACCOUNT_CODES) read
+ * operating, and CashFlowCategoryBackfill moves them on charts seeded before.
+ * An account a user adds still gets the rule below.
  *
  * ## The defaults are meant to be argued with
  *
@@ -72,11 +72,8 @@ class CashFlowCategories
             // What the business does — the revenue it earns and the costs of
             // earning it.
             'income', 'expense' => 'operating',
-            // What it owns. For a lender the largest of these is the loan
-            // portfolio, and putting it here is the one classification most
-            // worth reviewing: releasing and collecting loans is this
-            // organisation's core operation, and an accountant may well move it
-            // to operating. The report makes that choice visible either way.
+            // What it owns. The seeded loan accounts are the exception and
+            // read operating (see the class docblock).
             'asset' => 'investing',
             // What it owes and what it was given — members' deposits, share
             // capital, borrowings.
