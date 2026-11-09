@@ -158,6 +158,36 @@ class ExtensionPayMethodTest extends TestCase
         $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'defer', 'method' => 'gcash'])->assertOk();
     }
 
+    public function test_the_extend_endpoint_passes_the_method_and_reference_through(): void
+    {
+        $this->seedChartOfAccounts();
+        $loan = $this->extendableLoan();
+
+        $this->postJson("/api/loans/{$loan->id}/extend", [
+            'interest_option' => 'pay',
+            'method' => 'gcash',
+            'reference_number' => 'REF-9',
+        ])->assertOk();
+
+        $collection = Repayment::where('loan_id', $loan->id)->sole();
+        $this->assertSame('gcash', $collection->method);
+        $this->assertSame('REF-9', $collection->reference_number);
+        $this->assertSame(180_000, $this->sumOn($this->collectionJournal($collection), '1020', 'debit'));
+    }
+
+    public function test_the_extend_endpoint_with_no_method_records_cash(): void
+    {
+        $this->seedChartOfAccounts();
+        $loan = $this->extendableLoan();
+
+        $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'pay'])->assertOk();
+
+        $collection = Repayment::where('loan_id', $loan->id)->sole();
+        $this->assertSame('cash', $collection->method);
+        $this->assertNull($collection->reference_number);
+        $this->assertSame(180_000, $this->sumOn($this->collectionJournal($collection), '1010', 'debit'));
+    }
+
     private function extendableLoan(): Loan
     {
         $loan = $this->createReleasedLoan([

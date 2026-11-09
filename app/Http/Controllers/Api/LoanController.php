@@ -1170,6 +1170,8 @@ DESC,
             $request->input('remarks'),
             $request->user(),
             $request->input('interest_option'),
+            $request->validated('method', 'cash'),
+            $request->validated('reference_number'),
         );
 
         // Mirrors show()'s eager-loads, lineage included — this endpoint
