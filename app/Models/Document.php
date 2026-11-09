@@ -5,6 +5,7 @@ namespace App\Models;
 use App\Services\SignedFileLink;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\MorphTo;
 
 class Document extends Model
@@ -36,11 +37,23 @@ class Document extends Model
         'original_filename',
         'mime_type',
         'file_size',
+        'uploaded_by',
     ];
 
     public function documentable(): MorphTo
     {
         return $this->morphTo();
+    }
+
+    /**
+     * The staff user who uploaded the file. Set on accounting attachments
+     * only; member documents leave it null.
+     *
+     * @return BelongsTo<User, $this>
+     */
+    public function uploader(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'uploaded_by');
     }
 
     /**
