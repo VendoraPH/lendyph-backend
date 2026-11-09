@@ -19,6 +19,10 @@ class ShareCapitalLedgerResource extends JsonResource
             'reference' => $this->reference,
             'debit' => (float) $this->debit,
             'credit' => (float) $this->credit,
+            // How the money moved and its reference. Null on rows written before
+            // they were recorded, and on build-up and release rows.
+            'method' => $this->method,
+            'reference_number' => $this->reference_number,
             // Only where the query selected it (ShareCapitalMemberService::withRunningBalance()).
             'running_balance' => $this->when(
                 array_key_exists('running_balance', $this->resource->getAttributes()),

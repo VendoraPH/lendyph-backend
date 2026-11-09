@@ -4,6 +4,7 @@ namespace App\Http\Requests\ShareCapital;
 
 use App\Models\Borrower;
 use App\Services\BranchAccess;
+use App\Services\ShareCapitalService;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\Rules\Exists;
@@ -23,7 +24,20 @@ class StoreShareCapitalLedgerRequest extends FormRequest
             'description' => ['required', 'string', 'max:255'],
             'type' => ['required', 'in:credit,debit'],
             'amount' => ['required', 'numeric', 'min:0.01', 'decimal:0,2'],
+            'method' => ['sometimes', Rule::in(ShareCapitalService::ENTRY_METHODS)],
+            'reference_number' => ['nullable', 'string', 'max:100', 'required_unless:method,cash'],
         ];
+    }
+
+    /**
+     * An entry sent without a method was paid in cash, as Record Payment
+     * assumes (StoreRepaymentRequest).
+     */
+    protected function prepareForValidation(): void
+    {
+        if (! $this->has('method')) {
+            $this->merge(['method' => 'cash']);
+        }
     }
 
     /**

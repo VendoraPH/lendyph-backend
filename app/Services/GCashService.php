@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\GCashTier;
 use App\Models\GCashTransaction;
 use App\Models\User;
+use App\Services\Accounting\AutomaticPoster;
 use App\Services\Accounting\Money;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Collection;
@@ -14,6 +15,16 @@ use Illuminate\Validation\ValidationException;
 
 class GCashService
 {
+    public function __construct(private AutomaticPoster $poster) {}
+
+    /**
+     * Records a Cash In or Cash Out. In the same transaction, a Cash Out and a
+     * Cash In paid at the counter post their journal (Phase 2, decision 6):
+     * Cash In Dr 1010 amount + charge / Cr 1020 amount / Cr 4090 charge, dated
+     * `paid_at`; Cash Out Dr 1020 amount / Cr 1010 amount − charge / Cr 4090
+     * charge, dated `transaction_date`. A pending Cash In posts nothing until
+     * markPaid().
+     */
     public function createTransaction(array $payload, User $actor): GCashTransaction
     {
         $isPending = (bool) ($payload['is_pending'] ?? false);
@@ -65,6 +76,10 @@ class GCashService
                 description: "GCash {$type} transaction {$tx->reference_no} created (status={$status})",
             );
 
+            if ($status !== 'pending') {
+                $this->poster->gcashTransaction($tx, $actor->id);
+            }
+
             return $tx;
         });
     }
@@ -107,35 +122,48 @@ class GCashService
         ];
     }
 
+    /**
+     * Settles a pending Cash In and posts its journal, dated `paid_at`.
+     *
+     * The row is locked and re-read first, so of two mark-paid requests only
+     * the first finds it pending: the second answers the same 422 as a Cash In
+     * that was already paid, and nothing posts twice.
+     */
     public function markPaid(GCashTransaction $tx, User $actor): GCashTransaction
     {
-        if ($tx->type !== 'cash_in' || $tx->status !== 'pending') {
-            throw ValidationException::withMessages([
-                'status' => ['Only pending Cash In transactions can be marked as paid.'],
+        return DB::transaction(function () use ($tx, $actor): GCashTransaction {
+            $locked = GCashTransaction::query()->whereKey($tx->getKey())->lockForUpdate()->firstOrFail();
+
+            if ($locked->type !== 'cash_in' || $locked->status !== 'pending') {
+                throw ValidationException::withMessages([
+                    'status' => ['Only pending Cash In transactions can be marked as paid.'],
+                ]);
+            }
+
+            $old = ['status' => $locked->status];
+
+            $locked->update([
+                'status' => 'paid',
+                'paid_at' => now(),
+                'paid_by_user_id' => $actor->id,
             ]);
-        }
 
-        $old = ['status' => $tx->status];
+            AuditLogService::log(
+                action: 'status_changed',
+                auditable: $locked,
+                oldValues: $old,
+                newValues: [
+                    'status' => $locked->status,
+                    'paid_at' => $locked->paid_at?->toIso8601String(),
+                    'paid_by_user_id' => $locked->paid_by_user_id,
+                ],
+                description: "GCash {$locked->reference_no} marked as paid",
+            );
 
-        $tx->update([
-            'status' => 'paid',
-            'paid_at' => now(),
-            'paid_by_user_id' => $actor->id,
-        ]);
+            $this->poster->gcashTransaction($locked, $actor->id);
 
-        AuditLogService::log(
-            action: 'status_changed',
-            auditable: $tx,
-            oldValues: $old,
-            newValues: [
-                'status' => $tx->status,
-                'paid_at' => $tx->paid_at?->toIso8601String(),
-                'paid_by_user_id' => $tx->paid_by_user_id,
-            ],
-            description: "GCash {$tx->reference_no} marked as paid",
-        );
-
-        return $tx->fresh();
+            return $locked->fresh();
+        });
     }
 
     public function replaceTiers(array $tiers): Collection
