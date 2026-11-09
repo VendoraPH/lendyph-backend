@@ -23,10 +23,16 @@ use Throwable;
  *
  * Each tick stops after 45 seconds or 200 members, whichever comes first, so
  * it returns before the next tick; what's left waits for the next one. A
- * member flagged again while being scored stays flagged. A member whose
- * scoring fails is logged by id, counted, and moved to the back of the queue,
- * and the tick carries on; the command then exits with a failure. Advisory
- * only: no loan is ever written.
+ * member flagged again while being scored stays flagged.
+ *
+ * A member whose scoring fails is logged by id and counted, and the tick
+ * carries on; the command then exits with a failure. The member backs off:
+ * `flagged_at` moves to now plus 2^attempts minutes (at most 60), and a tick
+ * reads only flags whose `flagged_at` has come, so failing members never
+ * crowd out a new change. A new change makes the member due again, and the
+ * attempts still count. After MAX_ATTEMPTS failures the minute job leaves
+ * the member to the nightly run, which clears the flag once it scores them.
+ * Advisory only: no loan is ever written.
  */
 #[Signature('credit-scoring:process-changes')]
 #[Description('Rescore members whose data changed since the last scan (advisory only)')]
@@ -36,6 +42,10 @@ class ProcessCreditScoreChanges extends Command
 
     public const MAX_MEMBERS = 200;
 
+    public const MAX_ATTEMPTS = 5;
+
+    public const MAX_RETRY_DELAY_MINUTES = 60;
+
     public function handle(ChangeScanner $scanner, Recalculator $recalculator): int
     {
         $started = microtime(true);
@@ -44,6 +54,8 @@ class ProcessCreditScoreChanges extends Command
         $failed = 0;
 
         $pending = CreditScoreDirtyMember::query()
+            ->where('flagged_at', '<=', Carbon::now())
+            ->where('attempts', '<', self::MAX_ATTEMPTS)
             ->orderBy('flagged_at')
             ->orderBy('id')
             ->limit(self::MAX_MEMBERS)
@@ -67,7 +79,7 @@ class ProcessCreditScoreChanges extends Command
                     $scored++;
                 }
             } catch (Throwable) {
-                $this->sendToBack($dirty);
+                $this->backOff($dirty);
                 $failed++;
 
                 continue;
@@ -76,23 +88,34 @@ class ProcessCreditScoreChanges extends Command
             $recalculator->clearDirty($borrowerId, $dirty->flagged_at);
         }
 
-        $this->info("Flagged {$flagged} member(s); rescored {$scored}".($failed > 0 ? ", {$failed} failed and moved to the back of the queue." : '.'));
+        $this->info("Flagged {$flagged} member(s); rescored {$scored}".($failed > 0 ? ", {$failed} failed and will be retried later." : '.'));
 
         return $failed > 0 ? self::FAILURE : self::SUCCESS;
     }
 
     /**
-     * Count the failure and requeue the member behind everyone flagged so
-     * far, so a member who keeps failing never holds up the others. Only the
+     * The wait before a member's next try after `$attempts` failures:
+     * 2^attempts minutes, at most MAX_RETRY_DELAY_MINUTES.
+     */
+    public static function retryDelayMinutes(int $attempts): int
+    {
+        return min(2 ** min(max($attempts, 0), 30), self::MAX_RETRY_DELAY_MINUTES);
+    }
+
+    /**
+     * Count the failure and hold the member back until their retry time, so
+     * a member who keeps failing never holds up the others. Only the
      * member's id is logged: an error's text can carry personal data.
      */
-    private function sendToBack(CreditScoreDirtyMember $dirty): void
+    private function backOff(CreditScoreDirtyMember $dirty): void
     {
+        $attempts = $dirty->attempts + 1;
+
         CreditScoreDirtyMember::query()->whereKey($dirty->id)->update([
-            'attempts' => $dirty->attempts + 1,
-            'flagged_at' => Carbon::now(),
+            'attempts' => $attempts,
+            'flagged_at' => Carbon::now()->addMinutes(self::retryDelayMinutes($attempts)),
         ]);
 
-        Log::warning('Credit scoring failed for a member.', ['borrower_id' => (int) $dirty->borrower_id, 'attempts' => $dirty->attempts + 1]);
+        Log::warning('Credit scoring failed for a member.', ['borrower_id' => (int) $dirty->borrower_id, 'attempts' => $attempts]);
     }
 }

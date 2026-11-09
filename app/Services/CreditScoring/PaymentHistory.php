@@ -18,8 +18,9 @@ use Carbon\Carbon;
  * - periods with nothing due.
  *
  * A loan restructured into a new loan stops being late on the restructure
- * date: an unpaid period on it is late only up to that date, and one due on
- * or after it isn't matured. Loans restructured before closed periods were
+ * date: an unpaid period on it is late only up to that date, so an unpaid
+ * period due on or after it isn't matured. A period due on that date that
+ * was paid counts like any paid period; one due after it isn't matured. Loans restructured before closed periods were
  * marked (`closed_by_loan_id`) still hold such periods open. Without a
  * restructure date, its unpaid periods are left out.
  *

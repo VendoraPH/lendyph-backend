@@ -177,13 +177,18 @@ class Recalculator
 
     /**
      * Drop the member's change flag if nothing flagged it again after
-     * `$before`.
+     * `$before`. A flag the minute job backed off after a failure holds its
+     * retry time in `flagged_at`, which can be later than `$before`; it is
+     * dropped too when nothing wrote it after `$before`, because the member
+     * has just been scored.
      */
     public function clearDirty(int $borrowerId, Carbon $before): void
     {
         CreditScoreDirtyMember::query()
             ->where('borrower_id', $borrowerId)
-            ->where('flagged_at', '<=', $before)
+            ->where(fn ($q) => $q
+                ->where('flagged_at', '<=', $before)
+                ->orWhere(fn ($backedOff) => $backedOff->where('attempts', '>', 0)->where('updated_at', '<=', $before)))
             ->delete();
     }
 
