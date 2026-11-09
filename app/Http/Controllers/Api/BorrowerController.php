@@ -7,6 +7,7 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\Borrower\RejectBorrowerRequest;
 use App\Http\Requests\Borrower\StoreBorrowerRequest;
 use App\Http\Requests\Borrower\UpdateBorrowerRequest;
+use App\Http\Requests\Document\UploadFileTypes;
 use App\Http\Resources\BorrowerResource;
 use App\Models\Borrower;
 use App\Rules\NoDuplicateBorrower;
@@ -890,14 +891,16 @@ DESC,
             $this->authorize('borrowers:update');
         }
 
-        // Every refusal in words, one sentence (`bail`), never Laravel's
-        // default ("The photo field must be an image.").
+        // The bytes must read as a picture and the name must end in one
+        // (UploadFileTypes). Every refusal in words, one sentence (`bail`),
+        // never Laravel's default ("The photo field must be an image.").
         $request->validate([
-            'photo' => ['bail', 'required', 'image', 'max:5120'],
+            'photo' => ['bail', 'required', 'image', 'extensions:'.UploadFileTypes::PHOTO_EXTENSIONS, 'max:5120'],
         ], [
             'photo.required' => 'Choose a photo to upload.',
             'photo.uploaded' => 'The photo didn\'t upload. Try again with a picture of at most 5 MB.',
             'photo.image' => 'The photo must be a picture, such as a JPG or PNG.',
+            'photo.extensions' => 'The photo\'s file name must end in '.UploadFileTypes::inWords(UploadFileTypes::PHOTO_EXTENSIONS).'.',
             'photo.max' => 'The photo can be at most 5 MB.',
         ]);
 

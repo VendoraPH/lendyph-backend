@@ -107,6 +107,20 @@ it('refuses a member photo in words', function (array $payload, string $message)
     'not a file' => [fn () => ['photo' => 'me.jpg'], 'The photo must be a picture, such as a JPG or PNG.'],
 ]);
 
+it('refuses a member photo whose name doesn\'t end in a picture\'s extension, in words', function (string $name) {
+    $this->postJson("/api/borrowers/{$this->member->id}/photo", ['photo' => round3JpegNamed($name)])
+        ->assertUnprocessable()
+        ->assertJsonPath('errors.photo', ['The photo\'s file name must end in .jpg, .jpeg, .jpe, .jfif, .png, .gif, .bmp, .webp, .avif, .heic or .heif.']);
+
+    expect($this->member->fresh()->photo_path)->toBeNull();
+})->with(['me.bat', 'me.pdf', 'me', 'me.svg']);
+
+it('still takes a member photo named like the pictures it accepts, in any letter case', function (string $name) {
+    $this->postJson("/api/borrowers/{$this->member->id}/photo", ['photo' => round3JpegNamed($name)])->assertOk();
+
+    expect($this->member->fresh()->photo_path)->not->toBeNull();
+})->with(['me.jpg', 'ME.JPEG', 'me.jfif', 'me.jpe', 'profile-photo.jpg']);
+
 it('opens a stored file whose saved name holds characters a header can\'t carry, under a cleaned name', function (string $saved, string $disposition) {
     Storage::disk('private')->put('documents/payslip/borrower/1/abc123.pdf', ROUND3_PDF_BYTES);
     $document = $this->member->documents()->create([

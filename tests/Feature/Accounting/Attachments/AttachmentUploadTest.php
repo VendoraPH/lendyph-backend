@@ -137,7 +137,22 @@ class AttachmentUploadTest extends TestCase
     {
         $this->upload($this->postedOn($this->branch), $this->pdf('receipt.bat'))
             ->assertUnprocessable()
-            ->assertJsonPath('errors.file', ['The file\'s name must end in .jpg, .jpeg, .png, .pdf, .doc or .docx.']);
+            ->assertJsonPath('errors.file', ['The file\'s name must end in .jpg, .jpeg, .jpe, .jfif, .png, .pdf, .doc or .docx.']);
+    }
+
+    public function test_a_jpeg_named_jfif_or_jpe_is_attached_as_a_member_document_would_be(): void
+    {
+        $image = UploadedFile::fake()->image('photo.jpg');
+        $bytes = (string) file_get_contents($image->getPathname());
+
+        foreach (['scan.jfif', 'scan.jpe', 'SCAN.JFIF'] as $name) {
+            $body = $this->upload($this->postedOn($this->branch), $this->realFile($name, $bytes))
+                ->assertCreated()
+                ->json('data');
+
+            $this->assertSame($name, $body['original_filename']);
+            $this->assertContains(pathinfo(Document::findOrFail($body['id'])->file_path, PATHINFO_EXTENSION), ['jpg', 'jpeg']);
+        }
     }
 
     public function test_an_svg_is_refused(): void
@@ -148,7 +163,7 @@ class AttachmentUploadTest extends TestCase
             ->assertUnprocessable()
             ->assertJsonPath('errors.file', [
                 'The file must be a picture (JPG or PNG), a PDF or a Word document.',
-                'The file\'s name must end in .jpg, .jpeg, .png, .pdf, .doc or .docx.',
+                'The file\'s name must end in .jpg, .jpeg, .jpe, .jfif, .png, .pdf, .doc or .docx.',
             ]);
     }
 
