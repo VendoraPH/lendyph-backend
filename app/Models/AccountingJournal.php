@@ -61,12 +61,12 @@ class AccountingJournal extends Model
      * Mirrors the column's enum exactly. A value absent here is a value no
      * posting rule can ask for.
      *
-     * ## Fourteen of these have a writer. Four do not — and one of those is a policy
+     * ## Eighteen of these have a writer. One does not, and that is a policy
      *
      * The list is the column's enum, not an inventory of live behaviour, and
-     * reading it as one has already misled people. What writes each value, as
-     * of this commit (the Phase 2 rules are called by their lending services
-     * once those are wired):
+     * reading it as one has already misled people. What writes each value
+     * once accounting round C is in (the Phase 2 rules are called by their
+     * lending services once those are wired):
      *
      * | source            | written by                                              |
      * |-------------------|---------------------------------------------------------|
@@ -84,6 +84,10 @@ class AccountingJournal extends Model
      * | `share_capital`   | PostingRules::shareCapitalEntry(), via AutomaticPoster   |
      * | `cash_in`         | PostingRules::gcashTransaction(), via AutomaticPoster    |
      * | `cash_out`        | PostingRules::gcashTransaction(), via AutomaticPoster    |
+     * | `opening_balance` | RecordOpeningBalances (the CLI) and the Opening Balances screen (C2) |
+     * | `bank_transaction`| the reconciliation actions (C5): a suspense line from a bank account |
+     * | `cash_transaction`| the reconciliation actions (C5): a suspense line from any other money account |
+     * | `closing`         | YearEndCloser: one per branch at the year-end close (C3) |
      *
      * ### `penalty` is reserved and always will be — it is a decision
      *
@@ -103,22 +107,17 @@ class AccountingJournal extends Model
      * a valid filter, so the API advertises a source that cannot return rows.
      * That is deliberate — see the filter's note there.
      *
-     * ### `opening_balance` is being implemented now
+     * `cash_in` and `cash_out` are GCash counter transactions, not cash moved
+     * between the organisation's own accounts, which still posts as
+     * `transfer`.
      *
-     * In flight at the time of writing, not reserved. Expect it to join the
-     * table above; do not annotate it as unused on the strength of a grep.
+     * ### `closing` is left out of the income statement
      *
-     * ### The remaining two are unclaimed enum surface
-     *
-     * `cash_transaction` and `bank_transaction` are written by nothing and no
-     * design currently calls for them. `cash_in` and `cash_out` are GCash
-     * counter transactions, not cash moved between the organisation's own
-     * accounts, which still posts as `transfer`.
-     *
-     * They are kept rather than removed because this is a live enum column on
-     * ten deployments: narrowing it means a migration, and a migration that
-     * cannot fail safely if any row anywhere holds one of these. Annotated is
-     * cheaper and just as honest.
+     * A closing journal, and the reversal of one (a reopened year), moves the
+     * year's result from income and expense into the `net_surplus` account.
+     * IncomeStatementBuilder leaves both out, so a closed year's income
+     * statement reads as it did before the close. It is the last value of the
+     * column's enum (migration 2026_11_09_203100).
      */
     public const SOURCES = [
         'loan_release',
@@ -139,6 +138,7 @@ class AccountingJournal extends Model
         'opening_balance',
         'credit_loss',
         'share_capital',
+        'closing',
     ];
 
     /**

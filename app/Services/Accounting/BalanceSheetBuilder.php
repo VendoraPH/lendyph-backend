@@ -25,7 +25,11 @@ use Carbon\CarbonImmutable;
  * - prior period earnings: the net income of the opening rows, earned before
  *   this year and not yet closed into equity;
  * - current year earnings: the cumulative net income less the prior figure,
- *   which is the income statement's net income for 1 January to as_of.
+ *   which is the income statement's net income for 1 January to as_of until
+ *   the year is closed. A year-end close (YearEndCloser) moves the result
+ *   into net surplus on 31 December, so at 31 December of a closed year this
+ *   reads 0, while the income statement, which leaves closing entries out,
+ *   still shows the year's result.
  *
  * Each is its own equity line with `account_id` and `account_code` null and
  * its own `kind`, never a made-up code: a real account could carry any code,

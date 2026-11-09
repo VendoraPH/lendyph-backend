@@ -100,6 +100,7 @@ it('files the planned Phase 2 models under their modules', function (string $cla
     'CreditDecision' => ['App\\Models\\CreditDecision', 'credit_scoring'],
     'AccountingYearClose' => ['App\\Models\\AccountingYearClose', 'accounting'],
     'AccountingAllowancePosting' => ['App\\Models\\AccountingAllowancePosting', 'accounting'],
+    'AccountingOpeningBalance' => ['App\\Models\\AccountingOpeningBalance', 'accounting'],
 ]);
 
 it('compares full class names, so a same-named class elsewhere is not mapped', function () {
