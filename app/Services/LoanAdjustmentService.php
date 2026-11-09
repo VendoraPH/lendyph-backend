@@ -9,6 +9,7 @@ use App\Models\LoanAdjustment;
 use App\Models\LoanLedgerEntry;
 use App\Models\Repayment;
 use App\Models\User;
+use App\Services\Accounting\AutomaticPoster;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Exceptions\HttpResponseException;
@@ -244,12 +245,19 @@ class LoanAdjustmentService
      * that reset whenever the dialog was reopened or the page refreshed. Doing
      * both here means either the borrower is charged AND the loan extends, or
      * neither happens.
+     *
+     * `$method` and `$reference` say how the member paid the 'pay'
+     * collection, as Record Payment's do (ExtendLoanRequest): the repayment
+     * stores them and its journal debits that method's settlement account
+     * (SettlementMethod). 'defer' collects nothing, so they are not used.
      */
     public function extendLoan(
         Loan $loan,
         ?string $remarks,
         User $user,
         string $interestOption = 'pay',
+        string $method = 'cash',
+        ?string $reference = null,
     ): LoanAdjustment {
         $this->assertExtendable($loan);
 
@@ -258,7 +266,7 @@ class LoanAdjustmentService
         // are the only callers. The interest is collected inside it, under its
         // loan lock, through recordRepaymentOnLockedLoan(): processRepayment()
         // opens a LoanWriteTransaction of its own, which must be the outermost.
-        return LoanWriteTransaction::run(function () use ($loan, $user, $remarks, $interestOption) {
+        return LoanWriteTransaction::run(function () use ($loan, $user, $remarks, $interestOption, $method, $reference) {
             // The loan row first, the order every loan write takes
             // (LoanWriteTransaction). No collateral lock: an extension writes
             // `ongoing` at most, over `released`, and both already pledge.
@@ -290,6 +298,8 @@ class LoanAdjustmentService
                     now()->toDateString(),
                     $user,
                     $remarks ?: '[EXTENSION INTEREST]',
+                    $method,
+                    $reference,
                 );
                 $this->assertCollectedAsQuoted($loan, $quoted, $interestRepayment);
 
@@ -1018,8 +1028,13 @@ class LoanAdjustmentService
      *
      * This is the outermost transaction: LoanAdjustmentController::apply() and
      * the test helpers are the only callers.
+     *
+     * `$userId` is who applied it, and posts a balance adjustment's journal
+     * (applyBalanceAdjustment()). The controller passes the signed-in user;
+     * a caller that passes none posts as the adjustment's approver, who
+     * held the same permission.
      */
-    public function applyAdjustment(LoanAdjustment $adjustment): LoanAdjustment
+    public function applyAdjustment(LoanAdjustment $adjustment, ?int $userId = null): LoanAdjustment
     {
         $this->guardStatus($adjustment, 'approved', 'apply');
         $this->assertPayloadFitsType($adjustment);
@@ -1030,8 +1045,14 @@ class LoanAdjustmentService
             ]);
         }
 
-        return LoanWriteTransaction::run(function () use ($adjustment) {
+        return LoanWriteTransaction::run(function () use ($adjustment, $userId) {
             $loan = $this->lockAdjustmentRows($adjustment, 'approved');
+            $userId ??= (int) $adjustment->approved_by;
+
+            // Set before the type is applied, so a balance adjustment's
+            // journal is dated the moment the adjustment records.
+            $appliedAt = now();
+            $adjustment->applied_at = $appliedAt;
 
             if (! in_array($loan->status, Loan::ACTIVE_STATUSES, true)) {
                 throw LoanWriteTransaction::conflict();
@@ -1042,13 +1063,13 @@ class LoanAdjustmentService
             match ($adjustment->adjustment_type) {
                 'restructure' => $this->applyRestructure($adjustment, $loan),
                 'penalty_waiver' => $this->applyPenaltyWaiver($adjustment, $loan),
-                'balance_adjustment' => $this->applyBalanceAdjustment($adjustment, $loan),
+                'balance_adjustment' => $this->applyBalanceAdjustment($adjustment, $loan, $userId),
                 'term_extension' => $this->applyTermExtension($adjustment, $loan),
             };
 
             $adjustment->update([
                 'status' => 'applied',
-                'applied_at' => now(),
+                'applied_at' => $appliedAt,
             ]);
 
             // One notice per extension or restructure, however it is applied;
@@ -1256,8 +1277,16 @@ class LoanAdjustmentService
      * applied is always what was approved. A reduction that leaves a period
      * owing nothing marks it `paid`, and one that leaves no open period
      * completes the loan.
+     *
+     * Once the periods are restated, the change to the principal is posted to
+     * the books in this same transaction (AutomaticPoster::balanceAdjustment(),
+     * decision 7): a reduction is Dr 1180 / Cr 1110 and an increase the
+     * mirror, and a reduction that completes a restructured loan moves the
+     * deferral it still holds. The poster reads the restated periods to tell
+     * whether the loan completed, so it runs last. A loan with nothing unpaid
+     * changes nothing and posts nothing; with no chart, nothing posts.
      */
-    private function applyBalanceAdjustment(LoanAdjustment $adjustment, Loan $loan): void
+    private function applyBalanceAdjustment(LoanAdjustment $adjustment, Loan $loan, int $userId): void
     {
         $adjustmentAmount = (float) $adjustment->ownNewValues()['adjustment_amount'];
 
@@ -1326,6 +1355,8 @@ class LoanAdjustmentService
         }
 
         $this->restateOpenRemainingBalances($loan);
+
+        app(AutomaticPoster::class)->balanceAdjustment($adjustment, $amount, $userId);
     }
 
     /**
