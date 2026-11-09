@@ -208,6 +208,17 @@ class Loan extends Model
         'restructure_principal',
         'restructure_shortfall',
         'restructure_remarks',
+        // How the release paid out (or, on a restructure, collected the
+        // deductions), in the Record Payment vocabulary, and its reference.
+        // Null on loans released before it was recorded ("Not recorded").
+        'release_method',
+        'release_reference',
+        // A restructure's split of the new principal, stored at release for
+        // the books (PostingRules::restructureSplit()). Null on every other loan.
+        'restructure_carried_principal',
+        'restructure_capitalised_interest',
+        'restructure_capitalised_penalty',
+        'restructure_written_off_principal',
     ];
 
     protected function casts(): array
@@ -240,6 +251,10 @@ class Loan extends Model
             'restructure_outstanding' => 'decimal:2',
             'restructure_principal' => 'decimal:2',
             'restructure_shortfall' => 'decimal:2',
+            'restructure_carried_principal' => 'decimal:2',
+            'restructure_capitalised_interest' => 'decimal:2',
+            'restructure_capitalised_penalty' => 'decimal:2',
+            'restructure_written_off_principal' => 'decimal:2',
             'term_unit' => TermUnit::class,
             'interest_rate_frequency' => InterestRateFrequency::class,
         ];

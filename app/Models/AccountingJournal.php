@@ -61,11 +61,12 @@ class AccountingJournal extends Model
      * Mirrors the column's enum exactly. A value absent here is a value no
      * posting rule can ask for.
      *
-     * ## Ten of these are written. Eight are not — and one of those is a policy
+     * ## Fourteen of these have a writer. Four do not — and one of those is a policy
      *
      * The list is the column's enum, not an inventory of live behaviour, and
-     * reading it as one has already misled people. What actually writes each
-     * value, as of this commit:
+     * reading it as one has already misled people. What writes each value, as
+     * of this commit (the Phase 2 rules are called by their lending services
+     * once those are wired):
      *
      * | source            | written by                                              |
      * |-------------------|---------------------------------------------------------|
@@ -76,9 +77,13 @@ class AccountingJournal extends Model
      * | `expense`         | ExpenseRecorder, cash expense                            |
      * | `payable`         | ExpenseRecorder, accrual AND its later settlement        |
      * | `transfer`        | FundTransferRecorder, PostingRules::fundTransfer()       |
-     * | `credit_loss`     | PostingRules::creditLossProvision()                      |
+     * | `credit_loss`     | PostingRules::creditLossProvision(), restructureWriteOff() (J2), allowanceAdjustment() |
      * | `manual`          | StoreJournalRequest — forced, a client cannot choose     |
      * | `reversal`        | JournalPoster::reverse()                                 |
+     * | `adjustment`      | PostingRules::balanceAdjustment(), via AutomaticPoster   |
+     * | `share_capital`   | PostingRules::shareCapitalEntry(), via AutomaticPoster   |
+     * | `cash_in`         | PostingRules::gcashTransaction(), via AutomaticPoster    |
+     * | `cash_out`        | PostingRules::gcashTransaction(), via AutomaticPoster    |
      *
      * ### `penalty` is reserved and always will be — it is a decision
      *
@@ -103,12 +108,12 @@ class AccountingJournal extends Model
      * In flight at the time of writing, not reserved. Expect it to join the
      * table above; do not annotate it as unused on the strength of a grep.
      *
-     * ### The remaining six are unclaimed enum surface
+     * ### The remaining two are unclaimed enum surface
      *
-     * `cash_transaction`, `bank_transaction`, `cash_in`, `cash_out`,
-     * `adjustment` and `share_capital` are written by nothing and no design
-     * currently calls for them. `cash_in`/`cash_out` in particular overlap
-     * `transfer`, which is what cash movement actually posts as today.
+     * `cash_transaction` and `bank_transaction` are written by nothing and no
+     * design currently calls for them. `cash_in` and `cash_out` are GCash
+     * counter transactions, not cash moved between the organisation's own
+     * accounts, which still posts as `transfer`.
      *
      * They are kept rather than removed because this is a live enum column on
      * ten deployments: narrowing it means a migration, and a migration that
@@ -145,11 +150,15 @@ class AccountingJournal extends Model
      * WHICH classes are resolved and which columns are selected — all from this
      * one list, so the query and the read cannot drift apart.
      *
-     * These four classes are the only ones a production path puts in
-     * `postable_type`. Loan comes from AutomaticPoster::loanRelease(),
-     * Repayment from loanCollection(), and the two expense rows from
-     * ExpenseRecorder. AutomaticPoster's other methods take an untyped
-     * `Model $postable` and could add to this list; nothing calls them yet.
+     * Loan comes from AutomaticPoster::loanRelease() and
+     * restructureRelease() (J1 on the new loan, J2 on the source), Repayment
+     * from loanCollection(), and the two expense rows from ExpenseRecorder.
+     * Phase 2 adds LoanAdjustment (balanceAdjustment()), ShareCapitalLedger
+     * (shareCapitalEntry()) and GCashTransaction (gcashTransaction()).
+     * AutomaticPoster::allowanceAdjustment() and the older loanFee(),
+     * creditLossProvision(), fundTransfer() and walletCharge() take an
+     * untyped `Model $postable`; a class they bring that is not here reads
+     * with no label.
      *
      * AccountingExpensePayment is deliberately empty: nothing on the payment
      * row names it. The payee lives on its parent expense, and reaching through
@@ -163,6 +172,9 @@ class AccountingJournal extends Model
         Repayment::class => ['receipt_number'],
         AccountingExpense::class => ['payee'],
         AccountingExpensePayment::class => [],
+        LoanAdjustment::class => ['adjustment_number'],
+        ShareCapitalLedger::class => ['reference'],
+        GCashTransaction::class => ['reference_no'],
     ];
 
     public const STATUSES = ['draft', 'posted', 'reversed'];
@@ -334,12 +346,12 @@ class AccountingJournal extends Model
      * dictionary is built in `addEagerConstraints()` before any `with()`
      * closure runs, and `getDictionary()` is a getter. So the load is done
      * here instead, from {@see self::POSTABLE_LABEL_COLUMNS} — a closed list
-     * of four classes that are referenced as `::class` and therefore cannot
+     * of classes that are referenced as `::class` and therefore cannot
      * silently stop existing.
      *
      * ## The cost
      *
-     * One keyed query per known type PRESENT, so three or four on a mixed
+     * One keyed query per known type PRESENT, so a handful on a mixed
      * register and zero on a page of transfers — and flat as the page grows
      * from 15 rows to 100, which is the property
      * `test_the_register_resolves_postables_without_going_n_plus_1()` pins.
