@@ -1,6 +1,7 @@
 <?php
 
 use App\Models\CreditApplicationProfile;
+use App\Models\CreditPolicyFlag;
 use App\Models\CreditScore;
 use App\Models\CreditScoringSetting;
 use App\Models\Loan;
@@ -21,6 +22,19 @@ uses(TestCase::class, CreditApiFixtures::class);
 beforeEach(function () {
     $this->pinToday();
     $this->full = $this->branchAnalyst();
+
+    // A member whose current score was taken with application details from
+    // a main-branch draft loan, with an amount past due.
+    $this->memberWithFigures = function () {
+        $member = $this->scoredMember();
+        $loan = $this->application($member);
+        CreditApplicationProfile::query()->create(['loan_id' => $loan->id, 'household_expenses' => 15000, 'outside_debt_payments' => 2000]);
+        $member->update(['monthly_income' => 41000]);
+        $this->period(Loan::query()->where('borrower_id', $member->id)->where('status', 'ongoing')->firstOrFail(), 4, '2026-09-01');
+        $this->scoreNow($member);
+
+        return $member;
+    };
 });
 
 /**
@@ -32,8 +46,9 @@ function expectFinancialsHidden(array $score): void
 
     expect($score['financials_hidden'])->toBeTrue()
         ->and($score['capacity'])->toBeNull()
-        ->and($score['data_used']['capacity'])->toBeNull()
-        ->and($score['data_used']['application_profile_id'])->toBeNull()
+        ->and($score['data_used'])->not->toHaveKeys(['capacity', 'application_profile_id', 'outstanding', 'past_due_amount', 'lendy_monthly_payments', 'requested_principal'])
+        ->and($score['data_used'])->toHaveKeys(['loan_ids', 'active_loans', 'matured_periods', 'other_branch_loans'])
+        ->and($details)->not->toContain('₱')
         ->and($details)->not->toContain('monthly income (')
         ->and($details)->not->toContain('Disposable income of')
         ->and($details)->not->toContain('% of annual income')
@@ -87,7 +102,7 @@ it('hides the member\'s income on an assessment from a caller without the member
         $data = $this->actingAs($caller)->getJson("/api/credit-scoring/loans/{$loan->id}/assessment")->assertOk()->json('data');
 
         expect($data['capacity'])->toBeNull()
-            ->and($data['application_profile']['household_expenses'])->toBe('33000.00');
+            ->and($data['application_profile']['household_expenses'])->toBeNull();
         expectFinancialsHidden($data['score']);
     }
 });
@@ -116,6 +131,61 @@ it('checks the manageable level against the caution level again under the lock',
         ->toThrow(ValidationException::class);
 
     expect(CreditScoringSetting::current()->dsr_manageable_max)->toBe('30.0000');
+});
+
+it('hides them from a caller who lacks only loans:view', function () {
+    $member = ($this->memberWithFigures)();
+
+    $data = $this->actingAs($this->caller(['credit_scoring:view', 'credit_scoring:override', 'borrowers:view', 'loans:update']))
+        ->getJson("/api/credit-scoring/borrowers/{$member->id}")->assertOk()->json('data');
+
+    expectFinancialsHidden($data);
+    expect(collect($data['factors'])->firstWhere('label', 'Past due amount')['detail'])->toStartWith('Past due amount against the amount outstanding.');
+
+    $full = $this->actingAs($this->full)->getJson("/api/credit-scoring/borrowers/{$member->id}")->json('data');
+    expect(collect($full['factors'])->firstWhere('label', 'Past due amount')['detail'])->toContain('₱')
+        ->and($full['data_used'])->toHaveKeys(['outstanding', 'past_due_amount', 'lendy_monthly_payments']);
+});
+
+it('reads the debt flags generically when the figures are hidden, on the member and the assessment', function () {
+    $member = ($this->memberWithFigures)();
+    $loan = Loan::query()->where('borrower_id', $member->id)->where('status', 'draft')->firstOrFail();
+    $flag = fn (?int $loanId, string $key, string $detail) => CreditPolicyFlag::query()->create([
+        'borrower_id' => $member->id, 'loan_id' => $loanId, 'rule_key' => $key, 'type' => 'soft_flag', 'label' => $key,
+        'detail' => $detail, 'first_triggered_at' => now(), 'last_seen_at' => now(),
+    ]);
+    $flag(null, 'too_many_active_loans', 'The member has 4 active loans, outside lenders included; the policy limit is 2.');
+    $flag($loan->id, 'debt_service_above_caution', 'The debt service ratio is 52.10%, above the caution level of 40%.');
+    $narrow = $this->caller(['credit_scoring:view', 'loans:view']);
+
+    $memberFlags = collect($this->actingAs($narrow)->getJson("/api/credit-scoring/borrowers/{$member->id}/policy-flags")->assertOk()->json('data'))->pluck('detail', 'label');
+    $assessmentFlags = collect($this->actingAs($narrow)->getJson("/api/credit-scoring/loans/{$loan->id}/assessment")->assertOk()->json('data.policy_flags'))->pluck('detail', 'label');
+    $fullFlags = collect($this->actingAs($this->full)->getJson("/api/credit-scoring/loans/{$loan->id}/assessment")->json('data.policy_flags'))->pluck('detail', 'label');
+
+    expect($memberFlags['too_many_active_loans'])->toBe('The member\'s active loans, outside lenders included, exceed the policy limit.')
+        ->and($assessmentFlags['too_many_active_loans'])->toBe($memberFlags['too_many_active_loans'])
+        ->and($assessmentFlags['debt_service_above_caution'])->toBe('Debt payments take more of the member\'s income than the caution level.')
+        ->and($fullFlags['debt_service_above_caution'])->toContain('52.10%')
+        ->and($fullFlags['too_many_active_loans'])->toContain('4 active loans');
+});
+
+it('nulls the application\'s money figures for a caller without borrowers:view or the member\'s branch', function () {
+    $farMember = $this->member(['branch_id' => $this->farBranch()->id, 'monthly_income' => 35000]);
+    $loan = $this->application($farMember, ['branch_id' => $this->mainBranch()->id]);
+    $this->actingAs($this->headOffice())->putJson("/api/credit-scoring/loans/{$loan->id}/assessment", [
+        'other_income' => 5000, 'business_income' => 3000, 'household_expenses' => 20000, 'outside_debt_payments' => 1000, 'outside_lenders_count' => 1,
+    ])->assertOk();
+
+    foreach ([$this->full, $this->caller(['credit_scoring:view', 'loans:view'])] as $caller) {
+        $data = $this->actingAs($caller)->getJson("/api/credit-scoring/loans/{$loan->id}/assessment")->assertOk()->json('data');
+
+        expect($data['application_figures_hidden'])->toBeTrue()
+            ->and($data['application_profile'])->toMatchArray(['other_income' => null, 'business_income' => null, 'household_expenses' => null, 'outside_debt_payments' => null, 'outside_lenders_count' => 1]);
+    }
+
+    $head = $this->actingAs($this->headOffice())->getJson("/api/credit-scoring/loans/{$loan->id}/assessment")->json('data');
+    expect($head['application_figures_hidden'])->toBeFalse()
+        ->and($head['application_profile']['household_expenses'])->toBe('20000.00');
 });
 
 it('needs loans:view to save an assessment, as well as loans:update', function () {

@@ -23,10 +23,10 @@ use Carbon\CarbonInterface;
  * (CreditScope::dataUsed()), and a possible-duplicate flag reads its rule's
  * description for a caller without `branches:view_all`, since its detail
  * names the other member. A caller who may not read the member's financial
- * figures (CreditScope::seesFinancials()) gets no capacity block, no
- * application details id, generic lines on the factors that print income or
- * debt, and a recommendation without the suggested maximum's amount;
- * `financials_hidden` says so.
+ * figures (CreditScope::seesFinancials()) gets no capacity block, a
+ * `data_used` cut to its non-money keys, generic lines on the factors and
+ * flags that print income, debt or amounts owed, and a recommendation
+ * without the suggested maximum's amount; `financials_hidden` says so.
  */
 final class Presenter
 {
@@ -34,13 +34,28 @@ final class Presenter
 
     private const GENERIC_FLAG_RULES = ['possible_duplicate'];
 
+    /** Flags whose detail prints the member's debt figures. */
+    private const FINANCIAL_FLAG_RULES = ['debt_service_above_caution', 'too_many_active_loans'];
+
+    /** The `data_used` keys a caller who may not read the figures still gets: counts and ids, no money. */
+    private const NON_MONEY_DATA_KEYS = [
+        'as_of', 'engine_version', 'application_loan_id', 'loan_ids', 'branch_ids', 'other_branch_loans',
+        'matured_periods', 'known_periods', 'on_time_periods', 'late_periods', 'legacy_periods',
+        'worst_days_late_24m', 'days_past_due', 'completed_loans', 'clean_completed_loans',
+        'defaulted_loans', 'written_off_loans', 'restructured_loans', 'active_loans', 'has_valid_id',
+    ];
+
     /** Factor lines that print the member's income or debt, and their stand-ins. */
     private const FINANCIAL_FACTOR_DETAILS = [
         'debt_service_ratio' => 'Debt payments against monthly income. The figures are shown to staff who can read the member\'s details and loans.',
         'payment_cover' => 'Disposable income against the proposed payment. The figures are shown to staff who can read the member\'s details and loans.',
         'debt_to_income' => 'Debt against annual income. The figures are shown to staff who can read the member\'s details and loans.',
         'active_loans' => 'Active loans, outside lenders included. The figures are shown to staff who can read the member\'s details and loans.',
+        'past_due_amount' => 'Past due amount against the amount outstanding. The figures are shown to staff who can read the member\'s details and loans.',
     ];
+
+    /** @var array<string, bool> "viewer:member" => whether the viewer sees the figures behind the member's current score */
+    private array $memberFinancials = [];
 
     private ?FactorTable $currentTable = null;
 
@@ -172,13 +187,13 @@ final class Presenter
      *
      * @return array<string, mixed>
      */
-    public function flag(User $viewer, CreditPolicyFlag $flag): array
+    public function flag(User $viewer, CreditPolicyFlag $flag, Borrower $member): array
     {
         return [
             'id' => (int) $flag->id,
             'type' => $flag->type,
             'label' => $flag->label,
-            'detail' => $this->flagDetail($viewer, $flag),
+            'detail' => $this->flagDetail($viewer, $flag, $member),
             'triggered_at' => self::time($flag->first_triggered_at),
             'loan_id' => $flag->loan_id === null ? null : (int) $flag->loan_id,
         ];
@@ -271,7 +286,7 @@ final class Presenter
     {
         $data = $this->scope->dataUsed($viewer, $score->data_used);
 
-        return $data === null || $financial ? $data : array_merge($data, ['capacity' => null, 'application_profile_id' => null]);
+        return $data === null || $financial ? $data : array_intersect_key($data, array_flip(self::NON_MONEY_DATA_KEYS));
     }
 
     /**
@@ -282,14 +297,42 @@ final class Presenter
         return (string) preg_replace('/(The proposed payment is above the suggested maximum payment) of ₱[\d,]+\.\d{2}\./u', '$1.', $recommendation);
     }
 
-    private function flagDetail(User $viewer, CreditPolicyFlag $flag): string
+    /**
+     * A flag's stored detail, or its rule's description when the detail
+     * names another member (without `branches:view_all`) or prints debt
+     * figures the viewer may not read. A loan's own flag is read against
+     * the member gate (its loan is visible, or it isn't listed); a member
+     * flag against the details behind the member's current score.
+     */
+    private function flagDetail(User $viewer, CreditPolicyFlag $flag, Borrower $member): string
     {
-        if (! in_array($flag->rule_key, self::GENERIC_FLAG_RULES, true) || $this->scope->seesEveryBranch($viewer)) {
+        $generic = match (true) {
+            in_array($flag->rule_key, self::GENERIC_FLAG_RULES, true) => ! $this->scope->seesEveryBranch($viewer),
+            in_array($flag->rule_key, self::FINANCIAL_FLAG_RULES, true) => ! ($flag->loan_id !== null
+                ? $this->scope->seesFinancials($viewer, $member, null)
+                : $this->seesMemberFinancials($viewer, $member)),
+            default => false,
+        };
+
+        if (! $generic) {
             return $flag->detail;
         }
 
         $this->currentTable ??= FactorTable::fromRevision(CreditScoringSetting::current()->currentRevision()->firstOrFail());
 
         return (string) ($this->currentTable->policyRule($flag->rule_key)['description'] ?? $flag->label);
+    }
+
+    private function seesMemberFinancials(User $viewer, Borrower $member): bool
+    {
+        $key = $viewer->getKey().':'.$member->getKey();
+
+        if (! array_key_exists($key, $this->memberFinancials)) {
+            $scoreId = CreditScoreMember::query()->where('borrower_id', $member->id)->value('credit_score_id');
+            $score = $scoreId === null ? null : CreditScore::query()->select(['id', 'data_used'])->find($scoreId);
+            $this->memberFinancials[$key] = $this->scope->seesFinancials($viewer, $member, $score);
+        }
+
+        return $this->memberFinancials[$key];
     }
 }

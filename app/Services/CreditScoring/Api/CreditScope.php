@@ -117,8 +117,7 @@ final class CreditScope
      */
     public function seesFinancials(User $user, Borrower $member, ?CreditScore $score): bool
     {
-        if (! $user->can('loans:view') || ! $user->can('borrowers:view')
-            || ! $this->access->canSee($user, $member->branch_id === null ? null : (int) $member->branch_id)) {
+        if (! $user->can('loans:view') || ! $this->seesMemberDetails($user, $member)) {
             return false;
         }
 
@@ -131,6 +130,16 @@ final class CreditScope
         $loanId = CreditApplicationProfile::query()->whereKey((int) $profileId)->value('loan_id');
 
         return $loanId !== null && Loan::query()->visibleTo($user)->whereKey($loanId)->exists();
+    }
+
+    /**
+     * Whether the caller may read the member's personal details (round fz):
+     * `borrowers:view` and the member's branch.
+     */
+    public function seesMemberDetails(User $user, Borrower $member): bool
+    {
+        return $user->can('borrowers:view')
+            && $this->access->canSee($user, $member->branch_id === null ? null : (int) $member->branch_id);
     }
 
     public function seesEveryBranch(User $user): bool

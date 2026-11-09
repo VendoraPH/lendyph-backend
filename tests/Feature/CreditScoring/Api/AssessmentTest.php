@@ -13,6 +13,7 @@ use App\Services\CreditScoring\Scorer;
 use App\Services\LoanService;
 use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 use Tests\Feature\CreditScoring\Api\CreditApiFixtures;
 use Tests\TestCase;
 
@@ -25,7 +26,7 @@ uses(TestCase::class, CreditApiFixtures::class);
 
 const ASSESSMENT_KEYS = [
     'loan_id', 'loan_status', 'editable', 'borrower_id', 'borrower_name', 'borrower_code', 'notice_version', 'privacy_notice',
-    'application_profile', 'score', 'capacity', 'policy_flags', 'decisions', 'decisions_total', 'employment_statuses',
+    'application_profile', 'application_figures_hidden', 'score', 'capacity', 'policy_flags', 'decisions', 'decisions_total', 'employment_statuses',
 ];
 
 const APPLICATION_PROFILE_KEYS = [
@@ -194,7 +195,7 @@ it('answers 409 when the member is still being scored after 3 seconds, saving no
         ->and(CreditApplicationProfile::query()->count())->toBe(0);
 });
 
-it('takes the member\'s lock outside the transaction and saves nothing while another holder has it', function () {
+it('refuses the save while another holder has the member\'s lock, running nothing', function () {
     $member = $this->member(['monthly_income' => 35000]);
     $loan = $this->application($member);
     $held = Cache::lock("credit-scoring:member:{$member->id}", 60);
@@ -222,6 +223,50 @@ it('rolls the saved details back when the assessment fails', function () {
 
     $this->actingAs($this->officer)->putJson("/api/credit-scoring/loans/{$loan->id}/assessment", ['household_expenses' => 1000, 'notice_acknowledged' => true])
         ->assertServerError();
+
+    $lock = Cache::lock("credit-scoring:member:{$loan->borrower_id}", 60);
+    expect(CreditApplicationProfile::query()->count())->toBe(0)
+        ->and(CreditScore::query()->count())->toBe(0)
+        ->and($lock->get())->toBeTrue();
+    $lock->release();
+});
+
+it('gives up after 3 real seconds on a member being scored, answers 409, and leaves the lock free', function () {
+    $member = $this->member(['monthly_income' => 35000]);
+    $loan = $this->application($member);
+    // Lock::block() times its wait with Carbon::now(); let the clock run.
+    $this->travelBack();
+    $held = Cache::lock("credit-scoring:member:{$member->id}", 60);
+    expect($held->get())->toBeTrue();
+    $started = microtime(true);
+
+    try {
+        $this->actingAs($this->officer)->putJson("/api/credit-scoring/loans/{$loan->id}/assessment", ['household_expenses' => 1000])->assertConflict();
+    } finally {
+        $held->release();
+    }
+
+    $after = Cache::lock("credit-scoring:member:{$member->id}", 60);
+    expect(microtime(true) - $started)->toBeGreaterThanOrEqual(2.5)->toBeLessThan(10.0)
+        ->and(CreditApplicationProfile::query()->count())->toBe(0)
+        ->and($after->get())->toBeTrue();
+    $after->release();
+});
+
+it('refuses the save when an approval lands before the status is read again under the lock', function () {
+    $loan = $this->application($this->member(['monthly_income' => 35000]));
+    app()->instance(Recalculator::class, new class(app(Scorer::class), app(PolicyFlags::class)) extends Recalculator
+    {
+        public function assessLoanAfter(Loan $loan, string $reason, callable $write, int $waitSeconds): array
+        {
+            DB::table('loans')->where('id', $loan->id)->update(['status' => 'approved']);
+
+            return parent::assessLoanAfter($loan, $reason, $write, $waitSeconds);
+        }
+    });
+
+    $this->actingAs($this->officer)->putJson("/api/credit-scoring/loans/{$loan->id}/assessment", ['household_expenses' => 1000])
+        ->assertUnprocessable()->assertJsonValidationErrors('loan');
 
     expect(CreditApplicationProfile::query()->count())->toBe(0)
         ->and(CreditScore::query()->count())->toBe(0);

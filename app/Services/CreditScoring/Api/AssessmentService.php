@@ -21,6 +21,10 @@ use Illuminate\Validation\ValidationException;
  * latest assessment score with the capacity block, the member's and the
  * loan's open flags, and the loan's decisions.
  *
+ * The application's money figures (income, expenses, outside debt) show
+ * only to a caller who may read the member's details (`borrowers:view` and
+ * the member's branch, round fz); `application_figures_hidden` says so.
+ *
  * Advisory only. Saving writes the application details
  * (credit_application_profiles) and, through the Recalculator, a score and
  * flags; never the loan, its schedule, approvals or payments, or the member.
@@ -48,6 +52,7 @@ final class AssessmentService
     public function __construct(
         private readonly Presenter $presenter,
         private readonly Recalculator $recalculator,
+        private readonly CreditScope $scope,
     ) {}
 
     /**
@@ -74,7 +79,8 @@ final class AssessmentService
             'borrower_code' => $member->borrower_code,
             'notice_version' => $settings->notice_version,
             'privacy_notice' => $settings->privacy_notice,
-            'application_profile' => $profile === null ? null : $this->profile($profile, $settings),
+            'application_profile' => $profile === null ? null : $this->profile($profile, $settings, $this->scope->seesMemberDetails($viewer, $member)),
+            'application_figures_hidden' => ! $this->scope->seesMemberDetails($viewer, $member),
             'score' => $score === null ? null : $this->presenter->score($viewer, $member, $score),
             'capacity' => $this->presenter->capacity($viewer, $member, $score),
             'policy_flags' => CreditPolicyFlag::query()
@@ -85,7 +91,7 @@ final class AssessmentService
                 ->orderByDesc('first_triggered_at')
                 ->orderByDesc('id')
                 ->get()
-                ->map(fn (CreditPolicyFlag $flag) => $this->presenter->flag($viewer, $flag))
+                ->map(fn (CreditPolicyFlag $flag) => $this->presenter->flag($viewer, $flag, $member))
                 ->all(),
             'decisions' => CreditDecision::query()
                 ->with('decidedByUser:id,first_name,last_name')
@@ -144,7 +150,7 @@ final class AssessmentService
      */
     private function writeProfile(User $user, Loan $loan, array $fields, ?bool $noticeAcknowledged): void
     {
-        $this->assertEditable(Loan::query()->select(['id', 'status'])->findOrFail($loan->id));
+        $this->assertEditable(Loan::query()->select(['id', 'status'])->lockForUpdate()->findOrFail($loan->id));
 
         $profile = CreditApplicationProfile::query()->firstOrNew(['loan_id' => $loan->id]);
         $profile->fill($fields);
@@ -179,13 +185,13 @@ final class AssessmentService
     /**
      * @return array<string, mixed>
      */
-    private function profile(CreditApplicationProfile $profile, CreditScoringSetting $settings): array
+    private function profile(CreditApplicationProfile $profile, CreditScoringSetting $settings, bool $figures): array
     {
         return [
-            'other_income' => $profile->other_income,
-            'business_income' => $profile->business_income,
-            'household_expenses' => $profile->household_expenses,
-            'outside_debt_payments' => $profile->outside_debt_payments,
+            'other_income' => $figures ? $profile->other_income : null,
+            'business_income' => $figures ? $profile->business_income : null,
+            'household_expenses' => $figures ? $profile->household_expenses : null,
+            'outside_debt_payments' => $figures ? $profile->outside_debt_payments : null,
             'outside_lenders_count' => $profile->outside_lenders_count,
             'employment_status' => $profile->employment_status,
             'business_start_date' => $profile->business_start_date?->toDateString(),

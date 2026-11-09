@@ -185,7 +185,7 @@ class CreditScoringController extends Controller
             ->orderByDesc('first_triggered_at')
             ->orderByDesc('id')
             ->get()
-            ->map(fn (CreditPolicyFlag $flag) => $this->presenter->flag($request->user(), $flag))
+            ->map(fn (CreditPolicyFlag $flag) => $this->presenter->flag($request->user(), $flag, $member))
             ->all());
     }
 
