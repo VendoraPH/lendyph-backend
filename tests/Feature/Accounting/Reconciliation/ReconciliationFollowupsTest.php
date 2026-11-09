@@ -5,6 +5,7 @@ namespace Tests\Feature\Accounting\Reconciliation;
 use App\Models\AccountingJournal;
 use App\Models\AccountingJournalLine;
 use App\Models\AccountingReconciliation;
+use App\Models\AccountingReconciliationLine;
 use App\Models\AuditLog;
 use App\Services\Accounting\JournalPoster;
 use App\Services\Accounting\ReconciliationMatcher;
@@ -328,10 +329,10 @@ class ReconciliationFollowupsTest extends TestCase
 
     // ── Outstanding items (deposits in transit, uncleared cheques) ──
 
-    public function test_the_worksheet_lists_unclaimed_entries_from_60_days_before_to_5_days_after(): void
+    public function test_the_worksheet_lists_unclaimed_entries_from_180_days_before_to_5_days_after(): void
     {
-        $this->deposit(10000, '2026-07-02'); // 61 days before Sep 1: too old
-        $inTransit = $this->deposit(20000, '2026-07-03'); // 60 days before
+        $this->deposit(10000, '2026-03-04'); // 181 days before Sep 1: too old
+        $inTransit = $this->deposit(20000, '2026-03-05'); // 180 days before
         $this->deposit(30000, '2026-09-15'); // in the period
         $late = $this->deposit(40000, '2026-10-05'); // 5 days after Sep 30
         $this->deposit(50000, '2026-10-06'); // 6 days after: too late
@@ -344,7 +345,7 @@ class ReconciliationFollowupsTest extends TestCase
             ->values()->all();
 
         $this->assertSame([
-            ['2026-07-03', 20000, true],
+            ['2026-03-05', 20000, true],
             ['2026-09-15', 30000, false],
             ['2026-10-05', 40000, true],
         ], $ledger);
@@ -362,7 +363,7 @@ class ReconciliationFollowupsTest extends TestCase
     public function test_an_outstanding_entry_can_be_matched_by_hand_and_an_older_one_cannot(): void
     {
         $inTransit = $this->deposit(20000, '2026-08-10');
-        $tooOld = $this->deposit(20000, '2026-06-30');
+        $tooOld = $this->deposit(20000, '2026-03-04'); // 181 days before Sep 1
 
         $reconciliation = $this->reconciliationWith([
             ['date' => '2026-09-01', 'description' => 'Deposit', 'amount' => 20000],
@@ -618,10 +619,18 @@ class ReconciliationFollowupsTest extends TestCase
             'journal_line_id' => $this->journalLineOn($elsewhere),
         ]]])->assertOk();
 
-        $reconciliation = $this->reconciliationWith([
-            ['date' => '2026-09-30', 'description' => 'Unrelated', 'amount' => 1],
-        ]);
-        $line = $this->statementLine($reconciliation);
+        // One statement line for each entry's amount and side, dated more than
+        // five days from every entry so none is suggested: a books-only row is
+        // matchable to a statement line of its own amount and side.
+        $amounts = [10000, 20000, -20000, 30000, -30000, 40000, -40000, 50000, 60000];
+        $reconciliation = $this->reconciliationWith(array_map(
+            static fn (int $amount): array => ['date' => '2026-09-22', 'description' => 'Line', 'amount' => $amount],
+            $amounts,
+        ));
+        $lineFor = AccountingReconciliationLine::query()
+            ->where('accounting_reconciliation_id', $reconciliation->id)
+            ->get()
+            ->keyBy('amount');
         $url = "/api/accounting/reconciliations/{$reconciliation->id}/match";
 
         $rows = collect($this->show($reconciliation)['lines'])->where('source', 'ledger')->values();
@@ -630,6 +639,7 @@ class ReconciliationFollowupsTest extends TestCase
         $offered = [];
 
         foreach ($rows as $row) {
+            $line = $lineFor[$row['amount']];
             $response = $this->postJson($url, ['matches' => [['line_id' => $line->id, 'journal_line_id' => $row['journal_line_id']]]]);
 
             $this->assertSame(

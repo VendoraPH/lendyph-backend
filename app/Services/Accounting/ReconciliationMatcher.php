@@ -38,8 +38,11 @@ use Illuminate\Support\Facades\DB;
  * Two passes, strongest signal first, each one-to-one:
  *
  * 1. **Reference.** The statement's `external_reference` equals the journal's
- *    `reference`. A bank that echoes a deposit slip number is telling you which
- *    entry it is; nothing else the engine has comes close.
+ *    `reference`, for the same signed amount. A bank that echoes a deposit
+ *    slip number is telling you which entry it is; nothing else the engine has
+ *    comes close. The amount must agree all the same, because a match needs
+ *    it ({@see self::matchRefusal()}) and a suggestion is always a pairing
+ *    match() would take.
  * 2. **Amount and nearby date.** The signed amounts are EXACTLY equal and the
  *    dates are within {@see self::DATE_WINDOW_DAYS}. Exactly equal, because two
  *    amounts a centavo apart are not the same transaction — they are a
@@ -89,8 +92,11 @@ class ReconciliationMatcher
      * it, so an entry dated up to this many days BEFORE the period can still
      * be the counterpart of one of its statement lines. After the period, only
      * the value-dating tolerance applies ({@see self::DATE_WINDOW_DAYS}).
+     *
+     * 180 days because a Philippine cheque goes stale six months after its
+     * date: until then it can still clear, so it is still outstanding.
      */
-    public const OUTSTANDING_DAYS_BEFORE = 60;
+    public const OUTSTANDING_DAYS_BEFORE = 180;
 
     /**
      * The dates a ledger line may carry and still be matched in this
@@ -158,6 +164,12 @@ class ReconciliationMatcher
 
             $rows = $this->pair($window, $reconciliation->lines);
             $rows = $this->withMatchable($rows, $window, $reconciliation);
+            $netted = $this->nettedLines($rows, $window, $ledger[$accountId] ?? new Collection, $partners, $reconciliation);
+            $rows = array_map(static function (array $row) use ($netted): array {
+                $row['netted'] = $row['journal_line_id'] !== null && isset($netted[$row['journal_line_id']]);
+
+                return $row;
+            }, $rows);
 
             // The book balance is the account's balance AS OF the period end —
             // every posting up to that day, not only the ones inside the
@@ -186,7 +198,9 @@ class ReconciliationMatcher
                     $rows,
                     static fn (array $row): bool => $row['match'] === 'unmatched' && ! $row['outside_period'],
                 )),
-                'outstanding_count' => $this->outstandingCount($rows, $window, $partners, $reconciliation),
+                // As of now: it reads today's matches, so a match made later
+                // can change an earlier month's count.
+                'outstanding_count' => $this->outstandingCount($rows, $reconciliation),
                 'notes' => $reconciliation->notes,
                 'lines' => $rows,
             ];
@@ -250,14 +264,22 @@ class ReconciliationMatcher
      * Refused: a draft; a line on another account; a line dated outside the
      * period and further than {@see self::OUTSTANDING_DAYS_BEFORE} days
      * before it or {@see self::DATE_WINDOW_DAYS} days after it; a line another
-     * statement line has claimed. Nothing here reads reversal links: every
-     * posted leg is an ordinary line.
+     * statement line has claimed; and, for a given statement line, a line of
+     * another amount or on the other side. Nothing here reads reversal links:
+     * every posted leg is an ordinary line.
+     *
+     * With no statement line (a books-only row's `matchable`), the amount is
+     * not judged: the row is matchable to a statement line of its own amount
+     * and side.
      *
      * @param  array<string, mixed>  $line  from {@see self::ledgerLine()}
-     * @param  int|null  $forStatementLineId  the statement line being paired, if any
+     * @param  AccountingReconciliationLine|null  $statementLine  the statement line being paired, if any
      */
-    public static function matchRefusal(AccountingReconciliation $reconciliation, array $line, ?int $forStatementLineId): ?string
-    {
+    public static function matchRefusal(
+        AccountingReconciliation $reconciliation,
+        array $line,
+        ?AccountingReconciliationLine $statementLine,
+    ): ?string {
         $id = $line['line_id'];
 
         if ($line['status'] === 'draft') {
@@ -280,19 +302,32 @@ class ReconciliationMatcher
 
         $claimedBy = $line['claimed_by_line'];
 
-        if ($claimedBy !== null && $claimedBy !== $forStatementLineId) {
+        if ($claimedBy !== null && $claimedBy !== $statementLine?->id) {
             return "Journal line {$id} is already matched to statement line {$claimedBy}. One ledger entry cannot "
                 .'stand for two statement lines — if the statement really shows the same amount twice, one of them '
                 .'is missing from the books.';
         }
 
+        if ($statementLine !== null && $statementLine->amount !== $line['amount']) {
+            return 'This statement line is '.self::inWords($statementLine->amount).'; the entry is '
+                .self::inWords($line['amount']).'. Only an entry for the same amount, in the same direction, can be '
+                .'matched to it.';
+        }
+
         return null;
+    }
+
+    /** A signed amount in words: "₱88.00 out", "₱2,000.00 in". */
+    public static function inWords(int $centavos): string
+    {
+        return Money::format(abs($centavos)).($centavos < 0 ? ' out' : ' in');
     }
 
     /**
      * Each row's `matchable`: whether match() accepts its ledger line for that
-     * row's statement line (or, on a books-only row, for any statement line).
-     * A statement-only row has no ledger line and is never matchable.
+     * row's statement line, amount included (or, on a books-only row, for a
+     * statement line of the same amount and side). A statement-only row has no
+     * ledger line and is never matchable.
      *
      * @param  list<array<string, mixed>>  $rows
      * @param  Collection<int, array<string, mixed>>  $window
@@ -301,12 +336,14 @@ class ReconciliationMatcher
     private function withMatchable(array $rows, Collection $window, AccountingReconciliation $reconciliation): array
     {
         $byId = $window->keyBy('line_id');
+        $statementLines = $reconciliation->lines->keyBy('id');
 
-        return array_map(static function (array $row) use ($byId, $reconciliation): array {
+        return array_map(static function (array $row) use ($byId, $statementLines, $reconciliation): array {
             $line = $row['journal_line_id'] === null ? null : $byId->get($row['journal_line_id']);
+            $statementLine = $row['statement_line_id'] === null ? null : $statementLines->get($row['statement_line_id']);
 
             $row['matchable'] = $line !== null
-                && self::matchRefusal($reconciliation, $line, $row['statement_line_id']) === null;
+                && self::matchRefusal($reconciliation, $line, $statementLine) === null;
 
             return $row;
         }, $rows);
@@ -316,36 +353,73 @@ class ReconciliationMatcher
      * Entries dated BEFORE the period that no statement line has matched yet:
      * deposits in transit and uncleared cheques. An entry dated after the
      * period is listed only as a value-dating candidate and counts in neither
-     * this nor `unmatched_count`.
+     * this nor `unmatched_count`. A row {@see self::nettedLines()} marks
+     * `netted` is left out.
      *
-     * A reversal pair that nets to ₱0.00 as of `end_date` isn't outstanding
-     * and is left out of the count, never off the worksheet: both legs stay
-     * listed and matchable. It nets to zero when the entry and its one
-     * reversal are both dated on or before `end_date`, neither is matched by
-     * any statement line, and neither is suggested here. Only reversal links
-     * dated on or before `end_date` are read, so a later reversal of a
-     * reversal never changes a closed month's count. A chain as of
-     * `end_date` is counted: it doesn't net to zero.
+     * The count is as of now, not as of `end_date`: it reads the matches
+     * stored today, so matching an entry later (in this reconciliation or
+     * another) can change an earlier month's count.
+     *
+     * @param  list<array<string, mixed>>  $rows  with `netted` set
+     */
+    private function outstandingCount(array $rows, AccountingReconciliation $reconciliation): int
+    {
+        $start = $reconciliation->start_date->toDateString();
+
+        return count(array_filter(
+            $rows,
+            static fn (array $row): bool => $row['source'] === 'ledger' && $row['date'] < $start && ! $row['netted'],
+        ));
+    }
+
+    /**
+     * The outstanding rows (books-only, dated before the period) that are one
+     * leg of a reversal pair netting to ₱0.00 as of `end_date`: keyed by
+     * journal line id. They stay on the worksheet, listed and matchable, and
+     * carry `netted: true`; only the count leaves them out.
+     *
+     * A pair nets to zero when the entry and its one reversal are both dated
+     * on or before `end_date`, and NEITHER journal (the row's own or the other
+     * leg) has a line on this account that a statement line has matched (in
+     * any reconciliation) or that is suggested here. Only reversal links dated
+     * on or before `end_date` are read, so a later reversal of a reversal
+     * never changes a closed month's count. A chain as of `end_date` doesn't
+     * net to zero.
      *
      * Matched and suggested are judged per journal, so a journal with two
      * lines on the account counts once either of its lines is matched.
      *
      * @param  list<array<string, mixed>>  $rows
      * @param  Collection<int, array<string, mixed>>  $window
+     * @param  Collection<int, array<string, mixed>>  $accountLedger  every line on the account in the read range, claimed elsewhere included
      * @param  array<int, array<string, mixed>>  $partners  journal id => facts, from {@see self::reversalPartnersFor()}
+     * @return array<int, true>
      */
-    private function outstandingCount(array $rows, Collection $window, array $partners, AccountingReconciliation $reconciliation): int
-    {
+    private function nettedLines(
+        array $rows,
+        Collection $window,
+        Collection $accountLedger,
+        array $partners,
+        AccountingReconciliation $reconciliation,
+    ): array {
         $start = $reconciliation->start_date->toDateString();
         $end = $reconciliation->end_date->toDateString();
         $accountId = $reconciliation->accounting_account_id;
         $byId = $window->keyBy('line_id');
 
-        $pairedJournals = [];
+        // Journals with a line on this account that is paired on this
+        // worksheet (matched or suggested), or matched by any statement line.
+        $takenJournals = [];
 
         foreach ($rows as $row) {
             if ($row['source'] === 'both') {
-                $pairedJournals[$row['journal_id']] = true;
+                $takenJournals[$row['journal_id']] = true;
+            }
+        }
+
+        foreach ($accountLedger as $line) {
+            if ($line['claimed_by'] !== null) {
+                $takenJournals[$line['journal_id']] = true;
             }
         }
 
@@ -364,7 +438,7 @@ class ReconciliationMatcher
             return $links;
         };
 
-        $count = 0;
+        $netted = [];
 
         foreach ($rows as $row) {
             if ($row['source'] !== 'ledger' || $row['date'] >= $start) {
@@ -372,6 +446,11 @@ class ReconciliationMatcher
             }
 
             $line = $byId->get($row['journal_line_id']);
+
+            if (isset($takenJournals[$line['journal_id']])) {
+                continue;
+            }
+
             $links = $linksAsOfEnd(
                 $line['reverses_journal_id'],
                 $partners[$line['reverses_journal_id']]['date'] ?? null,
@@ -389,14 +468,14 @@ class ReconciliationMatcher
                     $partner['reversed_by_date'],
                 ) === [$line['journal_id']]
                 && ! ($partner['claimed_accounts'][$accountId] ?? false)
-                && ! isset($pairedJournals[$links[0]]);
+                && ! isset($takenJournals[$links[0]]);
 
-            if (! $netsToNothing) {
-                $count++;
+            if ($netsToNothing) {
+                $netted[$row['journal_line_id']] = true;
             }
         }
 
-        return $count;
+        return $netted;
     }
 
     /**
@@ -494,6 +573,76 @@ class ReconciliationMatcher
         }
 
         return $accepted;
+    }
+
+    /**
+     * The entry already in the books that a statement line looks like, or
+     * null: the duplicate check behind the reconciliation actions.
+     *
+     * - `possible`: the engine's own suggestion for the line, the same one the
+     *   worksheet shows, so it covers outstanding items and is one to one (an
+     *   entry it gives to another statement line is not held against this
+     *   one). "Match it instead" works on it.
+     * - `reference`: no suggestion, but an unpaired, unclaimed entry in the
+     *   window has the line's reference (any case) on the same side, for
+     *   another amount. It can't be matched, but booking the line would
+     *   still record the same money twice.
+     *
+     * Bounded: one read of this account's ledger inside the window
+     * ({@see self::candidateDates()}) and one of the statement lines. No
+     * balance, matchable or outstanding count is worked out.
+     *
+     * @return array{kind: 'possible'|'reference', journal_no: string, date: string, outside_period: bool, amount: int}|null
+     */
+    public function duplicateOf(AccountingReconciliation $reconciliation, AccountingReconciliationLine $statementLine): ?array
+    {
+        $reconciliation = $reconciliation->fresh(['lines']);
+        $window = $this->candidatesFor(
+            $reconciliation,
+            $this->ledgerFor(new Collection([$reconciliation]))[$reconciliation->accounting_account_id] ?? new Collection,
+        );
+        $rows = $this->pair($window, $reconciliation->lines);
+
+        foreach ($rows as $row) {
+            if ($row['match'] === 'possible' && $row['statement_line_id'] === $statementLine->id) {
+                return $this->duplicate('possible', $row);
+            }
+        }
+
+        $reference = $statementLine->external_reference;
+
+        if ($reference === null || $reference === '') {
+            return null;
+        }
+
+        $suggestable = $window->keyBy('line_id');
+
+        foreach ($rows as $row) {
+            if ($row['source'] === 'ledger'
+                && $suggestable[$row['journal_line_id']]['suggestable']
+                && $row['external_reference'] !== null
+                && mb_strtolower((string) $row['external_reference']) === mb_strtolower($reference)
+                && ($row['amount'] > 0) === ($statementLine->amount > 0)) {
+                return $this->duplicate('reference', $row);
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * @param  array<string, mixed>  $row
+     * @return array{kind: 'possible'|'reference', journal_no: string, date: string, outside_period: bool, amount: int}
+     */
+    private function duplicate(string $kind, array $row): array
+    {
+        return [
+            'kind' => $kind,
+            'journal_no' => (string) $row['journal_no'],
+            'date' => $row['date'],
+            'outside_period' => $row['outside_period'],
+            'amount' => $row['amount'],
+        ];
     }
 
     /**
@@ -755,10 +904,11 @@ class ReconciliationMatcher
                 return $byReference[mb_strtolower($reference)] ?? [];
             },
             // A matching reference is the bank naming the entry. No date test:
-            // that is the point of trusting it over pass 2. The same side,
-            // though: a returned cheque echoes the deposit's reference with the
-            // opposite sign, and it is not the deposit.
-            static fn (AccountingReconciliationLine $line, array $candidate): bool => ($line->amount > 0) === ($candidate['amount'] > 0),
+            // that is the point of trusting it over pass 2. The same signed
+            // amount, though: a returned cheque echoes the deposit's reference
+            // with the opposite sign, and it is not the deposit; and an entry
+            // of another amount can't be matched, so it is never suggested.
+            static fn (AccountingReconciliationLine $line, array $candidate): bool => $line->amount === $candidate['amount'],
         );
 
         // ── Pass 2: the same amount, a few days either side ──
@@ -791,6 +941,8 @@ class ReconciliationMatcher
                 'statement_line_id' => $line->id,
                 'journal_line_id' => null,
                 'outside_period' => false,
+                'statement_date' => $line->date->toDateString(),
+                'statement_amount' => $line->amount,
             ];
         }
 
@@ -815,6 +967,8 @@ class ReconciliationMatcher
                 'journal_line_id' => $lineId,
                 // An outstanding item: dated outside the period, still unmatched.
                 'outside_period' => $candidate['outside_period'],
+                'statement_date' => null,
+                'statement_amount' => null,
             ];
         }
 
@@ -898,7 +1052,8 @@ class ReconciliationMatcher
      * `journal_id` is carried so the row links back to the entry. The amount is
      * the LEDGER's — this account's balance is built from the books, and
      * showing the bank's figure beside our `journal_id` would attribute one to
-     * the other.
+     * the other. The statement line's own date and amount ride alongside, as
+     * `statement_date` and `statement_amount`, so the screen can show both.
      *
      * @param  array<string, mixed>  $candidate
      * @return array<string, mixed>
@@ -917,6 +1072,8 @@ class ReconciliationMatcher
             'statement_line_id' => $line->id,
             'journal_line_id' => $candidate['line_id'],
             'outside_period' => $candidate['outside_period'],
+            'statement_date' => $line->date->toDateString(),
+            'statement_amount' => $line->amount,
         ];
     }
 
