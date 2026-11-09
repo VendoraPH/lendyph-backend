@@ -269,7 +269,7 @@ class AllowancePostingTest extends TestCase
         $this->postSimpleJournal('3050', '1200', 70_000, ['branch_id' => null, 'date' => Carbon::today()->subDays(3)->toDateString()]);
         // ₱90.00 already held in Main, dated after the earlier as_of below.
         $this->postSimpleJournal('5140', '1200', 9_000, ['date' => Carbon::today()->subDays(2)->toDateString()]);
-        $refusal = 'The allowance has ₱700.00 on entries with no branch. Move it to the branches with a journal entry first, then post.';
+        $refusal = 'The allowance has ₱700.00 on entries with no branch. Move it to the branches with one entry per branch first, then post.';
 
         $earlier = $this->preview(Carbon::today()->subDays(2)->subDay()->toDateString());
         $this->assertSame(0, $this->branchRow($earlier, $this->branch)['current_balance']);
@@ -304,7 +304,7 @@ class AllowancePostingTest extends TestCase
         [$main] = $this->twoPastDueLoans();
         $this->postTheRun()->assertCreated();
         $yesterday = Carbon::yesterday()->toDateString();
-        $refusal = 'An allowance was already posted as of '.$this->today().'. Post only on or after that date.';
+        $refusal = 'An allowance was already posted as of '.Carbon::today()->format('M j, Y').'. Post only on or after that date.';
 
         $backDated = $this->preview($yesterday);
         $this->assertFalse($backDated['can_post']);
@@ -343,6 +343,54 @@ class AllowancePostingTest extends TestCase
             collect($queries)->filter(fn (string $sql): bool => str_contains($sql, '`loans`') && str_contains($sql, 'for update'))->all(),
             'the run locked loan rows',
         );
+    }
+
+    public function test_a_run_dated_before_a_no_branch_1200_entry_is_refused_even_when_the_balance_is_zero_on_its_date(): void
+    {
+        $this->twoPastDueLoans();
+        $today = Carbon::today();
+        $yesterday = Carbon::yesterday()->toDateString();
+        // Today's opening balance posts ₱700.00 with no branch and is moved
+        // to Main the same day: nothing is left with no branch, on any date.
+        $this->postSimpleJournal('3050', '1200', 70_000, ['branch_id' => null, 'date' => $today->toDateString()]);
+        $this->postSimpleJournal('1200', '3050', 70_000, ['branch_id' => null, 'date' => $today->toDateString()]);
+        $this->postSimpleJournal('3050', '1200', 70_000, ['date' => $today->toDateString()]);
+        $refusal = 'The allowance has entries with no branch dated as late as '.$today->format('M j, Y').', after this run\'s date. Post as of '.$today->format('M j, Y').' or later.';
+
+        $backDated = $this->preview($yesterday);
+        $this->assertSame(0, $backDated['unassigned_balance']);
+        $this->assertFalse($backDated['can_post']);
+        $this->assertSame([$refusal], $backDated['blocking_reasons']);
+
+        $this->postJson('/api/accounting/allowance/postings', [
+            'as_of' => $yesterday,
+            'expected_adjustment' => $backDated['totals']['adjustment'],
+        ])->assertStatus(422)->assertJsonPath('errors.allowance.0', $refusal);
+        $this->assertSame(0, AccountingAllowancePosting::count());
+        $this->assertSame(0, AccountingJournal::query()->where('source', 'credit_loss')->count());
+
+        // On the entries' own date the run posts.
+        $this->assertNotContains($refusal, $this->preview()['blocking_reasons']);
+        $this->postTheRun()->assertCreated();
+    }
+
+    public function test_the_later_posting_check_is_a_locking_read_taken_after_the_allowance_lock(): void
+    {
+        $this->twoPastDueLoans();
+        $expected = $this->preview()['totals']['adjustment'];
+
+        DB::flushQueryLog();
+        DB::enableQueryLog();
+        app(AllowancePoster::class)->post($this->today(), $expected, $this->admin);
+        $queries = array_map(fn (array $query): string => strtolower($query['query']), DB::getQueryLog());
+        DB::disableQueryLog();
+
+        $lock = collect($queries)->search(fn (string $sql): bool => str_starts_with($sql, 'select * from `accounting_accounts`') && str_contains($sql, 'for update'));
+        $laterCheck = collect($queries)->search(fn (string $sql): bool => str_contains($sql, 'from `accounting_allowance_postings`') && str_contains($sql, '`as_of` >'));
+
+        $this->assertNotFalse($laterCheck, 'the run never checked for a later posting');
+        $this->assertStringContainsString('for update', $queries[$laterCheck], 'the later-posting check is a plain read');
+        $this->assertLessThan($laterCheck, $lock, 'the later-posting check ran before the allowance lock');
     }
 
     public function test_postings_are_listed_newest_first_with_totals_over_every_row(): void

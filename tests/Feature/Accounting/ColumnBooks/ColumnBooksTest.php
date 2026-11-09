@@ -324,6 +324,31 @@ class ColumnBooksTest extends TestCase
         $this->assertBookBalances($book);
     }
 
+    public function test_a_role_mapped_to_a_cash_account_gets_no_column_and_the_money_totals_are_unchanged(): void
+    {
+        $this->seedChartOfAccounts();
+        $this->receipt('1010', ['1110' => 10000, '3060' => 2500]);
+        $this->receipt('1040', ['4020' => 700]);
+        $before = $this->columns('cash-receipts');
+
+        // Borrower advances pointed at Cash on Hand, a money account: its
+        // lines are already in the money columns, so it gets no column.
+        AccountingAccountMapping::query()
+            ->where('role', 'borrower_advances')
+            ->update(['accounting_account_id' => $this->account('1010')]);
+
+        $book = $this->columns('cash-receipts');
+
+        $this->assertNotContains('borrower_advances', array_column($book['columns'], 'key'));
+        $this->assertArrayNotHasKey('borrower_advances', $book['totals']['columns']);
+        $this->assertSame($before['money_columns'], $book['money_columns']);
+        $this->assertSame($before['totals']['money'], $book['totals']['money']);
+        $this->assertSame([$this->account('1010') => 12500, $this->account('1040') => 700], $book['totals']['money']);
+        $this->assertSame($before['totals']['total_debit'], $book['totals']['total_debit']);
+        $this->assertSame($before['totals']['total_credit'], $book['totals']['total_credit']);
+        $this->assertBookBalances($book);
+    }
+
     public function test_the_four_line_books_keep_their_shape(): void
     {
         $this->seedChartOfAccounts();

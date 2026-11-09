@@ -121,7 +121,7 @@ class AttachmentUploadTest extends TestCase
     {
         $this->upload($this->postedOn($this->branch), UploadedFile::fake()->create('big.pdf', 10343, 'application/pdf'))
             ->assertUnprocessable()
-            ->assertJsonValidationErrors('file');
+            ->assertJsonPath('errors.file.0', 'The file can be at most 10 MB.');
     }
 
     public function test_an_executable_renamed_pdf_is_refused_by_its_content(): void
@@ -130,14 +130,14 @@ class AttachmentUploadTest extends TestCase
 
         $this->upload($this->postedOn($this->branch), $this->realFile('invoice.pdf', $exe))
             ->assertUnprocessable()
-            ->assertJsonValidationErrors('file');
+            ->assertJsonPath('errors.file.0', 'The file must be a picture (JPG or PNG), a PDF or a Word document.');
     }
 
     public function test_a_pdf_named_with_another_extension_is_refused(): void
     {
         $this->upload($this->postedOn($this->branch), $this->pdf('receipt.bat'))
             ->assertUnprocessable()
-            ->assertJsonValidationErrors('file');
+            ->assertJsonPath('errors.file', ['The file\'s name must end in .jpg, .jpeg, .png, .pdf, .doc or .docx.']);
     }
 
     public function test_an_svg_is_refused(): void
@@ -146,14 +146,30 @@ class AttachmentUploadTest extends TestCase
 
         $this->upload($this->postedOn($this->branch), $this->realFile('logo.svg', $svg))
             ->assertUnprocessable()
-            ->assertJsonValidationErrors('file');
+            ->assertJsonPath('errors.file', [
+                'The file must be a picture (JPG or PNG), a PDF or a Word document.',
+                'The file\'s name must end in .jpg, .jpeg, .png, .pdf, .doc or .docx.',
+            ]);
     }
 
     public function test_a_label_over_255_characters_is_refused(): void
     {
         $this->upload($this->postedOn($this->branch), null, ['label' => str_repeat('a', 256)])
             ->assertUnprocessable()
-            ->assertJsonValidationErrors('label');
+            ->assertJsonPath('errors.label.0', 'The label can be at most 255 characters.');
+    }
+
+    public function test_a_missing_file_or_one_that_is_not_a_file_is_refused_in_words(): void
+    {
+        $journal = $this->postedOn($this->branch);
+
+        $this->post($this->ownerPath($journal), ['label' => 'Receipt'], ['Accept' => 'application/json'])
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.file.0', 'Choose a file to attach.');
+
+        $this->post($this->ownerPath($journal), ['file' => 'not a file'], ['Accept' => 'application/json'])
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.file.0', 'The file didn\'t upload. Try again with a file of at most 10 MB.');
     }
 
     public function test_the_21st_attachment_on_a_journal_or_an_expense_is_refused(): void

@@ -169,6 +169,7 @@ final class ColumnBookBuilder
                 'total_debit' => $totalDebit,
                 'total_credit' => $totalCredit,
             ],
+            // Money = columns + sundry, the identity every row keeps; then the book's debits equal its credits.
             'is_balanced' => Money::isBalanced(Money::sum($moneyTotals), Money::sum($columnTotals) + $sundryNet)
                 && Money::isBalanced($totalDebit, $totalCredit),
         ];

@@ -112,6 +112,11 @@ class ExpenseListTotalsTest extends TestCase
         $this->assertSame([$percent->id], $this->ids('search=%25'));
         $this->assertSame([], $this->ids('search='.urlencode('\\')));
 
+        // A literal backslash: only `A\B` is found, never `AB`.
+        $backslash = $this->expense(100, 0, 'unpaid', null, ['payee' => 'Shop A\\B']);
+        $this->expense(100, 0, 'unpaid', null, ['payee' => 'Shop AB']);
+        $this->assertSame([$backslash->id], $this->ids('search='.urlencode('A\\B')));
+
         $meta = $this->getJson('/api/accounting/expenses?search=Meralco')->assertOk()->json('meta');
         $this->assertSame(2, $meta['totals']['count']);
         $this->assertSame(2, $meta['stats']['unpaid']);

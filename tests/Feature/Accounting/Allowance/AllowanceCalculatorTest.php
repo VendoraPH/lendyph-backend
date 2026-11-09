@@ -114,6 +114,29 @@ class AllowanceCalculatorTest extends TestCase
         );
     }
 
+    public function test_a_rate_with_many_decimals_never_throws_and_stays_exact(): void
+    {
+        // A third, to fifteen decimals: the old guard refused anything over
+        // ₱138.33 at this rate. Expected values are exact, worked out with
+        // fractions and rounded half up.
+        $third = '0.333333333333333';
+        $this->assertSame(4_611, AllowanceCalculator::requiredAt(13_834, $third));
+        $this->assertSame(333_333_333_333, AllowanceCalculator::requiredAt(999_999_999_999, $third));
+        $this->assertSame(123_456_789_012, AllowanceCalculator::requiredAt(999_999_999_999, '0.123456789012345'));
+        $this->assertSame(7, AllowanceCalculator::requiredAt(7, '0.999999999999999'));
+        $this->assertSame(0, AllowanceCalculator::requiredAt(500, '0.000000000000001'));
+
+        // Halves still round up, at any size.
+        $this->assertSame(500_000_000_000, AllowanceCalculator::requiredAt(999_999_999_999, '0.5'));
+        $this->assertSame(2, AllowanceCalculator::requiredAt(3, '0.5'));
+        $this->assertSame(1_543, AllowanceCalculator::requiredAt(12_345, '0.125'));
+        $this->assertSame(999_999_999_999, AllowanceCalculator::requiredAt(999_999_999_999, '1'));
+        $this->assertSame(0, AllowanceCalculator::requiredAt(0, $third));
+
+        // The bucket rates go through the same arithmetic.
+        $this->assertSame(AllowanceCalculator::requiredAt(999_999_999_999, '0.15'), AllowanceCalculator::requiredFor(999_999_999_999, '31_60'));
+    }
+
     public function test_the_bucket_is_rounded_not_each_loan(): void
     {
         // Two loans of ₱0.10 at 5%: 0.5 centavo each. Rounded per loan that

@@ -3,8 +3,11 @@
 namespace Tests\Feature\Accounting\LoanAccounting;
 
 use App\Models\Branch;
+use App\Models\User;
 use Illuminate\Support\Carbon;
+use Spatie\Permission\Models\Role;
 use Tests\TestCase;
+use Tests\Traits\PostsJournals;
 use Tests\Traits\SetupLendyPH;
 
 /**
@@ -13,7 +16,7 @@ use Tests\Traits\SetupLendyPH;
  */
 class LoanAccountingSummaryTest extends TestCase
 {
-    use LoanAccountingTestHelpers, SetupLendyPH;
+    use LoanAccountingTestHelpers, PostsJournals, SetupLendyPH;
 
     protected function setUp(): void
     {
@@ -111,6 +114,70 @@ class LoanAccountingSummaryTest extends TestCase
         $this->assertSame(1000, $summary['records']['outstanding_principal']);
         $this->assertSame(1000, $summary['aging']['total']);
         $this->getJson("/api/accounting/loan-accounting/summary?branch_id={$far->id}")->assertForbidden();
+    }
+
+    public function test_books_against_records_cover_only_the_branch_users_own_branch(): void
+    {
+        // Far's loan is released before the books exist, so it posts nothing
+        // and Far alone reads a difference; Main's posts and reconciles.
+        $far = Branch::factory()->create(['name' => 'Far Branch', 'code' => 'FAR']);
+        $main = $this->branch;
+        $this->branch = $far;
+        $this->createReleasedLoan(['principal_amount' => 25000.50]);
+        $this->branch = $main;
+        $this->seedChartOfAccounts();
+        $this->createReleasedLoan(['principal_amount' => 10000]);
+
+        $all = $this->getJson('/api/accounting/loan-accounting/summary')->assertOk()->json('data.books_vs_records');
+        $this->assertSame([3500050, -2500050, false], [$all['records_principal'], $all['difference'], $all['is_reconciled']]);
+
+        $this->actingAs($this->branchUser($main));
+        $check = $this->getJson('/api/accounting/loan-accounting/summary')->assertOk()->json('data.books_vs_records');
+        $this->assertSame([
+            'as_of' => Carbon::today()->toDateString(),
+            'books_principal' => 1000000,
+            'records_principal' => 1000000,
+            'difference' => 0,
+            'is_reconciled' => true,
+        ], $check);
+
+        $this->actingAs($this->branchUser($far));
+        $check = $this->getJson('/api/accounting/loan-accounting/summary')->assertOk()->json('data.books_vs_records');
+        $this->assertSame([0, 2500050, -2500050, false], [
+            $check['books_principal'], $check['records_principal'], $check['difference'], $check['is_reconciled'],
+        ]);
+    }
+
+    public function test_a_user_with_no_branch_and_no_view_all_sees_zeros_and_reconciled(): void
+    {
+        $this->seedChartOfAccounts();
+        $this->createReleasedLoan(['principal_amount' => 10000]);
+        $this->period($this->agedLoan(), 5, principal: 10);
+
+        $role = Role::firstOrCreate(['name' => 'loan_accounting_no_branch', 'guard_name' => 'web']);
+        $role->syncPermissions(['accounting:view', 'loans:view']);
+        $user = User::factory()->create(['branch_id' => null]);
+        $user->assignRole($role);
+        $this->actingAs($user);
+
+        $summary = $this->getJson('/api/accounting/loan-accounting/summary')->assertOk()->json('data');
+
+        $this->assertSame(0, $summary['aging']['total']);
+        $this->assertSame(0, $summary['aging']['count_total']);
+        $this->assertSame(['gross' => 0, 'allowance' => 0, 'unearned_income' => 0, 'adjustments_clearing' => 0, 'adjustments_clearing_needs_review' => false, 'net' => 0], $summary['books']);
+        $this->assertSame([0, 0, 0, 0, 0], [
+            $summary['records']['loan_count'],
+            $summary['records']['outstanding_principal'],
+            $summary['records']['total_outstanding'],
+            $summary['records']['past_due_amount'],
+            $summary['records']['past_due_count'],
+        ]);
+        $this->assertSame([0, 0, 0, true], [
+            $summary['books_vs_records']['books_principal'],
+            $summary['books_vs_records']['records_principal'],
+            $summary['books_vs_records']['difference'],
+            $summary['books_vs_records']['is_reconciled'],
+        ]);
     }
 
     public function test_the_summary_query_is_validated(): void
