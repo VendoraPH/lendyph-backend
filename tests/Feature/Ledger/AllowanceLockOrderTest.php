@@ -68,6 +68,7 @@ class AllowanceLockOrderTest extends TestCase
 
         try {
             $this->waitUntilItHoldsItsJournal($bookkeeper, $marker);
+            $writeOffBegan = microtime(true);
 
             $writeOff = DB::transaction(fn (): ?AccountingJournal => app(AutomaticPoster::class)
                 ->restructureRelease($new, $source, $this->admin->id, 'cash')['write_off']);
@@ -79,7 +80,11 @@ class AllowanceLockOrderTest extends TestCase
         }
 
         $this->assertSame(0, $bookkeeper->getExitCode(), 'the bookkeeper\'s write failed: '.$bookkeeper->getOutput().$bookkeeper->getErrorOutput());
-        $this->assertStringStartsWith('ok JE-', $bookkeeper->getOutput());
+        $this->assertMatchesRegularExpression('/^ok JE-\d+ at (\d+\.\d+)$/', $bookkeeper->getOutput());
+        // On a slow machine the pause could end before J2 starts, and the
+        // two would never overlap: then this proves nothing, so it fails.
+        $finished = (float) explode(' at ', $bookkeeper->getOutput())[1];
+        $this->assertGreaterThan($writeOffBegan, $finished, 'the bookkeeper\'s write finished before J2 began, so they never overlapped');
         $this->assertSame($action === 'post' ? 'posted' : 'reversed', $journal->fresh()->status);
 
         $this->assertSame(300_000, $this->sumOn($writeOff, '1200', 'debit'));
