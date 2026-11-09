@@ -58,9 +58,11 @@ abstract class TestCase extends BaseTestCase
      * Prepare the database for a test.
      *
      * Invoked by the framework's `setUpTraits()` because of the RefreshDatabase
-     * trait above. The transactional path is the trait's own; the opt-out path
-     * starts the test from the freshly migrated and seeded state with no
-     * transaction around it.
+     * trait above. Both paths start from the freshly migrated and seeded state,
+     * built by migrateAndSeedFresh(): the transactional path through the
+     * trait's own refreshDatabase(), which calls refreshTestDatabase() below
+     * and then opens the transaction, and the opt-out path directly, with no
+     * transaction around the test.
      */
     public function refreshDatabase(): void
     {
@@ -104,14 +106,16 @@ abstract class TestCase extends BaseTestCase
      */
     private function migrateAndSeedFresh(): void
     {
-        if (SeededBaseline::restore(DB::connection())) {
+        $options = $this->migrateFreshUsing();
+
+        if (SeededBaseline::restore(DB::connection(), $options)) {
             return;
         }
 
-        $this->artisan('migrate:fresh', $this->migrateFreshUsing());
+        $this->artisan('migrate:fresh', $options);
 
         $this->app[Kernel::class]->setArtisan(null);
 
-        SeededBaseline::capture(DB::connection());
+        SeededBaseline::capture(DB::connection(), $options);
     }
 }

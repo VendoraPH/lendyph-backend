@@ -276,7 +276,7 @@ jobs:
       # drifts far below the real total, and do not pin it to the exact number.
       - name: Passed-count floor across all shards
         env:
-          MIN_TESTS: "5000"
+          MIN_TESTS: "5500"
           SHARD_COUNT: "4"
         run: |
           set -uo pipefail

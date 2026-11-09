@@ -31,26 +31,34 @@ use stdClass;
  *    `migrate:fresh`.
  *
  * The state lives in static properties, so it belongs to one worker process
- * and one database, and a new process always starts with a real migrate.
+ * and one database and seeder, and a new process always starts with a real
+ * migrate. The `*_seeded` copy is left behind after a run, like the per-worker
+ * test databases themselves; the next capture replaces it.
  */
 final class SeededBaseline
 {
     /**
-     * The captured tables, keyed by name, for the database named in $database.
+     * The captured tables, keyed by name, for the rebuild named in $key.
      *
      * @var array<string, array{create: string, checksum: ?int, rows: int, increment: ?int, columns: string}>|null
      */
     private static ?array $tables = null;
 
-    private static ?string $database = null;
+    /**
+     * Which rebuild the capture came from: the database name plus the options
+     * `migrate:fresh` ran with (the seeder above all).
+     */
+    private static ?string $key = null;
 
     /**
      * Copy the database as it stands now, straight after a fresh migrate and seed.
+     *
+     * @param  array<string, mixed>  $options  the options `migrate:fresh` ran with
      */
-    public static function capture(Connection $connection): void
+    public static function capture(Connection $connection, array $options): void
     {
         self::$tables = null;
-        self::$database = null;
+        self::$key = null;
 
         $database = $connection->getDatabaseName();
         $copy = self::copyName($database);
@@ -79,21 +87,24 @@ final class SeededBaseline
         }
 
         self::$tables = $tables;
-        self::$database = $database;
+        self::$key = self::key($database, $options);
     }
 
     /**
      * Put the database back to the captured state.
      *
      * Returns false, having changed nothing, when there is no capture for this
-     * database or its schema no longer matches; the caller must then run a
-     * real `migrate:fresh` and capture() again.
+     * database and these `migrate:fresh` options (a test class with its own
+     * seeder gets a real rebuild), or the schema no longer matches; the caller
+     * must then run a real `migrate:fresh` and capture() again.
+     *
+     * @param  array<string, mixed>  $options  the options `migrate:fresh` would run with
      */
-    public static function restore(Connection $connection): bool
+    public static function restore(Connection $connection, array $options): bool
     {
         $database = $connection->getDatabaseName();
 
-        if (self::$tables === null || self::$database !== $database) {
+        if (self::$tables === null || self::$key !== self::key($database, $options)) {
             return false;
         }
 
@@ -142,6 +153,16 @@ final class SeededBaseline
         return true;
     }
 
+    /**
+     * @param  array<string, mixed>  $options
+     */
+    private static function key(string $database, array $options): string
+    {
+        ksort($options);
+
+        return $database.'|'.json_encode($options, JSON_THROW_ON_ERROR);
+    }
+
     private static function copyName(string $database): string
     {
         return $database.'_seeded';
@@ -164,13 +185,16 @@ final class SeededBaseline
 
     /**
      * The table's columns that accept a value, quoted and comma separated.
-     * Generated columns are left out: MySQL refuses an explicit value for one.
+     * Generated columns (VIRTUAL or STORED) are left out: MySQL refuses an
+     * explicit value for one. A column whose DEFAULT is an expression, such as
+     * `useCurrent()`, also reads DEFAULT_GENERATED in `extra` but takes its
+     * stored value, so it is copied like any other.
      */
     private static function insertableColumns(Connection $connection, string $database, string $table): string
     {
         $columns = $connection->select(
             "select column_name as name from information_schema.columns
-             where table_schema = ? and table_name = ? and extra not like '%GENERATED%'
+             where table_schema = ? and table_name = ? and generation_expression = ''
              order by ordinal_position",
             [$database, $table],
         );
