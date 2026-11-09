@@ -111,7 +111,7 @@ class AuditLogResource extends JsonResource
         'adjustment_type', 'cash_flow_category', 'cash_kind', 'category', 'civil_status', 'frequencies',
         'frequency', 'gender', 'insurance_payment_type', 'interest_method', 'interest_option',
         'interest_rate_frequency', 'interest_type', 'kind', 'method', 'normal_balance', 'payment_frequency',
-        'payment_method', 'payment_type', 'source', 'term_unit', 'type',
+        'payment_method', 'payment_type', 'retaken_on', 'source', 'term_unit', 'type',
     ];
 
     /**
