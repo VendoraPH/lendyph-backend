@@ -134,7 +134,7 @@ class YearEndPreviewTest extends TestCase
     {
         $this->postTheYear();
 
-        $reason = '2026 ends on 31 December 2026; it can be closed from 1 January 2027.';
+        $reason = '2026 ends on Dec 31, 2026; it can be closed from Jan 1, 2027.';
         $preview = $this->preview(2026);
 
         $this->assertFalse($preview['can_close']);
@@ -212,7 +212,7 @@ class YearEndPreviewTest extends TestCase
 
         $this->assertFalse($preview['can_close']);
         $this->assertSame(
-            ['December 2025 is closed. Reopen it so the closing entries can be dated 31 December.'],
+            ['December 2025 is closed. Reopen it so the closing entries can be dated Dec 31, 2025.'],
             $preview['blocking_reasons'],
         );
         $this->assertNotContains('December 2025', array_column($preview['periods_to_close'], 'name'));

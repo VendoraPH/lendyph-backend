@@ -89,8 +89,8 @@ final class SettlementMethod
     {
         if (! in_array($role, self::ROLES, true)) {
             throw CannotPostToTheBooksException::because(
-                "\"{$role}\" is not a settlement account. Money can only move through "
-                .implode(', ', self::ROLES).'.');
+                AccountingAccountMapping::label($role).' is not a settlement account. Money can only move through '
+                .AccountingAccountMapping::labelList(self::ROLES).'.');
         }
 
         return $role;

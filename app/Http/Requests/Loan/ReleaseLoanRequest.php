@@ -2,13 +2,14 @@
 
 namespace App\Http\Requests\Loan;
 
+use App\Http\Requests\Concerns\ReferenceNumberMessages;
 use App\Http\Requests\Loan\Concerns\ValidatesReleaseInsurance;
 use Illuminate\Contracts\Validation\Validator;
 use Illuminate\Foundation\Http\FormRequest;
 
 class ReleaseLoanRequest extends FormRequest
 {
-    use ValidatesReleaseInsurance;
+    use ReferenceNumberMessages, ValidatesReleaseInsurance;
 
     public function authorize(): bool
     {
@@ -53,6 +54,14 @@ class ReleaseLoanRequest extends FormRequest
         $reference = $this->validated('reference_number');
 
         return is_string($reference) && $reference !== '' ? $reference : null;
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    public function messages(): array
+    {
+        return $this->referenceNumberMessages();
     }
 
     protected function prepareForValidation(): void

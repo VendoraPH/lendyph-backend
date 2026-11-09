@@ -218,6 +218,35 @@ class AccountingOpeningBalancesTest extends TestCase
         $this->assertStringContainsString('PLUG', $output);
     }
 
+    public function test_the_plan_warns_when_a_contra_account_is_on_its_unusual_side_and_still_posts(): void
+    {
+        // 1200 Allowance for Credit Losses carries a credit; a debit on it is
+        // unusual but not refused (Lead's call 3).
+        $file = $this->csv("1010,50000.00,\n1200,400.00,\n2300,,10000.00\n");
+
+        $output = $this->runCommand(['--file' => $file, '--as-of' => self::AS_OF]);
+
+        $this->assertStringContainsString('WARNING', $output);
+        $this->assertStringContainsString(
+            '1200 Allowance for Credit Losses has a debit of ₱400.00. It is a contra account that normally carries a credit balance',
+            $output,
+        );
+        $this->assertSame(1, AccountingJournal::query()->count());
+    }
+
+    public function test_messages_and_the_audit_row_read_the_as_of_date_in_words(): void
+    {
+        $output = $this->runCommand(['--file' => $this->canonicalCsv(), '--as-of' => self::AS_OF]);
+
+        $this->assertStringContainsString('of opening balances as of Aug 31, 2026.', $output);
+        $this->assertStringContainsString('dated Aug 31, 2026.', $output);
+        $this->assertSame('Opening balances as of Aug 31, 2026', AccountingJournal::query()->sole()->description);
+        $this->assertStringEndsWith(
+            'onto the books as of Aug 31, 2026',
+            (string) AuditLog::query()->where('action', 'accounting_opening_balances_posted')->sole()->description,
+        );
+    }
+
     // ── Once, ever ──────────────────────────────────────────────────────────
 
     public function test_a_second_run_is_refused(): void
@@ -850,7 +879,7 @@ class AccountingOpeningBalancesTest extends TestCase
         $output = $this->runCommand(['--file' => $this->canonicalCsv(), '--as-of' => self::AS_OF], Command::FAILURE);
 
         $this->assertStringContainsString('Refused: the as-of date falls in or before a closed month — nothing was written:', $output);
-        $this->assertStringContainsString('The opening balances is dated 2026-08-31, which falls in', $output);
+        $this->assertStringContainsString('The opening balance entry is dated Aug 31, 2026, which falls in', $output);
         $this->assertStringNotContainsString('JournalPoster', $output);
         $this->assertSame(0, AccountingJournal::query()->count());
     }

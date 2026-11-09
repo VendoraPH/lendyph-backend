@@ -316,10 +316,10 @@ class RecordOpeningBalances extends Command
             'Posted %s — %s of opening balances as of %s.',
             $journal->journal_no,
             Money::format((int) $journal->total_debit),
-            $asOf,
+            OpeningBalancePoster::dateInWords($asOf),
         ));
         $this->line('These now appear in the trial balance, the general ledger and every statement');
-        $this->line('built on them, dated '.$asOf.'. Re-running this command will be refused.');
+        $this->line('built on them, dated '.OpeningBalancePoster::dateInWords($asOf).'. Re-running this command will be refused.');
 
         if ($plan['plug'] !== null) {
             $this->newLine();
@@ -1097,7 +1097,7 @@ class RecordOpeningBalances extends Command
                     // JournalPoster::reversalDescription() makes, for the same
                     // reason.
                     'reference' => mb_substr(basename($path), 0, self::MAX_REFERENCE),
-                    'description' => 'Opening balances as of '.$asOf,
+                    'description' => 'Opening balances as of '.OpeningBalancePoster::dateInWords($asOf),
                 ],
                 // No postable: the file is not a record. The source and the
                 // once-ever check are what identify this entry.
@@ -1148,7 +1148,7 @@ class RecordOpeningBalances extends Command
                     // entry — but the whole point of this row is that it holds
                     // what landed rather than what was intended.
                     Money::format((int) $journal->total_debit),
-                    $asOf,
+                    OpeningBalancePoster::dateInWords($asOf),
                 ),
                 // Not request()->ip(). Laravel synthesises a console request
                 // whose default makes that the literal 127.0.0.1, so the row
@@ -1181,7 +1181,7 @@ class RecordOpeningBalances extends Command
         $this->line(sprintf('  When   : %s %s', now()->format('Y-m-d H:i:s'), config('app.timezone')));
         $this->line(sprintf('  Where  : %s (%s)', config('app.name'), config('app.env')));
         $this->line(sprintf('  File   : %s', $path));
-        $this->line(sprintf('  As of  : %s — the entry is dated this day', $asOf));
+        $this->line(sprintf('  As of  : %s — the entry is dated this day', OpeningBalancePoster::dateInWords($asOf)));
     }
 
     /**
@@ -1222,6 +1222,12 @@ class RecordOpeningBalances extends Command
         $this->line($dryRun ? '  Would post this entry:' : '  About to post this entry:');
         $this->newLine();
         $this->table(['Code', 'Account', 'Debit', 'Credit', 'From'], $rows);
+
+        // Lead's call 3: never a refusal, but printed before the confirmation
+        // so the operator sees it while the run can still be cancelled.
+        foreach (OpeningBalancePoster::contraWarnings($plan['lines']) as $warning) {
+            $this->warn('  WARNING: '.$warning);
+        }
 
         if ($plan['plug'] === null) {
             $this->line('  The file balances on its own — no '.self::PLUG_CODE.' plug was computed.');

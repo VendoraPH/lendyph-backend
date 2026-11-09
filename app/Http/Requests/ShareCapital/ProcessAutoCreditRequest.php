@@ -2,12 +2,15 @@
 
 namespace App\Http\Requests\ShareCapital;
 
+use App\Http\Requests\Concerns\ReferenceNumberMessages;
 use App\Services\ShareCapitalService;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
 class ProcessAutoCreditRequest extends FormRequest
 {
+    use ReferenceNumberMessages;
+
     public function authorize(): bool
     {
         return $this->user()->can('auto_credit:process');
@@ -24,6 +27,14 @@ class ProcessAutoCreditRequest extends FormRequest
             'method' => ['sometimes', Rule::in(ShareCapitalService::AUTO_CREDIT_METHODS)],
             'reference_number' => ['nullable', 'string', 'max:100'],
         ];
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    public function messages(): array
+    {
+        return $this->referenceNumberMessages();
     }
 
     protected function prepareForValidation(): void

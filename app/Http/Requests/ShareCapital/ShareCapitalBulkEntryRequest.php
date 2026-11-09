@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests\ShareCapital;
 
+use App\Http\Requests\Concerns\ReferenceNumberMessages;
 use App\Models\Borrower;
 use App\Services\BranchAccess;
 use App\Services\ShareCapitalService;
@@ -11,6 +12,8 @@ use Illuminate\Validation\Rules\Exists;
 
 class ShareCapitalBulkEntryRequest extends FormRequest
 {
+    use ReferenceNumberMessages;
+
     public function authorize(): bool
     {
         return $this->user()->can('share_capital:create');
@@ -39,6 +42,14 @@ class ShareCapitalBulkEntryRequest extends FormRequest
             'method' => ['sometimes', Rule::in(ShareCapitalService::ENTRY_METHODS)],
             'reference_number' => ['nullable', 'string', 'max:100', 'required_unless:method,cash'],
         ];
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    public function messages(): array
+    {
+        return $this->referenceNumberMessages();
     }
 
     /**

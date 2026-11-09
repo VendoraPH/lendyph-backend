@@ -320,8 +320,8 @@ class AccountingAccountMapping extends Model
         if ($type !== $shape['type']) {
             return [
                 'field' => 'type',
-                'message' => "{$label} is {$type}, but the {$roleLabel} role has to resolve to "
-                    .self::article($shape['type'])." {$shape['type']} account. Posting through it would put the "
+                'message' => "{$label} is ".self::typeInWords($type).", but the {$roleLabel} role has to resolve to "
+                    .self::typeInWords($shape['type']).'. Posting through it would put the '
                     .'amount on the wrong statement, and the entry would still balance — so nothing would report '
                     .'the mistake.',
             ];
@@ -350,19 +350,20 @@ class AccountingAccountMapping extends Model
             return [
                 'field' => 'cash_kind',
                 'message' => "{$label} is the {$roleLabel} account, which is not a money account — but it is marked "
-                    ."as a {$cashKind} account. `cash_kind` is what puts a balance into the dashboard cash "
-                    .'figures, so this would report the balance as money on hand.',
+                    .'as '.self::cashKindInWords($cashKind).'. Being a money account is what puts a balance into the '
+                    .'dashboard cash figures, so this would report the balance as money on hand.',
             ];
         }
 
         if ($kind !== null && $cashKind !== $kind) {
-            $held = $cashKind === null ? 'is not a money account at all' : "is a {$cashKind} account";
+            $held = $cashKind === null ? 'is not a money account' : 'is '.self::cashKindInWords($cashKind);
 
             return [
                 'field' => 'cash_kind',
-                'message' => "{$label} {$held}, but the {$roleLabel} role has to resolve to one whose cash kind is "
-                    ."{$kind}. `cash_kind` is what puts an account on the Cash & Bank screen and into the "
-                    .'dashboard cash figures, so settlements through it would never appear in the money on hand.',
+                'message' => "{$label} {$held}, but the {$roleLabel} role has to resolve to "
+                    .self::cashKindInWords($kind).'. The kind of money account is what puts it on the Cash & Bank '
+                    .'screen and into the dashboard cash figures, so settlements through it would never appear in '
+                    .'the money on hand.',
             ];
         }
 
@@ -417,10 +418,32 @@ class AccountingAccountMapping extends Model
             ->join(', ', ' and ');
     }
 
-    /** "an asset", "a liability". Only `liability` takes "a". */
-    private static function article(string $type): string
+    /**
+     * An account type in words, with its article: "an asset account", "a
+     * liability account". Messages never show a bare stored type.
+     */
+    public static function typeInWords(string $type): string
     {
-        return in_array($type[0] ?? '', ['a', 'e', 'i', 'o', 'u'], true) ? 'an' : 'a';
+        $words = $type === '' ? 'unclassified' : $type;
+        $article = in_array($words[0], ['a', 'e', 'i', 'o', 'u'], true) ? 'an' : 'a';
+
+        return "{$article} {$words} account";
+    }
+
+    /**
+     * A money account's kind in words, with its article: "a cash account",
+     * "a GCash wallet". Messages never show a stored `cash_kind`.
+     */
+    public static function cashKindInWords(string $cashKind): string
+    {
+        return match ($cashKind) {
+            'cash' => 'a cash account',
+            'bank' => 'a bank account',
+            'gcash' => 'a GCash wallet',
+            'maya' => 'a Maya wallet',
+            'wallet' => 'an e-wallet',
+            default => 'a money account',
+        };
     }
 
     /**

@@ -57,6 +57,15 @@ class OpeningBalancePoster
 
     private const ALLOWANCE_ROLE = 'allowance_credit_losses';
 
+    /** Each account type's section in words, for the contra warnings. */
+    private const SECTIONS = [
+        'asset' => 'assets',
+        'liability' => 'liabilities',
+        'equity' => 'equity',
+        'income' => 'income',
+        'expense' => 'expenses',
+    ];
+
     public function __construct(
         private JournalPoster $poster,
         private PeriodGuard $periods,
@@ -112,7 +121,7 @@ class OpeningBalancePoster
                 'date' => $asOf,
                 'source' => self::SOURCE,
                 'reference' => $attributes['reference'] ?? null,
-                'description' => $attributes['description'] ?? 'Opening balances as of '.$asOf,
+                'description' => $attributes['description'] ?? 'Opening balances as of '.self::dateInWords($asOf),
                 // The organisation's, not a branch's: see the CLI.
                 'branch_id' => null,
                 'postable_type' => $postable?->getMorphClass(),
@@ -182,7 +191,7 @@ class OpeningBalancePoster
             $journal = $this->post(
                 array_map(static fn (array $line): array => $line + ['description' => 'Opening balance'], $lines),
                 $asOf,
-                ['reference' => self::REFERENCE, 'description' => 'Opening balances as of '.$asOf],
+                ['reference' => self::REFERENCE, 'description' => 'Opening balances as of '.self::dateInWords($asOf)],
                 $draft,
                 $userId,
                 function () use ($draft, $editVersion, $readVersion, $lines, $asOf, &$locked): ?ValidationException {
@@ -214,7 +223,7 @@ class OpeningBalancePoster
                 ],
                 description: sprintf(
                     'Finalised the opening balances as of %s, posted as %s carrying %s',
-                    $asOf,
+                    self::dateInWords($asOf),
                     $journal->journal_no,
                     Money::format((int) $journal->total_debit),
                 ),
@@ -301,7 +310,7 @@ class OpeningBalancePoster
     public function lockThePeriods(string $asOf): ?ValidationException
     {
         try {
-            $this->periods->assertOpen($asOf, 'The opening balances');
+            $this->periods->assertOpen($asOf, 'The opening balance entry');
         } catch (ValidationException $e) {
             return ValidationException::withMessages(['as_of' => $e->errors()['date'] ?? $e->errors()]);
         }
@@ -334,8 +343,65 @@ class OpeningBalancePoster
 
         return sprintf(
             'Months after %s are already closed. Reopen them before recording opening balances.',
-            Carbon::createFromFormat('!Y-m-d', $asOf)->format('j F Y'),
+            self::dateInWords($asOf),
         );
+    }
+
+    /**
+     * A `Y-m-d` date as the opening balance messages read it: "Aug 31, 2026".
+     */
+    public static function dateInWords(string $date): string
+    {
+        return Carbon::createFromFormat('!Y-m-d', substr($date, 0, 10))->format('M j, Y');
+    }
+
+    /**
+     * Lead's call 3: a contra account on its unusual side (a debit on 1200
+     * Allowance for Credit Losses, say) is worth a second look but is never
+     * refused, so it is answered as a warning in words, in account code
+     * order. An ordinary account on its unusual side (an overdrawn bank) is
+     * left alone: that is a real balance, not a likely slip.
+     *
+     * @param  list<array{account_id: int, debit: int, credit: int}>  $lines
+     * @return list<string>
+     */
+    public static function contraWarnings(array $lines): array
+    {
+        $byAccount = [];
+
+        foreach ($lines as $line) {
+            $byAccount[(int) $line['account_id']] = $line;
+        }
+
+        if ($byAccount === []) {
+            return [];
+        }
+
+        $warnings = [];
+        $contras = AccountingAccount::query()
+            ->whereKey(array_keys($byAccount))
+            ->where('is_contra', true)
+            ->orderBy('code')
+            ->get(['id', 'code', 'name', 'type', 'normal_balance']);
+
+        foreach ($contras as $account) {
+            $line = $byAccount[(int) $account->id];
+            $usual = (string) $account->normal_balance;
+            $unusual = $usual === 'credit' ? 'debit' : 'credit';
+            $amount = (int) $line[$unusual];
+
+            if ($amount <= 0) {
+                continue;
+            }
+
+            $section = self::SECTIONS[(string) $account->type] ?? 'accounts';
+
+            $warnings[] = "{$account->code} {$account->name} has a {$unusual} of ".Money::format($amount).'. '
+                ."It is a contra account that normally carries a {$usual} balance, so a {$unusual} adds to the "
+                ."{$section} it should reduce. Check the side before finalising.";
+        }
+
+        return $warnings;
     }
 
     /**

@@ -748,7 +748,7 @@ class AccountingAutomaticPostingTest extends TestCase
             $this->releaseLoanWithDeductions();
             $this->fail('The release was allowed to happen with no entry in the books.');
         } catch (CannotPostToTheBooksException $e) {
-            $this->assertStringContainsString('processing_fee_income', $e->getMessage());
+            $this->assertStringContainsString('the Processing fee income account', $e->getMessage());
         }
 
         // Nothing was written: no journal, and no released loan either.
@@ -768,7 +768,7 @@ class AccountingAutomaticPostingTest extends TestCase
             app(RepaymentService::class)->processRepayment($loan->fresh(), 5000, now()->toDateString(), $this->admin);
             $this->fail('The payment was recorded with no entry in the books.');
         } catch (CannotPostToTheBooksException $e) {
-            $this->assertStringContainsString('interest_income', $e->getMessage());
+            $this->assertStringContainsString('the Interest income account', $e->getMessage());
         }
 
         // The repayment row went with it, and so did the schedule allocation.

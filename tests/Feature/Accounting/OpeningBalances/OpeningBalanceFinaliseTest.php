@@ -44,7 +44,7 @@ class OpeningBalanceFinaliseTest extends TestCase
         $this->assertNull($journal->branch_id);
         $this->assertSame(self::AS_OF, $journal->date->toDateString());
         $this->assertSame('Opening balances', $journal->reference);
-        $this->assertSame('Opening balances as of '.self::AS_OF, $journal->description);
+        $this->assertSame('Opening balances as of Aug 31, 2026', $journal->description);
         $this->assertSame($draft->getMorphClass(), $journal->postable_type);
         $this->assertSame($draft->id, $journal->postable_id);
         $this->assertSame(250_000_000, $journal->total_debit);

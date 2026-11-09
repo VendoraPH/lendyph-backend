@@ -42,7 +42,7 @@ class AccountingOpeningBalanceController extends Controller
     #[OA\Get(
         path: '/api/accounting/opening-balances',
         summary: 'The opening balances entry, with the server\'s totals and the 3050 line that would balance it',
-        description: '`{data: OpeningBalance}`: `status` (`none`, `draft`, `finalised`, `posted_elsewhere`), `id`, `as_of`, `lines[]` in code order, `total_debit`, `total_credit`, `difference`, `is_balanced`, `opening_equity_line`, `suggested_opening_equity_line`, `posted_journals_on_or_before_as_of`, `journal`, `edit_version`, `finalised_at`, `finalised_by`, `can_edit`, `can_finalise` and `blocking_reasons[]`. Integer centavos. Nothing is written.',
+        description: '`{data: OpeningBalance}`: `status` (`none`, `draft`, `finalised`, `posted_elsewhere`), `id`, `as_of`, `lines[]` in code order, `total_debit`, `total_credit`, `difference`, `is_balanced`, `opening_equity_line`, `suggested_opening_equity_line`, `posted_journals_on_or_before_as_of`, `journal`, `edit_version`, `finalised_at`, `finalised_by`, `can_edit`, `can_finalise`, `blocking_reasons[]` and `warnings[]` (in words, never blocking: a contra account on its unusual side, such as a debit on 1200). Integer centavos. Nothing is written.',
         tags: ['Accounting'],
         security: [['sanctum' => []]],
         responses: [
@@ -218,7 +218,7 @@ class AccountingOpeningBalanceController extends Controller
                 'accounting_opening_balance_created',
                 auditable: $draft,
                 newValues: $figures($new),
-                description: sprintf('Started the opening balances as of %s with %d line(s)', $asOf, count($lines)),
+                description: sprintf('Started the opening balances as of %s with %d line(s)', OpeningBalancePoster::dateInWords($asOf), count($lines)),
                 userId: $userId,
             );
 
@@ -232,7 +232,7 @@ class AccountingOpeningBalanceController extends Controller
             newValues: $figures($new),
             description: sprintf(
                 'Saved the opening balances as of %s: %d line(s), %s debit and %s credit',
-                $asOf,
+                OpeningBalancePoster::dateInWords($asOf),
                 count($lines),
                 Money::format($new['total_debit']),
                 Money::format($new['total_credit']),
@@ -338,6 +338,7 @@ class AccountingOpeningBalanceController extends Controller
             'can_edit' => $canEdit,
             'can_finalise' => $canEdit && $status === AccountingOpeningBalance::STATUS_DRAFT && $user->can('journals:post') && $blocking === [],
             'blocking_reasons' => $blocking,
+            'warnings' => OpeningBalancePoster::contraWarnings($lines),
         ];
     }
 

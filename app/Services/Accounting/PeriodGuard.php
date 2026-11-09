@@ -3,6 +3,7 @@
 namespace App\Services\Accounting;
 
 use App\Models\AccountingPeriod;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Validation\ValidationException;
 
@@ -62,12 +63,13 @@ class PeriodGuard
             return;
         }
 
-        $closedAt = $period->closed_at?->format('j M Y');
+        $closedAt = $period->closed_at?->format('M j, Y');
         $when = $closedAt === null ? '' : " on {$closedAt}";
+        $dated = Carbon::parse($date)->format('M j, Y');
 
         throw ValidationException::withMessages([
             'date' => [
-                "{$what} is dated {$date}, which falls in {$period->name} — a period that was closed{$when}. "
+                "{$what} is dated {$dated}, which falls in {$period->name} — a period that was closed{$when}. "
                 .'Nothing can be posted into a closed period. Reopen it on the Period Closing screen if the entry '
                 .'genuinely belongs there, or date the entry in an open period.',
             ],

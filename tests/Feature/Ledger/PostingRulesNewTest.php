@@ -765,7 +765,7 @@ class PostingRulesNewTest extends TestCase
             $this->poster()->gcashTransaction($charged, $this->admin->id);
             $this->fail('An unmapped role must refuse the posting.');
         } catch (CannotPostToTheBooksException $e) {
-            $this->assertStringContainsString('gcash_service_income', $e->getMessage());
+            $this->assertStringContainsString('the GCash service income account', $e->getMessage());
         }
 
         $this->assertNull($this->journalFor($charged, 'cash_in'));

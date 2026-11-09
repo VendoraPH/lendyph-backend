@@ -308,7 +308,7 @@ class AccountingReleaseDeductionAccountsTest extends TestCase
 
         $this->patchJson("/api/loans/{$loan->id}/release")
             ->assertStatus(422)
-            ->assertJsonPath('errors.accounting.0', fn (string $message): bool => str_contains($message, '"notarial_fees_payable"')
+            ->assertJsonPath('errors.accounting.0', fn (string $message): bool => str_contains($message, 'the Notarial fees payable account')
                 && str_contains($message, 'Default Accounts'));
 
         $this->assertSame('approved', $loan->fresh()->status);

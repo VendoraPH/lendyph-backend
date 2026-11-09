@@ -6,6 +6,7 @@ namespace App\Console\Commands;
 
 use App\Exceptions\CannotPostToTheBooksException;
 use App\Models\AccountingAccount;
+use App\Models\AccountingAccountMapping;
 use App\Models\AccountingJournal;
 use App\Models\Loan;
 use App\Services\Accounting\AccountMap;
@@ -282,10 +283,15 @@ class DiffLoanReleaseJournals extends Command
      *   before the restructure. The rebuild reads that deferral from the
      *   source's own journals without J2's own lines, and without what its
      *   new loan's J1 carried off it, so a J2 that took more than the source
-     *   held shows. The source is closed by the restructure and
-     *   its voids are refused, so nothing else has moved it since. A missing
-     *   or reversed J2 is already a difference on its principal, so this part
-     *   isn't compared again for it.
+     *   held shows. The source is closed by the restructure and its voids are
+     *   refused, so nothing else has moved it since. A missing or reversed J2
+     *   is already a difference on its principal, so this part isn't
+     *   compared again for it.
+     *
+     * `$writeOff` is the one posted J2 whose `postable_id` is the source
+     * loan. This assumes one J2 per source, which holds because a
+     * restructured loan can't be restructured again (see the class
+     * docblock).
      *
      * How the rest was split between the allowance and expense depended on
      * the allowance balance at the moment J2 posted, which J2 itself has
@@ -540,7 +546,7 @@ class DiffLoanReleaseJournals extends Command
             '  Total deductions above their usable items (not itemised): %s loan(s), %s — booked to %s as before.',
             number_format($this->totalsAboveItems['loans']),
             Money::format($this->totalsAboveItems['amount']),
-            PostingRules::UNMAPPED_DEDUCTION_ROLE,
+            AccountingAccountMapping::label(PostingRules::UNMAPPED_DEDUCTION_ROLE),
         ));
         $this->line(sprintf(
             '  Usable items above total deductions: %s loan(s), %s — only the total is booked, as before.',
@@ -563,17 +569,19 @@ class DiffLoanReleaseJournals extends Command
         }
     }
 
-    /** "processing_fee_income → 4030 Loan Processing Fee Income", or why there is none. */
+    /** "Processing fee income → 4030 Loan Processing Fee Income", or why there is none. */
     private function mappingOf(?string $role, AccountMap $map): string
     {
         if ($role === null) {
-            return 'none — booked to '.PostingRules::UNMAPPED_DEDUCTION_ROLE.' as before'
+            return 'none — booked to '.AccountingAccountMapping::label(PostingRules::UNMAPPED_DEDUCTION_ROLE).' as before'
                 .$this->accountOf(PostingRules::UNMAPPED_DEDUCTION_ROLE, $map, ' (%s)');
         }
 
+        $label = AccountingAccountMapping::label($role);
+
         return $map->has($role)
-            ? $role.$this->accountOf($role, $map, ' → %s')
-            : "{$role} → not set in Default Accounts";
+            ? $label.$this->accountOf($role, $map, ' → %s')
+            : "{$label} → not set in Default Accounts";
     }
 
     private function accountOf(string $role, AccountMap $map, string $format): string
