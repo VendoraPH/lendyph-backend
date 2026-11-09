@@ -33,7 +33,33 @@ class ReleaseLoanRequest extends FormRequest
             // mismatch, so both already land somewhere sensible, and a
             // `size:64` rule would only make the format impossible to version.
             'fee_fingerprint' => ['nullable', 'string', 'max:255'],
+            // How the net proceeds went out, and its reference, in the shape
+            // Record Payment takes them (StoreRepaymentRequest). The release
+            // journal credits that method's settlement account.
+            'method' => ['sometimes', 'in:cash,gcash,maya,bank_transfer,online'],
+            'reference_number' => ['nullable', 'string', 'max:100', 'required_unless:method,cash'],
         ];
+    }
+
+    /** The release method, `cash` when none was sent. */
+    public function releaseMethod(): string
+    {
+        return (string) $this->validated('method', 'cash');
+    }
+
+    /** The release's reference, or null when none was sent. */
+    public function releaseReference(): ?string
+    {
+        $reference = $this->validated('reference_number');
+
+        return is_string($reference) && $reference !== '' ? $reference : null;
+    }
+
+    protected function prepareForValidation(): void
+    {
+        if (! $this->has('method')) {
+            $this->merge(['method' => 'cash']);
+        }
     }
 
     public function withValidator(Validator $validator): void

@@ -23,6 +23,8 @@ class ShareCapitalLedger extends Model
         'reference',
         'debit',
         'credit',
+        'method',
+        'reference_number',
         'created_by',
     ];
 
