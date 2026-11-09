@@ -76,6 +76,11 @@ final class ChangeScanner
     }
 
     /**
+     * Flag members for the minute job. A member already flagged keeps the
+     * later of their `flagged_at` and `$at`: a newer change moves the flag
+     * forward, and a member the minute job is holding back after a failure
+     * keeps their retry time, so the overlap rescans never undo a back-off.
+     *
      * @param  array<int, string>  $reasons  borrower id => reason
      */
     public function flag(array $reasons, Carbon $at): void
@@ -92,7 +97,7 @@ final class ChangeScanner
                     'updated_at' => $at,
                 ], $chunk),
                 ['borrower_id'],
-                ['reason', 'flagged_at', 'updated_at'],
+                ['reason', 'flagged_at' => DB::raw('greatest(`flagged_at`, values(`flagged_at`))'), 'updated_at'],
             );
         }
     }

@@ -93,3 +93,27 @@ it('deletes a member with scores but no decision, scores and all', function () {
     expect(CreditScore::query()->where('borrower_id', $member->id)->exists())->toBeFalse()
         ->and(CreditScoreMember::query()->where('borrower_id', $member->id)->exists())->toBeFalse();
 });
+
+it('never prunes an abandoned registration that carries a credit decision', function () {
+    $kept = $this->member(['status' => 'pending', 'approved_at' => null]);
+    $pruned = $this->member(['status' => 'pending', 'approved_at' => null]);
+    $outcome = app(Recalculator::class)->scoreMember($kept->id, 'Nightly review');
+    CreditDecision::query()->create([
+        'borrower_id' => $kept->id,
+        'credit_score_id' => $outcome['credit_score_id'],
+        'decision' => 'hold',
+        'reason' => 'Waiting for documents',
+        'score_snapshot' => ['score' => $outcome['score']],
+        'recommendation_snapshot' => 'Advice',
+        'revision_version' => '1.0',
+        'decided_by' => User::query()->value('id'),
+        'decided_at' => now(),
+    ]);
+    Borrower::query()->whereKey([$kept->id, $pruned->id])->toBase()->update(['updated_at' => now()->subDays(30)]);
+
+    $this->artisan('registrations:prune')->assertSuccessful();
+
+    expect(Borrower::query()->whereKey($kept->id)->exists())->toBeTrue()
+        ->and(Borrower::query()->whereKey($pruned->id)->exists())->toBeFalse()
+        ->and(CreditDecision::query()->where('borrower_id', $kept->id)->count())->toBe(1);
+});

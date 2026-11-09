@@ -10,7 +10,10 @@ use App\Models\CreditScoreDirtyMember;
 use App\Models\CreditScoreMember;
 use App\Models\CreditScoringSetting;
 use App\Models\Loan;
+use App\Services\LoanWriteTransaction;
 use Carbon\Carbon;
+use Illuminate\Contracts\Cache\LockTimeoutException;
+use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 
@@ -21,7 +24,8 @@ use Illuminate\Support\Facades\DB;
  * band, confidence or revision differs from the last one; otherwise only the
  * member's `checked_at` moves. A new score that dropped by the settings'
  * decline points (10) or more, or moved into a high band, writes an alert.
- * Policy flags are kept in step on every run.
+ * Policy flags are kept in step on every run, and the member's row records
+ * the application details they were raised from (`flags_profile_id`).
  *
  * Advisory only: it writes the credit scoring tables and nothing else, and
  * never a loan. A dry run calculates and compares, and writes nothing.
@@ -37,6 +41,8 @@ class Recalculator
     public const OPEN_APPLICATION_STATUSES = ['draft', 'for_review', 'approved'];
 
     private const LOCK_SECONDS = 60;
+
+    private const PROFILE_UNIQUE_INDEX = 'credit_application_profiles_loan_id_unique';
 
     private const LOCK_WAIT_SECONDS = 30;
 
@@ -77,6 +83,7 @@ class Recalculator
                     'branch_id' => $data->member->branch_id,
                     'has_active_loan' => $result['has_active_loan'],
                     'past_due' => $result['past_due'],
+                    'flags_profile_id' => $result['data_used']['application_profile_id'] ?? null,
                     'checked_at' => $now,
                 ], $changed ? [
                     'credit_score_id' => $scoreId,
@@ -109,38 +116,78 @@ class Recalculator
      */
     public function assessLoan(Loan $loan, string $reason, bool $dryRun = false, ?Carbon $asOf = null): array
     {
+        if ($dryRun) {
+            return $this->assessUnlocked($loan, $reason, true, $asOf);
+        }
+
+        return Cache::lock($this->lockKey((int) $loan->borrower_id), self::LOCK_SECONDS)
+            ->block(self::LOCK_WAIT_SECONDS, fn () => $this->assessUnlocked($loan, $reason, false, $asOf));
+    }
+
+    /**
+     * Run `$write` and assess the application in one transaction, under the
+     * member's lock, waiting at most `$waitSeconds` for it: the assessment
+     * screen saves the application details this way, so details the
+     * assessment fails on are rolled back with it. The lock is taken outside
+     * the transaction, so other processes see it. The transaction is
+     * LoanWriteTransaction's: a lock wait timeout or deadlock on the loan row,
+     * or two first saves of the same details, answer 409 with nothing saved.
+     *
+     * @param  callable(): void  $write
+     * @return array{borrower_id: int, changed: bool, status: string, score: int|null, previous_score: int|null, risk_level: string|null, confidence: string, credit_score_id: int|null}
+     *
+     * @throws LockTimeoutException when the member is still being scored after `$waitSeconds`
+     * @throws HttpResponseException 409 on a lock wait timeout, a deadlock or a details collision
+     */
+    public function assessLoanAfter(Loan $loan, string $reason, callable $write, int $waitSeconds): array
+    {
+        return Cache::lock($this->lockKey((int) $loan->borrower_id), self::LOCK_SECONDS)
+            ->block($waitSeconds, fn () => LoanWriteTransaction::run(
+                function () use ($loan, $reason, $write) {
+                    $write();
+
+                    return $this->assessUnlocked($loan, $reason, false, null);
+                },
+                self::PROFILE_UNIQUE_INDEX,
+                'This application was changed by someone else at the same time. Reload and try again.',
+            ));
+    }
+
+    /**
+     * The assessment itself, for a caller that holds the member's lock (or a
+     * dry run, which writes nothing).
+     *
+     * @return array{borrower_id: int, changed: bool, status: string, score: int|null, previous_score: int|null, risk_level: string|null, confidence: string, credit_score_id: int|null}
+     */
+    protected function assessUnlocked(Loan $loan, string $reason, bool $dryRun, ?Carbon $asOf): array
+    {
         $borrowerId = (int) $loan->borrower_id;
+        [$settings, $table] = $this->rules();
+        $data = MemberCreditData::load($borrowerId, $loan, $asOf);
+        $result = $this->scorer->score($data, $settings, $table);
+        $last = CreditScore::query()
+            ->where('loan_id', $loan->id)
+            ->where('context', CreditScore::CONTEXT_ASSESSMENT)
+            ->orderByDesc('id')
+            ->first();
+        $changed = $this->differs($result, $last, $last);
 
-        $run = function () use ($loan, $borrowerId, $reason, $dryRun, $asOf) {
-            [$settings, $table] = $this->rules();
-            $data = MemberCreditData::load($borrowerId, $loan, $asOf);
-            $result = $this->scorer->score($data, $settings, $table);
-            $last = CreditScore::query()
-                ->where('loan_id', $loan->id)
-                ->where('context', CreditScore::CONTEXT_ASSESSMENT)
-                ->orderByDesc('id')
-                ->first();
-            $changed = $this->differs($result, $last, $last);
+        if ($dryRun) {
+            return $this->outcome($borrowerId, $changed, $result, $last?->score, $last?->id);
+        }
 
-            if ($dryRun) {
-                return $this->outcome($borrowerId, $changed, $result, $last?->score, $last?->id);
+        return DB::transaction(function () use ($loan, $borrowerId, $reason, $result, $last, $changed) {
+            $now = Carbon::now();
+            $scoreId = $last?->id;
+
+            if ($changed) {
+                $scoreId = $this->writeScore($borrowerId, (int) $loan->id, CreditScore::CONTEXT_ASSESSMENT, $result, $reason, $last?->score, $now)->id;
             }
 
-            return DB::transaction(function () use ($loan, $borrowerId, $reason, $result, $last, $changed) {
-                $now = Carbon::now();
-                $scoreId = $last?->id;
+            $this->policyFlags->sync($borrowerId, (int) $loan->id, $result['flags'], $now);
 
-                if ($changed) {
-                    $scoreId = $this->writeScore($borrowerId, (int) $loan->id, CreditScore::CONTEXT_ASSESSMENT, $result, $reason, $last?->score, $now)->id;
-                }
-
-                $this->policyFlags->sync($borrowerId, (int) $loan->id, $result['flags'], $now);
-
-                return $this->outcome($borrowerId, $changed, $result, $last?->score, $scoreId);
-            });
-        };
-
-        return $dryRun ? $run() : Cache::lock($this->lockKey($borrowerId), self::LOCK_SECONDS)->block(self::LOCK_WAIT_SECONDS, $run);
+            return $this->outcome($borrowerId, $changed, $result, $last?->score, $scoreId);
+        });
     }
 
     /**
@@ -177,13 +224,18 @@ class Recalculator
 
     /**
      * Drop the member's change flag if nothing flagged it again after
-     * `$before`.
+     * `$before`. A flag the minute job backed off after a failure holds its
+     * retry time in `flagged_at`, which can be later than `$before`; it is
+     * dropped too when nothing wrote it after `$before`, because the member
+     * has just been scored.
      */
     public function clearDirty(int $borrowerId, Carbon $before): void
     {
         CreditScoreDirtyMember::query()
             ->where('borrower_id', $borrowerId)
-            ->where('flagged_at', '<=', $before)
+            ->where(fn ($q) => $q
+                ->where('flagged_at', '<=', $before)
+                ->orWhere(fn ($backedOff) => $backedOff->where('attempts', '>', 0)->where('updated_at', '<=', $before)))
             ->delete();
     }
 

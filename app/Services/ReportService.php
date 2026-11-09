@@ -7,6 +7,7 @@ use App\Models\Borrower;
 use App\Models\Loan;
 use App\Models\Repayment;
 use App\Models\ShareCapitalLedger;
+use App\Services\Accounting\AllowanceCalculator;
 use App\Services\Accounting\PostingRules;
 use Carbon\Carbon;
 use Closure;
@@ -3025,12 +3026,21 @@ class ReportService
      * boundary arithmetic, so the disjoint 1–30 / 31–60 / 61–90 / 90+
      * definitions documented there can never drift out from under this report.
      *
+     * `principal_basis` is the allowance posting's own base beside it
+     * (decision 12): AllowanceCalculator's figures for the same date and
+     * branch scope, each loan's outstanding principal in the bucket of its
+     * oldest unpaid instalment, in pesos converted once from centavos.
+     *
      * @param  array<string, mixed>  $filters
      * @return array<string, mixed>
      */
     public function provisioning(array $filters): array
     {
         $aging = $this->agingReport($filters);
+        $principalBasis = app(AllowanceCalculator::class)->principalBasis(
+            $this->resolveAsOfDate($filters)->toDateString(),
+            self::branchScope($filters),
+        );
 
         $buckets = [];
         $requiredAllowance = 0.0;
@@ -3068,8 +3078,9 @@ class ReportService
                     : 0.0,
             ],
             'rates' => self::PROVISION_RATES,
-            'policy_note' => 'Provision rates are POLICY, not arithmetic. They are a class constant only because there is no settings table for them yet; each cooperative board may set its own ladder.',
+            'policy_note' => 'Provision rates are POLICY, not arithmetic. They are a class constant only because there is no settings table for them yet; each cooperative board may set its own ladder. principal_basis applies the same rates to each past-due loan\'s outstanding principal, in the bucket of its oldest unpaid instalment: the base the allowance posting books.',
             'generated_at' => now()->toDateTimeString(),
+            'principal_basis' => $principalBasis,
         ];
     }
 

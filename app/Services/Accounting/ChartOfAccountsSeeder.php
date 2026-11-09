@@ -9,15 +9,25 @@ use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Support\Facades\DB;
+use InvalidArgumentException;
 
 /**
- * The default chart of accounts a new organisation starts from.
+ * The chart of accounts a new organisation starts from, in one of two
+ * templates (Phase 2, accounting round C):
  *
- * A TEMPLATE, not a fixed structure — administrators add, rename and deactivate
- * accounts, and a cooperative's equity and liability sections look nothing like
- * a lending corporation's (share capital, statutory funds and undivided net
- * surplus in place of capital and retained earnings). This is day one, not
- * the law.
+ * - `lending_company` ({@see self::CHART}), the default when none is named;
+ * - `cooperative`, the same chart plus {@see self::COOPERATIVE_ADDITIONS}
+ *   (savings and time deposits, interest on share capital and patronage refund
+ *   payable, the statutory funds under the 3070 heading, and 3080 Undivided
+ *   Net Surplus), with {@see self::COOPERATIVE_MAPPING_OVERRIDES} posting
+ *   `net_surplus` to 3080. 3010–3030 stay, so every mapping keeps working;
+ *   an administrator can deactivate them.
+ *
+ * Either is day one, not the law: administrators add, rename and deactivate
+ * accounts afterwards. A chart that already exists gets the cooperative rows
+ * only through `accounting:apply-cooperative-template`
+ * ({@see CooperativeTemplateBackfill}), never through a migration, because a
+ * lending company must not get them.
  *
  * Codes follow the classification convention {@see AccountRules::typeFromCode()}
  * relies on: 1xxx asset, 2xxx liability, 3xxx equity, 4xxx income, 5xxx expense.
@@ -30,6 +40,11 @@ use Illuminate\Support\Facades\DB;
  * asserts codes AND names against a fixture copied from it. The frontend renders
  * that constant as a read-only preview before a chart has ever been saved, so a
  * divergence shows a user one chart and seeds them another.
+ *
+ * The frontend has a second list for the second template,
+ * `COOPERATIVE_CHART_ADDITIONS`, which {@see self::COOPERATIVE_ADDITIONS}
+ * mirrors the same way; `Accounting\Setup\ChartTemplatesTest` holds its
+ * fixture of the cooperative rows.
  *
  * TWO ROWS DEVIATE, deliberately, and the frontend constant needs the same two
  * changes:
@@ -152,9 +167,9 @@ final class ChartOfAccountsSeeder
         ['code' => '2390', 'name' => 'Suspense Account', 'type' => 'liability', 'parent' => '2000'],
 
         // ── Equity ──
-        // A cooperative replaces these with Share Capital, Statutory Funds,
-        // Reserve Fund and Undivided Net Surplus. Left as the corporate default;
-        // the organisation type decides which set is seeded.
+        // The lending company's equity. The cooperative template keeps these
+        // and adds its statutory funds and 3080 Undivided Net Surplus
+        // (self::COOPERATIVE_ADDITIONS).
         ['code' => '3000', 'name' => 'Equity', 'type' => 'equity', 'is_group' => true],
         ['code' => '3010', 'name' => 'Capital', 'type' => 'equity', 'parent' => '3000'],
         ['code' => '3020', 'name' => 'Additional Capital', 'type' => 'equity', 'parent' => '3000'],
@@ -205,6 +220,42 @@ final class ChartOfAccountsSeeder
         ['code' => '5140', 'name' => 'Credit Loss Expense', 'type' => 'expense', 'parent' => '5000'],
         ['code' => '5150', 'name' => 'Miscellaneous Expense', 'type' => 'expense', 'parent' => '5000'],
     ];
+
+    /** The templates POST /accounting/accounts/seed accepts; the first is the default. */
+    public const TEMPLATES = ['lending_company', 'cooperative'];
+
+    /**
+     * What the cooperative template adds to {@see self::CHART}, in code order,
+     * each heading before its children. Types follow the code
+     * ({@see AccountRules::typeFromCode()}); cash flow categories come from
+     * CashFlowCategories::defaultFor(), as for every other row.
+     *
+     * The codes stay off 2500/2510 and match the savings example the frontend
+     * already uses (2050 Savings Deposits).
+     *
+     * @var list<array{code: string, name: string, type: string, parent: string, is_group?: bool}>
+     */
+    public const COOPERATIVE_ADDITIONS = [
+        ['code' => '2050', 'name' => 'Savings Deposits', 'type' => 'liability', 'parent' => '2000'],
+        ['code' => '2060', 'name' => 'Time Deposits', 'type' => 'liability', 'parent' => '2000'],
+        ['code' => '2070', 'name' => 'Interest on Share Capital Payable', 'type' => 'liability', 'parent' => '2000'],
+        ['code' => '2080', 'name' => 'Patronage Refund Payable', 'type' => 'liability', 'parent' => '2000'],
+        ['code' => '3070', 'name' => 'Statutory Funds', 'type' => 'equity', 'parent' => '3000', 'is_group' => true],
+        ['code' => '3071', 'name' => 'Reserve Fund', 'type' => 'equity', 'parent' => '3070'],
+        ['code' => '3072', 'name' => 'Education and Training Fund', 'type' => 'equity', 'parent' => '3070'],
+        ['code' => '3073', 'name' => 'Community Development Fund', 'type' => 'equity', 'parent' => '3070'],
+        ['code' => '3074', 'name' => 'Optional Fund', 'type' => 'equity', 'parent' => '3070'],
+        ['code' => '3080', 'name' => 'Undivided Net Surplus', 'type' => 'equity', 'parent' => '3000'],
+    ];
+
+    /**
+     * The cooperative template's posting roles that differ from
+     * {@see self::DEFAULT_MAPPING_CODES}: its year-end result goes to
+     * Undivided Net Surplus, not Retained Earnings.
+     *
+     * @var array<string, string>
+     */
+    public const COOPERATIVE_MAPPING_OVERRIDES = ['net_surplus' => '3080'];
 
     /**
      * Which seeded account each posting role points at by default.
@@ -262,6 +313,43 @@ final class ChartOfAccountsSeeder
         'suspense' => '2390',
     ];
 
+    /**
+     * A template's rows, in code order, parents before children.
+     *
+     * @return list<array{code: string, name: string, type: string, parent?: string, is_group?: bool, is_contra?: bool, cash_kind?: string}>
+     *
+     * @throws InvalidArgumentException on a template that isn't in self::TEMPLATES
+     */
+    public function chartFor(string $template): array
+    {
+        $this->assertKnown($template);
+
+        if ($template === 'lending_company') {
+            return self::CHART;
+        }
+
+        $rows = array_merge(self::CHART, self::COOPERATIVE_ADDITIONS);
+        usort($rows, static fn (array $a, array $b): int => strcmp($a['code'], $b['code']));
+
+        return $rows;
+    }
+
+    /**
+     * A template's posting roles: role => account code.
+     *
+     * @return array<string, string>
+     *
+     * @throws InvalidArgumentException on a template that isn't in self::TEMPLATES
+     */
+    public function mappingFor(string $template): array
+    {
+        $this->assertKnown($template);
+
+        return $template === 'cooperative'
+            ? array_merge(self::DEFAULT_MAPPING_CODES, self::COOPERATIVE_MAPPING_OVERRIDES)
+            : self::DEFAULT_MAPPING_CODES;
+    }
+
     /** Whether this organisation already has a chart. */
     public function hasChart(): bool
     {
@@ -269,7 +357,7 @@ final class ChartOfAccountsSeeder
     }
 
     /**
-     * Create the default chart and its posting defaults. One-time.
+     * Create a template's chart and its posting defaults. One-time.
      *
      * Refuses over an existing chart rather than merging into it. Merging would
      * silently resurrect accounts an administrator deliberately removed, and
@@ -280,10 +368,13 @@ final class ChartOfAccountsSeeder
      *
      * @return Collection<int, AccountingAccount> the whole chart, in code order
      */
-    public function seed(?int $createdBy = null): Collection
+    public function seed(?int $createdBy = null, string $template = 'lending_company'): Collection
     {
+        $chart = $this->chartFor($template);
+        $mapping = $this->mappingFor($template);
+
         try {
-            return $this->seedInTransaction($createdBy);
+            return $this->seedInTransaction($createdBy, $template, $chart, $mapping);
         } catch (UniqueConstraintViolationException $e) {
             /*
              * TWO SEEDS AT ONCE — a double-clicked button, or a retried request.
@@ -314,11 +405,14 @@ final class ChartOfAccountsSeeder
     }
 
     /**
+     * @param  list<array<string, mixed>>  $chart
+     * @param  array<string, string>  $mapping
+     *
      * @throws HttpResponseException when a chart already exists
      */
-    private function seedInTransaction(?int $createdBy): Collection
+    private function seedInTransaction(?int $createdBy, string $template, array $chart, array $mapping): Collection
     {
-        return DB::transaction(function () use ($createdBy) {
+        return DB::transaction(function () use ($createdBy, $template, $chart, $mapping) {
             if ($this->hasChart()) {
                 throw $this->alreadySeeded();
             }
@@ -335,8 +429,8 @@ final class ChartOfAccountsSeeder
              * this suppresses the audit LISTENER, not the model events, so
              * anything else hanging off `created` still runs.
              */
-            AuditLogService::withoutModelAuditing(function () use (&$idByCode, $createdBy): void {
-                foreach (self::CHART as $seed) {
+            AuditLogService::withoutModelAuditing(function () use (&$idByCode, $createdBy, $chart, $mapping): void {
+                foreach ($chart as $seed) {
                     $account = AccountingAccount::create([
                         'code' => $seed['code'],
                         'name' => $seed['name'],
@@ -347,7 +441,7 @@ final class ChartOfAccountsSeeder
                         'cash_kind' => $seed['cash_kind'] ?? null,
                         // Null lets the saving hook apply the default rule.
                         'cash_flow_category' => in_array($seed['code'], self::OPERATING_LOAN_ACCOUNT_CODES, true) ? 'operating' : null,
-                        // Parents always precede their children in CHART, so one
+                        // Parents always precede their children in the chart, so one
                         // pass is enough and a missing parent is a broken
                         // constant rather than an ordering accident.
                         'parent_id' => isset($seed['parent']) ? $idByCode[$seed['parent']] : null,
@@ -357,7 +451,7 @@ final class ChartOfAccountsSeeder
                     $idByCode[$seed['code']] = $account->id;
                 }
 
-                foreach (self::DEFAULT_MAPPING_CODES as $role => $code) {
+                foreach ($mapping as $role => $code) {
                     AccountingAccountMapping::create([
                         'role' => $role,
                         'accounting_account_id' => $idByCode[$code],
@@ -370,15 +464,26 @@ final class ChartOfAccountsSeeder
                 null,
                 null,
                 [
-                    'accounts' => count(self::CHART),
-                    'mappings' => count(self::DEFAULT_MAPPING_CODES),
+                    'template' => $template,
+                    'accounts' => count($chart),
+                    'mappings' => count($mapping),
                 ],
-                'Seeded the default chart of accounts and its posting defaults.',
+                $template === 'cooperative'
+                    ? 'Seeded the cooperative chart of accounts and its posting defaults.'
+                    : 'Seeded the default chart of accounts and its posting defaults.',
                 $createdBy,
             );
 
             return AccountingAccount::query()->inCodeOrder()->get();
         });
+    }
+
+    /** @throws InvalidArgumentException */
+    private function assertKnown(string $template): void
+    {
+        if (! in_array($template, self::TEMPLATES, true)) {
+            throw new InvalidArgumentException("Unknown chart of accounts template [{$template}].");
+        }
     }
 
     /**
