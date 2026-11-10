@@ -45,15 +45,18 @@ class AccruedInterest
 
         foreach ($accounts->groupBy(fn (SavingsAccount $account) => $this->startOf($account)) as $from => $group) {
             $loaded = $this->balances->load($group->pluck('id'), $from, $to);
+            $segments = [];
 
             foreach ($group as $account) {
                 $product = $products[$account->product_id];
+                // One rate history read per (product, first day), not per account.
+                $segments[$product->id] ??= $this->rates->segments($product->id, null, $from, $to);
                 $figures = $this->calculator->calculate(
                     $loaded[$account->id]['opening'],
                     $loaded[$account->id]['deltas'],
                     $from,
                     $to,
-                    $this->rates->segments($product->id, null, $from, $to),
+                    $segments[$product->id],
                     SavingsMath::centavos($product->minimum_adb_for_interest),
                     $taxRate,
                 );

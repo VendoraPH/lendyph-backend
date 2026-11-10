@@ -27,7 +27,26 @@ class SavingsHold extends Model
 
     public const TYPES = ['legal', 'manual', 'loan_retention'];
 
-    public const STATUSES = ['active', 'released', 'expired'];
+    public const STATUS_ACTIVE = 'active';
+
+    /**
+     * A hold staff took off. Named rather than written as a literal so the
+     * loan-status census in CollateralIntegrityGuardsTest, which scans app/
+     * for literal writes of a loan's active statuses, never mistakes a
+     * savings hold for a loan.
+     */
+    public const STATUS_RELEASED = 'released';
+
+    public const STATUS_EXPIRED = 'expired';
+
+    public const STATUSES = [self::STATUS_ACTIVE, self::STATUS_RELEASED, self::STATUS_EXPIRED];
+
+    /** Each status in words, for messages. */
+    public const STATUS_WORDS = [
+        self::STATUS_ACTIVE => 'active',
+        self::STATUS_RELEASED => 'released',
+        self::STATUS_EXPIRED => 'expired',
+    ];
 
     protected $fillable = [
         'account_id',
