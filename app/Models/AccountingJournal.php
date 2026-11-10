@@ -5,6 +5,7 @@ namespace App\Models;
 use App\Exceptions\PostedJournalIsImmutableException;
 use App\Http\Resources\JournalEntryResource;
 use App\Services\BranchAccess;
+use App\Services\Savings\SavingsJournalGuard;
 use App\Traits\Auditable;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
@@ -438,7 +439,9 @@ class AccountingJournal extends Model
                 'branch:id,name',
                 'creator:id,first_name,last_name',
                 'poster:id,first_name,last_name',
-                'reverses:id,journal_no',
+                // `source` and the postable tell SavingsJournalGuard whether a
+                // reversal undid a savings entry, with no query per row.
+                'reverses:id,journal_no,source,postable_type,postable_id',
             ])
             // Runs on the page `paginate()` produces — `paginate()` goes
             // through `get()`, which applies these. Here rather than left to
@@ -446,6 +449,7 @@ class AccountingJournal extends Model
             // `postable_label` from every row.
             ->afterQuery(static function (EloquentCollection $journals): EloquentCollection {
                 self::attachPostables($journals);
+                SavingsJournalGuard::preload($journals);
 
                 return $journals;
             });

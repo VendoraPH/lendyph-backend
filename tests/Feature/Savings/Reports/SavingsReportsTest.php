@@ -170,8 +170,8 @@ class SavingsReportsTest extends TestCase
     /**
      * Browser check (Phase 3, S5): a settled TD counted in "To pay out". The
      * rows still list every placement maturing in the period, with its
-     * status; every total counts only what is still owed (active, or matured
-     * and not settled yet).
+     * status (`listed_count`); every other total counts only what is still
+     * owed (active, or matured and not settled yet).
      */
     public function test_time_deposit_maturity_totals_count_only_placements_still_owed(): void
     {
@@ -188,6 +188,7 @@ class SavingsReportsTest extends TestCase
 
         $this->actingAs($this->reader)->getJson('/api/reports/savings/time-deposit-maturities?date_from=2026-12-01&date_to=2026-12-31')->assertOk()
             ->assertJsonPath('meta.total', 4)
+            ->assertJsonPath('totals.listed_count', 4)
             ->assertJsonPath('totals.count', 2)
             ->assertJsonPath('totals.total_principal', '20000.00')
             ->assertJsonPath('totals.total_net_interest', '200.00')

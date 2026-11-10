@@ -152,10 +152,6 @@ class AccountingJournalController extends Controller
 
         $journals = $matching()
             ->withRegisterRelations()
-            // Replaces the scope's `reverses` load with one that also reads
-            // `source`, so each reversal's `reversible` (SavingsJournalGuard)
-            // costs no query per row.
-            ->with('reverses:id,journal_no,source')
             // Newest first, and `id` as the tiebreak so two entries on the same
             // date do not swap places between pages — which would show one
             // twice and hide the other.
@@ -287,8 +283,8 @@ class AccountingJournalController extends Controller
                         new OA\Property(property: 'reverses_journal_id', type: 'integer', nullable: true, description: 'On a reversal, the entry it reverses.'),
                         new OA\Property(property: 'reverses_journal_no', type: 'string', nullable: true, example: 'JE-000042', description: 'On a reversal, the number of the entry it reverses; null on every other entry.'),
                         new OA\Property(property: 'reversed_by_journal_id', type: 'integer', nullable: true, description: 'The reversal that undid this entry.'),
-                        new OA\Property(property: 'reversible', type: 'boolean', description: 'False for an entry Savings posted or the reversal of one, which is reversed from Savings; true otherwise (draft and already-reversed checks are unchanged).'),
-                        new OA\Property(property: 'not_reversible_reason', type: 'string', nullable: true, description: 'Why the entry can\'t be reversed here, in words; null when it can.'),
+                        new OA\Property(property: 'reversible', type: 'boolean', description: 'False for an entry Savings posted or the reversal of one (reversed from Savings, or not at all); true otherwise (draft and already-reversed checks are unchanged).'),
+                        new OA\Property(property: 'not_reversible_reason', type: 'string', nullable: true, description: 'Why the entry can\'t be reversed here, in words: reverse it from Savings, or, for a time deposit or an account closing, record a correcting journal entry. Null when it can.'),
                     ]),
                 ]),
             ),
@@ -355,7 +351,7 @@ class AccountingJournalController extends Controller
     #[OA\Post(
         path: '/api/accounting/journals/{id}/reverse',
         summary: 'Reverse a posted entry',
-        description: "Writes a MIRROR entry — every debit becomes a credit against the same account — built from the original's stored lines, and posts it. The original is not edited beyond `status` and `reversed_by_journal_id`, so both halves stay on the record and the pair nets to zero on every statement. Returns the REVERSAL, not the original. Refused with 422 on a draft, on an entry already reversed, on a year-end `closing` entry or the reversal of one (reopen the year instead), and on an entry Savings posted (`savings`, `savings_interest`, `time_deposit`, `time_deposit_settlement`) or the reversal of one, which is reversed from Savings.",
+        description: "Writes a MIRROR entry — every debit becomes a credit against the same account — built from the original's stored lines, and posts it. The original is not edited beyond `status` and `reversed_by_journal_id`, so both halves stay on the record and the pair nets to zero on every statement. Returns the REVERSAL, not the original. Refused with 422 on a draft, on an entry already reversed, on a year-end `closing` entry or the reversal of one (reopen the year instead), and on an entry Savings posted (`savings`, `savings_interest`, `time_deposit`, `time_deposit_settlement`) or the reversal of one: deposits, withdrawals and interest runs are reversed from Savings; time deposit placements and settlements, account-closing payouts and the interest credited at closing can't be reversed (record a correcting journal entry).",
         tags: ['Accounting'],
         security: [['sanctum' => []]],
         parameters: [
@@ -378,8 +374,8 @@ class AccountingJournalController extends Controller
     {
         // A closing entry is undone by reopening its year, never by hand.
         $this->yearEnd->assertNotPartOfAClose($journal);
-        // A savings entry, or the reversal of one, is undone from Savings,
-        // with its savings record.
+        // A savings entry, or the reversal of one, is reversed from Savings
+        // with its savings record, or not at all (SavingsJournalGuard).
         SavingsJournalGuard::assertReversibleFromJournals($journal);
 
         $reversal = $this->poster->reverse(
@@ -404,9 +400,9 @@ class AccountingJournalController extends Controller
             'branch:id,name',
             'creator:id,first_name,last_name',
             'poster:id,first_name,last_name',
-            // `source` tells the resource whether a reversal undid a savings
-            // entry (SavingsJournalGuard).
-            'reverses:id,journal_no,source',
+            // `source` and the postable tell the resource whether a reversal
+            // undid a savings entry (SavingsJournalGuard).
+            'reverses:id,journal_no,source,postable_type,postable_id',
         ]);
 
         // `postable_label` is whenLoaded-guarded, so without this the field

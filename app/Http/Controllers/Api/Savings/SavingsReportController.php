@@ -111,7 +111,7 @@ class SavingsReportController extends Controller
     #[OA\Get(
         path: '/api/reports/savings/time-deposit-maturities',
         summary: 'Time Deposit Maturities',
-        description: 'Time deposits maturing in the period (default this month), soonest first; pre-terminated ones are left out. `totals`: count, total_principal, total_net_interest, total_maturity_amount and payout_amount (what is paid out rather than rolled over), counting only placements still owed (active, or matured and not settled); a placement already paid out or rolled over is listed with its status but counted in no total.',
+        description: 'Time deposits maturing in the period (default this month), soonest first; pre-terminated ones are left out. `totals`: listed_count (every placement listed), and count, total_principal, total_net_interest, total_maturity_amount and payout_amount (what is paid out rather than rolled over), which count only placements still owed (active, or matured and not settled); a placement already paid out or rolled over is listed with its status but counted in no money total.',
         tags: ['Savings Reports'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')), new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')), new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')), new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', maximum: 1000))],

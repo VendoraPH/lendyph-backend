@@ -45,7 +45,7 @@ class SavingsTimeDepositController extends Controller
     #[OA\Get(
         path: '/api/savings/time-deposits',
         summary: 'Time deposits',
-        description: 'One page of the placements in the caller\'s branches, newest placement first. `meta.stats` counts each status over the filter without `status` and `search`; `meta.totals` covers the whole filter: `count`, `total_principal` and `maturing_30_days` (the filtered placements that are active and mature from today to 30 days ahead).',
+        description: 'One page of the placements in the caller\'s branches, newest placement first. `meta.stats` counts each status over the filter without `status` and `search`; `meta.totals` covers the whole filter: `count`, `total_principal` and `maturing_30_days` (the filtered placements that are active and mature from today to 30 days ahead). Every row carries `pending_approval`: the payout or pre-termination waiting for a checker, `{id, kind, amount, requested_by{id, name}}`, else null.',
         tags: ['Savings'],
         security: [['sanctum' => []]],
         parameters: [
