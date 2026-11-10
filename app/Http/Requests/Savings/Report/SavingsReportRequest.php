@@ -3,6 +3,7 @@
 namespace App\Http\Requests\Savings\Report;
 
 use App\Services\BranchAccess;
+use App\Services\Savings\Reports\SavingsReports;
 use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Validator;
@@ -65,17 +66,27 @@ class SavingsReportRequest extends FormRequest
         ];
     }
 
+    /**
+     * The 10-year limit on the period the report will actually read, a missing
+     * end defaulted as SavingsReports::resolvePeriod() does (review L3), so
+     * leaving one end out can't widen the range past it.
+     */
     public function withValidator(Validator $validator): void
     {
         $validator->after(function (Validator $validator): void {
-            if ($validator->errors()->isNotEmpty() || ! $this->filled('date_from') || ! $this->filled('date_to')) {
+            if ($validator->errors()->isNotEmpty() || (! $this->filled('date_from') && ! $this->filled('date_to'))) {
                 return;
             }
 
-            $from = CarbonImmutable::parse((string) $this->input('date_from'));
+            [$from, $to] = SavingsReports::resolvePeriod($this->input('date_from'), $this->input('date_to'));
 
-            if ($from->addYears(self::MAX_SPAN_YEARS)->lessThan(CarbonImmutable::parse((string) $this->input('date_to')))) {
-                $validator->errors()->add('date_to', 'A report can cover at most '.self::MAX_SPAN_YEARS.' years.');
+            if (CarbonImmutable::parse($from)->addYears(self::MAX_SPAN_YEARS)->lessThan(CarbonImmutable::parse($to))) {
+                foreach (['date_from', 'date_to'] as $field) {
+                    if ($this->filled($field)) {
+                        $validator->errors()->add($field, 'A report can cover at most '.self::MAX_SPAN_YEARS.' years; '
+                            .CarbonImmutable::parse($from)->format('M j, Y').' to '.CarbonImmutable::parse($to)->format('M j, Y').' is longer.');
+                    }
+                }
             }
         });
     }

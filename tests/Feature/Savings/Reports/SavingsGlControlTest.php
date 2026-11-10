@@ -10,6 +10,7 @@ use App\Services\Accounting\AutomaticPoster;
 use App\Services\Savings\SavingsLedger;
 use DateTimeZone;
 use Illuminate\Console\Scheduling\Schedule;
+use Illuminate\Routing\Middleware\ThrottleRequests;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Tests\Feature\Savings\Interest\SavingsHistory;
@@ -138,6 +139,19 @@ class SavingsGlControlTest extends TestCase
         $this->onDay('2026-11-11');
         $this->artisan('savings:gl-control')->assertSuccessful();
         $this->assertSame(2, DB::table('notifications')->where('type', 'savings_gl_difference')->where('notifiable_id', $poster->id)->count(), 'A new date notifies again.');
+    }
+
+    public function test_the_csv_keeps_a_negative_difference_a_plain_number(): void
+    {
+        $account = $this->openAccount($this->product, 100_000);
+        // Money out of the subledger with no journal: the GL holds more.
+        DB::transaction(fn () => app(SavingsLedger::class)->debit($account, 'withdrawal', 5_000, ['method' => 'cash']));
+        $this->withoutMiddleware(ThrottleRequests::class);
+
+        $csv = $this->get('/api/reports/savings/gl-control/export')->assertOk()->streamedContent();
+
+        $this->assertStringContainsString(',950.00,1000.00,-50.00', $csv);
+        $this->assertStringNotContainsString("'", $csv);
     }
 
     public function test_the_command_does_nothing_without_savings_records(): void

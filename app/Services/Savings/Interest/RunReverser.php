@@ -5,6 +5,7 @@ namespace App\Services\Savings\Interest;
 use App\Models\SavingsAccount;
 use App\Models\SavingsInterestRun;
 use App\Models\SavingsInterestRunLine;
+use App\Models\SavingsProduct;
 use App\Models\SavingsTransaction;
 use App\Models\User;
 use App\Services\Accounting\AutomaticPoster;
@@ -41,6 +42,9 @@ class RunReverser
         $accountIds = $run->lines()->pluck('account_id')->all();
 
         return LoanWriteTransaction::run(function () use ($run, $user, $reason, $accountIds): SavingsInterestRun {
+            // The product row first (review M1), as a create takes it: the two
+            // never interleave, so no run is created on a period being reversed.
+            SavingsProduct::query()->whereKey($run->product_id)->lockForUpdate()->firstOrFail();
             $accounts = $this->locks->accounts($accountIds);
             $locked = SavingsInterestRun::query()->whereKey($run->getKey())->lockForUpdate()->firstOrFail();
 
@@ -124,6 +128,7 @@ class RunReverser
             $this->ledger->credit($account, 'reversal', SavingsMath::centavos($tax->debit), [
                 'value_date' => $tax->value_date->toDateString(),
                 'reverses_transaction_id' => $tax->id,
+                'interest_run_id' => $line->run_id,
                 'created_by' => $user->id,
                 'remarks' => $remarks,
             ]);
@@ -133,6 +138,7 @@ class RunReverser
             $this->ledger->debit($account, 'reversal', SavingsMath::centavos($interest->credit), [
                 'value_date' => $interest->value_date->toDateString(),
                 'reverses_transaction_id' => $interest->id,
+                'interest_run_id' => $line->run_id,
                 'created_by' => $user->id,
                 'remarks' => $remarks,
             ]);

@@ -11,6 +11,7 @@ use App\Models\SavingsTaxRule;
 use App\Models\SavingsTransaction;
 use App\Models\User;
 use App\Services\Savings\SavingsLedger;
+use App\Services\Savings\SavingsMath;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -201,12 +202,16 @@ class InterestRunLifecycleTest extends TestCase
 
     public function test_only_the_latest_run_is_reversed_then_its_period_runs_again(): void
     {
+        SavingsTaxRule::factory()->create(['holder_type' => SavingsTaxRule::HOLDER_MEMBER, 'rate' => '20.0000', 'effective_from' => '2026-01-01']);
         $q3 = $this->postedRun('2026-07-01');
 
         $this->onDay('2027-01-02');
         $q4 = $this->postedRun('2026-10-01');
-        $q4Gross = SavingsInterestRun::query()->findOrFail($q4)->total_gross;
-        $balance = $this->a->refresh()->ledger_balance;
+        $q4Run = SavingsInterestRun::query()->findOrFail($q4);
+        $interest = SavingsTransaction::query()->where('interest_run_id', $q4)->where('account_id', $this->a->id)->where('type', 'interest')->sole();
+        $tax = SavingsTransaction::query()->where('interest_run_id', $q4)->where('account_id', $this->a->id)->where('type', 'withholding_tax')->sole();
+        $this->assertGreaterThan(0, SavingsMath::centavos($tax->debit), 'The reversal is tested with tax withheld.');
+        $balance = SavingsMath::centavos($this->a->refresh()->ledger_balance);
 
         $this->actingAs($this->checker)->postJson("/api/savings/interest-runs/{$q3}/reverse", ['reason' => 'Wrong rate'])->assertStatus(422);
 
@@ -216,11 +221,12 @@ class InterestRunLifecycleTest extends TestCase
             ->assertJsonPath('data.reverse_reason', 'Wrong rate')
             ->assertJsonPath('data.reversed_by.id', $this->checker->id);
 
-        $interest = SavingsTransaction::query()->where('interest_run_id', $q4)->where('type', 'interest')->sole();
-        $reversal = SavingsTransaction::query()->where('reverses_transaction_id', $interest->id)->sole();
-        $this->assertSame([$interest->credit, '2026-12-31', '2027-01-02'], [$reversal->debit, $reversal->value_date->toDateString(), $reversal->date->toDateString()]);
+        $interestReversal = SavingsTransaction::query()->where('reverses_transaction_id', $interest->id)->sole();
+        $taxReversal = SavingsTransaction::query()->where('reverses_transaction_id', $tax->id)->sole();
+        $this->assertSame([$interest->credit, '2026-12-31', '2027-01-02', $q4], [$interestReversal->debit, $interestReversal->value_date->toDateString(), $interestReversal->date->toDateString(), $interestReversal->interest_run_id]);
+        $this->assertSame([$tax->debit, '2026-12-31', $q4], [$taxReversal->credit, $taxReversal->value_date->toDateString(), $taxReversal->interest_run_id]);
         $this->assertSame(
-            number_format((float) $balance - (float) $q4Gross, 2, '.', ''),
+            SavingsMath::pesos($balance - SavingsMath::centavos($interest->credit) + SavingsMath::centavos($tax->debit)),
             $this->a->refresh()->ledger_balance,
         );
         $this->assertSame('2026-09-30', $this->a->interest_credited_through->toDateString());
@@ -228,7 +234,7 @@ class InterestRunLifecycleTest extends TestCase
 
         $again = $this->actingAs($this->maker)->postJson('/api/savings/interest-runs', $this->body('2026-10-01'))->assertCreated()->json('data.0');
         $this->assertNotSame($q4, $again['id']);
-        $this->assertSame($q4Gross, $again['total_gross']);
+        $this->assertSame([$q4Run->total_gross, $q4Run->total_tax], [$again['total_gross'], $again['total_tax']]);
     }
 
     public function test_a_back_dated_row_into_a_credited_period_is_422(): void

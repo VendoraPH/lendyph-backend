@@ -9,6 +9,8 @@ use App\Models\SavingsInterestRun;
 use App\Models\SavingsProduct;
 use App\Models\TimeDeposit;
 use App\Models\User;
+use App\Services\Savings\AccruedInterest;
+use App\Services\Savings\SavingsMath;
 use Illuminate\Routing\Middleware\ThrottleRequests;
 use Illuminate\Support\Carbon;
 use Tests\Feature\Savings\Interest\SavingsHistory;
@@ -78,6 +80,28 @@ class SavingsReportsTest extends TestCase
         $this->actingAs($this->reader)->getJson("/api/reports/savings/balances?branch_id={$this->far->id}")->assertForbidden();
         $this->actingAs($this->admin)->getJson("/api/reports/savings/balances?branch_id={$this->far->id}")->assertOk()->assertJsonPath('totals.total_balance', '9999.00');
         $this->actingAs($this->admin)->getJson('/api/reports/savings/balances')->assertOk()->assertJsonPath('totals.account_count', 4);
+    }
+
+    public function test_balance_rows_and_totals_carry_each_accounts_own_accrued_interest(): void
+    {
+        $double = $this->regularProduct(['name' => 'Bonus Savings'], '7.3000');
+        $a = $this->openAccount($this->product, 100_000);
+        $b = $this->openAccount($this->product, 200_000);
+        $c = $this->openAccount($double, 100_000);
+        $this->onDay('2026-11-10');
+
+        // Nov 1 to Nov 9: 9 days. At 3.65% the gross is centavo-days ÷ 10,000.
+        $rows = collect($this->actingAs($this->reader)->getJson('/api/reports/savings/balances?per_page=1000')->assertOk()
+            ->assertJsonPath('totals.total_accrued_interest', '4.50')
+            ->assertJsonPath('totals.total_balance', '4000.00')
+            ->json('data'))->keyBy('account_id');
+
+        $this->assertSame(['0.90', '1.80', '1.80'], [$rows[$a->id]['accrued_interest'], $rows[$b->id]['accrued_interest'], $rows[$c->id]['accrued_interest']]);
+
+        foreach ([$a, $b, $c] as $account) {
+            $alone = app(AccruedInterest::class)->for($account->refresh());
+            $this->assertSame(SavingsMath::pesos($alone['gross']), $rows[$account->id]['accrued_interest']);
+        }
     }
 
     public function test_balances_as_of_a_past_day_read_the_ledger_on_that_day(): void
@@ -153,16 +177,41 @@ class SavingsReportsTest extends TestCase
         $make('2026-01-01', '2026-03-31', 'posted', '2026-04-02 09:00:00', '100.00');
         $make('2026-04-01', '2026-06-30', 'posted', '2026-07-02 09:00:00', '200.00');
         $make('2026-07-01', '2026-09-30', 'approved', null, '400.00');
+        $make('2025-10-01', '2025-12-31', 'reversed', '2026-01-03 09:00:00', '800.00');
 
         $this->actingAs($this->reader)->getJson('/api/reports/savings/interest-postings?date_from=2026-01-01&date_to=2026-10-31&per_page=1')->assertOk()
-            ->assertJsonPath('meta.total', 2)
-            ->assertJsonPath('totals.count', 2)
+            ->assertJsonPath('meta.total', 3)
+            ->assertJsonPath('totals.count', 3)
+            ->assertJsonPath('totals.reversed_count', 1)
             ->assertJsonPath('totals.total_gross', '300.00')
             ->assertJsonPath('totals.total_tax', '2.00')
             ->assertJsonPath('totals.total_net', '298.00')
             ->assertJsonPath('data.0.product_name', 'Regular Savings')
             ->assertJsonPath('data.0.branch_name', $this->branch->name)
-            ->assertJsonPath('data.0.status', 'posted');
+            ->assertJsonPath('data.0.status', 'reversed');
+
+        $this->withoutMiddleware(ThrottleRequests::class);
+        $csv = $this->actingAs($this->userWith(['reports:export', 'savings:view']))
+            ->get('/api/reports/savings/interest-postings/export?date_from=2026-01-01&date_to=2026-10-31')->streamedContent();
+        $this->assertStringContainsString(',Reversed,3,800.00,', $csv);
+        $this->assertStringContainsString(',Posted,3,100.00,', $csv);
+    }
+
+    public function test_a_one_sided_range_defaults_the_other_end_and_the_ten_year_limit_applies_to_it(): void
+    {
+        $this->onDay('2026-11-04');
+
+        $this->actingAs($this->reader)->getJson('/api/reports/savings/transactions?date_from=2026-11-03')->assertOk()
+            ->assertJsonPath('date_from', '2026-11-03')
+            ->assertJsonPath('date_to', '2026-11-04');
+        $this->actingAs($this->reader)->getJson('/api/reports/savings/transactions?date_to=2026-10-15')->assertOk()
+            ->assertJsonPath('date_from', '2026-10-01')
+            ->assertJsonPath('date_to', '2026-10-15');
+        $this->actingAs($this->reader)->getJson('/api/reports/savings/time-deposit-maturities?date_from=2027-02-10')->assertOk()
+            ->assertJsonPath('date_from', '2027-02-10')
+            ->assertJsonPath('date_to', '2027-02-28');
+        $this->actingAs($this->reader)->getJson('/api/reports/savings/transactions?date_from=2015-01-01')
+            ->assertStatus(422)->assertJsonValidationErrors('date_from');
     }
 
     public function test_dormant_accounts_only(): void

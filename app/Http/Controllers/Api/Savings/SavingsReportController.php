@@ -32,6 +32,9 @@ class SavingsReportController extends Controller
 {
     use CsvExportTrait;
 
+    /** Interest run statuses in words, for the CSV (the screen maps its own). */
+    private const RUN_STATUS_WORDS = ['posted' => 'Posted', 'reversed' => 'Reversed'];
+
     public function __construct(
         private readonly SavingsReports $reports,
         private readonly StatementBuilder $statements,
@@ -105,7 +108,7 @@ class SavingsReportController extends Controller
     #[OA\Get(
         path: '/api/reports/savings/interest-postings',
         summary: 'Savings Interest Postings',
-        description: 'Interest runs posted in the period (by the day they posted), one row per product and branch. `totals`: count, total_gross, total_tax, total_net.',
+        description: 'Interest runs posted in the period (by the day they posted), one row per product and branch, reversed ones included with their status. `totals`: count, reversed_count, and total_gross, total_tax and total_net of the runs still posted.',
         tags: ['Savings Reports'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')), new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')), new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')), new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', maximum: 1000))],
@@ -198,7 +201,7 @@ class SavingsReportController extends Controller
             }
         })();
 
-        return $this->streamCsv('savings-balances.csv', ['Account #', 'Member', 'Member Code', 'Product', 'Branch', 'Status', 'Balance', 'On Hold', 'Pending Approval', 'Available', 'Accrued Interest', 'Last Activity'], $rows);
+        return $this->savingsCsv('savings-balances.csv', ['Account #', 'Member', 'Member Code', 'Product', 'Branch', 'Status', 'Balance', 'On Hold', 'Pending Approval', 'Available', 'Accrued Interest', 'Last Activity'], $rows);
     }
 
     #[OA\Get(path: '/api/reports/savings/transactions/export', summary: 'Export Savings Transactions as CSV', tags: ['Savings Reports'], security: [['sanctum' => []]], parameters: [new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')), new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')), new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer'))], responses: [new OA\Response(response: 200, description: 'CSV file'), new OA\Response(response: 403, description: 'Missing reports:export or savings:view')])]
@@ -224,10 +227,10 @@ class SavingsReportController extends Controller
     #[OA\Get(path: '/api/reports/savings/interest-postings/export', summary: 'Export Savings Interest Postings as CSV', tags: ['Savings Reports'], security: [['sanctum' => []]], parameters: [new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')), new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')), new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer'))], responses: [new OA\Response(response: 200, description: 'CSV file'), new OA\Response(response: 403, description: 'Missing reports:export or savings:view')])]
     public function exportInterestPostings(SavingsExportRequest $request): StreamedResponse
     {
-        return $this->csv('savings-interest-postings.csv', ['From', 'To', 'Product', 'Branch', 'Accounts', 'Gross Interest', 'Tax Withheld', 'Net Credited', 'Posted'], $this->reports->interestPostingsQuery($request->filters()), function (SavingsInterestRun $run): array {
+        return $this->csv('savings-interest-postings.csv', ['From', 'To', 'Product', 'Branch', 'Status', 'Accounts', 'Gross Interest', 'Tax Withheld', 'Net Credited', 'Posted', 'Reversed'], $this->reports->interestPostingsQuery($request->filters()), function (SavingsInterestRun $run): array {
             $r = $this->reports->interestPostingRow($run);
 
-            return [$r['period_start'], $r['period_end'], $r['product_name'], $r['branch_name'], $r['account_count'], $r['total_gross'], $r['total_tax'], $r['total_net'], $run->posted_at?->toDateString()];
+            return [$r['period_start'], $r['period_end'], $r['product_name'], $r['branch_name'], self::RUN_STATUS_WORDS[$run->status] ?? 'Other', $r['account_count'], $r['total_gross'], $r['total_tax'], $r['total_net'], $run->posted_at?->toDateString(), $run->reversed_at?->toDateString()];
         });
     }
 
@@ -247,7 +250,7 @@ class SavingsReportController extends Controller
         $control = $this->controlFor($request->filters());
         $rows = array_map(fn (array $row) => [$control['as_of'], $row['branch_name'], $row['account_code'], $row['account_name'], $row['subledger_balance'], $row['gl_balance'], $row['difference']], $control['rows']);
 
-        return $this->streamCsv('savings-gl-control.csv', ['As Of', 'Branch', 'Account', 'Account Name', 'Savings Subledger', 'General Ledger', 'Difference'], $rows);
+        return $this->savingsCsv('savings-gl-control.csv', ['As Of', 'Branch', 'Account', 'Account Name', 'Savings Subledger', 'General Ledger', 'Difference'], $rows);
     }
 
     /** @return array<string, mixed> */
@@ -284,12 +287,37 @@ class SavingsReportController extends Controller
     }
 
     /**
+     * Stream a savings CSV (review L4). Cells are guarded against formulas as
+     * CsvExportTrait does, except a plain signed number ("-500.00"), which a
+     * spreadsheet must read as the number it is.
+     *
+     * @param  list<string>  $headers
+     * @param  iterable<array<int, mixed>>  $rows
+     */
+    private function savingsCsv(string $filename, array $headers, iterable $rows): StreamedResponse
+    {
+        return response()->streamDownload(function () use ($headers, $rows): void {
+            $handle = fopen('php://output', 'w');
+            fputcsv($handle, $headers);
+
+            foreach ($rows as $row) {
+                fputcsv($handle, array_map(
+                    fn (mixed $cell) => is_string($cell) && preg_match('/^-?\d+(\.\d+)?$/', $cell) === 1 ? $cell : self::sanitizeCsvCell($cell),
+                    is_array($row) ? $row : iterator_to_array($row),
+                ));
+            }
+
+            fclose($handle);
+        }, $filename, ['Content-Type' => 'text/csv']);
+    }
+
+    /**
      * @param  list<string>  $headers
      * @param  Closure(mixed): array<int, mixed>  $map
      */
     private function csv(string $filename, array $headers, Builder $query, Closure $map): StreamedResponse
     {
-        return $this->streamCsv($filename, $headers, $query->lazy(500)->map($map));
+        return $this->savingsCsv($filename, $headers, $query->lazy(500)->map($map));
     }
 
     /** @return array{date_from: string, date_to: string} */

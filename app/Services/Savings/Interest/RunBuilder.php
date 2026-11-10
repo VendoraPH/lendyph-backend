@@ -22,7 +22,9 @@ use Illuminate\Validation\ValidationException;
 /**
  * Works out an interest run's figures and saves drafts (design §5).
  *
- * One run per product, branch and crediting period. Each account in the
+ * One run per product, branch and crediting period. A change of frequency
+ * leaves one transitional period, from the day after the last posted run to
+ * the end of the new-frequency period that holds it (review M2). Each account in the
  * branch that was open during the period gets a line: from the later of the
  * period's start, its opening day and the day after its interest was last
  * credited, to the period's end, through InterestCalculator. A line that
@@ -167,11 +169,11 @@ class RunBuilder
             $this->refuse('product_id', "{$product->name} is a time deposit product. Time deposits earn on their own terms; interest runs are for regular savings.");
         }
 
-        if (! InterestPeriod::isStart($product->interest_crediting, $start)) {
+        if (! InterestPeriod::isStart($product->interest_crediting, $start) && ! $this->isTransitional($product, $start, $branchIds)) {
             $this->refuse('period_start', "Interest on {$product->name} is ".InterestPeriod::startsInWords($product->interest_crediting).'.');
         }
 
-        $end = InterestPeriod::endOf($product->interest_crediting, $start);
+        $end = $this->periodEnd($product, $start);
         $today = now()->toDateString();
 
         if ($end >= $today) {
@@ -207,6 +209,42 @@ class RunBuilder
     }
 
     /**
+     * The last day of the period starting on `$start`: a whole crediting
+     * period, or, for a transitional period after the product's frequency
+     * changed, the end of the current-frequency period that holds `$start`.
+     */
+    public function periodEnd(SavingsProduct $product, string $start): string
+    {
+        $crediting = $product->interest_crediting;
+
+        return InterestPeriod::endOf($crediting, InterestPeriod::isStart($crediting, $start) ? $start : InterestPeriod::startOf($crediting, $start));
+    }
+
+    /**
+     * Whether a start that isn't a period start under the product's current
+     * frequency is the transitional period after a frequency change (review
+     * M2): every branch has a posted run and continues from it on `$start`.
+     *
+     * @param  list<int>  $branchIds
+     */
+    private function isTransitional(SavingsProduct $product, string $start, array $branchIds): bool
+    {
+        if ($branchIds === []) {
+            return false;
+        }
+
+        foreach ($branchIds as $branchId) {
+            $posted = SavingsInterestRun::query()->where('product_id', $product->id)->where('branch_id', $branchId)->where('status', 'posted')->exists();
+
+            if (! $posted || $this->nextStart($product, $branchId) !== $start) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
      * The day the next run for a branch must start: the day after the latest
      * posted run, or, before any, the start of the period the branch's first
      * account opened in. Null when the branch has no account on the product.
@@ -239,9 +277,8 @@ class RunBuilder
      */
     public function preview(SavingsProduct $product, string $start, ?array $visible, ?array $requested): array
     {
-        $end = $this->assertRunnable($product, $start, []);
-        $branchIds = $this->branches($product->id, $start, $end, $visible, $requested);
-        $this->assertRunnable($product, $start, $branchIds);
+        $branchIds = $product->isTimeDeposit() ? [] : $this->branches($product->id, $start, $this->periodEnd($product, $start), $visible, $requested);
+        $end = $this->assertRunnable($product, $start, $branchIds);
         $runs = [];
 
         foreach ($branchIds as $branchId) {
@@ -264,15 +301,19 @@ class RunBuilder
      */
     public function create(SavingsProduct $product, string $start, ?array $visible, ?array $requested, User $maker): array
     {
-        $preview = $this->preview($product, $start, $visible, $requested);
-
-        if ($preview['runs'] === []) {
-            $this->refuse('product_id', "There are no {$product->name} accounts to credit in the branches chosen for this period.");
-        }
-
         $conflict = 'Another interest run for this period was saved at the same time. Reload and try again.';
 
-        return LoanWriteTransaction::run(function () use ($product, $preview, $maker): array {
+        return LoanWriteTransaction::run(function () use ($product, $start, $visible, $requested, $maker): array {
+            // The product row first (review M1): a create and a reversal of the
+            // same product queue here, so a run is never created against a
+            // previous period that is being reversed at the same moment.
+            $product = SavingsProduct::query()->whereKey($product->getKey())->lockForUpdate()->firstOrFail();
+            $preview = $this->preview($product, $start, $visible, $requested);
+
+            if ($preview['runs'] === []) {
+                $this->refuse('product_id', "There are no {$product->name} accounts to credit in the branches chosen for this period.");
+            }
+
             $created = [];
 
             foreach ($preview['runs'] as $run) {

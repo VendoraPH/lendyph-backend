@@ -26,6 +26,12 @@ use Illuminate\Support\Facades\DB;
  * today), credits the accounts through the period's end, sets the run's
  * totals from the rows it wrote and posts one `savings_interest` journal
  * (none when nothing was earned).
+ *
+ * Large branches (review M3): the whole run posts in one transaction, under
+ * every account's lock, through SavingsLedger row by row. 500 accounts post
+ * in about 1.2 s on a local MySQL (InterestRunPostTimeTest, 2026-11-10), and
+ * tellers on those accounts wait that long. A bulk ledger path, or chunked
+ * posting, is for v1.1 if a branch outgrows it.
  */
 class RunPoster
 {
@@ -99,6 +105,8 @@ class RunPoster
                 throw LoanWriteTransaction::conflict("Only an approved run can be posted; this one is {$this->statusWords($locked->status)}.");
             }
 
+            $this->assertNextInLine($locked, $start);
+
             $lines = $locked->lines()->orderBy('id')->get();
             $this->assertUnchanged($locked, $lines->keyBy('account_id')->map(fn (SavingsInterestRunLine $line) => RunBuilder::stored($line))->all(), $start, $end);
 
@@ -156,6 +164,36 @@ class RunPoster
 
             return $locked;
         }, 'savings_transactions_reference_unique', $this->conflictMessage());
+    }
+
+    /**
+     * 409 unless this run is the next one for its product and branch (review
+     * M1): it starts the day after the latest posted run (or on the first
+     * period) and no earlier run is still open. Checked under the run's lock,
+     * so a previous period reversed after this run was created can't leave a
+     * gap that loses its interest.
+     */
+    private function assertNextInLine(SavingsInterestRun $run, string $start): void
+    {
+        $expected = $this->builder->nextStart($run->product, (int) $run->branch_id);
+        $earlierOpen = SavingsInterestRun::query()
+            ->where('product_id', $run->product_id)
+            ->where('branch_id', $run->branch_id)
+            ->where('id', '!=', $run->id)
+            ->whereIn('status', ['draft', 'approved'])
+            ->where('period_start', '<', $start)
+            ->exists();
+
+        if ($expected === $start && ! $earlierOpen) {
+            return;
+        }
+
+        $day = fn (?string $date) => $date === null ? 'an earlier day' : CarbonImmutable::parse($date)->format('M j, Y');
+
+        throw LoanWriteTransaction::conflict($earlierOpen
+            ? 'An earlier interest period for this product and branch is not posted yet. Post or reject it first; nothing was posted.'
+            : 'This run starts on '.$day($start).', but interest for this product and branch must be credited from '.$day($expected)
+                .' next (a previous run was reversed). Nothing was posted. Reject this run and run that period first.');
     }
 
     /**

@@ -90,7 +90,7 @@ class SavingsReports
         $today = $asOf === now()->toDateString();
         $totals = ['count' => 0, 'balance' => 0, 'holds' => 0, 'pending' => 0, 'available' => 0, 'accrued' => 0];
 
-        $this->balancesQuery($filters)->reorder()->chunkById(self::CHUNK, function (Collection $accounts) use (&$totals, $asOf, $today): void {
+        $this->balancesQuery($filters)->setEagerLoads([])->reorder()->chunkById(self::CHUNK, function (Collection $accounts) use (&$totals, $asOf, $today): void {
             $totals['count'] += $accounts->count();
             $totals['balance'] += array_sum($this->balancesOn($accounts, $asOf));
 
@@ -121,15 +121,38 @@ class SavingsReports
 
     // ── Transactions ──
 
-    /** @return array{0: string, 1: string} the period, defaulting to this month to today */
+    /** @return array{0: string, 1: string} the report's period */
     public function period(array $filters, bool $wholeMonth = false): array
+    {
+        return self::resolvePeriod($filters['date_from'] ?? null, $filters['date_to'] ?? null, $wholeMonth);
+    }
+
+    /**
+     * A period from the filters (review L3). Neither end: this month, to today
+     * (`$wholeMonth`: to the month's end). Only a start: to today, or to the
+     * end of the start's month when that is later or `$wholeMonth`. Only an
+     * end: from the first of the end's month.
+     *
+     * @return array{0: string, 1: string}
+     */
+    public static function resolvePeriod(?string $from, ?string $to, bool $wholeMonth = false): array
     {
         $today = CarbonImmutable::parse(now()->toDateString());
 
-        return [
-            $filters['date_from'] ?? $today->startOfMonth()->toDateString(),
-            $filters['date_to'] ?? ($wholeMonth ? $today->endOfMonth()->toDateString() : $today->toDateString()),
-        ];
+        if ($from === null && $to === null) {
+            return [$today->startOfMonth()->toDateString(), ($wholeMonth ? $today->endOfMonth() : $today)->toDateString()];
+        }
+
+        if ($to === null) {
+            $start = CarbonImmutable::parse($from);
+            $end = $wholeMonth || $start->greaterThan($today) ? $start->endOfMonth() : $today;
+
+            return [$start->toDateString(), $end->toDateString()];
+        }
+
+        $end = CarbonImmutable::parse($to);
+
+        return [$from ?? $end->startOfMonth()->toDateString(), $end->toDateString()];
     }
 
     /** @return Builder<SavingsTransaction> */
@@ -253,8 +276,8 @@ class SavingsReports
         [$from, $to] = $this->period($filters);
 
         return $this->scopeBranches(SavingsInterestRun::query(), $filters)
-            ->with(['product', 'branch', 'poster'])
-            ->where('status', 'posted')
+            ->with(['product', 'branch', 'poster', 'reverser'])
+            ->whereIn('status', ['posted', 'reversed'])
             ->where('posted_at', '>=', $from.' 00:00:00')
             ->where('posted_at', '<=', $to.' 23:59:59')
             ->orderBy('posted_at')
@@ -279,18 +302,30 @@ class SavingsReports
             'total_net' => $this->money($run->total_net),
             'posted_at' => $run->posted_at?->toJSON(),
             'posted_by' => SavingsUserRef::from($run->poster),
+            'reversed_at' => $run->reversed_at?->toJSON(),
+            'reversed_by' => SavingsUserRef::from($run->reverser),
         ];
     }
 
-    /** @return array<string, int|string> */
+    /**
+     * Every run posted in the period is listed, reversed ones too (review
+     * L1), but the money totals are the runs still posted: a reversed run's
+     * interest was taken back.
+     *
+     * @return array<string, int|string>
+     */
     public function interestPostingTotals(array $filters): array
     {
-        $sums = $this->interestPostingsQuery($filters)->reorder()->toBase()
-            ->selectRaw('COUNT(*) AS rows_count, COALESCE(SUM(total_gross), 0) AS gross, COALESCE(SUM(total_tax), 0) AS tax, COALESCE(SUM(total_net), 0) AS net')
+        $sums = $this->interestPostingsQuery($filters)->setEagerLoads([])->reorder()->toBase()
+            ->selectRaw("COUNT(*) AS rows_count, COALESCE(SUM(CASE WHEN status = 'reversed' THEN 1 ELSE 0 END), 0) AS reversed_count")
+            ->selectRaw("COALESCE(SUM(CASE WHEN status = 'posted' THEN total_gross ELSE 0 END), 0) AS gross")
+            ->selectRaw("COALESCE(SUM(CASE WHEN status = 'posted' THEN total_tax ELSE 0 END), 0) AS tax")
+            ->selectRaw("COALESCE(SUM(CASE WHEN status = 'posted' THEN total_net ELSE 0 END), 0) AS net")
             ->first();
 
         return [
             'count' => (int) $sums->rows_count,
+            'reversed_count' => (int) $sums->reversed_count,
             'total_gross' => $this->money($sums->gross),
             'total_tax' => $this->money($sums->tax),
             'total_net' => $this->money($sums->net),
