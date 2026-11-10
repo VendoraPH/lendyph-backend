@@ -121,7 +121,8 @@ class TimeDepositAccessTest extends TestCase
             ->assertJsonCount(1, 'data')
             ->assertJsonPath('data.0.id', $settled->id)
             ->assertJsonPath('meta.stats.active', 2)
-            ->assertJsonPath('meta.totals.total_principal', '5000.00');
+            ->assertJsonPath('meta.totals.total_principal', '5000.00')
+            ->assertJsonPath('meta.totals.maturing_30_days', 0);
 
         $this->getJson('/api/savings/time-deposits?search='.urlencode($settled->certificate_number))->assertOk()
             ->assertJsonCount(1, 'data');
