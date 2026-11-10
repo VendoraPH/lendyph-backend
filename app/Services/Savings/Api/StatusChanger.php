@@ -15,7 +15,8 @@ use Illuminate\Validation\ValidationException;
  *
  * - **Freeze** an active or dormant account: nothing moves in or out until
  *   it is unfrozen (holds can still be placed).
- * - **Unfreeze** a frozen account: it becomes active.
+ * - **Unfreeze** a frozen account: it goes back to dormant when it was
+ *   dormant before it was frozen (`dormant_since` is kept), else active.
  * - **Reactivate** a dormant account. Staff reactivate one when the member
  *   comes in, so it counts as member activity: `last_member_activity_on`
  *   becomes today, or the nightly dormancy job would mark it dormant again.
@@ -41,9 +42,11 @@ class StatusChanger
         }
 
         $today = now()->toDateString();
+        $wasDormant = $account->dormant_since !== null;
         [$action, $changes, $words] = match (true) {
             $status === SavingsAccount::STATUS_FROZEN => ['savings_account_frozen', ['status' => $status], 'frozen'],
-            $from === SavingsAccount::STATUS_FROZEN => ['savings_account_unfrozen', ['status' => $status, 'dormant_since' => null], 'unfrozen'],
+            $from === SavingsAccount::STATUS_FROZEN && $wasDormant => ['savings_account_unfrozen', ['status' => SavingsAccount::STATUS_DORMANT], 'unfrozen (dormant again)'],
+            $from === SavingsAccount::STATUS_FROZEN => ['savings_account_unfrozen', ['status' => SavingsAccount::STATUS_ACTIVE], 'unfrozen'],
             default => ['savings_account_reactivated', ['status' => $status, 'dormant_since' => null, 'last_member_activity_on' => $today], 'reactivated'],
         };
 

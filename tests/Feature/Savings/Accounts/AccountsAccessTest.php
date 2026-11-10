@@ -72,7 +72,7 @@ class AccountsAccessTest extends TestCase
             ['money', "/api/savings/accounts/{$a}/close", ['date' => '2026-11-10', 'reason' => 'x', 'payout_method' => 'cash'], ['savings:close']],
             ['postJson', "/api/savings/accounts/{$a}/status", ['status' => 'frozen', 'reason' => 'x'], ['savings:close']],
             ['getJson', "/api/savings/accounts/{$a}/holds", [], ['savings:view']],
-            ['postJson', "/api/savings/accounts/{$a}/holds", ['type' => 'manual', 'amount' => '1', 'reason' => 'x'], ['savings:transact']],
+            ['money', "/api/savings/accounts/{$a}/holds", ['type' => 'manual', 'amount' => '1', 'reason' => 'x'], ['savings:transact']],
             ['postJson', "/api/savings/holds/{$this->hold->id}/release", ['reason' => 'x'], ['savings:transact']],
             ['getJson', '/api/savings/transactions', [], ['savings:view']],
             ['getJson', "/api/savings/transactions/{$this->deposit->id}", [], ['savings:view']],

@@ -43,6 +43,7 @@ class AccountCloser
         private readonly AccruedInterest $accrued,
         private readonly ApprovalGate $gate,
         private readonly PeriodGuard $periods,
+        private readonly Teller $teller,
     ) {}
 
     /**
@@ -75,6 +76,7 @@ class AccountCloser
     {
         $account = $this->locks->account($accountId);
         $this->assertCanClose($account);
+        $this->teller->assertNotBeforeLatest($account, $data['date']);
         $payout = $this->figures($account, $data['date'])['payout'];
 
         if ($this->gate->needsApproval($payout)) {
@@ -95,6 +97,11 @@ class AccountCloser
      * Carry the close out under the account lock (the caller holds it).
      * Returns the payout row, else the interest row, else null.
      *
+     * An approved close pays out only what the checkers approved: the payout
+     * is worked out again for the request's date, and any change since the
+     * request (a deposit, a hold released, interest) answers 409, so money
+     * never leaves on an amount nobody approved.
+     *
      * @param  array{date: string, reason: string, payout_method: string}  $data
      *
      * @throws ValidationException
@@ -102,6 +109,10 @@ class AccountCloser
     public function execute(SavingsAccount $account, array $data, int $closerId, int $posterId, ?SavingsApproval $approval): ?SavingsTransaction
     {
         $this->assertCanClose($account, $approval);
+
+        if ($approval !== null && $this->figures($account, $data['date'])['payout'] !== SavingsMath::centavos($approval->amount)) {
+            Refuse::conflict('The balance changed since this close was requested. Make a new request.');
+        }
 
         $date = $data['date'];
         $interest = $this->accrued->for($account, $date);
@@ -181,8 +192,17 @@ class AccountCloser
             $blockers[] = 'It has an active hold of '.Refuse::peso(SavingsMath::centavos($held)).'. Release the hold first.';
         }
 
+        $ownRows = SavingsTransaction::query()->where('account_id', $account->id);
         $waiting = SavingsApproval::query()
-            ->where('account_id', $account->id)->where('status', 'pending')->where('expires_at', '>', now())
+            ->where('status', 'pending')->where('expires_at', '>', now())
+            ->where(fn ($q) => $q
+                ->where('account_id', $account->id)
+                // A reversal of a transfer is keyed on one leg; the other
+                // leg's account is held by it too.
+                ->orWhere(fn ($r) => $r->where('kind', 'reversal')->whereIn('target_transaction_id',
+                    SavingsTransaction::query()->whereIn('counterpart_transaction_id', (clone $ownRows)->select('id'))->select('id')))
+                ->orWhere(fn ($r) => $r->where('kind', 'reversal')->whereIn('target_transaction_id',
+                    (clone $ownRows)->whereNotNull('counterpart_transaction_id')->select('counterpart_transaction_id'))))
             ->when($own !== null, fn ($q) => $q->whereKeyNot($own->id))
             ->count();
 

@@ -13,6 +13,7 @@ use App\Services\Savings\AvailableBalance;
 use App\Services\Savings\SavingsLedger;
 use App\Services\Savings\SavingsLocks;
 use App\Services\Savings\SavingsMath;
+use Carbon\CarbonImmutable;
 use Illuminate\Validation\ValidationException;
 
 /**
@@ -40,6 +41,7 @@ class Teller
         private readonly AvailableBalance $available,
         private readonly ApprovalGate $gate,
         private readonly PeriodGuard $periods,
+        private readonly LargeTransactionAlert $alert,
     ) {}
 
     /**
@@ -61,6 +63,7 @@ class Teller
 
         $row = $this->ledger->credit($account, 'deposit', SavingsMath::centavos($data['amount']), $this->attributes($data, $user->id));
         $this->poster->savingsTransaction($row, $user->id);
+        $this->alert->afterPosting($row, [$user->id]);
 
         return $row;
     }
@@ -82,6 +85,7 @@ class Teller
         $this->assertAvailable($account, $centavos);
 
         if ($this->gate->needsApproval($centavos)) {
+            $this->assertNotBeforeLatest($account, $data['date']);
             $this->periods->assertOpen($data['date'], 'This withdrawal');
 
             return ['transaction' => null, 'approval' => $this->gate->open('withdrawal', $centavos, [
@@ -103,14 +107,16 @@ class Teller
      * the WithdrawalExecutor) and post its journal.
      *
      * @param  array{date: string, payment_method: string, reference?: string|null, remarks?: string|null}  $data
+     * @param  list<int|null>  $otherDeciders  checkers who approved it before the poster (not alerted)
      */
-    public function postWithdrawal(SavingsAccount $account, int $centavos, array $data, int $makerId, ?int $approvalId, int $posterId): SavingsTransaction
+    public function postWithdrawal(SavingsAccount $account, int $centavos, array $data, int $makerId, ?int $approvalId, int $posterId, array $otherDeciders = []): SavingsTransaction
     {
         $row = $this->ledger->debit($account, 'withdrawal', $centavos, [
             ...$this->attributes($data, $makerId),
             'approval_id' => $approvalId,
         ]);
         $this->poster->savingsTransaction($row, $posterId);
+        $this->alert->afterPosting($row, [$makerId, $posterId, ...$otherDeciders]);
 
         return $row;
     }
@@ -183,6 +189,22 @@ class Teller
 
         if ($message !== null) {
             Refuse::field('account', $message);
+        }
+    }
+
+    /**
+     * Refuse, when a request is made, a date earlier than the account's latest
+     * row: the ledger would refuse it when the approved request posts.
+     *
+     * @throws ValidationException
+     */
+    public function assertNotBeforeLatest(SavingsAccount $account, string $date): void
+    {
+        $latest = $this->ledger->latestDate($account->id);
+
+        if ($latest !== null && $date < $latest) {
+            Refuse::field('date', "{$account->account_number} already has a transaction dated "
+                .CarbonImmutable::parse($latest)->format('M j, Y').'; this can\'t be dated earlier.');
         }
     }
 

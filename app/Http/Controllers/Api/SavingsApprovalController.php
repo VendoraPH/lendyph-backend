@@ -20,8 +20,10 @@ use OpenApi\Attributes as OA;
 
 /**
  * The savings approvals queue (maker-checker, design §2, slice S2): every
- * kind, from withdrawals and closes to time deposit payouts. The maker can
- * never approve or reject their own request (403) but can cancel it; a
+ * kind, from withdrawals and closes to time deposit payouts. Listing needs
+ * only `savings:view`, so makers see their own requests. The maker can never
+ * approve or reject their own request (403) but can cancel it (with
+ * `savings:transact`); a
  * second checker above tier 2 must be someone else again. Another branch's
  * request answers 404.
  */
@@ -36,7 +38,7 @@ class SavingsApprovalController extends Controller
     #[OA\Get(
         path: '/api/savings/approvals',
         summary: 'The savings approvals queue',
-        description: 'Newest first, in the caller\'s branches. `meta.stats` counts requests per status over every filter but `status`.',
+        description: 'Newest first, in the caller\'s branches. `meta.stats` counts requests per status over every filter but `status`. Needs `savings:view` (not `savings:approve`): makers see their own requests here too.',
         tags: ['Savings'],
         security: [['sanctum' => []]],
         parameters: [
@@ -125,7 +127,7 @@ class SavingsApprovalController extends Controller
     #[OA\Post(
         path: '/api/savings/approvals/{approval}/cancel',
         summary: 'Cancel your own savings request',
-        description: 'Only the maker (403 for anyone else), with an optional reason. 409 when it is no longer pending.',
+        description: 'Needs `savings:transact`, and only the maker may (403 for anyone else), with an optional reason. 409 when it is no longer pending.',
         tags: ['Savings'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'approval', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
@@ -134,7 +136,7 @@ class SavingsApprovalController extends Controller
         ])),
         responses: [
             new OA\Response(response: 200, description: 'The cancelled request'),
-            new OA\Response(response: 403, description: 'Not the maker'),
+            new OA\Response(response: 403, description: 'Missing savings:transact, or not the maker'),
             new OA\Response(response: 404, description: 'No such request in the caller\'s branches'),
             new OA\Response(response: 409, description: 'No longer pending, or expired'),
         ],

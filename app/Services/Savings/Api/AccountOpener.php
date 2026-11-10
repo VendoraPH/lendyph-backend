@@ -29,6 +29,7 @@ class AccountOpener
         private readonly SavingsNumbers $numbers,
         private readonly SavingsLedger $ledger,
         private readonly AutomaticPoster $poster,
+        private readonly LargeTransactionAlert $alert,
     ) {}
 
     /**
@@ -97,6 +98,7 @@ class AccountOpener
                 'created_by' => $user->id,
             ]);
             $this->poster->savingsTransaction($row, $user->id);
+            $this->alert->afterPosting($row, [$user->id]);
         }
 
         return $account->refresh();

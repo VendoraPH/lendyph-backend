@@ -33,6 +33,9 @@ use Illuminate\Validation\ValidationException;
  *   balance doesn't stop a correction.
  * - **Dates:** the reversal row is dated today and keeps the original row's
  *   value date, so interest counts as if the original had never posted.
+ * - **Refused (422):** a leg on a closed or frozen account, or one already
+ *   counted in credited interest (its value date on or before the account's
+ *   `interest_credited_through`): reverse that interest run first.
  */
 class Reverser
 {
@@ -70,10 +73,7 @@ class Reverser
 
         foreach ($legs as $leg) {
             $account = $accounts[$leg->account_id];
-
-            if ($account->isClosed()) {
-                Refuse::field('transaction', "{$account->account_number} is closed, so {$leg->reference} can't be reversed.");
-            }
+            $this->assertLegCanBeReversed($leg, $account);
 
             if (in_array($leg->type, self::MONEY_IN, true)) {
                 $this->teller->assertAvailable($account, SavingsMath::centavos($leg->credit), 0, false);
@@ -115,8 +115,14 @@ class Reverser
 
         $reversals = [];
 
+        $accounts = $legs->mapWithKeys(fn (SavingsTransaction $leg) => [$leg->id => SavingsAccount::query()->findOrFail($leg->account_id)]);
+
         foreach ($legs as $leg) {
-            $account = SavingsAccount::query()->findOrFail($leg->account_id);
+            $this->assertLegCanBeReversed($leg, $accounts[$leg->id]);
+        }
+
+        foreach ($legs as $leg) {
+            $account = $accounts[$leg->id];
             $amount = $this->amountOf($leg);
             $attributes = [
                 'date' => now()->toDateString(),
@@ -162,6 +168,32 @@ class Reverser
         }
 
         return $row->type === 'transfer_in' ? collect([$row, $other]) : collect([$other, $row]);
+    }
+
+    /**
+     * A leg can be reversed only on an open, unfrozen account (no money moves
+     * on a frozen one, reversals included), and only while no interest has
+     * been credited over it: interest already credited on the row would stay
+     * paid, so that interest run has to be reversed first. Checked on every
+     * leg, at request and again at approval.
+     *
+     * @throws ValidationException
+     */
+    private function assertLegCanBeReversed(SavingsTransaction $leg, SavingsAccount $account): void
+    {
+        if ($account->isClosed()) {
+            Refuse::field('transaction', "{$account->account_number} is closed, so {$leg->reference} can't be reversed.");
+        }
+
+        if ($account->status === SavingsAccount::STATUS_FROZEN) {
+            Refuse::field('transaction', "{$account->account_number} is frozen: no money moves on it, reversals included, until it is unfrozen.");
+        }
+
+        $credited = $account->interest_credited_through?->toDateString();
+
+        if ($credited !== null && $leg->value_date->toDateString() <= $credited) {
+            Refuse::field('transaction', 'Interest has already been credited on this. Reverse that interest run first, then this, then run the period again.');
+        }
     }
 
     /**

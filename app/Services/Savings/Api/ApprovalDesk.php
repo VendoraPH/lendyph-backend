@@ -29,7 +29,8 @@ use Symfony\Component\HttpKernel\Exception\HttpException;
  * - **Reject:** a checker other than the maker (the maker cancels instead).
  * - **Cancel:** the maker only.
  *
- * Deciding frees `live_key`, so the same thing can be asked for again.
+ * Deciding frees `live_key`, so the same thing can be asked for again. A
+ * lock wait timeout answers 409, never 500 (GeneratedNumberWrite::run).
  */
 class ApprovalDesk
 {
@@ -108,14 +109,14 @@ class ApprovalDesk
      */
     private function decide(SavingsApproval $approval, callable $write): SavingsApproval
     {
-        return DB::transaction(function () use ($approval, $write): SavingsApproval {
+        return GeneratedNumberWrite::run(fn (): SavingsApproval => DB::transaction(function () use ($approval, $write): SavingsApproval {
             $this->locks->accounts(array_filter([$approval->account_id]));
             $this->locks->timeDeposits(array_filter([$approval->time_deposit_id]));
             $locked = $this->lockPending($approval);
             $write($locked);
 
             return $locked;
-        });
+        }), GeneratedNumberWrite::SAVINGS_CONFLICT);
     }
 
     /** The approval row, locked, still pending and still within its day; 409 otherwise. */

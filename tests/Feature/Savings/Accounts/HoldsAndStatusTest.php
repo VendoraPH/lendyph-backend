@@ -38,7 +38,7 @@ class HoldsAndStatusTest extends TestCase
     {
         $this->actingAs($teller = $this->teller());
 
-        $hold = $this->postJson("/api/savings/accounts/{$this->savings->id}/holds", [
+        $hold = $this->money("/api/savings/accounts/{$this->savings->id}/holds", [
             'type' => 'legal', 'amount' => '600.00', 'reason' => 'Court order 12-345', 'expires_on' => '2026-12-31',
         ])->assertCreated()
             ->assertJsonPath('data.type', 'legal')
@@ -55,7 +55,7 @@ class HoldsAndStatusTest extends TestCase
         $this->getJson("/api/savings/accounts/{$this->savings->id}/holds")->assertOk()->assertJsonCount(1, 'data');
 
         // Only ₱400.00 is not held yet.
-        $this->postJson("/api/savings/accounts/{$this->savings->id}/holds", ['type' => 'manual', 'amount' => '400.01', 'reason' => 'Check'])
+        $this->money("/api/savings/accounts/{$this->savings->id}/holds", ['type' => 'manual', 'amount' => '400.01', 'reason' => 'Check'])
             ->assertUnprocessable()->assertJsonValidationErrors('amount');
 
         $this->postJson("/api/savings/holds/{$hold['id']}/release", [])->assertUnprocessable()->assertJsonValidationErrors('reason');
@@ -71,15 +71,15 @@ class HoldsAndStatusTest extends TestCase
 
     public function test_hold_refusals(): void
     {
-        $this->postJson("/api/savings/accounts/{$this->savings->id}/holds", ['type' => 'loan_retention', 'amount' => '1', 'reason' => 'x'])
+        $this->money("/api/savings/accounts/{$this->savings->id}/holds", ['type' => 'loan_retention', 'amount' => '1', 'reason' => 'x'])
             ->assertUnprocessable()->assertJsonValidationErrors('type');
-        $this->postJson("/api/savings/accounts/{$this->savings->id}/holds", ['type' => 'manual', 'amount' => '1', 'reason' => 'x', 'expires_on' => '2026-11-09'])
+        $this->money("/api/savings/accounts/{$this->savings->id}/holds", ['type' => 'manual', 'amount' => '1', 'reason' => 'x', 'expires_on' => '2026-11-09'])
             ->assertUnprocessable()->assertJsonValidationErrors('expires_on');
-        $this->postJson("/api/savings/accounts/{$this->savings->id}/holds", ['type' => 'manual', 'amount' => '0', 'reason' => 'x'])
+        $this->money("/api/savings/accounts/{$this->savings->id}/holds", ['type' => 'manual', 'amount' => '0', 'reason' => 'x'])
             ->assertUnprocessable()->assertJsonValidationErrors('amount');
 
         $this->savings->forceFill(['status' => 'closed', 'closed_on' => '2026-11-10', 'open_key' => null])->save();
-        $this->postJson("/api/savings/accounts/{$this->savings->id}/holds", ['type' => 'manual', 'amount' => '1', 'reason' => 'x'])
+        $this->money("/api/savings/accounts/{$this->savings->id}/holds", ['type' => 'manual', 'amount' => '1', 'reason' => 'x'])
             ->assertUnprocessable();
 
         $this->assertSame(0, SavingsHold::query()->count());

@@ -6,9 +6,9 @@ use App\Http\Requests\Savings\Account\AuthorizesSavingsRecord;
 use Illuminate\Foundation\Http\FormRequest;
 
 /**
- * `POST /savings/approvals/{approval}/cancel`: the maker withdraws their own
- * request, with an optional reason. Only the maker may (ApprovalDesk, 403);
- * another branch's request reads as not found.
+ * `POST /savings/approvals/{approval}/cancel` (savings:transact): the maker
+ * withdraws their own request, with an optional reason. Only the maker may
+ * (ApprovalDesk, 403); another branch's request reads as not found.
  */
 class CancelSavingsApprovalRequest extends FormRequest
 {
@@ -16,7 +16,7 @@ class CancelSavingsApprovalRequest extends FormRequest
 
     public function authorize(): bool
     {
-        return $this->authorizeRecord(null, 'approval', 'approval');
+        return $this->authorizeRecord('savings:transact', 'approval', 'approval');
     }
 
     /** @return array<string, mixed> */

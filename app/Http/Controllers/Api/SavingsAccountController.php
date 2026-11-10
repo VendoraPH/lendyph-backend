@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\Savings\Account\AccountTransactionsRequest;
 use App\Http\Requests\Savings\Account\ChangeSavingsStatusRequest;
 use App\Http\Requests\Savings\Account\CloseSavingsAccountRequest;
+use App\Http\Requests\Savings\Account\ClosingQuoteRequest;
 use App\Http\Requests\Savings\Account\ListSavingsAccountsRequest;
 use App\Http\Requests\Savings\Account\OpenSavingsAccountRequest;
 use App\Http\Requests\Savings\Account\SavingsMoneyRequest;
@@ -13,6 +14,7 @@ use App\Http\Requests\Savings\Account\TransferSavingsRequest;
 use App\Models\SavingsAccount;
 use App\Models\SavingsTransaction;
 use App\Services\BranchAccess;
+use App\Services\GeneratedNumberWrite;
 use App\Services\LikePattern;
 use App\Services\Savings\Api\AccountCloser;
 use App\Services\Savings\Api\AccountOpener;
@@ -314,21 +316,26 @@ class SavingsAccountController extends Controller
     #[OA\Get(
         path: '/api/savings/accounts/{account}/closing-quote',
         summary: 'What closing today credits and pays',
-        description: '`{balance, accrued_interest, withholding_tax, payout_amount, can_close, blockers[]}`: the interest accrued through yesterday and its tax, by the interest run\'s own calculation. `blockers` says, in words, why it can\'t close.',
+        description: '`{balance, accrued_interest, withholding_tax, payout_amount, can_close, blockers[]}` for closing on `date` (today by default; today or yesterday, as the close): the interest accrued through the day before and its tax, by the interest run\'s own calculation. `blockers` says, in words, why it can\'t close.',
         tags: ['Savings'],
         security: [['sanctum' => []]],
-        parameters: [new OA\Parameter(name: 'account', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
+        parameters: [
+            new OA\Parameter(name: 'account', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
+            new OA\Parameter(name: 'date', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
+        ],
         responses: [
             new OA\Response(response: 200, description: 'The quote'),
             new OA\Response(response: 403, description: 'Missing savings:close'),
             new OA\Response(response: 404, description: 'No such account in the caller\'s branches'),
+            new OA\Response(response: 422, description: 'A date other than today or yesterday'),
         ],
     )]
-    public function closingQuote(Request $request, AccountCloser $closer, int $account): JsonResponse
+    public function closingQuote(ClosingQuoteRequest $request, AccountCloser $closer, int $account): JsonResponse
     {
-        $this->authorize('savings:close');
+        /** @var SavingsAccount $found */
+        $found = $request->record();
 
-        return response()->json(['success' => true, 'data' => $closer->quote($this->scope->account($request->user(), $account))]);
+        return response()->json(['success' => true, 'data' => $closer->quote($found, $request->validated('date'))]);
     }
 
     #[OA\Post(
@@ -372,7 +379,7 @@ class SavingsAccountController extends Controller
     #[OA\Post(
         path: '/api/savings/accounts/{account}/status',
         summary: 'Freeze, unfreeze or reactivate',
-        description: '`frozen` freezes an active or dormant account; `active` unfreezes a frozen one or reactivates a dormant one (which counts as member activity today). Audited with the reason. A closed account keeps its status (422).',
+        description: '`frozen` freezes an active or dormant account; `active` unfreezes a frozen one (back to dormant when it was dormant before) or reactivates a dormant one (which counts as member activity today). Audited with the reason. A closed account keeps its status (422). A lock wait answers 409.',
         tags: ['Savings'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'account', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
@@ -390,7 +397,10 @@ class SavingsAccountController extends Controller
     public function status(ChangeSavingsStatusRequest $request, StatusChanger $changer, int $account): JsonResponse
     {
         $data = $request->validated();
-        $changed = DB::transaction(fn (): SavingsAccount => $changer->change($account, $data['status'], $data['reason'], $request->user()));
+        $changed = GeneratedNumberWrite::run(
+            fn (): SavingsAccount => DB::transaction(fn (): SavingsAccount => $changer->change($account, $data['status'], $data['reason'], $request->user())),
+            GeneratedNumberWrite::SAVINGS_CONFLICT,
+        );
 
         return response()->json(['success' => true, 'data' => $this->presenter->account($changed)]);
     }

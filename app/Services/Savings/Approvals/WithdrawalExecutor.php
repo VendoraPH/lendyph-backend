@@ -43,6 +43,6 @@ class WithdrawalExecutor implements ApprovalExecutor
         $this->teller->assertCanPayOut($account);
         $this->teller->assertAvailable($account, $centavos, $centavos);
 
-        return $this->teller->postWithdrawal($account, $centavos, $payload, $approval->requested_by, $approval->id, $checker->id);
+        return $this->teller->postWithdrawal($account, $centavos, $payload, $approval->requested_by, $approval->id, $checker->id, [$approval->first_checker_id]);
     }
 }

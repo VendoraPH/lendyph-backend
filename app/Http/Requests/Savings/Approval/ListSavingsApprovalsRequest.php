@@ -7,7 +7,11 @@ use App\Models\SavingsApproval;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
-/** `GET /savings/approvals` (savings:view): the queue, by status, kind and branch. */
+/**
+ * `GET /savings/approvals` (savings:view): the queue, by status, kind and
+ * branch. It stays on `savings:view`, not `savings:approve`, because makers
+ * need to see their own requests (and cancel them) too.
+ */
 class ListSavingsApprovalsRequest extends FormRequest
 {
     use AuthorizesSavingsRecord;
