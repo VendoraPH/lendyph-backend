@@ -123,7 +123,7 @@ class SavingsSettingController extends Controller
     #[OA\Post(
         path: '/api/savings/settings/prepare-books',
         summary: 'Set up savings in the books',
-        description: 'Adds any missing 2050 Savings Deposits, 2060 Time Deposits and 5160 Interest Expense on Deposits, and maps the four savings posting roles (withholding tax on deposits follows the account withholding tax payable posts to, else 2210). Idempotent: a role already mapped is kept, and a second call changes nothing. Each account added and role mapped writes a system audit row. Answers in words: `added`, `mapped`, `unchanged` (roles that already had an account) and `skipped` (roles it could not map, with the reason), plus `books_ready` and `books_missing` as on GET /savings/settings.',
+        description: 'Adds any missing 2050 Savings Deposits, 2060 Time Deposits and 5160 Interest Expense on Deposits, and maps the four savings posting roles (withholding tax on deposits follows the account withholding tax payable posts to, else 2210). Idempotent: a role already mapped is kept, and a second call changes nothing. Each account added and role mapped writes an audit row in the caller\'s name. Answers in words: `added`, `mapped`, `unchanged` (roles that already had an account) and `skipped` (roles it could not map, with the reason), plus `books_ready` and `books_missing` as on GET /savings/settings.',
         tags: ['Savings'],
         security: [['sanctum' => []]],
         responses: [
@@ -136,7 +136,7 @@ class SavingsSettingController extends Controller
     public function prepareBooks(PrepareSavingsBooksRequest $request): JsonResponse
     {
         try {
-            $result = $this->books->prepare(false);
+            $result = $this->books->prepare(false, $request->user()->id);
         } catch (UniqueConstraintViolationException) {
             abort(409, self::BOOKS_CONFLICT);
         } catch (PDOException $e) {

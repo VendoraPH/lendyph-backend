@@ -10,6 +10,7 @@ use App\Models\SavingsProduct;
 use App\Models\User;
 use App\Services\Accounting\ChartOfAccountsSeeder;
 use App\Services\BranchAccess;
+use App\Services\Savings\SavingsBooks;
 use Illuminate\Support\Str;
 use Spatie\Permission\PermissionRegistrar;
 use Tests\TestCase;
@@ -113,6 +114,28 @@ class PrepareBooksApiTest extends TestCase
         $this->putJson("/api/savings/products/{$product->id}", ['is_active' => true])
             ->assertOk()
             ->assertJsonPath('data.is_active', true);
+    }
+
+    public function test_the_audit_rows_name_who_pressed_it(): void
+    {
+        app(ChartOfAccountsSeeder::class)->seed($this->admin->id, 'lending_company');
+        $staff = $this->userWith(['savings:view', 'savings:settings', BranchAccess::VIEW_ALL]);
+        $auditBefore = AuditLog::query()->max('id');
+
+        $this->actingAs($staff)->postJson('/api/savings/settings/prepare-books')->assertOk();
+
+        $rows = AuditLog::query()->where('id', '>', $auditBefore)->orderBy('id')->get();
+        $this->assertCount(7, $rows);
+        $this->assertSame([$staff->id], $rows->pluck('user_id')->unique()->values()->all());
+        $this->assertSame(
+            [SavingsBooks::AUDIT_ACCOUNT_ADDED => 3, SavingsBooks::AUDIT_ROLE_MAPPED => 4],
+            $rows->countBy('action')->sortKeys()->all(),
+        );
+        $this->assertSame(
+            'Added account 2050 Savings Deposits (liability) for members\' savings balances, as approved in the Phase 3 plan on 2026-11-10.',
+            $rows->first()->description,
+        );
+        $this->assertStringNotContainsString('System change', $rows->pluck('description')->implode(' '));
     }
 
     public function test_a_second_call_changes_nothing_and_says_so(): void
