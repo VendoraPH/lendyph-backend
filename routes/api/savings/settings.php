@@ -17,6 +17,7 @@ use Illuminate\Support\Facades\Route;
 Route::prefix('savings')->group(function () {
     Route::get('/settings', [SavingsSettingController::class, 'show']);
     Route::put('/settings', [SavingsSettingController::class, 'update']);
+    Route::post('/settings/prepare-books', [SavingsSettingController::class, 'prepareBooks']);
     Route::post('/tax-rules', [SavingsSettingController::class, 'storeTaxRule']);
 
     Route::get('/products', [SavingsProductController::class, 'index']);
