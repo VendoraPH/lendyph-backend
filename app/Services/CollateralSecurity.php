@@ -27,10 +27,11 @@ use App\Models\User;
  *
  * A share capital pledge is its member's balance, so a saved loan's summary
  * withholds its figures from a viewer without `share_capital:view`
- * (ofLoan(), withheld()). The preview refuses a listed one, or a restructure
- * source's unlisted one (PreviewLoanRequest), and withholds an edited loan's
- * held one when no list is sent (LoanService::formPreview()), by the same
- * rule (withholdsBalances()).
+ * (ofLoan(), withheld()). The preview refuses a listed one the edited loan
+ * doesn't already hold, and a restructure source's unlisted one
+ * (PreviewLoanRequest). One the edited loan holds, listed or left untouched,
+ * it withholds (LoanService::formPreview()), by the same rule
+ * (withholdsAnyOf(), withholdsBalances()).
  */
 final class CollateralSecurity
 {
@@ -115,8 +116,36 @@ final class CollateralSecurity
 
         $loan->collaterals->loadMissing('collateralType');
 
-        return $loan->collaterals->contains(
-            fn (Collateral $collateral): bool => CollateralValuation::isShareCapital($collateral)
-        );
+        return self::holdsShareCapital($loan->collaterals);
+    }
+
+    /**
+     * withholdsBalances() for collaterals named by id: whether they include
+     * a share capital pledge the viewer may not see. POST /loans/preview asks
+     * it of the collaterals its total counts. Queries only for such a viewer.
+     *
+     * @param  list<int>  $collateralIds
+     */
+    public static function withholdsAnyOf(array $collateralIds, ?User $viewer): bool
+    {
+        if ($collateralIds === [] || $viewer?->can('share_capital:view')) {
+            return false;
+        }
+
+        return self::holdsShareCapital(Collateral::query()->whereKey($collateralIds)->with('collateralType')->get());
+    }
+
+    /**
+     * @param  iterable<Collateral>  $collaterals  with `collateralType` loaded
+     */
+    private static function holdsShareCapital(iterable $collaterals): bool
+    {
+        foreach ($collaterals as $collateral) {
+            if (CollateralValuation::isShareCapital($collateral)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

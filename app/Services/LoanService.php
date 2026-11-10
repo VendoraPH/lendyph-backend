@@ -2524,7 +2524,7 @@ class LoanService
         // a list is the complete list, held rows at their pledged value. A new
         // restructure carries every pledge of its source (inheritCollaterals()).
         $rows = $input['collaterals'] ?? null;
-        $pledged = $this->previewPledgedCentavos(
+        ['centavos' => $pledged, 'collateral_ids' => $counted] = $this->previewPledgedCentavos(
             $rows ?? [],
             $borrowerId === null ? null : (int) $borrowerId,
             $edited ?? $source,
@@ -2535,7 +2535,10 @@ class LoanService
         $maturity = $this->formMaturity($product, $input);
 
         $preview = [
-            'collateral' => $rows === null && $edited !== null && CollateralSecurity::withholdsBalances($edited, $viewer)
+            // Withheld when what it counts includes a share capital pledge the
+            // viewer may not see: on an edit, one the loan already holds,
+            // listed or left untouched (PreviewLoanRequest refuses any other).
+            'collateral' => CollateralSecurity::withholdsAnyOf($counted, $viewer)
                 ? CollateralSecurity::withheld()
                 : CollateralSecurity::summary($principal, $pledged),
             'maturity_date' => $maturity?->toDateString(),
@@ -2639,16 +2642,20 @@ class LoanService
      *    a held and listed pledge; on a restructure (`source_loan_id`) it is
      *    what inheritCollaterals() copies.
      *  - Anything else is a new pledge: CollateralValuation::pledgeValue().
-     *  - With `$carriesEveryPledge` (a restructure), every pledge the source
-     *    holds counts whether it is listed or not, because the restructure
-     *    copies all of them. On the edit page an unlisted pledge is one the
-     *    edit detaches, so it does not count.
+     *  - With `$carriesEveryPledge` (a restructure, or an edit sending no
+     *    list), every pledge `$holder` holds counts whether it is listed or
+     *    not. On an edit with a list, an unlisted pledge is one the edit
+     *    detaches, so it does not count.
+     *
+     * `collateral_ids` are the collaterals counted, so the caller can tell
+     * whether the total holds a share capital balance.
      *
      * @param  list<array{collateral_id: int|string}>  $rows
+     * @return array{centavos: int, collateral_ids: list<int>}
      *
      * @throws ValidationException on `collaterals.{index}.collateral_id` when a row is not on the register
      */
-    private function previewPledgedCentavos(array $rows, ?int $borrowerId, ?Loan $holder, bool $carriesEveryPledge = false): int
+    private function previewPledgedCentavos(array $rows, ?int $borrowerId, ?Loan $holder, bool $carriesEveryPledge = false): array
     {
         $held = $holder === null
             ? []
@@ -2678,13 +2685,16 @@ class LoanService
             $pledged += $this->toCentavos($held[$collateralId] ?? $values[$collateralId]);
         }
 
+        $counted = $listedIds;
+
         if ($carriesEveryPledge) {
-            foreach (array_diff_key($held, array_flip($listedIds)) as $value) {
+            foreach (array_diff_key($held, array_flip($listedIds)) as $collateralId => $value) {
                 $pledged += $this->toCentavos($value);
+                $counted[] = (int) $collateralId;
             }
         }
 
-        return $pledged;
+        return ['centavos' => $pledged, 'collateral_ids' => $counted];
     }
 
     /**

@@ -39,9 +39,10 @@ use Illuminate\Validation\Validator;
  * a share capital collateral, valued at its member's balance, needs
  * `share_capital:view` too (see after()). With `loan_id` and no
  * `collaterals` list the loan's held pledges count, as PUT /loans/{id} leaves
- * them untouched; a held share capital pledge is not refused then, the
- * preview withholds the collateral figures instead (LoanService::formPreview()),
- * so the edit page's preview keeps working.
+ * them untouched. A share capital pledge the edited loan already holds is
+ * never refused, listed or not: the preview withholds the collateral figures
+ * instead (LoanService::formPreview()), so the edit page's preview keeps
+ * working. Listing one the loan doesn't hold still needs the permission.
  */
 class PreviewLoanRequest extends FormRequest
 {
@@ -161,8 +162,14 @@ class PreviewLoanRequest extends FormRequest
     }
 
     /**
-     * Adds an error for each listed share capital collateral, and one on
-     * `source_loan_id` when the source loan holds one that is not listed.
+     * Adds an error for each listed share capital collateral the edited loan
+     * (`loan_id`) doesn't already hold, and one on `source_loan_id` when the
+     * source loan holds one that is not listed.
+     *
+     * A held one may be listed: the edit form sends the loan's complete list,
+     * and saving keeps that pledge as it is, so it adds nothing the caller
+     * may not see. The preview withholds the collateral figures instead
+     * (LoanService::formPreview()).
      *
      * @param  list<mixed>  $rows
      */
@@ -170,6 +177,7 @@ class PreviewLoanRequest extends FormRequest
     {
         $listedIds = array_map(static fn (array $row): int => (int) $row['collateral_id'], $rows);
         $sourceIds = $this->heldCollateralIds('source_loan_id');
+        $editedIds = $this->heldCollateralIds('loan_id');
 
         $ids = array_values(array_unique([...$listedIds, ...$sourceIds]));
 
@@ -185,7 +193,7 @@ class PreviewLoanRequest extends FormRequest
             ->modelKeys();
 
         foreach ($listedIds as $index => $collateralId) {
-            if (in_array($collateralId, $shareCapitalIds, true)) {
+            if (in_array($collateralId, $shareCapitalIds, true) && ! in_array($collateralId, $editedIds, true)) {
                 $validator->errors()->add(
                     "collaterals.{$index}.collateral_id",
                     'Previewing a share capital collateral needs the Share Capital: View permission.',

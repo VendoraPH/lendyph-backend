@@ -1411,7 +1411,7 @@ DESC,
 
         The restructure edit form sends `loan_id` and `source_loan_id` together: the edited loan must be the restructure of that source (else 422 on `loan_id`), the caller needs both loans:update and loans:restructure, each id is checked for the caller's branches, and collateral counts by the edit's rules (the listed rows only, held ones at their pledged value).
 
-        Listing collateral needs `collaterals:view`, and a share capital collateral (listed, or held by the source loan on a restructure) needs `share_capital:view`. With `loan_id` and no list, when the edited loan holds a share capital pledge and the caller lacks `share_capital:view`, `collateral` is `{total_value: null, security_status: null, short_by: null, value_unknown: true}`, never a 422, and every other section is unchanged.
+        Listing collateral needs `collaterals:view`, and a share capital collateral (listed, or held by the source loan on a restructure) needs `share_capital:view`, except one the edited loan (`loan_id`) already holds. When what `collateral` counts includes a share capital pledge the caller may not see (one the edited loan holds, listed or with no list sent), `collateral` is `{total_value: null, security_status: null, short_by: null, value_unknown: true}`, never a 422, and every other section is computed as usual.
 
         The product's amount, rate and term ranges are not checked here; saving the loan enforces them.
         TXT,
