@@ -4,6 +4,8 @@ namespace Tests\Feature\Cda\Foundation;
 
 use App\Models\AuditLog;
 use App\Models\Borrower;
+use App\Models\CdaDocument;
+use App\Models\CdaDocumentVersion;
 use App\Models\CdaMediationCase;
 use App\Models\CdaReport;
 use App\Models\CdaReportTemplate;
@@ -73,6 +75,55 @@ class CdaModelsAndAuditTest extends TestCase
             $this->assertStringNotContainsString($secret, $text);
         }
         $this->assertStringContainsString('resolved', $text);
+    }
+
+    public function test_a_mediation_documents_texts_never_reach_the_audit_and_a_normal_documents_title_does(): void
+    {
+        $byCategory = CdaDocument::factory()->create(['category' => 'mediation', 'title' => 'Settlement Juana Secret v Pedro Hidden', 'description' => 'Minutes naming the parties']);
+        $bySubject = CdaDocument::factory()->create(['category' => 'other', 'subject_type' => 'case', 'subject_id' => 7, 'title' => 'Juana Secret agreement', 'description' => 'Minutes of Pedro Hidden']);
+        $normal = CdaDocument::factory()->create(['category' => 'capr', 'title' => 'Signed CAPR 2026', 'description' => 'Board copy']);
+
+        foreach ([$byCategory, $bySubject, $normal] as $document) {
+            $document->update(['title' => $document->title.' (signed)', 'status' => 'withdrawn', 'withdraw_reason' => 'Replaced: Juana Secret asked']);
+            CdaDocumentVersion::factory()->create(['cda_document_id' => $document->id, 'version_label' => 'Juana Secret copy', 'notes' => 'Pedro Hidden signed']);
+        }
+
+        foreach ([$byCategory, $bySubject] as $document) {
+            $text = $this->auditTextOf($document);
+            $this->assertStringContainsString('withdrawn', $text);
+
+            foreach (['Juana', 'Pedro', 'Minutes'] as $secret) {
+                $this->assertStringNotContainsString($secret, $text, "Document #{$document->id}");
+            }
+        }
+
+        $normalText = $this->auditTextOf($normal);
+        $this->assertStringContainsString('Signed CAPR 2026', $normalText);
+        $this->assertStringContainsString('Pedro Hidden signed', $normalText, "A normal document's version notes stay.");
+    }
+
+    private function auditTextOf(CdaDocument $document): string
+    {
+        $versionIds = CdaDocumentVersion::query()->where('cda_document_id', $document->id)->pluck('id');
+
+        return AuditLog::query()
+            ->where(fn ($q) => $q->where(fn ($d) => $d->where('auditable_type', CdaDocument::class)->where('auditable_id', $document->id))
+                ->orWhere(fn ($v) => $v->where('auditable_type', CdaDocumentVersion::class)->whereIn('auditable_id', $versionIds)))
+            ->get()
+            ->map(fn (AuditLog $row) => json_encode([$row->old_values, $row->new_values, $row->description], JSON_UNESCAPED_UNICODE))
+            ->implode(' ');
+    }
+
+    public function test_a_deleted_cases_number_is_never_reused(): void
+    {
+        CdaMediationCase::factory()->create(['filed_on' => '2026-02-03']);
+        $newest = CdaMediationCase::factory()->create(['filed_on' => '2026-03-04']);
+        $this->assertSame('MC-2026-0002', $newest->case_number);
+
+        $newest->delete();
+
+        $this->assertSoftDeleted($newest);
+        $this->assertSame('MC-2026-0003', CdaMediationCase::factory()->create(['filed_on' => '2026-04-05'])->case_number);
     }
 
     public function test_a_taken_case_number_is_a_generated_number_collision(): void

@@ -3,7 +3,10 @@
 namespace App\Http\Requests\Loan;
 
 use App\Http\Requests\Concerns\ReferenceNumberMessages;
+use App\Rules\NotAFormerMember;
+use Closure;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Validator;
 
 class ExtendLoanRequest extends FormRequest
 {
@@ -33,6 +36,26 @@ class ExtendLoanRequest extends FormRequest
             'interest_option' => ['required', 'in:pay,defer'],
             'method' => ['exclude_unless:interest_option,pay', 'sometimes', 'in:cash,gcash,maya,bank_transfer,online'],
             'reference_number' => ['exclude_unless:interest_option,pay', 'nullable', 'string', 'max:100', 'required_unless:method,cash'],
+        ];
+    }
+
+    /**
+     * An extension on "defer" moves unpaid interest into a new period: new
+     * credit, so it's refused for a withdrawn or deceased member. "pay"
+     * collects what's owed and stays allowed (C1 review, L3).
+     *
+     * @return list<Closure(Validator): void>
+     */
+    public function after(): array
+    {
+        return [
+            function (Validator $validator): void {
+                $member = $this->route('loan')?->borrower;
+
+                if ($this->input('interest_option') === 'defer' && $member !== null && $member->isFormerMember()) {
+                    $validator->errors()->add('interest_option', NotAFormerMember::messageFor($member).' Choose "pay" to collect the interest instead.');
+                }
+            },
         ];
     }
 

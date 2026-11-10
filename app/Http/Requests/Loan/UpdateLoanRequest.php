@@ -6,7 +6,10 @@ use App\Http\Requests\Concerns\ExcludesRejectedBorrowers;
 use App\Http\Requests\Concerns\RequiresActiveAccountOfficer;
 use App\Http\Requests\Concerns\ValidatesDeductionAmounts;
 use App\Http\Requests\Concerns\ValidatesLoanCollaterals;
+use App\Rules\NotAFormerMember;
+use Closure;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Validator;
 
 class UpdateLoanRequest extends FormRequest
 {
@@ -36,7 +39,7 @@ class UpdateLoanRequest extends FormRequest
             // LoanService::coMakerIdsForMembers(). The same rule as the
             // principal borrower on StoreLoanRequest, because a co-maker is
             // jointly liable: a rejected registration must not become one.
-            'co_maker_ids.*' => ['integer', $this->nonRejectedBorrowerRule()],
+            'co_maker_ids.*' => ['integer', $this->nonRejectedBorrowerRule(), new NotAFormerMember(NotAFormerMember::AS_CO_MAKER)],
             // Sent by the edit form's account-officer picker. Without a rule the
             // value never reached validated(), so a draft's officer could be
             // changed on screen and silently not saved.
@@ -65,6 +68,25 @@ class UpdateLoanRequest extends FormRequest
             // as either, because the two mean opposite things.
             'collaterals' => ['sometimes', 'list'],
             'collaterals.*.collateral_id' => [...$this->collateralIdRules(), 'distinct'],
+        ];
+    }
+
+    /**
+     * The member is fixed after creation, so a loan whose member has since
+     * withdrawn or died is refused here instead (C1 review, H1).
+     *
+     * @return list<Closure(Validator): void>
+     */
+    public function after(): array
+    {
+        return [
+            function (Validator $validator): void {
+                $member = $this->route('loan')?->borrower;
+
+                if ($member !== null && $member->isFormerMember()) {
+                    $validator->errors()->add('borrower_id', NotAFormerMember::messageFor($member));
+                }
+            },
         ];
     }
 

@@ -6,6 +6,7 @@ use App\Enums\LoanFrequency;
 use App\Http\Requests\Concerns\ExcludesRejectedBorrowers;
 use App\Http\Requests\Concerns\RequiresActiveAccountOfficer;
 use App\Http\Requests\Concerns\ValidatesDeductionAmounts;
+use App\Rules\NotAFormerMember;
 use Illuminate\Foundation\Http\FormRequest;
 
 class StoreLoanRequest extends FormRequest
@@ -20,7 +21,7 @@ class StoreLoanRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'borrower_id' => ['required', $this->nonRejectedBorrowerRule()],
+            'borrower_id' => ['required', $this->nonRejectedBorrowerRule(), new NotAFormerMember],
             'co_maker_ids' => ['nullable', 'array'],
             // MEMBER ids only — all the loan form's co-maker picker sends —
             // never a co-maker record id: the two are separate sequences, so a
@@ -28,7 +29,7 @@ class StoreLoanRequest extends FormRequest
             // LoanService::coMakerIdsForMembers(). The same rule as the
             // principal borrower above, because a co-maker is jointly liable:
             // a rejected registration must not become one.
-            'co_maker_ids.*' => ['integer', $this->nonRejectedBorrowerRule()],
+            'co_maker_ids.*' => ['integer', $this->nonRejectedBorrowerRule(), new NotAFormerMember(NotAFormerMember::AS_CO_MAKER)],
             'loan_product_id' => ['required', 'exists:loan_products,id'],
             'principal_amount' => ['required', 'numeric', 'min:1'],
             'purpose' => ['nullable', 'string', 'max:500'],

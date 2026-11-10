@@ -35,6 +35,30 @@ class SavingsReportController extends Controller
     /** Interest run statuses in words, for the CSV (the screen maps its own). */
     private const RUN_STATUS_WORDS = ['posted' => 'Posted', 'reversed' => 'Reversed'];
 
+    /**
+     * The other keys a savings CSV shows, in the savings screens' words
+     * (savings-rules.ts and time-deposit-rules.ts), so a CSV never reads a raw
+     * key such as `active`. A key with no words reads "Other".
+     */
+    private const ACCOUNT_STATUS_WORDS = ['active' => 'Active', 'dormant' => 'Dormant', 'frozen' => 'Frozen', 'closed' => 'Closed'];
+
+    private const TRANSACTION_TYPE_WORDS = [
+        'deposit' => 'Deposit', 'withdrawal' => 'Withdrawal', 'transfer_in' => 'Transfer in', 'transfer_out' => 'Transfer out',
+        'interest' => 'Interest', 'withholding_tax' => 'Withholding tax', 'closing' => 'Closing payout', 'reversal' => 'Reversal',
+    ];
+
+    private const METHOD_WORDS = ['cash' => 'Cash', 'bank_transfer' => 'Bank transfer', 'gcash' => 'GCash', 'maya' => 'Maya', 'savings' => 'Savings account'];
+
+    private const TIME_DEPOSIT_STATUS_WORDS = [
+        'active' => 'Active', 'matured' => 'Matured', 'withdrawn' => 'Withdrawn', 'rolled_over' => 'Rolled over', 'preterminated' => 'Pre-terminated',
+    ];
+
+    private const MATURITY_INSTRUCTION_WORDS = [
+        'payout' => 'Pay out principal and interest',
+        'rollover_principal' => 'Roll over principal, pay out interest',
+        'rollover_all' => 'Roll over principal and interest',
+    ];
+
     public function __construct(
         private readonly SavingsReports $reports,
         private readonly StatementBuilder $statements,
@@ -87,7 +111,7 @@ class SavingsReportController extends Controller
     #[OA\Get(
         path: '/api/reports/savings/time-deposit-maturities',
         summary: 'Time Deposit Maturities',
-        description: 'Time deposits maturing in the period (default this month), soonest first; pre-terminated ones are left out. `totals`: count, total_principal, total_net_interest, total_maturity_amount and payout_amount (what is paid out rather than rolled over).',
+        description: 'Time deposits maturing in the period (default this month), soonest first; pre-terminated ones are left out. `totals`: listed_count (every placement listed), and count, total_principal, total_net_interest, total_maturity_amount and payout_amount (what is paid out rather than rolled over), which count only placements still owed (active, or matured and not settled); a placement already paid out or rolled over is listed with its status but counted in no money total.',
         tags: ['Savings Reports'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')), new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')), new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')), new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', maximum: 1000))],
@@ -196,7 +220,7 @@ class SavingsReportController extends Controller
         $rows = (function () use ($filters) {
             foreach ($this->reports->balancesQuery($filters)->reorder()->lazyById(500)->chunk(500) as $chunk) {
                 foreach ($this->reports->balanceRows($chunk->collect()->values(), $filters) as $row) {
-                    yield [$row['account_number'], $row['borrower_name'], $row['borrower_code'], $row['product_name'], $row['branch_name'], $row['status'], $row['balance'], $row['hold_amount'], $row['pending_amount'], $row['available_balance'], $row['accrued_interest'], $row['last_member_activity_on']];
+                    yield [$row['account_number'], $row['borrower_name'], $row['borrower_code'], $row['product_name'], $row['branch_name'], self::inWords(self::ACCOUNT_STATUS_WORDS, $row['status']), $row['balance'], $row['hold_amount'], $row['pending_amount'], $row['available_balance'], $row['accrued_interest'], $row['last_member_activity_on']];
                 }
             }
         })();
@@ -210,7 +234,7 @@ class SavingsReportController extends Controller
         return $this->csv('savings-transactions.csv', ['Date', 'Value Date', 'Reference', 'Account #', 'Member', 'Branch', 'Type', 'Method', 'In', 'Out', 'Balance'], $this->reports->transactionsQuery($request->filters()), function (SavingsTransaction $row): array {
             $r = $this->reports->transactionRow($row);
 
-            return [$r['date'], $r['value_date'], $r['reference'], $r['account_number'], $r['borrower_name'], $r['branch_name'], $r['type'], $r['method'], $r['credit'], $r['debit'], $r['balance_after']];
+            return [$r['date'], $r['value_date'], $r['reference'], $r['account_number'], $r['borrower_name'], $r['branch_name'], self::inWords(self::TRANSACTION_TYPE_WORDS, $r['type']), self::inWords(self::METHOD_WORDS, $r['method']), $r['credit'], $r['debit'], $r['balance_after']];
         });
     }
 
@@ -220,7 +244,7 @@ class SavingsReportController extends Controller
         return $this->csv('time-deposit-maturities.csv', ['Maturity', 'Certificate #', 'Member', 'Product', 'Branch', 'Principal', 'Rate', 'Days', 'Net Interest', 'Due at Maturity', 'Instruction', 'Status'], $this->reports->maturitiesQuery($request->filters()), function (TimeDeposit $deposit): array {
             $r = $this->reports->maturityRow($deposit);
 
-            return [$r['maturity_date'], $r['certificate_number'], $r['borrower_name'], $r['product_name'], $r['branch_name'], $r['principal'], $r['annual_rate'].'%', $r['term_days'], $r['net_interest'], $r['maturity_amount'], $r['maturity_instruction'], $r['status']];
+            return [$r['maturity_date'], $r['certificate_number'], $r['borrower_name'], $r['product_name'], $r['branch_name'], $r['principal'], $r['annual_rate'].'%', $r['term_days'], $r['net_interest'], $r['maturity_amount'], self::inWords(self::MATURITY_INSTRUCTION_WORDS, $r['maturity_instruction']), self::inWords(self::TIME_DEPOSIT_STATUS_WORDS, $r['status'])];
         });
     }
 
@@ -230,7 +254,7 @@ class SavingsReportController extends Controller
         return $this->csv('savings-interest-postings.csv', ['From', 'To', 'Product', 'Branch', 'Status', 'Accounts', 'Gross Interest', 'Tax Withheld', 'Net Credited', 'Posted', 'Reversed'], $this->reports->interestPostingsQuery($request->filters()), function (SavingsInterestRun $run): array {
             $r = $this->reports->interestPostingRow($run);
 
-            return [$r['period_start'], $r['period_end'], $r['product_name'], $r['branch_name'], self::RUN_STATUS_WORDS[$run->status] ?? 'Other', $r['account_count'], $r['total_gross'], $r['total_tax'], $r['total_net'], $run->posted_at?->toDateString(), $run->reversed_at?->toDateString()];
+            return [$r['period_start'], $r['period_end'], $r['product_name'], $r['branch_name'], self::inWords(self::RUN_STATUS_WORDS, $run->status), $r['account_count'], $r['total_gross'], $r['total_tax'], $r['total_net'], $run->posted_at?->toDateString(), $run->reversed_at?->toDateString()];
         });
     }
 
@@ -251,6 +275,17 @@ class SavingsReportController extends Controller
         $rows = array_map(fn (array $row) => [$control['as_of'], $row['branch_name'], $row['account_code'], $row['account_name'], $row['subledger_balance'], $row['gl_balance'], $row['difference']], $control['rows']);
 
         return $this->savingsCsv('savings-gl-control.csv', ['As Of', 'Branch', 'Account', 'Account Name', 'Savings Subledger', 'General Ledger', 'Difference'], $rows);
+    }
+
+    /**
+     * A key in words for a CSV cell; empty when there is none (a transaction
+     * with no method), "Other" for a key with no words.
+     *
+     * @param  array<string, string>  $words
+     */
+    private static function inWords(array $words, ?string $key): string
+    {
+        return $key === null || $key === '' ? '' : ($words[$key] ?? 'Other');
     }
 
     /** @return array<string, mixed> */

@@ -32,8 +32,12 @@ class CdaReportDeadlineController extends Controller
         ])),
         responses: [new OA\Response(response: 200, description: 'The report row with its effective deadline'), new OA\Response(response: 403, description: 'Missing a permission'), new OA\Response(response: 404, description: 'No such report'), new OA\Response(response: 422, description: 'No reference')],
     )]
-    public function update(UpdateCdaReportDeadlineRequest $request, CdaReport $report, CdaAccess $access): JsonResponse
+    public function update(UpdateCdaReportDeadlineRequest $request, int $report, CdaAccess $access): JsonResponse
     {
+        // Looked up only after the form request checked the permission (C1
+        // review, L4), so a caller without it can't probe which ids exist.
+        $report = CdaReport::query()->find($report);
+        abort_if($report === null, 404, 'There is no such CDA report.');
         $access->authorizeType($request->user(), $report->report_type);
 
         $report = DB::transaction(function () use ($request, $report): CdaReport {

@@ -16,8 +16,10 @@ use App\Services\Cda\Sources\SourceCatalog;
  * - sections and fields: slug keys, unique; known field types, select
  *   options, number decimals; table sections and their columns;
  * - sources: catalogue keys only, with valid params; a table section reads a
- *   table source; `overridable` is refused for loans, accounting, fs, share
- *   capital and savings figures;
+ *   table source; mediation sources and the mediation report's fields only
+ *   in the mediation template; `overridable` is refused for loans,
+ *   accounting, fs, share capital, savings, other reports' and PESOS
+ *   figures, and for calculations built on them;
  * - calculations: structured ops only (never parsed), references that
  *   resolve, and no cycles;
  * - rules: known types, severities, categories and components; named
@@ -79,6 +81,13 @@ final class TemplateDefinitionValidator
 
     public const DOCUMENT_STAGES = ['submit_for_review', 'approve', 'finalize', 'submit'];
 
+    /**
+     * The bounds a `date_range` rule may name: the period's start and end,
+     * the report's effective deadline, and today (Manila). Without `from` and
+     * `to` the range is the period; a date after today is always refused.
+     */
+    public const DATE_RANGE_BOUNDS = ['period_start', 'period_end', 'effective_deadline', 'today'];
+
     public const EXPORT_MODES = ['generated', 'template'];
 
     /** Where a rule's "fix it here" link may point: app screens only. */
@@ -86,7 +95,55 @@ final class TemplateDefinitionValidator
 
     private const SLUG = '/^[a-z][a-z0-9_]{0,59}$/';
 
-    private const CELL = '/^[A-Za-z0-9 _]{1,31}!\$?[A-Z]{1,3}\$?[1-9]\d{0,6}$/';
+    /**
+     * The keys each object takes (C1 review, M3): anything else, `regex`
+     * included, is refused.
+     */
+    private const KEYS = [
+        'meta' => ['verified', 'source_doc', 'notes'],
+        'deadline' => ['basis', 'days_setting'],
+        'section_fields' => ['key', 'title', 'kind', 'description', 'fields'],
+        'section_table' => ['key', 'title', 'kind', 'description', 'columns', 'source', 'editable'],
+        'field' => ['key', 'label', 'type', 'required', 'source', 'calc', 'overridable', 'editable', 'options', 'decimals', 'help', 'description', 'columns'],
+        'column' => ['key', 'label', 'format'],
+        'option' => ['value', 'label'],
+        'source' => ['key', 'params'],
+        'calc' => ['op', 'args'],
+        'operand_source' => ['source'],
+        'document' => ['key', 'category', 'label', 'stage', 'severity', 'description'],
+        'export' => ['pdf', 'excel'],
+        'export_pdf' => ['orientation'],
+        'export_excel' => ['mode', 'cells', 'draft_cell'],
+        'pesos' => ['components', 'indicators', 'rating_bands'],
+        'pesos_component' => ['key', 'label', 'weight'],
+        'pesos_indicator' => ['key', 'component', 'label', 'formula_key', 'numerator', 'denominator', 'unit', 'direction', 'weight', 'bands', 'recommendations'],
+        'pesos_band' => ['min', 'max', 'points', 'recommendation'],
+        'pesos_rating' => ['min', 'label'],
+    ];
+
+    private const RULE_COMMON_KEYS = ['id', 'type', 'severity', 'category', 'component', 'fix_href', 'message'];
+
+    private const RULE_KEYS = [
+        'required' => ['field'],
+        'date_range' => ['field', 'from', 'to'],
+        'min' => ['field', 'value'],
+        'max' => ['field', 'value'],
+        'max_length' => ['field', 'value'],
+        'one_of' => ['field', 'values'],
+        'pattern' => ['field', 'pattern'],
+        'compare' => ['left', 'op', 'right', 'tolerance'],
+        'sum_equals' => ['parts', 'total'],
+        'check' => ['check', 'params'],
+        'document' => ['document_category', 'stage', 'final'],
+    ];
+
+    /**
+     * A cell address, the forms the export's XlsxTemplateFiller reads: an
+     * unquoted sheet name, or a quoted one holding any character Excel allows
+     * in a sheet name (not ' [ ] : * ? / \, with '' for a literal quote),
+     * then `!`, and a column and row, either one absolute (`$`).
+     */
+    private const CELL = "/^(?:'(?:[^'\\[\\]:*?\\/\\\\]|''){1,31}'|[^'!\\[\\]:*?\\/\\\\]{1,31})!\\$?[A-Za-z]{1,3}\\$?[1-9]\\d{0,6}$/";
 
     /** @var list<array{path: string, message: string}> */
     private array $errors = [];
@@ -100,6 +157,14 @@ final class TemplateDefinitionValidator
     /** @var array<string, list<string>> full key => full keys it depends on */
     private array $dependencies = [];
 
+    /** @var array<string, string> full key => the source key it reads */
+    private array $sources = [];
+
+    /** @var array<string, string> full key => the path of its `overridable: true` */
+    private array $overridable = [];
+
+    private ?string $reportType = null;
+
     /**
      * @param  array<string, mixed>  $definition
      * @return list<array{path: string, message: string}>
@@ -110,6 +175,9 @@ final class TemplateDefinitionValidator
         $this->fields = [];
         $this->bare = [];
         $this->dependencies = [];
+        $this->sources = [];
+        $this->overridable = [];
+        $this->reportType = $reportType;
 
         foreach (array_keys($definition) as $key) {
             if (! in_array($key, self::TOP_LEVEL_KEYS, true)) {
@@ -135,7 +203,10 @@ final class TemplateDefinitionValidator
 
         $this->collectFields($sections);
         $this->checkSections($sections);
-        $this->checkCycles();
+
+        if ($this->checkCycles()) {
+            $this->checkOverridableCalculations();
+        }
         $this->checkRules($definition['rules'] ?? []);
         $this->checkDocuments($definition['documents'] ?? []);
         $this->checkExport($definition['export'] ?? null);
@@ -189,6 +260,8 @@ final class TemplateDefinitionValidator
             return;
         }
 
+        $this->checkKeys($meta, 'meta', 'meta');
+
         if (! is_bool($meta['verified'] ?? null)) {
             $this->error('meta.verified', '"verified" must be true or false: has it been checked against the official CDA form?');
         }
@@ -240,6 +313,8 @@ final class TemplateDefinitionValidator
 
             return;
         }
+
+        $this->checkKeys($deadline, 'deadline', 'deadline');
 
         if (! in_array($deadline['basis'] ?? null, self::DEADLINE_BASES, true)) {
             $this->error('deadline.basis', '"basis" must be year_end or half_end.');
@@ -294,6 +369,10 @@ final class TemplateDefinitionValidator
                 $this->error($path, 'A section must be an object.');
 
                 continue;
+            }
+
+            if (in_array($section['kind'] ?? null, self::SECTION_KINDS, true)) {
+                $this->checkKeys($section, 'section_'.$section['kind'], $path);
             }
 
             $key = $section['key'] ?? null;
@@ -361,6 +440,7 @@ final class TemplateDefinitionValidator
     /** @param  array<string, mixed>  $field */
     private function checkField(array $field, string $path, string $full): void
     {
+        $this->checkKeys($field, 'field', $path);
         $type = $field['type'] ?? null;
 
         if (! in_array($type, self::FIELD_TYPES, true)) {
@@ -384,6 +464,10 @@ final class TemplateDefinitionValidator
 
             if (! $valid) {
                 $this->error("{$path}.options", 'A select field needs options, each with a value and a label.');
+            } else {
+                foreach ($options as $n => $option) {
+                    $this->checkKeys($option, 'option', "{$path}.options.{$n}");
+                }
             }
         }
 
@@ -395,6 +479,10 @@ final class TemplateDefinitionValidator
             $this->checkColumns($field['columns'] ?? null, "{$path}.columns");
         }
 
+        if (($field['overridable'] ?? false) === true) {
+            $this->overridable[$full] = "{$path}.overridable";
+        }
+
         if (isset($field['source'], $field['calc'])) {
             $this->error($path, 'A field takes its value from a source or a calculation, not both.');
         }
@@ -402,8 +490,17 @@ final class TemplateDefinitionValidator
         if (isset($field['source'])) {
             $sourceKey = $this->checkSource($field['source'], "{$path}.source");
 
+            if ($sourceKey !== null) {
+                $this->sources[$full] = $sourceKey;
+            }
+
             if ($sourceKey !== null && ($field['overridable'] ?? false) === true && ! SourceCatalog::overridable($sourceKey)) {
-                $this->error("{$path}.overridable", "A figure from \"{$sourceKey}\" can't be overridden: loans, accounting, financial statements, share capital and savings are fixed at their source.");
+                $this->error("{$path}.overridable", "A figure from \"{$sourceKey}\" can't be overridden: loans, accounting, financial statements, share capital, savings, other reports and PESOS are fixed at their source.");
+                unset($this->overridable[$full]);
+            }
+
+            if ($sourceKey !== null && $type === 'table' && ($field['editable'] ?? false) === true && ! SourceCatalog::overridable($sourceKey)) {
+                $this->error("{$path}.editable", "The table \"{$full}\" reads \"{$sourceKey}\", a fixed figure, so its rows can't be edited.");
             }
         }
 
@@ -425,8 +522,19 @@ final class TemplateDefinitionValidator
         if (isset($section['source'])) {
             $key = $this->checkSource($section['source'], "{$path}.source");
 
+            if ($key !== null && is_string($section['key'] ?? null)) {
+                // A table is referenced by its section key, so a calculation
+                // over it (sum_column) inherits whether its source is fixed.
+                $this->sources[$section['key']] = $key;
+            }
+
             if ($key !== null && ! in_array(SourceCatalog::unitFor($key, (array) ($section['source']['params'] ?? [])), ['table', 'any'], true)) {
                 $this->error("{$path}.source", "A table reads a table source; \"{$key}\" gives a single figure.");
+            }
+
+            if ($key !== null && ($section['editable'] ?? false) === true && ! SourceCatalog::overridable($key)) {
+                $tableKey = is_string($section['key'] ?? null) ? $section['key'] : '';
+                $this->error("{$path}.editable", "The table \"{$tableKey}\" reads \"{$key}\", a fixed figure, so its rows can't be edited.");
             }
         }
     }
@@ -443,6 +551,10 @@ final class TemplateDefinitionValidator
 
         foreach ($columns as $k => $column) {
             $key = is_array($column) ? ($column['key'] ?? null) : null;
+
+            if (is_array($column)) {
+                $this->checkKeys($column, 'column', "{$path}.{$k}");
+            }
 
             if (! is_string($key) || preg_match(self::SLUG, $key) !== 1) {
                 $this->error("{$path}.{$k}.key", 'A column key is lower-case letters, digits and underscores.');
@@ -471,6 +583,7 @@ final class TemplateDefinitionValidator
             return null;
         }
 
+        $this->checkKeys($source, 'source', $path);
         $key = $source['key'];
         $params = $source['params'] ?? [];
 
@@ -490,6 +603,8 @@ final class TemplateDefinitionValidator
             $this->error("{$path}.params", $message);
         }
 
+        $this->refuseMediationLeak($key, ($params['type'] ?? null) === 'mediation', $path);
+
         return $key;
     }
 
@@ -501,6 +616,7 @@ final class TemplateDefinitionValidator
             return;
         }
 
+        $this->checkKeys($calc, 'calc', $path);
         $op = $calc['op'];
 
         if (! in_array($op, self::CALC_OPS, true)) {
@@ -605,7 +721,8 @@ final class TemplateDefinitionValidator
         return $full;
     }
 
-    private function checkCycles(): void
+    /** Whether the calculations are free of cycles (an error is added when not). */
+    private function checkCycles(): bool
     {
         $state = [];
 
@@ -615,9 +732,62 @@ final class TemplateDefinitionValidator
             if ($cycle !== null) {
                 $this->error('sections', 'The calculations form a cycle: '.implode(' → ', $cycle).'.');
 
-                return;
+                return false;
             }
         }
+
+        return true;
+    }
+
+    /**
+     * An overridable calculation can't depend, directly or through other
+     * calculations, on a fixed figure (C1 review, M2): overriding it would
+     * override that figure.
+     */
+    private function checkOverridableCalculations(): void
+    {
+        $fixed = [];
+
+        foreach ($this->overridable as $full => $path) {
+            if (! isset($this->dependencies[$full])) {
+                continue;
+            }
+
+            $source = $this->fixedSourceBehind($full, $fixed);
+
+            if ($source !== null) {
+                $this->error($path, "\"{$full}\" is calculated from \"{$source}\", a fixed figure, so it can't be overridden.");
+            }
+        }
+    }
+
+    /**
+     * The fixed source a field reads or is calculated from, if any.
+     *
+     * @param  array<string, string|false>  $memo
+     */
+    private function fixedSourceBehind(string $full, array &$memo): ?string
+    {
+        if (array_key_exists($full, $memo)) {
+            return $memo[$full] === false ? null : $memo[$full];
+        }
+
+        $memo[$full] = false;
+        $source = $this->sources[$full] ?? null;
+
+        if ($source !== null && ! SourceCatalog::overridable($source)) {
+            return $memo[$full] = $source;
+        }
+
+        foreach ($this->dependencies[$full] ?? [] as $dependency) {
+            $found = $this->fixedSourceBehind($dependency, $memo);
+
+            if ($found !== null) {
+                return $memo[$full] = $found;
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -711,10 +881,22 @@ final class TemplateDefinitionValidator
     {
         $type = $rule['type'] ?? null;
 
+        if (is_string($type) && isset(self::RULE_KEYS[$type])) {
+            $this->checkKeysIn($rule, [...self::RULE_COMMON_KEYS, ...self::RULE_KEYS[$type]], $path);
+        }
+
         switch ($type) {
             case 'required':
+                $this->reference($rule['field'] ?? null, "{$path}.field", null);
+                break;
             case 'date_range':
                 $this->reference($rule['field'] ?? null, "{$path}.field", null);
+                foreach (['from', 'to'] as $bound) {
+                    if (isset($rule[$bound]) && ! in_array($rule[$bound], self::DATE_RANGE_BOUNDS, true)) {
+                        $value = is_string($rule[$bound]) ? $rule[$bound] : gettype($rule[$bound]);
+                        $this->error("{$path}.{$bound}", "Unknown date bound \"{$value}\". Use one of ".implode(', ', self::DATE_RANGE_BOUNDS).'.');
+                    }
+                }
                 break;
             case 'min':
             case 'max':
@@ -801,6 +983,8 @@ final class TemplateDefinitionValidator
                 $this->error($path, "\"{$operand}\" must read report:<report type>.<field>.");
             }
 
+            $this->refuseMediationLeak($operand, $type === 'mediation', $path);
+
             return;
         }
 
@@ -810,6 +994,8 @@ final class TemplateDefinitionValidator
             if (! SourceCatalog::has($key)) {
                 $this->error($path, "Unknown source key \"{$key}\".");
             } else {
+                $this->refuseMediationLeak($key, false, $path);
+
                 foreach (SourceCatalog::errors($key, []) as $message) {
                     $this->error($path, $message);
                 }
@@ -819,6 +1005,7 @@ final class TemplateDefinitionValidator
         }
 
         if (is_array($operand) && isset($operand['source'])) {
+            $this->checkKeys($operand, 'operand_source', $path);
             $this->checkSource($operand['source'], "{$path}.source");
 
             return;
@@ -858,6 +1045,7 @@ final class TemplateDefinitionValidator
             }
 
             $seen[$key] = true;
+            $this->checkKeys($document, 'document', $path);
 
             if (! is_string($document['category'] ?? null) || ! is_string($document['label'] ?? null)) {
                 $this->error($path, 'A document needs a category and a label.');
@@ -885,6 +1073,10 @@ final class TemplateDefinitionValidator
             return;
         }
 
+        if (is_array($export['pdf'] ?? null)) {
+            $this->checkKeys($export['pdf'], 'export_pdf', 'export.pdf');
+        }
+
         if (isset($export['pdf']['orientation']) && ! in_array($export['pdf']['orientation'], ['portrait', 'landscape'], true)) {
             $this->error('export.pdf.orientation', 'The orientation is portrait or landscape.');
         }
@@ -900,6 +1092,8 @@ final class TemplateDefinitionValidator
 
             return;
         }
+
+        $this->checkKeys($excel, 'export_excel', 'export.excel');
 
         foreach ((array) ($excel['cells'] ?? []) as $cell => $value) {
             if (preg_match(self::CELL, (string) $cell) !== 1) {
@@ -948,9 +1142,14 @@ final class TemplateDefinitionValidator
             return;
         }
 
+        $this->checkKeys($pesos, 'pesos', 'pesos');
         $components = [];
 
         foreach ($pesos['components'] as $i => $component) {
+            if (is_array($component)) {
+                $this->checkKeys($component, 'pesos_component', "pesos.components.{$i}");
+            }
+
             if (! is_array($component) || ! is_string($component['key'] ?? null) || preg_match(self::SLUG, $component['key']) !== 1 || ! is_string($component['label'] ?? null) || ! is_numeric($component['weight'] ?? null)) {
                 $this->error("pesos.components.{$i}", 'A component has a key, a label and a weight.');
 
@@ -976,6 +1175,13 @@ final class TemplateDefinitionValidator
             }
 
             $seen[$indicator['key']] = true;
+            $this->checkKeys($indicator, 'pesos_indicator', $path);
+
+            foreach ((array) ($indicator['bands'] ?? []) as $n => $band) {
+                if (is_array($band)) {
+                    $this->checkKeys($band, 'pesos_band', "{$path}.bands.{$n}");
+                }
+            }
 
             if (! isset($components[$indicator['component'] ?? ''])) {
                 $this->error("{$path}.component", 'An indicator belongs to one of the components.');
@@ -1007,6 +1213,10 @@ final class TemplateDefinitionValidator
         }
 
         foreach ($pesos['rating_bands'] as $i => $band) {
+            if (is_array($band)) {
+                $this->checkKeys($band, 'pesos_rating', "pesos.rating_bands.{$i}");
+            }
+
             if (! is_array($band) || ! is_numeric($band['min'] ?? null) || ! is_string($band['label'] ?? null)) {
                 $this->error("pesos.rating_bands.{$i}", 'A rating band has a minimum score and a label.');
             }
@@ -1026,6 +1236,43 @@ final class TemplateDefinitionValidator
         }
 
         return false;
+    }
+
+    /**
+     * Mediation data stays in the mediation report (restricted to
+     * `cda:view_mediation`): no other template may read a `mediation.*`
+     * source or a mediation report's field.
+     */
+    private function refuseMediationLeak(string $key, bool $readsMediationReport, string $path): void
+    {
+        if ($this->reportType === null || $this->reportType === 'mediation') {
+            return;
+        }
+
+        $isMediation = $readsMediationReport || (SourceCatalog::has($key) && SourceCatalog::family($key) === 'mediation');
+
+        if ($isMediation) {
+            $this->error($path, "Mediation figures are restricted to the mediation report: \"{$key}\" can't be read by ".ReportTypes::title($this->reportType).'.');
+        }
+    }
+
+    /** @param  array<mixed>  $object */
+    private function checkKeys(array $object, string $kind, string $path): void
+    {
+        $this->checkKeysIn($object, self::KEYS[$kind], $path);
+    }
+
+    /**
+     * @param  array<mixed>  $object
+     * @param  list<string>  $allowed
+     */
+    private function checkKeysIn(array $object, array $allowed, string $path): void
+    {
+        foreach (array_keys($object) as $key) {
+            if (! in_array($key, $allowed, true)) {
+                $this->error("{$path}.{$key}", "Unknown key \"{$key}\". Allowed here: ".implode(', ', $allowed).'.');
+            }
+        }
     }
 
     private function error(string $path, string $message): void
