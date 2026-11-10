@@ -4,6 +4,7 @@ namespace Tests\Feature\Cda\Foundation;
 
 use App\Models\CdaReport;
 use App\Models\CdaReportTemplate;
+use App\Models\CdaSetting;
 use App\Services\BranchAccess;
 use App\Services\Cda\TemplateDefinitionValidator;
 use Illuminate\Support\Facades\DB;
@@ -72,6 +73,12 @@ class CdaReviewFixesTest extends TestCase
             ['key' => 'staff_total', 'label' => 'Staff', 'type' => 'number', 'overridable' => true, 'calc' => ['op' => 'add', 'args' => ['employees_regular', 'employees_casual']]],
         ]];
         $this->assertSame('', $this->messages($manualOnly));
+
+        $sumOfFixedTable = $this->capr();
+        $sumOfFixedTable['sections'][] = ['key' => 'derived', 'title' => 'Derived', 'kind' => 'fields', 'fields' => [
+            ['key' => 'released_total', 'label' => 'Released', 'type' => 'money', 'overridable' => true, 'calc' => ['op' => 'sum_column', 'args' => ['loans_by_product', 'amount']]],
+        ]];
+        $this->assertStringContainsString('derived.released_total', $this->messages($sumOfFixedTable));
 
         $editableTable = $this->capr();
         $editableTable['sections'][] = ['key' => 'products_copy', 'title' => 'Products', 'kind' => 'table', 'editable' => true, 'source' => ['key' => 'loans.by_product'], 'columns' => [['key' => 'product', 'label' => 'Product', 'format' => 'text']]];
@@ -145,6 +152,15 @@ class CdaReviewFixesTest extends TestCase
         });
 
         $this->postJson('/api/cda/templates', [...$body, 'version' => '2031.2'])->assertUnprocessable()->assertJsonValidationErrors('version');
+    }
+
+    public function test_the_settings_row_that_template_writes_lock_is_seeded_once(): void
+    {
+        $this->assertSame(1, CdaSetting::query()->count());
+
+        (require database_path('migrations/2026_11_11_100100_create_cda_tables.php'))->up();
+
+        $this->assertSame(1, CdaSetting::query()->count());
     }
 
     public function test_an_edit_checks_the_end_date_against_the_stored_start(): void

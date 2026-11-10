@@ -78,7 +78,9 @@
         "field": "statement_date",
         "severity": "warning",
         "category": "invalid_data",
-        "component": "fields"
+        "component": "fields",
+        "from": "period_start",
+        "to": "effective_deadline"
       },
       {
         "id": "signed_statement",

@@ -16,8 +16,10 @@ use App\Services\Cda\Sources\SourceCatalog;
  * - sections and fields: slug keys, unique; known field types, select
  *   options, number decimals; table sections and their columns;
  * - sources: catalogue keys only, with valid params; a table section reads a
- *   table source; `overridable` is refused for loans, accounting, fs, share
- *   capital and savings figures;
+ *   table source; mediation sources and the mediation report's fields only
+ *   in the mediation template; `overridable` is refused for loans,
+ *   accounting, fs, share capital, savings, other reports' and PESOS
+ *   figures, and for calculations built on them;
  * - calculations: structured ops only (never parsed), references that
  *   resolve, and no cycles;
  * - rules: known types, severities, categories and components; named
@@ -79,6 +81,13 @@ final class TemplateDefinitionValidator
 
     public const DOCUMENT_STAGES = ['submit_for_review', 'approve', 'finalize', 'submit'];
 
+    /**
+     * The bounds a `date_range` rule may name: the period's start and end,
+     * the report's effective deadline, and today (Manila). Without `from` and
+     * `to` the range is the period; a date after today is always refused.
+     */
+    public const DATE_RANGE_BOUNDS = ['period_start', 'period_end', 'effective_deadline', 'today'];
+
     public const EXPORT_MODES = ['generated', 'template'];
 
     /** Where a rule's "fix it here" link may point: app screens only. */
@@ -116,7 +125,7 @@ final class TemplateDefinitionValidator
 
     private const RULE_KEYS = [
         'required' => ['field'],
-        'date_range' => ['field'],
+        'date_range' => ['field', 'from', 'to'],
         'min' => ['field', 'value'],
         'max' => ['field', 'value'],
         'max_length' => ['field', 'value'],
@@ -148,6 +157,8 @@ final class TemplateDefinitionValidator
     /** @var array<string, string> full key => the path of its `overridable: true` */
     private array $overridable = [];
 
+    private ?string $reportType = null;
+
     /**
      * @param  array<string, mixed>  $definition
      * @return list<array{path: string, message: string}>
@@ -160,6 +171,7 @@ final class TemplateDefinitionValidator
         $this->dependencies = [];
         $this->sources = [];
         $this->overridable = [];
+        $this->reportType = $reportType;
 
         foreach (array_keys($definition) as $key) {
             if (! in_array($key, self::TOP_LEVEL_KEYS, true)) {
@@ -504,6 +516,12 @@ final class TemplateDefinitionValidator
         if (isset($section['source'])) {
             $key = $this->checkSource($section['source'], "{$path}.source");
 
+            if ($key !== null && is_string($section['key'] ?? null)) {
+                // A table is referenced by its section key, so a calculation
+                // over it (sum_column) inherits whether its source is fixed.
+                $this->sources[$section['key']] = $key;
+            }
+
             if ($key !== null && ! in_array(SourceCatalog::unitFor($key, (array) ($section['source']['params'] ?? [])), ['table', 'any'], true)) {
                 $this->error("{$path}.source", "A table reads a table source; \"{$key}\" gives a single figure.");
             }
@@ -578,6 +596,8 @@ final class TemplateDefinitionValidator
         foreach (SourceCatalog::errors($key, $params) as $message) {
             $this->error("{$path}.params", $message);
         }
+
+        $this->refuseMediationLeak($key, ($params['type'] ?? null) === 'mediation', $path);
 
         return $key;
     }
@@ -861,8 +881,16 @@ final class TemplateDefinitionValidator
 
         switch ($type) {
             case 'required':
+                $this->reference($rule['field'] ?? null, "{$path}.field", null);
+                break;
             case 'date_range':
                 $this->reference($rule['field'] ?? null, "{$path}.field", null);
+                foreach (['from', 'to'] as $bound) {
+                    if (isset($rule[$bound]) && ! in_array($rule[$bound], self::DATE_RANGE_BOUNDS, true)) {
+                        $value = is_string($rule[$bound]) ? $rule[$bound] : gettype($rule[$bound]);
+                        $this->error("{$path}.{$bound}", "Unknown date bound \"{$value}\". Use one of ".implode(', ', self::DATE_RANGE_BOUNDS).'.');
+                    }
+                }
                 break;
             case 'min':
             case 'max':
@@ -949,6 +977,8 @@ final class TemplateDefinitionValidator
                 $this->error($path, "\"{$operand}\" must read report:<report type>.<field>.");
             }
 
+            $this->refuseMediationLeak($operand, $type === 'mediation', $path);
+
             return;
         }
 
@@ -958,6 +988,8 @@ final class TemplateDefinitionValidator
             if (! SourceCatalog::has($key)) {
                 $this->error($path, "Unknown source key \"{$key}\".");
             } else {
+                $this->refuseMediationLeak($key, false, $path);
+
                 foreach (SourceCatalog::errors($key, []) as $message) {
                     $this->error($path, $message);
                 }
@@ -1198,6 +1230,24 @@ final class TemplateDefinitionValidator
         }
 
         return false;
+    }
+
+    /**
+     * Mediation data stays in the mediation report (restricted to
+     * `cda:view_mediation`): no other template may read a `mediation.*`
+     * source or a mediation report's field.
+     */
+    private function refuseMediationLeak(string $key, bool $readsMediationReport, string $path): void
+    {
+        if ($this->reportType === null || $this->reportType === 'mediation') {
+            return;
+        }
+
+        $isMediation = $readsMediationReport || (SourceCatalog::has($key) && SourceCatalog::family($key) === 'mediation');
+
+        if ($isMediation) {
+            $this->error($path, "Mediation figures are restricted to the mediation report: \"{$key}\" can't be read by ".ReportTypes::title($this->reportType).'.');
+        }
     }
 
     /** @param  array<mixed>  $object */

@@ -696,7 +696,7 @@
       },
       {
         "key": "social",
-        "title": "Social responsibility and dispute settlement",
+        "title": "Social responsibility",
         "kind": "fields",
         "fields": [
           {
@@ -719,27 +719,6 @@
               "key": "social_programs.summary",
               "params": {
                 "measure": "cdf_amount"
-              }
-            }
-          },
-          {
-            "key": "mediation_cases",
-            "label": "Mediation cases handled",
-            "type": "number",
-            "decimals": 0,
-            "source": {
-              "key": "mediation.summary"
-            }
-          },
-          {
-            "key": "mediation_resolved",
-            "label": "Mediation cases resolved",
-            "type": "number",
-            "decimals": 0,
-            "source": {
-              "key": "mediation.summary",
-              "params": {
-                "status": "resolved"
               }
             }
           }
@@ -928,7 +907,7 @@
         "key": "signed_capr",
         "category": "capr",
         "label": "Signed CAPR",
-        "stage": "finalize",
+        "stage": "submit",
         "severity": "critical"
       }
     ],

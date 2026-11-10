@@ -140,6 +140,19 @@ class CdaYearEndCaptureTest extends TestCase
         $this->assertStringContainsString('not as of Dec 31, 2026', $capture['basis_note']);
     }
 
+    public function test_a_run_early_on_dec_31_is_refused_or_kept_not_exact(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-12-31 09:00:00', 'Asia/Manila'));
+
+        $this->artisan('cda:capture-year-end')->expectsOutputToContain('23:55')->assertFailed();
+        $this->assertSame(0, CdaReportingPeriod::query()->count());
+
+        $this->artisan('cda:capture-year-end', ['--backfill' => true])->assertSuccessful();
+        $capture = CdaReportingPeriod::query()->where('year', 2026)->firstOrFail()->year_end_capture;
+        $this->assertFalse($capture['exact']);
+        $this->assertStringContainsString('2026-12-31 09:00', $capture['basis_note']);
+    }
+
     public function test_the_scheduled_run_on_dec_31_is_exact(): void
     {
         Carbon::setTestNow(Carbon::parse('2026-12-31 15:58:00', 'UTC'));

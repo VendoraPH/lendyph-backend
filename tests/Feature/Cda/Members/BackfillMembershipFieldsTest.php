@@ -155,4 +155,15 @@ class BackfillMembershipFieldsTest extends TestCase
 
         $this->assertNull($m['noApproval']->fresh()->membership_number);
     }
+
+    public function test_a_date_is_still_filled_when_the_member_code_is_taken_as_someone_elses_number(): void
+    {
+        $m = $this->members();
+        DB::table('borrowers')->where('id', $m['dated']->id)->update(['membership_number' => $m['viaEndpoint']->borrower_code]);
+
+        $this->artisan('members:backfill-membership-fields')->expectsOutputToContain('already used')->assertSuccessful();
+
+        $this->assertSame('2024-03-04', $m['viaEndpoint']->fresh()->membership_date->toDateString());
+        $this->assertNull($m['viaEndpoint']->fresh()->membership_number);
+    }
 }

@@ -19,8 +19,9 @@ use Illuminate\Validation\ValidationException;
  *
  * - `withdrawn` is refused, in words, while the member still has a loan
  *   being paid (Loan::COLLECTIBLE_STATUSES) or one not yet released (draft,
- *   for approval, approved), an open savings account or time deposit, or
- *   share capital above ₱0.00: those are settled or closed first.
+ *   for approval, approved), is a co-maker on such a loan, has an open
+ *   savings account or time deposit, or share capital above ₱0.00: those
+ *   are settled or closed first.
  * - `deceased` is always allowed: the estate settles what is left.
  * - Reactivating a former member needs a reason and clears the end date and
  *   reason.
@@ -130,6 +131,17 @@ final class MembershipStatus
         if ($applications !== []) {
             $numbers = array_values(array_filter($applications));
             $open[] = self::count(count($applications), 'loan application', 'loan applications').' not yet released'.($numbers === [] ? '' : ' ('.implode(', ', $numbers).')');
+        }
+
+        $coMakerOn = Loan::query()
+            ->whereIn('status', [...self::UNRELEASED_LOAN_STATUSES, ...Loan::COLLECTIBLE_STATUSES])
+            ->whereHas('coMakers', fn ($query) => $query->where('co_makers.member_borrower_id', $borrower->id))
+            ->orderBy('id')
+            ->get(['id', 'loan_account_number', 'application_number']);
+
+        if ($coMakerOn->isNotEmpty()) {
+            $numbers = $coMakerOn->map(fn (Loan $loan) => $loan->loan_account_number ?? $loan->application_number)->filter()->values()->all();
+            $open[] = 'co-maker liability on '.self::count($coMakerOn->count(), 'loan', 'loans').' not yet paid'.($numbers === [] ? '' : ' ('.implode(', ', $numbers).')');
         }
 
         $accounts = SavingsAccount::query()->where('borrower_id', $borrower->id)->where('status', '!=', SavingsAccount::STATUS_CLOSED)->count();

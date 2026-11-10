@@ -50,16 +50,82 @@ class CdaTemplatesTest extends TestCase
         }
     }
 
-    public function test_the_seeded_capr_uses_every_source_family(): void
+    public function test_the_seeded_capr_uses_every_source_family_but_mediation(): void
     {
         $families = collect($this->validator->sourceKeysIn($this->capr()))
             ->map(fn (string $key) => SourceCatalog::KEYS[$key]['family'])
             ->unique()->sort()->values()->all();
 
-        $every = SourceCatalog::FAMILIES;
+        $every = array_values(array_diff(SourceCatalog::FAMILIES, ['mediation']));
         sort($every);
 
-        $this->assertSame($every, $families);
+        $this->assertSame($every, $families, 'Mediation figures stay in the mediation report.');
+    }
+
+    public function test_required_documents_are_needed_to_submit_never_to_finalize(): void
+    {
+        foreach (CdaReportTemplate::query()->where('version', '2026.1')->get() as $template) {
+            foreach ($template->definition['documents'] ?? [] as $document) {
+                $this->assertSame('submit', $document['stage'], "{$template->report_type}: {$document['key']} is produced after finalizing.");
+            }
+
+            foreach ($template->definition['rules'] ?? [] as $rule) {
+                if ($rule['type'] === 'document') {
+                    $this->assertSame('submit', $rule['stage'], "{$template->report_type}: {$rule['id']}");
+                }
+            }
+        }
+    }
+
+    public function test_the_sworn_statement_is_dated_from_the_period_start_to_the_deadline(): void
+    {
+        $sworn = CdaReportTemplate::query()->where('report_type', 'sworn_statement')->where('status', 'active')->firstOrFail()->definition;
+        $rule = collect($sworn['rules'])->firstWhere('type', 'date_range');
+
+        $this->assertSame(['from' => 'period_start', 'to' => 'effective_deadline'], ['from' => $rule['from'], 'to' => $rule['to']]);
+
+        $bad = $sworn;
+        $bad['rules'][0]['to'] = 'next_tuesday';
+        $messages = collect($this->validator->validate($bad, 'sworn_statement'))->pluck('message')->implode("\n");
+        $this->assertStringContainsString('next_tuesday', $messages);
+    }
+
+    public function test_mediation_sources_are_refused_outside_the_mediation_template(): void
+    {
+        $leaks = [
+            'field' => function (array $d): array {
+                $d['sections'][] = ['key' => 'disputes', 'title' => 'Disputes', 'kind' => 'fields', 'fields' => [
+                    ['key' => 'cases', 'label' => 'Cases', 'type' => 'number', 'source' => ['key' => 'mediation.summary']],
+                ]];
+
+                return $d;
+            },
+            'table' => function (array $d): array {
+                $d['sections'][] = ['key' => 'case_list', 'title' => 'Cases', 'kind' => 'table', 'source' => ['key' => 'mediation.cases'], 'columns' => [['key' => 'case_number', 'label' => 'Case']]];
+
+                return $d;
+            },
+            'report field' => function (array $d): array {
+                $d['sections'][] = ['key' => 'disputes', 'title' => 'Disputes', 'kind' => 'fields', 'fields' => [
+                    ['key' => 'cases', 'label' => 'Cases', 'type' => 'number', 'source' => ['key' => 'report.field', 'params' => ['type' => 'mediation', 'part' => 'h1', 'field' => 'summary.cases_total']]],
+                ]];
+
+                return $d;
+            },
+            'rule operand' => function (array $d): array {
+                $d['rules'][] = ['id' => 'cases_leak', 'type' => 'compare', 'left' => 'source:mediation.summary', 'op' => 'gte', 'right' => 0, 'severity' => 'info', 'category' => 'invalid_data'];
+
+                return $d;
+            },
+        ];
+
+        foreach ($leaks as $label => $leak) {
+            $messages = collect($this->validator->validate($leak($this->capr()), 'capr'))->pluck('message')->implode("\n");
+            $this->assertStringContainsString('Mediation figures are restricted', $messages, $label);
+        }
+
+        $mediation = CdaReportTemplate::query()->where('report_type', 'mediation')->where('status', 'active')->firstOrFail()->definition;
+        $this->assertSame([], $this->validator->validate($mediation, 'mediation'));
     }
 
     public function test_the_seed_migration_runs_safely_twice(): void

@@ -4,7 +4,7 @@ namespace App\Http\Requests\Loan;
 
 use App\Http\Requests\Concerns\ReferenceNumberMessages;
 use App\Http\Requests\Loan\Concerns\ValidatesReleaseInsurance;
-use App\Rules\NotAFormerMember;
+use App\Services\Cda\FormerMemberGuard;
 use Illuminate\Contracts\Validation\Validator;
 use Illuminate\Foundation\Http\FormRequest;
 
@@ -76,14 +76,20 @@ class ReleaseLoanRequest extends FormRequest
     {
         $this->validateInsuranceCombination($validator);
 
-        // No release to a member whose membership ended after approval (C1
-        // review, H1). Withdrawing is refused while a loan is approved, so
-        // only a death recorded since can reach this.
+        // No release while the member or a co-maker is a former member (C1
+        // review, H1 and M2). LoanService::release() checks again under the
+        // loan lock.
         $validator->after(function (Validator $validator): void {
-            $member = $this->route('loan')?->borrower;
+            $loan = $this->route('loan');
 
-            if ($member !== null && $member->isFormerMember()) {
-                $validator->errors()->add('borrower_id', NotAFormerMember::messageFor($member));
+            if ($loan === null) {
+                return;
+            }
+
+            foreach (app(FormerMemberGuard::class)->releaseRefusals($loan) as $field => $messages) {
+                foreach ($messages as $message) {
+                    $validator->errors()->add($field, $message);
+                }
             }
         });
     }

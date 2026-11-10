@@ -146,10 +146,12 @@ class Borrower extends Model
          * Borrower::scopeMembers() and ShareCapitalPledge::scopeForMembers().
          */
         // The first membership date a member is given brings their membership
-        // number with it (the member code), unless they already have one.
+        // number with it (the member code), unless they already have one or
+        // another member already holds that code as their number.
         static::updating(function (Borrower $borrower): void {
             if ($borrower->isDirty('membership_date') && $borrower->getOriginal('membership_date') === null
-                && $borrower->membership_date !== null && blank($borrower->membership_number)) {
+                && $borrower->membership_date !== null && blank($borrower->membership_number)
+                && ! static::query()->where('membership_number', $borrower->borrower_code)->whereKeyNot($borrower->id)->exists()) {
                 $borrower->membership_number = $borrower->borrower_code;
             }
         });
