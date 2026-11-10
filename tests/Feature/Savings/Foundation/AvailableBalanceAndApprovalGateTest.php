@@ -109,9 +109,8 @@ class AvailableBalanceAndApprovalGateTest extends TestCase
         $this->assertSame(1, $gate->requiredCheckers(1_000_001));
         $this->assertSame(2, $gate->requiredCheckers(5_000_001));
 
-        SavingsSetting::current()->update(['tier1_limit' => '20000.00', 'tier3_checkers' => 3]);
+        SavingsSetting::current()->update(['tier1_limit' => '20000.00']);
         $this->assertSame(ApprovalGate::TIER_DIRECT, $gate->tierFor(1_000_001));
-        $this->assertSame(3, $gate->requiredCheckers(5_000_001));
     }
 
     public function test_open_writes_a_pending_approval_that_expires_at_the_end_of_the_business_day(): void

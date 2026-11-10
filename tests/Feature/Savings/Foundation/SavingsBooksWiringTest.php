@@ -92,7 +92,9 @@ class SavingsBooksWiringTest extends TestCase
     public function test_a_transfer_posts_no_journal_and_an_interest_row_is_refused_there(): void
     {
         $account = $this->account();
-        $in = $this->write($account, 'credit', 'transfer_in', 100, ['method' => 'savings']);
+        $this->write($account, 'credit', 'deposit', 100, ['method' => 'cash']);
+        $out = $this->write($account, 'debit', 'transfer_out', 100, ['method' => 'savings']);
+        $in = $this->write($this->account(), 'credit', 'transfer_in', 100, ['method' => 'savings', 'counterpart_transaction_id' => $out->id]);
         $interest = $this->write($account, 'credit', 'interest', 100, ['value_date' => '2026-11-09', 'created_by' => null]);
 
         $this->assertNull($this->poster->savingsTransaction($in, $this->admin->id));
@@ -127,6 +129,7 @@ class SavingsBooksWiringTest extends TestCase
             'total_tax' => '0.00',
             'total_net' => '1234.56',
         ]);
+        $this->write($this->account(), 'credit', 'interest', 123_456, ['value_date' => '2026-11-09', 'interest_run_id' => $run->id, 'created_by' => null]);
 
         $journal = $this->poster->savingsInterestRun($run, $this->admin->id);
 

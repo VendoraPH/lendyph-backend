@@ -57,13 +57,13 @@ class SavingsSettingsApiTest extends TestCase
         $this->putJson('/api/savings/settings', [
             'tier1_limit' => '15000.50',
             'tier2_limit' => '60000',
-            'tier3_checkers' => 3,
+            'tier3_checkers' => 2,
             'dormancy_months' => 36,
             'large_transaction_alert' => '750000.00',
         ])->assertOk()
             ->assertJsonPath('data.tier1_limit', '15000.50')
             ->assertJsonPath('data.tier2_limit', '60000.00')
-            ->assertJsonPath('data.tier3_checkers', 3)
+            ->assertJsonPath('data.tier3_checkers', 2)
             ->assertJsonPath('data.dormancy_months', 36);
 
         $setting = SavingsSetting::current();

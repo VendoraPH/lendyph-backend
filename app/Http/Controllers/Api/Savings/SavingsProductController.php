@@ -10,6 +10,7 @@ use App\Http\Resources\Savings\SavingsProductRateResource;
 use App\Http\Resources\Savings\SavingsProductResource;
 use App\Models\SavingsProduct;
 use App\Models\SavingsProductRate;
+use App\Services\BranchAccess;
 use App\Services\Savings\SavingsBooks;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
@@ -21,7 +22,8 @@ use OpenApi\Attributes as OA;
 
 /**
  * Savings products and their append-only rate history (design §2). Reading
- * needs `savings:view`; every write needs `savings:settings`. A product is
+ * needs `savings:view`; every write needs `savings:settings` and
+ * `branches:view_all`, since a product applies to every branch. A product is
  * created off unless turned on at once, and is turned on only when the books
  * are ready (no chart, or an unmapped role it posts to: 422). It can be
  * deleted only while it holds no account or time deposit.
@@ -88,7 +90,7 @@ class SavingsProductController extends Controller
         ])),
         responses: [
             new OA\Response(response: 201, description: 'The product'),
-            new OA\Response(response: 403, description: 'Missing savings:settings'),
+            new OA\Response(response: 403, description: 'Missing savings:settings or branches:view_all (company-wide)'),
             new OA\Response(response: 422, description: 'Invalid fields, a code in use, or turned on before the books are ready'),
         ],
     )]
@@ -139,7 +141,7 @@ class SavingsProductController extends Controller
         parameters: [new OA\Parameter(name: 'product', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
         responses: [
             new OA\Response(response: 200, description: 'The product'),
-            new OA\Response(response: 403, description: 'Missing savings:settings'),
+            new OA\Response(response: 403, description: 'Missing savings:settings or branches:view_all (company-wide)'),
             new OA\Response(response: 404, description: 'No such product'),
             new OA\Response(response: 422, description: 'Invalid fields, or turned on before the books are ready'),
         ],
@@ -174,14 +176,18 @@ class SavingsProductController extends Controller
         parameters: [new OA\Parameter(name: 'product', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
         responses: [
             new OA\Response(response: 200, description: 'Deleted'),
-            new OA\Response(response: 403, description: 'Missing savings:settings'),
+            new OA\Response(response: 403, description: 'Missing savings:settings or branches:view_all (company-wide)'),
             new OA\Response(response: 404, description: 'No such product'),
             new OA\Response(response: 422, description: 'The product is in use'),
         ],
     )]
-    public function destroy(SavingsProduct $product): JsonResponse
+    public function destroy(Request $request, SavingsProduct $product): JsonResponse
     {
-        $this->authorize('savings:settings');
+        abort_unless(
+            $request->user()->can('savings:settings') && $request->user()->can(BranchAccess::VIEW_ALL),
+            403,
+            UpdateSavingsProductRequest::COMPANY_WIDE_REFUSAL,
+        );
 
         DB::transaction(function () use ($product): void {
             $locked = SavingsProduct::query()->whereKey($product->id)->lockForUpdate()->firstOrFail();
@@ -240,7 +246,7 @@ class SavingsProductController extends Controller
         ])),
         responses: [
             new OA\Response(response: 201, description: 'The new rate'),
-            new OA\Response(response: 403, description: 'Missing savings:settings'),
+            new OA\Response(response: 403, description: 'Missing savings:settings or branches:view_all (company-wide)'),
             new OA\Response(response: 404, description: 'No such product'),
             new OA\Response(response: 422, description: 'A past date, a term the product doesn\'t offer, or a rate outside 0–100%'),
         ],

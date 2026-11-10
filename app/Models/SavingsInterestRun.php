@@ -18,7 +18,7 @@ use Illuminate\Support\Carbon;
  *
  * @property int $id
  * @property int $product_id
- * @property int|null $branch_id
+ * @property int $branch_id
  * @property Carbon $period_start
  * @property Carbon $period_end
  * @property string $status
@@ -77,9 +77,9 @@ class SavingsInterestRun extends Model
     }
 
     /** The key that keeps one live run per product, branch and period. */
-    public static function liveKey(int $productId, ?int $branchId, string $periodStart): string
+    public static function liveKey(int $productId, int $branchId, string $periodStart): string
     {
-        return $productId.':'.($branchId ?? 'none').':'.$periodStart;
+        return "{$productId}:{$branchId}:{$periodStart}";
     }
 
     public function product(): BelongsTo

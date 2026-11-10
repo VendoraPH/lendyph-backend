@@ -24,7 +24,7 @@ class SavingsInterestRunFactory extends Factory
             'period_start' => '2026-07-01',
             'period_end' => '2026-09-30',
             'status' => 'draft',
-            'live_key' => fn (array $attributes) => SavingsInterestRun::liveKey((int) $attributes['product_id'], $attributes['branch_id'] === null ? null : (int) $attributes['branch_id'], (string) $attributes['period_start']),
+            'live_key' => fn (array $attributes) => SavingsInterestRun::liveKey((int) $attributes['product_id'], (int) $attributes['branch_id'], (string) $attributes['period_start']),
             'account_count' => 0,
             'total_gross' => '0.00',
             'total_tax' => '0.00',

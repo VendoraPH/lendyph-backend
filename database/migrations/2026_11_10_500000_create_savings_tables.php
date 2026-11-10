@@ -16,6 +16,8 @@ use Illuminate\Support\Facades\Schema;
  *   constants, never ENUMs, so v2 can add values without an ALTER.
  * - Foreign keys restrict deletes, except a product's rate history, which
  *   goes with a product that never held an account.
+ * - An account and an interest run always have a branch: books are kept per
+ *   branch, and a row with none would post to no branch's books.
  * - `savings_transactions` is append-only (the model refuses updates and
  *   deletes); `unique(reverses_transaction_id)` lets a row be reversed once.
  *
@@ -83,7 +85,7 @@ return new class extends Migration
             $table->string('account_number', 20)->unique();
             $table->foreignId('borrower_id')->constrained('borrowers')->restrictOnDelete();
             $table->foreignId('product_id')->constrained('savings_products')->restrictOnDelete();
-            $table->foreignId('branch_id')->nullable()->constrained('branches')->restrictOnDelete();
+            $table->foreignId('branch_id')->constrained('branches')->restrictOnDelete();
             $table->string('status', 24)->default('active');
             $table->decimal('ledger_balance', 12, 2)->default(0);
             $table->date('opened_on');
@@ -163,7 +165,7 @@ return new class extends Migration
         $this->create('savings_interest_runs', function (Blueprint $table): void {
             $table->id();
             $table->foreignId('product_id')->constrained('savings_products')->restrictOnDelete();
-            $table->foreignId('branch_id')->nullable()->constrained('branches')->restrictOnDelete();
+            $table->foreignId('branch_id')->constrained('branches')->restrictOnDelete();
             $table->date('period_start');
             $table->date('period_end');
             $table->string('status', 24)->default('draft');

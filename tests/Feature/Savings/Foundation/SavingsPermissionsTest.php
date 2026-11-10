@@ -99,14 +99,14 @@ class SavingsPermissionsTest extends TestCase
         $product = SavingsProduct::factory()->create();
         $calls = [
             ['getJson', '/api/savings/settings', [], ['savings:view', 'savings:settings']],
-            ['putJson', '/api/savings/settings', ['dormancy_months' => 12], ['savings:settings']],
-            ['postJson', '/api/savings/tax-rules', ['holder_type' => 'member', 'rate' => '0', 'effective_from' => now()->toDateString()], ['savings:settings']],
+            ['putJson', '/api/savings/settings', ['dormancy_months' => 12], ['savings:settings', 'branches:view_all']],
+            ['postJson', '/api/savings/tax-rules', ['holder_type' => 'member', 'rate' => '0', 'effective_from' => now()->toDateString()], ['savings:settings', 'branches:view_all']],
             ['getJson', '/api/savings/products', [], ['savings:view']],
-            ['postJson', '/api/savings/products', ['code' => 'NEW', 'name' => 'New', 'kind' => 'regular', 'annual_interest_rate' => '1'], ['savings:settings']],
-            ['putJson', "/api/savings/products/{$product->id}", ['name' => 'Renamed'], ['savings:settings']],
+            ['postJson', '/api/savings/products', ['code' => 'NEW', 'name' => 'New', 'kind' => 'regular', 'annual_interest_rate' => '1'], ['savings:settings', 'branches:view_all']],
+            ['putJson', "/api/savings/products/{$product->id}", ['name' => 'Renamed'], ['savings:settings', 'branches:view_all']],
             ['getJson', "/api/savings/products/{$product->id}/rates", [], ['savings:view']],
-            ['postJson', "/api/savings/products/{$product->id}/rates", ['annual_rate' => '1', 'effective_from' => now()->toDateString()], ['savings:settings']],
-            ['deleteJson', "/api/savings/products/{$product->id}", [], ['savings:settings']],
+            ['postJson', "/api/savings/products/{$product->id}/rates", ['annual_rate' => '1', 'effective_from' => now()->toDateString()], ['savings:settings', 'branches:view_all']],
+            ['deleteJson', "/api/savings/products/{$product->id}", [], ['savings:settings', 'branches:view_all']],
         ];
 
         $everyOther = array_values(array_diff(self::NAMES, ['savings:view', 'savings:settings']));

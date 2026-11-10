@@ -118,7 +118,9 @@ class SavingsFrontendContractTest extends TestCase
         $deposit = DB::transaction(fn () => app(SavingsLedger::class)->credit($account, 'deposit', 10_000, ['method' => 'cash']));
         $poster = app(AutomaticPoster::class);
         $poster->savingsTransaction($deposit, $this->admin->id);
-        $poster->savingsInterestRun(SavingsInterestRun::factory()->create(['total_gross' => '10.00', 'total_net' => '10.00']), $this->admin->id);
+        $run = SavingsInterestRun::factory()->create(['total_gross' => '10.00', 'total_net' => '10.00']);
+        DB::transaction(fn () => app(SavingsLedger::class)->credit($account, 'interest', 1_000, ['value_date' => '2026-11-09', 'interest_run_id' => $run->id, 'created_by' => null]));
+        $poster->savingsInterestRun($run, $this->admin->id);
         $poster->timeDepositPlacement(TimeDeposit::factory()->create(['placement_date' => '2026-11-10']), $this->admin->id);
 
         $types = collect($this->getJson('/api/accounting/journals?per_page=100')->assertOk()->json('data'))
