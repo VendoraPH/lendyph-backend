@@ -23,6 +23,7 @@ use Illuminate\Support\Carbon;
  * @property string $certificate_number
  * @property int $borrower_id
  * @property int $product_id
+ * @property int|null $pretermination_product_id the regular product its early termination and post-maturity interest pay at, snapshotted at placement
  * @property int|null $branch_id
  * @property string $principal
  * @property string $annual_rate
@@ -48,6 +49,7 @@ class TimeDeposit extends Model
         'certificate_number',
         'borrower_id',
         'product_id',
+        'pretermination_product_id',
         'branch_id',
         'principal',
         'annual_rate',
@@ -80,6 +82,7 @@ class TimeDeposit extends Model
         return [
             'borrower_id' => 'integer',
             'product_id' => 'integer',
+            'pretermination_product_id' => 'integer',
             'branch_id' => 'integer',
             'principal' => 'decimal:2',
             'annual_rate' => 'decimal:4',
@@ -112,6 +115,11 @@ class TimeDeposit extends Model
     public function product(): BelongsTo
     {
         return $this->belongsTo(SavingsProduct::class, 'product_id');
+    }
+
+    public function preterminationProduct(): BelongsTo
+    {
+        return $this->belongsTo(SavingsProduct::class, 'pretermination_product_id');
     }
 
     public function branch(): BelongsTo

@@ -184,6 +184,33 @@ class SavingsLedgerTest extends TestCase
         $this->assertSame('0.00', $account->refresh()->ledger_balance);
     }
 
+    public function test_a_system_credit_is_not_member_activity_and_leaves_a_dormant_account_dormant(): void
+    {
+        $account = $this->account(['status' => 'dormant', 'dormant_since' => '2026-11-05', 'last_member_activity_on' => '2024-11-01']);
+        $before = AuditLog::query()->max('id') ?? 0;
+
+        DB::transaction(fn () => $this->ledger->credit($account, 'deposit', 500_00, ['method' => 'savings', 'created_by' => null, 'member_activity' => false]));
+
+        $account->refresh();
+        $this->assertSame('dormant', $account->status);
+        $this->assertSame('2026-11-05', $account->dormant_since->toDateString());
+        $this->assertSame('2024-11-01', $account->last_member_activity_on->toDateString());
+        $this->assertSame(0, AuditLog::query()->where('id', '>', $before)->where('action', 'savings_account_reactivated')->count());
+        $this->assertSame('500.00', $account->ledger_balance);
+    }
+
+    public function test_a_system_credit_is_still_refused_on_a_frozen_account(): void
+    {
+        $account = $this->account(['status' => 'frozen']);
+
+        $this->assertRefused(
+            fn () => $this->ledger->credit($account, 'deposit', 100, ['method' => 'savings', 'created_by' => null, 'member_activity' => false]),
+            'account',
+            'frozen',
+        );
+        $this->assertSame(0, SavingsTransaction::query()->where('account_id', $account->id)->count());
+    }
+
     public function test_a_deposit_reactivates_a_dormant_account_with_an_audit_row(): void
     {
         $account = $this->account(['status' => 'dormant', 'dormant_since' => '2026-11-05']);
