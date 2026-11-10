@@ -39,7 +39,11 @@ use LogicException;
  * days held, no penalty in v1.
  *
  * **Paying out:** in cash, by bank, GCash or Maya, or into the member's own
- * savings account named at placement (`payout_method` savings). A payout
+ * savings account (`payout_method` savings): the one named at placement, or
+ * any other of the member's active accounts in the placement's branch that
+ * staff pick at settlement (`payout_account_id`). The settled placement then
+ * records the account it was paid into; a rollover's new placement keeps the
+ * account named at placement. A payout
  * through a money method above tier 1 waits for a checker (202, a
  * `td_payout` or `pretermination` approval, carried out by its executor);
  * a payout into savings moves no cash, like a transfer, and posts at once.
@@ -75,7 +79,7 @@ class Settlement
      * A settlement asked for at the counter: carried out now (201), or waiting
      * for a checker (202).
      *
-     * @param  array{date: string, action: string, payout_method?: string|null, next_instruction?: string|null}  $data
+     * @param  array{date: string, action: string, payout_method?: string|null, payout_account_id?: int|null, next_instruction?: string|null}  $data
      * @return array{deposit: TimeDeposit, rolled: TimeDeposit|null, approval: SavingsApproval|null}
      *
      * @throws ValidationException
@@ -84,7 +88,8 @@ class Settlement
     {
         $payoutMethod = $data['payout_method'] ?? null;
         $nextInstruction = $data['next_instruction'] ?? null;
-        $locked = $this->lock($deposit, $payoutMethod === 'savings');
+        $payoutAccountId = $payoutMethod === 'savings' ? ($data['payout_account_id'] ?? null) : null;
+        $locked = $this->lock($deposit, $payoutMethod === 'savings', $payoutAccountId);
 
         $this->assertOpen($locked);
         $this->assertNoPendingApproval($locked);
@@ -94,7 +99,7 @@ class Settlement
         $paidOut = $split['paid_out'];
 
         if ($paidOut > 0) {
-            $this->assertPayoutMethod($locked, $payoutMethod);
+            $this->assertPayoutMethod($locked, $payoutMethod, $payoutAccountId);
 
             if ($payoutMethod !== 'savings' && $this->gate->needsApproval($paidOut)) {
                 $approval = $this->gate->open('td_payout', $paidOut, [
@@ -112,7 +117,7 @@ class Settlement
             }
         }
 
-        $result = $this->settle($locked, $data['date'], $data['action'], $payoutMethod, $user->id, $nextInstruction);
+        $result = $this->settle($locked, $data['date'], $data['action'], $payoutMethod, $user->id, $nextInstruction, payoutAccountId: $payoutAccountId);
 
         return [...$result, 'approval' => null];
     }
@@ -123,12 +128,14 @@ class Settlement
      * job). Re-checks what can have changed since a request.
      * `$postMaturityTaxRate` is the rate an approval snapshotted at request,
      * so a tax rule added since then never changes or refuses it.
+     * `$payoutAccountId` is the savings account staff picked to pay into
+     * (else the one named at placement); the caller has locked it.
      *
      * @return array{deposit: TimeDeposit, rolled: TimeDeposit|null, credit: SavingsTransaction|null}
      *
      * @throws ValidationException
      */
-    public function settle(TimeDeposit $locked, string $date, string $action, ?string $payoutMethod, ?int $userId, ?string $nextInstruction = null, ?string $postMaturityTaxRate = null): array
+    public function settle(TimeDeposit $locked, string $date, string $action, ?string $payoutMethod, ?int $userId, ?string $nextInstruction = null, ?string $postMaturityTaxRate = null, ?int $payoutAccountId = null): array
     {
         $this->assertInTransaction();
         $this->assertOpen($locked);
@@ -145,10 +152,8 @@ class Settlement
 
         ['gross' => $gross, 'tax' => $tax, 'rolled' => $rolled, 'paid_out' => $paidOut, 'post_maturity' => $postMaturity] = $this->split($locked, $action, $date, $postMaturityTaxRate);
         $method = $paidOut > 0 ? $payoutMethod : null;
-
-        if ($paidOut > 0) {
-            $this->assertPayoutMethod($locked, $method);
-        }
+        $into = $paidOut > 0 ? $this->assertPayoutMethod($locked, $method, $payoutAccountId) : null;
+        $named = $locked->payout_account_id;
 
         $before = $locked->status;
         $status = $action === 'payout' ? 'withdrawn' : 'rolled_over';
@@ -165,9 +170,10 @@ class Settlement
         $this->closeOnce($locked, self::OPEN_STATUSES, $values);
 
         $rolledInto = $rolled > 0 ? $this->placement->rollover($locked, $rolled, $userId, $date, $nextInstruction) : null;
-        $credit = $method === 'savings'
-            ? $this->creditSavings($locked, $paidOut, $date, $userId, "Time deposit {$locked->certificate_number} matured")
-            : null;
+        $credit = $into === null
+            ? null
+            : $this->creditSavings($locked, $into, $paidOut, $date, $userId, "Time deposit {$locked->certificate_number} matured");
+        $moved = $this->recordPaidInto($locked, $into);
 
         $this->poster->timeDepositSettlement($locked, $rolled, $method, $userId);
 
@@ -180,15 +186,17 @@ class Settlement
         AuditLogService::log(
             'time_deposit_settled',
             $locked,
-            ['status' => $before],
+            ['status' => $before, ...$this->accountChange($moved, $named)],
             [
                 ...$values,
+                ...$this->accountChange($moved, $into?->id),
                 'post_maturity_days' => $postMaturity['days'],
                 'post_maturity_interest' => SavingsMath::pesos($postMaturity['gross']),
                 'rolled_over_amount' => SavingsMath::pesos($rolled),
                 'rolled_over_to' => $rolledInto?->certificate_number,
             ],
             "Time deposit {$locked->certificate_number} settled on ".CarbonImmutable::parse($date)->format('M j, Y').": {$words}"
+                .($into === null ? '' : " into savings account {$into->account_number}")
                 .($postMaturity['days'] > 0 ? ", with {$this->peso($postMaturity['gross'])} post-maturity interest for {$postMaturity['days']} days" : '')
                 .($userId === null ? ', by the system.' : '.'),
             $userId,
@@ -201,21 +209,22 @@ class Settlement
      * A pre-termination asked for at the counter: carried out now (201), or
      * waiting for a checker (202).
      *
-     * @param  array{date: string, reason: string, payout_method: string}  $data
+     * @param  array{date: string, reason: string, payout_method: string, payout_account_id?: int|null}  $data
      * @return array{deposit: TimeDeposit, approval: SavingsApproval|null}
      *
      * @throws ValidationException
      */
     public function requestPretermination(TimeDeposit $deposit, array $data, User $user): array
     {
-        $locked = $this->lock($deposit, $data['payout_method'] === 'savings');
+        $payoutAccountId = $data['payout_method'] === 'savings' ? ($data['payout_account_id'] ?? null) : null;
+        $locked = $this->lock($deposit, $data['payout_method'] === 'savings', $payoutAccountId);
 
         $this->assertCanPreterminate($locked);
         $this->assertNoPendingApproval($locked);
         $this->assertCounterDate($data['date']);
 
         $figures = $this->quote->pretermination($locked, $data['date']);
-        $this->assertPayoutMethod($locked, $data['payout_method']);
+        $this->assertPayoutMethod($locked, $data['payout_method'], $payoutAccountId);
 
         if ($data['payout_method'] !== 'savings' && $this->gate->needsApproval($figures['payout'])) {
             $approval = $this->gate->open('pretermination', $figures['payout'], [
@@ -226,26 +235,27 @@ class Settlement
             return ['deposit' => $locked, 'approval' => $approval];
         }
 
-        $this->preterminate($locked, $data['date'], $data['reason'], $data['payout_method'], $user->id);
+        $this->preterminate($locked, $data['date'], $data['reason'], $data['payout_method'], $user->id, $payoutAccountId);
 
         return ['deposit' => $locked, 'approval' => null];
     }
 
     /**
      * Break a placement early, under its lock: the quote's figures, paid out,
-     * audited with the reason.
+     * audited with the reason. `$payoutAccountId` as for {@see self::settle()}.
      *
      * @return array{deposit: TimeDeposit, credit: SavingsTransaction|null, payout: int}
      *
      * @throws ValidationException
      */
-    public function preterminate(TimeDeposit $locked, string $date, string $reason, string $payoutMethod, ?int $userId): array
+    public function preterminate(TimeDeposit $locked, string $date, string $reason, string $payoutMethod, ?int $userId, ?int $payoutAccountId = null): array
     {
         $this->assertInTransaction();
         $this->assertCanPreterminate($locked);
 
         $figures = $this->quote->pretermination($locked, $date);
-        $this->assertPayoutMethod($locked, $payoutMethod);
+        $into = $this->assertPayoutMethod($locked, $payoutMethod, $payoutAccountId);
+        $named = $locked->payout_account_id;
 
         $this->closeOnce($locked, ['active'], [
             'status' => 'preterminated',
@@ -257,20 +267,21 @@ class Settlement
             'settled_by' => $userId,
         ]);
 
+        $credit = $into === null
+            ? null
+            : $this->creditSavings($locked, $into, $figures['payout'], $figures['date'], $userId, "Time deposit {$locked->certificate_number} pre-terminated");
+        $moved = $this->recordPaidInto($locked, $into);
+
         $day = CarbonImmutable::parse($figures['date'])->format('M j, Y');
         AuditLogService::log(
             'time_deposit_preterminated',
             $locked,
-            ['status' => 'active', 'settled_on' => null, 'settled_amount' => null],
-            ['status' => 'preterminated', 'settled_on' => $figures['date'], 'settled_amount' => SavingsMath::pesos($figures['payout']), 'reason' => $reason],
+            ['status' => 'active', 'settled_on' => null, 'settled_amount' => null, ...$this->accountChange($moved, $named)],
+            ['status' => 'preterminated', 'settled_on' => $figures['date'], 'settled_amount' => SavingsMath::pesos($figures['payout']), 'reason' => $reason, ...$this->accountChange($moved, $into?->id)],
             "Time deposit {$locked->certificate_number} pre-terminated on {$day}, {$figures['days_held']} days held, paying "
-                .$this->peso($figures['payout']).". Reason: {$reason}",
+                .$this->peso($figures['payout']).($into === null ? '' : " into savings account {$into->account_number}").". Reason: {$reason}",
             $userId,
         );
-
-        $credit = $payoutMethod === 'savings'
-            ? $this->creditSavings($locked, $figures['payout'], $figures['date'], $userId, "Time deposit {$locked->certificate_number} pre-terminated")
-            : null;
 
         $this->poster->timeDepositSettlement($locked, 0, $payoutMethod, $userId);
 
@@ -344,26 +355,38 @@ class Settlement
     }
 
     /**
-     * Refuses a payout method that can't take the money: into savings with no
-     * payout account named at placement, or into one that is closed or frozen.
+     * Refuses a payout method that can't take the money, and answers the
+     * savings account a savings payout goes into (null for any other method).
+     *
+     * - Into the account named at placement (no `$payoutAccountId`, or the
+     *   same one): refused when there is none, or it is closed or frozen.
+     * - Into another account staff picked: it must be the same member's, in
+     *   the placement's branch, and active (not dormant, frozen or closed).
      *
      * @throws ValidationException
      */
-    public function assertPayoutMethod(TimeDeposit $deposit, ?string $method): void
+    public function assertPayoutMethod(TimeDeposit $deposit, ?string $method, ?int $payoutAccountId = null): ?SavingsAccount
     {
         if ($method === null) {
             $this->refuse('payout_method', 'Say how the payout leaves: cash, bank transfer, GCash, Maya or the member\'s savings account.');
         }
 
         if ($method !== 'savings') {
-            return;
+            return null;
+        }
+
+        if ($payoutAccountId !== null && $payoutAccountId !== $deposit->payout_account_id) {
+            return $this->pickedAccount($deposit, $payoutAccountId);
         }
 
         if ($deposit->payout_account_id === null) {
-            $this->refuse('payout_method', "{$deposit->certificate_number} names no savings account to pay into. Pick another payout method.");
+            $this->refuse('payout_method', "{$deposit->certificate_number} names no savings account to pay into. Pick one of the member's savings accounts, or another payout method.");
         }
 
-        $this->placement->assertCanReceive(SavingsAccount::query()->findOrFail($deposit->payout_account_id), 'payout_method');
+        $account = SavingsAccount::query()->findOrFail($deposit->payout_account_id);
+        $this->placement->assertCanReceive($account, 'payout_method');
+
+        return $account;
     }
 
     /**
@@ -403,12 +426,76 @@ class Settlement
         }
     }
 
-    /** Lock the payout account (when it is paid into) and then the placement. */
-    private function lock(TimeDeposit $deposit, bool $intoSavings): TimeDeposit
+    /**
+     * A savings account staff picked to pay into: the member's own, in the
+     * placement's branch, and active.
+     *
+     * @throws ValidationException
+     */
+    private function pickedAccount(TimeDeposit $deposit, int $accountId): SavingsAccount
+    {
+        $account = SavingsAccount::query()->find($accountId);
+
+        if ($account === null || $account->borrower_id !== $deposit->borrower_id) {
+            $deposit->loadMissing('borrower');
+            $this->refuse('payout_account_id', "That savings account isn't one of {$deposit->borrower?->full_name}'s.");
+        }
+
+        if ($account->branch_id !== $deposit->branch_id) {
+            $this->refuse('payout_account_id', 'That savings account is in another branch. A time deposit can only move money within the member\'s own branch.');
+        }
+
+        if ($account->status !== SavingsAccount::STATUS_ACTIVE) {
+            $this->refuse('payout_account_id', "{$account->account_number} is {$account->status}. Only an active savings account can receive the payout.");
+        }
+
+        return $account;
+    }
+
+    /**
+     * The settled placement records the account it was paid into, when staff
+     * picked one other than the account named at placement. Written after any
+     * rollover, so the new placement keeps the named account. Whether it
+     * changed.
+     */
+    private function recordPaidInto(TimeDeposit $locked, ?SavingsAccount $into): bool
+    {
+        if ($into === null || $into->id === $locked->payout_account_id) {
+            return false;
+        }
+
+        TimeDeposit::query()->whereKey($locked->id)->update(['payout_account_id' => $into->id, 'updated_at' => now()]);
+        $locked->refresh();
+
+        return true;
+    }
+
+    /**
+     * The payout account in the audit row's old or new values, by number,
+     * only when the payout went to another account than the one named.
+     *
+     * @return array<string, mixed>
+     */
+    private function accountChange(bool $moved, ?int $accountId): array
+    {
+        if (! $moved) {
+            return [];
+        }
+
+        return ['payout_account' => $accountId === null ? null : SavingsAccount::query()->whereKey($accountId)->value('account_number')];
+    }
+
+    /**
+     * Lock the payout account (when it is paid into: the one staff picked,
+     * else the one named at placement) and then the placement.
+     */
+    private function lock(TimeDeposit $deposit, bool $intoSavings, ?int $pickedAccountId = null): TimeDeposit
     {
         $this->assertInTransaction();
 
-        $payoutAccountId = $intoSavings ? DB::table('time_deposits')->where('id', $deposit->id)->value('payout_account_id') : null;
+        $payoutAccountId = $intoSavings
+            ? ($pickedAccountId ?? DB::table('time_deposits')->where('id', $deposit->id)->value('payout_account_id'))
+            : null;
         $this->locks->accounts(array_filter([$payoutAccountId]));
 
         return $this->locks->timeDeposit($deposit->id);
@@ -447,10 +534,8 @@ class Settlement
      * user) is not the member's doing: it doesn't count as their activity and
      * doesn't wake a dormant account. Staff paying it out at the counter does.
      */
-    private function creditSavings(TimeDeposit $deposit, int $centavos, string $date, ?int $userId, string $remarks): SavingsTransaction
+    private function creditSavings(TimeDeposit $deposit, SavingsAccount $account, int $centavos, string $date, ?int $userId, string $remarks): SavingsTransaction
     {
-        $account = SavingsAccount::query()->findOrFail($deposit->payout_account_id);
-
         return $this->ledger->credit($account, 'deposit', $centavos, [
             'date' => $date,
             'method' => 'savings',
