@@ -38,7 +38,11 @@ use LogicException;
  *   for member activity (deposits, withdrawals and transfers), the
  *   `last_member_activity_on` date;
  * - reactivates a dormant account on member money in (a deposit or a
- *   transfer in), with an audit row.
+ *   transfer in), with an audit row;
+ * - except for a row the member didn't make (`member_activity` false, such as
+ *   a time deposit the nightly job pays into savings): it moves no
+ *   `last_member_activity_on` and wakes no dormant account. It is refused on
+ *   a frozen account and follows the date rules all the same.
  *
  * The journal is the caller's: post it through AutomaticPoster in the same
  * transaction, after this (lock step 7).
@@ -61,9 +65,11 @@ class SavingsLedger
      *
      * @param  string  $type  deposit, transfer_in, interest or reversal
      * @param  array<string, mixed>  $attributes  date, value_date, method, external_reference, remarks, counterpart_transaction_id,
-     *                                            reverses_transaction_id, time_deposit_id, interest_run_id, approval_id, created_by, reference.
-     *                                            `date` defaults to today and `value_date` to `date`; `created_by` defaults to the
-     *                                            signed-in user (pass null for the system); `reference` to the next SVT number.
+     *                                            reverses_transaction_id, time_deposit_id, interest_run_id, approval_id, created_by, reference,
+     *                                            member_activity. `date` defaults to today and `value_date` to `date`; `created_by` defaults
+     *                                            to the signed-in user (pass null for the system); `reference` to the next SVT number;
+     *                                            `member_activity` to true (false: the member didn't make this row, so it neither counts
+     *                                            as their activity nor reactivates a dormant account).
      *
      * @throws ValidationException
      */
@@ -173,13 +179,14 @@ class SavingsLedger
         ]);
 
         $changes = ['ledger_balance' => SavingsMath::pesos($after), 'updated_at' => now()];
+        $byMember = (bool) ($attributes['member_activity'] ?? true);
 
-        if (in_array($type, SavingsTransaction::MEMBER_ACTIVITY_TYPES, true)
+        if ($byMember && in_array($type, SavingsTransaction::MEMBER_ACTIVITY_TYPES, true)
             && ($locked->last_member_activity_on === null || $locked->last_member_activity_on->toDateString() < $date)) {
             $changes['last_member_activity_on'] = $date;
         }
 
-        if (in_array($type, self::REACTIVATING_TYPES, true) && $locked->status === SavingsAccount::STATUS_DORMANT) {
+        if ($byMember && in_array($type, self::REACTIVATING_TYPES, true) && $locked->status === SavingsAccount::STATUS_DORMANT) {
             $changes['status'] = SavingsAccount::STATUS_ACTIVE;
             $changes['dormant_since'] = null;
         }

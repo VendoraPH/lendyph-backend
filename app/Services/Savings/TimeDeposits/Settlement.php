@@ -424,6 +424,11 @@ class Settlement
         }
     }
 
+    /**
+     * Pay into the member's savings account. A payout by the nightly job (no
+     * user) is not the member's doing: it doesn't count as their activity and
+     * doesn't wake a dormant account. Staff paying it out at the counter does.
+     */
     private function creditSavings(TimeDeposit $deposit, int $centavos, string $date, ?int $userId, string $remarks): SavingsTransaction
     {
         $account = SavingsAccount::query()->findOrFail($deposit->payout_account_id);
@@ -434,6 +439,7 @@ class Settlement
             'remarks' => $remarks,
             'time_deposit_id' => $deposit->id,
             'created_by' => $userId,
+            'member_activity' => $userId !== null,
         ]);
     }
 

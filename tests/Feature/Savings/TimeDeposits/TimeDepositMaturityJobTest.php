@@ -3,6 +3,7 @@
 namespace Tests\Feature\Savings\TimeDeposits;
 
 use App\Models\AccountingJournal;
+use App\Models\AuditLog;
 use App\Models\SavingsProduct;
 use App\Models\SavingsTransaction;
 use App\Models\TimeDeposit;
@@ -128,7 +129,7 @@ class TimeDepositMaturityJobTest extends TestCase
         $this->assertSame('100739.73', $account->ledger_balance);
         $this->assertSame('dormant', $account->status);
         $this->assertSame('2026-11-10', $account->last_member_activity_on->toDateString());
-        $this->assertSame(0, \App\Models\AuditLog::query()->where('action', 'savings_account_reactivated')->where('auditable_id', $account->id)->count());
+        $this->assertSame(0, AuditLog::query()->where('action', 'savings_account_reactivated')->where('auditable_id', $account->id)->count());
     }
 
     public function test_a_staff_payout_into_savings_is_member_activity(): void
