@@ -306,6 +306,7 @@ return new class extends Migration
             $table->string('status', 16)->default('pending');
             $table->text('remarks')->nullable();
             $table->timestamps();
+            $table->softDeletes();
             $table->index('filed_on');
             $table->index('resolved_on');
         });

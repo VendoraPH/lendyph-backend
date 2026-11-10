@@ -114,6 +114,18 @@ class CdaModelsAndAuditTest extends TestCase
             ->implode(' ');
     }
 
+    public function test_a_deleted_cases_number_is_never_reused(): void
+    {
+        CdaMediationCase::factory()->create(['filed_on' => '2026-02-03']);
+        $newest = CdaMediationCase::factory()->create(['filed_on' => '2026-03-04']);
+        $this->assertSame('MC-2026-0002', $newest->case_number);
+
+        $newest->delete();
+
+        $this->assertSoftDeleted($newest);
+        $this->assertSame('MC-2026-0003', CdaMediationCase::factory()->create(['filed_on' => '2026-04-05'])->case_number);
+    }
+
     public function test_a_taken_case_number_is_a_generated_number_collision(): void
     {
         CdaMediationCase::factory()->create(['filed_on' => '2026-02-03']);
