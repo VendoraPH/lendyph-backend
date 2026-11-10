@@ -9,8 +9,10 @@ use Throwable;
 /**
  * A report value as an export shows it: money as ₱ with two decimals
  * (₱1,500.00), percents with a % sign, dates as "Dec 31, 2026", booleans as
- * Yes or No, a select's option label, and "—" for nothing. Text is returned
- * as is; the Blade view and the Excel writer escape it.
+ * Yes or No, a select's option label, and "—" for nothing. Negative money
+ * reads in parentheses, "(₱400.00)". Anything that can't be read as its type
+ * is shown as written, never an error. Text is returned as is; the Blade view
+ * and the Excel writers escape it.
  */
 final class ValueFormatter
 {
@@ -42,17 +44,32 @@ final class ValueFormatter
         };
     }
 
+    /**
+     * ₱ with two decimals; a negative amount in parentheses, "(₱400.00)", as
+     * the accounting screens show it. The sign is read apart from the digits,
+     * so the amount itself is parsed as a positive figure.
+     */
     private static function money(mixed $value): string
     {
-        if (! is_numeric($value)) {
+        $text = is_float($value) ? (string) $value : trim((string) $value);
+
+        if (! is_numeric($text) || preg_match('/^[+-]?\d+(\.\d+)?$/', $text) !== 1) {
             return (string) $value;
         }
 
         try {
-            return Money::format((int) Money::toCentavos(is_float($value) ? (string) $value : $value));
+            $centavos = Money::toCentavos(ltrim($text, '+-'));
         } catch (Throwable) {
             return (string) $value;
         }
+
+        if ($centavos === null) {
+            return (string) $value;
+        }
+
+        $formatted = Money::format($centavos);
+
+        return str_starts_with($text, '-') && $centavos > 0 ? '('.$formatted.')' : $formatted;
     }
 
     /** Thousands separators, the decimals kept as given (never rounded here). */
@@ -78,13 +95,18 @@ final class ValueFormatter
         return in_array($value, [true, 1, '1', 'true', 'yes'], true);
     }
 
+    /** "Dec 31, 2026"; anything that isn't a real date stays as written. */
     private static function date(string $value): string
     {
-        if (preg_match('/^\d{4}-\d{2}-\d{2}/', $value) !== 1) {
+        if (preg_match('/^(\d{4})-(\d{2})-(\d{2})/', $value, $m) !== 1 || ! checkdate((int) $m[2], (int) $m[3], (int) $m[1])) {
             return $value;
         }
 
-        return Carbon::parse(substr($value, 0, 10))->format('M j, Y');
+        try {
+            return Carbon::parse(substr($value, 0, 10))->format('M j, Y');
+        } catch (Throwable) {
+            return $value;
+        }
     }
 
     /** @param  array<int, mixed>  $options */
@@ -99,18 +121,39 @@ final class ValueFormatter
         return (string) $value;
     }
 
-    /** @param  array<string, mixed>  $value */
+    /**
+     * The rating in words, with its remarks. A rating or remarks that aren't
+     * plain text are shown as their raw JSON, never an error.
+     *
+     * @param  array<string, mixed>  $value
+     */
     private static function compliance(array $value): string
     {
-        $rating = match ($value['rating'] ?? $value['value'] ?? null) {
-            'compliant' => 'Compliant',
-            'partial' => 'Partly compliant',
-            'non_compliant' => 'Not compliant',
-            'not_applicable' => 'Not applicable',
-            null => self::EMPTY,
-            default => (string) ($value['rating'] ?? $value['value']),
+        $raw = $value['rating'] ?? $value['value'] ?? null;
+
+        $rating = match (true) {
+            $raw === null => self::EMPTY,
+            ! is_scalar($raw) => self::raw($raw),
+            default => match ($raw) {
+                'compliant' => 'Compliant',
+                'partial' => 'Partly compliant',
+                'non_compliant' => 'Not compliant',
+                'not_applicable' => 'Not applicable',
+                default => (string) $raw,
+            },
         };
 
-        return filled($value['remarks'] ?? null) ? $rating.' ('.$value['remarks'].')' : $rating;
+        $remarks = $value['remarks'] ?? null;
+
+        if ($remarks === null || $remarks === '' || $remarks === []) {
+            return $rating;
+        }
+
+        return $rating.' ('.(is_scalar($remarks) ? (string) $remarks : self::raw($remarks)).')';
+    }
+
+    private static function raw(mixed $value): string
+    {
+        return (string) json_encode($value, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PARTIAL_OUTPUT_ON_ERROR);
     }
 }

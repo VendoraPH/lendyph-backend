@@ -13,8 +13,11 @@ use ZipArchive;
  * footer facts, plus a printed footer with "Page X of Y" on every page.
  *
  * Text is always an inline string, never a formula, so a value such as
- * "=HYPERLINK(…)" stays text. Money, percents and counts are numbers with a
- * ₱, % or plain format. Drafts carry the DRAFT mark in A1.
+ * "=HYPERLINK(…)" stays text, and characters XML can't hold are dropped
+ * (XmlText). Money, percents and counts are numbers with a ₱, % or plain
+ * format; negative money is a signed number whose format shows it in
+ * parentheses, "(₱400.00)", and as text it reads the same. Drafts carry the
+ * DRAFT mark in A1.
  */
 final class XlsxWriter
 {
@@ -100,6 +103,8 @@ final class XlsxWriter
     /** @return array{value: string, type: string, style?: int} */
     private function text(string $value, ?int $style = null): array
     {
+        $value = XmlText::clean($value);
+
         return $style === null ? ['value' => $value, 'type' => 's'] : ['value' => $value, 'type' => 's', 'style' => $style];
     }
 
@@ -168,7 +173,7 @@ final class XlsxWriter
         $w->writeAttribute('orientation', $content->orientation);
         $w->endElement();
         $w->startElement('headerFooter');
-        $w->writeElement('oddFooter', '&L'.self::headerText(mb_substr($content->title.' · '.$content->periodLabel, 0, 120)).'&RPage &P of &N');
+        $w->writeElement('oddFooter', '&L'.self::headerText(XmlText::clean(mb_substr($content->title.' · '.$content->periodLabel, 0, 120))).'&RPage &P of &N');
         $w->endElement();
         $w->endElement();
         $w->endDocument();
@@ -237,7 +242,7 @@ final class XlsxWriter
     {
         return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             .'<styleSheet xmlns="'.self::NS.'">'
-            .'<numFmts count="2"><numFmt numFmtId="164" formatCode="&quot;₱&quot;#,##0.00"/><numFmt numFmtId="165" formatCode="0.00&quot;%&quot;"/></numFmts>'
+            .'<numFmts count="2"><numFmt numFmtId="164" formatCode="&quot;₱&quot;#,##0.00;(&quot;₱&quot;#,##0.00)"/><numFmt numFmtId="165" formatCode="0.00&quot;%&quot;"/></numFmts>'
             .'<fonts count="2"><font><sz val="10"/><name val="Calibri"/></font><font><b/><sz val="10"/><name val="Calibri"/></font></fonts>'
             .'<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>'
             .'<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'

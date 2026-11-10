@@ -11,8 +11,9 @@ namespace App\Services\Cda\Exports;
  * `sections`: each `{key, title, kind: fields|table, fields: [{key, label,
  * type, display, raw}], columns: [{key, label, format}], rows: [[display…]],
  * raw_rows: [[raw…]]}`. `values` holds the raw value of every field key for
- * the official workbook's cell map, and `profile` the stored CDA profile
- * fields.
+ * the official workbook's cell map, `types` each field key's template type
+ * (money, percent, number, text, …, table), and `profile` the stored CDA
+ * profile fields.
  */
 final class ExportContent
 {
@@ -21,6 +22,7 @@ final class ExportContent
     /**
      * @param  list<array<string, mixed>>  $sections
      * @param  array<string, mixed>  $values
+     * @param  array<string, string>  $types
      * @param  array<string, mixed>  $profile
      * @param  array<string, mixed>  $excel  the template's `export.excel` block
      */
@@ -45,6 +47,7 @@ final class ExportContent
         public readonly string $orientation,
         public readonly array $sections,
         public readonly array $values,
+        public readonly array $types,
         public readonly array $profile,
         public readonly array $excel,
     ) {}

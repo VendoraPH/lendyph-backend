@@ -10,6 +10,7 @@ use App\Services\Cda\Sources\SourceContext;
 use App\Services\Cda\Sources\SourceRegistry;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 use Tests\Feature\Cda\Foundation\CdaTestHelpers;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
@@ -219,5 +220,21 @@ class LoanClassificationTest extends TestCase
         $this->assertSame(['bucket', 'label', 'dpd_range', 'loan_count', 'outstanding_principal', 'rate_percent', 'required'], array_keys($over));
         $this->assertSame('60000.00', $over['outstanding_principal']);
         $this->assertSame('30000.00', $over['required']);
+    }
+
+    public function test_a_live_classification_ages_the_loans_once(): void
+    {
+        $this->loanBook();
+        Carbon::setTestNow(Carbon::parse('2026-11-20 09:00:00', 'Asia/Manila'));
+        app(PeriodOpener::class)->ensure(2026);
+        $viewer = $this->viewer(loans: true);
+        DB::flushQueryLog();
+        DB::enableQueryLog();
+
+        $this->actingAs($viewer)->getJson(self::URI)->assertOk();
+
+        $agings = collect(DB::getQueryLog())->filter(fn (array $query) => str_contains($query['query'], 'as oldest_unpaid_due'));
+        DB::disableQueryLog();
+        $this->assertCount(1, $agings, 'The aging query runs once; the allowance is worked out from the same rows.');
     }
 }

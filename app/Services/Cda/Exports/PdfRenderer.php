@@ -15,8 +15,10 @@ use Dompdf\Options;
  * in a report can never make it read a file or call out. DejaVu Sans, bundled
  * with dompdf, renders the ₱ sign. "Page X of Y" is drawn on every page after
  * layout; the view's fixed footer carries the rest.
+ *
+ * Not final, so a test can stand in for it (the export race test).
  */
-final class PdfRenderer
+class PdfRenderer
 {
     public const FONT = 'DejaVu Sans';
 

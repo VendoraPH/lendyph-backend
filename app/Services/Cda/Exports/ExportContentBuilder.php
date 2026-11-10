@@ -92,9 +92,38 @@ final class ExportContentBuilder
             orientation: ($definition['export']['pdf']['orientation'] ?? 'portrait') === 'landscape' ? 'landscape' : 'portrait',
             sections: $this->sections((array) ($definition['sections'] ?? []), $values),
             values: $values,
+            types: $this->types((array) ($definition['sections'] ?? [])),
             profile: $profile,
             excel: (array) ($definition['export']['excel'] ?? []),
         );
+    }
+
+    /**
+     * Each field key's template type: "section.field" for fields, the
+     * section's key for a table section.
+     *
+     * @param  list<array<string, mixed>>  $sections
+     * @return array<string, string>
+     */
+    private function types(array $sections): array
+    {
+        $types = [];
+
+        foreach ($sections as $section) {
+            $key = (string) ($section['key'] ?? '');
+
+            if (($section['kind'] ?? 'fields') === 'table') {
+                $types[$key] = 'table';
+
+                continue;
+            }
+
+            foreach ((array) ($section['fields'] ?? []) as $field) {
+                $types[$key.'.'.$field['key']] = (string) ($field['type'] ?? 'text');
+            }
+        }
+
+        return $types;
     }
 
     /** @return array<string, mixed> */

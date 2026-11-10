@@ -9,25 +9,23 @@ use App\Models\CdaReportTemplate;
 use App\Services\Cda\Exports\SnapshotReader;
 use App\Services\Cda\Sources\SourceCatalog;
 use App\Services\Cda\Sources\SourceContext;
-use App\Services\Cda\Sources\SourceRegistry;
 use App\Services\Cda\Sources\SourceResult;
-use App\Services\Cda\Sources\SourceUnavailable;
-use InvalidArgumentException;
 
 /**
  * A year's Enhanced PESOS (CDA design §8): the year's PESOS report template
  * (else the active PESOS template), each indicator's numerator and
  * denominator resolved through the source registry, and PesosEngine's scores.
  *
- * A source that isn't available (not built, unknown, bad params) or gives no
- * figure is missing data, never an error. `ratio_avg` reads the denominator's
+ * Figures come through PesosFigures: one that isn't available or gives no
+ * number is missing data, never an error. `ratio_avg` reads the denominator's
  * opening balance with `as_of: prior_period_end`. The result is provisional
- * when the template isn't verified or any figure used is provisional.
+ * when the template isn't verified or any figure used (the opening balance
+ * included) is provisional.
  */
 final class PesosAssessment
 {
     public function __construct(
-        private readonly SourceRegistry $registry,
+        private readonly PesosFigures $figures,
         private readonly PesosEngine $engine,
     ) {}
 
@@ -48,8 +46,9 @@ final class PesosAssessment
     }
 
     /**
-     * The score of each earlier year with a finalized PESOS snapshot, then
-     * this year's.
+     * The score of each earlier year whose PESOS report is finalized or later
+     * (LOCKED_STATUSES) with a current snapshot that isn't superseded, then
+     * this year's. A reopened year is left out until it is finalized again.
      *
      * @return list<array{year: int, score: string|null}>
      */
@@ -59,15 +58,15 @@ final class PesosAssessment
             ->join('cda_reporting_periods', 'cda_reporting_periods.id', '=', 'cda_reports.period_id')
             ->where('cda_reporting_periods.year', '<', $period->year)
             ->where('cda_reports.report_type', 'pesos')
+            ->whereIn('cda_reports.status', CdaReport::LOCKED_STATUSES)
             ->whereNotNull('cda_reports.current_snapshot_id')
             ->orderBy('cda_reporting_periods.year')
             ->get(['cda_reports.current_snapshot_id', 'cda_reporting_periods.year']);
 
-        $snapshots = CdaReportSnapshot::query()->whereIn('id', $earlier->pluck('current_snapshot_id'))->get()->keyBy('id');
+        $snapshots = CdaReportSnapshot::query()->whereIn('id', $earlier->pluck('current_snapshot_id'))->whereNull('superseded_at')->get()->keyBy('id');
 
-        $trend = $earlier->map(function ($row) use ($snapshots): array {
-            $snapshot = $snapshots->get($row->current_snapshot_id);
-            $value = $snapshot === null ? null : (SnapshotReader::values(SnapshotReader::payload($snapshot))['result.score'] ?? null);
+        $trend = $earlier->filter(fn ($row) => $snapshots->has($row->current_snapshot_id))->map(function ($row) use ($snapshots): array {
+            $value = SnapshotReader::values(SnapshotReader::payload($snapshots->get($row->current_snapshot_id)))['result.score'] ?? null;
 
             return ['year' => (int) $row->year, 'score' => $value === null ? null : (string) $value];
         })->values()->all();
@@ -91,7 +90,7 @@ final class PesosAssessment
             $figures = [];
 
             foreach (['numerator', 'denominator'] as $side) {
-                $result = $this->figure($indicator[$side] ?? null, $context, $missing);
+                $result = $this->figures->resolve($indicator[$side] ?? null, $context, $missing);
                 $figures[$side] = $result?->value;
                 $sources[$side] = $result?->label ?? (SourceCatalog::KEYS[$indicator[$side]['key'] ?? '']['label'] ?? $side);
                 $provisional = $provisional || (bool) $result?->provisional;
@@ -100,9 +99,10 @@ final class PesosAssessment
             if ($indicator['formula_key'] === 'ratio_avg') {
                 $spec = $indicator['denominator'] ?? [];
                 $spec['params'] = array_merge((array) ($spec['params'] ?? []), ['as_of' => 'prior_period_end']);
-                $result = $this->figure($spec, $context, $missing);
+                $result = $this->figures->resolve($spec, $context, $missing);
                 $figures['denominator_opening'] = $result?->value;
                 $sources['denominator_opening'] = $result?->label ?? 'Opening balance';
+                $provisional = $provisional || (bool) $result?->provisional;
             }
 
             $inputs[$indicator['key']] = [...$figures, 'sources' => $sources, 'missing' => $missing];
@@ -127,40 +127,5 @@ final class PesosAssessment
         return $report?->template()->first()
             ?? CdaReportTemplate::query()->where('report_type', 'pesos')->where('status', CdaReportTemplate::STATUS_ACTIVE)
                 ->orderByDesc('effective_from')->first();
-    }
-
-    /**
-     * A figure as a decimal string or int, or null (with the reason added to
-     * `$missing`) when it isn't available.
-     *
-     * @param  array<string, mixed>|null  $spec
-     * @param  list<string>  $missing
-     */
-    private function figure(?array $spec, SourceContext $context, array &$missing): ?SourceResult
-    {
-        $key = (string) ($spec['key'] ?? '');
-        $label = SourceCatalog::KEYS[$key]['label'] ?? $key;
-
-        if (! SourceCatalog::has($key) || SourceCatalog::family($key) === 'pesos') {
-            $missing[] = "{$label} is not a figure PESOS can use";
-
-            return null;
-        }
-
-        try {
-            $result = $this->registry->resolve($key, (array) ($spec['params'] ?? []), $context);
-        } catch (SourceUnavailable|InvalidArgumentException $e) {
-            $missing[] = $e->getMessage();
-
-            return null;
-        }
-
-        if ($result->value === null || (! is_int($result->value) && ! is_numeric($result->value))) {
-            $missing[] = "{$result->label} has no figure";
-
-            return null;
-        }
-
-        return $result;
     }
 }

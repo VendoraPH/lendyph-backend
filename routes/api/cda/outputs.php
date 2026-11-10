@@ -15,12 +15,13 @@ use Illuminate\Support\Facades\Route;
 | own `cda:*` permission (CdaAccess, checked in the controllers). The
 | classification and PESOS screens are read only: they have no write routes.
 | Export downloads use the signed `files.document` link; there is no new
-| public route.
+| public route. Generating an export is limited to 10 a minute per user.
 */
 Route::prefix('cda')->group(function () {
     Route::get('/periods/{year}/loan-classification', [CdaLoanClassificationController::class, 'show'])->whereNumber('year');
     Route::get('/periods/{year}/pesos', [CdaPesosController::class, 'show'])->whereNumber('year');
 
     Route::get('/reports/{report}/exports', [CdaExportController::class, 'index'])->whereNumber('report');
-    Route::post('/reports/{report}/exports', [CdaExportController::class, 'store'])->whereNumber('report');
+    Route::post('/reports/{report}/exports', [CdaExportController::class, 'store'])->whereNumber('report')
+        ->middleware('throttle:10,1,cda-exports');
 });

@@ -4,10 +4,13 @@ namespace Tests\Feature\Cda\Outputs;
 
 use App\Models\CdaReport;
 use App\Models\CdaReportSnapshot;
+use App\Models\CdaReportTemplate;
 use App\Models\User;
 use App\Services\Cda\PeriodOpener;
+use App\Services\Cda\Pesos\PesosFigures;
 use App\Services\Cda\Sources\SourceContext;
 use App\Services\Cda\Sources\SourceRegistry;
+use App\Services\Cda\Sources\SourceResult;
 use App\Services\Cda\Sources\SourceUnavailable;
 use Illuminate\Support\Carbon;
 use Tests\Feature\Cda\Foundation\CdaTestHelpers;
@@ -122,5 +125,63 @@ class PesosAssessmentTest extends TestCase
 
         $this->expectException(SourceUnavailable::class);
         $registry->resolve('pesos.result', ['field' => 'nope'], $context);
+    }
+
+    public function test_the_trend_leaves_out_reopened_and_superseded_snapshots(): void
+    {
+        $reopened = app(PeriodOpener::class)->ensure(2024);
+        $superseded = app(PeriodOpener::class)->ensure(2025);
+        app(PeriodOpener::class)->ensure(2026);
+
+        foreach ([[$reopened, CdaReport::STATUS_DRAFT, null], [$superseded, CdaReport::STATUS_FINALIZED, now()]] as [$period, $status, $supersededAt]) {
+            $report = CdaReport::query()->where('period_id', $period->id)->where('report_type', 'pesos')->firstOrFail();
+            $snapshot = CdaReportSnapshot::query()->create([
+                'report_id' => $report->id, 'version' => 1, 'template_id' => $report->template_id,
+                'payload' => json_encode(['values' => [['field_key' => 'result.score', 'value' => '50.00']]]),
+                'checksum' => str_repeat('e', 64), 'finalized_by' => $this->admin->id, 'finalized_at' => now(), 'superseded_at' => $supersededAt,
+            ]);
+            $report->forceFill(['status' => $status, 'current_snapshot_id' => $snapshot->id])->save();
+        }
+
+        $trend = $this->actingAs($this->viewer())->getJson(self::URI)->assertOk()->json('data.trend');
+
+        $this->assertSame([2026], array_column($trend, 'year'));
+    }
+
+    public function test_a_provisional_opening_balance_makes_the_result_provisional(): void
+    {
+        $period = app(PeriodOpener::class)->ensure(2026);
+        $report = CdaReport::query()->where('period_id', $period->id)->where('report_type', 'pesos')->firstOrFail();
+        $definition = $report->template->definition;
+        $definition['meta']['verified'] = true;
+        $definition['pesos']['indicators'] = [array_merge($definition['pesos']['indicators'][4], [
+            'key' => 'average_return', 'formula_key' => 'ratio_avg',
+            'numerator' => ['key' => 'fs.net_surplus'], 'denominator' => ['key' => 'fs.total_assets'],
+        ])];
+        $template = CdaReportTemplate::query()->create([
+            'report_type' => 'pesos', 'version' => '2026.7', 'name' => 'Verified test', 'effective_from' => '2026-01-01',
+            'definition' => $definition, 'status' => CdaReportTemplate::STATUS_DRAFT,
+        ]);
+        $report->forceFill(['template_id' => $template->id])->save();
+
+        $figures = fn (bool $openingProvisional) => new class($openingProvisional) extends PesosFigures
+        {
+            public function __construct(private readonly bool $openingProvisional) {}
+
+            public function resolve(?array $spec, SourceContext $context, array &$missing): ?SourceResult
+            {
+                $opening = ($spec['params']['as_of'] ?? null) === 'prior_period_end';
+
+                return new SourceResult($opening ? '100.00' : ($spec['key'] === 'fs.net_surplus' ? '15.00' : '200.00'), 'Figure', 'money', null, $opening && $this->openingProvisional);
+            }
+        };
+
+        $this->app->instance(PesosFigures::class, $figures(false));
+        $settled = $this->actingAs($this->viewer())->getJson(self::URI)->assertOk()->json('data');
+        $this->assertFalse($settled['provisional']);
+        $this->assertSame('10.00', $settled['metrics'][0]['value'], '15 ÷ ((100 + 200) ÷ 2)');
+
+        $this->app->instance(PesosFigures::class, $figures(true));
+        $this->assertTrue($this->actingAs($this->viewer())->getJson(self::URI)->assertOk()->json('data.provisional'));
     }
 }

@@ -16,10 +16,11 @@ use Illuminate\Support\Carbon;
  * - With a year-end capture (`cda_reporting_periods.year_end_capture`, taken
  *   at 23:58 Manila on Dec 31), the figures are the capture's, unchanged:
  *   loan balances can't be read for a past date afterwards.
- * - Without one, they are computed live, through the same AllowanceCalculator
- *   and LoanAgingBuilder the capture uses, as of today (Manila) or the period
- *   end if that is earlier, from current balances: `provisional`, with a
- *   Warning in words.
+ * - Without one, they are computed live from current balances, as of today
+ *   (Manila) or the period end if that is earlier: `provisional`, with a
+ *   Warning in words. The loans are aged once (LoanAgingBuilder) and the
+ *   required allowance is worked out from those rows with
+ *   AllowanceCalculator's own rates and rounding (requiredFor()).
  *
  * Buckets: Current (no allowance) and the five past-due buckets of
  * AllowanceCalculator. The past-due buckets' counts, principal and required
@@ -111,7 +112,7 @@ final class LoanClassification
             'as_of' => $asOf,
             'basis_note' => AllowanceCalculator::BASIS_NOTE,
             'rates' => $this->allowance->rates(),
-            'allowance' => $this->allowance->forDate($asOf),
+            'allowance' => $this->allowanceFrom($rows),
             'balances' => ['branches' => $balances['branches'], 'unassigned' => (int) $balances['unassigned']],
             'loans' => array_map(fn (array $row): array => [
                 'loan_id' => (int) $row['loan_id'],
@@ -128,6 +129,50 @@ final class LoanClassification
                 'unpaid_interest_due' => $interest[(int) $row['loan_id']] ?? 0,
             ], $rows),
         ];
+    }
+
+    /**
+     * The required allowance by branch and bucket from aging rows already
+     * read, as AllowanceCalculator::forDate() works it out (each branch's
+     * bucket rounded once, at its rate), so the loans are aged once per
+     * request. Only the five past-due buckets; branches without a past-due
+     * loan add nothing to the totals and are left out.
+     *
+     * @param  list<array<string, mixed>>  $rows
+     * @return array{branches: list<array{branch: array{id: int}, buckets: list<array{bucket: string, loan_count: int, principal: int, rate_percent: string, required: int}>}>}
+     */
+    private function allowanceFrom(array $rows): array
+    {
+        $rates = array_column($this->allowance->rates(), 'rate_percent', 'bucket');
+        $grouped = [];
+
+        foreach ($rows as $row) {
+            if (! in_array($row['bucket'], AllowanceCalculator::BUCKETS, true)) {
+                continue;
+            }
+
+            $branchId = (int) ($row['branch']['id'] ?? 0);
+            $grouped[$branchId][$row['bucket']]['loan_count'] = ($grouped[$branchId][$row['bucket']]['loan_count'] ?? 0) + 1;
+            $grouped[$branchId][$row['bucket']]['principal'] = ($grouped[$branchId][$row['bucket']]['principal'] ?? 0) + (int) $row['outstanding_principal'];
+        }
+
+        ksort($grouped);
+        $branches = [];
+
+        foreach ($grouped as $branchId => $buckets) {
+            $branches[] = [
+                'branch' => ['id' => $branchId],
+                'buckets' => array_map(fn (string $bucket): array => [
+                    'bucket' => $bucket,
+                    'loan_count' => $buckets[$bucket]['loan_count'] ?? 0,
+                    'principal' => $buckets[$bucket]['principal'] ?? 0,
+                    'rate_percent' => (string) $rates[$bucket],
+                    'required' => AllowanceCalculator::requiredFor($buckets[$bucket]['principal'] ?? 0, $bucket),
+                ], AllowanceCalculator::BUCKETS),
+            ];
+        }
+
+        return ['branches' => $branches];
     }
 
     /**

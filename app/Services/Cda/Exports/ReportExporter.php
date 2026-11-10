@@ -19,7 +19,8 @@ use Throwable;
  *
  * - The file is rendered first (PDF, or Excel generated or filled into the
  *   template's official workbook), outside any lock.
- * - It is stored on the private disk as a `documents` row owned by the
+ * - It is stored on the private disk (a failed save answers 503 and records
+ *   nothing) as a `documents` row owned by the
  *   report, and as a new version (origin generated, never overwritten) of the
  *   report's export document for that format, in the repository category
  *   `report_export`.
@@ -39,6 +40,8 @@ final class ReportExporter
     public const FORMATS = ['pdf', 'xlsx'];
 
     private const FORMAT_WORDS = ['pdf' => 'PDF', 'xlsx' => 'Excel'];
+
+    public const NOT_SAVED = "The export couldn't be saved to the server's storage, so nothing was recorded. Try again; if it keeps failing, ask your administrator to check the disk.";
 
     private const MIME = [
         'pdf' => 'application/pdf',
@@ -60,7 +63,7 @@ final class ReportExporter
         $content = $this->builder->build($report, $user);
         [$bytes, $note] = $this->render($content, $format);
         $path = 'cda/exports/'.$report->id.'/'.Str::uuid()->toString().'.'.$format;
-        Storage::disk('private')->put($path, $bytes);
+        $this->store($path, $bytes);
 
         try {
             return DB::transaction(fn (): CdaDocumentVersion => $this->record($report, $content, $format, $user, $path, $bytes, $note));
@@ -69,6 +72,19 @@ final class ReportExporter
 
             throw $e;
         }
+    }
+
+    /** Saves the file, or answers 503 in words; nothing is recorded then. */
+    private function store(string $path, string $bytes): void
+    {
+        try {
+            $saved = Storage::disk('private')->put($path, $bytes);
+        } catch (Throwable $e) {
+            report($e);
+            $saved = false;
+        }
+
+        abort_unless($saved === true, 503, self::NOT_SAVED);
     }
 
     /** @return array{0: string, 1: string|null} the file and a note about how it was made */
@@ -83,7 +99,9 @@ final class ReportExporter
             $disk = Storage::disk('private');
 
             if ($workbook !== null && $disk->exists($workbook->file_path)) {
-                return [$this->filler->fill((string) $disk->get($workbook->file_path), $content), 'Filled into the official workbook.'];
+                [$bytes, $skipped] = $this->filler->fill((string) $disk->get($workbook->file_path), $content);
+
+                return [$bytes, trim('Filled into the official workbook. '.$skipped)];
             }
 
             return [$this->xlsx->write($content), 'The template maps an official workbook, but none is attached, so the generated layout was used.'];
