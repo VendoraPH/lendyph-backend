@@ -3,6 +3,7 @@
 namespace Tests\Feature\Savings\TimeDeposits;
 
 use App\Models\AccountingJournal;
+use App\Models\SavingsProduct;
 use App\Models\SavingsTransaction;
 use App\Models\TimeDeposit;
 use Illuminate\Console\Scheduling\Schedule;
@@ -98,7 +99,7 @@ class TimeDepositMaturityJobTest extends TestCase
 
     public function test_a_rollover_that_cannot_be_placed_stays_matured_and_the_run_carries_on(): void
     {
-        $other = \App\Models\SavingsProduct::factory()->timeDeposit()->create();
+        $other = SavingsProduct::factory()->timeDeposit()->create();
         $this->rate($other, 90, '3.0000');
         $stuck = $this->placed(['maturity_instruction' => 'rollover_all']);
         $fine = $this->placed(['maturity_instruction' => 'rollover_all', 'product_id' => $other->id]);

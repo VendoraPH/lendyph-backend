@@ -3,6 +3,7 @@
 namespace Tests\Feature\Savings\TimeDeposits;
 
 use App\Models\AccountingJournal;
+use App\Models\AccountingPeriod;
 use App\Models\Borrower;
 use App\Models\Role;
 use App\Models\SavingsAccount;
@@ -12,6 +13,7 @@ use App\Models\SavingsTransaction;
 use App\Models\User;
 use App\Services\Accounting\ChartOfAccountsSeeder;
 use App\Services\Savings\SavingsLedger;
+use Carbon\CarbonImmutable;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -136,6 +138,16 @@ trait TimeDepositFixtures
     protected function journalFor(string $type, int $id, string $source): ?AccountingJournal
     {
         return AccountingJournal::query()->where('postable_type', $type)->where('postable_id', $id)->where('source', $source)->first();
+    }
+
+    /** Close the accounting period holding $date. */
+    protected function closePeriodOf(string $date): void
+    {
+        AccountingPeriod::query()->create(AccountingPeriod::attributesForMonth(CarbonImmutable::parse($date)->startOfMonth()) + [
+            'status' => 'closed',
+            'closed_at' => now(),
+            'closed_by' => $this->admin->id,
+        ]);
     }
 
     protected function savingsRows(SavingsAccount $account): int

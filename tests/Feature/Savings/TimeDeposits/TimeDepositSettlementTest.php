@@ -11,6 +11,7 @@ use App\Services\Savings\ApprovalGate;
 use App\Services\Savings\SavingsLocks;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\ValidationException;
 use Tests\TestCase;
 
 /**
@@ -123,7 +124,7 @@ class TimeDepositSettlementTest extends TestCase
         $approval = SavingsApproval::query()->findOrFail($this->settle($deposit)->assertStatus(202)->json('data.approval.id'));
         DB::table('time_deposits')->where('id', $deposit->id)->update(['status' => 'withdrawn', 'settled_on' => '2027-02-08']);
 
-        $this->expectException(\Illuminate\Validation\ValidationException::class);
+        $this->expectException(ValidationException::class);
         $this->execute($approval, User::factory()->create());
     }
 
@@ -173,7 +174,7 @@ class TimeDepositSettlementTest extends TestCase
 
         $this->assertSame('100000.00', $new['principal']);
         $journal = $this->journalFor(TimeDeposit::class, $deposit->id, 'time_deposit_settlement');
-        $this->assertSame([['2060', 10_000_000, 0], ['5160', 73_973, 0], ['2060', 0, 10_000_000], ['1030', 0, 73_973]], $this->lines($journal));
+        $this->assertSame([['2060', 10_000_000, 0], ['5160', 73_973, 0], ['2060', 0, 10_000_000], ['1020', 0, 73_973]], $this->lines($journal));
         $this->assertSame('gcash', $deposit->refresh()->payout_method);
     }
 
@@ -185,6 +186,19 @@ class TimeDepositSettlementTest extends TestCase
 
         $this->settle($deposit)->assertConflict();
         $this->assertSame(1, AccountingJournal::query()->where('postable_type', TimeDeposit::class)->where('source', 'time_deposit_settlement')->count());
+    }
+
+    public function test_a_closed_period_refuses_a_rollover_and_writes_nothing(): void
+    {
+        $deposit = $this->placed(['maturity_instruction' => 'rollover_all']);
+        $this->toMaturity();
+        $this->closePeriodOf('2027-02-08');
+
+        $this->settle($deposit, ['action' => 'rollover_all'])->assertUnprocessable()->assertJsonValidationErrors('date');
+
+        $this->assertSame('active', $deposit->refresh()->status);
+        $this->assertSame(0, TimeDeposit::query()->where('rolled_over_from_id', $deposit->id)->count());
+        $this->assertNull($this->journalFor(TimeDeposit::class, $deposit->id, 'time_deposit_settlement'));
     }
 
     public function test_a_payout_into_savings_moves_no_cash_so_needs_no_checker(): void

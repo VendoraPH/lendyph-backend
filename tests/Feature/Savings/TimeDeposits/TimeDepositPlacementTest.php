@@ -3,6 +3,8 @@
 namespace Tests\Feature\Savings\TimeDeposits;
 
 use App\Models\AccountingJournal;
+use App\Models\Borrower;
+use App\Models\SavingsAccount;
 use App\Models\SavingsProduct;
 use App\Models\SavingsTaxRule;
 use App\Models\SavingsTransaction;
@@ -156,7 +158,7 @@ class TimeDepositPlacementTest extends TestCase
             ->assertUnprocessable()
             ->assertJsonValidationErrors('funding_account_id');
 
-        $other = $this->savingsAccount(20_000_000, \App\Models\Borrower::factory()->create(['branch_id' => $this->branch->id]));
+        $other = $this->savingsAccount(20_000_000, Borrower::factory()->create(['branch_id' => $this->branch->id]));
 
         $this->place(['payment_method' => 'savings', 'funding_account_id' => $other->id])
             ->assertUnprocessable()
@@ -201,12 +203,16 @@ class TimeDepositPlacementTest extends TestCase
     {
         $this->place(['placement_date' => '2026-11-11'])->assertUnprocessable()->assertJsonValidationErrors('placement_date');
         $this->place(['placement_date' => '2026-11-08'])->assertUnprocessable()->assertJsonValidationErrors('placement_date');
+        $this->place(['placement_date' => '2026-11-09'])->assertUnprocessable()
+            ->assertJsonFragment(['term_days' => ["{$this->product->name} has no rate in force for 90 days on Nov 9, 2026. Add one in Savings → Products."]]);
+
+        $this->rate($this->product, 90, '3.0000', '2026-11-09');
         $this->place(['placement_date' => '2026-11-09'])->assertCreated()->assertJsonPath('data.maturity_date', '2027-02-07');
     }
 
     public function test_a_payout_account_must_be_the_members_open_account(): void
     {
-        $closed = \App\Models\SavingsAccount::factory()->closed()->create([
+        $closed = SavingsAccount::factory()->closed()->create([
             'borrower_id' => $this->member->id, 'product_id' => $this->regular->id, 'branch_id' => $this->branch->id,
         ]);
 
@@ -216,6 +222,20 @@ class TimeDepositPlacementTest extends TestCase
         $this->place(['payout_account_id' => $open->id])->assertCreated()
             ->assertJsonPath('data.payout_account_id', $open->id)
             ->assertJsonPath('data.payout_account_number', $open->account_number);
+    }
+
+    public function test_a_closed_period_is_422_and_writes_nothing(): void
+    {
+        $account = $this->savingsAccount(15_000_000);
+        $journals = AccountingJournal::query()->count();
+        $this->closePeriodOf('2026-11-10');
+
+        $this->place()->assertUnprocessable()->assertJsonValidationErrors('date');
+        $this->place(['payment_method' => 'savings', 'funding_account_id' => $account->id])->assertUnprocessable()->assertJsonValidationErrors('date');
+
+        $this->assertSame(0, TimeDeposit::query()->count());
+        $this->assertSame(1, $this->savingsRows($account));
+        $this->assertSame($journals, AccountingJournal::query()->count());
     }
 
     public function test_a_placement_needs_an_idempotency_key(): void
