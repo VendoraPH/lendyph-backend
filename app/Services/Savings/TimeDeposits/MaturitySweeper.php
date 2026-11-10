@@ -4,7 +4,12 @@ namespace App\Services\Savings\TimeDeposits;
 
 use App\Exceptions\CannotPostToTheBooksException;
 use App\Models\TimeDeposit;
+use App\Services\AuditLogService;
 use App\Services\Savings\SavingsLocks;
+use Illuminate\Database\DeadlockException;
+use Illuminate\Database\DetectsConcurrencyErrors;
+use Illuminate\Database\QueryException;
+use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
@@ -14,8 +19,8 @@ use Symfony\Component\HttpKernel\Exception\HttpException;
  * The nightly maturity run (`savings:mature-time-deposits`, 00:40 Manila,
  * design §6).
  *
- * 1. Every active placement whose maturity date has come moves to matured
- *    (audited as the system).
+ * 1. Every active placement whose maturity date has come moves to matured,
+ *    with a `time_deposit_matured` audit row as the system.
  * 2. It then settles, as the system, only what moves no cash:
  *    - `rollover_all`;
  *    - `rollover_principal` when the interest goes into the member's savings
@@ -28,10 +33,13 @@ use Symfony\Component\HttpKernel\Exception\HttpException;
  * after locking, so a rerun (or a second job) finds it settled and does
  * nothing, and the journal's postable key never posts twice. A settlement
  * that is refused (a turned-off product, a frozen account, a closed period)
- * leaves the placement matured, is logged, and the run carries on.
+ * leaves the placement matured, is logged, and the run carries on; so does
+ * a deadlock or lock-wait timeout on one placement (the next run retries it).
  */
 class MaturitySweeper
 {
+    use DetectsConcurrencyErrors;
+
     private const CHUNK = 200;
 
     public function __construct(
@@ -51,9 +59,16 @@ class MaturitySweeper
             ->select('id')
             ->chunkById(self::CHUNK, function ($chunk) use ($today, &$counts): void {
                 foreach ($chunk as $row) {
-                    $counts['matured'] += $this->mature((int) $row->id) ? 1 : 0;
-                    $outcome = $this->autoSettle((int) $row->id, $today);
-                    $counts[$outcome]++;
+                    try {
+                        $counts['matured'] += $this->mature((int) $row->id) ? 1 : 0;
+                    } catch (QueryException|DeadlockException $e) {
+                        $this->skipOnConcurrency($e, (int) $row->id);
+                        $counts['refused']++;
+
+                        continue;
+                    }
+
+                    $counts[$this->autoSettle((int) $row->id, $today)]++;
                 }
             });
 
@@ -70,7 +85,15 @@ class MaturitySweeper
                 return false;
             }
 
-            $deposit->forceFill(['status' => 'matured'])->save();
+            $deposit->forceFill(['status' => 'matured'])->saveQuietly();
+
+            AuditLogService::log(
+                'time_deposit_matured',
+                $deposit,
+                ['status' => 'active'],
+                ['status' => 'matured'],
+                "Time deposit {$deposit->certificate_number} matured on {$deposit->maturity_date->format('M j, Y')}, by the system.",
+            );
 
             return true;
         });
@@ -100,14 +123,42 @@ class MaturitySweeper
 
                 return 'settled';
             });
-        } catch (ValidationException|CannotPostToTheBooksException|HttpException $refused) {
-            Log::warning('savings:mature-time-deposits left a time deposit matured: it could not be settled automatically.', [
-                'time_deposit_id' => $id,
-                'reason' => $refused->getMessage(),
-            ]);
+        } catch (ValidationException|CannotPostToTheBooksException|HttpException|HttpResponseException $refused) {
+            $this->logLeftMatured($id, $refused instanceof HttpResponseException
+                ? (string) ($refused->getResponse()->getData(true)['message'] ?? 'conflict')
+                : $refused->getMessage());
+
+            return 'refused';
+        } catch (QueryException|DeadlockException $e) {
+            $this->skipOnConcurrency($e, $id);
 
             return 'refused';
         }
+    }
+
+    /**
+     * A deadlock or lock-wait timeout on one placement is logged and the run
+     * carries on (the next run picks it up again); any other database error
+     * still stops the run. Inside an outer transaction Laravel rethrows a
+     * deadlock as a DeadlockException, hence both.
+     *
+     * @throws QueryException|DeadlockException
+     */
+    private function skipOnConcurrency(QueryException|DeadlockException $e, int $id): void
+    {
+        if (! $this->causedByConcurrencyError($e)) {
+            throw $e;
+        }
+
+        $this->logLeftMatured($id, 'another change held the placement at the same moment ('.strtok($e->getMessage(), '(').')');
+    }
+
+    private function logLeftMatured(int $id, string $reason): void
+    {
+        Log::warning('savings:mature-time-deposits could not settle a time deposit automatically; it is left for the next run or staff.', [
+            'time_deposit_id' => $id,
+            'reason' => $reason,
+        ]);
     }
 
     /**

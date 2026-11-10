@@ -189,6 +189,7 @@ class TimeDepositReviewFixesTest extends TestCase
 
     public function test_the_placement_journal_is_dated_the_placement_date_and_the_settlement_journal_the_settlement_date(): void
     {
+        $this->rate($this->regular, null, '1.0000', '2026-11-09');
         $this->rate($this->product, 90, '3.0000', '2026-11-09');
         $yesterday = $this->placed(['placement_date' => '2026-11-09']);
         $this->assertSame('2026-11-09', $this->journalFor(TimeDeposit::class, $yesterday->id, 'time_deposit')->date->toDateString());

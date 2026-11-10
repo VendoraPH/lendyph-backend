@@ -45,7 +45,7 @@ class SavingsTimeDepositController extends Controller
     #[OA\Get(
         path: '/api/savings/time-deposits',
         summary: 'Time deposits',
-        description: 'One page of the placements in the caller\'s branches, newest placement first. `meta.stats` counts each status over the filter without `status` and `search`; `meta.totals` covers the whole filter: `count`, `total_principal` and `maturing_30_days` (active placements maturing from today to 30 days ahead).',
+        description: 'One page of the placements in the caller\'s branches, newest placement first. `meta.stats` counts each status over the filter without `status` and `search`; `meta.totals` covers the whole filter: `count`, `total_principal` and `maturing_30_days` (the filtered placements that are active and mature from today to 30 days ahead).',
         tags: ['Savings'],
         security: [['sanctum' => []]],
         parameters: [
@@ -83,7 +83,7 @@ class SavingsTimeDepositController extends Controller
 
         $sum = (clone $filtered)->toBase()->selectRaw('COUNT(*) AS total_count, COALESCE(SUM(principal), 0) AS total_principal')->first();
         $today = now()->toDateString();
-        $maturing = (clone $base)->where('status', 'active')
+        $maturing = (clone $filtered)->where('status', 'active')
             ->whereBetween('maturity_date', [$today, now()->addDays(30)->toDateString()])
             ->count();
 
@@ -199,7 +199,7 @@ class SavingsTimeDepositController extends Controller
     #[OA\Post(
         path: '/api/savings/time-deposits/{timeDeposit}/settle',
         summary: 'Settle a time deposit at maturity',
-        description: 'Needs an Idempotency-Key. On or after the maturity date (422 before), dated today or yesterday, at the contract\'s figures. `action` payout pays principal and net interest out; rollover_principal places the principal again and pays the interest out; rollover_all places both again, at the rate in force on the maturity date. 201 with this placement, or the new one on a rollover. A cash payout above tier 1 answers 202 with `{approval}`; a payout into the member\'s savings account (`payout_method` savings) posts at once.',
+        description: 'Needs an Idempotency-Key. On or after the maturity date (422 before), dated today or yesterday, at the contract\'s figures. `action` payout pays principal and net interest out; rollover_principal places the principal again and pays the interest out; rollover_all places both again, at the rate in force on the maturity date, starting on the settlement date, with `next_instruction` (else the old instruction). 201 with this placement, or the new one on a rollover. A cash payout above tier 1 answers 202 with `{approval}`; a payout into the member\'s savings account (`payout_method` savings) posts at once.',
         tags: ['Savings'],
         security: [['sanctum' => []]],
         parameters: [
@@ -210,6 +210,7 @@ class SavingsTimeDepositController extends Controller
             new OA\Property(property: 'date', type: 'string', format: 'date'),
             new OA\Property(property: 'action', type: 'string', enum: TimeDeposit::MATURITY_INSTRUCTIONS),
             new OA\Property(property: 'payout_method', type: 'string', enum: ['cash', 'bank_transfer', 'gcash', 'maya', 'savings']),
+            new OA\Property(property: 'next_instruction', type: 'string', enum: TimeDeposit::MATURITY_INSTRUCTIONS, nullable: true, description: 'On a rollover: the new placement\'s instruction; the old one\'s when left out'),
         ])),
         responses: [
             new OA\Response(response: 201, description: 'The settled placement, or the new placement on a rollover'),
@@ -254,13 +255,13 @@ class SavingsTimeDepositController extends Controller
             new OA\Response(response: 403, description: 'Missing savings:close'),
             new OA\Response(response: 404, description: 'No such placement in the caller\'s branches'),
             new OA\Response(response: 409, description: 'Already settled'),
-            new OA\Response(response: 422, description: 'A date before placement or on or after maturity'),
+            new OA\Response(response: 422, description: 'A matured placement (settle it instead), or a date before placement or on or after maturity'),
         ],
     )]
     public function preterminationQuote(PreterminationQuoteRequest $request, int $timeDeposit, Settlement $settlement): JsonResponse
     {
         $deposit = $this->scope->find($request->user(), $timeDeposit);
-        $settlement->assertOpen($deposit);
+        $settlement->assertCanPreterminate($deposit);
 
         return response()->json([
             'success' => true,
@@ -289,7 +290,7 @@ class SavingsTimeDepositController extends Controller
             new OA\Response(response: 403, description: 'Missing savings:close'),
             new OA\Response(response: 404, description: 'No such placement in the caller\'s branches'),
             new OA\Response(response: 409, description: 'Already settled, or a payout already waits for approval'),
-            new OA\Response(response: 422, description: 'On or after maturity, a date outside today and yesterday or before placement, or a payout account that can\'t take it'),
+            new OA\Response(response: 422, description: 'A matured placement or a date on or after maturity (settle it instead), a date outside today and yesterday or before placement, or a payout account that can\'t take it'),
         ],
     )]
     public function preterminate(PreterminateTimeDepositRequest $request, int $timeDeposit, Settlement $settlement): JsonResponse

@@ -124,27 +124,30 @@ class Placement
 
     /**
      * Place again what a matured placement rolls over (design §5): the same
-     * product, term, instruction and payout account, at the rate, tax rate
-     * and pre-termination rate in force on its maturity date, starting on
-     * that date so the money never stops earning. Refused (422) when the
-     * product is turned off, no longer offers the term, or has no rate for it.
+     * product, term and payout account, at the rate, tax rate and
+     * pre-termination rate in force on its maturity date. It starts on the
+     * day it is settled ($placementDate), the day the settlement journal
+     * moves the money into it, so time deposits in the books and in the
+     * subledger agree every day. The next instruction is staff's choice at
+     * settlement, else the old placement's. Refused (422) when the product is
+     * turned off, no longer offers the term, or has no rate for it.
      *
      * @throws ValidationException
      */
-    public function rollover(TimeDeposit $from, int $principal, ?int $userId): TimeDeposit
+    public function rollover(TimeDeposit $from, int $principal, ?int $userId, string $placementDate, ?string $nextInstruction = null): TimeDeposit
     {
         $this->assertInTransaction();
 
         $product = SavingsProduct::query()->findOrFail($from->product_id);
-        $figures = $this->quote->figures($product, $principal, $from->term_days, $from->maturity_date->toDateString(), rollover: true);
+        $figures = $this->quote->figures($product, $principal, $from->term_days, $placementDate, rollover: true, ratesOn: $from->maturity_date->toDateString());
 
         return TimeDeposit::query()->create([
             ...$this->contract($figures),
-            'certificate_number' => $this->numbers->certificateNumber(now()->toDateString()),
+            'certificate_number' => $this->numbers->certificateNumber($placementDate),
             'borrower_id' => $from->borrower_id,
             'product_id' => $from->product_id,
             'branch_id' => $from->branch_id,
-            'maturity_instruction' => $from->maturity_instruction,
+            'maturity_instruction' => $nextInstruction ?? $from->maturity_instruction,
             'funding_method' => self::ROLLOVER_FUNDING,
             'payout_account_id' => $from->payout_account_id,
             'status' => 'active',

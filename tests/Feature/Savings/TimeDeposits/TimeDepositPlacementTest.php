@@ -206,6 +206,7 @@ class TimeDepositPlacementTest extends TestCase
         $this->place(['placement_date' => '2026-11-09'])->assertUnprocessable()
             ->assertJsonFragment(['term_days' => ["{$this->product->name} has no rate in force for 90 days on Nov 9, 2026. Add one in Savings → Products."]]);
 
+        $this->rate($this->regular, null, '1.0000', '2026-11-09');
         $this->rate($this->product, 90, '3.0000', '2026-11-09');
         $this->place(['placement_date' => '2026-11-09'])->assertCreated()->assertJsonPath('data.maturity_date', '2027-02-07');
     }

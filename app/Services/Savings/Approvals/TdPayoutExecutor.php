@@ -6,6 +6,7 @@ use App\Models\SavingsApproval;
 use App\Models\SavingsTransaction;
 use App\Models\TimeDeposit;
 use App\Models\User;
+use App\Services\Savings\SavingsLocks;
 use App\Services\Savings\SavingsMath;
 use App\Services\Savings\TimeDeposits\Settlement;
 use Illuminate\Validation\ValidationException;
@@ -21,7 +22,10 @@ use Illuminate\Validation\ValidationException;
  */
 class TdPayoutExecutor implements ApprovalExecutor
 {
-    public function __construct(private readonly Settlement $settlement) {}
+    public function __construct(
+        private readonly Settlement $settlement,
+        private readonly SavingsLocks $locks,
+    ) {}
 
     public function accountIds(SavingsApproval $approval): array
     {
@@ -41,7 +45,11 @@ class TdPayoutExecutor implements ApprovalExecutor
 
     public function execute(SavingsApproval $approval, User $checker): ?SavingsTransaction
     {
-        $deposit = TimeDeposit::query()->findOrFail($approval->time_deposit_id);
+        // Locking reads in the design's order (accounts, then the placement),
+        // whatever the desk already holds: two approvals of one placement
+        // carried out at once settle it once (review M1).
+        $this->locks->accounts($this->accountIds($approval));
+        $deposit = $this->locks->timeDeposit((int) $approval->time_deposit_id);
         $payload = $approval->payload ?? [];
 
         if (! in_array($deposit->status, Settlement::OPEN_STATUSES, true)) {
@@ -58,6 +66,13 @@ class TdPayoutExecutor implements ApprovalExecutor
             ]]);
         }
 
-        return $this->settlement->settle($deposit, (string) $payload['date'], (string) $payload['action'], $payload['payout_method'] ?? null, $checker->id)['credit'];
+        return $this->settlement->settle(
+            $deposit,
+            (string) $payload['date'],
+            (string) $payload['action'],
+            $payload['payout_method'] ?? null,
+            $checker->id,
+            $payload['next_instruction'] ?? null,
+        )['credit'];
     }
 }

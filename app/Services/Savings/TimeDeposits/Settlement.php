@@ -27,10 +27,13 @@ use LogicException;
  * - `rollover_principal`: the principal is placed again, the net interest is
  *   paid out;
  * - `rollover_all`: principal and net interest are placed again.
- * A rollover is a new placement ({@see Placement::rollover()}).
+ * A rollover is a new placement ({@see Placement::rollover()}) starting on
+ * the settlement date, with the next instruction staff chose (else the old
+ * one's).
  *
- * **Early** ({@see self::preterminate()}): before the maturity date, at the
- * snapshotted regular rate for the days held, no penalty in v1.
+ * **Early** ({@see self::preterminate()}): only while the placement is still
+ * running, before the maturity date, at the snapshotted regular rate for the
+ * days held, no penalty in v1.
  *
  * **Paying out:** in cash, by bank, GCash or Maya, or into the member's own
  * savings account named at placement (`payout_method` savings). A payout
@@ -38,9 +41,15 @@ use LogicException;
  * `td_payout` or `pretermination` approval, carried out by its executor);
  * a payout into savings moves no cash, like a transfer, and posts at once.
  *
- * **Books:** one `time_deposit_settlement` journal per placement. Its stored
- * `settled_amount` is what was paid out (₱0.00 on a full rollover), the
- * figure AutomaticPoster checks the journal against.
+ * **Once only:** the settling write is conditioned on the placement still
+ * being open (409 when no row changes), on top of the placement's row lock;
+ * a placement with any pending approval refuses a new request (409).
+ *
+ * **Books:** one `time_deposit_settlement` journal per placement, dated the
+ * settlement date (`settled_on`). Its stored `settled_amount` is what was
+ * paid out (₱0.00 on a full rollover), the figure AutomaticPoster checks the
+ * journal against. Each settlement writes a `time_deposit_settled` audit row
+ * (staff, or the system for the maturity job).
  *
  * **Locks:** the payout account first, then the placement, then the
  * approval row and the generated numbers, then the journal last.
@@ -63,7 +72,7 @@ class Settlement
      * A settlement asked for at the counter: carried out now (201), or waiting
      * for a checker (202).
      *
-     * @param  array{date: string, action: string, payout_method?: string|null}  $data
+     * @param  array{date: string, action: string, payout_method?: string|null, next_instruction?: string|null}  $data
      * @return array{deposit: TimeDeposit, rolled: TimeDeposit|null, approval: SavingsApproval|null}
      *
      * @throws ValidationException
@@ -71,6 +80,7 @@ class Settlement
     public function requestSettlement(TimeDeposit $deposit, array $data, User $user): array
     {
         $payoutMethod = $data['payout_method'] ?? null;
+        $nextInstruction = $data['next_instruction'] ?? null;
         $locked = $this->lock($deposit, $payoutMethod === 'savings');
 
         $this->assertOpen($locked);
@@ -85,14 +95,19 @@ class Settlement
             if ($payoutMethod !== 'savings' && $this->gate->needsApproval($paidOut)) {
                 $approval = $this->gate->open('td_payout', $paidOut, [
                     'time_deposit_id' => $locked->id,
-                    'payload' => ['date' => $data['date'], 'action' => $data['action'], 'payout_method' => $payoutMethod],
+                    'payload' => [
+                        'date' => $data['date'],
+                        'action' => $data['action'],
+                        'payout_method' => $payoutMethod,
+                        'next_instruction' => $nextInstruction,
+                    ],
                 ], $user->id);
 
                 return ['deposit' => $locked, 'rolled' => null, 'approval' => $approval];
             }
         }
 
-        $result = $this->settle($locked, $data['date'], $data['action'], $payoutMethod, $user->id);
+        $result = $this->settle($locked, $data['date'], $data['action'], $payoutMethod, $user->id, $nextInstruction);
 
         return [...$result, 'approval' => null];
     }
@@ -106,7 +121,7 @@ class Settlement
      *
      * @throws ValidationException
      */
-    public function settle(TimeDeposit $locked, string $date, string $action, ?string $payoutMethod, ?int $userId): array
+    public function settle(TimeDeposit $locked, string $date, string $action, ?string $payoutMethod, ?int $userId, ?string $nextInstruction = null): array
     {
         $this->assertInTransaction();
         $this->assertOpen($locked);
@@ -115,8 +130,10 @@ class Settlement
             $this->refuse('date', $this->tooEarly($locked));
         }
 
-        if (! in_array($action, TimeDeposit::MATURITY_INSTRUCTIONS, true)) {
-            throw new LogicException("\"{$action}\" is not a maturity instruction.");
+        foreach ([$action, $nextInstruction ?? $action] as $instruction) {
+            if (! in_array($instruction, TimeDeposit::MATURITY_INSTRUCTIONS, true)) {
+                throw new LogicException("\"{$instruction}\" is not a maturity instruction.");
+            }
         }
 
         ['gross' => $gross, 'tax' => $tax, 'rolled' => $rolled, 'paid_out' => $paidOut] = $this->split($locked, $action);
@@ -126,22 +143,42 @@ class Settlement
             $this->assertPayoutMethod($locked, $method);
         }
 
-        $locked->forceFill([
-            'status' => $action === 'payout' ? 'withdrawn' : 'rolled_over',
+        $before = $locked->status;
+        $status = $action === 'payout' ? 'withdrawn' : 'rolled_over';
+        $values = [
+            'status' => $status,
             'settled_on' => $date,
             'settled_interest' => SavingsMath::pesos($gross),
             'settled_tax' => SavingsMath::pesos($tax),
             'settled_amount' => SavingsMath::pesos($paidOut),
             'payout_method' => $method,
             'settled_by' => $userId,
-        ])->save();
+        ];
 
-        $rolledInto = $rolled > 0 ? $this->placement->rollover($locked, $rolled, $userId) : null;
+        $this->closeOnce($locked, self::OPEN_STATUSES, $values);
+
+        $rolledInto = $rolled > 0 ? $this->placement->rollover($locked, $rolled, $userId, $date, $nextInstruction) : null;
         $credit = $method === 'savings'
             ? $this->creditSavings($locked, $paidOut, $date, $userId, "Time deposit {$locked->certificate_number} matured")
             : null;
 
         $this->poster->timeDepositSettlement($locked, $rolled, $method, $userId);
+
+        $words = match ($action) {
+            'payout' => 'paid out '.$this->peso($paidOut),
+            'rollover_principal' => "rolled over the principal into {$rolledInto?->certificate_number} and paid out ".$this->peso($paidOut).' interest',
+            default => 'rolled over '.$this->peso($rolled)." into {$rolledInto?->certificate_number}",
+        };
+
+        AuditLogService::log(
+            'time_deposit_settled',
+            $locked,
+            ['status' => $before],
+            [...$values, 'rolled_over_amount' => SavingsMath::pesos($rolled), 'rolled_over_to' => $rolledInto?->certificate_number],
+            "Time deposit {$locked->certificate_number} settled on ".CarbonImmutable::parse($date)->format('M j, Y').": {$words}"
+                .($userId === null ? ', by the system.' : '.'),
+            $userId,
+        );
 
         return ['deposit' => $locked, 'rolled' => $rolledInto, 'credit' => $credit];
     }
@@ -159,7 +196,7 @@ class Settlement
     {
         $locked = $this->lock($deposit, $data['payout_method'] === 'savings');
 
-        $this->assertOpen($locked);
+        $this->assertCanPreterminate($locked);
         $this->assertNoPendingApproval($locked);
         $this->assertCounterDate($data['date']);
 
@@ -191,17 +228,12 @@ class Settlement
     public function preterminate(TimeDeposit $locked, string $date, string $reason, string $payoutMethod, ?int $userId): array
     {
         $this->assertInTransaction();
-        $this->assertOpen($locked);
-
-        if ($locked->status !== 'active') {
-            $this->refuse('date', "{$locked->certificate_number} has matured, so it can't be pre-terminated. Settle it instead.");
-        }
+        $this->assertCanPreterminate($locked);
 
         $figures = $this->quote->pretermination($locked, $date);
         $this->assertPayoutMethod($locked, $payoutMethod);
-        $before = $locked->only(['status', 'settled_on', 'settled_amount']);
 
-        $locked->forceFill([
+        $this->closeOnce($locked, ['active'], [
             'status' => 'preterminated',
             'settled_on' => $figures['date'],
             'settled_interest' => SavingsMath::pesos($figures['gross']),
@@ -209,16 +241,16 @@ class Settlement
             'settled_amount' => SavingsMath::pesos($figures['payout']),
             'payout_method' => $payoutMethod,
             'settled_by' => $userId,
-        ])->saveQuietly();
+        ]);
 
         $day = CarbonImmutable::parse($figures['date'])->format('M j, Y');
         AuditLogService::log(
             'time_deposit_preterminated',
             $locked,
-            ['status' => $before['status'], 'settled_on' => null, 'settled_amount' => null],
+            ['status' => 'active', 'settled_on' => null, 'settled_amount' => null],
             ['status' => 'preterminated', 'settled_on' => $figures['date'], 'settled_amount' => SavingsMath::pesos($figures['payout']), 'reason' => $reason],
             "Time deposit {$locked->certificate_number} pre-terminated on {$day}, {$figures['days_held']} days held, paying "
-                .'₱'.number_format($figures['payout'] / 100, 2).". Reason: {$reason}",
+                .$this->peso($figures['payout']).". Reason: {$reason}",
             $userId,
         );
 
@@ -274,9 +306,22 @@ class Settlement
     public function assertOpen(TimeDeposit $deposit): void
     {
         if (! in_array($deposit->status, self::OPEN_STATUSES, true)) {
-            $on = $deposit->settled_on === null ? '' : ' on '.$deposit->settled_on->format('M j, Y');
+            $this->alreadySettled($deposit);
+        }
+    }
 
-            abort(409, "{$deposit->certificate_number} was already settled{$on} (".str_replace('_', ' ', $deposit->status).').');
+    /**
+     * Only a running placement can be broken early: one already settled is a
+     * 409, a matured one a 422 (settle it instead).
+     *
+     * @throws ValidationException
+     */
+    public function assertCanPreterminate(TimeDeposit $deposit): void
+    {
+        $this->assertOpen($deposit);
+
+        if ($deposit->status !== 'active') {
+            $this->refuse('time_deposit', "{$deposit->certificate_number} has matured, so it can't be pre-terminated. Settle it instead.");
         }
     }
 
@@ -303,14 +348,41 @@ class Settlement
         $this->placement->assertCanReceive(SavingsAccount::query()->findOrFail($deposit->payout_account_id), 'payout_method');
     }
 
-    /** Whether a payout or pre-termination of this placement waits for a checker. */
+    /**
+     * Whether a payout or pre-termination of this placement waits for a
+     * checker. Every `pending` row counts, past its `expires_at` too, until
+     * the 00:30 `savings:expire` run (or a decision) closes it: an approval
+     * that is still pending can still be carried out.
+     */
     public function hasPendingApproval(TimeDeposit $deposit): bool
     {
         return SavingsApproval::query()
             ->where('time_deposit_id', $deposit->id)
             ->where('status', 'pending')
-            ->where(fn ($q) => $q->whereNull('expires_at')->orWhere('expires_at', '>', now()))
             ->exists();
+    }
+
+    /**
+     * The one write that settles a placement: conditioned on its status still
+     * being one of $from, so a second settlement changes no row and answers
+     * 409, whatever lock a caller did or didn't take. No automatic audit row:
+     * the caller writes the settlement's own.
+     *
+     * @param  list<string>  $from
+     * @param  array<string, mixed>  $values
+     */
+    private function closeOnce(TimeDeposit $locked, array $from, array $values): void
+    {
+        $changed = TimeDeposit::query()
+            ->whereKey($locked->id)
+            ->whereIn('status', $from)
+            ->update([...$values, 'updated_at' => now()]);
+
+        $locked->refresh();
+
+        if ($changed === 0) {
+            $this->alreadySettled($locked);
+        }
     }
 
     /** Lock the payout account (when it is paid into) and then the placement. */
@@ -327,8 +399,15 @@ class Settlement
     private function assertNoPendingApproval(TimeDeposit $deposit): void
     {
         if ($this->hasPendingApproval($deposit)) {
-            abort(409, "A payout of {$deposit->certificate_number} is already waiting for approval.");
+            abort(409, "A payout of {$deposit->certificate_number} is already waiting for approval. Approve, reject or cancel it first.");
         }
+    }
+
+    private function alreadySettled(TimeDeposit $deposit): never
+    {
+        $on = $deposit->settled_on === null ? '' : ' on '.$deposit->settled_on->format('M j, Y');
+
+        abort(409, "{$deposit->certificate_number} was already settled{$on} (".str_replace('_', ' ', $deposit->status).').');
     }
 
     /** @throws ValidationException */
@@ -361,6 +440,11 @@ class Settlement
     private function tooEarly(TimeDeposit $deposit): string
     {
         return "{$deposit->certificate_number} matures on {$deposit->maturity_date->format('M j, Y')}. Before then, pre-terminate it instead.";
+    }
+
+    private function peso(int $centavos): string
+    {
+        return '₱'.number_format($centavos / 100, 2);
     }
 
     private function assertInTransaction(): void

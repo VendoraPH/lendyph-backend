@@ -6,6 +6,7 @@ use App\Models\SavingsApproval;
 use App\Models\SavingsTransaction;
 use App\Models\TimeDeposit;
 use App\Models\User;
+use App\Services\Savings\SavingsLocks;
 use App\Services\Savings\SavingsMath;
 use App\Services\Savings\TimeDeposits\Quote;
 use App\Services\Savings\TimeDeposits\Settlement;
@@ -24,6 +25,7 @@ class PreterminationExecutor implements ApprovalExecutor
     public function __construct(
         private readonly Settlement $settlement,
         private readonly Quote $quote,
+        private readonly SavingsLocks $locks,
     ) {}
 
     public function accountIds(SavingsApproval $approval): array
@@ -44,7 +46,11 @@ class PreterminationExecutor implements ApprovalExecutor
 
     public function execute(SavingsApproval $approval, User $checker): ?SavingsTransaction
     {
-        $deposit = TimeDeposit::query()->findOrFail($approval->time_deposit_id);
+        // Locking reads in the design's order (accounts, then the placement),
+        // whatever the desk already holds: two approvals of one placement
+        // carried out at once settle it once (review M1).
+        $this->locks->accounts($this->accountIds($approval));
+        $deposit = $this->locks->timeDeposit((int) $approval->time_deposit_id);
         $payload = $approval->payload ?? [];
 
         if ($deposit->status !== 'active') {
