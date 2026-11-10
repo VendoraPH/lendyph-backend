@@ -63,12 +63,13 @@ class HoldDesk
         $this->locks->account($hold->account_id);
         $locked = SavingsHold::query()->whereKey($hold->id)->lockForUpdate()->firstOrFail();
 
-        if ($locked->status !== 'active') {
-            Refuse::conflict("This hold is already {$locked->status}.");
+        if ($locked->status !== SavingsHold::STATUS_ACTIVE) {
+            $words = SavingsHold::STATUS_WORDS[$locked->status] ?? 'no longer active';
+            Refuse::conflict("This hold is already {$words}.");
         }
 
         $locked->update([
-            'status' => 'released',
+            'status' => SavingsHold::STATUS_RELEASED,
             'released_on' => now()->toDateString(),
             'release_reason' => $reason,
             'released_by' => $user->id,
