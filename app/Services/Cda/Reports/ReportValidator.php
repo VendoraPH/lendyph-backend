@@ -4,6 +4,7 @@ namespace App\Services\Cda\Reports;
 
 use App\Models\CdaDocument;
 use App\Models\CdaReport;
+use App\Services\Cda\Deadlines;
 use App\Services\Cda\ReportTypes;
 use App\Services\Cda\Sources\SourceContext;
 use App\Services\Cda\Sources\SourceRegistry;
@@ -156,7 +157,7 @@ final class ReportValidator
                 'max_length' => ! FieldValue::filled($value) || mb_strlen((string) $value) <= (int) $rule['value'] ? null : "{$label} takes up to {$rule['value']} characters.",
                 'one_of' => ! FieldValue::filled($value) || in_array($value, (array) $rule['values'], true) ? null : "{$label} must be one of ".implode(', ', (array) $rule['values']).'.',
                 'pattern' => $this->matchesPattern($value, (string) $rule['pattern']) ? null : "{$label} isn't a valid ".self::PATTERN_WORDS[$rule['pattern']].'.',
-                'date_range' => $this->inPeriod($value, $context) ? null : "{$label} must be a date within {$context->year()}, and not in the future.",
+                'date_range' => $this->dateRange($rule, $value, $report, $context, $label),
                 'compare' => $this->compare($rule, $definition, $values, $context),
                 'sum_equals' => $this->sumEquals($rule, $definition, $values),
                 'check' => $this->checks->run((string) $rule['check'], (array) ($rule['params'] ?? []), $context, $definition),
@@ -195,15 +196,42 @@ final class ReportValidator
         };
     }
 
-    private function inPeriod(mixed $value, SourceContext $context): bool
+    /**
+     * A date between the rule's bounds and never in the future. `from` and
+     * `to` are each period_start, period_end, effective_deadline or today
+     * (default: the period), so a sworn statement signed in the filing year
+     * can run up to the report's effective deadline.
+     */
+    private function dateRange(array $rule, mixed $value, CdaReport $report, SourceContext $context, string $label): ?string
     {
         if (! FieldValue::filled($value)) {
-            return true;
+            return null;
         }
 
         $date = (string) $value;
+        $today = Carbon::today()->toDateString();
+        $from = $this->dateBound((string) ($rule['from'] ?? 'period_start'), $report, $context);
+        $to = $this->dateBound((string) ($rule['to'] ?? 'period_end'), $report, $context);
 
-        return $date >= $context->date('period_start') && $date <= $context->date('period_end') && $date <= Carbon::today()->toDateString();
+        if ($date > $today) {
+            return "{$label} can't be in the future.";
+        }
+
+        if ($date < $from || $date > $to) {
+            return sprintf('%s must be a date from %s to %s.', $label, Carbon::parse($from)->format('M j, Y'), Carbon::parse($to)->format('M j, Y'));
+        }
+
+        return null;
+    }
+
+    private function dateBound(string $token, CdaReport $report, SourceContext $context): string
+    {
+        return match ($token) {
+            'effective_deadline' => Deadlines::effective($report, $context->period),
+            'today' => Carbon::today()->toDateString(),
+            'period_end' => $context->date('period_end'),
+            default => $context->date('period_start'),
+        };
     }
 
     private function compare(array $rule, ReportDefinition $definition, array $values, SourceContext $context): ?string
