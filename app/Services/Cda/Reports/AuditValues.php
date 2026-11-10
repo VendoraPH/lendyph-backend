@@ -19,6 +19,12 @@ use App\Services\Cda\ReportTypes;
  * - A save also records each override's change (`is_override`, and its
  *   reason where the report isn't restricted) and which fields' remarks or
  *   evidence changed, by key only.
+ *
+ * Decided (C2 re-review, M-A): "restricted" is the report type's own
+ * restriction. CAPR isn't restricted, so the financial statement totals it
+ * carries (total assets, liabilities, equity, net surplus) are audited like
+ * any CAPR figure: every CDA user files and sees them. The audit
+ * restriction covers the audited statements' own content.
  */
 final class AuditValues
 {

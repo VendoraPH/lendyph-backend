@@ -361,14 +361,28 @@ final class ReportWorkflow
         return CdaSubmission::query()->where('report_id', $report->id)->where('snapshot_id', $report->current_snapshot_id)->latest('id')->first();
     }
 
-    /** @param  array<string, mixed>  $extra */
+    /**
+     * One audit row per transition. A mediation, audit or tax report's
+     * free-text reason stays out of it (its text can name parties or
+     * figures); the reason still reaches the notice, and a reopen's reason
+     * is kept on the superseded snapshot.
+     *
+     * @param  array<string, mixed>  $extra
+     */
     private function audit(CdaReport $report, string $action, string $from, ?string $reason = null, array $extra = []): void
     {
+        $reason = AuditValues::restricted($report) ? null : $reason;
+        $new = ['status' => $report->status, 'action' => $action, ...$extra];
+
+        if ($reason !== null) {
+            $new['reason'] = $reason;
+        }
+
         AuditLogService::log(
             'cda_workflow',
             $report,
             ['status' => $from],
-            ['status' => $report->status, 'action' => $action, 'reason' => $reason, ...$extra],
+            $new,
             sprintf('%s %d %s%s.', ReportValidator::reportName($report), $report->period->year, self::ACTION_WORDS[$action], $reason === null ? '' : ": {$reason}"),
         );
     }

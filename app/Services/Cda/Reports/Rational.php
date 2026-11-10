@@ -13,8 +13,9 @@ use OverflowException;
  * and a ratio is never a float. Rounding happens only when a figure is
  * written out (toFixed), half up (away from zero), as everywhere else.
  *
- * A number is read with at most 18 significant digits (else an
- * InvalidArgumentException, a 422 in words); a result too large for a 64-bit
+ * A number is read with up to 18 digits in all, at most 9 of them after the
+ * decimal point (leading zeros of the whole part don't count), else an
+ * InvalidArgumentException, a 422 in words; a result too large for a 64-bit
  * integer throws OverflowException, which the engine reports as an issue
  * instead of a wrong figure. Never a TypeError.
  */
@@ -38,7 +39,7 @@ final class Rational
         $text = is_float($value) ? self::floatText($value) : trim($value);
 
         if (! self::parse($text, $m)) {
-            throw new InvalidArgumentException("\"{$text}\" is not a number of up to ".self::MAX_DIGITS.' digits.');
+            throw new InvalidArgumentException("\"{$text}\" is not a number of up to ".self::MAX_DIGITS.' digits, with at most 9 after the decimal point.');
         }
 
         $decimals = $m[3] ?? '';
@@ -59,9 +60,9 @@ final class Rational
     }
 
     /**
-     * A decimal of up to 18 significant digits (at most 9 after the point),
-     * so its numerator always fits a 64-bit integer; leading zeros of the
-     * whole part don't count.
+     * A decimal of up to 18 digits in all, at most 9 after the point, so its
+     * numerator always fits a 64-bit integer; leading zeros of the whole part
+     * don't count (zeros after the point do).
      *
      * @param  array<int, string>|null  $m
      */
@@ -147,7 +148,7 @@ final class Rational
     public function toFixed(int $decimals): string
     {
         $scaled = $this->round($decimals);
-        $units = intdiv($scaled->numerator * (10 ** $decimals), $scaled->denominator);
+        $units = intdiv(self::checked($scaled->numerator * (10 ** $decimals)), $scaled->denominator);
         $sign = $units < 0 ? '-' : '';
         $units = abs($units);
 

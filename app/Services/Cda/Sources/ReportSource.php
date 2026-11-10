@@ -13,6 +13,13 @@ use App\Services\Cda\ReportTypes;
  * provisional. The other report's stored values are read, never refreshed,
  * so two reports reading each other can't loop. Sources run unscoped: the
  * figure is shown on the reading report whatever its type's restriction.
+ *
+ * Decided (C2 re-review, M-A): the financial statement totals CAPR carries
+ * (total assets, liabilities, equity, net surplus) aren't sensitive; they
+ * are part of CAPR, which every CDA user files and sees. The audit
+ * restriction covers the audited statements' own content (auditor details,
+ * notes, documents, the full statements), not those totals. An issue
+ * comparing against a restricted report still never shows its figure.
  */
 final class ReportSource implements CdaSource
 {

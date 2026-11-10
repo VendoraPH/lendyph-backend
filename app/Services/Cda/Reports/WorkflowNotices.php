@@ -53,7 +53,7 @@ final class WorkflowNotices
 
     public function returned(CdaReport $report, User $actor, string $reason): void
     {
-        $this->send($report, $actor, self::RETURNED, [CdaAccess::PREPARE], 'CDA report returned', '%s was returned to draft by %s. Reason: '.$reason);
+        $this->send($report, $actor, self::RETURNED, [CdaAccess::PREPARE], 'CDA report returned', '%s was returned to draft by %s. Reason: %s', [$reason]);
     }
 
     public function finalized(CdaReport $report, User $actor): void
@@ -63,13 +63,20 @@ final class WorkflowNotices
 
     public function forCorrection(CdaReport $report, User $actor, string $reason): void
     {
-        $this->send($report, $actor, self::FOR_CORRECTION, [CdaAccess::PREPARE, CdaAccess::APPROVE], 'CDA report needs correction', '%s needs correction, recorded by %s. Reason: '.$reason);
+        $this->send($report, $actor, self::FOR_CORRECTION, [CdaAccess::PREPARE, CdaAccess::APPROVE], 'CDA report needs correction', '%s needs correction, recorded by %s. Reason: %s', [$reason]);
     }
 
-    /** @param  list<string>  $audience */
-    private function send(CdaReport $report, User $actor, string $type, array $audience, string $title, string $body): void
+    /**
+     * The body is a fixed format: the report and the actor fill its first two
+     * `%s`, and anything staff typed (a reason) only ever goes in as a later
+     * argument, never into the format itself.
+     *
+     * @param  list<string>  $audience
+     * @param  list<string>  $extra  further arguments for the body
+     */
+    private function send(CdaReport $report, User $actor, string $type, array $audience, string $title, string $body, array $extra = []): void
     {
-        $deliver = function () use ($report, $actor, $type, $audience, $title, $body): void {
+        $deliver = function () use ($report, $actor, $type, $audience, $title, $body, $extra): void {
             try {
                 $recipients = $this->recipients($report, $audience, (int) $actor->id);
 
@@ -83,7 +90,7 @@ final class WorkflowNotices
                 Notification::send($recipients, new StaffNotification(
                     $type,
                     $title,
-                    sprintf($body, $name, trim((string) $actor->full_name) ?: (string) $actor->username),
+                    sprintf($body, $name, trim((string) $actor->full_name) ?: (string) $actor->username, ...$extra),
                     (self::PATHS[$report->report_type] ?? '/cda').'?year='.$year,
                     ['report_id' => (int) $report->id, 'report_type' => $report->report_type, 'part' => $report->part, 'year' => $year],
                 ));

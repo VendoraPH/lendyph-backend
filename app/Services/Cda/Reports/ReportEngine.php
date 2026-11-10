@@ -148,9 +148,17 @@ final class ReportEngine
         )['issues'];
     }
 
-    /** After a save: the calculations, issues and readiness from the stored values. */
+    /**
+     * After a save: the calculations, issues and readiness from the stored
+     * values. Like refresh(), it leaves alone a report that is no longer a
+     * draft (the caller holds the row's lock).
+     */
     public function recompute(CdaReport $report): void
     {
+        if (CdaReport::query()->whereKey($report->id)->value('status') !== CdaReport::STATUS_DRAFT) {
+            return;
+        }
+
         $report->loadMissing(['template', 'period']);
         $definition = $this->definition($report);
         $context = $this->context($report);
