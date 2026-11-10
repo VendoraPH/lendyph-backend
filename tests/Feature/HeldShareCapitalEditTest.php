@@ -171,4 +171,94 @@ class HeldShareCapitalEditTest extends TestCase
             $this->postJson('/api/loans/preview', $this->previewBody([$this->shareCapital, $this->land]))->assertOk()->json('data.collateral'),
         );
     }
+
+    /**
+     * Held means held by the loan being edited: a share capital pledge
+     * another loan of the same member holds is a new pledge here, so listing
+     * it still needs the permission.
+     */
+    public function test_share_capital_held_by_another_loan_of_the_member_is_still_refused(): void
+    {
+        $other = app(LoanService::class)->createLoan([
+            'borrower_id' => $this->loan->borrower_id,
+            'loan_product_id' => $this->loan->loan_product_id,
+            'principal_amount' => 50000,
+            'start_date' => now()->toDateString(),
+        ], $this->admin);
+
+        $this->actingAs($this->editor());
+
+        $this->postJson('/api/loans/preview', [...$this->previewBody([$this->shareCapital, $this->land]), 'loan_id' => $other->id])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['collaterals.0.collateral_id' => 'Previewing a share capital collateral needs the Share Capital: View permission.'])
+            ->assertJsonMissingValidationErrors(['collaterals.1.collateral_id']);
+    }
+
+    /**
+     * The restructure edit form (`loan_id` with `source_loan_id`). The draft
+     * inherited the source's share capital pledge, so listing that row is a
+     * held one: withheld, never refused. Leaving it out is still the source's
+     * refusal, since a restructure carries every pledge of its source.
+     */
+    public function test_the_restructure_edit_form_may_list_the_inherited_share_capital_row(): void
+    {
+        $member = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+        ShareCapitalLedger::factory()->create(['borrower_id' => $member->id, 'credit' => 3456.78, 'debit' => 0]);
+        $shareCapital = Collateral::factory()->create([
+            'borrower_id' => $member->id,
+            'collateral_type_id' => CollateralType::where('source', 'share_capital')->firstOrFail()->id,
+            'amount' => 999999,
+        ]);
+        $loans = app(LoanService::class);
+        $source = $loans->createLoan([
+            'borrower_id' => $member->id,
+            'loan_product_id' => $this->loan->loan_product_id,
+            'principal_amount' => 60000,
+            'start_date' => now()->toDateString(),
+        ], $this->admin);
+        $loans->submitForReview($source);
+        $loans->approve($source, $this->admin, 'Approved for testing');
+        $loans->release($source, $this->admin);
+        $source->collaterals()->attach($shareCapital->id, ['snapshot_value' => 3456.78, 'attached_at' => now()]);
+
+        $draft = Loan::findOrFail($this->postJson("/api/loans/{$source->id}/restructure", [
+            'borrower_id' => $member->id,
+            'loan_product_id' => $source->loan_product_id,
+            'principal_amount' => 70800,
+            'start_date' => now()->toDateString(),
+        ])->assertCreated()->json('data.id'));
+        $this->assertTrue($draft->collaterals()->whereKey($shareCapital->id)->exists(), 'setup: the draft inherited the pledge');
+        $land = Collateral::factory()->create(['borrower_id' => $member->id, 'amount' => 20000]);
+
+        $body = fn (array $collaterals): array => [
+            'loan_id' => $draft->id,
+            'source_loan_id' => $source->id,
+            'loan_product_id' => $source->loan_product_id,
+            'principal_amount' => 70800,
+            'interest_rate' => 3.0,
+            'term' => 6,
+            'frequency' => 'monthly',
+            'start_date' => now()->toDateString(),
+            'collaterals' => array_map(fn (Collateral $c): array => ['collateral_id' => $c->id], $collaterals),
+        ];
+
+        $user = User::factory()->create();
+        $user->givePermissionTo(['loans:update', 'loans:restructure', 'collaterals:view', 'collaterals:update']);
+        $this->actingAs($user);
+
+        $response = $this->postJson('/api/loans/preview', $body([$shareCapital, $land]))->assertOk();
+        $this->assertSame(
+            ['total_value' => null, 'security_status' => null, 'short_by' => null, 'value_unknown' => true],
+            $response->json('data.collateral'),
+        );
+        $this->assertSame('0.00', $response->json('data.restructure.paid_out'));
+        $this->assertNotNull($response->json('data.amortization'));
+        foreach (['3456.78', '3456', '23456.78', '23456', '47343.22', '47343', '999999'] as $figure) {
+            $this->assertStringNotContainsString($figure, $response->getContent(), "{$figure} must not appear");
+        }
+
+        $this->postJson('/api/loans/preview', $body([$land]))
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['source_loan_id' => 'This loan is secured by share capital; previewing its restructure needs the Share Capital: View permission.']);
+    }
 }

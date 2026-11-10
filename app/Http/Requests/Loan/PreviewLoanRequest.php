@@ -130,8 +130,10 @@ class PreviewLoanRequest extends FormRequest
      *  - A share capital collateral needs `share_capital:view`: its value is
      *    the member's balance, so the preview's total would show what the
      *    permission hides. On a restructure that includes the source loan's
-     *    pledges, which count whether listed or not. (An edit with no list
-     *    is withheld rather than refused: LoanService::formPreview().)
+     *    pledges, which count whether listed or not. A share capital pledge
+     *    the edited loan (`loan_id`) already holds is never refused, whether
+     *    it is listed or no list is sent: the preview withholds the
+     *    collateral figures instead (LoanService::formPreview()).
      *
      * @return array<int, \Closure(Validator): void>
      */
