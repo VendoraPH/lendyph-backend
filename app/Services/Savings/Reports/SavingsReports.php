@@ -10,6 +10,7 @@ use App\Models\TimeDeposit;
 use App\Services\Savings\AccruedInterest;
 use App\Services\Savings\AvailableBalance;
 use App\Services\Savings\SavingsMath;
+use App\Services\Savings\TimeDeposits\Settlement;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
@@ -250,6 +251,12 @@ class SavingsReports
     }
 
     /**
+     * `listed_count` is every placement the report lists. Every other total
+     * counts only the placements still owed: active, or matured and not
+     * settled yet (Settlement::OPEN_STATUSES). A placement already paid out,
+     * rolled over or pre-terminated is listed with its status but counted in
+     * no money total.
+     *
      * `payout_amount` is the cash the placements leave the cooperative with
      * at maturity: everything on `payout`, the net interest on
      * `rollover_principal`, nothing on `rollover_all`.
@@ -258,12 +265,19 @@ class SavingsReports
      */
     public function maturityTotals(array $filters): array
     {
+        $owed = 'status IN ('.implode(', ', array_fill(0, count(Settlement::OPEN_STATUSES), '?')).')';
+        $bindings = Settlement::OPEN_STATUSES;
+
         $sums = $this->maturitiesQuery($filters)->reorder()->toBase()
-            ->selectRaw('COUNT(*) AS rows_count, COALESCE(SUM(principal), 0) AS principal, COALESCE(SUM(net_interest), 0) AS net_interest, COALESCE(SUM(maturity_amount), 0) AS maturity_amount')
-            ->selectRaw("COALESCE(SUM(CASE WHEN maturity_instruction = 'payout' THEN maturity_amount WHEN maturity_instruction = 'rollover_principal' THEN net_interest ELSE 0 END), 0) AS payout")
+            ->selectRaw("COUNT(*) AS listed_count, COALESCE(SUM(CASE WHEN {$owed} THEN 1 ELSE 0 END), 0) AS rows_count", $bindings)
+            ->selectRaw("COALESCE(SUM(CASE WHEN {$owed} THEN principal ELSE 0 END), 0) AS principal", $bindings)
+            ->selectRaw("COALESCE(SUM(CASE WHEN {$owed} THEN net_interest ELSE 0 END), 0) AS net_interest", $bindings)
+            ->selectRaw("COALESCE(SUM(CASE WHEN {$owed} THEN maturity_amount ELSE 0 END), 0) AS maturity_amount", $bindings)
+            ->selectRaw("COALESCE(SUM(CASE WHEN NOT ({$owed}) THEN 0 WHEN maturity_instruction = 'payout' THEN maturity_amount WHEN maturity_instruction = 'rollover_principal' THEN net_interest ELSE 0 END), 0) AS payout", $bindings)
             ->first();
 
         return [
+            'listed_count' => (int) $sums->listed_count,
             'count' => (int) $sums->rows_count,
             'total_principal' => $this->money($sums->principal),
             'total_net_interest' => $this->money($sums->net_interest),

@@ -29,6 +29,9 @@ use Throwable;
  * screen never works it out); otherwise 0 and "0.00". When that live figure
  * can't be worked out (no tax rule in force, say), both read null and the
  * reason is logged, so one row never fails a page.
+ *
+ * `pending_approval`: the payout or pre-termination waiting for a checker,
+ * `{id, kind, amount, requested_by}`, else null.
  */
 class TimeDepositPresenter
 {
@@ -43,6 +46,8 @@ class TimeDepositPresenter
         'settler:id,first_name,last_name,username',
         'creator:id,first_name,last_name,username',
         'rolledOverInto:id,rolled_over_from_id',
+        'pendingApproval',
+        'pendingApproval.requester:id,first_name,last_name,username',
     ];
 
     /**
@@ -97,8 +102,32 @@ class TimeDepositPresenter
             ...$this->postMaturity($deposit),
             'rolled_over_from_id' => $deposit->rolled_over_from_id,
             'rolled_over_to_id' => $deposit->rolledOverInto?->id,
+            'pending_approval' => $this->pendingApproval($deposit),
             'created_by' => SavingsUserRef::from($deposit->creator),
             'created_at' => $deposit->created_at,
+        ];
+    }
+
+    /**
+     * The payout or pre-termination waiting for a checker, so the screen can
+     * show "Waiting for approval" and hold Settle and Pre-terminate; null when
+     * there is none.
+     *
+     * @return array{id: int, kind: string, amount: string, requested_by: array{id: int, name: string}|null}|null
+     */
+    private function pendingApproval(TimeDeposit $deposit): ?array
+    {
+        $approval = $deposit->pendingApproval;
+
+        if ($approval === null) {
+            return null;
+        }
+
+        return [
+            'id' => $approval->id,
+            'kind' => $approval->kind,
+            'amount' => $approval->amount,
+            'requested_by' => SavingsUserRef::from($approval->requester),
         ];
     }
 
