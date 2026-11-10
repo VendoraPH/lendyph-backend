@@ -25,6 +25,10 @@ use OpenApi\Attributes as OA;
  * report or by subject) also need their view permission: the list leaves
  * them out, and opening or changing one answers 403.
  *
+ * A register's document (a certificate, a proof, a mediation paper) also
+ * needs that register's write permission to upload to or withdraw
+ * (DocumentRepository::writePermissionFor()).
+ *
  * Every upload is a new version, never overwriting one; `final` makes it the
  * one final version; withdrawing keeps every file. Files are reached only by
  * a signed `url` (30 minutes, bound to the user). Uploads take the member
@@ -79,13 +83,15 @@ class CdaDocumentController extends Controller
         $page = $query->with(['period', 'report', 'versions.file'])->orderBy('category')->orderByDesc('id')
             ->paginate(RegisterPresenter::perPage($request->query('per_page')));
 
-        return RegisterPresenter::page($page, $page->getCollection()->map(fn (CdaDocument $document) => RegisterPresenter::document($document))->all());
+        $users = RegisterPresenter::usersFor($page->getCollection());
+
+        return RegisterPresenter::page($page, $page->getCollection()->map(fn (CdaDocument $document) => RegisterPresenter::document($document, $users))->all());
     }
 
     #[OA\Post(
         path: '/api/cda/periods/{year}/documents',
         summary: 'Upload a new compliance document',
-        description: 'Needs `cda:upload` and `branches:view_all`, plus the view permission of a restricted category or report (403). Multipart: `file` (up to 10 MB; a picture, PDF, Word document or Excel workbook, judged by its contents and its name), `title`, `category`, optional `report_id` (one of the period\'s), `subject_type` + `subject_id` (training, program or case), `description`, `expires_on`, `version_label`, `notes`, `final`. Audited.',
+        description: 'Needs `cda:upload` and `branches:view_all`, plus the view permission of a restricted category, report or case, and a register\'s write permission for its documents (`cda:manage_officers` for certificates and trainings, `cda:manage_mediation` for mediation papers and cases), checked before anything is looked up (403). A training\'s certificate is added from the training (422). Multipart: `file` (up to 10 MB; a picture, PDF, Word document or Excel workbook, judged by its contents and its name), `title`, `category`, optional `report_id` (one of the period\'s), `subject_type` + `subject_id` (training, program or case), `description`, `expires_on`, `version_label`, `notes`, `final`. Audited.',
         tags: ['CDA'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'year', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
@@ -119,6 +125,7 @@ class CdaDocumentController extends Controller
             'expires_on' => $data['expires_on'] ?? null,
         ]);
         $this->documents->authorizeSee($request->user(), $draft);
+        $this->documents->authorizeWrite($request->user(), $draft->category, $draft->subject_type);
 
         $document = $this->documents->create(
             $draft->only(['period_id', 'category', 'report_id', 'subject_type', 'subject_id', 'title', 'description', 'expires_on']),
@@ -145,18 +152,19 @@ class CdaDocumentController extends Controller
     {
         $this->access->authorize($request->user(), CdaAccess::VIEW);
         $found = $this->find($request->user(), $document);
+        $users = RegisterPresenter::usersFor([$found]);
 
         return response()->json([
             'success' => true,
-            'data' => $found->versions->sortByDesc('version')->values()->map(fn (CdaDocumentVersion $version) => RegisterPresenter::version($version))->all(),
-            'meta' => ['document' => RegisterPresenter::document($found)],
+            'data' => $found->versions->sortByDesc('version')->values()->map(fn (CdaDocumentVersion $version) => RegisterPresenter::version($version, $users))->all(),
+            'meta' => ['document' => RegisterPresenter::document($found, $users)],
         ]);
     }
 
     #[OA\Post(
         path: '/api/cda/documents/{id}/versions',
         summary: 'Upload a new version of a document',
-        description: 'Needs `cda:upload` and `branches:view_all`, plus the view permission of a restricted document (403). Multipart `file`, optional `version_label`, `notes`, `final` (makes it the one final version). Never replaces an older version. A withdrawn document answers 409. Audited.',
+        description: 'Needs `cda:upload` and `branches:view_all`, plus the view permission of a restricted document and, for a register\'s document, its write permission (`cda:submit` for a proof, `cda:manage_officers` for a certificate, `cda:manage_mediation` for mediation) (403). Multipart `file`, optional `version_label`, `notes`, `final` (makes it the one final version). Never replaces an older version. A withdrawn document answers 409. Audited.',
         tags: ['CDA'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
@@ -171,6 +179,7 @@ class CdaDocumentController extends Controller
     public function addVersion(CdaVersionRequest $request, int $document): JsonResponse
     {
         $found = $this->find($request->user(), $document);
+        $this->documents->authorizeWrite($request->user(), $found->category, $found->subject_type);
         $data = $request->validated();
 
         $this->documents->addVersion($found, $request->file('file'), $request->user(), $data['version_label'] ?? null, $data['notes'] ?? null, (bool) ($data['final'] ?? false));
@@ -181,7 +190,7 @@ class CdaDocumentController extends Controller
     #[OA\Post(
         path: '/api/cda/documents/{id}/withdraw',
         summary: 'Withdraw a document, keeping every file',
-        description: 'Needs `cda:upload` and `branches:view_all`, plus the view permission of a restricted document (403). `reason` is required (up to 500). Already withdrawn: 409. Audited.',
+        description: 'Needs `cda:upload` and `branches:view_all`, plus the view permission of a restricted document and, for a register\'s document, its write permission (403). `reason` is required (up to 500). Already withdrawn: 409. Audited.',
         tags: ['CDA'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
@@ -192,6 +201,7 @@ class CdaDocumentController extends Controller
     {
         $this->access->authorize($request->user(), CdaAccess::UPLOAD);
         $found = $this->find($request->user(), $document);
+        $this->documents->authorizeWrite($request->user(), $found->category, $found->subject_type);
         $reason = (string) $request->validate(
             ['reason' => ['required', 'string', 'max:500']],
             ['reason.required' => 'Give the reason the document is withdrawn.', 'reason.string' => 'Give the reason the document is withdrawn.', 'reason.max' => 'The reason can be at most 500 characters.'],

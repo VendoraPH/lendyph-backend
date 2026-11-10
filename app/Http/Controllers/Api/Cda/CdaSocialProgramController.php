@@ -11,10 +11,10 @@ use App\Models\CdaSocialProgram;
 use App\Services\Cda\CdaAccess;
 use App\Services\Cda\Registers\RegisterStaleness;
 use App\Services\Cda\Sources\SocialSource;
+use App\Services\LoanWriteTransaction;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 use OpenApi\Attributes as OA;
 
@@ -28,6 +28,8 @@ use OpenApi\Attributes as OA;
  */
 class CdaSocialProgramController extends Controller
 {
+    private const CONFLICT = 'Another change to this register was saved at the same time. Reload and try again.';
+
     public function __construct(
         private readonly CdaAccess $access,
         private readonly RegisterStaleness $staleness,
@@ -106,12 +108,12 @@ class CdaSocialProgramController extends Controller
     {
         $period = $this->period($year);
 
-        $program = DB::transaction(function () use ($request, $period): CdaSocialProgram {
+        $program = LoanWriteTransaction::run(function () use ($request, $period): CdaSocialProgram {
             $program = CdaSocialProgram::query()->create([...$request->programData(), 'period_id' => $period->id]);
             $this->staleness->touchPeriod(RegisterStaleness::SOCIAL, $period->id);
 
             return $program;
-        });
+        }, conflictMessage: self::CONFLICT);
 
         return RegisterPresenter::one(RegisterPresenter::socialProgram($program->load(['period', 'responsibleOfficer.member'])), 201, 'Program recorded.');
     }
@@ -124,11 +126,11 @@ class CdaSocialProgramController extends Controller
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
         requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent(type: 'object')),
-        responses: [new OA\Response(response: 200, description: '{success, message, data: program}'), new OA\Response(response: 403, description: 'Missing cda:manage_social or branches:view_all'), new OA\Response(response: 404, description: 'No such program'), new OA\Response(response: 422, description: 'Refused, in words')],
+        responses: [new OA\Response(response: 200, description: '{success, message, data: program}'), new OA\Response(response: 403, description: 'Missing cda:manage_social or branches:view_all'), new OA\Response(response: 404, description: 'No such program'), new OA\Response(response: 409, description: 'Another change was saved at the same time (deadlock or lock wait)'), new OA\Response(response: 422, description: 'Refused, in words')],
     )]
     public function update(CdaSocialProgramRequest $request, int $program): JsonResponse
     {
-        $saved = DB::transaction(function () use ($request, $program): CdaSocialProgram {
+        $saved = LoanWriteTransaction::run(function () use ($request, $program): CdaSocialProgram {
             $locked = CdaSocialProgram::query()->whereKey($program)->lockForUpdate()->first();
             abort_if($locked === null, 404, 'There is no such social program.');
 
@@ -140,7 +142,7 @@ class CdaSocialProgramController extends Controller
             }
 
             return $locked;
-        });
+        }, conflictMessage: self::CONFLICT);
 
         return RegisterPresenter::one(RegisterPresenter::socialProgram($saved->load(['period', 'responsibleOfficer.member'])), message: 'Program saved.');
     }
@@ -152,19 +154,19 @@ class CdaSocialProgramController extends Controller
         tags: ['CDA'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
-        responses: [new OA\Response(response: 200, description: '{success, message}'), new OA\Response(response: 403, description: 'Missing cda:manage_social or branches:view_all'), new OA\Response(response: 404, description: 'No such program')],
+        responses: [new OA\Response(response: 200, description: '{success, message}'), new OA\Response(response: 403, description: 'Missing cda:manage_social or branches:view_all'), new OA\Response(response: 404, description: 'No such program'), new OA\Response(response: 409, description: 'Another change was saved at the same time (deadlock or lock wait)')],
     )]
     public function destroy(Request $request, int $program): JsonResponse
     {
         $this->access->authorize($request->user(), CdaAccess::MANAGE_SOCIAL);
 
-        DB::transaction(function () use ($program): void {
+        LoanWriteTransaction::run(function () use ($program): void {
             $locked = CdaSocialProgram::query()->whereKey($program)->lockForUpdate()->first();
             abort_if($locked === null, 404, 'There is no such social program.');
 
             $locked->delete();
             $this->staleness->touchPeriod(RegisterStaleness::SOCIAL, $locked->period_id);
-        });
+        }, conflictMessage: self::CONFLICT);
 
         return response()->json(['success' => true, 'message' => 'Program deleted.']);
     }

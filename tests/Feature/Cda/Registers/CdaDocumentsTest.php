@@ -4,10 +4,14 @@ namespace Tests\Feature\Cda\Registers;
 
 use App\Models\CdaDocument;
 use App\Models\CdaDocumentVersion;
+use App\Models\CdaMediationCase;
+use App\Models\CdaOfficerTraining;
 use App\Models\CdaReport;
+use App\Models\CdaSubmission;
 use App\Services\Cda\CdaAccess;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Testing\TestResponse;
 use Tests\TestCase;
@@ -188,5 +192,100 @@ class CdaDocumentsTest extends TestCase
         $this->upload(['title' => 'Minutes', 'category' => 'minutes', 'file' => $this->pdf()])->assertCreated();
         $this->upload(['file' => $this->pdf()], "/api/cda/documents/{$document->id}/versions")->assertCreated();
         $this->postJson("/api/cda/documents/{$document->id}/withdraw", ['reason' => 'Replaced'])->assertOk();
+    }
+
+    public function test_owned_documents_need_the_owners_write_permission(): void
+    {
+        $period = $this->period();
+        $capr = CdaReport::query()->where('period_id', $period->id)->where('report_type', 'capr')->sole();
+        $training = CdaOfficerTraining::factory()->create();
+        $case = CdaMediationCase::factory()->create(['filed_on' => '2026-03-01']);
+        $submission = CdaSubmission::factory()->create(['report_id' => $capr->id]);
+        $owned = [
+            CdaAccess::MANAGE_OFFICERS => CdaDocument::factory()->create(['period_id' => $period->id, 'category' => 'certificates', 'subject_type' => 'training', 'subject_id' => $training->id]),
+            CdaAccess::SUBMIT => CdaDocument::factory()->create(['period_id' => $period->id, 'category' => 'submission_proof', 'report_id' => $capr->id, 'subject_type' => 'submission', 'subject_id' => $submission->id]),
+            CdaAccess::MANAGE_MEDIATION => CdaDocument::factory()->create(['period_id' => $period->id, 'category' => 'other', 'subject_type' => 'case', 'subject_id' => $case->id]),
+        ];
+        $base = [CdaAccess::VIEW, CdaAccess::UPLOAD, CdaAccess::VIEW_MEDIATION];
+
+        foreach ($owned as $permission => $document) {
+            $this->actingAs($this->cdaUser($base));
+            $this->upload(['file' => $this->pdf()], "/api/cda/documents/{$document->id}/versions")->assertForbidden()
+                ->assertJsonPath('message', "This document belongs to its register: changing it needs the {$permission} permission.");
+            $this->postJson("/api/cda/documents/{$document->id}/withdraw", ['reason' => 'x'])->assertForbidden();
+
+            $this->actingAs($this->cdaUser([...$base, $permission]));
+            $this->upload(['file' => $this->pdf()], "/api/cda/documents/{$document->id}/versions")->assertCreated();
+            $this->postJson("/api/cda/documents/{$document->id}/withdraw", ['reason' => 'Replaced'])->assertOk();
+        }
+
+        $this->actingAs($this->cdaUser($base));
+        $this->upload(['title' => 'Certificates', 'category' => 'certificates', 'file' => $this->pdf()])->assertForbidden();
+        $this->upload(['title' => 'Mediation minutes', 'category' => 'mediation', 'file' => $this->pdf()])->assertForbidden();
+        $this->upload(['title' => 'Case papers', 'category' => 'other', 'subject_type' => 'case', 'subject_id' => $case->id, 'file' => $this->pdf()])->assertForbidden();
+        $this->actingAs($this->cdaUser([...$base, CdaAccess::MANAGE_MEDIATION]));
+        $this->upload(['title' => 'Case papers', 'category' => 'other', 'subject_type' => 'case', 'subject_id' => $case->id, 'file' => $this->pdf()])->assertCreated();
+    }
+
+    public function test_a_certificate_for_a_training_is_added_from_the_training(): void
+    {
+        $training = CdaOfficerTraining::factory()->create();
+        $this->actingAs($this->cdaUser([CdaAccess::VIEW, CdaAccess::UPLOAD, CdaAccess::MANAGE_OFFICERS]));
+
+        $this->upload(['title' => 'Certificate', 'category' => 'certificates', 'subject_type' => 'training', 'subject_id' => $training->id, 'file' => $this->pdf()])
+            ->assertUnprocessable()->assertJsonPath('errors.category.0', 'Add a certificate from the training.');
+        $this->upload(['title' => 'Seminar certificates', 'category' => 'certificates', 'file' => $this->pdf()])->assertCreated();
+    }
+
+    public function test_restricted_subjects_and_categories_are_refused_before_any_lookup(): void
+    {
+        $case = CdaMediationCase::factory()->create(['filed_on' => '2026-03-01']);
+        $this->actingAs($this->cdaUser([CdaAccess::VIEW, CdaAccess::UPLOAD]));
+
+        foreach ([$case->id, 999999] as $id) {
+            $this->upload(['title' => 'Probe', 'category' => 'other', 'subject_type' => 'case', 'subject_id' => $id, 'file' => $this->pdf()])->assertForbidden();
+        }
+
+        $this->upload(['title' => 'Probe', 'category' => 'audit_report', 'report_id' => 999999])->assertForbidden();
+        $this->upload(['title' => 'Probe', 'category' => 'tax'])->assertForbidden();
+    }
+
+    public function test_a_file_name_with_control_characters_is_cleaned_and_still_downloads(): void
+    {
+        $this->actingAs($this->cdaUser([CdaAccess::VIEW, CdaAccess::UPLOAD]));
+
+        $version = $this->upload(['title' => 'Minutes', 'category' => 'minutes', 'file' => UploadedFile::fake()->create("board\x10min\x13utes.pdf", 10, 'application/pdf')])
+            ->assertCreated()->json('data.current_version');
+
+        $this->assertSame('boardminutes.pdf', $version['file_name']);
+        $this->openAsBrowser($version['url'])->assertOk();
+    }
+
+    public function test_the_list_takes_the_same_queries_for_one_document_or_many(): void
+    {
+        $period = $this->period();
+        $uploaders = [$this->cdaUser([CdaAccess::UPLOAD]), $this->cdaUser([CdaAccess::UPLOAD])];
+        $make = function (int $count) use ($period, $uploaders): void {
+            for ($i = 0; $i < $count; $i++) {
+                $document = CdaDocument::factory()->create(['period_id' => $period->id, 'category' => 'minutes', 'created_by' => $uploaders[$i % 2]->id]);
+                CdaDocumentVersion::factory()->create(['cda_document_id' => $document->id, 'uploaded_by' => $uploaders[($i + 1) % 2]->id]);
+            }
+        };
+        $this->actingAs($this->cdaUser([CdaAccess::VIEW]));
+        $queries = function (): int {
+            DB::flushQueryLog();
+            DB::enableQueryLog();
+            $this->getJson('/api/cda/periods/2026/documents')->assertOk();
+            DB::disableQueryLog();
+
+            return count(DB::getQueryLog());
+        };
+
+        $make(1);
+        $queries();
+        $one = $queries();
+        $make(6);
+        $this->assertSame($one, $queries());
+        $this->assertNotNull($this->getJson('/api/cda/periods/2026/documents')->json('data.0.created_by.name'));
     }
 }

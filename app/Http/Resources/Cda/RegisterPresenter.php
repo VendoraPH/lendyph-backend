@@ -99,9 +99,10 @@ final class RegisterPresenter
 
     /**
      * @param  CdaDocument|null  $certificate  the training's certificate document, with its versions
+     * @param  array<int, array{id: int, name: string}|null>|null  $users  from usersFor(), for a list
      * @return array<string, mixed>
      */
-    public static function training(CdaOfficerTraining $training, ?CdaDocument $certificate): array
+    public static function training(CdaOfficerTraining $training, ?CdaDocument $certificate, ?array $users = null): array
     {
         $officer = $training->officer;
         $latest = $certificate?->versions->sortByDesc('version')->first();
@@ -126,7 +127,7 @@ final class RegisterPresenter
             'certificate' => $latest === null ? null : [
                 'cda_document_id' => (int) $certificate->id,
                 'status' => $certificate->status,
-                ...self::version($latest),
+                ...self::version($latest, $users ?? self::usersFor([$certificate])),
             ],
             'created_at' => $training->created_at,
             'updated_at' => $training->updated_at,
@@ -202,12 +203,15 @@ final class RegisterPresenter
 
     /**
      * A document with its latest version and its final one. Load `versions`
-     * (with `file` and `uploader`) and `report` first.
+     * (with `file`), `period` and `report` first; pass usersFor() of the
+     * whole page for a list.
      *
+     * @param  array<int, array{id: int, name: string}|null>|null  $users
      * @return array<string, mixed>
      */
-    public static function document(CdaDocument $document): array
+    public static function document(CdaDocument $document, ?array $users = null): array
     {
+        $users ??= self::usersFor([$document]);
         $versions = $document->versions->sortByDesc('version')->values();
         $final = $versions->first(fn (CdaDocumentVersion $version) => $version->final_key !== null);
         $report = $document->report;
@@ -230,18 +234,23 @@ final class RegisterPresenter
             'withdraw_reason' => $document->withdraw_reason,
             'expires_on' => $document->expires_on?->toDateString(),
             'version_count' => $versions->count(),
-            'current_version' => $versions->isEmpty() ? null : self::version($versions->first()),
-            'final_version' => $final === null ? null : self::version($final),
-            'created_by' => self::user($document->created_by),
+            'current_version' => $versions->isEmpty() ? null : self::version($versions->first(), $users),
+            'final_version' => $final === null ? null : self::version($final, $users),
+            'created_by' => $document->created_by === null ? null : ($users[$document->created_by] ?? null),
             'created_at' => $document->created_at,
             'updated_at' => $document->updated_at,
         ];
     }
 
-    /** @return array<string, mixed> */
-    public static function version(CdaDocumentVersion $version): array
+    /**
+     * @param  array<int, array{id: int, name: string}|null>|null  $users  from usersFor()
+     * @return array<string, mixed>
+     */
+    public static function version(CdaDocumentVersion $version, ?array $users = null): array
     {
         $file = $version->file;
+        $uploader = $version->uploaded_by;
+        $users ??= self::users([$uploader]);
 
         return [
             'id' => (int) $version->id,
@@ -257,16 +266,48 @@ final class RegisterPresenter
             'file_size' => $file?->file_size === null ? null : (int) $file->file_size,
             'sha256' => $version->sha256,
             'notes' => $version->notes,
-            'uploaded_by' => self::user($version->uploaded_by),
+            'uploaded_by' => $uploader === null ? null : ($users[$uploader] ?? null),
             'created_at' => $version->created_at,
             'url' => $file === null ? null : SignedFileLink::to('files.document', ['document' => $file->getKey()]),
         ];
     }
 
-    /** @return array{id: int, name: string}|null */
-    private static function user(?int $id): ?array
+    /**
+     * Who created the documents and uploaded their versions, in one query,
+     * keyed by user id, so a list never asks once per row.
+     *
+     * @param  iterable<CdaDocument|null>  $documents  with `versions` loaded
+     * @return array<int, array{id: int, name: string}|null>
+     */
+    public static function usersFor(iterable $documents): array
     {
-        return $id === null ? null : CdaPresenter::user(User::query()->find($id));
+        $ids = [];
+
+        foreach ($documents as $document) {
+            if ($document === null) {
+                continue;
+            }
+
+            $ids[] = $document->created_by;
+
+            foreach ($document->versions as $version) {
+                $ids[] = $version->uploaded_by;
+            }
+        }
+
+        return self::users($ids);
+    }
+
+    /**
+     * @param  list<int|null>  $ids
+     * @return array<int, array{id: int, name: string}|null>
+     */
+    private static function users(array $ids): array
+    {
+        $ids = array_values(array_unique(array_filter($ids, fn ($id) => $id !== null)));
+
+        return $ids === [] ? [] : User::query()->whereKey($ids)->get()
+            ->mapWithKeys(fn (User $user) => [(int) $user->id => CdaPresenter::user($user)])->all();
     }
 
     private static function money(mixed $value): string

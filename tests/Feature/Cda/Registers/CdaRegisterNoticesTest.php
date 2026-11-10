@@ -105,4 +105,21 @@ class CdaRegisterNoticesTest extends TestCase
         $this->assertSame('/cda/officers', $body['url']);
         $this->assertSame('2026', CdaNoticeSent::query()->where('subject_id', $treasurer->id)->value('dedupe_key'));
     }
+
+    public function test_a_notice_with_no_recipients_is_kept_until_someone_can_receive_it(): void
+    {
+        User::query()->update(['status' => 'inactive']);
+        $document = CdaDocument::factory()->create(['period_id' => $this->period()->id, 'category' => 'tax', 'title' => 'Tax exemption', 'expires_on' => '2026-11-25']);
+
+        $this->artisan('cda:register-notices')->assertSuccessful();
+        $this->assertSame(0, CdaNoticeSent::query()->count());
+        $this->assertSame(0, DB::table('notifications')->count());
+
+        $taxPreparer = $this->cdaUser([CdaAccess::VIEW, CdaAccess::PREPARE, CdaAccess::VIEW_TAX]);
+        $this->artisan('cda:register-notices')->assertSuccessful();
+        $this->artisan('cda:register-notices')->assertSuccessful();
+
+        $this->assertSame([RegisterNotices::DOCUMENT_EXPIRING], $this->received()[$taxPreparer->id]);
+        $this->assertSame(1, CdaNoticeSent::query()->where('subject_id', $document->id)->count());
+    }
 }

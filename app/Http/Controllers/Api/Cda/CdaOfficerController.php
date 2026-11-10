@@ -9,6 +9,7 @@ use App\Models\CdaOfficer;
 use App\Services\Cda\CdaAccess;
 use App\Services\Cda\Registers\RegisterStaleness;
 use App\Services\Cda\Registers\TrainingCompliance;
+use App\Services\LoanWriteTransaction;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -24,6 +25,8 @@ use OpenApi\Attributes as OA;
  */
 class CdaOfficerController extends Controller
 {
+    private const CONFLICT = 'Another change to this register was saved at the same time. Reload and try again.';
+
     public function __construct(
         private readonly CdaAccess $access,
         private readonly TrainingCompliance $compliance,
@@ -92,12 +95,12 @@ class CdaOfficerController extends Controller
     )]
     public function store(CdaOfficerRequest $request): JsonResponse
     {
-        $officer = DB::transaction(function () use ($request): CdaOfficer {
+        $officer = LoanWriteTransaction::run(function () use ($request): CdaOfficer {
             $officer = CdaOfficer::query()->create($request->officerData());
             $this->touch($officer);
 
             return $officer;
-        });
+        }, conflictMessage: self::CONFLICT);
 
         return RegisterPresenter::one($this->present($officer->load(['member', 'trainings'])), 201, 'Officer added.');
     }
@@ -110,11 +113,11 @@ class CdaOfficerController extends Controller
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
         requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent(type: 'object')),
-        responses: [new OA\Response(response: 200, description: '{success, message, data: officer}'), new OA\Response(response: 403, description: 'Missing cda:manage_officers or branches:view_all'), new OA\Response(response: 404, description: 'No such officer'), new OA\Response(response: 422, description: 'Refused, in words')],
+        responses: [new OA\Response(response: 200, description: '{success, message, data: officer}'), new OA\Response(response: 403, description: 'Missing cda:manage_officers or branches:view_all'), new OA\Response(response: 404, description: 'No such officer'), new OA\Response(response: 409, description: 'Another change was saved at the same time (deadlock or lock wait)'), new OA\Response(response: 422, description: 'Refused, in words')],
     )]
     public function update(CdaOfficerRequest $request, int $officer): JsonResponse
     {
-        $saved = DB::transaction(function () use ($request, $officer): CdaOfficer {
+        $saved = LoanWriteTransaction::run(function () use ($request, $officer): CdaOfficer {
             $locked = CdaOfficer::query()->whereKey($officer)->lockForUpdate()->first();
             abort_if($locked === null, 404, 'There is no such officer in the register.');
 
@@ -127,7 +130,7 @@ class CdaOfficerController extends Controller
             }
 
             return $locked;
-        });
+        }, conflictMessage: self::CONFLICT);
 
         return RegisterPresenter::one($this->present($saved->load(['member', 'trainings'])), message: 'Officer saved.');
     }
@@ -139,19 +142,19 @@ class CdaOfficerController extends Controller
         tags: ['CDA'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
-        responses: [new OA\Response(response: 200, description: '{success, message}'), new OA\Response(response: 403, description: 'Missing cda:manage_officers or branches:view_all'), new OA\Response(response: 404, description: 'No such officer')],
+        responses: [new OA\Response(response: 200, description: '{success, message}'), new OA\Response(response: 403, description: 'Missing cda:manage_officers or branches:view_all'), new OA\Response(response: 404, description: 'No such officer'), new OA\Response(response: 409, description: 'Another change was saved at the same time (deadlock or lock wait)')],
     )]
     public function destroy(Request $request, int $officer): JsonResponse
     {
         $this->access->authorize($request->user(), CdaAccess::MANAGE_OFFICERS);
 
-        DB::transaction(function () use ($officer): void {
+        LoanWriteTransaction::run(function () use ($officer): void {
             $locked = CdaOfficer::query()->whereKey($officer)->lockForUpdate()->first();
             abort_if($locked === null, 404, 'There is no such officer in the register.');
 
             $locked->delete();
             $this->touch($locked);
-        });
+        }, conflictMessage: self::CONFLICT);
 
         return response()->json(['success' => true, 'message' => 'Officer removed from the register.']);
     }

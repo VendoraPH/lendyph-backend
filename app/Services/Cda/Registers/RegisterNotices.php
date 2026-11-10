@@ -27,7 +27,9 @@ use Throwable;
  *
  * Recipients are active users holding `branches:view_all` and `cda:prepare`
  * or `cda:approve`, plus the document's view permission when it is
- * restricted. Each notice is recorded in `cda_notices_sent` before it is
+ * restricted. A notice nobody can receive is neither sent nor recorded, so it
+ * goes out once someone gains the permission. Each notice is recorded in
+ * `cda_notices_sent` before it is
  * sent, in one transaction, so a second run sends nothing; a failure to send
  * is logged and rolls back only that notice.
  */
@@ -117,6 +119,10 @@ final class RegisterNotices
     /** @param  Collection<int, User>  $recipients */
     private function sendOnce(string $subjectType, int $subjectId, string $kind, string $dedupeKey, Collection $recipients, StaffNotification $notice): int
     {
+        if ($recipients->isEmpty()) {
+            return 0;
+        }
+
         $key = ['subject_type' => $subjectType, 'subject_id' => $subjectId, 'kind' => $kind, 'dedupe_key' => $dedupeKey];
 
         if (CdaNoticeSent::query()->where($key)->exists()) {
@@ -126,10 +132,7 @@ final class RegisterNotices
         try {
             DB::transaction(function () use ($key, $recipients, $notice): void {
                 CdaNoticeSent::query()->create([...$key, 'sent_at' => now()]);
-
-                if ($recipients->isNotEmpty()) {
-                    Notification::send($recipients, $notice);
-                }
+                Notification::send($recipients, $notice);
             });
         } catch (UniqueConstraintViolationException) {
             return 0;

@@ -148,6 +148,49 @@ final class DocumentRepository
     }
 
     /**
+     * The permission a change to the document needs on top of `cda:upload`,
+     * when it belongs to a register: a proof to the submission
+     * (`cda:submit`), a certificate or a training's file to the officers
+     * register (`cda:manage_officers`), a mediation paper or a case's file to
+     * the mediation register (`cda:manage_mediation`). Null for the rest.
+     */
+    public static function writePermissionFor(?string $category, ?string $subjectType): ?string
+    {
+        return match (true) {
+            $category === DocumentCategories::SUBMISSION_PROOF || $subjectType === 'submission' => CdaAccess::SUBMIT,
+            $category === DocumentCategories::CERTIFICATES || $subjectType === 'training' => CdaAccess::MANAGE_OFFICERS,
+            $category === 'mediation' || $subjectType === 'case' => CdaAccess::MANAGE_MEDIATION,
+            default => null,
+        };
+    }
+
+    /** 403, in words, unless the user may change a document of this kind. */
+    public function authorizeWrite(User $user, ?string $category, ?string $subjectType): void
+    {
+        $permission = self::writePermissionFor($category, $subjectType);
+
+        abort_unless($permission === null || $user->can($permission), 403, "This document belongs to its register: changing it needs the {$permission} permission.");
+    }
+
+    /**
+     * 403, in words, for an upload the user can't make, judged only on what
+     * was sent (the category and the kind of subject), before any record is
+     * looked up, so a refusal never tells whether a case or report exists.
+     */
+    public function authorizeUploadOf(User $user, mixed $category, mixed $subjectType): void
+    {
+        $category = is_string($category) ? $category : null;
+        $subjectType = is_string($subjectType) ? $subjectType : null;
+        $needs = [$category === null ? null : DocumentCategories::restriction($category), $subjectType === 'case' ? CdaAccess::VIEW_MEDIATION : null];
+
+        foreach (array_filter($needs) as $permission) {
+            abort_unless($user->can($permission), 403, "This document is restricted: it needs the {$permission} permission.");
+        }
+
+        $this->authorizeWrite($user, $category, $subjectType);
+    }
+
+    /**
      * Narrows a document query to what the user may see, in SQL so a list
      * pages correctly.
      *

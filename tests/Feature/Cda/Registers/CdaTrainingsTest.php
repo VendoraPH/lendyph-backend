@@ -6,6 +6,8 @@ use App\Models\CdaDocument;
 use App\Models\CdaDocumentVersion;
 use App\Models\CdaOfficer;
 use App\Models\CdaOfficerTraining;
+use App\Models\CdaReport;
+use App\Models\CdaReportingPeriod;
 use App\Services\Cda\CdaAccess;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Carbon;
@@ -163,5 +165,59 @@ class CdaTrainingsTest extends TestCase
         $this->postJson('/api/cda/trainings', $body)->assertCreated();
         $this->putJson("/api/cda/trainings/{$training->id}", ['hours' => '2'])->assertOk();
         $this->deleteJson("/api/cda/trainings/{$training->id}")->assertOk();
+    }
+
+    public function test_a_255_character_title_still_files_its_certificate(): void
+    {
+        $this->actingAs($this->cdaUser([CdaAccess::VIEW, CdaAccess::MANAGE_OFFICERS]));
+        $title = str_repeat('Governance and Ethics ', 12).'Final';
+        $title = substr($title, 0, 255);
+        $this->assertSame(255, strlen($title));
+
+        $data = $this->post('/api/cda/trainings', [
+            'officer_id' => $this->officer->id, 'title' => $title, 'completed_on' => '2026-04-01', 'hours' => '8',
+            'certificate' => UploadedFile::fake()->create('certificate.pdf', 10, 'application/pdf'),
+        ], ['Accept' => 'application/json'])->assertCreated()->json('data');
+
+        $document = CdaDocument::query()->findOrFail($data['certificate']['cda_document_id']);
+        $this->assertSame(255, mb_strlen($document->title));
+        $this->assertStringStartsWith('Training certificate: Governance', $document->title);
+    }
+
+    public function test_a_certificate_files_under_the_nearest_period_when_its_year_has_none(): void
+    {
+        $this->dropPeriods();
+        $this->period(2023);
+        $this->period(2027);
+        $this->actingAs($this->cdaUser([CdaAccess::VIEW, CdaAccess::MANAGE_OFFICERS]));
+
+        $data = $this->post('/api/cda/trainings', [
+            'officer_id' => $this->officer->id, 'title' => 'Governance', 'completed_on' => '2024-04-01', 'started_on' => '2024-04-01', 'hours' => '8',
+            'certificate' => UploadedFile::fake()->create('certificate.pdf', 10, 'application/pdf'),
+        ], ['Accept' => 'application/json'])->assertCreated()->json('data');
+
+        $this->assertSame(2023, (int) CdaDocument::query()->findOrFail($data['certificate']['cda_document_id'])->period->year);
+    }
+
+    public function test_a_certificate_with_no_reporting_period_at_all_is_refused_in_words(): void
+    {
+        $this->dropPeriods();
+        $this->actingAs($this->cdaUser([CdaAccess::VIEW, CdaAccess::MANAGE_OFFICERS]));
+        $before = CdaOfficerTraining::query()->count();
+
+        $this->post('/api/cda/trainings', [
+            'officer_id' => $this->officer->id, 'title' => 'Governance', 'completed_on' => '2026-04-01', 'hours' => '8',
+            'certificate' => UploadedFile::fake()->create('certificate.pdf', 10, 'application/pdf'),
+        ], ['Accept' => 'application/json'])->assertUnprocessable()
+            ->assertJsonPath('errors.certificate.0', 'Open a CDA reporting period first, so the certificate has a year to be filed under.');
+
+        $this->assertSame($before, CdaOfficerTraining::query()->count());
+        $this->postJson('/api/cda/trainings', ['officer_id' => $this->officer->id, 'title' => 'Governance', 'completed_on' => '2026-04-01', 'hours' => '8'])->assertCreated();
+    }
+
+    private function dropPeriods(): void
+    {
+        CdaReport::query()->delete();
+        CdaReportingPeriod::query()->delete();
     }
 }

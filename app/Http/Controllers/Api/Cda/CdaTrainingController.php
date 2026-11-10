@@ -14,13 +14,16 @@ use App\Services\Cda\CdaAccess;
 use App\Services\Cda\Registers\DocumentCategories;
 use App\Services\Cda\Registers\DocumentRepository;
 use App\Services\Cda\Registers\RegisterStaleness;
+use App\Services\LoanWriteTransaction;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 use OpenApi\Attributes as OA;
 
 /**
@@ -31,11 +34,18 @@ use OpenApi\Attributes as OA;
  * its subject, in the period of the year it was completed) and each upload a
  * new version of it, never overwriting the last; `certificate.url` is a
  * signed link. Deleting a training withdraws its certificate and keeps the
- * file. A write marks the draft reports reading officers as stale.
+ * file. A certificate files under the period of the year it was completed,
+ * else the nearest one; with no period at all it is refused (422). A write
+ * marks the draft reports reading officers as stale, and a collision answers
+ * 409, never 500.
  */
 class CdaTrainingController extends Controller
 {
     private const DELETED_REASON = 'The training was deleted.';
+
+    public const NO_PERIOD = 'Open a CDA reporting period first, so the certificate has a year to be filed under.';
+
+    private const CONFLICT = 'Another change to this register was saved at the same time. Reload and try again.';
 
     public function __construct(
         private readonly CdaAccess $access,
@@ -78,9 +88,10 @@ class CdaTrainingController extends Controller
             ->paginate(RegisterPresenter::perPage($request->query('per_page')));
 
         $certificates = $this->certificates($page->getCollection()->pluck('id')->all());
+        $users = RegisterPresenter::usersFor($certificates);
 
         return RegisterPresenter::page($page, $page->getCollection()
-            ->map(fn (CdaOfficerTraining $training) => RegisterPresenter::training($training, $certificates->get($training->id)))->all());
+            ->map(fn (CdaOfficerTraining $training) => RegisterPresenter::training($training, $certificates->get($training->id), $users))->all());
     }
 
     #[OA\Post(
@@ -110,13 +121,13 @@ class CdaTrainingController extends Controller
     )]
     public function store(CdaTrainingRequest $request): JsonResponse
     {
-        $training = DB::transaction(function () use ($request): CdaOfficerTraining {
+        $training = LoanWriteTransaction::run(function () use ($request): CdaOfficerTraining {
             $training = CdaOfficerTraining::query()->create($request->trainingData());
             $this->attach($training, $request->file('certificate'), $request->user());
             $this->touch($training);
 
             return $training;
-        });
+        }, conflictMessage: self::CONFLICT);
 
         return RegisterPresenter::one($this->present($training), 201, 'Training recorded.');
     }
@@ -129,11 +140,11 @@ class CdaTrainingController extends Controller
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
         requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent(type: 'object')),
-        responses: [new OA\Response(response: 200, description: '{success, message, data: training}'), new OA\Response(response: 403, description: 'Missing cda:manage_officers or branches:view_all'), new OA\Response(response: 404, description: 'No such training'), new OA\Response(response: 422, description: 'Refused, in words')],
+        responses: [new OA\Response(response: 200, description: '{success, message, data: training}'), new OA\Response(response: 403, description: 'Missing cda:manage_officers or branches:view_all'), new OA\Response(response: 404, description: 'No such training'), new OA\Response(response: 409, description: 'Another change was saved at the same time (deadlock or lock wait)'), new OA\Response(response: 422, description: 'Refused, in words')],
     )]
     public function update(CdaTrainingRequest $request, int $training): JsonResponse
     {
-        $saved = DB::transaction(function () use ($request, $training): CdaOfficerTraining {
+        $saved = LoanWriteTransaction::run(function () use ($request, $training): CdaOfficerTraining {
             $locked = CdaOfficerTraining::query()->whereKey($training)->lockForUpdate()->first();
             abort_if($locked === null, 404, 'There is no such training.');
 
@@ -148,7 +159,7 @@ class CdaTrainingController extends Controller
             $this->attach($locked, $request->file('certificate'), $request->user());
 
             return $locked;
-        });
+        }, conflictMessage: self::CONFLICT);
 
         return RegisterPresenter::one($this->present($saved), message: 'Training saved.');
     }
@@ -160,13 +171,13 @@ class CdaTrainingController extends Controller
         tags: ['CDA'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
-        responses: [new OA\Response(response: 200, description: '{success, message}'), new OA\Response(response: 403, description: 'Missing cda:manage_officers or branches:view_all'), new OA\Response(response: 404, description: 'No such training')],
+        responses: [new OA\Response(response: 200, description: '{success, message}'), new OA\Response(response: 403, description: 'Missing cda:manage_officers or branches:view_all'), new OA\Response(response: 404, description: 'No such training'), new OA\Response(response: 409, description: 'Another change was saved at the same time (deadlock or lock wait)')],
     )]
     public function destroy(Request $request, int $training): JsonResponse
     {
         $this->access->authorize($request->user(), CdaAccess::MANAGE_OFFICERS);
 
-        DB::transaction(function () use ($training): void {
+        LoanWriteTransaction::run(function () use ($training): void {
             $locked = CdaOfficerTraining::query()->whereKey($training)->lockForUpdate()->first();
             abort_if($locked === null, 404, 'There is no such training.');
 
@@ -174,7 +185,7 @@ class CdaTrainingController extends Controller
                 ->each(fn (CdaDocument $document) => $this->documents->withdraw($document, self::DELETED_REASON));
             $this->touch($locked);
             $locked->delete();
-        });
+        }, conflictMessage: self::CONFLICT);
 
         return response()->json(['success' => true, 'message' => 'Training deleted. Its certificate was withdrawn and kept.']);
     }
@@ -194,13 +205,19 @@ class CdaTrainingController extends Controller
             return;
         }
 
-        $date = $training->completed_on ?? $training->started_on ?? now('Asia/Manila');
+        $year = ($training->completed_on ?? $training->started_on ?? now('Asia/Manila'))->year;
+        $period = CdaReportingPeriod::query()->orderByRaw('ABS(CAST(`year` AS SIGNED) - ?)', [$year])->orderBy('year')->first();
+
+        if ($period === null) {
+            throw ValidationException::withMessages(['certificate' => self::NO_PERIOD]);
+        }
+
         $this->documents->create([
-            'period_id' => CdaReportingPeriod::query()->where('year', $date->year)->value('id'),
+            'period_id' => $period->id,
             'category' => DocumentCategories::CERTIFICATES,
             'subject_type' => 'training',
             'subject_id' => $training->id,
-            'title' => 'Training certificate: '.$training->title,
+            'title' => Str::limit('Training certificate: '.$training->title, 255, ''),
         ], $file, $user);
     }
 

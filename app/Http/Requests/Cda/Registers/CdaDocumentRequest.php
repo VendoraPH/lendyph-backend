@@ -15,8 +15,10 @@ use Illuminate\Validation\Validator;
  * POST /cda/periods/{year}/documents (`cda:upload`), multipart: a new
  * document and its first version. The report, when named, is one of the
  * period's; the subject, when named, is a training, program or case that
- * exists. A restricted category or report also needs its view permission
- * (checked by the controller, 403).
+ * exists. A restricted category or a case also needs its view permission,
+ * and a register's document its write permission (403, before any lookup);
+ * a restricted report is checked by the controller. A training's
+ * certificate is added from the training, never here (422).
  */
 class CdaDocumentRequest extends CdaFormRequest
 {
@@ -25,6 +27,19 @@ class CdaDocumentRequest extends CdaFormRequest
     protected function permission(): ?string
     {
         return CdaAccess::UPLOAD;
+    }
+
+    /**
+     * `cda:upload` and `branches:view_all`, then what the category and the
+     * kind of subject need, judged before any record is looked up so a
+     * refusal never tells whether a case exists.
+     */
+    public function authorize(): bool
+    {
+        parent::authorize();
+        app(DocumentRepository::class)->authorizeUploadOf($this->user(), $this->input('category'), $this->input('subject_type'));
+
+        return true;
     }
 
     /** @return array<string, mixed> */
@@ -74,6 +89,12 @@ class CdaDocumentRequest extends CdaFormRequest
             }
 
             $type = $this->input('subject_type');
+
+            if ($this->input('category') === DocumentCategories::CERTIFICATES && $type === 'training' && ! $validator->errors()->has('category')) {
+                $validator->errors()->add('category', 'Add a certificate from the training.');
+
+                return;
+            }
 
             if (is_string($type) && ! $validator->errors()->hasAny(['subject_type', 'subject_id'])
                 && ! app(DocumentRepository::class)->subjectExists($type, (int) $this->input('subject_id'))) {

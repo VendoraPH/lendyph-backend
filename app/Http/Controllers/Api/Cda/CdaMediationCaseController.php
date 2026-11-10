@@ -10,10 +10,13 @@ use App\Models\CdaReportingPeriod;
 use App\Services\Cda\CdaAccess;
 use App\Services\Cda\Registers\RegisterStaleness;
 use App\Services\GeneratedNumberWrite;
+use App\Services\LoanWriteTransaction;
+use Closure;
+use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
 use OpenApi\Attributes as OA;
+use RuntimeException;
 
 /**
  * Mediation and conciliation cases (CDA design §6), restricted: reading
@@ -26,10 +29,14 @@ use OpenApi\Attributes as OA;
  * - None of its text reaches an audit row: the model leaves every free-text
  *   field out, and nothing here writes one of its own.
  * - A write marks the draft reports reading mediation (CAPR, the halves it
- *   touches) as stale.
+ *   touches) as stale. A collision answers 409, never 500, and a database
+ *   failure is rethrown without the SQL bindings, so no case text reaches
+ *   the logs.
  */
 class CdaMediationCaseController extends Controller
 {
+    private const CONFLICT = 'Another change to this register was saved at the same time. Reload and try again.';
+
     private const HALVES = ['h1' => ['01-01', '06-30'], 'h2' => ['07-01', '12-31']];
 
     public function __construct(
@@ -93,12 +100,12 @@ class CdaMediationCaseController extends Controller
     {
         $this->period($year);
 
-        $case = GeneratedNumberWrite::run(function () use ($request): CdaMediationCase {
+        $case = $this->withoutCaseText(fn (): CdaMediationCase => GeneratedNumberWrite::run(function () use ($request): CdaMediationCase {
             $case = CdaMediationCase::query()->create($request->validated());
             $this->touch($case);
 
             return $case;
-        }, GeneratedNumberWrite::MEDIATION_CONFLICT);
+        }, GeneratedNumberWrite::MEDIATION_CONFLICT));
 
         return RegisterPresenter::one(RegisterPresenter::mediationCase($case->refresh(), $year), 201, "Case {$case->case_number} recorded.");
     }
@@ -111,11 +118,11 @@ class CdaMediationCaseController extends Controller
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
         requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent(type: 'object')),
-        responses: [new OA\Response(response: 200, description: '{success, message, data: case}'), new OA\Response(response: 403, description: 'Missing cda:manage_mediation or branches:view_all'), new OA\Response(response: 404, description: 'No such case'), new OA\Response(response: 422, description: 'Refused, in words')],
+        responses: [new OA\Response(response: 200, description: '{success, message, data: case}'), new OA\Response(response: 403, description: 'Missing cda:manage_mediation or branches:view_all'), new OA\Response(response: 404, description: 'No such case'), new OA\Response(response: 409, description: 'Another change was saved at the same time (deadlock or lock wait)'), new OA\Response(response: 422, description: 'Refused, in words')],
     )]
     public function update(CdaMediationCaseRequest $request, int $case): JsonResponse
     {
-        $saved = DB::transaction(function () use ($request, $case): CdaMediationCase {
+        $saved = $this->withoutCaseText(fn (): CdaMediationCase => LoanWriteTransaction::run(function () use ($request, $case): CdaMediationCase {
             $locked = CdaMediationCase::query()->whereKey($case)->lockForUpdate()->first();
             abort_if($locked === null, 404, 'There is no such mediation case.');
 
@@ -128,7 +135,7 @@ class CdaMediationCaseController extends Controller
             }
 
             return $locked;
-        });
+        }, conflictMessage: self::CONFLICT));
 
         return RegisterPresenter::one(RegisterPresenter::mediationCase($saved, $saved->filed_on->year), message: "Case {$saved->case_number} saved.");
     }
@@ -140,13 +147,13 @@ class CdaMediationCaseController extends Controller
         tags: ['CDA'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
-        responses: [new OA\Response(response: 200, description: '{success, message}'), new OA\Response(response: 403, description: 'Missing cda:manage_mediation or branches:view_all'), new OA\Response(response: 404, description: 'No such case')],
+        responses: [new OA\Response(response: 200, description: '{success, message}'), new OA\Response(response: 403, description: 'Missing cda:manage_mediation or branches:view_all'), new OA\Response(response: 404, description: 'No such case'), new OA\Response(response: 409, description: 'Another change was saved at the same time (deadlock or lock wait)')],
     )]
     public function destroy(Request $request, int $case): JsonResponse
     {
         $this->access->authorize($request->user(), CdaAccess::MANAGE_MEDIATION);
 
-        $number = DB::transaction(function () use ($case): string {
+        $number = $this->withoutCaseText(fn (): string => LoanWriteTransaction::run(function () use ($case): string {
             $locked = CdaMediationCase::query()->whereKey($case)->lockForUpdate()->first();
             abort_if($locked === null, 404, 'There is no such mediation case.');
 
@@ -154,9 +161,31 @@ class CdaMediationCaseController extends Controller
             $this->touch($locked);
 
             return $locked->case_number;
-        });
+        }, conflictMessage: self::CONFLICT));
 
         return response()->json(['success' => true, 'message' => "Case {$number} deleted."]);
+    }
+
+    /**
+     * Runs a write so that a database failure never carries the case's text
+     * into the logs: a QueryException's message holds the SQL bindings (the
+     * parties, the dispute), so it is replaced by one naming only the
+     * SQLSTATE, with no previous exception. A collision's 409 passes through.
+     *
+     * @template T
+     *
+     * @param  Closure(): T  $write
+     * @return T
+     */
+    private function withoutCaseText(Closure $write): mixed
+    {
+        try {
+            return $write();
+        } catch (QueryException $e) {
+            $state = preg_match('/SQLSTATE\[(\w+)\]/', $e->getMessage(), $m) === 1 ? $m[1] : (string) $e->getCode();
+
+            throw new RuntimeException("A mediation case could not be saved (SQLSTATE {$state}).");
+        }
     }
 
     private function period(int $year): CdaReportingPeriod
