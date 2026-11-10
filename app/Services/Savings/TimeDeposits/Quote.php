@@ -33,6 +33,13 @@ use OverflowException;
  * A rollover is placed on the day it is settled but priced at the rates in
  * force on the old placement's maturity date (`$ratesOn`).
  *
+ * **Post-maturity interest** ({@see self::postMaturity()}): a placement
+ * settled after its maturity date earns, for the days from the maturity date
+ * to the day before settlement, the regular savings rate (its product's
+ * pre-termination product's rate in force on each day, split where it
+ * changes) on its maturity amount, rounded half up once, taxed at the
+ * member tax rule in force on the settlement date.
+ *
  * Writes nothing. Amounts are centavos inside and two-decimal strings out.
  */
 class Quote
@@ -211,6 +218,38 @@ class Quote
             'penalty' => $penalty,
             'payout' => $principal + $gross - $tax - $penalty,
         ];
+    }
+
+    /**
+     * Post-maturity interest for settling on $settledOn: none on or before
+     * the maturity date.
+     *
+     * @return array{days: int, gross: int, tax: int}
+     *
+     * @throws ValidationException
+     */
+    public function postMaturity(TimeDeposit $deposit, string $settledOn): array
+    {
+        $matures = CarbonImmutable::parse($deposit->maturity_date->toDateString());
+        $on = CarbonImmutable::parse($settledOn)->startOfDay();
+
+        if ($on->lessThanOrEqualTo($matures)) {
+            return ['days' => 0, 'gross' => 0, 'tax' => 0];
+        }
+
+        $start = $matures->toDateString();
+        $end = $on->subDay()->toDateString();
+        $regularId = $deposit->product()->value('pretermination_product_id');
+        $segments = $regularId === null ? [] : $this->rates->segments((int) $regularId, null, $start, $end);
+        $taxRate = $this->taxes->rateOn(SavingsTaxRule::HOLDER_MEMBER, $on->toDateString());
+
+        try {
+            $figures = $this->interest->calculate(SavingsMath::centavos($deposit->maturity_amount), [], $start, $end, $segments, 0, $taxRate);
+        } catch (OverflowException) {
+            $this->refuse('date', "{$deposit->certificate_number}'s maturity amount is too large to work out its post-maturity interest.");
+        }
+
+        return ['days' => $figures['days'], 'gross' => $figures['gross'], 'tax' => $figures['tax']];
     }
 
     /**

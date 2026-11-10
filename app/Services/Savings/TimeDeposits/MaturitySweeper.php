@@ -172,7 +172,7 @@ class MaturitySweeper
 
         return match ($deposit->maturity_instruction) {
             'rollover_all' => null,
-            'rollover_principal' => $this->settlement->split($deposit, 'rollover_principal')['paid_out'] === 0 ? null : ($intoSavings ? 'savings' : false),
+            'rollover_principal' => $this->settlement->split($deposit, 'rollover_principal', now()->toDateString())['paid_out'] === 0 ? null : ($intoSavings ? 'savings' : false),
             'payout' => $intoSavings ? 'savings' : false,
             default => false,
         };

@@ -113,7 +113,7 @@ class SavingsTimeDepositController extends Controller
     #[OA\Get(
         path: '/api/savings/time-deposits/{timeDeposit}',
         summary: 'A time deposit',
-        description: 'The placement with its snapshotted rates, contract figures, settlement and rollover links (`rolled_over_from_id`, `rolled_over_to_id`).',
+        description: 'The placement with its snapshotted rates, contract figures, settlement and rollover links (`rolled_over_from_id`, `rolled_over_to_id`). `post_maturity_days` and `post_maturity_interest`: what a late settlement paid, or what settling today would pay on a placement past its maturity date.',
         tags: ['Savings'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'timeDeposit', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
@@ -199,7 +199,7 @@ class SavingsTimeDepositController extends Controller
     #[OA\Post(
         path: '/api/savings/time-deposits/{timeDeposit}/settle',
         summary: 'Settle a time deposit at maturity',
-        description: 'Needs an Idempotency-Key. On or after the maturity date (422 before), dated today or yesterday, at the contract\'s figures. `action` payout pays principal and net interest out; rollover_principal places the principal again and pays the interest out; rollover_all places both again, at the rate in force on the maturity date, starting on the settlement date, with `next_instruction` (else the old instruction). 201 with this placement, or the new one on a rollover. A cash payout above tier 1 answers 202 with `{approval}`; a payout into the member\'s savings account (`payout_method` savings) posts at once.',
+        description: 'Needs an Idempotency-Key. On or after the maturity date (422 before), dated today or yesterday, at the contract\'s figures plus, when settled after the maturity date, post-maturity interest for those days at the regular savings rate (`post_maturity_days`, `post_maturity_interest`). `action` payout pays principal and net interest out; rollover_principal places the principal again and pays the interest out; rollover_all places both again, at the rate in force on the maturity date, starting on the settlement date, with `next_instruction` (else the old instruction). 201 with this placement, or the new one on a rollover. A cash payout above tier 1 answers 202 with `{approval}`; a payout into the member\'s savings account (`payout_method` savings) posts at once.',
         tags: ['Savings'],
         security: [['sanctum' => []]],
         parameters: [

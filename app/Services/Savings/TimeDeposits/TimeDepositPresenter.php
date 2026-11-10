@@ -5,6 +5,8 @@ namespace App\Services\Savings\TimeDeposits;
 use App\Http\Resources\Savings\SavingsUserRef;
 use App\Models\SavingsApproval;
 use App\Models\TimeDeposit;
+use App\Services\Savings\SavingsMath;
+use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection;
 
@@ -17,9 +19,17 @@ use Illuminate\Database\Eloquent\Collection;
  * A rollover's own placement is funded by the one it came from
  * (`rolled_over_from_id`), so its `funding_method` reads null: no money
  * method paid for it.
+ *
+ * `post_maturity_days` and `post_maturity_interest` (gross, before tax): on
+ * a placement settled at maturity, what its settlement paid for the days
+ * after the maturity date; on one past its maturity date and not settled
+ * yet, what settling it today would pay (the server's figure, so the settle
+ * screen never works it out); otherwise 0 and "0.00".
  */
 class TimeDepositPresenter
 {
+    public function __construct(private readonly Quote $quote) {}
+
     /** The relations {@see self::present()} reads, for eager loading. */
     public const RELATIONS = [
         'borrower:id,borrower_code,first_name,middle_name,last_name,suffix',
@@ -80,11 +90,33 @@ class TimeDepositPresenter
             'settled_amount' => $deposit->settled_amount,
             'payout_method' => $deposit->payout_method,
             'settled_by' => SavingsUserRef::from($deposit->settler),
+            ...$this->postMaturity($deposit),
             'rolled_over_from_id' => $deposit->rolled_over_from_id,
             'rolled_over_to_id' => $deposit->rolledOverInto?->id,
             'created_by' => SavingsUserRef::from($deposit->creator),
             'created_at' => $deposit->created_at,
         ];
+    }
+
+    /** @return array{post_maturity_days: int, post_maturity_interest: string} */
+    private function postMaturity(TimeDeposit $deposit): array
+    {
+        $matures = CarbonImmutable::parse($deposit->maturity_date->toDateString());
+
+        if (in_array($deposit->status, ['withdrawn', 'rolled_over'], true) && $deposit->settled_on !== null) {
+            return [
+                'post_maturity_days' => max(0, (int) $matures->diffInDays(CarbonImmutable::parse($deposit->settled_on->toDateString()))),
+                'post_maturity_interest' => SavingsMath::pesos(max(0, SavingsMath::centavos($deposit->settled_interest) - SavingsMath::centavos($deposit->gross_interest))),
+            ];
+        }
+
+        if (in_array($deposit->status, Settlement::OPEN_STATUSES, true)) {
+            $figures = $this->quote->postMaturity($deposit, now()->toDateString());
+
+            return ['post_maturity_days' => $figures['days'], 'post_maturity_interest' => SavingsMath::pesos($figures['gross'])];
+        }
+
+        return ['post_maturity_days' => 0, 'post_maturity_interest' => '0.00'];
     }
 
     /**

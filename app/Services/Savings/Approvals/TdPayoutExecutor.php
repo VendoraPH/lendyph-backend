@@ -58,7 +58,7 @@ class TdPayoutExecutor implements ApprovalExecutor
             ]]);
         }
 
-        $paidOut = $this->settlement->split($deposit, (string) $payload['action'])['paid_out'];
+        $paidOut = $this->settlement->split($deposit, (string) $payload['action'], (string) $payload['date'])['paid_out'];
 
         if ($paidOut !== SavingsMath::centavos($approval->amount)) {
             throw ValidationException::withMessages(['approval' => [

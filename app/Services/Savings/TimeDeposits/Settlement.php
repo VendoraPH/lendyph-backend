@@ -22,11 +22,14 @@ use LogicException;
  * Settling a time deposit at maturity, and breaking one early (design §2, §5).
  *
  * **At maturity** ({@see self::settle()}): on or after the maturity date, at
- * the contract's own figures (interest only to maturity), once only.
+ * the contract's own figures plus, when settled late, post-maturity interest
+ * from the maturity date to the settlement date ({@see Quote::postMaturity()}),
+ * once only. `settled_interest` and `settled_tax` hold both together.
  * - `payout`: principal and net interest are paid out;
  * - `rollover_principal`: the principal is placed again, the net interest is
  *   paid out;
- * - `rollover_all`: principal and net interest are placed again.
+ * - `rollover_all`: principal and net interest (post-maturity included) are
+ *   placed again.
  * A rollover is a new placement ({@see Placement::rollover()}) starting on
  * the settlement date, with the next instruction staff chose (else the old
  * one's).
@@ -87,7 +90,7 @@ class Settlement
         $this->assertNoPendingApproval($locked);
         $this->assertSettlementDate($locked, $data['date']);
 
-        $paidOut = $this->split($locked, $data['action'])['paid_out'];
+        $paidOut = $this->split($locked, $data['action'], $data['date'])['paid_out'];
 
         if ($paidOut > 0) {
             $this->assertPayoutMethod($locked, $payoutMethod);
@@ -136,7 +139,7 @@ class Settlement
             }
         }
 
-        ['gross' => $gross, 'tax' => $tax, 'rolled' => $rolled, 'paid_out' => $paidOut] = $this->split($locked, $action);
+        ['gross' => $gross, 'tax' => $tax, 'rolled' => $rolled, 'paid_out' => $paidOut, 'post_maturity' => $postMaturity] = $this->split($locked, $action, $date);
         $method = $paidOut > 0 ? $payoutMethod : null;
 
         if ($paidOut > 0) {
@@ -174,8 +177,15 @@ class Settlement
             'time_deposit_settled',
             $locked,
             ['status' => $before],
-            [...$values, 'rolled_over_amount' => SavingsMath::pesos($rolled), 'rolled_over_to' => $rolledInto?->certificate_number],
+            [
+                ...$values,
+                'post_maturity_days' => $postMaturity['days'],
+                'post_maturity_interest' => SavingsMath::pesos($postMaturity['gross']),
+                'rolled_over_amount' => SavingsMath::pesos($rolled),
+                'rolled_over_to' => $rolledInto?->certificate_number,
+            ],
             "Time deposit {$locked->certificate_number} settled on ".CarbonImmutable::parse($date)->format('M j, Y').": {$words}"
+                .($postMaturity['days'] > 0 ? ", with {$this->peso($postMaturity['gross'])} post-maturity interest for {$postMaturity['days']} days" : '')
                 .($userId === null ? ', by the system.' : '.'),
             $userId,
         );
@@ -264,16 +274,20 @@ class Settlement
     }
 
     /**
-     * The principal, interest and tax of a settlement at maturity, and how
-     * the amount due splits between what rolls over and what is paid out.
+     * The principal, interest and tax of a settlement on $date (the contract's
+     * plus any post-maturity interest), and how the amount due splits between
+     * what rolls over and what is paid out.
      *
-     * @return array{principal: int, gross: int, tax: int, rolled: int, paid_out: int}
+     * @return array{principal: int, gross: int, tax: int, rolled: int, paid_out: int, post_maturity: array{days: int, gross: int, tax: int}}
+     *
+     * @throws ValidationException
      */
-    public function split(TimeDeposit $deposit, string $action): array
+    public function split(TimeDeposit $deposit, string $action, string $date): array
     {
+        $postMaturity = $this->quote->postMaturity($deposit, $date);
         $principal = SavingsMath::centavos($deposit->principal);
-        $gross = SavingsMath::centavos($deposit->gross_interest);
-        $tax = SavingsMath::centavos($deposit->withholding_tax);
+        $gross = SavingsMath::add(SavingsMath::centavos($deposit->gross_interest), $postMaturity['gross']);
+        $tax = SavingsMath::centavos($deposit->withholding_tax) + $postMaturity['tax'];
         $due = $principal + $gross - $tax;
 
         $rolled = match ($action) {
@@ -282,7 +296,7 @@ class Settlement
             default => 0,
         };
 
-        return ['principal' => $principal, 'gross' => $gross, 'tax' => $tax, 'rolled' => $rolled, 'paid_out' => $due - $rolled];
+        return ['principal' => $principal, 'gross' => $gross, 'tax' => $tax, 'rolled' => $rolled, 'paid_out' => $due - $rolled, 'post_maturity' => $postMaturity];
     }
 
     /**
