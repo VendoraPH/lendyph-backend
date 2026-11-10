@@ -25,7 +25,7 @@ class ShareCapitalService
     /**
      * Post one credit per eligible pledge and record the run.
      *
-     * `forMembers()` is a financial control, not cosmetics: toggleAutoCredit()
+     * `forCurrentMembers()` is a financial control, not cosmetics: toggleAutoCredit()
      * performs no status check, so a `pending` applicant's auto-created pledge
      * can already carry `auto_credit = true` with a non-zero amount. Without
      * this scope the run would post real share_capital_ledger credits for
@@ -44,7 +44,7 @@ class ShareCapitalService
         ?string $referenceNumber = null,
     ): AutoCreditRun {
         $eligiblePledges = ShareCapitalPledge::with('borrower')
-            ->forMembers()
+            ->forCurrentMembers()
             ->when($scopeTo !== null, fn ($q) => $q->whereHas('borrower', fn ($b) => $b->visibleTo($scopeTo)))
             ->where('auto_credit', true)
             ->where('amount', '>', 0)
@@ -92,8 +92,8 @@ class ShareCapitalService
     /**
      * Auto-credit dashboard figures.
      *
-     * Member-scoped so it agrees with what processAutoCredit() would actually
-     * post; a `pending` applicant must not show up under `no_pledge_members`
+     * Scoped to current members (withdrawn and deceased left out) so it
+     * agrees with what processAutoCredit() would actually post; a `pending` applicant must not show up under `no_pledge_members`
      * as somebody to chase for a pledge amount.
      *
      * With `$scopeTo`, only the pledges of members in that user's branches
@@ -104,7 +104,7 @@ class ShareCapitalService
     public function getAutoCreditStatus(?User $scopeTo = null): array
     {
         $allPledges = ShareCapitalPledge::with('borrower')
-            ->forMembers()
+            ->forCurrentMembers()
             ->when($scopeTo !== null, fn ($q) => $q->whereHas('borrower', fn ($b) => $b->visibleTo($scopeTo)))
             ->get();
 

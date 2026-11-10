@@ -300,6 +300,12 @@ class LoanAdjustmentService
             // `ongoing` at most, over `released`, and both already pledge.
             $this->lockLoanForExtension($loan);
 
+            // "defer" is new credit, so never for a former member; re-checked
+            // under the loan lock (C1 re-review, L2). "pay" stays allowed.
+            if ($interestOption === 'defer') {
+                app(Cda\FormerMemberGuard::class)->assertMemberCurrent($loan, 'interest_option', 'Choose "pay" to collect the interest instead.');
+            }
+
             $oldMaturityDate = $loan->maturity_date->toDateString();
             $oldTerm = $loan->term;
 

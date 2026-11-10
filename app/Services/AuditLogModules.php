@@ -20,6 +20,21 @@ use App\Models\AuditLog;
 use App\Models\Borrower;
 use App\Models\BorrowerNotificationPreference;
 use App\Models\Branch;
+use App\Models\CdaDocument;
+use App\Models\CdaDocumentVersion;
+use App\Models\CdaMediationCase;
+use App\Models\CdaNoticeSent;
+use App\Models\CdaOfficer;
+use App\Models\CdaOfficerTraining;
+use App\Models\CdaRegulatoryProfile;
+use App\Models\CdaReport;
+use App\Models\CdaReportingPeriod;
+use App\Models\CdaReportSnapshot;
+use App\Models\CdaReportTemplate;
+use App\Models\CdaReportValue;
+use App\Models\CdaSetting;
+use App\Models\CdaSocialProgram;
+use App\Models\CdaSubmission;
 use App\Models\Collateral;
 use App\Models\CollateralType;
 use App\Models\CoMaker;
@@ -166,6 +181,25 @@ class AuditLogModules
         SavingsInterestRun::class => 'savings',
         SavingsInterestRunLine::class => 'savings',
         SavingsIdempotencyKey::class => 'savings',
+        // CDA Reports (Phase 3): every CDA model, including the ones that
+        // write no audit rows today (report values, notices), so a later
+        // writer never drifts into `system`. Mediation cases redact their
+        // text ($auditRedacted).
+        CdaRegulatoryProfile::class => 'cda',
+        CdaSetting::class => 'cda',
+        CdaReportTemplate::class => 'cda',
+        CdaReportingPeriod::class => 'cda',
+        CdaReport::class => 'cda',
+        CdaReportValue::class => 'cda',
+        CdaReportSnapshot::class => 'cda',
+        CdaSubmission::class => 'cda',
+        CdaDocument::class => 'cda',
+        CdaDocumentVersion::class => 'cda',
+        CdaOfficer::class => 'cda',
+        CdaOfficerTraining::class => 'cda',
+        CdaSocialProgram::class => 'cda',
+        CdaMediationCase::class => 'cda',
+        CdaNoticeSent::class => 'cda',
         // Deliberately system: an import run is housekeeping, not a record
         // any module's screen shows.
         CsvImportRun::class => self::UNMAPPED,

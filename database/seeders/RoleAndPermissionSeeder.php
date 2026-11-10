@@ -193,6 +193,16 @@ class RoleAndPermissionSeeder extends Seeder
             // the already-migrated deployments.
             'savings:view', 'savings:create', 'savings:transact', 'savings:close',
             'savings:approve', 'savings:post', 'savings:settings',
+
+            // CDA Reports (Phase 3). admin and super_admin only, through
+            // Permission::all() below; no other role lists them. Mirrors
+            // 2026_11_11_100200_add_cda_permissions, which grants them on the
+            // already-migrated deployments. The template manager is a
+            // super_admin role check, not a permission.
+            'cda:view', 'cda:prepare', 'cda:upload', 'cda:review', 'cda:approve',
+            'cda:finalize', 'cda:reopen', 'cda:submit', 'cda:export', 'cda:settings',
+            'cda:manage_officers', 'cda:manage_social', 'cda:manage_mediation',
+            'cda:view_mediation', 'cda:view_audit', 'cda:view_tax',
         ];
 
         $guard = 'web';

@@ -1,0 +1,106 @@
+{
+  "report_type": "sworn_statement",
+  "version": "2026.1",
+  "name": "Sworn Statement of Compliance CY2026",
+  "effective_from": "2026-01-01",
+  "effective_until": null,
+  "cooperative_types": [],
+  "asset_classes": [],
+  "definition": {
+    "schema_version": 1,
+    "meta": {
+      "verified": false,
+      "source_doc": "Sworn statement wording (owner to supply; to verify)"
+    },
+    "parts": [
+      "annual"
+    ],
+    "deadline": {
+      "basis": "year_end",
+      "days_setting": "annual_deadline_days"
+    },
+    "sections": [
+      {
+        "key": "statement",
+        "title": "Sworn statement",
+        "kind": "fields",
+        "fields": [
+          {
+            "key": "cooperative_name",
+            "label": "Cooperative",
+            "type": "text",
+            "source": {
+              "key": "coop.name"
+            }
+          },
+          {
+            "key": "cda_registration_no",
+            "label": "CDA registration number",
+            "type": "text",
+            "source": {
+              "key": "profile.field",
+              "params": {
+                "name": "cda_registration_no"
+              }
+            }
+          },
+          {
+            "key": "signatory_name",
+            "label": "Signatory",
+            "type": "text",
+            "required": true
+          },
+          {
+            "key": "signatory_position",
+            "label": "Position",
+            "type": "text",
+            "required": true
+          },
+          {
+            "key": "statement_date",
+            "label": "Date signed",
+            "type": "date",
+            "required": true
+          },
+          {
+            "key": "notarized",
+            "label": "Notarized",
+            "type": "boolean",
+            "required": true
+          }
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "statement_date_in_range",
+        "type": "date_range",
+        "field": "statement_date",
+        "severity": "warning",
+        "category": "invalid_data",
+        "component": "fields",
+        "from": "period_start",
+        "to": "effective_deadline"
+      },
+      {
+        "id": "signed_statement",
+        "type": "document",
+        "document_category": "sworn_statement",
+        "stage": "submit",
+        "final": true,
+        "severity": "critical",
+        "category": "compliance_document",
+        "component": "documents"
+      },
+      {
+        "id": "template_verified",
+        "type": "check",
+        "check": "template.verified",
+        "severity": "info",
+        "category": "invalid_data",
+        "component": "fields",
+        "message": "This form follows the CDA template as understood in v1 and is still to be checked against the official form."
+      }
+    ]
+  }
+}

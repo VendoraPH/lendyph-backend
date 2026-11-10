@@ -88,3 +88,14 @@ sort($savingsSchedules);
 foreach ($savingsSchedules as $savingsSchedule) {
     require $savingsSchedule;
 }
+
+/*
+ * CDA Reports schedules (routes/console/cda/*.php), in file-name order: each
+ * CDA slice adds its own file. All run on Asia/Manila time.
+ */
+$cdaSchedules = glob(__DIR__.'/console/cda/*.php') ?: [];
+sort($cdaSchedules);
+
+foreach ($cdaSchedules as $cdaSchedule) {
+    require $cdaSchedule;
+}
