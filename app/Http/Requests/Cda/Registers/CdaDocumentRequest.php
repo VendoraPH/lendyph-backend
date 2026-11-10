@@ -17,7 +17,8 @@ use Illuminate\Validation\Validator;
  * period's; the subject, when named, is a training, program or case that
  * exists. A restricted category or a case also needs its view permission,
  * and a register's document its write permission (403, before any lookup);
- * a restricted report is checked by the controller. A training's
+ * a restricted report is checked by the controller. A mediation report's
+ * documents go in the mediation category (422). A training's
  * certificate is added from the training, never here (422).
  */
 class CdaDocumentRequest extends CdaFormRequest
@@ -83,9 +84,12 @@ class CdaDocumentRequest extends CdaFormRequest
             $period = CdaReportingPeriod::query()->where('year', (int) $this->route('year'))->first();
             $reportId = $this->input('report_id');
 
-            if ($period !== null && $reportId !== null && ! $validator->errors()->has('report_id')
-                && ! CdaReport::query()->whereKey((int) $reportId)->where('period_id', $period->id)->exists()) {
+            $report = $reportId === null || $validator->errors()->has('report_id') ? null : CdaReport::query()->find((int) $reportId);
+
+            if ($period !== null && $reportId !== null && ! $validator->errors()->has('report_id') && $report?->period_id !== $period->id) {
                 $validator->errors()->add('report_id', "Choose a report of the {$period->year} period.");
+            } elseif ($report?->report_type === 'mediation' && $this->input('category') !== 'mediation') {
+                $validator->errors()->add('report_id', 'A mediation report\'s documents go in the mediation category.');
             }
 
             $type = $this->input('subject_type');

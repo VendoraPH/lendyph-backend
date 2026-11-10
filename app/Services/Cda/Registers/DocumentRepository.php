@@ -106,7 +106,8 @@ final class DocumentRepository
     }
 
     /**
-     * The view permissions a document needs on top of `cda:view`.
+     * The view permissions a document needs on top of `cda:view`. A report
+     * export with no report could be of any type, so it needs all three.
      *
      * @return list<string>
      */
@@ -117,6 +118,10 @@ final class DocumentRepository
         if ($document->report_id !== null) {
             $type = CdaReport::query()->whereKey($document->report_id)->value('report_type');
             $needs[] = $type === null ? null : ReportTypes::restriction($type);
+        }
+
+        if ($document->category === DocumentCategories::REPORT_EXPORT && $document->report_id === null) {
+            array_push($needs, ...CdaAccess::RESTRICTED_VIEWS);
         }
 
         $needs[] = match ($document->subject_type) {
@@ -208,6 +213,10 @@ final class DocumentRepository
         ));
 
         $query->whereNotIn('category', $hidden);
+
+        if (collect(CdaAccess::RESTRICTED_VIEWS)->contains(fn (string $permission) => ! $user->can($permission))) {
+            $query->where(fn (Builder $q) => $q->where('category', '!=', DocumentCategories::REPORT_EXPORT)->orWhereNotNull('report_id'));
+        }
 
         if ($hiddenTypes !== []) {
             $query->where(fn (Builder $q) => $q->whereNull('report_id')

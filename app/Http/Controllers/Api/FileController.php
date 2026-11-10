@@ -49,7 +49,7 @@ class FileController extends Controller
     {
         $this->assertLinkIsStillLive($request);
         abort_if(! $document->file_path || ! Storage::disk('private')->exists($document->file_path), 404);
-        app(DocumentDownloads::class)->record($request, $document);
+        app(DocumentDownloads::class)->authorizeAndRecord($request, $document);
 
         return $this->stream($document->file_path, $document->original_filename);
     }

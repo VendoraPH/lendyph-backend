@@ -13,6 +13,7 @@ use App\Models\User;
 use App\Services\Cda\CdaAccess;
 use App\Services\Cda\Registers\DocumentCategories;
 use App\Services\Cda\Registers\DocumentRepository;
+use App\Services\LoanWriteTransaction;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
@@ -23,7 +24,8 @@ use OpenApi\Attributes as OA;
  * `cda:view`, uploading and withdrawing `cda:upload`, both with
  * `branches:view_all`. Audit, tax and mediation documents (by category, by
  * report or by subject) also need their view permission: the list leaves
- * them out, and opening or changing one answers 403.
+ * them out, and opening or changing one answers 404, as a missing one does,
+ * so ids can't be probed. A report export changes only by exporting again.
  *
  * A register's document (a certificate, a proof, a mediation paper) also
  * needs that register's write permission to upload to or withdraw
@@ -146,7 +148,7 @@ class CdaDocumentController extends Controller
         tags: ['CDA'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
-        responses: [new OA\Response(response: 200, description: '{success, data: version[], meta: {document}}'), new OA\Response(response: 403, description: 'Missing cda:view, branches:view_all or the restricted view permission'), new OA\Response(response: 404, description: 'No such document')],
+        responses: [new OA\Response(response: 200, description: '{success, data: version[], meta: {document}}'), new OA\Response(response: 403, description: 'Missing cda:view or branches:view_all'), new OA\Response(response: 404, description: 'No such document, or one the caller may not see (mediation, audit, tax)')],
     )]
     public function versions(Request $request, int $document): JsonResponse
     {
@@ -174,11 +176,12 @@ class CdaDocumentController extends Controller
             new OA\Property(property: 'notes', type: 'string', nullable: true),
             new OA\Property(property: 'final', type: 'boolean'),
         ]))),
-        responses: [new OA\Response(response: 201, description: '{success, message, data: document}'), new OA\Response(response: 403, description: 'Missing cda:upload, branches:view_all or the restricted view permission'), new OA\Response(response: 404, description: 'No such document'), new OA\Response(response: 409, description: 'The document is withdrawn'), new OA\Response(response: 422, description: 'Refused, in words')],
+        responses: [new OA\Response(response: 201, description: '{success, message, data: document}'), new OA\Response(response: 403, description: 'Missing cda:upload, branches:view_all or the register\'s write permission'), new OA\Response(response: 404, description: 'No such document, or one the caller may not see (mediation, audit, tax)'), new OA\Response(response: 409, description: 'The document is withdrawn, or is a report export (export the report again)'), new OA\Response(response: 422, description: 'Refused, in words')],
     )]
     public function addVersion(CdaVersionRequest $request, int $document): JsonResponse
     {
         $found = $this->find($request->user(), $document);
+        $this->refuseExport($found);
         $this->documents->authorizeWrite($request->user(), $found->category, $found->subject_type);
         $data = $request->validated();
 
@@ -195,12 +198,13 @@ class CdaDocumentController extends Controller
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
         requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent(required: ['reason'], properties: [new OA\Property(property: 'reason', type: 'string')])),
-        responses: [new OA\Response(response: 200, description: '{success, message, data: document}'), new OA\Response(response: 403, description: 'Missing cda:upload, branches:view_all or the restricted view permission'), new OA\Response(response: 404, description: 'No such document'), new OA\Response(response: 409, description: 'Already withdrawn'), new OA\Response(response: 422, description: 'No reason')],
+        responses: [new OA\Response(response: 200, description: '{success, message, data: document}'), new OA\Response(response: 403, description: 'Missing cda:upload, branches:view_all or the register\'s write permission'), new OA\Response(response: 404, description: 'No such document, or one the caller may not see (mediation, audit, tax)'), new OA\Response(response: 409, description: 'Already withdrawn, or a report export (export the report again)'), new OA\Response(response: 422, description: 'No reason')],
     )]
     public function withdraw(Request $request, int $document): JsonResponse
     {
         $this->access->authorize($request->user(), CdaAccess::UPLOAD);
         $found = $this->find($request->user(), $document);
+        $this->refuseExport($found);
         $this->documents->authorizeWrite($request->user(), $found->category, $found->subject_type);
         $reason = (string) $request->validate(
             ['reason' => ['required', 'string', 'max:500']],
@@ -212,11 +216,19 @@ class CdaDocumentController extends Controller
         return RegisterPresenter::one($this->present($found), message: 'Document withdrawn. Its files are kept.');
     }
 
+    /** A server export changes only by exporting the report again (409). */
+    private function refuseExport(CdaDocument $document): void
+    {
+        if ($document->category === DocumentCategories::REPORT_EXPORT) {
+            throw LoanWriteTransaction::conflict('Export the report again.');
+        }
+    }
+
+    /** The document, or 404 when it is missing or the user may not see it, so ids can't be probed. */
     private function find(User $user, int $id): CdaDocument
     {
         $document = CdaDocument::query()->with(['period', 'report', 'versions.file'])->find($id);
-        abort_if($document === null, 404, 'There is no such document.');
-        $this->documents->authorizeSee($user, $document);
+        abort_if($document === null || ! $this->documents->canSee($user, $document), 404, 'There is no such document.');
 
         return $document;
     }

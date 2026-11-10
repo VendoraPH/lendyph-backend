@@ -8,10 +8,14 @@ use App\Models\CdaDocument;
 use App\Models\CdaDocumentVersion;
 use App\Models\CdaReport;
 use App\Models\Document;
+use App\Models\Role;
+use App\Models\User;
+use App\Services\BranchAccess;
 use App\Services\Cda\CdaAccess;
 use App\Services\SignedFileLink;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Storage;
+use Spatie\Permission\PermissionRegistrar;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
@@ -165,6 +169,41 @@ class CdaDocumentDownloadsTest extends TestCase
         $this->openAsBrowser($url)->assertOk();
 
         $this->assertSame($user->id, $this->downloads()[0]->user_id);
+        $this->assertEquals(['document_id' => $file->id, 'version' => 1, 'via' => 'link'], $this->downloads()[0]->new_values);
+    }
+
+    public function test_a_link_is_refused_once_its_user_loses_the_permission_or_is_deactivated(): void
+    {
+        $file = $this->cdaFile(['category' => 'mediation', 'title' => self::PARTY]);
+        $role = Role::create(['name' => 'cda_link_probe', 'guard_name' => 'web']);
+        $role->givePermissionTo([BranchAccess::VIEW_ALL, CdaAccess::VIEW, CdaAccess::VIEW_MEDIATION]);
+        $user = User::factory()->inBranches($this->branch)->create();
+        $user->assignRole($role);
+        app(PermissionRegistrar::class)->forgetCachedPermissions();
+        $this->actingAs($user);
+        $url = $this->link($file);
+
+        $this->openAsBrowser($url)->assertOk();
+
+        $role->revokePermissionTo(CdaAccess::VIEW_MEDIATION);
+        app(PermissionRegistrar::class)->forgetCachedPermissions();
+        $this->openAsBrowser($url)->assertNotFound();
+
+        $role->givePermissionTo(CdaAccess::VIEW_MEDIATION);
+        app(PermissionRegistrar::class)->forgetCachedPermissions();
+        $user->update(['status' => 'inactive']);
+        $this->openAsBrowser($url)->assertNotFound();
+
+        $this->assertCount(1, $this->downloads());
+    }
+
+    public function test_a_cda_link_made_with_nobody_signed_in_is_refused(): void
+    {
+        $file = $this->cdaFile(['category' => 'minutes']);
+        $this->app['auth']->forgetGuards();
+
+        $this->openAsBrowser($this->link($file))->assertNotFound();
+        $this->assertSame([], $this->downloads());
     }
 
     public function test_member_files_are_unchanged_for_a_signed_in_caller(): void

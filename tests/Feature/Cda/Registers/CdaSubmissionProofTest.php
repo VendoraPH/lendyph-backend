@@ -66,9 +66,12 @@ class CdaSubmissionProofTest extends TestCase
         $this->assertSame(2, $second['document']['final_version']['version']);
         $this->assertSame(1, CdaDocument::query()->where('subject_type', 'submission')->where('subject_id', $submission->id)->count());
 
-        $presented = app(SubmissionProofs::class)->present($submission->fresh());
+        $viewer = $this->cdaUser([CdaAccess::VIEW]);
+        $presented = app(SubmissionProofs::class)->present($submission->fresh(), $viewer);
         $this->assertSame('stamped.pdf', $presented['file_name']);
-        $this->openAsBrowser($presented['url'])->assertOk();
+        $this->assertNotNull($presented['url']);
+        $this->assertNull(app(SubmissionProofs::class)->present($submission->fresh())['url']);
+        $this->assertNull(app(SubmissionProofs::class)->present($submission->fresh(), $this->cdaUser([CdaAccess::SUBMIT]))['url']);
     }
 
     public function test_a_restricted_reports_proof_needs_its_view_permission(): void
@@ -96,5 +99,16 @@ class CdaSubmissionProofTest extends TestCase
         $this->postJson("/api/cda/submissions/{$submission->id}/proof", [])->assertUnprocessable()->assertJsonPath('errors.file.0', 'Choose a file to upload.');
         $this->proof($submission->id)->assertCreated();
         $this->proof(999999)->assertNotFound();
+    }
+
+    public function test_a_restricted_reports_proof_has_no_url_for_someone_who_cant_see_it(): void
+    {
+        $submission = $this->submissionFor('financial_statements');
+        $this->actingAs($this->cdaUser([CdaAccess::VIEW, CdaAccess::SUBMIT, CdaAccess::VIEW_AUDIT]));
+        $this->proof($submission->id)->assertCreated();
+
+        $proofs = app(SubmissionProofs::class);
+        $this->assertNull($proofs->present($submission->fresh(), $this->cdaUser([CdaAccess::VIEW]))['url']);
+        $this->assertNotNull($proofs->present($submission->fresh(), $this->cdaUser([CdaAccess::VIEW, CdaAccess::VIEW_AUDIT]))['url']);
     }
 }

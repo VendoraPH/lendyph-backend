@@ -2,6 +2,7 @@
 
 namespace Tests\Feature\Cda\Registers;
 
+use App\Models\AuditLog;
 use App\Models\CdaDocument;
 use App\Models\CdaDocumentVersion;
 use App\Models\CdaMediationCase;
@@ -148,9 +149,10 @@ class CdaDocumentsTest extends TestCase
 
         $this->actingAs($this->cdaUser([CdaAccess::VIEW, CdaAccess::UPLOAD]));
         $this->assertSame([$open->id], array_column($this->getJson('/api/cda/periods/2026/documents')->assertOk()->json('data'), 'id'));
-        $this->getJson("/api/cda/documents/{$audit->id}/versions")->assertForbidden();
-        $this->getJson("/api/cda/documents/{$byReport->id}/versions")->assertForbidden();
-        $this->postJson("/api/cda/documents/{$tax->id}/withdraw", ['reason' => 'x'])->assertForbidden();
+        $this->getJson("/api/cda/documents/{$audit->id}/versions")->assertNotFound()->assertJsonPath('message', 'There is no such document.');
+        $this->getJson("/api/cda/documents/{$byReport->id}/versions")->assertNotFound();
+        $this->postJson("/api/cda/documents/{$tax->id}/withdraw", ['reason' => 'x'])->assertNotFound();
+        $this->getJson('/api/cda/documents/999999/versions')->assertNotFound()->assertJsonPath('message', 'There is no such document.');
         $this->upload(['title' => 'AFS', 'category' => 'audit_report', 'file' => $this->pdf()])->assertForbidden();
         $this->upload(['title' => 'Mediation minutes', 'category' => 'mediation', 'file' => $this->pdf()])->assertForbidden();
 
@@ -306,5 +308,48 @@ class CdaDocumentsTest extends TestCase
         $ids = array_column($this->getJson('/api/cda/periods/2026/documents?category=report_export')->json('data'), 'id');
         sort($ids);
         $this->assertSame([$capr->id, $fs->id, $atir->id], $ids);
+    }
+
+    public function test_a_mediation_report_takes_only_mediation_documents_and_its_documents_read_as_mediation(): void
+    {
+        $period = $this->period();
+        $h1 = CdaReport::query()->where('period_id', $period->id)->where('report_type', 'mediation')->where('part', 'h1')->sole();
+        $this->actingAs($this->cdaUser([CdaAccess::VIEW, CdaAccess::UPLOAD, CdaAccess::VIEW_MEDIATION, CdaAccess::MANAGE_MEDIATION]));
+
+        $this->upload(['title' => 'Minutes', 'category' => 'minutes', 'report_id' => $h1->id, 'file' => $this->pdf()])
+            ->assertUnprocessable()->assertJsonPath('errors.report_id.0', 'A mediation report\'s documents go in the mediation category.');
+        $this->upload(['title' => 'Juan Dela Cruz settlement', 'category' => 'mediation', 'report_id' => $h1->id, 'file' => $this->pdf()])->assertCreated();
+
+        $before = (int) (AuditLog::query()->max('id') ?? 0);
+        $export = CdaDocument::factory()->create(['period_id' => $period->id, 'category' => 'report_export', 'report_id' => $h1->id, 'title' => 'Juan Dela Cruz export']);
+
+        $this->assertTrue($export->isMediation());
+        $logged = AuditLog::query()->where('id', '>', $before)->get()->map(fn (AuditLog $row) => json_encode([$row->new_values, $row->description]))->implode(' ');
+        $this->assertStringNotContainsString('Juan', $logged);
+    }
+
+    public function test_exports_take_no_new_version_and_cant_be_withdrawn(): void
+    {
+        $period = $this->period();
+        $capr = CdaReport::query()->where('period_id', $period->id)->where('report_type', 'capr')->sole();
+        $export = CdaDocument::factory()->create(['period_id' => $period->id, 'category' => 'report_export', 'report_id' => $capr->id]);
+        $this->actingAs($this->cdaUser([CdaAccess::VIEW, CdaAccess::UPLOAD]));
+
+        $this->upload(['file' => $this->pdf()], "/api/cda/documents/{$export->id}/versions")->assertConflict()->assertJsonPath('message', 'Export the report again.');
+        $this->postJson("/api/cda/documents/{$export->id}/withdraw", ['reason' => 'x'])->assertConflict()->assertJsonPath('message', 'Export the report again.');
+        $this->assertSame('active', $export->fresh()->status);
+    }
+
+    public function test_an_export_with_no_report_is_shown_only_to_holders_of_every_restricted_view(): void
+    {
+        $orphan = CdaDocument::factory()->create(['period_id' => $this->period()->id, 'category' => 'report_export', 'report_id' => null]);
+
+        $this->actingAs($this->cdaUser([CdaAccess::VIEW, CdaAccess::VIEW_AUDIT, CdaAccess::VIEW_TAX]));
+        $this->assertSame([], $this->getJson('/api/cda/periods/2026/documents')->assertOk()->json('data'));
+        $this->getJson("/api/cda/documents/{$orphan->id}/versions")->assertNotFound();
+
+        $this->actingAs($this->cdaUser([CdaAccess::VIEW, CdaAccess::VIEW_AUDIT, CdaAccess::VIEW_TAX, CdaAccess::VIEW_MEDIATION]));
+        $this->assertSame([$orphan->id], array_column($this->getJson('/api/cda/periods/2026/documents')->json('data'), 'id'));
+        $this->getJson("/api/cda/documents/{$orphan->id}/versions")->assertOk();
     }
 }

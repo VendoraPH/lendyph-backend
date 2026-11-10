@@ -14,8 +14,9 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
  * by period and category, optionally about a report or a subject (a training,
  * program, case or submission). Its files are versions, never overwritten; a
  * withdrawn document keeps them. Audited; a document restricted to
- * mediation (a `mediation` category or a `case` subject) keeps its title,
- * description and withdrawal reason out of the audit rows.
+ * mediation (a `mediation` category, a `case` subject, or a document of a
+ * mediation report, such as its export) keeps its title, description and
+ * withdrawal reason out of the audit rows.
  */
 class CdaDocument extends Model
 {
@@ -63,13 +64,21 @@ class CdaDocument extends Model
     /** Restricted to mediation: a mediation category or a case subject. */
     public function isMediation(): bool
     {
-        return $this->category === self::MEDIATION_CATEGORY || $this->subject_type === self::CASE_SUBJECT;
+        return $this->category === self::MEDIATION_CATEGORY || $this->subject_type === self::CASE_SUBJECT
+            || self::isMediationReport($this->report_id);
     }
 
     /** Whether it was restricted to mediation before this change. */
     public function wasMediation(): bool
     {
-        return $this->getOriginal('category') === self::MEDIATION_CATEGORY || $this->getOriginal('subject_type') === self::CASE_SUBJECT;
+        return $this->getOriginal('category') === self::MEDIATION_CATEGORY || $this->getOriginal('subject_type') === self::CASE_SUBJECT
+            || self::isMediationReport($this->getOriginal('report_id'));
+    }
+
+    /** Whether the report is a mediation report (H1 or H2). */
+    private static function isMediationReport(mixed $reportId): bool
+    {
+        return $reportId !== null && CdaReport::query()->whereKey((int) $reportId)->value('report_type') === self::MEDIATION_CATEGORY;
     }
 
     protected function casts(): array
