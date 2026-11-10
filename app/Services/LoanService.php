@@ -1956,7 +1956,8 @@ class LoanService
      *
      * `collected_now` is every deduction the release withholds, insurance
      * included, which a restructure collects from the member; nothing is
-     * paid out.
+     * paid out (restructureProceeds(), which POST /loans/preview states them
+     * by too).
      *
      * @return array{carried_principal: string, capitalised_interest: string, capitalised_penalty: string, written_off_principal: string, collected_now: string, paid_out: string}
      *
@@ -1974,7 +1975,24 @@ class LoanService
             'capitalised_interest' => self::pesos($split['capitalised_interest']),
             'capitalised_penalty' => self::pesos($split['capitalised_penalty']),
             'written_off_principal' => self::pesos($split['written_off_principal']),
-            'collected_now' => self::pesos(self::toCentavos((float) $collectedNow)),
+            ...self::restructureProceeds(self::toCentavos((float) $collectedNow)),
+        ];
+    }
+
+    /**
+     * What a restructure's release does with its deductions: every one is
+     * collected from the member (`collected_now`), and nothing is paid out
+     * (`paid_out`), since the new loan's principal settles the source rather
+     * than reaching the member. The one rule the release preview and the
+     * restructure page's preview (formPreview()) state them by. 2dp strings;
+     * `collected_now` is null while the deductions are not known.
+     *
+     * @return array{collected_now: string|null, paid_out: string}
+     */
+    private static function restructureProceeds(?int $deductionCentavos): array
+    {
+        return [
+            'collected_now' => $deductionCentavos === null ? null : self::pesos($deductionCentavos),
             'paid_out' => self::pesos(0),
         ];
     }
@@ -2458,7 +2476,13 @@ class LoanService
      *   card uses too. Each is valued by its id, on the borrower's register,
      *   at what saving would pledge it at (previewPledgedCentavos()); a sent
      *   `snapshot_value` is ignored. With `loan_id` (the edit page) the
-     *   borrower is that loan's, and with `source_loan_id` the source's.
+     *   borrower is that loan's, and with `source_loan_id` the source's. With
+     *   `loan_id` and no `collaterals` (absent or null) the loan's held
+     *   pledges count at their stored value, as PUT /loans/{id} leaves them.
+     *   When one of them is share capital and `$viewer` lacks
+     *   `share_capital:view`, the section is withheld instead
+     *   (CollateralSecurity::withheld(), by withholdsBalances(), the loan
+     *   card's rule): its figures would reveal the balance.
      * - `maturity_date`: where the loan would mature, by the code a create
      *   stores it with. Null until the product, a term inside its range, the
      *   frequency and the start date are known; the principal and the rate
@@ -2474,41 +2498,62 @@ class LoanService
      *   0 are too.
      * - `restructure`, only with `source_loan_id` (the restructure page):
      *   restructureFigures() of that loan at the principal, the figures and
-     *   rules POST /loans/{id}/restructure applies. The borrower is the source
-     *   loan's.
+     *   rules POST /loans/{id}/restructure applies, plus what its release
+     *   does with the deductions (restructureProceeds(), as the release
+     *   preview states it). The borrower is the source loan's. With `loan_id`
+     *   too (the restructure edit form), the edited loan must restructure
+     *   that source, and collateral counts by the edit's rules.
      *
      * Money is added in whole centavos, never as peso floats. Writes nothing.
      *
      * @param  array{loan_id?: int|null, source_loan_id?: int|null, borrower_id?: int|null, loan_product_id?: int|null, principal_amount?: float|int|string|null, interest_rate?: float|int|string|null, term?: int|null, frequency?: string|null, start_date?: string|null, scb_amount?: float|int|string|null, collaterals?: list<array{collateral_id: int}>|null, deductions?: list<array{name: string, amount: float|int|string, type: string}>|null}  $input
-     * @return array{collateral: array{total_value: float|int, security_status: string, short_by: float|int}, maturity_date: string|null, deductions: array<string, mixed>|null, amortization: array<string, mixed>|null, restructure?: array{restructurable_balance: float, principal: float, shortfall: float, remarks_required: bool, write_off_permission_required: bool}}
+     * @return array{collateral: array{total_value: float|int|null, security_status: string|null, short_by: float|int|null, value_unknown?: true}, maturity_date: string|null, deductions: array<string, mixed>|null, amortization: array<string, mixed>|null, restructure?: array{restructurable_balance: float, principal: float, shortfall: float, remarks_required: bool, write_off_permission_required: bool, collected_now: string|null, paid_out: string}}
      *
-     * @throws ValidationException when the edited loan cannot be edited, the source cannot be restructured, or a collateral is not on the borrower's register
+     * @throws ValidationException when the edited loan cannot be edited or does not restructure the source sent with it, the source cannot be restructured, or a collateral is not on the borrower's register
      */
-    public function formPreview(array $input): array
+    public function formPreview(array $input, ?User $viewer = null): array
     {
         $principal = $this->toCentavos((float) ($input['principal_amount'] ?? 0));
-        $edited = isset($input['loan_id']) ? $this->previewEditedLoan((int) $input['loan_id'], $input['borrower_id'] ?? null) : null;
-        $source = isset($input['source_loan_id']) ? $this->previewSource((int) $input['source_loan_id'], $input['borrower_id'] ?? null) : null;
+        $sourceLoanId = isset($input['source_loan_id']) ? (int) $input['source_loan_id'] : null;
+        $edited = isset($input['loan_id']) ? $this->previewEditedLoan((int) $input['loan_id'], $input['borrower_id'] ?? null, $sourceLoanId) : null;
+        $source = $sourceLoanId === null ? null : $this->previewSource($sourceLoanId, $input['borrower_id'] ?? null);
         $borrowerId = $edited?->borrower_id ?? $source?->borrower_id ?? ($input['borrower_id'] ?? null);
+        // An edit, a restructure's included, pledges what updateLoan() would
+        // leave. No list (absent or null) leaves its pledges untouched, so
+        // every held one counts at its stored value; `[]` detaches them all;
+        // a list is the complete list, held rows at their pledged value. A new
+        // restructure carries every pledge of its source (inheritCollaterals()).
+        $rows = $input['collaterals'] ?? null;
         $pledged = $this->previewPledgedCentavos(
-            $input['collaterals'] ?? [],
+            $rows ?? [],
             $borrowerId === null ? null : (int) $borrowerId,
             $edited ?? $source,
-            carriesEveryPledge: $source !== null,
+            carriesEveryPledge: $edited === null ? $source !== null : $rows === null,
         );
 
         $product = isset($input['loan_product_id']) ? LoanProduct::find($input['loan_product_id']) : null;
         $maturity = $this->formMaturity($product, $input);
 
         $preview = [
-            'collateral' => CollateralSecurity::summary($principal, $pledged),
+            'collateral' => $rows === null && $edited !== null && CollateralSecurity::withholdsBalances($edited, $viewer)
+                ? CollateralSecurity::withheld()
+                : CollateralSecurity::summary($principal, $pledged),
             'maturity_date' => $maturity?->toDateString(),
             'deductions' => $product === null || $principal <= 0 ? null : $this->formDeductions($product, $input, $principal, $maturity, $edited?->term_unit),
             'amortization' => $product === null || $maturity === null ? null : $this->formSchedule($product, $input, $principal, $maturity),
         ];
 
         if ($source !== null) {
-            $preview['restructure'] = Arr::except($this->restructureFigures($source, $principal / 100), 'exceeds_balance');
+            $deductions = $preview['deductions'];
+
+            $preview['restructure'] = [
+                ...Arr::except($this->restructureFigures($source, $principal / 100), 'exceeds_balance'),
+                // Not known while the deductions are refused, as their
+                // `net_proceeds` is not.
+                ...self::restructureProceeds($deductions === null || $deductions['error'] !== null
+                    ? null
+                    : self::toCentavos((float) $deductions['total_deductions'])),
+            ];
         }
 
         return $preview;
@@ -2518,15 +2563,24 @@ class LoanService
      * The loan an edit preview is for: one updateLoan() would still edit, and
      * no other borrower's. A plain read, like previewSource().
      *
-     * @throws ValidationException when the loan is gone or no longer editable, or a different borrower is named
+     * With `$sourceLoanId` (the restructure edit form, which previews with
+     * both ids) it must be the restructure of that loan.
+     *
+     * @throws ValidationException when the loan is gone, restructures another loan or none, is no longer editable, or a different borrower is named
      */
-    private function previewEditedLoan(int $loanId, int|string|null $borrowerId): Loan
+    private function previewEditedLoan(int $loanId, int|string|null $borrowerId, ?int $sourceLoanId = null): Loan
     {
         $loan = Loan::find($loanId);
 
         if (! $loan) {
             throw ValidationException::withMessages([
                 'loan_id' => ['The loan being edited no longer exists.'],
+            ]);
+        }
+
+        if ($sourceLoanId !== null && (int) $loan->source_loan_id !== $sourceLoanId) {
+            throw ValidationException::withMessages([
+                'loan_id' => ['The loan being edited is not a restructure of this loan.'],
             ]);
         }
 

@@ -162,16 +162,38 @@ class CollateralServerValueTest extends TestCase
         $loan->load('collaterals');
 
         $this->assertSame(
-            ['total_value' => null, 'security_status' => 'partially_secured', 'short_by' => null, 'value_unknown' => true],
+            ['total_value' => null, 'security_status' => null, 'short_by' => null, 'value_unknown' => true],
             CollateralSecurity::ofLoan($loan, $this->userWith('loans:view')),
         );
         $this->assertSame(
-            ['total_value' => null, 'security_status' => 'partially_secured', 'short_by' => null, 'value_unknown' => true],
+            ['total_value' => null, 'security_status' => null, 'short_by' => null, 'value_unknown' => true],
             CollateralSecurity::ofLoan($loan->fresh('collaterals')),
         );
         $this->assertEquals(
             ['total_value' => 7250.5, 'security_status' => 'partially_secured', 'short_by' => 92749.5],
             CollateralSecurity::ofLoan($loan->fresh('collaterals'), $this->userWith('loans:view', 'share_capital:view')),
+        );
+    }
+
+    /**
+     * Withheld means every figure built from the total: a "secured" status
+     * would say the share capital balance covers the principal (follow-up
+     * round 3 re-review), so it is null too, as POST /loans/preview's
+     * withheld `collateral` is.
+     */
+    public function test_the_loan_page_withholds_the_status_a_share_capital_balance_would_reveal(): void
+    {
+        $loan = $this->draftLoan();
+        $collateral = $this->shareCapitalCollateral($loan->borrower_id, 150000);
+        $this->postJson("/api/loans/{$loan->id}/collaterals", ['collateral_id' => $collateral->id])->assertCreated();
+
+        $this->assertSame(
+            ['total_value' => null, 'security_status' => null, 'short_by' => null, 'value_unknown' => true],
+            $this->actingAs($this->userWith('loans:view'))->getJson("/api/loans/{$loan->id}")->assertOk()->json('data.collateral_summary'),
+        );
+        $this->assertEquals(
+            ['total_value' => 150000, 'security_status' => 'secured', 'short_by' => 0],
+            $this->actingAs($this->userWith('loans:view', 'share_capital:view'))->getJson("/api/loans/{$loan->id}")->assertOk()->json('data.collateral_summary'),
         );
     }
 
@@ -205,7 +227,7 @@ class CollateralServerValueTest extends TestCase
     public function test_the_loan_page_withholds_a_share_capital_balance_from_a_viewer_who_cannot_see_it(): void
     {
         $this->assertSame(
-            ['total_value' => null, 'security_status' => 'partially_secured', 'short_by' => null, 'value_unknown' => true],
+            ['total_value' => null, 'security_status' => null, 'short_by' => null, 'value_unknown' => true],
             $this->shownSummaryOfShareCapitalLoan($this->userWith('loans:view')),
         );
     }

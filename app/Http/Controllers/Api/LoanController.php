@@ -1399,7 +1399,7 @@ DESC,
         description: <<<'TXT'
         Read-only. Every field is optional; each section is computed from what was sent.
 
-        `collateral` is always present: `total_value` (each listed collateral valued by the server by `collateral_id` on the borrower's register: its `amount`, or for share capital its member's balance, at least 0; collateral the edited loan (`loan_id`) or the source loan (`source_loan_id`) already holds counts at the value it was pledged at, and on a restructure every pledge of the source counts, listed or not. A sent `snapshot_value` is ignored), `security_status` (`unsecured` with no principal or nothing pledged, `secured` when the total reaches the principal, else `partially_secured`) and `short_by` (the principal less the total, never below 0; 0 without a principal). GET /api/loans/{id} `collateral_summary` uses the same rule for a saved loan's pledges.
+        `collateral` is always present: `total_value` (each listed collateral valued by the server by `collateral_id` on the borrower's register: its `amount`, or for share capital its member's balance, at least 0; collateral the edited loan (`loan_id`) or the source loan (`source_loan_id`) already holds counts at the value it was pledged at, and on a restructure every pledge of the source counts, listed or not. With `loan_id` the edit's rules apply, as PUT /api/loans/{id} saves them: no `collaterals` (absent or null) counts the loan's held pledges at their stored value, `[]` counts nothing, and a list counts only its rows. A sent `snapshot_value` is ignored), `security_status` (`unsecured` with no principal or nothing pledged, `secured` when the total reaches the principal, else `partially_secured`) and `short_by` (the principal less the total, never below 0; 0 without a principal). GET /api/loans/{id} `collateral_summary` uses the same rule for a saved loan's pledges.
 
         `maturity_date` is where the loan would mature, as creating it would store it: null until `loan_product_id`, a `term` inside the product's term range, `frequency` and `start_date` are sent (the principal and the rate are not needed).
 
@@ -1407,9 +1407,11 @@ DESC,
 
         `amortization` is null until `loan_product_id`, a `principal_amount` above 0, an `interest_rate` above 0, `term`, `frequency` and `start_date` are all sent. Its `rows` are the schedule a release of the same loan writes, built with the product's interest method, term unit and rate frequency (`interest_method` says which), each with the `share_capital_build_up` (`scb_amount`) and `total_payment` (`total_due` plus it); `totals` adds up principal, interest, build-up and payment.
 
-        `restructure` is present only with `source_loan_id`: `{restructurable_balance, principal, shortfall, remarks_required, write_off_permission_required}`, by the rule POST /api/loans/{id}/restructure applies. `shortfall` is 0 when the principal reaches or exceeds the balance. The two flags state what the restructure needs, not whether the caller holds `loans:write_off`.
+        `restructure` is present only with `source_loan_id`: `{restructurable_balance, principal, shortfall, remarks_required, write_off_permission_required, collected_now, paid_out}`, by the rule POST /api/loans/{id}/restructure applies. `shortfall` is 0 when the principal reaches or exceeds the balance. The two flags state what the restructure needs, not whether the caller holds `loans:write_off`. `collected_now` (every deduction, `deductions.total_deductions`, collected from the member) and `paid_out` (always 0.00) are 2dp strings, by the code GET /api/loans/{id}/release-preview's `restructure` states them with; `collected_now` is null while `deductions` is null or carries an `error`. Insurance is chosen at release, so it is not in them here.
 
-        Listing collateral needs `collaterals:view`, and a share capital collateral (listed, or held by the source loan on a restructure) needs `share_capital:view`.
+        The restructure edit form sends `loan_id` and `source_loan_id` together: the edited loan must be the restructure of that source (else 422 on `loan_id`), the caller needs both loans:update and loans:restructure, each id is checked for the caller's branches, and collateral counts by the edit's rules (the listed rows only, held ones at their pledged value).
+
+        Listing collateral needs `collaterals:view`, and a share capital collateral (listed, or held by the source loan on a restructure) needs `share_capital:view`. With `loan_id` and no list, when the edited loan holds a share capital pledge and the caller lacks `share_capital:view`, `collateral` is `{total_value: null, security_status: null, short_by: null, value_unknown: true}`, never a 422, and every other section is unchanged.
 
         The product's amount, rate and term ranges are not checked here; saving the loan enforces them.
         TXT,
@@ -1418,8 +1420,8 @@ DESC,
         requestBody: new OA\RequestBody(
             content: new OA\JsonContent(
                 properties: [
-                    new OA\Property(property: 'loan_id', type: 'integer', nullable: true, description: 'The loan being edited (the edit page). Needs loans:update; the loan must be draft or for_review. Cannot be sent with source_loan_id'),
-                    new OA\Property(property: 'source_loan_id', type: 'integer', nullable: true, description: 'The loan being restructured (the restructure page). Needs loans:restructure'),
+                    new OA\Property(property: 'loan_id', type: 'integer', nullable: true, description: 'The loan being edited (the edit page). Needs loans:update; the loan must be draft or for_review. With source_loan_id, it must be the restructure of that loan'),
+                    new OA\Property(property: 'source_loan_id', type: 'integer', nullable: true, description: 'The loan being restructured (the restructure page, and with loan_id the restructure edit form). Needs loans:restructure'),
                     new OA\Property(property: 'borrower_id', type: 'integer', nullable: true, description: 'Required when collaterals is not empty, unless loan_id or source_loan_id is sent; if sent with either, it must be that loan\'s borrower'),
                     new OA\Property(property: 'loan_product_id', type: 'integer', nullable: true),
                     new OA\Property(property: 'principal_amount', type: 'number', nullable: true),
@@ -1446,13 +1448,13 @@ DESC,
         ),
         responses: [
             new OA\Response(response: 200, description: '`{data: {collateral, maturity_date, deductions, amortization, restructure?}}`'),
-            new OA\Response(response: 403, description: 'Missing both loans:create and loans:update; with `loan_id`, missing loans:update; with `source_loan_id`, missing loans:restructure'),
-            new OA\Response(response: 422, description: 'Malformed input, a collateral not on the borrower\'s register, collateral without collaterals:view, a share capital collateral without share_capital:view, a loan that can no longer be edited, or a source loan that cannot be restructured'),
+            new OA\Response(response: 403, description: 'Missing both loans:create and loans:update; with `loan_id`, missing loans:update; with `source_loan_id`, missing loans:restructure (both ids need both)'),
+            new OA\Response(response: 422, description: 'Malformed input, a collateral not on the borrower\'s register, collateral without collaterals:view, a share capital collateral without share_capital:view, a loan that can no longer be edited, an edited loan that is not the restructure of `source_loan_id`, or a source loan that cannot be restructured'),
         ],
     )]
     public function formPreview(PreviewLoanRequest $request): JsonResponse
     {
-        return response()->json(['data' => $this->loanService->formPreview($request->validated())]);
+        return response()->json(['data' => $this->loanService->formPreview($request->validated(), $request->user())]);
     }
 
     #[OA\Get(

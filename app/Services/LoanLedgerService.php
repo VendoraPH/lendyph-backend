@@ -119,20 +119,24 @@ final class LoanLedgerService
     }
 
     /**
-     * The contract the loan was released with, in centavos: its principal plus
+     * The contract the loan was released with, in centavos: its principal and
      * the interest of the schedule it was released with
      * (originalInterestCentavos()), never a build-up or penalty. The Ledger's
      * release line holds the same two figures. It is how a restructured
      * source, whose unpaid periods its restructure deleted, still shows its
-     * whole contract.
+     * whole contract (LoanResource `contract_total` and `contract_interest`).
+     *
+     * @return array{principal: int, interest: int}
      */
-    public function originalContractCentavos(Loan $loan): int
+    public function originalContractParts(Loan $loan): array
     {
         $adjustments = $loan->adjustments()->where('status', 'applied')->reorder('applied_at')->orderBy('id')->get();
         $debits = LoanLedgerEntry::where('loan_id', $loan->id)->where('type', 'debit')->orderBy('id')->get();
 
-        return $this->centavos($loan->principal_amount)
-            + $this->originalInterestCentavos($loan, $loan->amortizationSchedules()->get(), $adjustments, $debits);
+        return [
+            'principal' => $this->centavos($loan->principal_amount),
+            'interest' => $this->originalInterestCentavos($loan, $loan->amortizationSchedules()->get(), $adjustments, $debits),
+        ];
     }
 
     /**

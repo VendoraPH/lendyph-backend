@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Models\Loan;
+use Carbon\Carbon;
 use Illuminate\Support\Collection;
 use Tests\Feature\Ledger\Release\ReleasesLoans;
 use Tests\TestCase;
@@ -79,5 +80,98 @@ class DashboardRecentTransactionsTest extends TestCase
         $payments = $this->recent()->where('type', 'payment')->pluck('description')->sort()->values()->all();
 
         $this->assertSame(['Payment via Bank Transfer', 'Payment via Cash', 'Payment via GCash'], $payments);
+    }
+
+    /**
+     * Newest first across payments and releases (follow-up round 3, lead's
+     * call 5), by the date each row shows: a payment's payment date, a
+     * release's release time. A payment recorded today for an earlier day
+     * sits at that day, not at the top. Rows on the same day go by when they
+     * were recorded, then by id.
+     */
+    public function test_rows_are_newest_first_across_every_source(): void
+    {
+        $this->travelTo(now()->subDays(5)->setTime(10, 0));
+        $older = $this->createReleasedLoan();
+        $this->travelTo(now()->addDays(4)->setTime(9, 30));
+        $newer = $this->createReleasedLoan();
+        $this->travelBack();
+        $this->travelTo(now()->setTime(15, 0));
+
+        $pay = fn (Loan $loan, string $date, float $amount): mixed => $this->postJson("/api/loans/{$loan->id}/repayments", [
+            'payment_date' => $date,
+            'amount_paid' => $amount,
+            'method' => 'cash',
+        ])->assertCreated();
+
+        // Recorded today, for two days ago: older than the newer loan's release.
+        $pay($older, now()->subDays(2)->toDateString(), 11800);
+        // Two on today's date, recorded in the same second: the later one (by
+        // id) first.
+        $pay($newer, now()->toDateString(), 11800);
+        $pay($newer, now()->toDateString(), 5000);
+
+        $names = [$older->borrower->full_name => 'older', $newer->borrower->full_name => 'newer'];
+        $order = $this->recent()
+            ->filter(fn (array $row): bool => isset($names[$row['borrower_name']]))
+            ->map(fn (array $row): string => $row['type'].' '.$names[$row['borrower_name']])
+            ->values()
+            ->all();
+
+        $this->assertSame([
+            'payment newer',
+            'payment newer',
+            'release newer',
+            'payment older',
+            'release older',
+        ], $order);
+
+        $this->assertSame(
+            [5000.0, 11800.0],
+            collect($this->getJson('/api/dashboard/recent-transactions?limit=2')->assertOk()->json('data'))->map(fn (array $row): float => (float) $row['amount'])->all(),
+        );
+    }
+
+    /**
+     * A payment row shows the time it was recorded (Manila) when that falls
+     * on its own payment date, else the payment date alone: `payment_date`
+     * holds no time, so it used to read "12:00 AM" (follow-up round 3).
+     * Release rows keep their release time.
+     */
+    public function test_a_payment_row_shows_its_recorded_time_only_on_its_own_payment_date(): void
+    {
+        $this->travelTo(Carbon::parse('2026-11-01 10:00:00', 'Asia/Manila'));
+        $loan = $this->createReleasedLoan();
+
+        $pay = function (string $recordedAt, string $paymentDate, float $amount) use ($loan): void {
+            $this->travelTo(Carbon::parse($recordedAt, 'Asia/Manila'));
+            $this->postJson("/api/loans/{$loan->id}/repayments", [
+                'payment_date' => $paymentDate,
+                'amount_paid' => $amount,
+                'method' => 'cash',
+            ])->assertCreated();
+        };
+
+        // The last second of its own day, then the first second after it.
+        $pay('2026-11-09 23:59:59', '2026-11-09', 1001);
+        $pay('2026-11-10 00:00:00', '2026-11-09', 1002);
+        // Recorded on its own day, at midnight and in the afternoon.
+        $pay('2026-11-10 00:00:00', '2026-11-10', 1003);
+        $pay('2026-11-10 14:05:00', '2026-11-10', 1004);
+        // Recorded later, for an earlier day.
+        $pay('2026-11-10 14:06:00', '2026-11-08', 1005);
+
+        $dates = $this->recent()->where('type', 'payment')
+            ->mapWithKeys(fn (array $row): array => [(string) (int) $row['amount'] => $row['date']])
+            ->all();
+
+        $this->assertSame('Nov 9, 11:59 PM', $dates['1001'] ?? null);
+        $this->assertSame('Nov 9', $dates['1002'] ?? null);
+        $this->assertSame('Nov 10, 12:00 AM', $dates['1003'] ?? null);
+        $this->assertSame('Nov 10, 2:05 PM', $dates['1004'] ?? null);
+        $this->assertSame('Nov 8', $dates['1005'] ?? null);
+
+        $release = $this->recent()->firstWhere('type', 'release');
+        $this->assertSame('Nov 1, 10:00 AM', $release['date']);
     }
 }

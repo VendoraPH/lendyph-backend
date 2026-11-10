@@ -60,6 +60,26 @@ class AutoPayTest extends TestCase
             ->assertJsonValidationErrors(['cbs_reference']);
     }
 
+    /** Follow-up round 3: the CBS reference refusals read in words, not Laravel's defaults. */
+    public function test_cbs_reference_refusals_read_in_words(): void
+    {
+        $loan = $this->createReleasedLoan();
+
+        $this->patchJson("/api/loans/{$loan->id}/auto-pay", ['enabled' => true])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['cbs_reference' => 'Enter the CBS reference to turn Auto-Pay on.']);
+
+        $this->patchJson("/api/loans/{$loan->id}/auto-pay", ['enabled' => true, 'cbs_reference' => str_repeat('A', 101)])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['cbs_reference' => 'The CBS reference can be at most 100 characters.']);
+
+        $this->patchJson("/api/loans/{$loan->id}/auto-pay", ['enabled' => true, 'cbs_reference' => ['CBS-1']])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['cbs_reference' => 'The CBS reference must be text.']);
+
+        $this->assertFalse((bool) $loan->fresh()->auto_pay);
+    }
+
     public function test_toggle_disable_clears_reference_and_audit_columns(): void
     {
         $loan = $this->enableAutoPay($this->createReleasedLoan());

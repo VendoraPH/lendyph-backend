@@ -55,6 +55,7 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'penalty_amount', type: 'number'),
         new OA\Property(property: 'total_payable', type: 'number', nullable: true, description: 'Principal, interest and penalty still owed on the periods, plus `insurance_owed`. Never includes the Share Capital Build-Up. Null before release, when nothing is owed yet (see `contract_total`).'),
         new OA\Property(property: 'contract_total', type: 'number', nullable: true, description: 'Principal plus interest over the whole schedule, in whole centavos, never the Share Capital Build-Up or penalty. After release: the stored schedule\'s (equals `amortization_schedule_totals.principal` + `.interest`), except on a restructured source loan, whose restructure deleted its unpaid periods: there it is the original contract, every period it was released with (the Ledger\'s release line), on GET /loans/{id} only and null on lists. Before release: the schedule GET /loans/{id}/amortization-preview builds, on GET /loans/{id} only; null on lists and wherever the periods (after release) or the collaterals (before release, the single-loan view) were not loaded.'),
+        new OA\Property(property: 'contract_interest', type: 'number', nullable: true, description: 'The interest of the contract `contract_total` adds up, by the same rule and in the same places: `contract_total` less the contract\'s principal, which is `principal_amount` (after release, the stored schedule\'s principal, `amortization_schedule_totals.principal`). Pesos, added in whole centavos, never the Share Capital Build-Up or penalty. On a restructured source loan it is the original contract\'s interest (the Ledger\'s release line), on GET /loans/{id} only; elsewhere the interest of the schedule `contract_total` reads. Null wherever `contract_total` is.'),
         new OA\Property(property: 'unitemised_deductions', type: 'number', description: '`total_deductions` less the itemised `deductions`, in whole centavos, signed: positive when the total is more than the items, negative when the items add up to more, 0 when they agree. The release voucher prints it as its own line.'),
         new OA\Property(property: 'amortization_schedule_totals', type: 'object', description: 'Only with `amortization_schedules`. Each column of the schedule added up in whole centavos.', properties: [
             new OA\Property(property: 'principal', type: 'number'),
@@ -65,9 +66,9 @@ use OpenApi\Attributes as OA;
             new OA\Property(property: 'share_capital_build_up', type: 'number', description: 'One `scb_amount` per period, none on a period an extension or adjustment closed'),
             new OA\Property(property: 'total_payment', type: 'number', description: '`total_due` plus `share_capital_build_up`; equals POST /loans/preview\'s `amortization.totals.total_payment` for the same loan'),
         ]),
-        new OA\Property(property: 'collateral_summary', type: 'object', nullable: true, description: 'GET /loans/{id} only; null where the loan\'s collaterals are not loaded (lists). The values the server pledged each collateral at (`snapshot_value`: its `amount`, or for share capital its member\'s balance) added up against the principal, by the rule POST /loans/preview\'s `collateral` uses. When the loan holds a share capital pledge and the caller lacks `share_capital:view`, `total_value` and `short_by` are null and `value_unknown` is true, because they would reveal the balance.', properties: [
+        new OA\Property(property: 'collateral_summary', type: 'object', nullable: true, description: 'GET /loans/{id} only; null where the loan\'s collaterals are not loaded (lists). The values the server pledged each collateral at (`snapshot_value`: its `amount`, or for share capital its member\'s balance) added up against the principal, by the rule POST /loans/preview\'s `collateral` uses. When the loan holds a share capital pledge and the caller lacks `share_capital:view`, `total_value`, `security_status` and `short_by` are null and `value_unknown` is true, because they would reveal the balance ("secured" would say it covers the principal).', properties: [
             new OA\Property(property: 'total_value', type: 'number', nullable: true),
-            new OA\Property(property: 'security_status', type: 'string', enum: ['secured', 'partially_secured', 'unsecured']),
+            new OA\Property(property: 'security_status', type: 'string', nullable: true, enum: ['secured', 'partially_secured', 'unsecured']),
             new OA\Property(property: 'short_by', type: 'number', nullable: true),
             new OA\Property(property: 'value_unknown', type: 'boolean', description: 'Present, and true, only when the totals are withheld'),
         ]),
@@ -216,6 +217,8 @@ class LoanResource extends JsonResource
             }) + (float) $this->insurance_remaining_balance, 2);
         }
 
+        $contract = $this->contractParts($isReleased, $scheduleTotals);
+
         return [
             'id' => $this->id,
             'application_number' => $this->application_number,
@@ -292,7 +295,10 @@ class LoanResource extends JsonResource
             'penalty_amount' => $totalPenalty,
             // Nothing is owed before release, so no figure rather than 0.
             'total_payable' => $isReleased ? $totalPayable : null,
-            'contract_total' => $this->contractTotal($isReleased, $scheduleTotals),
+            'contract_total' => $contract === null ? null : ($contract['principal'] + $contract['interest']) / 100,
+            // The interest half of `contract_total`, by the same rule, so
+            // Principal + Interest Amount = Contract Total on the loan page.
+            'contract_interest' => $contract === null ? null : $contract['interest'] / 100,
             // What a payment must be today to clear the insurance premium owed
             // and every open period due by today, from the server
             // (RepaymentService::amountDueNow()). Only for a loan that takes
@@ -583,15 +589,17 @@ class LoanResource extends JsonResource
     }
 
     /**
-     * Principal plus interest over the whole contract, in whole centavos,
-     * never the Share Capital Build-Up (decision 7(a): SCB is not debt).
+     * The principal and the interest of the whole contract, in whole
+     * centavos, never the Share Capital Build-Up (decision 7(a): SCB is not
+     * debt). `contract_total` is their sum and `contract_interest` the
+     * interest.
      *
      * After release, the stored schedule's (`$scheduleTotals`, null where the
      * periods were not loaded). A restructured source's rows no longer hold
      * its contract (its restructure deleted the unpaid periods and shrank a
      * part-paid one to what was collected), so its figure is the schedule it
      * was released with, as its Ledger's release line holds it
-     * (LoanLedgerService::originalContractCentavos()). Before release, the
+     * (LoanLedgerService::originalContractParts()). Before release, the
      * schedule the pre-release amortization preview builds
      * (LoanService::buildAmortizationPreview()).
      *
@@ -600,31 +608,34 @@ class LoanResource extends JsonResource
      * otherwise build one for every such row on the page, so it gets null.
      *
      * @param  array<string, float|int>|null  $scheduleTotals  PersistedScheduleFigures::totals()
+     * @return array{principal: int, interest: int}|null
      */
-    private function contractTotal(bool $isReleased, ?array $scheduleTotals): ?float
+    private function contractParts(bool $isReleased, ?array $scheduleTotals): ?array
     {
         if ($isReleased && $this->restructured_at !== null) {
             return $this->relationLoaded('collaterals')
-                ? app(LoanLedgerService::class)->originalContractCentavos($this->resource) / 100
+                ? app(LoanLedgerService::class)->originalContractParts($this->resource)
                 : null;
         }
 
         if ($isReleased) {
-            return $scheduleTotals === null
-                ? null
-                : (LoanService::toCentavos((float) $scheduleTotals['principal']) + LoanService::toCentavos((float) $scheduleTotals['interest'])) / 100;
+            return $scheduleTotals === null ? null : [
+                'principal' => LoanService::toCentavos((float) $scheduleTotals['principal']),
+                'interest' => LoanService::toCentavos((float) $scheduleTotals['interest']),
+            ];
         }
 
         if (! $this->relationLoaded('collaterals')) {
             return null;
         }
 
-        $centavos = 0;
+        $parts = ['principal' => 0, 'interest' => 0];
 
         foreach (app(LoanService::class)->buildAmortizationPreview($this->resource) as $row) {
-            $centavos += LoanService::toCentavos((float) $row['principal_due']) + LoanService::toCentavos((float) $row['interest_due']);
+            $parts['principal'] += LoanService::toCentavos((float) $row['principal_due']);
+            $parts['interest'] += LoanService::toCentavos((float) $row['interest_due']);
         }
 
-        return $centavos / 100;
+        return $parts;
     }
 }

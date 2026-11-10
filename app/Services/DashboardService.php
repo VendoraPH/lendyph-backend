@@ -330,6 +330,17 @@ class DashboardService
      * its release journal collects), so it reads "Loan restructured" with
      * that amount and its own type.
      *
+     * Newest first across both sources, by the date each row shows: a
+     * payment's payment date, a release's release time. A payment recorded
+     * today for an earlier day sits at that day. Rows on the same day go by
+     * when they happened (a payment's recording time, a release's time), then
+     * by id, so the order never depends on how the database returns ties.
+     * Each source is read in that same order, so its first `$limit` rows are
+     * the ones the merge can need.
+     *
+     * A payment row's `date` is paymentRowDate(); a release row's is its
+     * release time.
+     *
      * @param  list<int>|null  $branchIds
      */
     public function recentTransactions(?array $branchIds, int $limit = 10): array
@@ -337,7 +348,9 @@ class DashboardService
         $payments = $this->repayments($branchIds)
             ->with('loan.borrower')
             ->where('status', 'posted')
-            ->latest('payment_date')
+            ->orderByDesc('payment_date')
+            ->orderByDesc('created_at')
+            ->orderByDesc('id')
             ->take($limit)
             ->get()
             ->map(fn ($r) => [
@@ -345,14 +358,15 @@ class DashboardService
                 'borrower_name' => $r->loan?->borrower?->full_name,
                 'description' => 'Payment via '.PaymentMethod::labelFor($r->method),
                 'amount' => (float) $r->amount_paid,
-                'date' => $r->payment_date?->format('M j, g:i A'),
-                'created_at' => $r->created_at,
+                'date' => self::paymentRowDate($r),
+                'sort' => [$r->payment_date?->toDateString(), $r->created_at?->format('Y-m-d H:i:s'), $r->id],
             ]);
 
         $releases = $this->loans($branchIds)
             ->with('borrower')
             ->whereNotNull('released_at')
-            ->latest('released_at')
+            ->orderByDesc('released_at')
+            ->orderByDesc('id')
             ->take($limit)
             ->get()
             ->map(fn ($l) => [
@@ -361,16 +375,38 @@ class DashboardService
                 'description' => $l->isRestructure() ? 'Loan restructured' : 'Loan released',
                 'amount' => (float) ($l->isRestructure() ? $l->total_deductions : $l->net_proceeds),
                 'date' => $l->released_at?->format('M j, g:i A'),
-                'created_at' => $l->released_at,
+                'sort' => [$l->released_at?->toDateString(), $l->released_at?->format('Y-m-d H:i:s'), $l->id],
             ]);
 
         $merged = $payments->concat($releases)
-            ->sortByDesc('created_at')
+            ->sort(fn (array $a, array $b): int => [...$b['sort'], $b['type']] <=> [...$a['sort'], $a['type']])
             ->take($limit)
             ->values()
-            ->map(fn ($item) => collect($item)->except('created_at')->toArray());
+            ->map(fn ($item) => collect($item)->except('sort')->toArray());
 
         return ['data' => $merged->toArray()];
+    }
+
+    /**
+     * A payment row's date in words. `payment_date` holds no time, so it shows
+     * the time the payment was recorded ("Nov 10, 2:05 PM") only when that was
+     * on the payment date itself, in Manila (timestamps are stored in Manila
+     * time). A payment recorded on another day, or with no recorded time,
+     * shows its payment date alone ("Nov 9"), never a made-up "12:00 AM".
+     */
+    private static function paymentRowDate(Repayment $repayment): ?string
+    {
+        $paidOn = $repayment->payment_date;
+
+        if ($paidOn === null) {
+            return null;
+        }
+
+        $recordedAt = $repayment->created_at?->copy()->setTimezone('Asia/Manila');
+
+        return $recordedAt !== null && $recordedAt->toDateString() === $paidOn->toDateString()
+            ? $recordedAt->format('M j, g:i A')
+            : $paidOn->format('M j');
     }
 
     /**
