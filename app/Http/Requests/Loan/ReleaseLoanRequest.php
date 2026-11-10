@@ -4,6 +4,7 @@ namespace App\Http\Requests\Loan;
 
 use App\Http\Requests\Concerns\ReferenceNumberMessages;
 use App\Http\Requests\Loan\Concerns\ValidatesReleaseInsurance;
+use App\Rules\NotAFormerMember;
 use Illuminate\Contracts\Validation\Validator;
 use Illuminate\Foundation\Http\FormRequest;
 
@@ -74,6 +75,17 @@ class ReleaseLoanRequest extends FormRequest
     public function withValidator(Validator $validator): void
     {
         $this->validateInsuranceCombination($validator);
+
+        // No release to a member whose membership ended after approval (C1
+        // review, H1). Withdrawing is refused while a loan is approved, so
+        // only a death recorded since can reach this.
+        $validator->after(function (Validator $validator): void {
+            $member = $this->route('loan')?->borrower;
+
+            if ($member !== null && $member->isFormerMember()) {
+                $validator->errors()->add('borrower_id', NotAFormerMember::messageFor($member));
+            }
+        });
     }
 
     /**

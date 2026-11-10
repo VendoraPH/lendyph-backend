@@ -55,6 +55,15 @@ class ShareCapitalPledgeController extends Controller
         // member and allowed the write. `borrower_id` is a restrictOnDelete
         // foreign key so that cannot happen today — but a guard should not
         // depend on a constraint declared in a different file to be safe.
+        // A withdrawn member settled their share capital to leave, so nothing
+        // more is recorded for them. A deceased member's estate still settles
+        // through here (C1 review, M1).
+        if ($status === 'withdrawn') {
+            throw ValidationException::withMessages([
+                'borrower_id' => 'This member withdrew from the cooperative, so no share capital is recorded for them. Reactivate the membership first, with a reason.',
+            ]);
+        }
+
         if ($status !== null && ! in_array($status, Borrower::NON_MEMBER_STATUSES, true)) {
             return;
         }

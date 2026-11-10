@@ -71,7 +71,7 @@ DESC,
         security: [['sanctum' => []]],
         parameters: [
             new OA\Parameter(name: 'search', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
-            new OA\Parameter(name: 'status', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['active', 'inactive', 'blacklisted', 'pending', 'rejected'])),
+            new OA\Parameter(name: 'status', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['active', 'inactive', 'blacklisted', 'pending', 'rejected', 'withdrawn', 'deceased'])),
             new OA\Parameter(name: 'members_only', in: 'query', required: false, description: 'Exclude pending and rejected registrations.', schema: new OA\Schema(type: 'boolean')),
             new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15, maximum: 100)),
@@ -202,6 +202,8 @@ DESC,
                 'blacklisted' => (int) ($stats['blacklisted'] ?? 0),
                 'pending' => (int) ($stats['pending'] ?? 0),
                 'rejected' => (int) ($stats['rejected'] ?? 0),
+                'withdrawn' => (int) ($stats['withdrawn'] ?? 0),
+                'deceased' => (int) ($stats['deceased'] ?? 0),
             ]]]);
     }
 
