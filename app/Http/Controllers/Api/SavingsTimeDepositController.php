@@ -113,7 +113,7 @@ class SavingsTimeDepositController extends Controller
     #[OA\Get(
         path: '/api/savings/time-deposits/{timeDeposit}',
         summary: 'A time deposit',
-        description: 'The placement with its snapshotted rates, contract figures, settlement and rollover links (`rolled_over_from_id`, `rolled_over_to_id`). `post_maturity_days` and `post_maturity_interest`: what a late settlement paid, or what settling today would pay on a placement past its maturity date.',
+        description: 'The placement with its snapshotted rates, contract figures, settlement and rollover links (`rolled_over_from_id`, `rolled_over_to_id`). `post_maturity_days` and `post_maturity_interest`: what a late settlement paid, or what settling today would pay on a placement past its maturity date. `pending_approval`: the payout or pre-termination waiting for a checker, `{id, kind, amount, requested_by{id, name}}`, else null.',
         tags: ['Savings'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'timeDeposit', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],

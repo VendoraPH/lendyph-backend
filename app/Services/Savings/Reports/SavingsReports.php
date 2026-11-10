@@ -10,6 +10,7 @@ use App\Models\TimeDeposit;
 use App\Services\Savings\AccruedInterest;
 use App\Services\Savings\AvailableBalance;
 use App\Services\Savings\SavingsMath;
+use App\Services\Savings\TimeDeposits\Settlement;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
@@ -250,6 +251,11 @@ class SavingsReports
     }
 
     /**
+     * Every total counts only the placements still owed: active, or matured
+     * and not settled yet (Settlement::OPEN_STATUSES). A placement already
+     * paid out, rolled over or pre-terminated is listed with its status but
+     * counted in no total.
+     *
      * `payout_amount` is the cash the placements leave the cooperative with
      * at maturity: everything on `payout`, the net interest on
      * `rollover_principal`, nothing on `rollover_all`.
@@ -258,7 +264,9 @@ class SavingsReports
      */
     public function maturityTotals(array $filters): array
     {
-        $sums = $this->maturitiesQuery($filters)->reorder()->toBase()
+        $sums = $this->maturitiesQuery($filters)->reorder()
+            ->whereIn('status', Settlement::OPEN_STATUSES)
+            ->toBase()
             ->selectRaw('COUNT(*) AS rows_count, COALESCE(SUM(principal), 0) AS principal, COALESCE(SUM(net_interest), 0) AS net_interest, COALESCE(SUM(maturity_amount), 0) AS maturity_amount')
             ->selectRaw("COALESCE(SUM(CASE WHEN maturity_instruction = 'payout' THEN maturity_amount WHEN maturity_instruction = 'rollover_principal' THEN net_interest ELSE 0 END), 0) AS payout")
             ->first();

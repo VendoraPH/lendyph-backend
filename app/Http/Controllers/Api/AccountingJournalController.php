@@ -15,6 +15,7 @@ use App\Services\Accounting\JournalPreview;
 use App\Services\Accounting\YearEndCloser;
 use App\Services\BranchAccess;
 use App\Services\LikePattern;
+use App\Services\Savings\SavingsJournalGuard;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
@@ -282,6 +283,8 @@ class AccountingJournalController extends Controller
                         new OA\Property(property: 'reverses_journal_id', type: 'integer', nullable: true, description: 'On a reversal, the entry it reverses.'),
                         new OA\Property(property: 'reverses_journal_no', type: 'string', nullable: true, example: 'JE-000042', description: 'On a reversal, the number of the entry it reverses; null on every other entry.'),
                         new OA\Property(property: 'reversed_by_journal_id', type: 'integer', nullable: true, description: 'The reversal that undid this entry.'),
+                        new OA\Property(property: 'reversible', type: 'boolean', description: 'False for an entry Savings posted, which is reversed from Savings; true otherwise (draft and already-reversed checks are unchanged).'),
+                        new OA\Property(property: 'not_reversible_reason', type: 'string', nullable: true, description: 'Why the entry can\'t be reversed here, in words; null when it can.'),
                     ]),
                 ]),
             ),
@@ -348,7 +351,7 @@ class AccountingJournalController extends Controller
     #[OA\Post(
         path: '/api/accounting/journals/{id}/reverse',
         summary: 'Reverse a posted entry',
-        description: "Writes a MIRROR entry — every debit becomes a credit against the same account — built from the original's stored lines, and posts it. The original is not edited beyond `status` and `reversed_by_journal_id`, so both halves stay on the record and the pair nets to zero on every statement. Returns the REVERSAL, not the original. Refused with 422 on a draft, on an entry already reversed, and on a year-end `closing` entry or the reversal of one (reopen the year instead).",
+        description: "Writes a MIRROR entry — every debit becomes a credit against the same account — built from the original's stored lines, and posts it. The original is not edited beyond `status` and `reversed_by_journal_id`, so both halves stay on the record and the pair nets to zero on every statement. Returns the REVERSAL, not the original. Refused with 422 on a draft, on an entry already reversed, on a year-end `closing` entry or the reversal of one (reopen the year instead), and on an entry Savings posted (`savings`, `savings_interest`, `time_deposit`, `time_deposit_settlement`), which is reversed from Savings.",
         tags: ['Accounting'],
         security: [['sanctum' => []]],
         parameters: [
@@ -371,6 +374,8 @@ class AccountingJournalController extends Controller
     {
         // A closing entry is undone by reopening its year, never by hand.
         $this->yearEnd->assertNotPartOfAClose($journal);
+        // A savings entry is undone from Savings, with its savings record.
+        SavingsJournalGuard::assertReversibleFromJournals($journal);
 
         $reversal = $this->poster->reverse(
             $journal,

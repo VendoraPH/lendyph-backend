@@ -13,6 +13,11 @@ use App\Models\Loan;
 use App\Models\LoanApprovalStep;
 use App\Models\LoanProduct;
 use App\Models\Role;
+use App\Models\SavingsAccount;
+use App\Models\SavingsInterestRun;
+use App\Models\SavingsProduct;
+use App\Models\SavingsTransaction;
+use App\Models\TimeDeposit;
 use App\Models\User;
 use App\Services\AuditLogModules;
 use App\Services\PersonalDataKeys;
@@ -31,9 +36,10 @@ class AuditLogResource extends JsonResource
      */
     private const USER_FOREIGN_KEYS = [
         'account_officer_id', 'acted_by', 'added_by', 'adjusted_by', 'approved_by',
-        'auto_pay_enabled_by', 'closed_by', 'created_by', 'initiated_by', 'paid_by_user_id',
-        'posted_by', 'processed_by', 'received_by', 'rejected_by', 'released_by',
-        'reopened_by', 'transactor_user_id', 'user_id', 'voided_by',
+        'auto_pay_enabled_by', 'checked_by', 'closed_by', 'created_by', 'decided_by',
+        'first_checker_id', 'initiated_by', 'paid_by_user_id', 'posted_by', 'processed_by',
+        'received_by', 'rejected_by', 'released_by', 'reopened_by', 'requested_by',
+        'reversed_by', 'settled_by', 'transactor_user_id', 'updated_by', 'user_id', 'voided_by',
     ];
 
     /**
@@ -42,9 +48,39 @@ class AuditLogResource extends JsonResource
     private const TIMESTAMP_KEYS = ['created_at', 'updated_at', 'deleted_at'];
 
     /**
-     * Never listed as a change either: a hash that means nothing to a reader.
+     * Never listed as a change either: a hash or an internal key that means
+     * nothing to a reader (a savings approval's or interest run's `live_key`,
+     * an account's `open_key`, an idempotency key's `request_hash`).
      */
-    private const TECHNICAL_KEYS = ['fee_fingerprint', 'fingerprint'];
+    private const TECHNICAL_KEYS = ['fee_fingerprint', 'fingerprint', 'live_key', 'open_key', 'request_hash'];
+
+    /**
+     * On a savings row only (self::isSavingsRow()), the fields holding the id
+     * of another savings record, by the kind of record: read as a transaction's
+     * reference, an account's number, a product's name, a time deposit's
+     * certificate number or an interest run's period. Elsewhere the same names
+     * (`account_id`, `product_id`, `run_id`) mean other things and read as
+     * stored.
+     */
+    private const SAVINGS_ID_KEYS = [
+        'savingsTransactions' => [
+            'counterpart_transaction_id', 'funding_transaction_id', 'interest_transaction_id',
+            'result_transaction_id', 'reverses_transaction_id', 'target_transaction_id', 'tax_transaction_id',
+        ],
+        'savingsAccounts' => ['account_id', 'funding_account_id', 'payout_account_id', 'to_account_id'],
+        'savingsProducts' => ['product_id', 'pretermination_product_id'],
+        'timeDeposits' => ['time_deposit_id', 'rolled_over_from_id'],
+        'savingsRuns' => ['run_id', 'interest_run_id'],
+    ];
+
+    /** What a savings id reads as when its record is gone ("Transaction #12"). */
+    private const SAVINGS_ID_KINDS = [
+        'savingsTransactions' => 'Transaction',
+        'savingsAccounts' => 'Savings account',
+        'savingsProducts' => 'Savings product',
+        'timeDeposits' => 'Time deposit',
+        'savingsRuns' => 'Interest run',
+    ];
 
     /**
      * Change-list fields that hold a loan product id or a list of them.
@@ -162,10 +198,10 @@ class AuditLogResource extends JsonResource
 
     /**
      * Load, in ONE query each, the users, roles, branches, loan products,
-     * loans, collaterals, journals, journal lines and approval steps these
-     * rows' old and new values name, and hand the sets to
-     * every row so the change list can show names instead of ids and keys
-     * without a query per row.
+     * loans, collaterals, journals, journal lines, approval steps and savings
+     * records (self::savingsNames()) these rows' old and new values name, and
+     * hand the sets to every row so the change list can show names instead of
+     * ids and keys without a query per row.
      *
      * @param  iterable<AuditLog>  $logs
      */
@@ -239,7 +275,10 @@ class AuditLogResource extends JsonResource
                 ->get(['loan_id', 'step_id', 'name'])
                 ->mapWithKeys(fn (LoanApprovalStep $step) => ["{$step->loan_id}:{$step->step_id}" => $step->name]);
 
+        $savingsNames = self::savingsNames($logs);
+
         $logs->each(fn (AuditLog $log) => $log->setRelation('changeUsers', $users)
+            ->setRelation('changeSavings', $savingsNames)
             ->setRelation('changeBranches', $branches)
             ->setRelation('changeRoles', $roles)
             ->setRelation('changeProducts', $products)
@@ -248,6 +287,47 @@ class AuditLogResource extends JsonResource
             ->setRelation('changeCollaterals', $collaterals)
             ->setRelation('changeJournals', $journals)
             ->setRelation('changeJournalLines', $journalLines));
+    }
+
+    /**
+     * The savings records the savings rows' values name, by kind and id, in
+     * one query per kind that appears.
+     *
+     * @param  Collection<int, AuditLog>  $logs
+     * @return Collection<string, Collection<int, string>>
+     */
+    private static function savingsNames(Collection $logs): Collection
+    {
+        $savingsLogs = $logs->filter(fn (AuditLog $log) => self::isSavingsRow($log->auditable_type))->values();
+
+        return collect(self::SAVINGS_ID_KEYS)->map(function (array $fields, string $kind) use ($savingsLogs): Collection {
+            $ids = self::changeIds($savingsLogs, $fields);
+
+            if ($ids->isEmpty()) {
+                return collect();
+            }
+
+            return match ($kind) {
+                'savingsTransactions' => SavingsTransaction::query()->whereIn('id', $ids)->pluck('reference', 'id'),
+                'savingsAccounts' => SavingsAccount::query()->whereIn('id', $ids)->pluck('account_number', 'id'),
+                'savingsProducts' => SavingsProduct::query()->whereIn('id', $ids)->pluck('name', 'id'),
+                'timeDeposits' => TimeDeposit::query()->whereIn('id', $ids)->pluck('certificate_number', 'id'),
+                'savingsRuns' => SavingsInterestRun::query()->whereIn('id', $ids)->get(['id', 'period_start', 'period_end'])
+                    ->mapWithKeys(fn (SavingsInterestRun $run) => [$run->id => "Interest run #{$run->id} ({$run->period_start->format('M j, Y')} to {$run->period_end->format('M j, Y')})"]),
+            };
+        });
+    }
+
+    /**
+     * Whether a row's target is one of the savings models (`Savings…` or
+     * `TimeDeposit`), whose `account_id`, `product_id` and `run_id` name
+     * savings records.
+     */
+    private static function isSavingsRow(?string $type): bool
+    {
+        $basename = $type === null ? '' : class_basename($type);
+
+        return str_starts_with($basename, 'Savings') || $basename === 'TimeDeposit';
     }
 
     /**
@@ -550,13 +630,25 @@ class AuditLogResource extends JsonResource
         $isCollateral = in_array($field, self::COLLATERAL_KEYS, true);
         $isJournal = in_array($field, self::JOURNAL_KEYS, true);
         $isJournalLine = in_array($field, self::JOURNAL_LINE_KEYS, true);
+        $savingsKind = $this->savingsKindOf($field);
 
-        if (! $isUser && ! $isBranch && ! $isRole && ! $isProduct && ! $isStep && ! $isLoan && ! $isCollateral && ! $isJournal && ! $isJournalLine) {
+        if (! $isUser && ! $isBranch && ! $isRole && ! $isProduct && ! $isStep && ! $isLoan && ! $isCollateral && ! $isJournal && ! $isJournalLine && $savingsKind === null) {
             return null;
         }
 
         if (! $this->relationLoaded('changeUsers')) {
             self::loadChangeNames([$this->resource]);
+        }
+
+        if ($savingsKind !== null) {
+            $names = $this->getRelation('changeSavings')->get($savingsKind, collect());
+            $kind = self::SAVINGS_ID_KINDS[$savingsKind];
+
+            if (self::isId($value)) {
+                return $names->get((int) $value) ?? "{$kind} #{$value}";
+            }
+
+            return null;
         }
 
         if ($isStep) {
@@ -592,6 +684,24 @@ class AuditLogResource extends JsonResource
         }
 
         return $this->idsByName($value, 'changeBranches', 'Branch');
+    }
+
+    /**
+     * The kind of savings record a savings row's field names, or null.
+     */
+    private function savingsKindOf(string $field): ?string
+    {
+        if (! self::isSavingsRow($this->auditable_type)) {
+            return null;
+        }
+
+        foreach (self::SAVINGS_ID_KEYS as $kind => $fields) {
+            if (in_array($field, $fields, true)) {
+                return $kind;
+            }
+        }
+
+        return null;
     }
 
     /**

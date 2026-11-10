@@ -1,11 +1,19 @@
 <?php
 
 use App\Models\AuditLog;
+use App\Models\Loan;
 use App\Models\SavingsAccount;
+use App\Models\SavingsApproval;
+use App\Models\SavingsHold;
+use App\Models\SavingsIdempotencyKey;
+use App\Models\SavingsInterestRun;
+use App\Models\SavingsInterestRunLine;
 use App\Models\SavingsProduct;
 use App\Models\SavingsSetting;
 use App\Models\SavingsTaxRule;
+use App\Models\SavingsTransaction;
 use App\Models\TimeDeposit;
+use App\Models\User;
 use App\Services\AuditLogModules;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
@@ -79,6 +87,108 @@ it('names a savings account and a time deposit by their numbers', function () {
 
         $this->getJson("/api/audit-logs/{$row->id}")->assertOk()->assertJsonPath('data.target.label', $label);
     }
+});
+
+/*
+ * Browser check (Phase 3, S5): a savings change list read "decided by: — → 5",
+ * "result transaction id: — → 12" and "live key: rev:3 → —". People read by
+ * name, transactions by their reference, accounts, products, time deposits
+ * and interest runs by their number or name, and internal keys are left out.
+ * Stored rows never change.
+ */
+it('names the people on a savings change list', function () {
+    $ana = User::factory()->create(['first_name' => 'Ana', 'last_name' => 'Reyes']);
+    $ben = User::factory()->create(['first_name' => 'Ben', 'last_name' => 'Santos']);
+
+    $approval = savingsAuditChanges(SavingsApproval::class,
+        ['requested_by' => $ana->id, 'first_checker_id' => null, 'decided_by' => null],
+        ['requested_by' => $ben->id, 'first_checker_id' => $ana->id, 'decided_by' => $ben->id]);
+    $run = savingsAuditChanges(SavingsInterestRun::class,
+        ['checked_by' => null, 'posted_by' => null, 'reversed_by' => null],
+        ['checked_by' => $ana->id, 'posted_by' => $ben->id, 'reversed_by' => (string) $ana->id]);
+    $deposit = savingsAuditChanges(TimeDeposit::class, ['settled_by' => null], ['settled_by' => $ben->id]);
+    $settings = savingsAuditChanges(SavingsSetting::class, ['updated_by' => $ana->id], ['updated_by' => 999_999]);
+
+    expect($approval['requested_by'])->toMatchArray(['old' => $ana->full_name, 'new' => $ben->full_name])
+        ->and($approval['first_checker_id'])->toMatchArray(['old' => null, 'new' => $ana->full_name])
+        ->and($approval['decided_by']['new'])->toBe($ben->full_name)
+        ->and($run['checked_by']['new'])->toBe($ana->full_name)
+        ->and($run['posted_by']['new'])->toBe($ben->full_name)
+        ->and($run['reversed_by']['new'])->toBe($ana->full_name)
+        ->and($deposit['settled_by']['new'])->toBe($ben->full_name)
+        ->and($settings['updated_by'])->toMatchArray(['old' => $ana->full_name, 'new' => 'User #999999']);
+});
+
+it('reads savings transaction ids by their reference', function () {
+    [$target, $result, $interest, $tax, $funding] = collect(['000012', '000013', '000014', '000015', '000016'])
+        ->map(fn (string $n) => SavingsTransaction::factory()->create(['reference' => "SVT-20261110-{$n}"]))->all();
+
+    $approval = savingsAuditChanges(SavingsApproval::class,
+        ['target_transaction_id' => null, 'result_transaction_id' => null],
+        ['target_transaction_id' => $target->id, 'result_transaction_id' => $result->id]);
+    $line = savingsAuditChanges(SavingsInterestRunLine::class,
+        ['interest_transaction_id' => null, 'tax_transaction_id' => null],
+        ['interest_transaction_id' => $interest->id, 'tax_transaction_id' => $tax->id]);
+    $deposit = savingsAuditChanges(TimeDeposit::class, ['funding_transaction_id' => null], ['funding_transaction_id' => $funding->id]);
+    $transaction = savingsAuditChanges(SavingsTransaction::class,
+        ['reverses_transaction_id' => null, 'counterpart_transaction_id' => null],
+        ['reverses_transaction_id' => $target->id, 'counterpart_transaction_id' => 999_999]);
+
+    expect($approval['target_transaction_id'])->toMatchArray(['old' => null, 'new' => 'SVT-20261110-000012'])
+        ->and($approval['result_transaction_id']['new'])->toBe('SVT-20261110-000013')
+        ->and($line['interest_transaction_id']['new'])->toBe('SVT-20261110-000014')
+        ->and($line['tax_transaction_id']['new'])->toBe('SVT-20261110-000015')
+        ->and($deposit['funding_transaction_id']['new'])->toBe('SVT-20261110-000016')
+        ->and($transaction['reverses_transaction_id']['new'])->toBe('SVT-20261110-000012')
+        ->and($transaction['counterpart_transaction_id']['new'])->toBe('Transaction #999999');
+});
+
+it('reads savings account, product, time deposit and run ids by their number or name', function () {
+    $regular = SavingsProduct::factory()->create(['name' => 'Regular Savings']);
+    $other = SavingsProduct::factory()->create(['name' => 'Kiddie Savings']);
+    $account = SavingsAccount::factory()->create(['account_number' => 'SAV-2026-000042', 'product_id' => $regular->id]);
+    $deposit = TimeDeposit::factory()->create(['certificate_number' => 'TD-2026-000007']);
+    $run = SavingsInterestRun::factory()->create(['product_id' => $regular->id, 'period_start' => '2026-07-01', 'period_end' => '2026-09-30']);
+
+    $approval = savingsAuditChanges(SavingsApproval::class,
+        ['account_id' => null, 'time_deposit_id' => null],
+        ['account_id' => $account->id, 'time_deposit_id' => $deposit->id]);
+    $placement = savingsAuditChanges(TimeDeposit::class,
+        ['payout_account_id' => null, 'rolled_over_from_id' => null, 'product_id' => $regular->id],
+        ['payout_account_id' => $account->id, 'rolled_over_from_id' => $deposit->id, 'product_id' => $other->id]);
+    $product = savingsAuditChanges(SavingsProduct::class, ['pretermination_product_id' => null], ['pretermination_product_id' => $regular->id]);
+    $line = savingsAuditChanges(SavingsInterestRunLine::class, ['run_id' => null], ['run_id' => $run->id]);
+    $transaction = savingsAuditChanges(SavingsTransaction::class, ['interest_run_id' => null], ['interest_run_id' => 999_999]);
+
+    expect($approval['account_id']['new'])->toBe('SAV-2026-000042')
+        ->and($approval['time_deposit_id']['new'])->toBe('TD-2026-000007')
+        ->and($placement['payout_account_id']['new'])->toBe('SAV-2026-000042')
+        ->and($placement['rolled_over_from_id']['new'])->toBe('TD-2026-000007')
+        ->and($placement['product_id'])->toMatchArray(['old' => 'Regular Savings', 'new' => 'Kiddie Savings'])
+        ->and($product['pretermination_product_id']['new'])->toBe('Regular Savings')
+        ->and($line['run_id']['new'])->toBe("Interest run #{$run->id} (Jul 1, 2026 to Sep 30, 2026)")
+        ->and($transaction['interest_run_id']['new'])->toBe('Interest run #999999');
+});
+
+it('leaves an id named like a savings one as stored on a row that is not savings', function () {
+    $loan = savingsAuditChanges(Loan::class, ['account_id' => 4, 'run_id' => 5], ['account_id' => 6, 'run_id' => 7]);
+
+    expect($loan['account_id'])->toMatchArray(['old' => '4', 'new' => '6'])
+        ->and($loan['run_id'])->toMatchArray(['old' => '5', 'new' => '7']);
+});
+
+it('leaves internal savings keys out of the change list', function () {
+    $approval = savingsAuditChanges(SavingsApproval::class, ['live_key' => 'rev:3', 'status' => 'pending'], ['live_key' => null, 'status' => 'approved']);
+    $account = savingsAuditChanges(SavingsAccount::class, ['open_key' => '7:2', 'status' => 'active'], ['open_key' => null, 'status' => 'closed']);
+    $run = savingsAuditChanges(SavingsInterestRun::class, ['live_key' => '2:1:2026-07-01'], ['live_key' => null]);
+    $key = savingsAuditChanges(SavingsIdempotencyKey::class, ['request_hash' => str_repeat('a', 64)], ['request_hash' => str_repeat('b', 64)]);
+    $hold = savingsAuditChanges(SavingsHold::class, ['status' => 'active'], ['status' => 'released']);
+
+    expect($approval)->not->toHaveKey('live_key')->toHaveKey('status')
+        ->and($account)->not->toHaveKey('open_key')->toHaveKey('status')
+        ->and($run)->toBe([])
+        ->and($key)->toBe([])
+        ->and($hold)->toHaveKey('status');
 });
 
 it('files every savings model under savings', function (string $class) {

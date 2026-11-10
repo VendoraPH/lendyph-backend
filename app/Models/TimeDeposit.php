@@ -45,6 +45,9 @@ class TimeDeposit extends Model
 
     public const MATURITY_INSTRUCTIONS = ['payout', 'rollover_principal', 'rollover_all'];
 
+    /** The approval kinds that act on a placement. */
+    public const APPROVAL_KINDS = ['td_payout', 'pretermination'];
+
     protected $fillable = [
         'certificate_number',
         'borrower_id',
@@ -150,6 +153,18 @@ class TimeDeposit extends Model
     public function transactions(): HasMany
     {
         return $this->hasMany(SavingsTransaction::class);
+    }
+
+    /**
+     * The payout or pre-termination waiting for a checker, if any (the newest
+     * when there were ever two). Every `pending` row counts, past its
+     * `expires_at` too, as Settlement::hasPendingApproval() reads it.
+     */
+    public function pendingApproval(): HasOne
+    {
+        return $this->hasOne(SavingsApproval::class, 'time_deposit_id')->ofMany(['id' => 'max'], function ($query): void {
+            $query->where('status', 'pending')->whereIn('kind', self::APPROVAL_KINDS);
+        });
     }
 
     public function settler(): BelongsTo
