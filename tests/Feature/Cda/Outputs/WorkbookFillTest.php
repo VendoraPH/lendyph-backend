@@ -218,6 +218,20 @@ class WorkbookFillTest extends TestCase
         $this->assertSame(0, CdaDocumentVersion::query()->count());
     }
 
+    public function test_a_utf16_workbook_part_with_a_doctype_is_refused(): void
+    {
+        $xml = '<?xml version="1.0" encoding="UTF-16"?><!DOCTYPE worksheet>'
+            .'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="5"><c r="C5"><v>1</v></c></row></sheetData></worksheet>';
+        $utf16 = "\xFF\xFE".mb_convert_encoding($xml, 'UTF-16LE', 'UTF-8');
+        $this->assertStringNotContainsString('<!DOCTYPE', $utf16, 'The byte check alone would miss it.');
+        $this->useWorkbook(['Sheet1!C5' => 'membership.members_total'], 'Sheet1!A1', $utf16);
+
+        $this->actingAs($this->exporter())->postJson("/api/cda/reports/{$this->capr->id}/exports", ['format' => 'xlsx'])
+            ->assertUnprocessable()
+            ->assertJsonPath('message', 'The official workbook attached to this template holds a document type declaration, which exports refuse. A super admin can save it again in Excel and attach it to a new template version.');
+        $this->assertSame(0, CdaDocumentVersion::query()->count());
+    }
+
     public function test_cells_or_rows_without_references_are_refused(): void
     {
         $message = 'The official workbook attached to this template has rows or cells without a reference (r), so its cells can\'t be found. A super admin can save it again in Excel and attach it to a new template version.';

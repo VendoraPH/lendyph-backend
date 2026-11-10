@@ -74,7 +74,10 @@ final class ReportExporter
         }
     }
 
-    /** Saves the file, or answers 503 in words; nothing is recorded then. */
+    /**
+     * Saves the file, or removes whatever part of it was written and answers
+     * 503 in words; nothing is recorded then.
+     */
     private function store(string $path, string $bytes): void
     {
         try {
@@ -84,7 +87,15 @@ final class ReportExporter
             $saved = false;
         }
 
-        abort_unless($saved === true, 503, self::NOT_SAVED);
+        if ($saved !== true) {
+            try {
+                Storage::disk('private')->delete($path);
+            } catch (Throwable $e) {
+                report($e);
+            }
+
+            abort(503, self::NOT_SAVED);
+        }
     }
 
     /** @return array{0: string, 1: string|null} the file and a note about how it was made */

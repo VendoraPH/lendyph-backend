@@ -389,7 +389,11 @@ final class XlsxTemplateFiller
         return $element;
     }
 
-    /** The part as a DOM, refusing a DOCTYPE (no entities, no external loads). */
+    /**
+     * The part as a DOM, refusing a DOCTYPE: first by its bytes, then on the
+     * parsed document, so one in another encoding (UTF-16) is refused too.
+     * Entities are never substituted and nothing is loaded from outside.
+     */
     private function dom(string $xml): DOMDocument
     {
         abort_if(preg_match('/<!DOCTYPE/i', $xml) === 1, 422, self::DOCTYPE);
@@ -400,6 +404,8 @@ final class XlsxTemplateFiller
         if ($xml === '' || ! @$dom->loadXML($xml, LIBXML_NONET)) {
             abort(422, self::INVALID);
         }
+
+        abort_if($dom->doctype !== null, 422, self::DOCTYPE);
 
         $dom->encoding = 'UTF-8';
 

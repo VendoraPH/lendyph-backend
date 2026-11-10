@@ -73,7 +73,7 @@ class CdaExportController extends Controller
     #[OA\Post(
         path: '/api/cda/reports/{id}/exports',
         summary: 'Export a CDA report as PDF or Excel',
-        description: 'Needs `cda:export` and `branches:view_all`, and the report\'s view permission when it is restricted. Until the report is finalized the export renders the live values with a "DRAFT — not for submission" mark and a file name ending in -DRAFT; from finalized on it renders the snapshot. Every page carries a footer (page, period, generation time in Manila, who generated it, template version, snapshot version and checksum). Excel fills the template\'s official workbook when one is attached (`export.excel.mode: template`), else a generated layout. Negative money reads in parentheses, (₱400.00); Excel keeps it a signed number. Audited. Limited to 10 a minute per user. A server without the PHP zip extension answers 503 for Excel.',
+        description: 'Needs `cda:export` and `branches:view_all`, and the report\'s view permission when it is restricted. Until the report is finalized the export renders the live values with a "DRAFT — not for submission" mark and a file name ending in -DRAFT; from finalized on it renders the snapshot. Every page carries a footer (page, period, generation time in Manila, who generated it, template version, snapshot version and checksum). Excel fills the template\'s official workbook when one is attached (`export.excel.mode: template`), else a generated layout. Negative money reads in parentheses, (₱400.00); Excel keeps it a signed number. Audited. Shares the `exports` limit (5 a minute per user) with the other exports. A server without the PHP zip extension answers 503 for Excel.',
         tags: ['CDA'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
@@ -90,7 +90,7 @@ class CdaExportController extends Controller
             new OA\Response(response: 404, description: 'No such report'),
             new OA\Response(response: 409, description: 'The report changed while it was being exported'),
             new OA\Response(response: 422, description: 'A format other than pdf or xlsx; or the official workbook can\'t be filled (no DRAFT cell for a draft, not a valid .xlsx, a DOCTYPE, a part over 50 MB, or rows and cells without references), in words'),
-            new OA\Response(response: 429, description: 'More than 10 exports a minute'),
+            new OA\Response(response: 429, description: 'More than 5 exports a minute (the shared exports limit)'),
             new OA\Response(response: 503, description: 'Excel without the PHP zip extension, or the file could not be saved'),
         ],
     )]

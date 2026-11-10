@@ -15,6 +15,7 @@ use Illuminate\Contracts\Filesystem\Filesystem;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Storage;
 use Mockery;
+use RuntimeException;
 use Tests\Feature\Cda\Foundation\CdaTestHelpers;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
@@ -24,8 +25,8 @@ use ZipArchive;
  * Export review fixes (H1, L9, L14, L15): negative money reads "(₱400.00)"
  * in the PDF and the Excel text and stays a signed number in Excel cells; a
  * report that changes while it renders answers 409 and keeps nothing; a
- * storage failure answers 503 and records no version; exports are limited to
- * 10 a minute per user.
+ * storage failure answers 503, records no version and leaves no partial
+ * file; exports share the project's `exports` limiter (5 a minute per user).
  */
 class ExportSafetyTest extends TestCase
 {
@@ -132,11 +133,21 @@ class ExportSafetyTest extends TestCase
         $this->assertSame([], Storage::disk('private')->allFiles('cda/exports'));
     }
 
-    public function test_a_storage_failure_answers_503_and_records_no_version(): void
+    public function test_a_save_that_returns_false_answers_503_records_nothing_and_removes_the_partial_file(): void
+    {
+        $this->assertFailedSave(fn ($put) => $put->andReturn(false));
+    }
+
+    public function test_a_save_that_throws_answers_503_records_nothing_and_removes_the_partial_file(): void
+    {
+        $this->assertFailedSave(fn ($put) => $put->andThrow(new RuntimeException('disk full')));
+    }
+
+    private function assertFailedSave(callable $fails): void
     {
         $disk = Mockery::mock(Filesystem::class);
-        $disk->shouldReceive('put')->andReturn(false);
-        $disk->shouldReceive('delete')->andReturn(true);
+        $fails($disk->shouldReceive('put')->once());
+        $disk->shouldReceive('delete')->once()->with(Mockery::pattern('#^cda/exports/'.$this->capr->id.'/[0-9a-f-]{36}\.pdf$#'))->andReturn(true);
         Storage::shouldReceive('disk')->with('private')->andReturn($disk);
 
         $this->actingAs($this->exporter())->postJson("/api/cda/reports/{$this->capr->id}/exports", ['format' => 'pdf'])
@@ -145,18 +156,21 @@ class ExportSafetyTest extends TestCase
         $this->assertSame(0, CdaDocumentVersion::query()->count());
     }
 
-    public function test_exports_are_limited_to_ten_a_minute_per_user(): void
+    public function test_exports_use_the_shared_exports_limiter_of_five_a_minute_per_user(): void
     {
         $user = $this->exporter();
         $other = $this->exporter();
 
-        for ($i = 0; $i < 10; $i++) {
+        for ($i = 0; $i < 5; $i++) {
             $this->actingAs($user)->postJson("/api/cda/reports/{$this->capr->id}/exports", ['format' => 'xlsx'])->assertCreated();
         }
 
         $this->actingAs($user)->postJson("/api/cda/reports/{$this->capr->id}/exports", ['format' => 'xlsx'])->assertStatus(429);
         $this->actingAs($other)->postJson("/api/cda/reports/{$this->capr->id}/exports", ['format' => 'xlsx'])->assertCreated();
         $this->actingAs($user)->getJson("/api/cda/reports/{$this->capr->id}/exports")->assertOk();
+
+        $route = collect(app('router')->getRoutes()->getRoutes())->first(fn ($route) => $route->uri() === 'api/cda/reports/{report}/exports' && in_array('POST', $route->methods(), true));
+        $this->assertContains('throttle:exports', $route->gatherMiddleware());
     }
 
     /** @return array<string, string> */
