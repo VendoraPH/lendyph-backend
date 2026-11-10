@@ -68,7 +68,8 @@ final class Portfolio
      *
      * - Summary: members with a current score; high risk is high plus very
      *   high; declines are score rows that fell, and new hard flags are hard
-     *   flags first raised, both in the last 30 days (rolling).
+     *   flags first raised, both in the last 30 days (rolling). A flag closed
+     *   because its draft loan was deleted isn't counted (Lead's call 8).
      * - Affected members: in a high band, past due, or holding an open hard
      *   flag, lowest score first, at most 100, with the full count.
      * - Past due is a loan fact: without `loans:view` it lists no member.
@@ -102,6 +103,8 @@ final class Portfolio
                 'new_hard_flags_30d' => ! $readsFlags ? null : CreditPolicyFlag::query()
                     ->where('type', CreditPolicyFlag::HARD)
                     ->where('first_triggered_at', '>=', $since)
+                    // A deleted draft's flags lost their loan; they were never the member's.
+                    ->where(fn ($q) => $q->whereNull('cleared_reason')->orWhere('cleared_reason', '!=', CreditPolicyFlag::CLEARED_LOAN_DELETED))
                     ->whereIn('borrower_id', $this->scope->memberIds($user))
                     ->where(fn ($q) => $q->whereNull('loan_id')->when($user->can('loans:view'), fn ($q) => $q->orWhereIn('loan_id', $this->scope->loanIds($user))))
                     ->count(),

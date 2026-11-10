@@ -47,7 +47,7 @@ it('refuses a PDF named .bat by its name, in words', function () {
         'file' => uploadNamed('receipt.bat', "%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n"),
         'type' => 'policy_exception_letter',
     ])->assertUnprocessable()
-        ->assertJsonPath('message', 'The file\'s name must end in .jpg, .jpeg, .png, .pdf, .doc or .docx.');
+        ->assertJsonPath('message', 'The file\'s name must end in .jpg, .jpeg, .jpe, .jfif, .png, .pdf, .doc or .docx.');
 });
 
 it('asks for the file and the type in words', function () {

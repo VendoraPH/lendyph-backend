@@ -63,6 +63,11 @@ class ValidIdService
     }
 
     /**
+     * The file name endings a valid ID upload takes.
+     */
+    private const EXTENSIONS = 'extensions:jpg,jpeg,jpe,jfif,png,pdf';
+
+    /**
      * Every refusal of a valid ID upload in words, so no Laravel default
      * ("The front file field must…") reaches the screen.
      */
@@ -81,21 +86,29 @@ class ValidIdService
         'file.uploaded' => 'The ID didn\'t upload. Try again with a file of at most 10 MB.',
         'file.max' => 'The ID can be at most 10 MB.',
         'file.mimes' => 'The ID must be a picture (JPG or PNG) or a PDF.',
+        'file.extensions' => 'The ID\'s file name must end in .jpg, .jpeg, .jpe, .jfif, .png or .pdf.',
         'front_file.required_without' => 'Choose a picture of the ID\'s front.',
         'front_file.file' => 'The ID\'s front didn\'t upload. Try again with a file of at most 10 MB.',
         'front_file.uploaded' => 'The ID\'s front didn\'t upload. Try again with a file of at most 10 MB.',
         'front_file.max' => 'The ID\'s front can be at most 10 MB.',
         'front_file.mimes' => 'The ID\'s front must be a picture (JPG or PNG) or a PDF.',
+        'front_file.extensions' => 'The file name of the ID\'s front must end in .jpg, .jpeg, .jpe, .jfif, .png or .pdf.',
         'back_file.file' => 'The ID\'s back didn\'t upload. Try again with a file of at most 10 MB.',
         'back_file.uploaded' => 'The ID\'s back didn\'t upload. Try again with a file of at most 10 MB.',
         'back_file.max' => 'The ID\'s back can be at most 10 MB.',
         'back_file.mimes' => 'The ID\'s back must be a picture (JPG or PNG) or a PDF.',
+        'back_file.extensions' => 'The file name of the ID\'s back must end in .jpg, .jpeg, .jpe, .jfif, .png or .pdf.',
     ];
 
     /**
      * The valid ID upload's rules: a member's ID needs its number, a
      * co-maker's may leave it out. Each file stops at its first refusal
      * (`bail`), so it answers one sentence.
+     *
+     * `mimes` reads the bytes and `extensions` the file's own name, as the
+     * document upload does, so a PDF named id.bat is refused. `jpe` and
+     * `jfif` are JPEG names Windows often saves; the stored file takes the
+     * extension its bytes read as.
      *
      * @return array<string, list<string>>
      */
@@ -105,9 +118,9 @@ class ValidIdService
             'type' => ['required', 'string', 'max:100'],
             'custom_type_name' => ['nullable', 'string', 'max:100', 'required_if:type,others'],
             'id_number' => [$forMember ? 'required' : 'nullable', 'string', 'max:100'],
-            'file' => ['bail', 'required_without:front_file', 'file', 'max:10240', 'mimes:jpg,jpeg,png,pdf'],
-            'front_file' => ['bail', 'required_without:file', 'file', 'max:10240', 'mimes:jpg,jpeg,png,pdf'],
-            'back_file' => ['bail', 'nullable', 'file', 'max:10240', 'mimes:jpg,jpeg,png,pdf'],
+            'file' => ['bail', 'required_without:front_file', 'file', 'max:10240', 'mimes:jpg,jpeg,png,pdf', self::EXTENSIONS],
+            'front_file' => ['bail', 'required_without:file', 'file', 'max:10240', 'mimes:jpg,jpeg,png,pdf', self::EXTENSIONS],
+            'back_file' => ['bail', 'nullable', 'file', 'max:10240', 'mimes:jpg,jpeg,png,pdf', self::EXTENSIONS],
         ];
     }
 

@@ -18,6 +18,13 @@ class CreditPolicyFlag extends Model
 
     public const SOFT = 'soft_flag';
 
+    /**
+     * `cleared_reason` of a flag closed because its draft loan was deleted.
+     * The delete nulls `loan_id`, so this is what tells such a flag apart
+     * from a member-wide one.
+     */
+    public const CLEARED_LOAN_DELETED = 'loan_deleted';
+
     protected $fillable = [
         'borrower_id',
         'loan_id',
@@ -28,6 +35,7 @@ class CreditPolicyFlag extends Model
         'first_triggered_at',
         'last_seen_at',
         'cleared_at',
+        'cleared_reason',
     ];
 
     protected function casts(): array

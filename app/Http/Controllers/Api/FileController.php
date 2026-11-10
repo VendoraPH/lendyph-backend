@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Borrower;
 use App\Models\Document;
+use App\Services\DownloadFilename;
 use App\Services\SignedFileLink;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
@@ -84,10 +85,11 @@ class FileController extends Controller
 
         // Inline so the browser renders it in an <img> or preview pane rather
         // than downloading it.
-        return $disk->response($path, $downloadName, [
+        return $disk->response($path, null, [
             // These are personal identity documents — never let a shared cache
             // hold on to one.
             'Cache-Control' => 'private, max-age=0, no-store',
+            'Content-Disposition' => DownloadFilename::inlineDisposition($downloadName, $path),
         ]);
     }
 }
