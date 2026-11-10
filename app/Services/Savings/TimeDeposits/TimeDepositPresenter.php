@@ -9,6 +9,8 @@ use App\Services\Savings\SavingsMath;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection;
+use Illuminate\Support\Facades\Log;
+use Throwable;
 
 /**
  * A placement as the savings screens read it (`TimeDeposit` in the frontend's
@@ -24,7 +26,9 @@ use Illuminate\Database\Eloquent\Collection;
  * a placement settled at maturity, what its settlement paid for the days
  * after the maturity date; on one past its maturity date and not settled
  * yet, what settling it today would pay (the server's figure, so the settle
- * screen never works it out); otherwise 0 and "0.00".
+ * screen never works it out); otherwise 0 and "0.00". When that live figure
+ * can't be worked out (no tax rule in force, say), both read null and the
+ * reason is logged, so one row never fails a page.
  */
 class TimeDepositPresenter
 {
@@ -98,7 +102,7 @@ class TimeDepositPresenter
         ];
     }
 
-    /** @return array{post_maturity_days: int, post_maturity_interest: string} */
+    /** @return array{post_maturity_days: int|null, post_maturity_interest: string|null} */
     private function postMaturity(TimeDeposit $deposit): array
     {
         $matures = CarbonImmutable::parse($deposit->maturity_date->toDateString());
@@ -111,7 +115,16 @@ class TimeDepositPresenter
         }
 
         if (in_array($deposit->status, Settlement::OPEN_STATUSES, true)) {
-            $figures = $this->quote->postMaturity($deposit, now()->toDateString());
+            try {
+                $figures = $this->quote->postMaturity($deposit, now()->toDateString());
+            } catch (Throwable $e) {
+                Log::warning('A time deposit\'s post-maturity interest could not be worked out for display.', [
+                    'time_deposit_id' => $deposit->id,
+                    'reason' => $e->getMessage(),
+                ]);
+
+                return ['post_maturity_days' => null, 'post_maturity_interest' => null];
+            }
 
             return ['post_maturity_days' => $figures['days'], 'post_maturity_interest' => SavingsMath::pesos($figures['gross'])];
         }

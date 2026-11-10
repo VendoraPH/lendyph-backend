@@ -102,14 +102,13 @@ class MaturitySweeper
     /** @return 'settled'|'waiting'|'refused' */
     private function autoSettle(int $id, string $today): string
     {
-        $plain = TimeDeposit::query()->findOrFail($id);
-        $method = $this->automaticPayout($plain);
-
-        if ($method === false) {
-            return 'waiting';
-        }
-
         try {
+            $method = $this->automaticPayout(TimeDeposit::query()->findOrFail($id), $today);
+
+            if ($method === false) {
+                return 'waiting';
+            }
+
             return DB::transaction(function () use ($id, $today, $method): string {
                 $payoutAccountId = $method === 'savings' ? TimeDeposit::query()->whereKey($id)->value('payout_account_id') : null;
                 $this->locks->accounts(array_filter([$payoutAccountId]));
@@ -166,13 +165,13 @@ class MaturitySweeper
      * nothing is paid out, 'savings' into the member's account, or false when
      * it waits for staff.
      */
-    private function automaticPayout(TimeDeposit $deposit): string|false|null
+    private function automaticPayout(TimeDeposit $deposit, string $today): string|false|null
     {
         $intoSavings = $deposit->payout_account_id !== null;
 
         return match ($deposit->maturity_instruction) {
             'rollover_all' => null,
-            'rollover_principal' => $this->settlement->split($deposit, 'rollover_principal', now()->toDateString())['paid_out'] === 0 ? null : ($intoSavings ? 'savings' : false),
+            'rollover_principal' => $this->settlement->split($deposit, 'rollover_principal', $today)['paid_out'] === 0 ? null : ($intoSavings ? 'savings' : false),
             'payout' => $intoSavings ? 'savings' : false,
             default => false,
         };

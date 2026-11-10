@@ -56,8 +56,8 @@ class Quote
      * term, and (except on a rollover) at least its minimum principal.
      *
      * @param  string|null  $ratesOn  the day whose rates apply, when not the placement date (a rollover's maturity date)
-     * @return array{principal: int, annual_rate: string, pretermination_rate: string|null, withholding_tax_rate: string, term_days: int,
-     *               placement_date: string, maturity_date: string, gross: int, tax: int, net: int, maturity: int}
+     * @return array{principal: int, annual_rate: string, pretermination_rate: string|null, pretermination_product_id: int|null, withholding_tax_rate: string,
+     *               term_days: int, placement_date: string, maturity_date: string, gross: int, tax: int, net: int, maturity: int}
      *
      * @throws ValidationException
      */
@@ -118,6 +118,7 @@ class Quote
             'principal' => $principal,
             'annual_rate' => $annualRate,
             'pretermination_rate' => $preterminationRate === null ? null : SavingsMath::rateString(SavingsMath::rateUnits((string) $preterminationRate)),
+            'pretermination_product_id' => $product->pretermination_product_id,
             'withholding_tax_rate' => $taxRate,
             'term_days' => $termDays,
             'placement_date' => $date->toDateString(),
@@ -222,26 +223,29 @@ class Quote
 
     /**
      * Post-maturity interest for settling on $settledOn: none on or before
-     * the maturity date.
+     * the maturity date. The regular rates are those of the pre-termination
+     * product snapshotted on the placement (its product's current link when
+     * it has none). `$taxRate` is a rate snapshotted earlier (an approval's,
+     * taken at request); otherwise the member rule in force on $settledOn.
      *
-     * @return array{days: int, gross: int, tax: int}
+     * @return array{days: int, gross: int, tax: int, tax_rate: string|null}
      *
      * @throws ValidationException
      */
-    public function postMaturity(TimeDeposit $deposit, string $settledOn): array
+    public function postMaturity(TimeDeposit $deposit, string $settledOn, ?string $taxRate = null): array
     {
         $matures = CarbonImmutable::parse($deposit->maturity_date->toDateString());
         $on = CarbonImmutable::parse($settledOn)->startOfDay();
 
         if ($on->lessThanOrEqualTo($matures)) {
-            return ['days' => 0, 'gross' => 0, 'tax' => 0];
+            return ['days' => 0, 'gross' => 0, 'tax' => 0, 'tax_rate' => null];
         }
 
         $start = $matures->toDateString();
         $end = $on->subDay()->toDateString();
-        $regularId = $deposit->product()->value('pretermination_product_id');
+        $regularId = $deposit->pretermination_product_id ?? $deposit->product()->value('pretermination_product_id');
         $segments = $regularId === null ? [] : $this->rates->segments((int) $regularId, null, $start, $end);
-        $taxRate = $this->taxes->rateOn(SavingsTaxRule::HOLDER_MEMBER, $on->toDateString());
+        $taxRate ??= $this->taxes->rateOn(SavingsTaxRule::HOLDER_MEMBER, $on->toDateString());
 
         try {
             $figures = $this->interest->calculate(SavingsMath::centavos($deposit->maturity_amount), [], $start, $end, $segments, 0, $taxRate);
@@ -249,7 +253,7 @@ class Quote
             $this->refuse('date', "{$deposit->certificate_number}'s maturity amount is too large to work out its post-maturity interest.");
         }
 
-        return ['days' => $figures['days'], 'gross' => $figures['gross'], 'tax' => $figures['tax']];
+        return ['days' => $figures['days'], 'gross' => $figures['gross'], 'tax' => $figures['tax'], 'tax_rate' => $figures['tax_rate']];
     }
 
     /**

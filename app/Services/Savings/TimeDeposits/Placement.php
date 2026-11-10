@@ -172,8 +172,8 @@ class Placement
     /**
      * The snapshotted contract columns.
      *
-     * @param  array{principal: int, annual_rate: string, pretermination_rate: string|null, withholding_tax_rate: string, term_days: int,
-     *               placement_date: string, maturity_date: string, gross: int, tax: int, net: int, maturity: int}  $figures
+     * @param  array{principal: int, annual_rate: string, pretermination_rate: string|null, pretermination_product_id: int|null, withholding_tax_rate: string,
+     *               term_days: int, placement_date: string, maturity_date: string, gross: int, tax: int, net: int, maturity: int}  $figures
      * @return array<string, mixed>
      */
     private function contract(array $figures): array
@@ -182,6 +182,7 @@ class Placement
             'principal' => SavingsMath::pesos($figures['principal']),
             'annual_rate' => $figures['annual_rate'],
             'pretermination_rate' => $figures['pretermination_rate'],
+            'pretermination_product_id' => $figures['pretermination_product_id'],
             'withholding_tax_rate' => $figures['withholding_tax_rate'],
             'term_days' => $figures['term_days'],
             'placement_date' => $figures['placement_date'],

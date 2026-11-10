@@ -58,7 +58,8 @@ class TdPayoutExecutor implements ApprovalExecutor
             ]]);
         }
 
-        $paidOut = $this->settlement->split($deposit, (string) $payload['action'], (string) $payload['date'])['paid_out'];
+        $taxRate = isset($payload['post_maturity_tax_rate']) ? (string) $payload['post_maturity_tax_rate'] : null;
+        $paidOut = $this->settlement->split($deposit, (string) $payload['action'], (string) $payload['date'], $taxRate)['paid_out'];
 
         if ($paidOut !== SavingsMath::centavos($approval->amount)) {
             throw ValidationException::withMessages(['approval' => [
@@ -73,6 +74,7 @@ class TdPayoutExecutor implements ApprovalExecutor
             $payload['payout_method'] ?? null,
             $checker->id,
             $payload['next_instruction'] ?? null,
+            $taxRate,
         )['credit'];
     }
 }

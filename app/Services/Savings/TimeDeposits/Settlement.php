@@ -90,7 +90,8 @@ class Settlement
         $this->assertNoPendingApproval($locked);
         $this->assertSettlementDate($locked, $data['date']);
 
-        $paidOut = $this->split($locked, $data['action'], $data['date'])['paid_out'];
+        $split = $this->split($locked, $data['action'], $data['date']);
+        $paidOut = $split['paid_out'];
 
         if ($paidOut > 0) {
             $this->assertPayoutMethod($locked, $payoutMethod);
@@ -103,6 +104,7 @@ class Settlement
                         'action' => $data['action'],
                         'payout_method' => $payoutMethod,
                         'next_instruction' => $nextInstruction,
+                        'post_maturity_tax_rate' => $split['post_maturity']['tax_rate'],
                     ],
                 ], $user->id);
 
@@ -119,12 +121,14 @@ class Settlement
      * Settle a matured placement, under its lock (and the payout account's,
      * when it pays into savings). `$userId` null is the system (the maturity
      * job). Re-checks what can have changed since a request.
+     * `$postMaturityTaxRate` is the rate an approval snapshotted at request,
+     * so a tax rule added since then never changes or refuses it.
      *
      * @return array{deposit: TimeDeposit, rolled: TimeDeposit|null, credit: SavingsTransaction|null}
      *
      * @throws ValidationException
      */
-    public function settle(TimeDeposit $locked, string $date, string $action, ?string $payoutMethod, ?int $userId, ?string $nextInstruction = null): array
+    public function settle(TimeDeposit $locked, string $date, string $action, ?string $payoutMethod, ?int $userId, ?string $nextInstruction = null, ?string $postMaturityTaxRate = null): array
     {
         $this->assertInTransaction();
         $this->assertOpen($locked);
@@ -139,7 +143,7 @@ class Settlement
             }
         }
 
-        ['gross' => $gross, 'tax' => $tax, 'rolled' => $rolled, 'paid_out' => $paidOut, 'post_maturity' => $postMaturity] = $this->split($locked, $action, $date);
+        ['gross' => $gross, 'tax' => $tax, 'rolled' => $rolled, 'paid_out' => $paidOut, 'post_maturity' => $postMaturity] = $this->split($locked, $action, $date, $postMaturityTaxRate);
         $method = $paidOut > 0 ? $payoutMethod : null;
 
         if ($paidOut > 0) {
@@ -278,13 +282,13 @@ class Settlement
      * plus any post-maturity interest), and how the amount due splits between
      * what rolls over and what is paid out.
      *
-     * @return array{principal: int, gross: int, tax: int, rolled: int, paid_out: int, post_maturity: array{days: int, gross: int, tax: int}}
+     * @return array{principal: int, gross: int, tax: int, rolled: int, paid_out: int, post_maturity: array{days: int, gross: int, tax: int, tax_rate: string|null}}
      *
      * @throws ValidationException
      */
-    public function split(TimeDeposit $deposit, string $action, string $date): array
+    public function split(TimeDeposit $deposit, string $action, string $date, ?string $postMaturityTaxRate = null): array
     {
-        $postMaturity = $this->quote->postMaturity($deposit, $date);
+        $postMaturity = $this->quote->postMaturity($deposit, $date, $postMaturityTaxRate);
         $principal = SavingsMath::centavos($deposit->principal);
         $gross = SavingsMath::add(SavingsMath::centavos($deposit->gross_interest), $postMaturity['gross']);
         $tax = SavingsMath::centavos($deposit->withholding_tax) + $postMaturity['tax'];
