@@ -4,17 +4,23 @@ namespace Tests\Feature\Cda\Members;
 
 use App\Models\AuditLog;
 use App\Models\Borrower;
-use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
 /**
- * `members:backfill-membership-fields` (CDA design §1): for members only,
- * where empty, the membership date becomes the Manila date of `approved_at`
- * and the membership number the member code. The dry-run writes nothing;
- * each member changed gets one system audit row; a second run changes
- * nothing; members with no approval date keep no date and are listed.
+ * `members:backfill-membership-fields` writes only what a replay proves (C1
+ * review, H3):
+ * - `membership_date` only from a real approval in the audit trail (a staff
+ *   user moving the member out of `pending` or `rejected`): that row's date;
+ * - never from an `approved_at` that `registrations:backfill-approvals`
+ *   stamped (no approver, or the creation time) or the CSV importer stamped
+ *   (the extract's date), nor for a member with no approval at all: those
+ *   are skipped and listed with the reason;
+ * - `membership_number` from the member code for every member, since that
+ *   is exact, unless another member holds it.
+ * The dry-run writes nothing and shows filled and skipped; one system audit
+ * row per member changed; a second run changes nothing.
  */
 class BackfillMembershipFieldsTest extends TestCase
 {
@@ -24,78 +30,102 @@ class BackfillMembershipFieldsTest extends TestCase
     {
         parent::setUp();
         $this->seedAndLogin();
-        Auth::logout();
     }
 
-    /** @return array{0: Borrower, 1: Borrower, 2: Borrower, 3: Borrower, 4: Borrower} */
+    /** @return array<string, Borrower> */
     private function members(): array
     {
-        $plain = Borrower::factory()->create(['branch_id' => $this->branch->id, 'approved_at' => '2024-03-04 23:30:00']);
-        $dated = Borrower::factory()->create(['branch_id' => $this->branch->id, 'approved_at' => '2024-05-06 09:00:00']);
-        DB::table('borrowers')->where('id', $dated->id)->update(['membership_date' => '2020-01-15', 'membership_number' => 'OLD-0001']);
-        $noApproval = Borrower::factory()->create(['branch_id' => $this->branch->id, 'approved_at' => null]);
-        $applicant = Borrower::factory()->create(['branch_id' => $this->branch->id, 'status' => 'pending', 'approved_at' => null]);
-        $withdrawn = Borrower::factory()->create(['branch_id' => $this->branch->id, 'status' => 'withdrawn', 'approved_at' => '2023-07-08 10:00:00']);
+        $create = fn (array $attributes = []) => Borrower::factory()->create(['branch_id' => $this->branch->id, ...$attributes]);
 
-        DB::table('borrowers')->whereIn('id', [$plain->id, $noApproval->id, $applicant->id, $withdrawn->id])
+        $viaEndpoint = $create(['status' => 'pending', 'approved_at' => null]);
+        $viaEndpoint->documents()->create(['type' => 'valid_id', 'label' => 'umid', 'file_path' => 'documents/valid_id/t.jpg', 'original_filename' => 't.jpg']);
+        $this->travelTo('2024-03-04 23:30:00');
+        $this->patchJson("/api/borrowers/{$viaEndpoint->id}/approve-registration")->assertOk();
+        $this->travelBack();
+
+        $viaReactivate = $create(['status' => 'pending', 'approved_at' => null]);
+        DB::table('audit_logs')->insert([
+            'user_id' => $this->admin->id, 'action' => 'updated', 'auditable_type' => Borrower::class, 'auditable_id' => $viaReactivate->id,
+            'old_values' => json_encode(['status' => 'pending']), 'new_values' => json_encode(['status' => 'active']), 'created_at' => '2023-05-06 09:00:00',
+        ]);
+        DB::table('borrowers')->where('id', $viaReactivate->id)->update(['status' => 'active', 'approved_at' => '2023-05-06 09:00:00', 'approved_by' => $this->admin->id]);
+
+        $stamped = $create(['approved_at' => null]);
+        DB::table('borrowers')->where('id', $stamped->id)->update(['approved_at' => $stamped->created_at, 'approved_by' => null]);
+
+        $imported = $create(['external_account_no' => 'ACC-0042', 'approved_at' => '2025-12-31 00:00:00', 'approved_by' => $this->admin->id]);
+        $noApproval = $create(['approved_at' => null]);
+        $applicant = $create(['status' => 'pending', 'approved_at' => null]);
+        $dated = $create(['approved_at' => '2022-01-01 08:00:00']);
+
+        DB::table('borrowers')->whereIn('id', [$viaEndpoint->id, $viaReactivate->id, $stamped->id, $imported->id, $noApproval->id, $applicant->id])
             ->update(['membership_date' => null, 'membership_number' => null]);
+        DB::table('borrowers')->where('id', $dated->id)->update(['membership_date' => '2020-01-15', 'membership_number' => 'OLD-0001']);
 
-        return [$plain, $dated, $noApproval, $applicant, $withdrawn];
+        $this->app['auth']->forgetGuards();
+
+        return compact('viaEndpoint', 'viaReactivate', 'stamped', 'imported', 'noApproval', 'applicant', 'dated');
     }
 
-    public function test_the_dry_run_writes_nothing_and_lists_what_it_would_do(): void
+    public function test_the_dry_run_writes_nothing_and_shows_filled_and_skipped_with_reasons(): void
     {
-        [$plain, , $noApproval] = $this->members();
+        $m = $this->members();
         $audits = AuditLog::query()->count();
 
         $this->artisan('members:backfill-membership-fields', ['--dry-run' => true])
             ->expectsOutputToContain('Dry run')
-            ->expectsOutputToContain($plain->borrower_code)
-            ->expectsOutputToContain($noApproval->borrower_code)
+            ->expectsOutputToContain("{$m['viaEndpoint']->borrower_code}: would set membership date 2024-03-04")
+            ->expectsOutputToContain("{$m['stamped']->borrower_code}: membership date skipped: the approval date was stamped by registrations:backfill-approvals")
+            ->expectsOutputToContain("{$m['imported']->borrower_code}: membership date skipped: imported from a CSV migration")
+            ->expectsOutputToContain("{$m['noApproval']->borrower_code}: membership date skipped: no approval on record")
             ->assertSuccessful();
 
-        $this->assertNull($plain->fresh()->membership_date);
-        $this->assertNull($plain->fresh()->membership_number);
+        $this->assertNull($m['viaEndpoint']->fresh()->membership_date);
+        $this->assertNull($m['viaEndpoint']->fresh()->membership_number);
         $this->assertSame($audits, AuditLog::query()->count());
     }
 
-    public function test_only_empty_fields_of_members_are_filled_with_one_system_audit_row_each(): void
+    public function test_dates_come_only_from_real_approvals_and_numbers_from_the_member_code(): void
     {
-        [$plain, $dated, $noApproval, $applicant, $withdrawn] = $this->members();
+        $m = $this->members();
         $before = AuditLog::query()->max('id') ?? 0;
 
         $this->artisan('members:backfill-membership-fields')->assertSuccessful();
 
-        $this->assertSame('2024-03-04', $plain->fresh()->membership_date->toDateString());
-        $this->assertSame($plain->borrower_code, $plain->fresh()->membership_number);
-        $this->assertSame('2020-01-15', $dated->fresh()->membership_date->toDateString());
-        $this->assertSame('OLD-0001', $dated->fresh()->membership_number);
-        $this->assertNull($noApproval->fresh()->membership_date);
-        $this->assertSame($noApproval->borrower_code, $noApproval->fresh()->membership_number);
-        $this->assertNull($applicant->fresh()->membership_date);
-        $this->assertNull($applicant->fresh()->membership_number);
-        $this->assertSame('2023-07-08', $withdrawn->fresh()->membership_date->toDateString());
+        $this->assertSame('2024-03-04', $m['viaEndpoint']->fresh()->membership_date->toDateString());
+        $this->assertSame('2023-05-06', $m['viaReactivate']->fresh()->membership_date->toDateString());
+
+        foreach (['stamped', 'imported', 'noApproval'] as $skipped) {
+            $this->assertNull($m[$skipped]->fresh()->membership_date, $skipped);
+            $this->assertSame($m[$skipped]->borrower_code, $m[$skipped]->fresh()->membership_number, $skipped);
+        }
+
+        $this->assertNull($m['applicant']->fresh()->membership_number);
+        $this->assertSame('2020-01-15', $m['dated']->fresh()->membership_date->toDateString());
+        $this->assertSame('OLD-0001', $m['dated']->fresh()->membership_number);
 
         $rows = AuditLog::query()->where('id', '>', $before)->get();
-        $this->assertEqualsCanonicalizing([$plain->id, $noApproval->id, $withdrawn->id], $rows->pluck('auditable_id')->all());
-        $this->assertSame([Borrower::class], $rows->pluck('auditable_type')->unique()->values()->all());
+        $this->assertEqualsCanonicalizing(
+            [$m['viaEndpoint']->id, $m['viaReactivate']->id, $m['stamped']->id, $m['imported']->id, $m['noApproval']->id],
+            $rows->pluck('auditable_id')->all(),
+        );
         $this->assertSame([null], $rows->pluck('user_id')->unique()->values()->all());
-        $plainRow = $rows->firstWhere('auditable_id', $plain->id);
-        $this->assertSame(['membership_date' => null, 'membership_number' => null], $plainRow->old_values);
-        $this->assertSame(['membership_date' => '2024-03-04', 'membership_number' => $plain->borrower_code], $plainRow->new_values);
-        $this->assertStringContainsString('members:backfill-membership-fields', (string) $plainRow->description);
+        $endpointRow = $rows->firstWhere('auditable_id', $m['viaEndpoint']->id);
+        $this->assertSame(['membership_date' => '2024-03-04', 'membership_number' => $m['viaEndpoint']->borrower_code], $endpointRow->new_values);
+        $this->assertStringContainsString('approved by Super Admin', (string) $endpointRow->description);
+        $this->assertSame(['membership_number' => $m['stamped']->borrower_code], $rows->firstWhere('auditable_id', $m['stamped']->id)->new_values);
     }
 
-    public function test_a_second_run_changes_nothing_and_still_lists_members_with_no_approval_date(): void
+    public function test_a_second_run_changes_nothing_and_still_lists_the_skipped(): void
     {
-        [, , $noApproval] = $this->members();
+        $m = $this->members();
         $this->artisan('members:backfill-membership-fields')->assertSuccessful();
         $audits = AuditLog::query()->count();
         $snapshot = DB::table('borrowers')->orderBy('id')->get(['id', 'membership_date', 'membership_number', 'updated_at'])->toArray();
 
         $this->artisan('members:backfill-membership-fields')
             ->expectsOutputToContain('0 members updated')
-            ->expectsOutputToContain($noApproval->borrower_code)
+            ->expectsOutputToContain($m['noApproval']->borrower_code)
             ->assertSuccessful();
 
         $this->assertSame($audits, AuditLog::query()->count());
@@ -104,15 +134,13 @@ class BackfillMembershipFieldsTest extends TestCase
 
     public function test_a_membership_number_already_taken_is_skipped_and_listed(): void
     {
-        [$plain] = $this->members();
-        $other = Borrower::factory()->create(['branch_id' => $this->branch->id, 'approved_at' => '2024-01-01 08:00:00']);
-        DB::table('borrowers')->where('id', $other->id)->update(['membership_number' => $plain->borrower_code]);
+        $m = $this->members();
+        DB::table('borrowers')->where('id', $m['dated']->id)->update(['membership_number' => $m['noApproval']->borrower_code]);
 
         $this->artisan('members:backfill-membership-fields')
             ->expectsOutputToContain('already used')
             ->assertSuccessful();
 
-        $this->assertNull($plain->fresh()->membership_number);
-        $this->assertSame('2024-03-04', $plain->fresh()->membership_date->toDateString());
+        $this->assertNull($m['noApproval']->fresh()->membership_number);
     }
 }
