@@ -127,7 +127,7 @@ class AuditLogResource extends JsonResource
      * (`outstanding_balance`, `collected_at_release`, `new_principal`), unless
      * NOT_MONEY_FIELD says it is about money rather than an amount of it.
      */
-    private const MONEY_FIELD = '/(^|_)(amount|applied|balance|charge|charged|collected|credit|debit|deductions|due|income|interest|outstanding|overpayment|owed|paid|penalty|premium|principal|proceeds|shortfall|waived)(_|$)|^(snapshot_value|total_payment)$/';
+    private const MONEY_FIELD = '/(^|_)(amount|applied|balance|budget|charge|charged|collected|credit|debit|deductions|due|expense|income|interest|outstanding|overpayment|owed|paid|penalty|premium|principal|proceeds|shortfall|waived)(_|$)|^(snapshot_value|total_payment)$/';
 
     private const NOT_MONEY_FIELD = '/(_at|_by|_count|_date|_id|_ids|_method|_number|_pct|_percentage|_rate|_status|_type)$|^auto_credit$/';
 
@@ -141,6 +141,9 @@ class AuditLogResource extends JsonResource
         'interest_method', 'interest_option', 'interest_rate_frequency', 'interest_type', 'kind',
         'maturity_instruction', 'method', 'normal_balance', 'payment_frequency', 'payment_method', 'payment_type',
         'payout_method', 'retaken_on', 'source', 'term_unit', 'type',
+        // Members and CDA Reports (Phase 3).
+        'asset_class', 'asset_class_source', 'cooperative_category', 'funding_source', 'member_type', 'origin',
+        'part', 'position', 'report_type', 'sex', 'training_type',
     ];
 
     /**
@@ -156,6 +159,18 @@ class AuditLogResource extends JsonResource
         'td_payout' => 'Time Deposit Payout',
         'rollover_principal' => 'Roll Over Principal',
         'rollover_all' => 'Roll Over Principal and Interest',
+        // CDA Reports (Phase 3): report types, halves, funds and filing methods.
+        'capr' => 'CAPR',
+        'atir' => 'ATIR',
+        'abr' => 'ABR',
+        'pesos' => 'Enhanced PESOS',
+        'officers_trainings' => 'Officers and Trainings',
+        'h1' => 'First half (January–June)',
+        'h2' => 'Second half (July–December)',
+        'cdf' => 'CDF',
+        'cetf' => 'CETF',
+        'cais' => 'CAIS',
+        'ecoophub' => 'e-CoopHub',
     ];
 
     private const TIMESTAMP_WITH_SECONDS = 'M j, Y, g:i:s A';

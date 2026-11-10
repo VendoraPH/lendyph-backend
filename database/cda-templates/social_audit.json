@@ -1,0 +1,144 @@
+{
+  "report_type": "social_audit",
+  "version": "2026.1",
+  "name": "Social Audit Report CY2026",
+  "effective_from": "2026-01-01",
+  "effective_until": null,
+  "cooperative_types": [],
+  "asset_classes": [],
+  "definition": {
+    "schema_version": 1,
+    "meta": {
+      "verified": false,
+      "source_doc": "Social audit report (as understood in v1; to verify)"
+    },
+    "parts": [
+      "annual"
+    ],
+    "deadline": {
+      "basis": "year_end",
+      "days_setting": "annual_deadline_days"
+    },
+    "sections": [
+      {
+        "key": "programs",
+        "title": "Social programs",
+        "kind": "table",
+        "source": {
+          "key": "social_programs.list"
+        },
+        "columns": [
+          {
+            "key": "name",
+            "label": "Program",
+            "format": "text"
+          },
+          {
+            "key": "category",
+            "label": "Category",
+            "format": "text"
+          },
+          {
+            "key": "actual_beneficiaries",
+            "label": "Beneficiaries",
+            "format": "number"
+          },
+          {
+            "key": "actual_expense",
+            "label": "Amount spent",
+            "format": "money"
+          },
+          {
+            "key": "cdf_amount",
+            "label": "From the CDF",
+            "format": "money"
+          }
+        ]
+      },
+      {
+        "key": "summary",
+        "title": "Summary",
+        "kind": "fields",
+        "fields": [
+          {
+            "key": "program_count",
+            "label": "Programs held",
+            "type": "number",
+            "decimals": 0,
+            "source": {
+              "key": "social_programs.summary",
+              "params": {
+                "measure": "count"
+              }
+            }
+          },
+          {
+            "key": "beneficiaries",
+            "label": "Beneficiaries",
+            "type": "number",
+            "decimals": 0,
+            "source": {
+              "key": "social_programs.summary",
+              "params": {
+                "measure": "beneficiaries"
+              }
+            }
+          },
+          {
+            "key": "cdf_used",
+            "label": "Community Development Fund used",
+            "type": "money",
+            "source": {
+              "key": "social_programs.summary",
+              "params": {
+                "measure": "cdf_amount"
+              }
+            }
+          },
+          {
+            "key": "cdf_booked",
+            "label": "CDF used per the books (3073)",
+            "type": "money",
+            "source": {
+              "key": "accounting.flow",
+              "params": {
+                "code": "3073",
+                "side": "debit"
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "cdf_matches_books",
+        "type": "compare",
+        "left": "cdf_used",
+        "op": "eq",
+        "right": "cdf_booked",
+        "severity": "warning",
+        "category": "accounting_mismatch",
+        "component": "accounting"
+      },
+      {
+        "id": "template_verified",
+        "type": "check",
+        "check": "template.verified",
+        "severity": "info",
+        "category": "invalid_data",
+        "component": "fields",
+        "message": "This form follows the CDA template as understood in v1 and is still to be checked against the official form."
+      }
+    ],
+    "documents": [
+      {
+        "key": "social_audit_report",
+        "category": "social_audit",
+        "label": "Social audit report (signed)",
+        "stage": "finalize",
+        "severity": "critical"
+      }
+    ]
+  }
+}

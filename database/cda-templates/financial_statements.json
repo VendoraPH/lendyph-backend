@@ -1,0 +1,215 @@
+{
+  "report_type": "financial_statements",
+  "version": "2026.1",
+  "name": "Audited Financial Statements CY2026",
+  "effective_from": "2026-01-01",
+  "effective_until": null,
+  "cooperative_types": [],
+  "asset_classes": [],
+  "definition": {
+    "schema_version": 1,
+    "meta": {
+      "verified": false,
+      "source_doc": "Audited financial statements (as understood in v1; to verify)"
+    },
+    "parts": [
+      "annual"
+    ],
+    "deadline": {
+      "basis": "year_end",
+      "days_setting": "annual_deadline_days"
+    },
+    "sections": [
+      {
+        "key": "statements",
+        "title": "Statement of financial condition and operations",
+        "kind": "fields",
+        "fields": [
+          {
+            "key": "total_assets",
+            "label": "Total assets",
+            "type": "money",
+            "required": true,
+            "source": {
+              "key": "fs.total_assets"
+            }
+          },
+          {
+            "key": "total_liabilities",
+            "label": "Total liabilities",
+            "type": "money",
+            "required": true,
+            "source": {
+              "key": "fs.total_liabilities"
+            }
+          },
+          {
+            "key": "total_equity",
+            "label": "Total equity",
+            "type": "money",
+            "required": true,
+            "source": {
+              "key": "fs.total_equity"
+            }
+          },
+          {
+            "key": "is_balanced",
+            "label": "Assets equal liabilities and equity",
+            "type": "boolean",
+            "source": {
+              "key": "fs.is_balanced"
+            }
+          },
+          {
+            "key": "total_income",
+            "label": "Total income",
+            "type": "money",
+            "source": {
+              "key": "fs.total_income"
+            }
+          },
+          {
+            "key": "total_expenses",
+            "label": "Total expenses",
+            "type": "money",
+            "source": {
+              "key": "fs.total_expenses"
+            }
+          },
+          {
+            "key": "net_surplus",
+            "label": "Net surplus",
+            "type": "money",
+            "source": {
+              "key": "fs.net_surplus"
+            }
+          }
+        ]
+      },
+      {
+        "key": "balance_sheet",
+        "title": "Balance sheet",
+        "kind": "table",
+        "source": {
+          "key": "fs.balance_sheet"
+        },
+        "columns": [
+          {
+            "key": "account_code",
+            "label": "Code",
+            "format": "text"
+          },
+          {
+            "key": "account_name",
+            "label": "Account",
+            "format": "text"
+          },
+          {
+            "key": "amount",
+            "label": "Amount",
+            "format": "money"
+          }
+        ]
+      },
+      {
+        "key": "auditor",
+        "title": "External auditor",
+        "kind": "fields",
+        "fields": [
+          {
+            "key": "auditor_name",
+            "label": "Auditor",
+            "type": "text",
+            "required": true
+          },
+          {
+            "key": "auditor_accreditation_no",
+            "label": "CDA accreditation number",
+            "type": "text",
+            "required": true
+          },
+          {
+            "key": "audit_opinion",
+            "label": "Opinion",
+            "type": "select",
+            "required": true,
+            "options": [
+              {
+                "value": "unmodified",
+                "label": "Unmodified"
+              },
+              {
+                "value": "qualified",
+                "label": "Qualified"
+              },
+              {
+                "value": "adverse",
+                "label": "Adverse"
+              },
+              {
+                "value": "disclaimer",
+                "label": "Disclaimer"
+              }
+            ]
+          },
+          {
+            "key": "audit_report_date",
+            "label": "Date of the audit report",
+            "type": "date",
+            "required": true
+          }
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "year_closed",
+        "type": "check",
+        "check": "accounting.year_closed",
+        "severity": "critical",
+        "category": "financial_data",
+        "component": "accounting",
+        "fix_href": "/accounting"
+      },
+      {
+        "id": "fs_balanced",
+        "type": "check",
+        "check": "fs.balanced",
+        "severity": "critical",
+        "category": "accounting_mismatch",
+        "component": "accounting"
+      },
+      {
+        "id": "tb_matches_fs",
+        "type": "check",
+        "check": "fs.tb_matches_fs",
+        "severity": "critical",
+        "category": "accounting_mismatch",
+        "component": "accounting"
+      },
+      {
+        "id": "template_verified",
+        "type": "check",
+        "check": "template.verified",
+        "severity": "info",
+        "category": "invalid_data",
+        "component": "fields",
+        "message": "This form follows the CDA template as understood in v1 and is still to be checked against the official form."
+      }
+    ],
+    "documents": [
+      {
+        "key": "audited_fs",
+        "category": "financial_statements",
+        "label": "Audited financial statements (signed)",
+        "stage": "finalize",
+        "severity": "critical"
+      }
+    ],
+    "export": {
+      "pdf": {
+        "orientation": "portrait"
+      }
+    }
+  }
+}

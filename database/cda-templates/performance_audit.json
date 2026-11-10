@@ -1,0 +1,77 @@
+{
+  "report_type": "performance_audit",
+  "version": "2026.1",
+  "name": "Performance Audit Report CY2026",
+  "effective_from": "2026-01-01",
+  "effective_until": null,
+  "cooperative_types": [],
+  "asset_classes": [],
+  "definition": {
+    "schema_version": 1,
+    "meta": {
+      "verified": false,
+      "source_doc": "Performance audit report (as understood in v1; to verify)"
+    },
+    "parts": [
+      "annual"
+    ],
+    "deadline": {
+      "basis": "year_end",
+      "days_setting": "annual_deadline_days"
+    },
+    "sections": [
+      {
+        "key": "checklist",
+        "title": "Performance audit checklist",
+        "kind": "fields",
+        "fields": [
+          {
+            "key": "governance",
+            "label": "Governance and management",
+            "type": "compliance"
+          },
+          {
+            "key": "operations",
+            "label": "Operations",
+            "type": "compliance"
+          },
+          {
+            "key": "financial",
+            "label": "Financial performance",
+            "type": "compliance"
+          },
+          {
+            "key": "compliance_with_laws",
+            "label": "Compliance with laws and regulations",
+            "type": "compliance"
+          },
+          {
+            "key": "auditor_remarks",
+            "label": "Auditor's remarks",
+            "type": "textarea"
+          }
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "template_verified",
+        "type": "check",
+        "check": "template.verified",
+        "severity": "info",
+        "category": "invalid_data",
+        "component": "fields",
+        "message": "This form follows the CDA template as understood in v1 and is still to be checked against the official form."
+      }
+    ],
+    "documents": [
+      {
+        "key": "performance_audit_report",
+        "category": "performance_audit",
+        "label": "Performance audit report (signed)",
+        "stage": "finalize",
+        "severity": "critical"
+      }
+    ]
+  }
+}

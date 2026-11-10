@@ -256,6 +256,23 @@ class TimezoneShift
         'savings_settings' => ['created_at', 'updated_at'],
         'savings_tax_rules' => ['created_at'],
         'savings_transactions' => ['created_at'],
+        // Added 2026-11-11 with CDA Reports (Phase 3), well after the
+        // cutover, for the same reason. Their business dates are DATEs.
+        'cda_document_versions' => ['created_at'],
+        'cda_documents' => ['created_at', 'updated_at'],
+        'cda_mediation_cases' => ['created_at', 'updated_at'],
+        'cda_notices_sent' => ['sent_at'],
+        'cda_officer_trainings' => ['created_at', 'updated_at'],
+        'cda_officers' => ['created_at', 'deleted_at', 'updated_at'],
+        'cda_regulatory_profiles' => ['created_at', 'updated_at'],
+        'cda_report_snapshots' => ['created_at', 'finalized_at', 'superseded_at', 'updated_at'],
+        'cda_report_templates' => ['activated_at', 'created_at', 'updated_at'],
+        'cda_report_values' => ['created_at', 'refreshed_at', 'updated_at'],
+        'cda_reporting_periods' => ['created_at', 'updated_at', 'year_end_captured_at'],
+        'cda_reports' => ['approved_at', 'created_at', 'finalized_at', 'refreshed_at', 'stale_at', 'submitted_for_review_at', 'updated_at', 'validated_at'],
+        'cda_settings' => ['created_at', 'updated_at'],
+        'cda_social_programs' => ['created_at', 'updated_at'],
+        'cda_submissions' => ['created_at', 'updated_at'],
         'time_deposits' => ['created_at', 'updated_at'],
         // The shift's own bookkeeping, written after the cutover by definition.
         'timezone_shifts' => ['completed_at', 'cutover_at', 'started_at'],

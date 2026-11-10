@@ -1,0 +1,195 @@
+{
+  "report_type": "officers_trainings",
+  "version": "2026.1",
+  "name": "List of Officers and Trainings CY2026",
+  "effective_from": "2026-01-01",
+  "effective_until": null,
+  "cooperative_types": [],
+  "asset_classes": [],
+  "definition": {
+    "schema_version": 1,
+    "meta": {
+      "verified": false,
+      "source_doc": "Officers and trainings (as understood in v1; to verify)"
+    },
+    "parts": [
+      "annual"
+    ],
+    "deadline": {
+      "basis": "year_end",
+      "days_setting": "annual_deadline_days"
+    },
+    "sections": [
+      {
+        "key": "officers",
+        "title": "Officers",
+        "kind": "table",
+        "source": {
+          "key": "officers.list"
+        },
+        "columns": [
+          {
+            "key": "name",
+            "label": "Name",
+            "format": "text"
+          },
+          {
+            "key": "sex",
+            "label": "Sex",
+            "format": "text"
+          },
+          {
+            "key": "position",
+            "label": "Position",
+            "format": "text"
+          },
+          {
+            "key": "committee",
+            "label": "Committee",
+            "format": "text"
+          },
+          {
+            "key": "election_date",
+            "label": "Elected",
+            "format": "date"
+          },
+          {
+            "key": "term_start",
+            "label": "Term start",
+            "format": "date"
+          },
+          {
+            "key": "term_end",
+            "label": "Term end",
+            "format": "date"
+          }
+        ]
+      },
+      {
+        "key": "trainings",
+        "title": "Trainings",
+        "kind": "table",
+        "source": {
+          "key": "trainings.summary"
+        },
+        "columns": [
+          {
+            "key": "officer",
+            "label": "Officer",
+            "format": "text"
+          },
+          {
+            "key": "required",
+            "label": "Required trainings",
+            "format": "number"
+          },
+          {
+            "key": "completed",
+            "label": "Completed",
+            "format": "number"
+          },
+          {
+            "key": "hours",
+            "label": "Hours",
+            "format": "number"
+          },
+          {
+            "key": "status",
+            "label": "Status",
+            "format": "text"
+          }
+        ]
+      },
+      {
+        "key": "summary",
+        "title": "Summary",
+        "kind": "fields",
+        "fields": [
+          {
+            "key": "officers_male",
+            "label": "Male officers",
+            "type": "number",
+            "decimals": 0,
+            "source": {
+              "key": "officers.count",
+              "params": {
+                "sex": "male"
+              }
+            }
+          },
+          {
+            "key": "officers_female",
+            "label": "Female officers",
+            "type": "number",
+            "decimals": 0,
+            "source": {
+              "key": "officers.count",
+              "params": {
+                "sex": "female"
+              }
+            }
+          },
+          {
+            "key": "officers_total",
+            "label": "Total officers",
+            "type": "number",
+            "decimals": 0,
+            "source": {
+              "key": "officers.count"
+            }
+          }
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "required_positions",
+        "type": "check",
+        "check": "officers.required_positions",
+        "severity": "critical",
+        "category": "officer_data",
+        "component": "sources",
+        "fix_href": "/cda/officers"
+      },
+      {
+        "id": "trainings_complete",
+        "type": "check",
+        "check": "officers.training_incomplete",
+        "severity": "warning",
+        "category": "training",
+        "component": "sources",
+        "fix_href": "/cda/officers"
+      },
+      {
+        "id": "sex_sum",
+        "type": "sum_equals",
+        "parts": [
+          "officers_male",
+          "officers_female"
+        ],
+        "total": "officers_total",
+        "severity": "warning",
+        "category": "officer_data",
+        "component": "sources"
+      },
+      {
+        "id": "template_verified",
+        "type": "check",
+        "check": "template.verified",
+        "severity": "info",
+        "category": "invalid_data",
+        "component": "fields",
+        "message": "This form follows the CDA template as understood in v1 and is still to be checked against the official form."
+      }
+    ],
+    "documents": [
+      {
+        "key": "training_certificates",
+        "category": "certificates",
+        "label": "Training certificates",
+        "stage": "finalize",
+        "severity": "warning"
+      }
+    ]
+  }
+}

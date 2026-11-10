@@ -61,6 +61,12 @@ final class GeneratedNumberWrite
 
     public const TIME_DEPOSIT_CERTIFICATE_INDEX = 'time_deposits_certificate_number_unique';
 
+    /** CDA mediation cases, `MC-YYYY-NNNN` (CdaMediationCase::booted()). */
+    public const MEDIATION_CASE_NUMBER_INDEX = 'cda_mediation_cases_case_number_unique';
+
+    /** A member's membership number, given from the member code on create. */
+    public const MEMBERSHIP_NUMBER_INDEX = 'borrowers_membership_number_unique';
+
     public const MEMBER_CONFLICT = 'Another member was created at the same moment. Submit again.';
 
     public const CO_MAKER_CONFLICT = 'Another co-maker was created at the same moment. Submit again.';
@@ -71,6 +77,8 @@ final class GeneratedNumberWrite
 
     public const SAVINGS_CONFLICT = 'Another savings transaction was saved at the same moment. Submit again.';
 
+    public const MEDIATION_CONFLICT = 'Another mediation case was recorded at the same moment. Submit again.';
+
     private const INDEXES = [
         self::BORROWER_CODE_INDEX,
         self::CO_MAKER_CODE_INDEX,
@@ -79,6 +87,8 @@ final class GeneratedNumberWrite
         self::SAVINGS_ACCOUNT_NUMBER_INDEX,
         self::SAVINGS_TRANSACTION_REFERENCE_INDEX,
         self::TIME_DEPOSIT_CERTIFICATE_INDEX,
+        self::MEDIATION_CASE_NUMBER_INDEX,
+        self::MEMBERSHIP_NUMBER_INDEX,
     ];
 
     private const BACKOFF_MILLISECONDS = 20;
