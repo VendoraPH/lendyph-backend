@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\Accounting\PostJournalRequest;
 use App\Http\Requests\Accounting\PreviewJournalRequest;
 use App\Http\Requests\Accounting\ReverseJournalRequest;
 use App\Http\Requests\Accounting\StoreJournalRequest;
@@ -44,7 +45,7 @@ class AccountingJournalController extends Controller
     #[OA\Get(
         path: '/api/accounting/journals',
         summary: 'List journal entries',
-        description: 'The journal register, newest first. Returns the raw Laravel paginator envelope ({data, links, meta}); clients drain it by following `meta.last_page`. `per_page` is clamped at 100 and defaults to 15.',
+        description: 'The journal register, newest first. Returns the raw Laravel paginator envelope ({data, links, meta}); clients drain it by following `meta.last_page`. `per_page` is clamped at 100 and defaults to 15. Each row carries `reverses_journal_no`: on a reversal, the number of the entry it reverses; null on every other entry.',
         tags: ['Accounting'],
         security: [['sanctum' => []]],
         parameters: [
@@ -167,7 +168,7 @@ class AccountingJournalController extends Controller
     #[OA\Post(
         path: '/api/accounting/journals',
         summary: 'Create a manual journal entry (draft)',
-        description: 'Creates a DRAFT. `source` is forced to `manual` on this route. `total_debit`/`total_credit` are accepted and ignored — they are recomputed from the persisted lines when the entry posts. Every line needs exactly one non-zero side, in integer CENTAVOS, and an entry needs at least two lines.',
+        description: 'Creates a DRAFT. `source` is forced to `manual` on this route. `total_debit`/`total_credit` are accepted and ignored — they are recomputed from the persisted lines when the entry posts. Every line needs exactly one non-zero side, in integer CENTAVOS, and an entry needs at least two lines. `date` is a plain `YYYY-MM-DD`; a date with a time or an offset is refused. An entry with no branch that has a line on the allowance account (the `allowance_credit_losses` mapping, 1200 by default) can\'t be dated after today in Manila.',
         tags: ['Accounting'],
         security: [['sanctum' => []]],
         requestBody: new OA\RequestBody(
@@ -175,7 +176,7 @@ class AccountingJournalController extends Controller
             content: new OA\JsonContent(
                 required: ['date', 'description', 'lines'],
                 properties: [
-                    new OA\Property(property: 'date', type: 'string', format: 'date'),
+                    new OA\Property(property: 'date', type: 'string', format: 'date', example: '2026-11-10', description: 'A plain day, `YYYY-MM-DD`, with no time or offset.'),
                     new OA\Property(property: 'reference', type: 'string', nullable: true, maxLength: 64),
                     new OA\Property(property: 'description', type: 'string', maxLength: 500),
                     new OA\Property(property: 'branch_id', type: 'integer', nullable: true),
@@ -199,7 +200,7 @@ class AccountingJournalController extends Controller
         responses: [
             new OA\Response(response: 201, description: 'Draft created'),
             new OA\Response(response: 403, description: 'Missing journals:create'),
-            new OA\Response(response: 422, description: 'Validation error'),
+            new OA\Response(response: 422, description: 'Validation error, in words: a date that isn\'t a plain `YYYY-MM-DD`, or an entry with no branch and a line on the allowance account dated after today in Manila (`errors.date`)'),
         ],
     )]
     public function store(StoreJournalRequest $request): JsonResponse
@@ -273,7 +274,17 @@ class AccountingJournalController extends Controller
             new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
         ],
         responses: [
-            new OA\Response(response: 200, description: 'The entry, with its lines'),
+            new OA\Response(
+                response: 200,
+                description: 'The entry, with its lines',
+                content: new OA\JsonContent(properties: [
+                    new OA\Property(property: 'data', type: 'object', properties: [
+                        new OA\Property(property: 'reverses_journal_id', type: 'integer', nullable: true, description: 'On a reversal, the entry it reverses.'),
+                        new OA\Property(property: 'reverses_journal_no', type: 'string', nullable: true, example: 'JE-000042', description: 'On a reversal, the number of the entry it reverses; null on every other entry.'),
+                        new OA\Property(property: 'reversed_by_journal_id', type: 'integer', nullable: true, description: 'The reversal that undid this entry.'),
+                    ]),
+                ]),
+            ),
             new OA\Response(response: 403, description: 'Missing journals:view'),
             new OA\Response(response: 404, description: 'Not found'),
         ],
@@ -298,7 +309,7 @@ class AccountingJournalController extends Controller
         responses: [
             new OA\Response(response: 200, description: 'Draft updated'),
             new OA\Response(response: 403, description: 'Missing journals:create'),
-            new OA\Response(response: 422, description: 'Validation error, or the entry is already posted'),
+            new OA\Response(response: 422, description: 'Validation error, or the entry is already posted. The same date rules as create: a plain `YYYY-MM-DD`, and no date after today in Manila for an entry with no branch and a line on the allowance account (`errors.date`)'),
         ],
     )]
     public function update(UpdateJournalRequest $request, AccountingJournal $journal): JsonResponse
@@ -324,14 +335,12 @@ class AccountingJournalController extends Controller
         responses: [
             new OA\Response(response: 200, description: 'The posted entry, carrying its new journal_no'),
             new OA\Response(response: 403, description: 'Missing journals:post'),
-            new OA\Response(response: 422, description: 'Already posted, unbalanced, single-line, or referencing an unpostable account'),
+            new OA\Response(response: 422, description: 'Already posted, unbalanced, single-line, or referencing an unpostable account; or, in words on `errors.date`, a draft with no branch and a line on the allowance account dated after today in Manila (the same rule as create)'),
         ],
     )]
-    public function post(AccountingJournal $journal): JsonResponse
+    public function post(PostJournalRequest $request, AccountingJournal $journal): JsonResponse
     {
-        $this->authorize('journals:post');
-
-        $posted = $this->poster->post($journal, request()->user()?->id);
+        $posted = $this->poster->post($journal, $request->user()?->id);
 
         return $this->respond($posted);
     }
@@ -348,14 +357,14 @@ class AccountingJournalController extends Controller
         requestBody: new OA\RequestBody(
             required: false,
             content: new OA\JsonContent(properties: [
-                new OA\Property(property: 'date', type: 'string', format: 'date', description: 'Where the reversal lands. Defaults to today — routinely NOT the original\'s date, or a period already reported on would change.'),
+                new OA\Property(property: 'date', type: 'string', format: 'date', description: 'Where the reversal lands. Defaults to today — routinely NOT the original\'s date, or a period already reported on would change. A time or an offset is read as its day in Manila. Never before the entry\'s own date, and never after today when the entry has no branch and a line on the allowance account.'),
                 new OA\Property(property: 'reason', type: 'string', maxLength: 300, description: 'Folded into the reversal description; there is no column for it.'),
             ]),
         ),
         responses: [
-            new OA\Response(response: 201, description: 'The posted reversing entry'),
+            new OA\Response(response: 201, description: 'The posted reversing entry; its `reverses_journal_no` is the original\'s number'),
             new OA\Response(response: 403, description: 'Missing journals:reverse'),
-            new OA\Response(response: 422, description: 'Not posted, already reversed, or part of a year-end close'),
+            new OA\Response(response: 422, description: 'In words: not posted, already reversed, or part of a year-end close; a reversal dated before the entry\'s own date, given or by default (`errors.date`); or, for an entry with no branch and a line on the allowance account, a reversal dated after today in Manila (`errors.date`; the entry\'s own date is always allowed, since the pair cancels out on it, and the message names the dates that are)'),
         ],
     )]
     public function reverse(ReverseJournalRequest $request, AccountingJournal $journal): JsonResponse
@@ -385,6 +394,7 @@ class AccountingJournalController extends Controller
             'branch:id,name',
             'creator:id,first_name,last_name',
             'poster:id,first_name,last_name',
+            'reverses:id,journal_no',
         ]);
 
         // `postable_label` is whenLoaded-guarded, so without this the field

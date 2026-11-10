@@ -134,6 +134,7 @@ class JournalEntryResource extends JsonResource
             'total_debit' => $this->totalOf('debit'),
             'total_credit' => $this->totalOf('credit'),
             'reverses_journal_id' => $this->reverses_journal_id,
+            'reverses_journal_no' => $this->reversesJournalNo(),
             'reversed_by_journal_id' => $this->reversed_by_journal_id,
             // The document that caused this entry. All three are null together
             // and legitimately so: a fund transfer IS the document rather than
@@ -164,6 +165,22 @@ class JournalEntryResource extends JsonResource
         }
 
         return (int) $this->{"total_{$side}"};
+    }
+
+    /**
+     * The number of the entry this reversal undoes, so a reversal page needs
+     * no second request for it. Null, with no query, on anything that isn't a
+     * reversal. On a reversal it reads the eager-loaded `reverses` relation
+     * (every journal route loads it), and is absent rather than one query per
+     * row when a caller forgets to.
+     */
+    private function reversesJournalNo(): mixed
+    {
+        if ($this->reverses_journal_id === null) {
+            return null;
+        }
+
+        return $this->whenLoaded('reverses', fn (): ?string => $this->reverses?->journal_no);
     }
 
     /**

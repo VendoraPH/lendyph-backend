@@ -421,6 +421,7 @@ class AccountingJournal extends Model
                 'branch:id,name',
                 'creator:id,first_name,last_name',
                 'poster:id,first_name,last_name',
+                'reverses:id,journal_no',
             ])
             // Runs on the page `paginate()` produces — `paginate()` goes
             // through `get()`, which applies these. Here rather than left to

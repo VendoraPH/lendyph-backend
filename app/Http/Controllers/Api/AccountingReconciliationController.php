@@ -136,7 +136,7 @@ class AccountingReconciliationController extends Controller
                 required: ['account_id', 'start_date', 'end_date', 'statement_balance'],
                 properties: [
                     new OA\Property(property: 'account_id', type: 'integer', description: 'A money account — one carrying a cash_kind.'),
-                    new OA\Property(property: 'period', type: 'string', nullable: true, description: 'Derived from the range when omitted — "September 2026".'),
+                    new OA\Property(property: 'period', type: 'string', nullable: true, description: 'Derived from the range when omitted: "September 2026" for a whole calendar month, otherwise the dates in words, "Sep 3 – Sep 20, 2026" ("Dec 15, 2026 – Jan 10, 2027" across a year end).'),
                     new OA\Property(property: 'start_date', type: 'string', format: 'date'),
                     new OA\Property(property: 'end_date', type: 'string', format: 'date'),
                     new OA\Property(property: 'statement_balance', type: 'integer', description: 'Centavos, signed.'),
@@ -164,23 +164,28 @@ class AccountingReconciliationController extends Controller
         $account = $this->requireMoneyAccount((int) $data['account_id'], 'account_id');
 
         $period = $data['period'] ?? null;
+        $labels = [$period];
 
         if ($period === null || trim($period) === '') {
             $period = $this->periodLabel((string) $data['start_date'], (string) $data['end_date']);
+            // A part-month range was labelled with raw dates before they read
+            // in words; the same range stored under that label is the same
+            // period.
+            $labels = array_values(array_unique([$period, $this->legacyPeriodLabel((string) $data['start_date'], (string) $data['end_date'])]));
         }
 
-        $exists = AccountingReconciliation::query()
+        $existing = AccountingReconciliation::query()
             ->where('accounting_account_id', $account->id)
-            ->where('period', $period)
-            ->exists();
+            ->whereIn('period', $labels)
+            ->value('period');
 
-        if ($exists) {
+        if ($existing !== null) {
             // The unique index refuses this anyway; catching it here turns what
             // would surface as a 500 into something the screen can render, and
             // says which of the two fields to change.
             throw ValidationException::withMessages([
                 'period' => [
-                    "{$account->code} {$account->name} already has a reconciliation for {$period}. "
+                    "{$account->code} {$account->name} already has a reconciliation for {$existing}. "
                     .'Open that one rather than starting a second — the screen keys its cards on the account '
                     .'and the period, so two would render as one and quietly hide the other.',
                 ],
@@ -409,7 +414,8 @@ class AccountingReconciliationController extends Controller
 
     /**
      * "September 2026" when the range is exactly a calendar month, and the two
-     * dates otherwise.
+     * dates in words otherwise: "Sep 3 – Sep 20, 2026", with the year once
+     * when both dates share it, "Dec 15, 2026 – Jan 10, 2027" when they don't.
      *
      * Derived rather than typed so the common case cannot be spelled two
      * different ways for the same month — which, given the unique index on
@@ -425,6 +431,20 @@ class AccountingReconciliationController extends Controller
             return $from->format('F Y');
         }
 
-        return $from->toDateString().' – '.$to->toDateString();
+        if ($from->year === $to->year) {
+            return $from->format('M j').' – '.$to->format('M j, Y');
+        }
+
+        return $from->format('M j, Y').' – '.$to->format('M j, Y');
+    }
+
+    /**
+     * The label a part-month range was stored with before dates read in
+     * words, "2026-09-03 – 2026-09-20". Read only by the duplicate check;
+     * stored labels are never rewritten.
+     */
+    private function legacyPeriodLabel(string $start, string $end): string
+    {
+        return CarbonImmutable::parse($start)->toDateString().' – '.CarbonImmutable::parse($end)->toDateString();
     }
 }
