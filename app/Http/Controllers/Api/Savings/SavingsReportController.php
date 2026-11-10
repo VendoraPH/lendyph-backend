@@ -244,7 +244,7 @@ class SavingsReportController extends Controller
         return $this->csv('time-deposit-maturities.csv', ['Maturity', 'Certificate #', 'Member', 'Product', 'Branch', 'Principal', 'Rate', 'Days', 'Net Interest', 'Due at Maturity', 'Instruction', 'Status'], $this->reports->maturitiesQuery($request->filters()), function (TimeDeposit $deposit): array {
             $r = $this->reports->maturityRow($deposit);
 
-            return [$r['maturity_date'], $r['certificate_number'], $r['borrower_name'], $r['product_name'], $r['branch_name'], $r['principal'], $r['annual_rate'].'%', $r['term_days'], $r['net_interest'], $r['maturity_amount'], self::inWords(self::MATURITY_INSTRUCTION_WORDS, $r['maturity_instruction']), self::inWords(self::TIME_DEPOSIT_STATUS_WORDS, $r['status'])];
+            return [$r['maturity_date'], $r['certificate_number'], $r['borrower_name'], $r['product_name'], $r['branch_name'], $r['principal'], self::percent($r['annual_rate']), $r['term_days'], $r['net_interest'], $r['maturity_amount'], self::inWords(self::MATURITY_INSTRUCTION_WORDS, $r['maturity_instruction']), self::inWords(self::TIME_DEPOSIT_STATUS_WORDS, $r['status'])];
         });
     }
 
@@ -286,6 +286,19 @@ class SavingsReportController extends Controller
     private static function inWords(array $words, ?string $key): string
     {
         return $key === null || $key === '' ? '' : ($words[$key] ?? 'Other');
+    }
+
+    /**
+     * A stored rate as the screen shows it, "3.5%" for "3.5000": trailing
+     * zeros dropped, never rounded.
+     */
+    private static function percent(?string $rate): string
+    {
+        if ($rate === null || $rate === '') {
+            return '';
+        }
+
+        return (str_contains($rate, '.') ? rtrim(rtrim($rate, '0'), '.') : $rate).'%';
     }
 
     /** @return array<string, mixed> */

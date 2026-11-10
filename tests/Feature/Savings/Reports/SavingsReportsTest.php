@@ -209,7 +209,14 @@ class SavingsReportsTest extends TestCase
         TimeDeposit::factory()->create([
             'borrower_id' => Borrower::factory()->create(['branch_id' => $this->branch->id])->id,
             'maturity_instruction' => 'rollover_principal', 'maturity_date' => '2026-11-20', 'status' => 'rolled_over',
+            'annual_rate' => '3.5000',
         ]);
+        foreach (['10.0000', '0.0500'] as $rate) {
+            TimeDeposit::factory()->create([
+                'borrower_id' => Borrower::factory()->create(['branch_id' => $this->branch->id])->id,
+                'maturity_date' => '2026-11-21', 'status' => 'active', 'annual_rate' => $rate,
+            ]);
+        }
         $exporter = $this->userWith(['reports:export', 'savings:view']);
         $this->withoutMiddleware(ThrottleRequests::class);
 
@@ -223,6 +230,12 @@ class SavingsReportsTest extends TestCase
         $this->assertStringContainsString(',Deposit,"Bank transfer",', $transactions);
         $this->assertStringNotContainsString(',deposit,', $transactions);
         $this->assertStringContainsString(',"Roll over principal, pay out interest","Rolled over"', $maturities);
+        // Rates read as the screen shows them: never padded, never rounded.
+        $this->assertStringContainsString(',3.5%,', $maturities);
+        $this->assertStringNotContainsString('3.5000%', $maturities);
+        $this->assertStringContainsString(',10%,', $maturities);
+        $this->assertStringContainsString(',0.05%,', $maturities);
+        $this->assertStringNotContainsString('0.0500%', $maturities);
     }
 
     public function test_interest_postings_in_the_period(): void
