@@ -140,7 +140,10 @@ class SavingsSettingController extends Controller
         } catch (UniqueConstraintViolationException) {
             abort(409, self::BOOKS_CONFLICT);
         } catch (PDOException $e) {
-            abort_unless($this->causedByConcurrencyError($e), 500);
+            if (! $this->causedByConcurrencyError($e)) {
+                throw $e;
+            }
+
             abort(409, self::BOOKS_CONFLICT);
         }
 

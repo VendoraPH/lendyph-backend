@@ -11,7 +11,11 @@ use App\Models\User;
 use App\Services\Accounting\ChartOfAccountsSeeder;
 use App\Services\BranchAccess;
 use App\Services\Savings\SavingsBooks;
+use Illuminate\Database\QueryException;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Str;
+use PDOException;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Spatie\Permission\PermissionRegistrar;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
@@ -158,6 +162,70 @@ class PrepareBooksApiTest extends TestCase
             ]);
 
         $this->assertSame($before, $this->snapshot());
+    }
+
+    public function test_an_administrators_own_mapping_survives_set_up(): void
+    {
+        app(ChartOfAccountsSeeder::class)->seed($this->admin->id, 'lending_company');
+        $own = AccountingAccount::query()->create(['code' => '2055', 'name' => 'Members Savings', 'type' => 'liability', 'normal_balance' => 'credit', 'is_active' => true]);
+        AccountingAccountMapping::query()->create(['role' => 'savings_deposits', 'accounting_account_id' => $own->id]);
+
+        $this->postJson('/api/savings/settings/prepare-books')
+            ->assertOk()
+            ->assertJsonPath('data.books_ready', true)
+            ->assertJsonPath('data.added', ['2060 Time Deposits (liability)', '5160 Interest Expense on Deposits (expense)'])
+            ->assertJsonPath('data.unchanged', ['Savings deposits already posts to 2055 Members Savings']);
+
+        $this->assertSame($own->id, AccountingAccountMapping::query()->where('role', 'savings_deposits')->value('accounting_account_id'));
+        $this->assertFalse(AccountingAccount::query()->where('code', '2050')->exists());
+    }
+
+    /** @return array<string, array{0: QueryException}> */
+    public static function races(): array
+    {
+        return [
+            'a duplicate account or mapping' => [new UniqueConstraintViolationException('mysql', 'insert into `accounting_account_mappings`', [], new PDOException("SQLSTATE[23000]: Integrity constraint violation: 1062 Duplicate entry 'savings_deposits'"))],
+            'a deadlock' => [new QueryException('mysql', 'insert into `accounting_accounts`', [], new PDOException('SQLSTATE[40001]: Serialization failure: 1213 Deadlock found when trying to get lock; try restarting transaction'))],
+        ];
+    }
+
+    #[DataProvider('races')]
+    public function test_two_set_ups_at_once_answer_409_never_500(QueryException $race): void
+    {
+        app(ChartOfAccountsSeeder::class)->seed($this->admin->id, 'lending_company');
+        $this->booksThatThrow($race);
+
+        $this->postJson('/api/savings/settings/prepare-books')
+            ->assertConflict()
+            ->assertJsonPath('message', 'Someone else was setting up the savings books at the same moment. Refresh to see the result.');
+    }
+
+    public function test_any_other_database_error_is_rethrown_as_it_is(): void
+    {
+        app(ChartOfAccountsSeeder::class)->seed($this->admin->id, 'lending_company');
+        $error = new QueryException('mysql', 'insert into `accounting_accounts`', [], new PDOException("SQLSTATE[42S22]: Column not found: 1054 Unknown column 'x'"));
+        $this->booksThatThrow($error);
+        $this->withoutExceptionHandling();
+
+        try {
+            $this->postJson('/api/savings/settings/prepare-books');
+            $this->fail('The database error was swallowed.');
+        } catch (QueryException $thrown) {
+            $this->assertSame($error, $thrown);
+        }
+    }
+
+    private function booksThatThrow(QueryException $error): void
+    {
+        $this->app->instance(SavingsBooks::class, new class($error) extends SavingsBooks
+        {
+            public function __construct(private readonly QueryException $error) {}
+
+            public function prepare(bool $dryRun, ?int $userId = null): array
+            {
+                throw $this->error;
+            }
+        });
     }
 
     public function test_with_no_chart_it_is_422_in_words_and_writes_nothing(): void

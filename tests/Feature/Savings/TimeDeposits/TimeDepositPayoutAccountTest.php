@@ -16,10 +16,12 @@ use Tests\TestCase;
 /**
  * Paying a time deposit into any of the member's savings accounts: settle and
  * preterminate take an optional `payout_account_id` with `payout_method`
- * savings. It must be the same member's active account in the placement's
- * branch (422 in words otherwise); left out, the account named at placement
- * is used, as before. A payout into savings needs no checker, and the
- * journal is still Dr 2060 / Cr 2050.
+ * savings. It must be the same member's account in the placement's branch,
+ * and not closed or frozen (422 in words on `payout_account_id` otherwise);
+ * left out, the account named at placement is used, as before. One rule for
+ * both: a dormant account can receive it, and a staff payout wakes it (the
+ * nightly job's doesn't, see TimeDepositMaturityJobTest). A payout into
+ * savings needs no checker, and the journal is still Dr 2060 / Cr 2050.
  */
 class TimeDepositPayoutAccountTest extends TestCase
 {
@@ -143,13 +145,12 @@ class TimeDepositPayoutAccountTest extends TestCase
     {
         return [
             'frozen' => [SavingsAccount::STATUS_FROZEN],
-            'dormant' => [SavingsAccount::STATUS_DORMANT],
             'closed' => [SavingsAccount::STATUS_CLOSED],
         ];
     }
 
     #[DataProvider('statusesThatCantReceive')]
-    public function test_an_account_that_isnt_active_is_refused_in_words(string $status): void
+    public function test_a_closed_or_frozen_account_is_refused_in_words(string $status): void
     {
         $account = $this->otherAccount(['status' => $status, ...($status === SavingsAccount::STATUS_CLOSED ? ['open_key' => null, 'closed_on' => now()->toDateString()] : [])]);
         $deposit = $this->placed();
@@ -157,9 +158,63 @@ class TimeDepositPayoutAccountTest extends TestCase
 
         $this->settle($deposit, ['payout_account_id' => $account->id])
             ->assertUnprocessable()
-            ->assertJsonPath('errors.payout_account_id.0', "{$account->account_number} is {$status}. Only an active savings account can receive the payout.");
+            ->assertJsonPath('errors.payout_account_id.0', "{$account->account_number} is {$status}, so it can't receive the payout.");
 
         $this->assertNothingSettled($deposit, $account);
+    }
+
+    public function test_a_dormant_account_picked_by_staff_receives_the_payout_and_wakes_up(): void
+    {
+        $dormant = $this->otherAccount(['status' => SavingsAccount::STATUS_DORMANT, 'dormant_since' => '2026-11-10', 'last_member_activity_on' => '2026-11-10']);
+        $deposit = $this->placed();
+        $this->toMaturity();
+
+        $this->settle($deposit, ['payout_account_id' => $dormant->id])->assertCreated();
+
+        $dormant->refresh();
+        $this->assertSame('100739.73', $dormant->ledger_balance);
+        $this->assertSame(SavingsAccount::STATUS_ACTIVE, $dormant->status);
+        $this->assertSame('2027-02-08', $dormant->last_member_activity_on->toDateString());
+        $this->assertSame(1, AuditLog::query()->where('action', 'savings_account_reactivated')->where('auditable_id', $dormant->id)->count());
+        $this->assertSame(self::MATURITY_LINES, $this->lines($this->journalFor(TimeDeposit::class, $deposit->id, 'time_deposit_settlement')));
+    }
+
+    public function test_the_named_accounts_own_id_follows_the_same_rule(): void
+    {
+        $named = $this->savingsAccount();
+        $deposit = $this->placed(['payout_account_id' => $named->id]);
+        $this->toMaturity();
+        $named->forceFill(['status' => SavingsAccount::STATUS_FROZEN])->saveQuietly();
+
+        $this->settle($deposit, ['payout_account_id' => $named->id])
+            ->assertUnprocessable()
+            ->assertJsonMissingValidationErrors('payout_method')
+            ->assertJsonPath('errors.payout_account_id.0', "{$named->account_number} is frozen, so it can't receive the payout.");
+
+        $named->forceFill(['status' => SavingsAccount::STATUS_DORMANT, 'dormant_since' => '2026-11-10'])->saveQuietly();
+
+        $this->settle($deposit, ['payout_account_id' => $named->id])
+            ->assertCreated()
+            ->assertJsonPath('data.payout_account_id', $named->id);
+
+        $this->assertSame(SavingsAccount::STATUS_ACTIVE, $named->refresh()->status);
+        $this->assertSame('100739.73', $named->ledger_balance);
+    }
+
+    public function test_a_pretermination_into_a_dormant_account_picked_by_staff_wakes_it(): void
+    {
+        $dormant = $this->otherAccount(['status' => SavingsAccount::STATUS_DORMANT, 'dormant_since' => '2026-11-10']);
+        $deposit = $this->placed();
+        $this->travelTo(Carbon::parse('2026-12-10 09:00:00', 'Asia/Manila'));
+
+        $this->idem("/api/savings/time-deposits/{$deposit->id}/preterminate", [
+            'date' => now()->toDateString(),
+            'reason' => 'Member needs the money for tuition.',
+            'payout_method' => 'savings',
+            'payout_account_id' => $dormant->id,
+        ])->assertCreated();
+
+        $this->assertSame(SavingsAccount::STATUS_ACTIVE, $dormant->refresh()->status);
     }
 
     public function test_an_account_in_another_branch_is_refused_in_words(): void
