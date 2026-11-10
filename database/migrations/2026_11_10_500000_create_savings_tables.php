@@ -19,7 +19,8 @@ use Illuminate\Support\Facades\Schema;
  * - An account and an interest run always have a branch: books are kept per
  *   branch, and a row with none would post to no branch's books.
  * - `savings_transactions` is append-only (the model refuses updates and
- *   deletes); `unique(reverses_transaction_id)` lets a row be reversed once.
+ *   deletes); `unique(reverses_transaction_id)` lets a row be reversed once,
+ *   and `unique(counterpart_transaction_id)` pairs a transfer leg once.
  *
  * Seeds the single settings row (tiers ₱10,000.00 and ₱50,000.00, two
  * checkers above, dormancy at 24 months, an alert at ₱500,000.00) and the
@@ -200,7 +201,7 @@ return new class extends Migration
             $table->string('method', 24)->nullable();
             $table->string('external_reference', 100)->nullable();
             $table->string('remarks', 500)->nullable();
-            $table->foreignId('counterpart_transaction_id')->nullable()->constrained('savings_transactions')->restrictOnDelete();
+            $table->foreignId('counterpart_transaction_id')->nullable()->unique()->constrained('savings_transactions')->restrictOnDelete();
             $table->foreignId('reverses_transaction_id')->nullable()->unique()->constrained('savings_transactions')->restrictOnDelete();
             $table->foreignId('time_deposit_id')->nullable()->constrained('time_deposits')->restrictOnDelete();
             $table->foreignId('interest_run_id')->nullable()->constrained('savings_interest_runs')->restrictOnDelete();
