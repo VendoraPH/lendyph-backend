@@ -57,7 +57,8 @@ class ReviewFixesTest extends TestCase
 
         $this->assertSame(['active', '20100.00'], [$account->refresh()->status, $account->ledger_balance]);
         $this->assertSame(0, SavingsTransaction::query()->where('type', 'closing')->count());
-        $this->assertSame('pending', SavingsApproval::query()->findOrFail($approval['id'])->status);
+        // The stale request is rejected at once (re-review Low 1), so it no longer blocks the account.
+        $this->assertSame('rejected', SavingsApproval::query()->findOrFail($approval['id'])->status);
     }
 
     // ── M1: no money moves on a frozen account, reversals included ──

@@ -5,7 +5,6 @@ namespace App\Services\Savings\Api;
 use App\Models\SavingsAccount;
 use App\Models\SavingsApproval;
 use App\Models\SavingsHold;
-use App\Models\SavingsInterestRunLine;
 use App\Models\SavingsTransaction;
 use App\Models\User;
 use App\Services\Accounting\AutomaticPoster;
@@ -36,6 +35,9 @@ use Illuminate\Validation\ValidationException;
  */
 class AccountCloser
 {
+    /** Why a close request is rejected when its payout changed before it was approved. */
+    public const STALE_REASON = 'The balance changed since this close was requested.';
+
     public function __construct(
         private readonly SavingsLocks $locks,
         private readonly SavingsLedger $ledger,
@@ -44,6 +46,7 @@ class AccountCloser
         private readonly ApprovalGate $gate,
         private readonly PeriodGuard $periods,
         private readonly Teller $teller,
+        private readonly LargeTransactionAlert $alert,
     ) {}
 
     /**
@@ -53,6 +56,11 @@ class AccountCloser
     {
         $figures = $this->figures($account, $date ?? now()->toDateString());
         $blockers = $this->blockers($account, $own);
+        $latest = $date === null || $account->isClosed() ? null : $this->ledger->latestDate($account->id);
+
+        if ($latest !== null && $date < $latest) {
+            $blockers[] = "{$account->account_number} already has a transaction dated ".CarbonImmutable::parse($latest)->format('M j, Y').'; a close can\'t be dated earlier.';
+        }
 
         return [
             'balance' => SavingsMath::pesos($figures['balance']),
@@ -110,8 +118,8 @@ class AccountCloser
     {
         $this->assertCanClose($account, $approval);
 
-        if ($approval !== null && $this->figures($account, $data['date'])['payout'] !== SavingsMath::centavos($approval->amount)) {
-            Refuse::conflict('The balance changed since this close was requested. Make a new request.');
+        if ($approval !== null) {
+            $this->assertPayoutUnchanged($account, $approval);
         }
 
         $date = $data['date'];
@@ -139,6 +147,7 @@ class AccountCloser
                 ...$attributes, 'method' => $data['payout_method'], 'remarks' => $data['reason'],
             ]);
             $this->poster->savingsTransaction($result, $posterId);
+            $this->alert->afterPosting($result, [$closerId, $posterId, $approval?->first_checker_id]);
         }
 
         $before = $account->only(['status', 'closed_on', 'close_reason', 'closed_by', 'open_key', 'interest_credited_through']);
@@ -167,6 +176,22 @@ class AccountCloser
         );
 
         return $result;
+    }
+
+    /**
+     * Refuse (StaleCloseRequest) a close request whose payout, worked out
+     * again for its own date under the account lock, is no longer the amount
+     * that was requested and is being approved.
+     *
+     * @throws StaleCloseRequest
+     */
+    public function assertPayoutUnchanged(SavingsAccount $account, SavingsApproval $approval): void
+    {
+        $date = $approval->payload['date'] ?? null;
+
+        if (! is_string($date) || $this->figures($account, $date)['payout'] !== SavingsMath::centavos($approval->amount)) {
+            throw new StaleCloseRequest($approval->id);
+        }
     }
 
     /**
@@ -212,12 +237,7 @@ class AccountCloser
                 : "{$waiting} requests on it are waiting for approval. Approve, reject or cancel them first.";
         }
 
-        $inRun = SavingsInterestRunLine::query()
-            ->where('account_id', $account->id)
-            ->whereHas('run', fn ($q) => $q->whereIn('status', ['draft', 'approved']))
-            ->exists();
-
-        if ($inRun) {
+        if (UnpostedInterestRun::holds($account->id)) {
             $blockers[] = 'It is in an interest run that has not posted yet. Post or reject the run first.';
         }
 

@@ -2,10 +2,12 @@
 
 namespace App\Services\Savings\Api;
 
+use App\Models\SavingsAccount;
 use App\Models\SavingsApproval;
 use App\Models\User;
 use App\Services\GeneratedNumberWrite;
 use App\Services\Savings\ApprovalGate;
+use App\Services\Savings\Approvals\ApprovalExecutor;
 use App\Services\Savings\SavingsLocks;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -29,6 +31,10 @@ use Symfony\Component\HttpKernel\Exception\HttpException;
  * - **Reject:** a checker other than the maker (the maker cancels instead).
  * - **Cancel:** the maker only.
  *
+ * A close whose payout changed since it was requested (checked by the first
+ * checker and again by the last) is rejected as the system in a write of its
+ * own, then answered 409, so a new request can be made at once.
+ *
  * Deciding frees `live_key`, so the same thing can be asked for again. A
  * lock wait timeout answers 409, never 500 (GeneratedNumberWrite::run).
  */
@@ -37,6 +43,7 @@ class ApprovalDesk
     public function __construct(
         private readonly SavingsLocks $locks,
         private readonly ApprovalGate $gate,
+        private readonly AccountCloser $closer,
     ) {}
 
     /** @throws ValidationException|HttpException */
@@ -44,6 +51,18 @@ class ApprovalDesk
     {
         $executor = $this->gate->executor($approval->kind);
 
+        try {
+            return $this->carryOut($approval, $checker, $executor);
+        } catch (StaleCloseRequest) {
+            $this->rejectStale($approval);
+
+            Refuse::conflict(AccountCloser::STALE_REASON.' Make a new request.');
+        }
+    }
+
+    /** @throws ValidationException|HttpException|StaleCloseRequest */
+    private function carryOut(SavingsApproval $approval, User $checker, ApprovalExecutor $executor): SavingsApproval
+    {
         return GeneratedNumberWrite::run(fn (): SavingsApproval => DB::transaction(function () use ($approval, $checker, $executor): SavingsApproval {
             $this->locks->accounts($executor->accountIds($approval));
             $this->locks->timeDeposits($executor->timeDepositIds($approval));
@@ -51,6 +70,10 @@ class ApprovalDesk
             $this->gate->assertCheckerAllowed($locked, $checker);
 
             if ($locked->required_checkers >= 2 && $locked->first_checker_id === null) {
+                if ($locked->kind === 'close') {
+                    $this->closer->assertPayoutUnchanged(SavingsAccount::query()->findOrFail($locked->account_id), $locked);
+                }
+
                 $locked->update(['first_checker_id' => $checker->id]);
 
                 return $locked;
@@ -67,6 +90,28 @@ class ApprovalDesk
             ]);
 
             return $locked;
+        }), GeneratedNumberWrite::SAVINGS_CONFLICT);
+    }
+
+    /**
+     * Reject a stale close request as the system, in its own committed write,
+     * so it stops blocking the account and reserving its payout at once.
+     */
+    private function rejectStale(SavingsApproval $approval): void
+    {
+        GeneratedNumberWrite::run(fn () => DB::transaction(function () use ($approval): void {
+            $this->locks->accounts(array_filter([$approval->account_id]));
+            $locked = SavingsApproval::query()->whereKey($approval->id)->lockForUpdate()->firstOrFail();
+
+            if ($locked->status === 'pending') {
+                $locked->update([
+                    'status' => 'rejected',
+                    'decided_by' => null,
+                    'decision_reason' => AccountCloser::STALE_REASON,
+                    'decided_at' => now(),
+                    'live_key' => null,
+                ]);
+            }
         }), GeneratedNumberWrite::SAVINGS_CONFLICT);
     }
 

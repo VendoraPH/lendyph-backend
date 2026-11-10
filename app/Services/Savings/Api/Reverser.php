@@ -33,7 +33,8 @@ use Illuminate\Validation\ValidationException;
  *   balance doesn't stop a correction.
  * - **Dates:** the reversal row is dated today and keeps the original row's
  *   value date, so interest counts as if the original had never posted.
- * - **Refused (422):** a leg on a closed or frozen account, or one already
+ * - **Refused (422):** a leg on a closed or frozen account, on an account
+ *   in an interest run not yet posted (draft or approved), or one already
  *   counted in credited interest (its value date on or before the account's
  *   `interest_credited_through`): reverse that interest run first.
  */
@@ -187,6 +188,10 @@ class Reverser
 
         if ($account->status === SavingsAccount::STATUS_FROZEN) {
             Refuse::field('transaction', "{$account->account_number} is frozen: no money moves on it, reversals included, until it is unfrozen.");
+        }
+
+        if (UnpostedInterestRun::holds($account->id)) {
+            Refuse::field('transaction', 'This account is in an interest run waiting to be posted. Post or reject that run first.');
         }
 
         $credited = $account->interest_credited_through?->toDateString();
