@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Services\Accounting;
 
 use App\Exceptions\CannotPostToTheBooksException;
+use App\Models\AccountingAccountMapping;
 use App\Services\FeeOverlapDetector;
 
 /**
@@ -75,6 +76,14 @@ use App\Services\FeeOverlapDetector;
  *
  * Cash basis throughout (decision 1): a waiver or a deferred extension
  * interest posts nothing.
+ *
+ * ## Phase 3 rules (Savings & Deposits v1, approved 2026-11-10)
+ *
+ * {@see self::savingsDeposit()}, {@see self::savingsWithdrawal()},
+ * {@see self::savingsInterest()}, {@see self::timeDepositPlacement()} and
+ * {@see self::timeDepositSettlement()}: centavos in, against the four
+ * {@see self::SAVINGS_ROLES}. Interest expense posts when it is credited, never
+ * accrued.
  */
 final class PostingRules
 {
@@ -1458,6 +1467,190 @@ final class PostingRules
                 self::credit($map->accountFor('allowance_credit_losses'), $amount),
             ],
         ];
+    }
+
+    // ── Savings & Deposits (Phase 3, design §4; new records only) ──
+
+    /** Members' savings balances: 2050 Savings Deposits on a seeded chart. */
+    public const SAVINGS_DEPOSITS_ROLE = 'savings_deposits';
+
+    /** Members' time deposits: 2060 Time Deposits. */
+    public const TIME_DEPOSITS_ROLE = 'time_deposits';
+
+    /** Interest paid on deposits: 5160 Interest Expense on Deposits. */
+    public const INTEREST_EXPENSE_DEPOSITS_ROLE = 'interest_expense_deposits';
+
+    /** Tax withheld from deposit interest: the chart's withholding tax payable (2210). */
+    public const WITHHOLDING_TAX_DEPOSITS_ROLE = 'withholding_tax_deposits';
+
+    /** The four savings roles, in the order the settings screen lists them. */
+    public const SAVINGS_ROLES = [
+        self::SAVINGS_DEPOSITS_ROLE,
+        self::TIME_DEPOSITS_ROLE,
+        self::INTEREST_EXPENSE_DEPOSITS_ROLE,
+        self::WITHHOLDING_TAX_DEPOSITS_ROLE,
+    ];
+
+    /**
+     * A savings deposit: Dr settlement / Cr savings deposits. The settlement
+     * role is one of the four money accounts; savings deposits itself is
+     * refused, since the entry would debit and credit one account.
+     */
+    public static function savingsDeposit(int $amount, string $settlementRole, AccountMap $map): array
+    {
+        self::requireAmount($amount, 'A savings deposit');
+        $role = SettlementMethod::assertIsSettlementRole($settlementRole);
+
+        return [
+            'source' => 'savings',
+            'description' => 'Savings deposit',
+            'lines' => [
+                self::debit($map->accountFor($role), $amount),
+                self::credit($map->accountFor(self::SAVINGS_DEPOSITS_ROLE), $amount),
+            ],
+        ];
+    }
+
+    /**
+     * A savings withdrawal, and the payout when an account closes:
+     * Dr savings deposits / Cr settlement.
+     */
+    public static function savingsWithdrawal(int $amount, string $settlementRole, AccountMap $map): array
+    {
+        self::requireAmount($amount, 'A savings withdrawal');
+        $role = SettlementMethod::assertIsSettlementRole($settlementRole);
+
+        return [
+            'source' => 'savings',
+            'description' => 'Savings withdrawal',
+            'lines' => [
+                self::debit($map->accountFor(self::SAVINGS_DEPOSITS_ROLE), $amount),
+                self::credit($map->accountFor($role), $amount),
+            ],
+        ];
+    }
+
+    /**
+     * Interest credited to savings, on a cash basis (Phase 2 decision 1):
+     * Dr interest expense on deposits, gross / Cr savings deposits, gross less
+     * tax / Cr withholding tax on deposits, the tax (no line, and no account
+     * needed, when there is none). Tax above the gross is refused.
+     */
+    public static function savingsInterest(int $gross, int $tax, AccountMap $map): array
+    {
+        self::requireAmount($gross, 'Interest credited');
+        self::requireComponent($tax, 'The withholding tax');
+
+        if ($tax > $gross) {
+            throw CannotPostToTheBooksException::because(
+                'The withholding tax of '.Money::format($tax).' is more than the interest of '.Money::format($gross).'.');
+        }
+
+        return [
+            'source' => 'savings_interest',
+            'description' => 'Interest credited on savings',
+            'lines' => self::used([
+                self::debit($map->accountFor(self::INTEREST_EXPENSE_DEPOSITS_ROLE), $gross),
+                self::creditIfAny($map, self::SAVINGS_DEPOSITS_ROLE, $gross - $tax),
+                self::creditIfAny($map, self::WITHHOLDING_TAX_DEPOSITS_ROLE, $tax),
+            ]),
+        ];
+    }
+
+    /**
+     * A time deposit placed: Dr the funding account (a money account, or
+     * savings deposits when it comes out of the member's savings) / Cr time
+     * deposits.
+     */
+    public static function timeDepositPlacement(int $principal, string $fundingRole, AccountMap $map): array
+    {
+        self::requireAmount($principal, 'A time deposit placement');
+        $role = self::depositSideRole($fundingRole, 'fund a time deposit');
+
+        return [
+            'source' => 'time_deposit',
+            'description' => 'Time deposit placed',
+            'lines' => [
+                self::debit($map->accountFor($role), $principal),
+                self::credit($map->accountFor(self::TIME_DEPOSITS_ROLE), $principal),
+            ],
+        ];
+    }
+
+    /**
+     * A time deposit settled at maturity, rolled over, or terminated early:
+     *
+     * - Dr time deposits, the principal, and Dr interest expense on deposits,
+     *   the gross interest;
+     * - Cr time deposits, what rolls into the new placement; Cr withholding
+     *   tax on deposits, the tax; Cr the payout account (a money account or
+     *   savings deposits), what is paid out.
+     *
+     * Refused unless rolled over + paid out = principal + gross − tax, and
+     * when money is paid out with no payout account.
+     */
+    public static function timeDepositSettlement(
+        int $principal,
+        int $gross,
+        int $tax,
+        int $rolledOver,
+        int $paidOut,
+        ?string $payoutRole,
+        AccountMap $map,
+    ): array {
+        self::requireAmount($principal, 'A time deposit settlement');
+        self::requireComponent($gross, 'The time deposit interest');
+        self::requireComponent($tax, 'The withholding tax');
+        self::requireComponent($rolledOver, 'The amount rolled over');
+        self::requireComponent($paidOut, 'The amount paid out');
+
+        if ($tax > $gross) {
+            throw CannotPostToTheBooksException::because(
+                'The withholding tax of '.Money::format($tax).' is more than the interest of '.Money::format($gross).'.');
+        }
+
+        $due = self::requireWithinBounds($principal + $gross - $tax, 'A time deposit settlement');
+
+        if ($rolledOver + $paidOut !== $due) {
+            throw CannotPostToTheBooksException::because(
+                'This settlement does not add up: '.Money::format($rolledOver).' rolled over and '.Money::format($paidOut)
+                .' paid out, but the principal and interest less tax come to '.Money::format($due).'.');
+        }
+
+        if ($paidOut > 0 && $payoutRole === null) {
+            throw CannotPostToTheBooksException::because(
+                Money::format($paidOut).' is paid out with no payout account to pay it from.');
+        }
+
+        $payout = $paidOut > 0 ? self::depositSideRole((string) $payoutRole, 'pay out a time deposit') : null;
+
+        return [
+            'source' => 'time_deposit_settlement',
+            'description' => 'Time deposit settled',
+            'lines' => self::used([
+                self::debit($map->accountFor(self::TIME_DEPOSITS_ROLE), $principal),
+                self::debitIfAny($map, self::INTEREST_EXPENSE_DEPOSITS_ROLE, $gross),
+                self::creditIfAny($map, self::TIME_DEPOSITS_ROLE, $rolledOver),
+                self::creditIfAny($map, self::WITHHOLDING_TAX_DEPOSITS_ROLE, $tax),
+                $payout === null ? null : self::credit($map->accountFor($payout), $paidOut),
+            ]),
+        ];
+    }
+
+    /**
+     * The account money comes from or goes to on the member's side of a time
+     * deposit: a money account, or savings deposits. Never time deposits
+     * itself, which would debit and credit one account.
+     */
+    private static function depositSideRole(string $role, string $what): string
+    {
+        if ($role === self::SAVINGS_DEPOSITS_ROLE || in_array($role, SettlementMethod::ROLES, true)) {
+            return $role;
+        }
+
+        throw CannotPostToTheBooksException::because(
+            AccountingAccountMapping::label($role).' can\'t '.$what.'. Money can only move through '
+            .AccountingAccountMapping::labelList([...SettlementMethod::ROLES, self::SAVINGS_DEPOSITS_ROLE]).'.');
     }
 
     /**

@@ -7,9 +7,9 @@ use Illuminate\Support\Facades\DB;
 use Tests\TestCase;
 
 /**
- * The `closing` journal source: last in `accounting_journals.source`, after
- * every existing value in its order, and added by a migration that changes
- * nothing when it runs again.
+ * The `closing` journal source: appended to `accounting_journals.source`
+ * after every value before it, in order (the savings sources follow it since
+ * Phase 3), and added by a migration that changes nothing when it runs again.
  */
 class ClosingSourceTest extends TestCase
 {
@@ -21,10 +21,11 @@ class ClosingSourceTest extends TestCase
 
     private const MIGRATION = 'database/migrations/2026_11_09_203100_add_closing_to_accounting_journals_source.php';
 
-    public function test_the_column_and_the_model_list_the_same_sources_with_closing_last(): void
+    public function test_the_column_and_the_model_list_the_same_sources_with_closing_after_share_capital(): void
     {
         $this->assertSame(AccountingJournal::SOURCES, $this->sources());
-        $this->assertSame('closing', AccountingJournal::SOURCES[array_key_last(AccountingJournal::SOURCES)]);
+        $closing = array_search('closing', AccountingJournal::SOURCES, true);
+        $this->assertSame('share_capital', AccountingJournal::SOURCES[$closing - 1]);
     }
 
     public function test_a_journal_can_be_stored_with_the_closing_source(): void

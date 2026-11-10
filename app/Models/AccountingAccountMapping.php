@@ -87,6 +87,10 @@ class AccountingAccountMapping extends Model
         'unearned_restructure_income',
         'net_surplus',
         'suspense',
+        'savings_deposits',
+        'time_deposits',
+        'interest_expense_deposits',
+        'withholding_tax_deposits',
     ];
 
     /**
@@ -124,6 +128,10 @@ class AccountingAccountMapping extends Model
         'unearned_restructure_income' => 'Unearned restructure interest and penalty',
         'net_surplus' => 'Retained earnings or net surplus',
         'suspense' => 'Suspense',
+        'savings_deposits' => 'Savings deposits',
+        'time_deposits' => 'Time deposits',
+        'interest_expense_deposits' => 'Interest expense on deposits',
+        'withholding_tax_deposits' => 'Withholding tax on deposits',
     ];
 
     /**
@@ -250,6 +258,19 @@ class AccountingAccountMapping extends Model
         'unearned_restructure_income' => ['type' => 'asset', 'is_contra' => true],
         'net_surplus' => ['type' => 'equity'],
         'suspense' => ['type' => 'liability'],
+
+        /*
+         * Savings & Deposits (Phase 3, approved 2026-11-10). Members' savings
+         * and time deposits are money the cooperative owes them back, so both
+         * are liabilities; interest paid on them is an expense, credited to
+         * the member when it is paid (cash basis); tax withheld from that
+         * interest is owed to the BIR. Mapped by the cooperative template and
+         * by `savings:prepare-books`.
+         */
+        'savings_deposits' => ['type' => 'liability'],
+        'time_deposits' => ['type' => 'liability'],
+        'interest_expense_deposits' => ['type' => 'expense'],
+        'withholding_tax_deposits' => ['type' => 'liability'],
     ];
 
     protected $fillable = [

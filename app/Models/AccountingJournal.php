@@ -116,8 +116,15 @@ class AccountingJournal extends Model
      * A closing journal, and the reversal of one (a reopened year), moves the
      * year's result from income and expense into the `net_surplus` account.
      * IncomeStatementBuilder leaves both out, so a closed year's income
-     * statement reads as it did before the close. It is the last value of the
+     * statement reads as it did before the close. It was the last value of the
      * column's enum (migration 2026_11_09_203100).
+     *
+     * ### Savings & Deposits (Phase 3)
+     *
+     * `savings` (deposits, withdrawals and closing payouts), `savings_interest`
+     * (interest runs and the interest credited at close), `time_deposit`
+     * (placements) and `time_deposit_settlement` (maturity, rollover and early
+     * termination), appended after `closing` by migration 2026_11_10_500100.
      */
     public const SOURCES = [
         'loan_release',
@@ -139,6 +146,10 @@ class AccountingJournal extends Model
         'credit_loss',
         'share_capital',
         'closing',
+        'savings',
+        'savings_interest',
+        'time_deposit',
+        'time_deposit_settlement',
     ];
 
     /**
@@ -158,7 +169,10 @@ class AccountingJournal extends Model
      * AutomaticPoster::allowanceAdjustment() and the older loanFee(),
      * creditLossProvision(), fundTransfer() and walletCharge() take an
      * untyped `Model $postable`; a class they bring that is not here reads
-     * with no label.
+     * with no label. Phase 3 adds SavingsTransaction (savingsTransaction() and
+     * savingsInterestCredit()), SavingsInterestRun (savingsInterestRun(), which
+     * the journal's own description names) and TimeDeposit
+     * (timeDepositPlacement() and timeDepositSettlement()).
      *
      * AccountingExpensePayment is deliberately empty: nothing on the payment
      * row names it. The payee lives on its parent expense, and reaching through
@@ -175,6 +189,9 @@ class AccountingJournal extends Model
         LoanAdjustment::class => ['adjustment_number'],
         ShareCapitalLedger::class => ['reference'],
         GCashTransaction::class => ['reference_no'],
+        SavingsTransaction::class => ['reference'],
+        SavingsInterestRun::class => [],
+        TimeDeposit::class => ['certificate_number'],
     ];
 
     public const STATUSES = ['draft', 'posted', 'reversed'];

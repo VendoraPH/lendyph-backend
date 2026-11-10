@@ -754,6 +754,19 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     require __DIR__.'/api/credit-scoring.php';
     require __DIR__.'/api/reminders.php';
 
+    /*
+     * Savings & Deposits partials (routes/api/savings/*.php), in file-name
+     * order: each savings slice adds its own file and never edits this one.
+     * Each file sets its own prefix (`/savings`, `/reports/savings`). An empty
+     * folder adds nothing.
+     */
+    $savingsPartials = glob(__DIR__.'/api/savings/*.php') ?: [];
+    sort($savingsPartials);
+
+    foreach ($savingsPartials as $savingsPartial) {
+        require $savingsPartial;
+    }
+
     // Branding (organization logo + identity printed on reports and documents)
     Route::get('/settings/branding', [BrandingController::class, 'show']);
     Route::put('/settings/branding', [BrandingController::class, 'update']);

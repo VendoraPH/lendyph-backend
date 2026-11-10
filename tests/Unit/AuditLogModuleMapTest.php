@@ -80,7 +80,7 @@ it('files auth events under auth whatever their class', function () {
 it('lists the module values', function () {
     expect(AuditLogModules::all())->toEqualCanonicalizing([
         'auth', 'borrowers', 'loans', 'payments', 'collections', 'users', 'roles', 'accounting', 'gcash',
-        'reminders', 'credit_scoring', 'system',
+        'reminders', 'credit_scoring', 'savings', 'system',
     ]);
 });
 
@@ -101,6 +101,10 @@ it('files the planned Phase 2 models under their modules', function (string $cla
     'AccountingYearClose' => ['App\\Models\\AccountingYearClose', 'accounting'],
     'AccountingAllowancePosting' => ['App\\Models\\AccountingAllowancePosting', 'accounting'],
     'AccountingOpeningBalance' => ['App\\Models\\AccountingOpeningBalance', 'accounting'],
+    'SavingsAccount' => ['App\\Models\\SavingsAccount', 'savings'],
+    'SavingsTransaction' => ['App\\Models\\SavingsTransaction', 'savings'],
+    'TimeDeposit' => ['App\\Models\\TimeDeposit', 'savings'],
+    'SavingsInterestRun' => ['App\\Models\\SavingsInterestRun', 'savings'],
 ]);
 
 it('compares full class names, so a same-named class elsewhere is not mapped', function () {
