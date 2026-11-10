@@ -7,17 +7,14 @@ use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
 /**
- * `POST /savings/products/{product}/rates` (savings:settings): a new rate from
+ * `POST /savings/products/{product}/rates` (savings:settings and branches:view_all): a new rate from
  * a date, today or later. A regular product's rate has no term; a time
  * deposit product's names one of the terms it offers. Rates are only ever
  * appended: there is no route to change or remove one.
  */
 class StoreSavingsProductRateRequest extends FormRequest
 {
-    public function authorize(): bool
-    {
-        return (bool) $this->user()?->can('savings:settings');
-    }
+    use AuthorizesCompanyWideSavings;
 
     /** @return array<string, mixed> */
     public function rules(): array
@@ -26,7 +23,7 @@ class StoreSavingsProductRateRequest extends FormRequest
         $product = $this->route('product');
 
         return [
-            'annual_rate' => ['required', ...SavingsRules::rate()],
+            'annual_rate' => ['required', ...SavingsRules::rate('interest rate')],
             'term_days' => $product->isTimeDeposit()
                 ? ['required', 'integer', Rule::in(array_map('intval', $product->term_options_days ?? []))]
                 : ['prohibited'],

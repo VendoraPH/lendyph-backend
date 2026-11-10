@@ -20,27 +20,35 @@ use LogicException;
  * Under the account's row lock (re-taken here; already held by a caller that
  * locked through SavingsLocks, so it never waits twice) it:
  *
- * - refuses a closed account, a zero amount, and a debit that would take the
+ * - refuses a closed account, member activity (deposits, withdrawals and
+ *   transfers) on a frozen one, a zero amount, a debit that would take the
  *   balance below ₱0.00 (the available-balance guard is the caller's; this is
- *   the last line);
+ *   the last line) and a balance beyond what the column holds;
  * - enforces the date rules: `date` is never after today (Manila), never
  *   before yesterday (back-dating only until the next morning, decision 8),
  *   never before the account opened, and never earlier than the account's
  *   latest row; `value_date` is never after `date` and never on or before
- *   `interest_credited_through` (a credited period is closed to new rows);
+ *   `interest_credited_through` (a credited period is closed to new rows),
+ *   except a `reversal` row that keeps the exact value date of the row it
+ *   reverses (`reverses_transaction_id`, same account), so an interest run
+ *   can be reversed;
  *   and the accounting period of `date` must be open (PeriodGuard, 422);
  * - writes the row with `balance_after`, then the `ledger_balance` cache and,
  *   for member activity (deposits, withdrawals and transfers), the
  *   `last_member_activity_on` date;
- * - reactivates a dormant account on a deposit, with an audit row.
+ * - reactivates a dormant account on member money in (a deposit or a
+ *   transfer in), with an audit row.
  *
  * The journal is the caller's: post it through AutomaticPoster in the same
  * transaction, after this (lock step 7).
  */
 class SavingsLedger
 {
-    /** decimal(12,2): the largest amount a row can hold, in centavos. */
+    /** decimal(12,2): the largest amount a row or a balance can hold, in centavos. */
     public const MAX_CENTAVOS = 999_999_999_999;
+
+    /** Member-initiated money in, which wakes a dormant account. */
+    public const REACTIVATING_TYPES = ['deposit', 'transfer_in'];
 
     public function __construct(
         private readonly SavingsNumbers $numbers,
@@ -110,7 +118,13 @@ class SavingsLedger
             throw ValidationException::withMessages(['account' => ["{$locked->account_number} is closed and takes no more transactions."]]);
         }
 
-        [$date, $valueDate] = $this->assertDates($locked, $attributes);
+        if ($locked->status === SavingsAccount::STATUS_FROZEN && in_array($type, SavingsTransaction::MEMBER_ACTIVITY_TYPES, true)) {
+            throw ValidationException::withMessages(['account' => [
+                "{$locked->account_number} is frozen: deposits, withdrawals and transfers are refused until it is unfrozen.",
+            ]]);
+        }
+
+        [$date, $valueDate] = $this->assertDates($locked, $type, $attributes);
         $this->periods->assertOpen($date, 'This savings transaction');
 
         $before = SavingsMath::signedCentavos($locked->ledger_balance);
@@ -119,6 +133,12 @@ class SavingsLedger
         if ($after < 0) {
             throw ValidationException::withMessages(['amount' => [
                 "That would take {$locked->account_number} below ₱0.00: its balance is ".$this->peso($before).'.',
+            ]]);
+        }
+
+        if ($after > self::MAX_CENTAVOS) {
+            throw ValidationException::withMessages(['amount' => [
+                "That would take {$locked->account_number} beyond ".$this->peso(self::MAX_CENTAVOS).', the most a savings balance can hold.',
             ]]);
         }
 
@@ -155,7 +175,7 @@ class SavingsLedger
             $changes['last_member_activity_on'] = $date;
         }
 
-        if ($type === 'deposit' && $locked->status === SavingsAccount::STATUS_DORMANT) {
+        if (in_array($type, self::REACTIVATING_TYPES, true) && $locked->status === SavingsAccount::STATUS_DORMANT) {
             $changes['status'] = SavingsAccount::STATUS_ACTIVE;
             $changes['dormant_since'] = null;
         }
@@ -168,7 +188,7 @@ class SavingsLedger
                 $locked,
                 ['status' => SavingsAccount::STATUS_DORMANT, 'dormant_since' => $locked->dormant_since?->toDateString()],
                 ['status' => SavingsAccount::STATUS_ACTIVE, 'dormant_since' => null],
-                "Savings account {$locked->account_number} reactivated by deposit {$row->reference}.",
+                "Savings account {$locked->account_number} reactivated by ".($type === 'deposit' ? 'deposit' : 'transfer in')." {$row->reference}.",
             );
         }
 
@@ -198,7 +218,7 @@ class SavingsLedger
      *
      * @throws ValidationException
      */
-    private function assertDates(SavingsAccount $account, array $attributes): array
+    private function assertDates(SavingsAccount $account, string $type, array $attributes): array
     {
         $today = CarbonImmutable::parse(now()->toDateString());
         $date = $this->dateOf($attributes['date'] ?? $today->toDateString(), 'date');
@@ -233,11 +253,36 @@ class SavingsLedger
 
         $credited = $account->interest_credited_through;
 
-        if ($credited !== null && $valueDate->toDateString() <= $credited->toDateString()) {
+        if ($credited !== null && $valueDate->toDateString() <= $credited->toDateString()
+            && ! $this->keepsTheReversedValueDate($account, $type, $attributes, $valueDate)) {
             $this->refuse('value_date', "Interest on {$account->account_number} has already been credited through {$this->day(CarbonImmutable::parse($credited->toDateString()))}, so nothing can be value-dated on or before it.");
         }
 
         return [$date->toDateString(), $valueDate->toDateString()];
+    }
+
+    /**
+     * Whether a reversal row carries exactly the value date of the row it
+     * reverses, on the same account. Such a row may fall inside a credited
+     * period: it undoes a row already counted there (an interest run being
+     * reversed), so it changes no credited figure the run didn't already
+     * hold. Any other row there is refused.
+     *
+     * @param  array<string, mixed>  $attributes
+     */
+    private function keepsTheReversedValueDate(SavingsAccount $account, string $type, array $attributes, CarbonImmutable $valueDate): bool
+    {
+        $reverses = $attributes['reverses_transaction_id'] ?? null;
+
+        if ($type !== 'reversal' || $reverses === null) {
+            return false;
+        }
+
+        $original = DB::table('savings_transactions')->where('id', $reverses)->first(['account_id', 'value_date']);
+
+        return $original !== null
+            && (int) $original->account_id === $account->id
+            && CarbonImmutable::parse($original->value_date)->toDateString() === $valueDate->toDateString();
     }
 
     private function dateOf(mixed $value, string $field): CarbonImmutable

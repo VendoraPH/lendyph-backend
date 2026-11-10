@@ -7,22 +7,19 @@ use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
 /**
- * `POST /savings/tax-rules` (savings:settings): a new withholding tax rate
+ * `POST /savings/tax-rules` (savings:settings and branches:view_all): a new withholding tax rate
  * for a holder type, from today or later. Rules are only ever appended.
  */
 class StoreSavingsTaxRuleRequest extends FormRequest
 {
-    public function authorize(): bool
-    {
-        return (bool) $this->user()?->can('savings:settings');
-    }
+    use AuthorizesCompanyWideSavings;
 
     /** @return array<string, mixed> */
     public function rules(): array
     {
         return [
             'holder_type' => ['required', Rule::in(SavingsTaxRule::HOLDER_TYPES)],
-            'rate' => ['required', ...SavingsRules::rate()],
+            'rate' => ['required', ...SavingsRules::rate('tax rate')],
             'effective_from' => ['required', 'date_format:Y-m-d', 'after_or_equal:'.now()->toDateString()],
         ];
     }

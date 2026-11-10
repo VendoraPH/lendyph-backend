@@ -1418,7 +1418,10 @@ final class AutomaticPoster
      * A deposit, a withdrawal or a closing payout (source `savings`, keyed on
      * the row): Dr settlement / Cr savings deposits, or the reverse. A
      * transfer between a member's own accounts in one branch posts nothing
-     * (null): both legs sit on savings deposits. A row whose money belongs to
+     * (null): both legs sit on savings deposits. Call it for a transfer leg
+     * only once both legs are written (the second leg names the first as its
+     * `counterpart_transaction_id`); a leg with no other leg, or legs in two
+     * branches, are refused (decision 9). A row whose money belongs to
      * another journal (interest, tax, a time deposit's, or a reversal, which
      * goes through reverseFor()) is refused.
      *
@@ -1429,6 +1432,8 @@ final class AutomaticPoster
         $this->requireBooksForSavings();
 
         if (in_array($row->type, ['transfer_in', 'transfer_out'], true)) {
+            $this->assertTransferWithinOneBranch($row);
+
             return null;
         }
 
@@ -1448,7 +1453,7 @@ final class AutomaticPoster
             $posting['description'] = 'Savings account closed, balance paid out';
         }
 
-        return $this->write($posting, $row, [
+        return $this->savingsWrite($posting, $row, [
             'date' => $row->date,
             'reference' => $row->reference,
             'description' => $this->describe($posting['description'], $row->reference),
@@ -1482,7 +1487,7 @@ final class AutomaticPoster
             AccountMap::resolve(),
         );
 
-        return $this->write($posting, $interest, [
+        return $this->savingsWrite($posting, $interest, [
             'date' => $interest->date,
             'reference' => $interest->reference,
             'description' => $this->describe($posting['description'], $interest->reference),
@@ -1492,10 +1497,12 @@ final class AutomaticPoster
 
     /**
      * One journal for a posted interest run (source `savings_interest`, keyed
-     * on the run), from its totals, dated the day it posts (`posted_at`, else
-     * today), in the run's branch.
+     * on the run), dated the day it posts (`posted_at`, else today), in the
+     * run's branch. Call it after the run's interest and tax rows are written
+     * (`interest_run_id` = the run): it refuses when their sums differ from the
+     * run's totals.
      *
-     * @throws CannotPostToTheBooksException when the totals don't reconcile or a role is unmapped
+     * @throws CannotPostToTheBooksException when the totals don't reconcile with themselves or the rows, or a role is unmapped
      */
     public function savingsInterestRun(SavingsInterestRun $run, ?int $userId): ?AccountingJournal
     {
@@ -1511,10 +1518,27 @@ final class AutomaticPoster
                 .' is not the net of '.Money::format($net).'. Nothing has been saved.');
         }
 
+        // The rows the run wrote, read in this transaction: the journal posts
+        // what the subledger holds, never a total that drifted from it.
+        $rows = DB::table('savings_transactions')
+            ->where('interest_run_id', $run->id)
+            ->selectRaw("COALESCE(SUM(CASE WHEN type = 'interest' THEN credit ELSE 0 END), 0) AS gross")
+            ->selectRaw("COALESCE(SUM(CASE WHEN type = 'withholding_tax' THEN debit ELSE 0 END), 0) AS tax")
+            ->first();
+        $rowsGross = $this->centavos((string) $rows->gross, 'interest rows', $run);
+        $rowsTax = $this->centavos((string) $rows->tax, 'tax rows', $run);
+
+        if ($rowsGross !== $gross || $rowsTax !== $tax) {
+            throw CannotPostToTheBooksException::because(
+                'This interest run\'s own interest and tax rows come to '.Money::format($rowsGross).' interest and '
+                .Money::format($rowsTax).' tax, which does not match its totals of '.Money::format($gross).' and '
+                .Money::format($tax).'. Nothing has been saved.');
+        }
+
         $posting = PostingRules::savingsInterest($gross, $tax, AccountMap::resolve());
         $period = $run->period_start->format('M j, Y').' to '.$run->period_end->format('M j, Y');
 
-        return $this->write($posting, $run, [
+        return $this->savingsWrite($posting, $run, [
             'date' => $run->posted_at,
             'description' => $this->describe("{$posting['description']}, {$period}", null),
             'branch_id' => $run->branch_id,
@@ -1532,13 +1556,19 @@ final class AutomaticPoster
     {
         $this->requireBooksForSavings();
 
+        if ($deposit->rolled_over_from_id !== null) {
+            throw CannotPostToTheBooksException::because(
+                "{$deposit->certificate_number} was rolled over from an earlier placement, whose settlement already "
+                .'moved the amount rolled over into time deposits. It posts no placement of its own. Nothing has been saved.');
+        }
+
         $role = $deposit->funding_method === 'savings'
             ? PostingRules::SAVINGS_DEPOSITS_ROLE
             : $this->savingsSettlementRole($deposit->funding_method, $deposit->certificate_number);
 
         $posting = PostingRules::timeDepositPlacement($this->centavos($deposit->principal, 'principal', $deposit), $role, AccountMap::resolve());
 
-        return $this->write($posting, $deposit, [
+        return $this->savingsWrite($posting, $deposit, [
             'date' => $deposit->placement_date,
             'reference' => $deposit->certificate_number,
             'description' => $this->describe($posting['description'], $deposit->certificate_number),
@@ -1551,8 +1581,10 @@ final class AutomaticPoster
      * placement), from its stored settlement: `settled_interest` (gross),
      * `settled_tax` and `settled_on`. `$rolledOverCentavos` goes into the new
      * placement; the rest is paid out through `$payoutMethod` (`savings` for
-     * the member's savings account; null when nothing is paid out). A null
-     * `$userId` posts as the system (an automatic rollover).
+     * the member's savings account; null when nothing is paid out) and must
+     * equal the stored `settled_amount`, which is the amount PAID OUT (₱0.00
+     * on a full rollover). A null `$userId` posts as the system (an automatic
+     * rollover).
      *
      * @throws CannotPostToTheBooksException
      */
@@ -1573,22 +1605,89 @@ final class AutomaticPoster
             default => $this->savingsSettlementRole($payoutMethod, $deposit->certificate_number),
         };
 
+        $paidOut = $principal + $gross - $tax - $rolledOverCentavos;
+        $settledAmount = $this->centavos($deposit->settled_amount, 'settled amount', $deposit);
+
+        if ($paidOut !== $settledAmount) {
+            throw CannotPostToTheBooksException::because(
+                "{$deposit->certificate_number}'s settled amount of ".Money::format($settledAmount).' is not what this '
+                .'settlement pays out ('.Money::format($paidOut).'). Nothing has been saved.');
+        }
+
         $posting = PostingRules::timeDepositSettlement(
             $principal,
             $gross,
             $tax,
             $rolledOverCentavos,
-            $principal + $gross - $tax - $rolledOverCentavos,
+            $paidOut,
             $payoutRole,
             AccountMap::resolve(),
         );
 
-        return $this->write($posting, $deposit, [
+        return $this->savingsWrite($posting, $deposit, [
             'date' => $deposit->settled_on,
             'reference' => $deposit->certificate_number,
             'description' => $this->describe($posting['description'], $deposit->certificate_number),
             'branch_id' => $deposit->branch_id,
         ], $userId);
+    }
+
+    /**
+     * {@see self::write()} for savings, refusing a key whose journal was
+     * reversed. write() hands back the existing journal for a (postable,
+     * source) key, which keeps a retry from posting twice; but a reversed one
+     * handed back would let a re-post silently do nothing. A re-post after a
+     * reversal is a new subledger row, with its own key.
+     *
+     * @param  array{source: string, description: string, lines: list<array{account_id: int, debit: int, credit: int}>}  $posting
+     * @param  array<string, mixed>  $context
+     *
+     * @throws CannotPostToTheBooksException
+     */
+    private function savingsWrite(array $posting, Model $postable, array $context, ?int $userId): AccountingJournal
+    {
+        $existing = AccountingJournal::query()
+            ->where('postable_type', $postable->getMorphClass())
+            ->where('postable_id', $postable->getKey())
+            ->where('source', $posting['source'])
+            ->first(['id', 'journal_no', 'status']);
+
+        if ($existing !== null && $existing->status === 'reversed') {
+            $what = $context['reference'] ?? 'This savings record';
+
+            throw CannotPostToTheBooksException::because(
+                "{$what} was already posted in journal {$existing->journal_no}, which has been reversed. A reversed "
+                .'posting is never posted again: record a new transaction instead. Nothing has been saved.');
+        }
+
+        return $this->write($posting, $postable, $context, $userId);
+    }
+
+    /**
+     * Both legs of a transfer are in one branch, so savings deposits moves
+     * within one branch's books and no journal is needed (decision 9).
+     *
+     * @throws CannotPostToTheBooksException
+     */
+    private function assertTransferWithinOneBranch(SavingsTransaction $row): void
+    {
+        $other = $row->counterpart_transaction_id !== null
+            ? SavingsTransaction::query()->find($row->counterpart_transaction_id)
+            : SavingsTransaction::query()->where('counterpart_transaction_id', $row->id)->first();
+        $opposite = $row->type === 'transfer_in' ? 'transfer_out' : 'transfer_in';
+
+        if ($other === null || $other->type !== $opposite) {
+            throw CannotPostToTheBooksException::because(
+                "{$row->reference} is one leg of a transfer, and its other leg isn't recorded. Nothing has been saved.");
+        }
+
+        $branches = SavingsAccount::query()->whereIn('id', [$row->account_id, $other->account_id])->pluck('branch_id', 'id');
+
+        if ($branches[$row->account_id] !== $branches[$other->account_id]) {
+            throw CannotPostToTheBooksException::because(
+                "{$row->reference} and {$other->reference} move money between two branches. Savings transfers stay "
+                .'within one branch, since each branch keeps its own books. Nothing has been saved.');
+        }
     }
 
     /** @throws CannotPostToTheBooksException when there is no chart of accounts */

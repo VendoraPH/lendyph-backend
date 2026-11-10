@@ -17,7 +17,8 @@ use OpenApi\Attributes as OA;
  * Savings settings (design §1, §2): the approval tiers, dormancy and the
  * large-transaction alert, with the withholding tax rules. Readable with
  * `savings:view` or `savings:settings`; saving and adding a tax rule need
- * `savings:settings`. Company-wide, so not branch-scoped.
+ * `savings:settings` and `branches:view_all`, since they apply to every
+ * branch (like Phase 2's company-wide reminder settings).
  */
 class SavingsSettingController extends Controller
 {
@@ -44,7 +45,7 @@ class SavingsSettingController extends Controller
     #[OA\Put(
         path: '/api/savings/settings',
         summary: 'Save savings settings',
-        description: 'Partial. The second approval limit must stay above the first; above it, 2 to 5 different checkers approve. Audited.',
+        description: 'Partial. The second approval limit must stay above the first; above it, exactly two different checkers approve (`tier3_checkers` is 2 in v1). Audited.',
         tags: ['Savings'],
         security: [['sanctum' => []]],
         requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent(properties: [
@@ -56,7 +57,7 @@ class SavingsSettingController extends Controller
         ])),
         responses: [
             new OA\Response(response: 200, description: 'The saved settings'),
-            new OA\Response(response: 403, description: 'Missing savings:settings'),
+            new OA\Response(response: 403, description: 'Missing savings:settings or branches:view_all (company-wide)'),
             new OA\Response(response: 422, description: 'Outside the limits, in words'),
         ],
     )]
@@ -85,7 +86,7 @@ class SavingsSettingController extends Controller
         ])),
         responses: [
             new OA\Response(response: 201, description: 'The new rule'),
-            new OA\Response(response: 403, description: 'Missing savings:settings'),
+            new OA\Response(response: 403, description: 'Missing savings:settings or branches:view_all (company-wide)'),
             new OA\Response(response: 422, description: 'A past date, an unknown holder type, or a rate outside 0–100% with more than four decimals'),
         ],
     )]

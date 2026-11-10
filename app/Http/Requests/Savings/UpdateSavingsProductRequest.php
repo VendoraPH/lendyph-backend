@@ -7,7 +7,7 @@ use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
 /**
- * `PUT /savings/products/{product}` (savings:settings). Partial. The kind
+ * `PUT /savings/products/{product}` (savings:settings and branches:view_all). Partial. The kind
  * never changes; the code only while the product holds no account or time
  * deposit. The rate is never edited here (422): rates are appended through
  * the rates endpoint. Turning it on is checked against the books by the
@@ -15,10 +15,7 @@ use Illuminate\Validation\Rule;
  */
 class UpdateSavingsProductRequest extends FormRequest
 {
-    public function authorize(): bool
-    {
-        return (bool) $this->user()?->can('savings:settings');
-    }
+    use AuthorizesCompanyWideSavings;
 
     /** @return array<string, mixed> */
     public function rules(): array
@@ -37,9 +34,9 @@ class UpdateSavingsProductRequest extends FormRequest
             'name' => ['sometimes', 'required', 'string', 'max:120'],
             'kind' => ['sometimes', Rule::in([$product->kind])],
             'interest_crediting' => ['sometimes', 'required', Rule::in(SavingsProduct::CREDITING)],
-            'minimum_opening_balance' => ['sometimes', 'required', ...SavingsRules::money()],
-            'maintaining_balance' => ['sometimes', 'required', ...SavingsRules::money()],
-            'minimum_adb_for_interest' => ['sometimes', 'required', ...SavingsRules::money()],
+            'minimum_opening_balance' => ['sometimes', 'required', ...SavingsRules::money('minimum opening balance')],
+            'maintaining_balance' => ['sometimes', 'required', ...SavingsRules::money('maintaining balance')],
+            'minimum_adb_for_interest' => ['sometimes', 'required', ...SavingsRules::money('minimum average daily balance for interest')],
             'term_options_days' => $isTimeDeposit ? ['sometimes', 'required', 'array', 'min:1', 'max:20'] : ['prohibited'],
             'term_options_days.*' => ['integer', 'between:1,3650', 'distinct'],
             'pretermination_product_id' => $isTimeDeposit

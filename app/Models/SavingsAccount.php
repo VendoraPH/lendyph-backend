@@ -23,7 +23,7 @@ use Illuminate\Support\Carbon;
  * @property string $account_number
  * @property int $borrower_id
  * @property int $product_id
- * @property int|null $branch_id
+ * @property int $branch_id
  * @property string $status
  * @property string $ledger_balance
  * @property Carbon $opened_on

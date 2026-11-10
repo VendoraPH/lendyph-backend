@@ -15,7 +15,9 @@ use Illuminate\Support\Carbon;
  * A time deposit placement (design §1, §5): principal, rates and tax
  * snapshotted at placement, the maturity figures, how it was funded and how
  * it settles. A rollover is a new placement pointing at this one
- * (`rolled_over_from_id`, unique).
+ * (`rolled_over_from_id`, unique), which posts no placement journal of its own.
+ * `settled_amount` is what the settlement paid out (₱0.00 on a full rollover);
+ * `settled_interest` is the gross interest and `settled_tax` the tax.
  *
  * @property int $id
  * @property string $certificate_number

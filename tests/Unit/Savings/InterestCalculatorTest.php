@@ -144,6 +144,17 @@ class InterestCalculatorTest extends TestCase
         (new InterestCalculator)->calculate(9_000_000_000_000_000, [], '2026-01-01', '2026-12-31', [$this->segment('2026-01-01', '2026-12-31', '100.0000')], 0, '0');
     }
 
+    public function test_overlapping_rate_segments_are_refused(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('overlap');
+
+        (new InterestCalculator)->calculate(100_000, [], '2026-01-01', '2026-01-31', [
+            $this->segment('2026-01-01', '2026-01-20', '1.0000'),
+            $this->segment('2026-01-15', '2026-01-31', '2.0000'),
+        ], 0, '0');
+    }
+
     public function test_multiply_refuses_an_overflow(): void
     {
         $this->assertSame(6, SavingsMath::multiply(2, 3));

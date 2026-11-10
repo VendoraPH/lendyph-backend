@@ -3,31 +3,30 @@
 namespace App\Http\Requests\Savings;
 
 use App\Models\SavingsSetting;
+use App\Services\Savings\ApprovalGate;
 use App\Services\Savings\SavingsMath;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Validator;
 
 /**
- * `PUT /savings/settings` (savings:settings). Every field is optional; the
- * second tier must stay above the first, comparing what is sent with what is
- * stored. Dual control above the second tier needs at least two checkers.
+ * `PUT /savings/settings` (savings:settings and branches:view_all: the
+ * settings are company-wide). Every field is optional; the second tier must
+ * stay above the first, comparing what is sent with what is stored. Above
+ * the second tier exactly two checkers approve (v1 records two).
  */
 class UpdateSavingsSettingsRequest extends FormRequest
 {
-    public function authorize(): bool
-    {
-        return (bool) $this->user()?->can('savings:settings');
-    }
+    use AuthorizesCompanyWideSavings;
 
     /** @return array<string, mixed> */
     public function rules(): array
     {
         return [
-            'tier1_limit' => ['sometimes', 'required', ...SavingsRules::money()],
-            'tier2_limit' => ['sometimes', 'required', ...SavingsRules::money()],
-            'tier3_checkers' => ['sometimes', 'required', 'integer', 'between:2,5'],
+            'tier1_limit' => ['sometimes', 'required', ...SavingsRules::money('first approval limit')],
+            'tier2_limit' => ['sometimes', 'required', ...SavingsRules::money('second approval limit')],
+            'tier3_checkers' => ['sometimes', 'required', 'integer', 'in:'.ApprovalGate::DUAL_CHECKERS],
             'dormancy_months' => ['sometimes', 'required', 'integer', 'between:1,120'],
-            'large_transaction_alert' => ['sometimes', 'required', ...SavingsRules::money(), 'gt:0'],
+            'large_transaction_alert' => ['sometimes', 'required', ...SavingsRules::money('large transaction alert'), 'gt:0'],
         ];
     }
 
@@ -60,7 +59,7 @@ class UpdateSavingsSettingsRequest extends FormRequest
             ]),
             'large_transaction_alert.gt' => 'The large transaction alert must be above ₱0.00.',
             'tier3_checkers.integer' => 'The number of checkers above the second limit must be a whole number.',
-            'tier3_checkers.between' => 'Above the second approval limit, between 2 and 5 different checkers must approve.',
+            'tier3_checkers.in' => 'Above the second approval limit, exactly two different checkers approve; this version can\'t record a third.',
             'dormancy_months.integer' => 'The months before an account turns dormant must be a whole number.',
             'dormancy_months.between' => 'An account can turn dormant after 1 to 120 months without member activity.',
             '*.required' => 'This setting can\'t be left empty.',
