@@ -243,6 +243,20 @@ class TimezoneShift
         // every deployment), so this table cannot hold a row written by the old
         // UTC application. Same reasoning as the csv_import_* tables above.
         'repayment_allocations' => ['created_at', 'updated_at'],
+        // Added 2026-11-10 with Savings & Deposits (Phase 3), well after the
+        // cutover completed, so none of these tables can hold a row written by
+        // the old UTC application. Their business dates are DATEs.
+        'savings_accounts' => ['created_at', 'updated_at'],
+        'savings_approvals' => ['created_at', 'decided_at', 'expires_at', 'updated_at'],
+        'savings_holds' => ['created_at', 'updated_at'],
+        'savings_idempotency_keys' => ['created_at'],
+        'savings_interest_runs' => ['checked_at', 'created_at', 'posted_at', 'reversed_at', 'updated_at'],
+        'savings_product_rates' => ['created_at'],
+        'savings_products' => ['created_at', 'updated_at'],
+        'savings_settings' => ['created_at', 'updated_at'],
+        'savings_tax_rules' => ['created_at'],
+        'savings_transactions' => ['created_at'],
+        'time_deposits' => ['created_at', 'updated_at'],
         // The shift's own bookkeeping, written after the cutover by definition.
         'timezone_shifts' => ['completed_at', 'cutover_at', 'started_at'],
     ];

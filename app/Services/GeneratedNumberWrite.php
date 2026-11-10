@@ -55,6 +55,12 @@ final class GeneratedNumberWrite
 
     public const SHARE_CAPITAL_REFERENCE_INDEX = 'share_capital_ledger_reference_unique';
 
+    public const SAVINGS_ACCOUNT_NUMBER_INDEX = 'savings_accounts_account_number_unique';
+
+    public const SAVINGS_TRANSACTION_REFERENCE_INDEX = 'savings_transactions_reference_unique';
+
+    public const TIME_DEPOSIT_CERTIFICATE_INDEX = 'time_deposits_certificate_number_unique';
+
     public const MEMBER_CONFLICT = 'Another member was created at the same moment. Submit again.';
 
     public const CO_MAKER_CONFLICT = 'Another co-maker was created at the same moment. Submit again.';
@@ -63,11 +69,16 @@ final class GeneratedNumberWrite
 
     public const ADJUSTMENT_CONFLICT = 'Another adjustment was requested at the same moment. Submit again.';
 
+    public const SAVINGS_CONFLICT = 'Another savings transaction was saved at the same moment. Submit again.';
+
     private const INDEXES = [
         self::BORROWER_CODE_INDEX,
         self::CO_MAKER_CODE_INDEX,
         self::ADJUSTMENT_NUMBER_INDEX,
         self::SHARE_CAPITAL_REFERENCE_INDEX,
+        self::SAVINGS_ACCOUNT_NUMBER_INDEX,
+        self::SAVINGS_TRANSACTION_REFERENCE_INDEX,
+        self::TIME_DEPOSIT_CERTIFICATE_INDEX,
     ];
 
     private const BACKOFF_MILLISECONDS = 20;

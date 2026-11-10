@@ -13,7 +13,11 @@ use App\Models\GCashTransaction;
 use App\Models\Loan;
 use App\Models\LoanAdjustment;
 use App\Models\Repayment;
+use App\Models\SavingsAccount;
+use App\Models\SavingsInterestRun;
+use App\Models\SavingsTransaction;
 use App\Models\ShareCapitalLedger;
+use App\Models\TimeDeposit;
 use App\Services\LoanReleaseFeeService;
 use DateTimeInterface;
 use Illuminate\Database\Eloquent\Model;
@@ -700,11 +704,17 @@ final class AutomaticPoster
      * would strand the operator over books that never mentioned it.
      * Already-reversed entries are skipped for the same reason: a second void
      * attempt must not fail on the state the first one left.
+     *
+     * Savings reverses through here too (Phase 3): a reversed deposit or
+     * withdrawal (SavingsTransaction, `savings`), a reversed interest run
+     * (SavingsInterestRun, `savings_interest`) and a time deposit's postings
+     * (TimeDeposit, `time_deposit` and `time_deposit_settlement`). A null
+     * `$userId` reverses as the system. The reversal is dated today.
      */
     public function reverseFor(
         Model $postable,
         string $source,
-        int $userId,
+        ?int $userId,
         ?string $reason = null,
     ): ?AccountingJournal {
         $journal = AccountingJournal::query()
@@ -1387,6 +1397,220 @@ final class AutomaticPoster
         }
 
         return $accountId;
+    }
+
+    // ── Savings & Deposits (Phase 3, design §4) ──
+    //
+    // Called inside the savings write's own transaction, after SavingsLedger
+    // (lock step 7). Unlike the lending postings these never answer null for
+    // an organisation with no books: savings needs books, a product can't be
+    // turned on without them, and a savings row with no journal would leave
+    // the subledger and the general ledger disagreeing. Branch = the
+    // account's or the time deposit's; date = the row's business date.
+
+    /**
+     * How a savings row's money moved, as the settlement role. `savings` is a
+     * move between savings records and settles through no money account.
+     */
+    private const SAVINGS_SETTLEMENT_ROLES = ['cash' => 'cash', 'bank_transfer' => 'bank', 'gcash' => 'gcash', 'maya' => 'maya'];
+
+    /**
+     * A deposit, a withdrawal or a closing payout (source `savings`, keyed on
+     * the row): Dr settlement / Cr savings deposits, or the reverse. A
+     * transfer between a member's own accounts in one branch posts nothing
+     * (null): both legs sit on savings deposits. A row whose money belongs to
+     * another journal (interest, tax, a time deposit's, or a reversal, which
+     * goes through reverseFor()) is refused.
+     *
+     * @throws CannotPostToTheBooksException
+     */
+    public function savingsTransaction(SavingsTransaction $row, ?int $userId): ?AccountingJournal
+    {
+        $this->requireBooksForSavings();
+
+        if (in_array($row->type, ['transfer_in', 'transfer_out'], true)) {
+            return null;
+        }
+
+        if (! in_array($row->type, ['deposit', 'withdrawal', 'closing'], true) || $row->time_deposit_id !== null || $row->interest_run_id !== null) {
+            throw CannotPostToTheBooksException::because(
+                "{$row->reference} is not a deposit, withdrawal or closing payout of its own, so it posts through its own "
+                .'journal (interest, tax, time deposit or reversal). Nothing has been saved.');
+        }
+
+        $role = $this->savingsSettlementRole($row->method, $row->reference);
+        $map = AccountMap::resolve();
+        $posting = $row->type === 'deposit'
+            ? PostingRules::savingsDeposit($this->centavos($row->credit, 'credit', $row), $role, $map)
+            : PostingRules::savingsWithdrawal($this->centavos($row->debit, 'debit', $row), $role, $map);
+
+        if ($row->type === 'closing') {
+            $posting['description'] = 'Savings account closed, balance paid out';
+        }
+
+        return $this->write($posting, $row, [
+            'date' => $row->date,
+            'reference' => $row->reference,
+            'description' => $this->describe($posting['description'], $row->reference),
+            'branch_id' => SavingsAccount::query()->whereKey($row->account_id)->value('branch_id'),
+        ], $userId);
+    }
+
+    /**
+     * Interest credited outside a run (at close), with its tax row if any
+     * (source `savings_interest`, keyed on the interest row).
+     *
+     * @throws CannotPostToTheBooksException
+     */
+    public function savingsInterestCredit(SavingsTransaction $interest, ?SavingsTransaction $tax, ?int $userId): ?AccountingJournal
+    {
+        $this->requireBooksForSavings();
+
+        if ($interest->type !== 'interest' || $interest->interest_run_id !== null) {
+            throw CannotPostToTheBooksException::because(
+                "{$interest->reference} is not interest credited outside an interest run. Nothing has been saved.");
+        }
+
+        if ($tax !== null && ($tax->type !== 'withholding_tax' || $tax->account_id !== $interest->account_id)) {
+            throw CannotPostToTheBooksException::because(
+                "{$tax->reference} is not the tax withheld from {$interest->reference}. Nothing has been saved.");
+        }
+
+        $posting = PostingRules::savingsInterest(
+            $this->centavos($interest->credit, 'credit', $interest),
+            $tax === null ? 0 : $this->centavos($tax->debit, 'debit', $tax),
+            AccountMap::resolve(),
+        );
+
+        return $this->write($posting, $interest, [
+            'date' => $interest->date,
+            'reference' => $interest->reference,
+            'description' => $this->describe($posting['description'], $interest->reference),
+            'branch_id' => SavingsAccount::query()->whereKey($interest->account_id)->value('branch_id'),
+        ], $userId);
+    }
+
+    /**
+     * One journal for a posted interest run (source `savings_interest`, keyed
+     * on the run), from its totals, dated the day it posts (`posted_at`, else
+     * today), in the run's branch.
+     *
+     * @throws CannotPostToTheBooksException when the totals don't reconcile or a role is unmapped
+     */
+    public function savingsInterestRun(SavingsInterestRun $run, ?int $userId): ?AccountingJournal
+    {
+        $this->requireBooksForSavings();
+
+        $gross = $this->centavos($run->total_gross, 'total gross interest', $run);
+        $tax = $this->centavos($run->total_tax, 'total tax', $run);
+        $net = $this->centavos($run->total_net, 'total net interest', $run);
+
+        if ($gross - $tax !== $net) {
+            throw CannotPostToTheBooksException::because(
+                'This interest run does not reconcile: gross '.Money::format($gross).' less tax '.Money::format($tax)
+                .' is not the net of '.Money::format($net).'. Nothing has been saved.');
+        }
+
+        $posting = PostingRules::savingsInterest($gross, $tax, AccountMap::resolve());
+        $period = $run->period_start->format('M j, Y').' to '.$run->period_end->format('M j, Y');
+
+        return $this->write($posting, $run, [
+            'date' => $run->posted_at,
+            'description' => $this->describe("{$posting['description']}, {$period}", null),
+            'branch_id' => $run->branch_id,
+        ], $userId);
+    }
+
+    /**
+     * A time deposit placed (source `time_deposit`, keyed on the placement):
+     * from a money account, or from savings deposits when funded from the
+     * member's savings (`funding_method` savings).
+     *
+     * @throws CannotPostToTheBooksException
+     */
+    public function timeDepositPlacement(TimeDeposit $deposit, ?int $userId): ?AccountingJournal
+    {
+        $this->requireBooksForSavings();
+
+        $role = $deposit->funding_method === 'savings'
+            ? PostingRules::SAVINGS_DEPOSITS_ROLE
+            : $this->savingsSettlementRole($deposit->funding_method, $deposit->certificate_number);
+
+        $posting = PostingRules::timeDepositPlacement($this->centavos($deposit->principal, 'principal', $deposit), $role, AccountMap::resolve());
+
+        return $this->write($posting, $deposit, [
+            'date' => $deposit->placement_date,
+            'reference' => $deposit->certificate_number,
+            'description' => $this->describe($posting['description'], $deposit->certificate_number),
+            'branch_id' => $deposit->branch_id,
+        ], $userId);
+    }
+
+    /**
+     * A time deposit settled (source `time_deposit_settlement`, keyed on the
+     * placement), from its stored settlement: `settled_interest` (gross),
+     * `settled_tax` and `settled_on`. `$rolledOverCentavos` goes into the new
+     * placement; the rest is paid out through `$payoutMethod` (`savings` for
+     * the member's savings account; null when nothing is paid out). A null
+     * `$userId` posts as the system (an automatic rollover).
+     *
+     * @throws CannotPostToTheBooksException
+     */
+    public function timeDepositSettlement(TimeDeposit $deposit, int $rolledOverCentavos, ?string $payoutMethod, ?int $userId): ?AccountingJournal
+    {
+        $this->requireBooksForSavings();
+
+        if ($deposit->settled_on === null) {
+            throw CannotPostToTheBooksException::because("{$deposit->certificate_number} has not been settled yet. Nothing has been saved.");
+        }
+
+        $principal = $this->centavos($deposit->principal, 'principal', $deposit);
+        $gross = $this->centavos($deposit->settled_interest ?? 0, 'settled interest', $deposit);
+        $tax = $this->centavos($deposit->settled_tax ?? 0, 'settled tax', $deposit);
+        $payoutRole = match (true) {
+            $payoutMethod === null => null,
+            $payoutMethod === 'savings' => PostingRules::SAVINGS_DEPOSITS_ROLE,
+            default => $this->savingsSettlementRole($payoutMethod, $deposit->certificate_number),
+        };
+
+        $posting = PostingRules::timeDepositSettlement(
+            $principal,
+            $gross,
+            $tax,
+            $rolledOverCentavos,
+            $principal + $gross - $tax - $rolledOverCentavos,
+            $payoutRole,
+            AccountMap::resolve(),
+        );
+
+        return $this->write($posting, $deposit, [
+            'date' => $deposit->settled_on,
+            'reference' => $deposit->certificate_number,
+            'description' => $this->describe($posting['description'], $deposit->certificate_number),
+            'branch_id' => $deposit->branch_id,
+        ], $userId);
+    }
+
+    /** @throws CannotPostToTheBooksException when there is no chart of accounts */
+    private function requireBooksForSavings(): void
+    {
+        if (! $this->enabled()) {
+            throw CannotPostToTheBooksException::because(
+                'Savings needs books, and there is no chart of accounts. Set one up in Accounting → Chart of Accounts. Nothing has been saved.');
+        }
+    }
+
+    /** @throws CannotPostToTheBooksException */
+    private function savingsSettlementRole(?string $method, ?string $reference): string
+    {
+        $role = self::SAVINGS_SETTLEMENT_ROLES[$method ?? ''] ?? null;
+
+        if ($role === null) {
+            throw CannotPostToTheBooksException::because(
+                ($reference ?? 'This savings transaction').' has no payment method that settles through a money account, so it cannot be posted to the books. Nothing has been saved.');
+        }
+
+        return $role;
     }
 
     /** Whether this organisation keeps books. See {@see AccountMap::chartExists()}. */

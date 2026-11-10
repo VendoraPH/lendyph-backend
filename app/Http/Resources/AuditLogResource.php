@@ -92,6 +92,17 @@ class AuditLogResource extends JsonResource
     ];
 
     /**
+     * Savings columns stored as a percentage (decimal:4), by the class of the
+     * row's target. Read as a percent, never rounded, like a loan product's.
+     */
+    private const SAVINGS_PERCENT_FIELDS = [
+        'SavingsProductRate' => ['annual_rate'],
+        'SavingsTaxRule' => ['rate'],
+        'TimeDeposit' => ['annual_rate', 'pretermination_rate', 'withholding_tax_rate'],
+        'SavingsInterestRunLine' => ['rate', 'tax_rate'],
+    ];
+
+    /**
      * Change-list fields that hold a branch id or a list of them.
      */
     private const BRANCH_KEYS = ['branch_id', 'branch_ids'];
@@ -126,15 +137,26 @@ class AuditLogResource extends JsonResource
      */
     private const ENUM_FIELDS = [
         'adjustment_type', 'cash_flow_category', 'cash_kind', 'category', 'civil_status', 'frequencies',
-        'frequency', 'gender', 'insurance_payment_type', 'interest_method', 'interest_option',
-        'interest_rate_frequency', 'interest_type', 'kind', 'method', 'normal_balance', 'payment_frequency',
-        'payment_method', 'payment_type', 'retaken_on', 'source', 'term_unit', 'type',
+        'frequency', 'funding_method', 'gender', 'holder_type', 'insurance_payment_type', 'interest_crediting',
+        'interest_method', 'interest_option', 'interest_rate_frequency', 'interest_type', 'kind',
+        'maturity_instruction', 'method', 'normal_balance', 'payment_frequency', 'payment_method', 'payment_type',
+        'payout_method', 'retaken_on', 'source', 'term_unit', 'type',
     ];
 
     /**
      * The enum keys Str::headline() doesn't read the way the app does.
      */
-    private const ENUM_WORDS = ['bi_weekly' => 'Bi-Weekly', 'gcash' => 'GCash', 'semi_monthly' => 'Semi-Monthly'];
+    private const ENUM_WORDS = [
+        'bi_weekly' => 'Bi-Weekly',
+        'gcash' => 'GCash',
+        'semi_monthly' => 'Semi-Monthly',
+        // Savings (Phase 3). A non-member reads "Walk-in", as on every screen.
+        'non_member' => 'Walk-in',
+        'semi_annual' => 'Semi-Annual',
+        'td_payout' => 'Time Deposit Payout',
+        'rollover_principal' => 'Roll Over Principal',
+        'rollover_all' => 'Roll Over Principal and Interest',
+    ];
 
     private const TIMESTAMP_WITH_SECONDS = 'M j, Y, g:i:s A';
 
@@ -353,7 +375,7 @@ class AuditLogResource extends JsonResource
         }
 
         // Prefer the most human-friendly attribute available on the related model.
-        foreach (['full_name', 'name', 'application_number', 'loan_account_number', 'receipt_number', 'borrower_code', 'code', 'title', 'journal_no', 'reference'] as $attr) {
+        foreach (['full_name', 'name', 'application_number', 'loan_account_number', 'receipt_number', 'borrower_code', 'code', 'title', 'journal_no', 'reference', 'account_number', 'certificate_number'] as $attr) {
             if (isset($model->{$attr}) && $model->{$attr} !== null && $model->{$attr} !== '') {
                 return (string) $model->{$attr};
             }
@@ -629,12 +651,15 @@ class AuditLogResource extends JsonResource
     }
 
     /**
-     * A loan product's rate as a percent, as written without trailing zeros
+     * A loan product's or a savings rate as a percent, as written without trailing zeros
      * ("0.0000" reads "0%", "1.5" reads "1.5%").
      */
     private function productRateInWords(string $field, mixed $value): ?string
     {
-        if ($this->auditable_type !== LoanProduct::class || ! in_array($field, self::PRODUCT_PERCENT_FIELDS, true) || ! is_numeric($value)) {
+        $savingsPercent = in_array($field, self::SAVINGS_PERCENT_FIELDS[class_basename((string) $this->auditable_type)] ?? [], true);
+        $productPercent = $this->auditable_type === LoanProduct::class && in_array($field, self::PRODUCT_PERCENT_FIELDS, true);
+
+        if (! ($savingsPercent || $productPercent) || ! is_numeric($value)) {
             return null;
         }
 

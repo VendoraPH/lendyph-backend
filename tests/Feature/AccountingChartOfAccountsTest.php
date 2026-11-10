@@ -7,6 +7,7 @@ use App\Models\AccountingAccountMapping;
 use App\Models\AuditLog;
 use App\Models\User;
 use App\Services\Accounting\ChartOfAccountsSeeder;
+use App\Services\Accounting\PostingRules;
 use Illuminate\Testing\TestResponse;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
@@ -260,7 +261,7 @@ class AccountingChartOfAccountsTest extends TestCase
         $this->seedChart()->assertStatus(409);
 
         $this->assertSame(count(self::EXPECTED_CHART), AccountingAccount::query()->count());
-        $this->assertSame(count(AccountingAccountMapping::ROLES), AccountingAccountMapping::query()->count());
+        $this->assertSame(count(ChartOfAccountsSeeder::DEFAULT_MAPPING_CODES), AccountingAccountMapping::query()->count());
     }
 
     /**
@@ -658,13 +659,16 @@ class AccountingChartOfAccountsTest extends TestCase
 
         $mapping = $this->getJson('/api/accounting/settings/account-mapping')->assertOk()->json('data');
 
-        $this->assertSame(AccountingAccountMapping::ROLES, array_keys($mapping));
+        // Every role but the four savings roles (Phase 3), which need deposit
+        // accounts the lending chart doesn't carry (savings:prepare-books).
+        $lendingRoles = array_values(array_diff(AccountingAccountMapping::ROLES, PostingRules::SAVINGS_ROLES));
+        $this->assertSame($lendingRoles, array_keys($mapping));
 
         // Counted off the constant rather than a literal. The literal was 13,
         // and adding `borrower_advances` to ROLES reddened this test from a
         // file the change never touched — the count is a restatement of the
         // line above it, so it can only ever go stale.
-        $this->assertCount(count(AccountingAccountMapping::ROLES), $mapping);
+        $this->assertCount(count($lendingRoles), $mapping);
 
         $expected = [];
         foreach (ChartOfAccountsSeeder::DEFAULT_MAPPING_CODES as $role => $code) {
@@ -773,7 +777,7 @@ class AccountingChartOfAccountsTest extends TestCase
         $this->assertCount(1, $rows);
         $this->assertSame($this->admin->id, $rows->first()->user_id);
         $this->assertSame(count(self::EXPECTED_CHART), $rows->first()->new_values['accounts']);
-        $this->assertSame(count(AccountingAccountMapping::ROLES), $rows->first()->new_values['mappings']);
+        $this->assertSame(count(ChartOfAccountsSeeder::DEFAULT_MAPPING_CODES), $rows->first()->new_values['mappings']);
 
         $this->assertSame(
             0,

@@ -30,7 +30,7 @@ class ApplyCooperativeTemplateTest extends TestCase
 
     private const COMMAND = 'accounting:apply-cooperative-template';
 
-    private const CODES = ['2050', '2060', '2070', '2080', '3070', '3071', '3072', '3073', '3074', '3080'];
+    private const CODES = ['2050', '2060', '2070', '2080', '3070', '3071', '3072', '3073', '3074', '3080', '5160'];
 
     protected function setUp(): void
     {
@@ -65,9 +65,9 @@ class ApplyCooperativeTemplateTest extends TestCase
         $this->assertSame('3080', $this->netSurplusCode());
 
         $rows = AuditLog::query()->where('id', '>', $before)->orderBy('id')->get();
-        $this->assertCount(11, $rows);
+        $this->assertCount(12, $rows);
         $this->assertSame([null], $rows->pluck('user_id')->unique()->values()->all());
-        $this->assertSame(10, $rows->where('action', CooperativeTemplateBackfill::AUDIT_ACCOUNT_ADDED)->count());
+        $this->assertSame(11, $rows->where('action', CooperativeTemplateBackfill::AUDIT_ACCOUNT_ADDED)->count());
         $this->assertSame(
             self::CODES,
             $rows->where('action', CooperativeTemplateBackfill::AUDIT_ACCOUNT_ADDED)->map(fn (AuditLog $row) => $row->new_values['code'])->values()->all(),
@@ -84,6 +84,8 @@ class ApplyCooperativeTemplateTest extends TestCase
     {
         app(ChartOfAccountsSeeder::class)->seed($this->admin->id);
         $this->runCommand(['--force' => true]);
+        // The template's savings roles (Phase 3) are mapped by savings:prepare-books.
+        $this->artisan('savings:prepare-books')->assertSuccessful();
         $applied = $this->snapshot();
 
         DB::table('accounting_account_mappings')->delete();
@@ -150,7 +152,7 @@ class ApplyCooperativeTemplateTest extends TestCase
 
         $this->assertStringContainsString('net_surplus skipped', $output);
         $this->assertSame('3020', $this->netSurplusCode());
-        $this->assertSame(10, AccountingAccount::query()->whereIn('code', self::CODES)->count());
+        $this->assertSame(count(self::CODES), AccountingAccount::query()->whereIn('code', self::CODES)->count());
     }
 
     public function test_a_mapping_a_user_changed_and_changed_back_is_kept(): void
@@ -179,7 +181,7 @@ class ApplyCooperativeTemplateTest extends TestCase
         $this->assertStringContainsString('Members Fund', $output);
         $this->assertSame('Members Fund', $taken->fresh()->name);
         $this->assertSame('3030', $this->netSurplusCode());
-        $this->assertSame(9, AccountingAccount::query()->whereIn('code', array_diff(self::CODES, ['3080']))->count());
+        $this->assertSame(count(self::CODES) - 1, AccountingAccount::query()->whereIn('code', array_diff(self::CODES, ['3080']))->count());
     }
 
     public function test_a_taken_heading_skips_its_children(): void

@@ -8,6 +8,7 @@ use App\Models\AuditLog;
 use App\Models\User;
 use App\Services\Accounting\CashFlowCategories;
 use App\Services\Accounting\ChartOfAccountsSeeder;
+use App\Services\Accounting\PostingRules;
 use InvalidArgumentException;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
@@ -18,8 +19,9 @@ use Tests\Traits\SetupLendyPH;
  *
  * - `lending_company`, today's chart and the default when no template is sent;
  * - `cooperative`, the same chart plus the rows below, with `net_surplus`
- *   posting to 3080 Undivided Net Surplus. 3010–3030 stay, so every mapping
- *   keeps working (an admin can deactivate them).
+ *   posting to 3080 Undivided Net Surplus and the savings roles (Phase 3) to
+ *   2050, 2060, 5160 and 2210. 3010–3030 stay, so every mapping keeps working
+ *   (an admin can deactivate them).
  *
  * {@see self::COOPERATIVE_ADDITIONS} mirrors `COOPERATIVE_CHART_ADDITIONS` in
  * the frontend's `src/constants/chart-of-accounts.ts`, code for code and name
@@ -45,6 +47,7 @@ class ChartTemplatesTest extends TestCase
         '3073' => ['Community Development Fund', 'equity', '3070', false, false, null],
         '3074' => ['Optional Fund', 'equity', '3070', false, false, null],
         '3080' => ['Undivided Net Surplus', 'equity', '3000', false, false, null],
+        '5160' => ['Interest Expense on Deposits', 'expense', '5000', false, false, null],
     ];
 
     protected function setUp(): void
@@ -77,7 +80,7 @@ class ChartTemplatesTest extends TestCase
         $this->assertSame(count(ChartOfAccountsSeeder::CHART), AccountingAccount::query()->count());
     }
 
-    public function test_the_cooperative_template_adds_its_ten_rows_and_posts_net_surplus_to_3080(): void
+    public function test_the_cooperative_template_adds_its_rows_posts_net_surplus_to_3080_and_maps_the_savings_roles(): void
     {
         $response = $this->postJson('/api/accounting/accounts/seed', ['template' => 'cooperative'])->assertCreated();
 
@@ -85,7 +88,7 @@ class ChartTemplatesTest extends TestCase
         ksort($expected, SORT_STRING);
 
         $this->assertSame($expected, $this->storedChart());
-        $this->assertCount(count(ChartOfAccountsSeeder::CHART) + 10, $response->json('data'));
+        $this->assertCount(count(ChartOfAccountsSeeder::CHART) + count(self::COOPERATIVE_ADDITIONS), $response->json('data'));
         $this->assertSame(array_map('strval', array_keys($expected)), array_column($response->json('data'), 'code'));
 
         $mapping = $this->storedMapping();
@@ -93,6 +96,14 @@ class ChartTemplatesTest extends TestCase
         $this->assertSame(
             array_merge(ChartOfAccountsSeeder::DEFAULT_MAPPING_CODES, ['net_surplus' => '3080']),
             $mapping,
+        );
+
+        $codes = AccountingAccount::query()->pluck('code', 'id');
+        $this->assertSame(
+            ['savings_deposits' => '2050', 'time_deposits' => '2060', 'interest_expense_deposits' => '5160', 'withholding_tax_deposits' => '2210'],
+            collect(PostingRules::SAVINGS_ROLES)->mapWithKeys(fn (string $role) => [
+                $role => $codes[AccountingAccountMapping::query()->where('role', $role)->value('accounting_account_id')] ?? null,
+            ])->all(),
         );
 
         foreach (['3010', '3020', '3030'] as $code) {
@@ -133,7 +144,7 @@ class ChartTemplatesTest extends TestCase
 
         $row = AuditLog::query()->where('action', 'chart_of_accounts_seeded')->sole();
         $this->assertSame('cooperative', $row->new_values['template']);
-        $this->assertSame(count(ChartOfAccountsSeeder::CHART) + 10, $row->new_values['accounts']);
+        $this->assertSame(count(ChartOfAccountsSeeder::CHART) + count(self::COOPERATIVE_ADDITIONS), $row->new_values['accounts']);
         $this->assertSame($this->admin->id, $row->user_id);
     }
 
@@ -169,7 +180,7 @@ class ChartTemplatesTest extends TestCase
         $this->postJson('/api/accounting/accounts/seed')->assertStatus(409);
         $this->postJson('/api/accounting/accounts/seed', ['template' => 'cooperative'])->assertStatus(409);
 
-        $this->assertSame(count(ChartOfAccountsSeeder::CHART) + 10, AccountingAccount::query()->count());
+        $this->assertSame(count(ChartOfAccountsSeeder::CHART) + count(self::COOPERATIVE_ADDITIONS), AccountingAccount::query()->count());
     }
 
     public function test_the_service_refuses_an_unknown_template(): void
@@ -186,7 +197,7 @@ class ChartTemplatesTest extends TestCase
         $this->assertSame(ChartOfAccountsSeeder::CHART, $seeder->chartFor('lending_company'));
         $this->assertSame(ChartOfAccountsSeeder::DEFAULT_MAPPING_CODES, $seeder->mappingFor('lending_company'));
         $this->assertSame(array_map('strval', array_keys(self::COOPERATIVE_ADDITIONS)), array_column(ChartOfAccountsSeeder::COOPERATIVE_ADDITIONS, 'code'));
-        $this->assertCount(count(ChartOfAccountsSeeder::CHART) + 10, $seeder->chartFor('cooperative'));
+        $this->assertCount(count(ChartOfAccountsSeeder::CHART) + count(self::COOPERATIVE_ADDITIONS), $seeder->chartFor('cooperative'));
         $this->assertSame('3080', $seeder->mappingFor('cooperative')['net_surplus']);
         $this->assertSame(['lending_company', 'cooperative'], ChartOfAccountsSeeder::TEMPLATES);
     }

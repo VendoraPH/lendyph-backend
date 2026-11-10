@@ -186,6 +186,13 @@ class RoleAndPermissionSeeder extends Seeder
             // 2026_11_09_100000_add_reminders_permissions, which grants them on
             // the already-migrated deployments.
             'reminders:view', 'reminders:send', 'reminders:pause', 'reminders:settings',
+
+            // Savings & Deposits (Phase 3). admin and super_admin only, through
+            // Permission::all() below; no other role lists them. Mirrors
+            // 2026_11_10_500300_add_savings_permissions, which grants them on
+            // the already-migrated deployments.
+            'savings:view', 'savings:create', 'savings:transact', 'savings:close',
+            'savings:approve', 'savings:post', 'savings:settings',
         ];
 
         $guard = 'web';

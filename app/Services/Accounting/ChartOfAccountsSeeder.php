@@ -246,16 +246,28 @@ final class ChartOfAccountsSeeder
         ['code' => '3073', 'name' => 'Community Development Fund', 'type' => 'equity', 'parent' => '3070'],
         ['code' => '3074', 'name' => 'Optional Fund', 'type' => 'equity', 'parent' => '3070'],
         ['code' => '3080', 'name' => 'Undivided Net Surplus', 'type' => 'equity', 'parent' => '3000'],
+        // Interest paid on members' savings and time deposits (Phase 3,
+        // approved 2026-11-10), credited when paid (cash basis).
+        ['code' => '5160', 'name' => 'Interest Expense on Deposits', 'type' => 'expense', 'parent' => '5000'],
     ];
 
     /**
      * The cooperative template's posting roles that differ from
      * {@see self::DEFAULT_MAPPING_CODES}: its year-end result goes to
-     * Undivided Net Surplus, not Retained Earnings.
+     * Undivided Net Surplus, not Retained Earnings, and its savings roles
+     * (Phase 3) point at its deposit accounts. A lending company's chart has
+     * no deposit accounts, so it gets the savings roles only from
+     * `savings:prepare-books`.
      *
      * @var array<string, string>
      */
-    public const COOPERATIVE_MAPPING_OVERRIDES = ['net_surplus' => '3080'];
+    public const COOPERATIVE_MAPPING_OVERRIDES = [
+        'net_surplus' => '3080',
+        'savings_deposits' => '2050',
+        'time_deposits' => '2060',
+        'interest_expense_deposits' => '5160',
+        'withholding_tax_deposits' => '2210',
+    ];
 
     /**
      * Which seeded account each posting role points at by default.

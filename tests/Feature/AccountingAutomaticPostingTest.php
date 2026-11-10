@@ -10,6 +10,7 @@ use App\Models\Loan;
 use App\Models\LoanProduct;
 use App\Models\Repayment;
 use App\Services\Accounting\AutomaticPoster;
+use App\Services\Accounting\PostingRules;
 use App\Services\LoanService;
 use App\Services\RepaymentService;
 use Illuminate\Database\QueryException;
@@ -1006,8 +1007,10 @@ class AccountingAutomaticPostingTest extends TestCase
         $this->assertArrayHasKey('borrower_advances', $mapping);
         $this->assertSame($this->account('2300'), $mapping['borrower_advances']);
 
-        // Every declared role resolves, so no rule can ask for one that does not.
-        foreach (AccountingAccountMapping::ROLES as $role) {
+        // Every declared lending role resolves, so no rule can ask for one that
+        // does not. The savings roles (Phase 3) need deposit accounts the
+        // lending chart doesn't carry; savings fails closed there instead.
+        foreach (array_diff(AccountingAccountMapping::ROLES, PostingRules::SAVINGS_ROLES) as $role) {
             $this->assertArrayHasKey($role, $mapping, "The {$role} role was not seeded.");
         }
     }

@@ -46,8 +46,20 @@ use App\Models\ReminderTemplate;
 use App\Models\Repayment;
 use App\Models\RepaymentAllocation;
 use App\Models\Role;
+use App\Models\SavingsAccount;
+use App\Models\SavingsApproval;
+use App\Models\SavingsHold;
+use App\Models\SavingsIdempotencyKey;
+use App\Models\SavingsInterestRun;
+use App\Models\SavingsInterestRunLine;
+use App\Models\SavingsProduct;
+use App\Models\SavingsProductRate;
+use App\Models\SavingsSetting;
+use App\Models\SavingsTaxRule;
+use App\Models\SavingsTransaction;
 use App\Models\ShareCapitalLedger;
 use App\Models\ShareCapitalPledge;
+use App\Models\TimeDeposit;
 use App\Models\User;
 use Illuminate\Database\Eloquent\Builder;
 
@@ -139,6 +151,21 @@ class AuditLogModules
         CreditScorecardRevision::class => 'credit_scoring',
         CreditApplicationProfile::class => 'credit_scoring',
         CreditDecision::class => 'credit_scoring',
+        // Savings & Deposits (Phase 3): every savings model, including the
+        // ones no module writes audit rows for today, so a later writer never
+        // drifts into `system`.
+        SavingsSetting::class => 'savings',
+        SavingsProduct::class => 'savings',
+        SavingsProductRate::class => 'savings',
+        SavingsTaxRule::class => 'savings',
+        SavingsAccount::class => 'savings',
+        SavingsTransaction::class => 'savings',
+        SavingsHold::class => 'savings',
+        SavingsApproval::class => 'savings',
+        TimeDeposit::class => 'savings',
+        SavingsInterestRun::class => 'savings',
+        SavingsInterestRunLine::class => 'savings',
+        SavingsIdempotencyKey::class => 'savings',
         // Deliberately system: an import run is housekeeping, not a record
         // any module's screen shows.
         CsvImportRun::class => self::UNMAPPED,
