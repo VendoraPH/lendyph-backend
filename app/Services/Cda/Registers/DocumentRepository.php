@@ -223,6 +223,28 @@ final class DocumentRepository
         }
     }
 
+    /**
+     * The ids of the `documents` file rows the signed-in user may download:
+     * every version file of a CDA document they may see (their own uploads
+     * and the server's exports alike), when they hold `cda:view` and
+     * `branches:view_all`; none otherwise. A subquery, for
+     * Document::resolveRouteBindingQuery().
+     *
+     * @return Builder<CdaDocumentVersion>
+     */
+    public function downloadableFileIds(User $user): Builder
+    {
+        $documents = CdaDocument::query()->select('cda_documents.id');
+
+        if (app(CdaAccess::class)->allows($user, CdaAccess::VIEW)) {
+            $this->scopeVisible($documents, $user);
+        } else {
+            $documents->whereRaw('1 = 0');
+        }
+
+        return CdaDocumentVersion::query()->select('document_id')->whereNotNull('document_id')->whereIn('cda_document_id', $documents);
+    }
+
     /** Whether the subject named on an upload exists. */
     public function subjectExists(string $type, int $id): bool
     {

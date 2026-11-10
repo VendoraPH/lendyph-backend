@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Borrower;
 use App\Models\Document;
+use App\Services\Cda\Registers\DocumentDownloads;
 use App\Services\DownloadFilename;
 use App\Services\SignedFileLink;
 use Illuminate\Http\Request;
@@ -47,6 +48,8 @@ class FileController extends Controller
     public function document(Request $request, Document $document): StreamedResponse
     {
         $this->assertLinkIsStillLive($request);
+        abort_if(! $document->file_path || ! Storage::disk('private')->exists($document->file_path), 404);
+        app(DocumentDownloads::class)->record($request, $document);
 
         return $this->stream($document->file_path, $document->original_filename);
     }

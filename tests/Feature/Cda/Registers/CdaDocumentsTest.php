@@ -288,4 +288,23 @@ class CdaDocumentsTest extends TestCase
         $this->assertSame($one, $queries());
         $this->assertNotNull($this->getJson('/api/cda/periods/2026/documents')->json('data.0.created_by.name'));
     }
+
+    public function test_exports_of_restricted_reports_are_hidden_from_the_list_without_their_view_permission(): void
+    {
+        $period = $this->period();
+        $report = fn (string $type) => CdaReport::query()->where('period_id', $period->id)->where('report_type', $type)->where('part', 'annual')->sole();
+        $capr = CdaDocument::factory()->create(['period_id' => $period->id, 'category' => 'report_export', 'report_id' => $report('capr')->id]);
+        $fs = CdaDocument::factory()->create(['period_id' => $period->id, 'category' => 'report_export', 'report_id' => $report('financial_statements')->id]);
+        $atir = CdaDocument::factory()->create(['period_id' => $period->id, 'category' => 'report_export', 'report_id' => $report('atir')->id]);
+
+        $this->actingAs($this->cdaUser([CdaAccess::VIEW]));
+        $rows = $this->getJson('/api/cda/periods/2026/documents?category=report_export')->assertOk()->json('data');
+        $this->assertSame([$capr->id], array_column($rows, 'id'));
+        $this->assertSame('Report export', $rows[0]['category_label']);
+
+        $this->actingAs($this->cdaUser([CdaAccess::VIEW, CdaAccess::VIEW_AUDIT, CdaAccess::VIEW_TAX]));
+        $ids = array_column($this->getJson('/api/cda/periods/2026/documents?category=report_export')->json('data'), 'id');
+        sort($ids);
+        $this->assertSame([$capr->id, $fs->id, $atir->id], $ids);
+    }
 }

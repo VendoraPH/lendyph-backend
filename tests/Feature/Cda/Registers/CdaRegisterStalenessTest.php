@@ -12,7 +12,8 @@ use Tests\Traits\SetupLendyPH;
  * A register write marks the draft reports that read it as stale (CDA design
  * §4), so the screen offers Refresh: officers feed CAPR and the officers
  * report, social programs feed CAPR, the social audit and the ABR, and
- * mediation feeds CAPR and the mediation halves it overlaps. Reports past
+ * mediation feeds only the mediation halves it overlaps (CAPR may not read
+ * mediation sources since C1's mediation-only rule). Reports past
  * draft, and reports that don't apply (ABR without a CTE), are left
  * alone.
  */
@@ -61,6 +62,6 @@ class CdaRegisterStalenessTest extends TestCase
 
         CdaReport::query()->update(['stale_at' => null]);
         $this->postJson('/api/cda/periods/2026/mediation-cases', ['filed_on' => '2026-08-03', 'status' => 'pending'])->assertCreated();
-        $this->assertSame(['capr/annual', 'mediation/h2'], $this->stale());
+        $this->assertSame(['mediation/h2'], $this->stale());
     }
 }

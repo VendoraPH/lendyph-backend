@@ -12,13 +12,17 @@ use App\Services\Cda\CdaAccess;
  *
  * #510's categories, plus one per report type so a template's document rule
  * (`document_category`) and an export can name its report, plus training
- * certificates and submission proofs.
+ * certificates, submission proofs and report exports (an export is
+ * restricted by its report's type, through `report_id`).
  */
 final class DocumentCategories
 {
     public const CERTIFICATES = 'certificates';
 
     public const SUBMISSION_PROOF = 'submission_proof';
+
+    /** A report's server export (slice C4): restricted by its report's type. */
+    public const REPORT_EXPORT = 'report_export';
 
     /** @var array<string, string> key => words */
     public const LABELS = [
@@ -37,6 +41,7 @@ final class DocumentCategories
         'minutes' => 'Minutes of meetings',
         self::CERTIFICATES => 'Training certificates',
         self::SUBMISSION_PROOF => 'Proof of submission',
+        self::REPORT_EXPORT => 'Report export',
         'other' => 'Other',
     ];
 
@@ -59,13 +64,13 @@ final class DocumentCategories
 
     /**
      * The categories staff pick on an upload: proofs come only from a
-     * submission.
+     * submission, exports only from the server.
      *
      * @return list<string>
      */
     public static function uploadable(): array
     {
-        return array_values(array_diff(self::keys(), [self::SUBMISSION_PROOF]));
+        return array_values(array_diff(self::keys(), [self::SUBMISSION_PROOF, self::REPORT_EXPORT]));
     }
 
     public static function label(string $category): string

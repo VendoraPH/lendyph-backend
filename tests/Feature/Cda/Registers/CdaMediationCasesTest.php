@@ -3,6 +3,7 @@
 namespace Tests\Feature\Cda\Registers;
 
 use App\Models\AuditLog;
+use App\Models\CdaDocument;
 use App\Models\CdaMediationCase;
 use App\Services\Cda\CdaAccess;
 use Illuminate\Support\Carbon;
@@ -127,5 +128,25 @@ class CdaMediationCasesTest extends TestCase
         $this->postJson('/api/cda/periods/2026/mediation-cases', $body)->assertCreated();
         $this->putJson("/api/cda/mediation-cases/{$case->id}", ['meetings_count' => 1])->assertOk();
         $this->deleteJson("/api/cda/mediation-cases/{$case->id}")->assertOk();
+    }
+
+    public function test_a_deleted_cases_number_is_never_reused_and_its_documents_stay_linked(): void
+    {
+        $this->actingAs($this->cdaUser([CdaAccess::VIEW, CdaAccess::VIEW_MEDIATION, CdaAccess::MANAGE_MEDIATION]));
+        $this->postJson('/api/cda/periods/2026/mediation-cases', ['filed_on' => '2026-02-10', 'status' => 'pending'])->assertCreated();
+        $last = $this->postJson('/api/cda/periods/2026/mediation-cases', ['filed_on' => '2026-03-10', 'status' => 'pending'])->assertCreated()->json('data');
+        $document = CdaDocument::factory()->create(['period_id' => $this->period()->id, 'category' => 'other', 'subject_type' => 'case', 'subject_id' => $last['id']]);
+
+        $this->deleteJson("/api/cda/mediation-cases/{$last['id']}")->assertOk();
+
+        $this->assertSoftDeleted('cda_mediation_cases', ['id' => $last['id']]);
+        $this->postJson('/api/cda/periods/2026/mediation-cases', ['filed_on' => '2026-04-01', 'status' => 'pending'])
+            ->assertCreated()->assertJsonPath('data.case_number', 'MC-2026-0003');
+        $this->assertNotContains($last['id'], array_column($this->getJson('/api/cda/periods/2026/mediation-cases')->json('data'), 'id'));
+
+        $document->refresh();
+        $this->assertSame('case', $document->subject_type);
+        $this->assertSame($last['case_number'], CdaMediationCase::withTrashed()->findOrFail($document->subject_id)->case_number);
+        $this->assertContains($document->id, array_column($this->getJson('/api/cda/periods/2026/documents')->assertOk()->json('data'), 'id'));
     }
 }
