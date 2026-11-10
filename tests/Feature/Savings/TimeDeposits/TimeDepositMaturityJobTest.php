@@ -114,6 +114,38 @@ class TimeDepositMaturityJobTest extends TestCase
         $this->assertSame(1, $this->settlementJournals());
     }
 
+    public function test_the_nightly_payout_into_savings_is_not_member_activity(): void
+    {
+        $account = $this->savingsAccount();
+        $deposit = $this->placed(['payout_account_id' => $account->id]);
+        $account->forceFill(['status' => 'dormant', 'dormant_since' => '2026-11-10', 'last_member_activity_on' => '2026-11-10'])->saveQuietly();
+
+        $this->travelTo(Carbon::parse('2027-02-08 00:40:00', 'Asia/Manila'));
+        $this->artisan('savings:mature-time-deposits')->assertSuccessful();
+
+        $this->assertSame('withdrawn', $deposit->refresh()->status);
+        $account->refresh();
+        $this->assertSame('100739.73', $account->ledger_balance);
+        $this->assertSame('dormant', $account->status);
+        $this->assertSame('2026-11-10', $account->last_member_activity_on->toDateString());
+        $this->assertSame(0, \App\Models\AuditLog::query()->where('action', 'savings_account_reactivated')->where('auditable_id', $account->id)->count());
+    }
+
+    public function test_a_staff_payout_into_savings_is_member_activity(): void
+    {
+        $account = $this->savingsAccount();
+        $deposit = $this->placed(['payout_account_id' => $account->id]);
+        $account->forceFill(['status' => 'dormant', 'dormant_since' => '2026-11-10', 'last_member_activity_on' => '2026-11-10'])->saveQuietly();
+
+        $this->travelTo(Carbon::parse('2027-02-08 09:00:00', 'Asia/Manila'));
+        $this->idem("/api/savings/time-deposits/{$deposit->id}/settle", ['date' => '2027-02-08', 'action' => 'payout', 'payout_method' => 'savings'])
+            ->assertCreated();
+
+        $account->refresh();
+        $this->assertSame('active', $account->status);
+        $this->assertSame('2027-02-08', $account->last_member_activity_on->toDateString());
+    }
+
     public function test_it_does_nothing_with_no_placements(): void
     {
         $this->artisan('savings:mature-time-deposits')->assertSuccessful();
