@@ -5,6 +5,7 @@ namespace Tests\Feature\Cda\Members;
 use App\Models\Borrower;
 use App\Models\Loan;
 use App\Models\LoanProduct;
+use App\Services\LoanAdjustmentService;
 use App\Services\LoanService;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -189,6 +190,40 @@ class FormerMemberCreditTest extends TestCase
 
         $this->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'pay', 'method' => 'cash'])
             ->assertJsonMissingValidationErrors('interest_option');
+    }
+
+    public function test_the_extension_rechecks_defer_under_the_loan_lock(): void
+    {
+        $loan = $this->createReleasedLoan(['product' => ['term' => 1, 'frequency' => 'monthly'], 'principal_amount' => 10000]);
+        $this->assertTrue($loan->isOneMonthTerm());
+        $this->end($loan->borrower, 'deceased');
+
+        try {
+            app(LoanAdjustmentService::class)->extendLoan($loan, null, $this->admin, 'defer');
+            $this->fail('A deceased member\'s loan was extended on defer.');
+        } catch (ValidationException $e) {
+            $this->assertStringContainsString('membership ended', $e->errors()['interest_option'][0]);
+        }
+
+        $this->assertSame(0, $loan->adjustments()->count());
+    }
+
+    public function test_restructure_and_term_extension_requests_are_refused_for_a_former_member(): void
+    {
+        $loan = $this->createReleasedLoan();
+        $this->end($loan->borrower, 'withdrawn');
+
+        $restructure = $this->postJson("/api/loans/{$loan->id}/adjustments", ['adjustment_type' => 'restructure', 'new_values' => ['term' => 12]])
+            ->assertUnprocessable()->assertJsonValidationErrors('adjustment_type');
+        $this->assertStringContainsString('membership ended', $restructure->json('errors.adjustment_type.0'));
+
+        $this->postJson("/api/loans/{$loan->id}/adjustments", ['adjustment_type' => 'term_extension', 'new_values' => ['additional_terms' => 2]])
+            ->assertUnprocessable()->assertJsonValidationErrors('adjustment_type');
+
+        $this->postJson("/api/loans/{$loan->id}/adjustments", ['adjustment_type' => 'penalty_waiver', 'new_values' => ['waive_all' => true]])
+            ->assertJsonMissingValidationErrors('adjustment_type');
+        $this->postJson("/api/loans/{$loan->id}/adjustments", ['adjustment_type' => 'balance_adjustment', 'new_values' => ['target_principal_balance' => 1000]])
+            ->assertJsonMissingValidationErrors('adjustment_type');
     }
 
     public function test_share_capital_refuses_a_withdrawn_member_and_allows_a_deceased_ones_estate(): void

@@ -137,7 +137,13 @@ final class TemplateDefinitionValidator
         'document' => ['document_category', 'stage', 'final'],
     ];
 
-    private const CELL = '/^[A-Za-z0-9 _]{1,31}!\$?[A-Z]{1,3}\$?[1-9]\d{0,6}$/';
+    /**
+     * A cell address, the forms the export's XlsxTemplateFiller reads: an
+     * unquoted sheet name, or a quoted one holding any character Excel allows
+     * in a sheet name (not ' [ ] : * ? / \, with '' for a literal quote),
+     * then `!`, and a column and row, either one absolute (`$`).
+     */
+    private const CELL = "/^(?:'(?:[^'\\[\\]:*?\\/\\\\]|''){1,31}'|[^'!\\[\\]:*?\\/\\\\]{1,31})!\\$?[A-Za-z]{1,3}\\$?[1-9]\\d{0,6}$/";
 
     /** @var list<array{path: string, message: string}> */
     private array $errors = [];

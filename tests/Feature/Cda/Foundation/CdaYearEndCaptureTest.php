@@ -140,17 +140,24 @@ class CdaYearEndCaptureTest extends TestCase
         $this->assertStringContainsString('not as of Dec 31, 2026', $capture['basis_note']);
     }
 
-    public function test_a_run_early_on_dec_31_is_refused_or_kept_not_exact(): void
+    public function test_a_run_early_on_dec_31_is_refused_even_as_a_backfill(): void
     {
         Carbon::setTestNow(Carbon::parse('2026-12-31 09:00:00', 'Asia/Manila'));
 
         $this->artisan('cda:capture-year-end')->expectsOutputToContain('23:55')->assertFailed();
         $this->assertSame(0, CdaReportingPeriod::query()->count());
 
-        $this->artisan('cda:capture-year-end', ['--backfill' => true])->assertSuccessful();
-        $capture = CdaReportingPeriod::query()->where('year', 2026)->firstOrFail()->year_end_capture;
-        $this->assertFalse($capture['exact']);
-        $this->assertStringContainsString('2026-12-31 09:00', $capture['basis_note']);
+        // A backfill this early would stand and block the exact capture
+        // tonight (C1 re-review, M2).
+        $this->artisan('cda:capture-year-end', ['--backfill' => true])
+            ->expectsOutputToContain('Wait for the 23:55 capture tonight.')
+            ->assertFailed();
+        $this->artisan('cda:capture-year-end', ['--date' => '2026-12-31', '--backfill' => true])->assertFailed();
+        $this->assertSame(0, CdaReportingPeriod::query()->count());
+
+        Carbon::setTestNow(Carbon::parse('2026-12-31 23:58:00', 'Asia/Manila'));
+        $this->artisan('cda:capture-year-end')->assertSuccessful();
+        $this->assertTrue(CdaReportingPeriod::query()->where('year', 2026)->firstOrFail()->year_end_capture['exact']);
     }
 
     public function test_the_scheduled_run_on_dec_31_is_exact(): void

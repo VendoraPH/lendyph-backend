@@ -90,6 +90,33 @@ class CdaTemplatesTest extends TestCase
         $this->assertStringContainsString('next_tuesday', $messages);
     }
 
+    public function test_excel_cells_accept_quoted_and_absolute_sheet_addresses(): void
+    {
+        $withCells = function (array $cells, string $draftCell): array {
+            $definition = $this->capr();
+            $definition['export']['excel'] = ['mode' => 'template', 'cells' => $cells, 'draft_cell' => $draftCell];
+
+            return $definition;
+        };
+
+        $valid = $withCells([
+            "'Annex A'!C3" => 'general.cooperative_name',
+            "'Sched-1'!B2" => 'membership.members_total',
+            "'Annex (A)'!D4" => 'profile.tin',
+            'Sheet1!$C$5' => 'general.tin',
+            "'O''Brien'!a1" => 'general.address',
+        ], "'Annex A'!\$A\$1");
+        $this->assertSame([], $this->validator->validate($valid, 'capr'));
+
+        foreach (["'Bad/Name'!A1", 'Sheet1!A0', "'Annex A!A1", "'Annex'A'!A1", "'Colon:'!B2"] as $bad) {
+            $errors = $this->validator->validate($withCells([$bad => 'general.tin'], 'CAPR!A1'), 'capr');
+            $this->assertNotSame([], $errors, $bad);
+
+            $errors = $this->validator->validate($withCells(['CAPR!C5' => 'general.tin'], $bad), 'capr');
+            $this->assertStringContainsString('draft_cell', collect($errors)->pluck('path')->implode(' '), $bad);
+        }
+    }
+
     public function test_mediation_sources_are_refused_outside_the_mediation_template(): void
     {
         $leaks = [

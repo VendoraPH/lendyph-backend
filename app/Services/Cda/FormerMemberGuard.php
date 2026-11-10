@@ -62,6 +62,23 @@ final class FormerMemberGuard
         return $refusals;
     }
 
+    /**
+     * No new credit on a loan whose member has withdrawn or died, re-checked
+     * under the caller's loan lock with the member row read under a shared
+     * lock: an extension on "defer" (C1 re-review, L2).
+     *
+     * @throws ValidationException 422 in words, on `$field`
+     */
+    public function assertMemberCurrent(Loan $loan, string $field, string $advice = ''): void
+    {
+        $member = Borrower::query()->whereKey($loan->borrower_id)->sharedLock()
+            ->first(['id', 'first_name', 'middle_name', 'last_name', 'suffix', 'borrower_code', 'status', 'membership_ended_on']);
+
+        if ($member !== null && $member->isFormerMember()) {
+            throw ValidationException::withMessages([$field => trim(NotAFormerMember::messageFor($member).' '.$advice)]);
+        }
+    }
+
     /** @throws ValidationException 422 in words when the loan can't be released */
     public function assertReleasable(Loan $loan): void
     {

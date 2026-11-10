@@ -40,9 +40,6 @@ class ExtendLoanRequest extends FormRequest
     }
 
     /**
-     * @return array<string, string>
-     */
-    /**
      * An extension on "defer" moves unpaid interest into a new period: new
      * credit, so it's refused for a withdrawn or deceased member. "pay"
      * collects what's owed and stays allowed (C1 review, L3).
@@ -62,6 +59,9 @@ class ExtendLoanRequest extends FormRequest
         ];
     }
 
+    /**
+     * @return array<string, string>
+     */
     public function messages(): array
     {
         return [

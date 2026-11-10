@@ -49,8 +49,8 @@ final class YearEndCapture
      * Capture the year ending on `$asOf` (a Dec 31).
      *
      * - On that Dec 31 itself (Manila), from 23:55, the capture is exact: the
-     *   balances read are the year-end ones. Earlier that day it is refused
-     *   without `$backfill`, and kept not exact with it.
+     *   balances read are the year-end ones. Earlier that day it is refused,
+     *   `$backfill` or not, so the exact capture tonight isn't blocked.
      * - A later date needs `$backfill`: the loan balances read are the ones
      *   on the capture day, not on Dec 31, so it is kept with `exact: false`
      *   and a basis note saying so.
@@ -77,6 +77,12 @@ final class YearEndCapture
         // Exact only from 23:55 on Dec 31 itself, after the day's business
         // and the portfolio snapshot (C1 review, M3).
         $exact = $asOf === $today && $now->format('H:i') >= self::EXACT_FROM;
+
+        // A backfill earlier on Dec 31 would stand and keep the exact capture
+        // tonight from being taken (C1 re-review, M2).
+        if ($asOf === $today && ! $exact) {
+            throw new InvalidArgumentException("It is {$now->format('H:i')} on {$asOf}, before ".self::EXACT_FROM.' Manila. Wait for the 23:55 capture tonight.');
+        }
 
         if (! $exact && ! $backfill) {
             throw new InvalidArgumentException($asOf === $today

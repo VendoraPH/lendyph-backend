@@ -7,6 +7,8 @@ use App\Models\AccountingJournalLine;
 use App\Models\AccountingReconciliationLine;
 use App\Models\AuditLog;
 use App\Models\Branch;
+use App\Models\CdaDocument;
+use App\Models\CdaDocumentVersion;
 use App\Models\Collateral;
 use App\Models\Fee;
 use App\Models\Loan;
@@ -387,6 +389,14 @@ class AuditLogResource extends JsonResource
 
         if ($model instanceof AccountingReconciliationLine) {
             return self::statementLineLabel($model);
+        }
+
+        // A mediation document's title (or a version's) can name the parties
+        // to a dispute, so it reads by type and id only (C1 re-review, M1).
+        $document = $model instanceof CdaDocumentVersion ? $model->cdaDocument : $model;
+
+        if ($document instanceof CdaDocument && $document->isMediation()) {
+            return $this->fallbackLabel();
         }
 
         // Prefer the most human-friendly attribute available on the related model.
