@@ -2,6 +2,7 @@
 
 namespace Tests\Feature\Savings\Interest;
 
+use App\Models\Branch;
 use App\Models\SavingsAccount;
 use App\Models\SavingsInterestRun;
 use App\Models\SavingsProduct;
@@ -82,6 +83,37 @@ class InterestRunSequenceTest extends TestCase
 
         $this->assertSame('approved', $q2->refresh()->status);
         $this->assertSame(0, SavingsTransaction::query()->where('interest_run_id', $q2->id)->count());
+    }
+
+    public function test_a_transitional_start_names_the_branch_that_blocks_it(): void
+    {
+        $far = Branch::factory()->create(['name' => 'Far Branch']);
+        $this->openAccount($this->product, 500_000, $far);
+        $farChecker = $this->userWith(['savings:view', 'savings:approve'], $far);
+
+        $this->onDay('2026-04-02');
+        $this->actingAs($this->maker)->postJson('/api/savings/interest-runs', ['product_id' => $this->product->id, 'period_start' => '2026-01-01', 'branch_ids' => [$this->branch->id]])->assertCreated();
+        $mainQ1 = SavingsInterestRun::query()->where('branch_id', $this->branch->id)->sole();
+        $this->actingAs($this->checker)->postJson("/api/savings/interest-runs/{$mainQ1->id}/approve")->assertOk();
+        $this->actingAs($this->maker)->postJson("/api/savings/interest-runs/{$mainQ1->id}/post")->assertOk();
+        $this->product->forceFill(['interest_crediting' => 'semi_annual'])->save();
+
+        $this->onDay('2026-07-02');
+        $this->actingAs($this->admin)->postJson('/api/savings/interest-runs/preview', ['product_id' => $this->product->id, 'period_start' => '2026-04-01'])
+            ->assertStatus(422)
+            ->assertJsonPath('errors.period_start.0', fn (string $message) => str_contains($message, 'Far Branch') && str_contains($message, 'no posted run'));
+
+        // Far Branch runs Jan 1 to Jun 30 under the new frequency; its next start is then Jul 1, not Apr 1.
+        $farRun = $this->actingAs($this->admin)->postJson('/api/savings/interest-runs', ['product_id' => $this->product->id, 'period_start' => '2026-01-01', 'branch_ids' => [$far->id]])
+            ->assertCreated()->json('data.0.id');
+        $this->actingAs($farChecker)->postJson("/api/savings/interest-runs/{$farRun}/approve")->assertOk();
+        $this->actingAs($this->admin)->postJson("/api/savings/interest-runs/{$farRun}/post")->assertOk();
+
+        $this->actingAs($this->admin)->postJson('/api/savings/interest-runs/preview', ['product_id' => $this->product->id, 'period_start' => '2026-04-01'])
+            ->assertStatus(422)
+            ->assertJsonPath('errors.period_start.0', fn (string $message) => str_contains($message, 'Far Branch') && str_contains($message, 'Jul 1, 2026'));
+        $this->actingAs($this->maker)->postJson('/api/savings/interest-runs/preview', ['product_id' => $this->product->id, 'period_start' => '2026-04-01'])
+            ->assertOk()->assertJsonPath('data.period_end', '2026-06-30');
     }
 
     public function test_a_change_from_quarterly_to_semi_annual_runs_one_transitional_period(): void

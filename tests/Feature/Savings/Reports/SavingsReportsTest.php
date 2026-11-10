@@ -212,6 +212,11 @@ class SavingsReportsTest extends TestCase
             ->assertJsonPath('date_to', '2027-02-28');
         $this->actingAs($this->reader)->getJson('/api/reports/savings/transactions?date_from=2015-01-01')
             ->assertStatus(422)->assertJsonValidationErrors('date_from');
+
+        // Maturities default a lone start to the end of its month, so the limit measures that month.
+        $this->actingAs($this->reader)->getJson('/api/reports/savings/time-deposit-maturities?date_from=2015-01-10')->assertOk()
+            ->assertJsonPath('date_from', '2015-01-10')
+            ->assertJsonPath('date_to', '2015-01-31');
     }
 
     public function test_dormant_accounts_only(): void
@@ -275,6 +280,22 @@ class SavingsReportsTest extends TestCase
 
         $csv = $this->actingAs($exporter)->get('/api/reports/savings/balances/export')->streamedContent();
         $this->assertStringContainsString('1000.00', $csv);
+    }
+
+    public function test_csv_cells_that_start_like_formulas_are_still_quoted(): void
+    {
+        foreach (['=HYPERLINK("http://x","y")', '-1+2'] as $first) {
+            $borrower = Borrower::factory()->create(['branch_id' => $this->branch->id, 'first_name' => $first, 'middle_name' => null, 'last_name' => 'Cruz']);
+            $account = SavingsAccount::factory()->create(['borrower_id' => $borrower->id, 'product_id' => $this->product->id, 'opened_on' => '2026-11-01']);
+            $this->deposit($account, 50_000);
+        }
+        $this->withoutMiddleware(ThrottleRequests::class);
+
+        $csv = $this->actingAs($this->userWith(['reports:export', 'savings:view']))->get('/api/reports/savings/balances/export')->assertOk()->streamedContent();
+
+        $this->assertStringContainsString("'\t=HYPERLINK", $csv);
+        $this->assertStringContainsString("'\t-1+2 Cruz", $csv);
+        $this->assertStringContainsString(',500.00,', $csv);
     }
 
     public function test_every_report_needs_reports_view_and_savings_view(): void

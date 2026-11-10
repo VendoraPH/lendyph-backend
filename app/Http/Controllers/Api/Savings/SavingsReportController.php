@@ -302,7 +302,7 @@ class SavingsReportController extends Controller
 
             foreach ($rows as $row) {
                 fputcsv($handle, array_map(
-                    fn (mixed $cell) => is_string($cell) && preg_match('/^-?\d+(\.\d+)?$/', $cell) === 1 ? $cell : self::sanitizeCsvCell($cell),
+                    fn (mixed $cell) => is_string($cell) && preg_match('/\A-?\d+(\.\d+)?\z/', $cell) === 1 ? $cell : self::sanitizeCsvCell($cell),
                     is_array($row) ? $row : iterator_to_array($row),
                 ));
             }

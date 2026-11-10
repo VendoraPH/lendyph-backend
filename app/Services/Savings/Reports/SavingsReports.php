@@ -128,10 +128,14 @@ class SavingsReports
     }
 
     /**
-     * A period from the filters (review L3). Neither end: this month, to today
-     * (`$wholeMonth`: to the month's end). Only a start: to today, or to the
-     * end of the start's month when that is later or `$wholeMonth`. Only an
-     * end: from the first of the end's month.
+     * A period from the filters (review L3):
+     * - neither end: the first of this month to today, or to this month's end
+     *   when `$wholeMonth`;
+     * - only a start: to the end of the start's month when `$wholeMonth` or
+     *   when the start is after today, otherwise to today;
+     * - only an end: from the first of the end's month.
+     *
+     * `$wholeMonth` is the time deposit maturities report's rule.
      *
      * @return array{0: string, 1: string}
      */

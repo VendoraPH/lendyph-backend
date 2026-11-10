@@ -4,6 +4,7 @@ namespace App\Services\Savings\Interest;
 
 use App\Models\SavingsInterestRun;
 use App\Models\SavingsInterestRunLine;
+use App\Models\SavingsProduct;
 use App\Models\User;
 use App\Services\Accounting\AutomaticPoster;
 use App\Services\LoanWriteTransaction;
@@ -19,7 +20,8 @@ use Illuminate\Support\Facades\DB;
  * who is not its maker (403), and post.
  *
  * Posting re-reads the account ids plainly, then, in one transaction, locks
- * the accounts (lock step 3) and the run (step 5) and re-checks the status.
+ * the product row, the accounts (lock step 3) and the run (step 5) and
+ * re-checks the status.
  * It works the figures out again under those locks and answers 409 when any
  * line differs from the draft the checker approved. Then it writes each
  * line's interest row and tax row (value date = the period's end, dated
@@ -32,6 +34,12 @@ use Illuminate\Support\Facades\DB;
  * in about 1.2 s on a local MySQL (InterestRunPostTimeTest, 2026-11-10), and
  * tellers on those accounts wait that long. A bulk ledger path, or chunked
  * posting, is for v1.1 if a branch outgrows it.
+ *
+ * Locks: create, post and reverse each take the product row, then the
+ * accounts, then the run. While one of them works out figures or writes the
+ * ledger, it holds the product row, so opening a new account on that product
+ * or adding a rate to it waits; teller deposits and withdrawals take only
+ * the account rows and don't wait on the product.
  */
 class RunPoster
 {
@@ -94,6 +102,8 @@ class RunPoster
             ->all();
 
         return LoanWriteTransaction::run(function () use ($run, $user, $start, $end, $accountIds): SavingsInterestRun {
+            // Product, then accounts, then run: the order create and reverse take too.
+            SavingsProduct::query()->whereKey($run->product_id)->lockForUpdate()->firstOrFail();
             $this->locks->accounts($accountIds);
             $locked = $this->lockRun($run);
 

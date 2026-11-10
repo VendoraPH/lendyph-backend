@@ -169,8 +169,12 @@ class RunBuilder
             $this->refuse('product_id', "{$product->name} is a time deposit product. Time deposits earn on their own terms; interest runs are for regular savings.");
         }
 
-        if (! InterestPeriod::isStart($product->interest_crediting, $start) && ! $this->isTransitional($product, $start, $branchIds)) {
-            $this->refuse('period_start', "Interest on {$product->name} is ".InterestPeriod::startsInWords($product->interest_crediting).'.');
+        if (! InterestPeriod::isStart($product->interest_crediting, $start)) {
+            $blocker = $this->transitionalBlocker($product, $start, $branchIds);
+
+            if ($blocker !== null) {
+                $this->refuse('period_start', "Interest on {$product->name} is ".InterestPeriod::startsInWords($product->interest_crediting).'.'.$blocker);
+            }
         }
 
         $end = $this->periodEnd($product, $start);
@@ -221,27 +225,37 @@ class RunBuilder
     }
 
     /**
-     * Whether a start that isn't a period start under the product's current
-     * frequency is the transitional period after a frequency change (review
-     * M2): every branch has a posted run and continues from it on `$start`.
+     * Why a start that isn't a period start under the product's current
+     * frequency can't be the transitional period after a frequency change
+     * (review M2), naming the branch that blocks it; null when every branch
+     * has a posted run and continues from it on `$start`.
      *
      * @param  list<int>  $branchIds
      */
-    private function isTransitional(SavingsProduct $product, string $start, array $branchIds): bool
+    private function transitionalBlocker(SavingsProduct $product, string $start, array $branchIds): ?string
     {
         if ($branchIds === []) {
-            return false;
+            return '';
         }
 
+        $names = Branch::query()->whereIn('id', $branchIds)->pluck('name', 'id');
+
         foreach ($branchIds as $branchId) {
+            $branch = $names[$branchId] ?? 'A branch';
             $posted = SavingsInterestRun::query()->where('product_id', $product->id)->where('branch_id', $branchId)->where('status', 'posted')->exists();
 
-            if (! $posted || $this->nextStart($product, $branchId) !== $start) {
-                return false;
+            if (! $posted) {
+                return " {$branch} has no posted run on this product, so its first period can't start on ".$this->day($start).'.';
+            }
+
+            $next = $this->nextStart($product, $branchId);
+
+            if ($next !== $start) {
+                return " {$branch}'s next interest period starts on ".$this->day((string) $next).', not '.$this->day($start).'.';
             }
         }
 
-        return true;
+        return null;
     }
 
     /**

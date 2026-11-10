@@ -78,7 +78,7 @@ class SavingsReportRequest extends FormRequest
                 return;
             }
 
-            [$from, $to] = SavingsReports::resolvePeriod($this->input('date_from'), $this->input('date_to'));
+            [$from, $to] = SavingsReports::resolvePeriod($this->input('date_from'), $this->input('date_to'), $this->wholeMonth());
 
             if (CarbonImmutable::parse($from)->addYears(self::MAX_SPAN_YEARS)->lessThan(CarbonImmutable::parse($to))) {
                 foreach (['date_from', 'date_to'] as $field) {
@@ -89,6 +89,15 @@ class SavingsReportRequest extends FormRequest
                 }
             }
         });
+    }
+
+    /**
+     * Whether the report reads whole months (the maturities report), so the
+     * limit measures the period that report resolves.
+     */
+    private function wholeMonth(): bool
+    {
+        return $this->is('api/reports/savings/time-deposit-maturities', 'api/reports/savings/time-deposit-maturities/*');
     }
 
     /**
