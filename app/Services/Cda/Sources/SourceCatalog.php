@@ -36,11 +36,13 @@ final class SourceCatalog
 
     /**
      * The keys whose figures are never overridden on a report (design §2,
-     * Task 14): loans, accounting, fs, share capital and savings.
+     * Task 14): loans, accounting, fs, share capital and savings, and (C1
+     * review, M2) another report's field and the PESOS result, which are
+     * built from them.
      *
      * @var list<string>
      */
-    public const NOT_OVERRIDABLE_PREFIXES = ['loans.', 'accounting.', 'fs.', 'share_capital.', 'savings.'];
+    public const NOT_OVERRIDABLE_PREFIXES = ['loans.', 'accounting.', 'fs.', 'share_capital.', 'savings.', 'report.', 'pesos.'];
 
     private const AS_OF = ['type' => 'date', 'default' => 'period_end'];
 

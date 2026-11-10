@@ -7,15 +7,16 @@ use App\Http\Requests\Cda\StoreCdaTemplateRequest;
 use App\Http\Requests\Cda\UpdateCdaTemplateRequest;
 use App\Http\Resources\Cda\CdaPresenter;
 use App\Models\CdaReportTemplate;
+use App\Models\CdaSetting;
 use App\Models\Document;
 use App\Services\Cda\CdaAccess;
 use App\Services\Cda\ReportTypes;
 use App\Services\Cda\TemplateDefinitionValidator;
 use App\Services\LoanWriteTransaction;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
@@ -32,6 +33,8 @@ use OpenApi\Attributes as OA;
  *   for the same cooperative types and asset classes.
  * - An active template is immutable (409); retire it, with a reason, and
  *   activate a new version. Reports keep the template they were created with.
+ * - Writes take the CDA settings row's lock first, one at a time; a
+ *   collision answers 409 (or 422 for a version taken), never 500.
  */
 class CdaTemplateController extends Controller
 {
@@ -77,11 +80,11 @@ class CdaTemplateController extends Controller
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
         responses: [new OA\Response(response: 200, description: 'The template'), new OA\Response(response: 403, description: 'Missing cda:view or branches:view_all'), new OA\Response(response: 404, description: 'No such template')],
     )]
-    public function show(Request $request, CdaReportTemplate $template): JsonResponse
+    public function show(Request $request, int $template): JsonResponse
     {
         $this->access->authorize($request->user(), CdaAccess::VIEW);
 
-        return response()->json(['success' => true, 'data' => CdaPresenter::template($template)]);
+        return response()->json(['success' => true, 'data' => CdaPresenter::template($this->find($template))]);
     }
 
     #[OA\Post(
@@ -104,13 +107,19 @@ class CdaTemplateController extends Controller
     )]
     public function store(StoreCdaTemplateRequest $request): JsonResponse
     {
-        $template = CdaReportTemplate::query()->create([
-            ...$request->validated(),
-            'cooperative_types' => $request->validated('cooperative_types') ?? [],
-            'asset_classes' => $request->validated('asset_classes') ?? [],
-            'status' => CdaReportTemplate::STATUS_DRAFT,
-            'created_by' => $request->user()->id,
-        ]);
+        try {
+            $template = $this->write(function () use ($request): CdaReportTemplate {
+                return CdaReportTemplate::query()->create([
+                    ...$request->validated(),
+                    'cooperative_types' => $request->validated('cooperative_types') ?? [],
+                    'asset_classes' => $request->validated('asset_classes') ?? [],
+                    'status' => CdaReportTemplate::STATUS_DRAFT,
+                    'created_by' => $request->user()->id,
+                ]);
+            });
+        } catch (UniqueConstraintViolationException) {
+            throw ValidationException::withMessages(['version' => 'This report type already has a template with that version.']);
+        }
 
         return response()->json(['success' => true, 'data' => CdaPresenter::template($template->refresh())], 201);
     }
@@ -124,18 +133,24 @@ class CdaTemplateController extends Controller
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
         responses: [new OA\Response(response: 200, description: 'The draft'), new OA\Response(response: 403, description: 'Not a super admin'), new OA\Response(response: 409, description: 'Not a draft')],
     )]
-    public function update(UpdateCdaTemplateRequest $request, CdaReportTemplate $template): JsonResponse
+    public function update(UpdateCdaTemplateRequest $request, int $template): JsonResponse
     {
-        $template = DB::transaction(function () use ($request, $template): CdaReportTemplate {
-            $locked = $this->lockDraft($template);
-            $locked->fill($request->validated());
+        $template = $this->find($template);
 
-            if ($locked->isDirty()) {
-                $locked->save();
-            }
+        try {
+            $template = $this->write(function () use ($request, $template): CdaReportTemplate {
+                $locked = $this->lockDraft($template);
+                $locked->fill($request->validated());
 
-            return $locked;
-        });
+                if ($locked->isDirty()) {
+                    $locked->save();
+                }
+
+                return $locked;
+            });
+        } catch (UniqueConstraintViolationException) {
+            throw ValidationException::withMessages(['version' => 'This report type already has a template with that version.']);
+        }
 
         return response()->json(['success' => true, 'data' => CdaPresenter::template($template->refresh())]);
     }
@@ -149,12 +164,12 @@ class CdaTemplateController extends Controller
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
         responses: [new OA\Response(response: 200, description: 'The active template'), new OA\Response(response: 403, description: 'Not a super admin'), new OA\Response(response: 409, description: 'Not a draft'), new OA\Response(response: 422, description: 'Invalid definition or an overlap')],
     )]
-    public function activate(Request $request, CdaReportTemplate $template, TemplateDefinitionValidator $validator): JsonResponse
+    public function activate(Request $request, int $template, TemplateDefinitionValidator $validator): JsonResponse
     {
         $this->access->authorizeTemplateManager($request->user());
+        $template = $this->find($template);
 
-        $template = DB::transaction(function () use ($template, $validator): CdaReportTemplate {
-            CdaReportTemplate::query()->where('report_type', $template->report_type)->where('status', CdaReportTemplate::STATUS_ACTIVE)->lockForUpdate()->get();
+        $template = $this->write(function () use ($template, $validator): CdaReportTemplate {
             $locked = $this->lockDraft($template);
 
             $errors = $validator->validate($locked->definition ?? [], $locked->report_type);
@@ -191,12 +206,13 @@ class CdaTemplateController extends Controller
         requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent(required: ['reason'], properties: [new OA\Property(property: 'reason', type: 'string')])),
         responses: [new OA\Response(response: 200, description: 'The retired template'), new OA\Response(response: 403, description: 'Not a super admin'), new OA\Response(response: 409, description: 'Not active'), new OA\Response(response: 422, description: 'No reason')],
     )]
-    public function retire(Request $request, CdaReportTemplate $template): JsonResponse
+    public function retire(Request $request, int $template): JsonResponse
     {
         $this->access->authorizeTemplateManager($request->user());
+        $template = $this->find($template);
         $reason = (string) $request->validate(['reason' => ['required', 'string', 'max:500']], ['reason.required' => 'Give the reason the template is retired.'])['reason'];
 
-        $template = DB::transaction(function () use ($template, $reason): CdaReportTemplate {
+        $template = $this->write(function () use ($template, $reason): CdaReportTemplate {
             $locked = CdaReportTemplate::query()->whereKey($template->id)->lockForUpdate()->firstOrFail();
 
             if ($locked->status !== CdaReportTemplate::STATUS_ACTIVE) {
@@ -220,9 +236,10 @@ class CdaTemplateController extends Controller
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
         responses: [new OA\Response(response: 200, description: 'The template with `excel_template`'), new OA\Response(response: 403, description: 'Not a super admin'), new OA\Response(response: 409, description: 'Not a draft'), new OA\Response(response: 422, description: 'Not an .xlsx workbook')],
     )]
-    public function excelFile(Request $request, CdaReportTemplate $template): JsonResponse
+    public function excelFile(Request $request, int $template): JsonResponse
     {
         $this->access->authorizeTemplateManager($request->user());
+        $template = $this->find($template);
         $request->validate(
             ['file' => ['required', 'file', 'max:10240', 'mimes:xlsx', 'extensions:xlsx']],
             ['file.mimes' => 'Upload the workbook as an .xlsx file.', 'file.extensions' => 'Upload the workbook as an .xlsx file.'],
@@ -236,7 +253,7 @@ class CdaTemplateController extends Controller
         $path = $upload->storeAs('cda/templates/'.$template->id, Str::uuid()->toString().'.xlsx', 'private');
 
         try {
-            $template = DB::transaction(function () use ($template, $upload, $path, $request): CdaReportTemplate {
+            $template = $this->write(function () use ($template, $upload, $path, $request): CdaReportTemplate {
                 $locked = $this->lockDraft($template);
                 $document = Document::query()->create([
                     'documentable_type' => CdaReportTemplate::class,
@@ -286,6 +303,34 @@ class CdaTemplateController extends Controller
         $errors = $validator->validate($input['definition'], $input['report_type']);
 
         return response()->json(['success' => true, 'data' => ['valid' => $errors === [], 'errors' => $errors]]);
+    }
+
+    /** The template, looked up only once the caller's permission is checked (C1 review, L4). */
+    private function find(int $id): CdaReportTemplate
+    {
+        $template = CdaReportTemplate::query()->find($id);
+        abort_if($template === null, 404, 'There is no such CDA template.');
+
+        return $template;
+    }
+
+    /**
+     * A template write, one at a time: it first locks the CDA settings row
+     * (the parent of every template), and a deadlock or lock timeout answers
+     * 409, never 500 (C1 review, L1).
+     *
+     * @template T
+     *
+     * @param  \Closure(): T  $write
+     * @return T
+     */
+    private function write(\Closure $write): mixed
+    {
+        return LoanWriteTransaction::run(function () use ($write): mixed {
+            CdaSetting::query()->whereKey(CdaSetting::current()->id)->lockForUpdate()->first();
+
+            return $write();
+        }, null, 'Another change to CDA templates was saved at the same moment. Reload and try again.');
     }
 
     private function lockDraft(CdaReportTemplate $template): CdaReportTemplate
