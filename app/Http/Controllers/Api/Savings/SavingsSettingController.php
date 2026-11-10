@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api\Savings;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Savings\StoreSavingsTaxRuleRequest;
 use App\Http\Requests\Savings\UpdateSavingsSettingsRequest;
+use App\Http\Resources\Savings\SavingsUserRef;
 use App\Models\SavingsSetting;
 use App\Models\SavingsTaxRule;
 use App\Services\Savings\TaxBook;
@@ -25,7 +26,7 @@ class SavingsSettingController extends Controller
     #[OA\Get(
         path: '/api/savings/settings',
         summary: 'Savings settings and withholding tax rules',
-        description: 'Money as two-decimal strings. `current_tax_rates` is the rate in force today per holder type; `tax_rules` is the whole append-only history, newest first.',
+        description: 'Money as two-decimal strings and rates as four-decimal strings; users as `{id, name}`. `current_tax_rates` is the rate in force today per holder type; `tax_rules` is the whole append-only history, newest first.',
         tags: ['Savings'],
         security: [['sanctum' => []]],
         responses: [
@@ -37,7 +38,7 @@ class SavingsSettingController extends Controller
     {
         abort_unless($request->user()->canAny(['savings:view', 'savings:settings']), 403);
 
-        return response()->json(['success' => true, 'data' => $this->present(SavingsSetting::current())]);
+        return response()->json(['success' => true, 'data' => $this->present(SavingsSetting::current()->load('updater'))]);
     }
 
     #[OA\Put(
@@ -68,7 +69,7 @@ class SavingsSettingController extends Controller
             $settings->save();
         }
 
-        return response()->json(['success' => true, 'message' => 'Savings settings saved.', 'data' => $this->present($settings->refresh())]);
+        return response()->json(['success' => true, 'message' => 'Savings settings saved.', 'data' => $this->present($settings->refresh()->load('updater'))]);
     }
 
     #[OA\Post(
@@ -92,7 +93,7 @@ class SavingsSettingController extends Controller
     {
         $rule = SavingsTaxRule::query()->create([...$request->validated(), 'created_by' => $request->user()->id]);
 
-        return response()->json(['success' => true, 'data' => $this->presentRule($rule->refresh())], 201);
+        return response()->json(['success' => true, 'data' => $this->presentRule($rule->refresh()->load('creator'))], 201);
     }
 
     /** @return array<string, mixed> */
@@ -104,10 +105,10 @@ class SavingsSettingController extends Controller
             'tier3_checkers' => $settings->tier3_checkers,
             'dormancy_months' => $settings->dormancy_months,
             'large_transaction_alert' => $settings->large_transaction_alert,
-            'updated_by' => $settings->updated_by,
+            'updated_by' => SavingsUserRef::from($settings->updater),
             'updated_at' => $settings->updated_at,
             'current_tax_rates' => $this->taxes->current(),
-            'tax_rules' => SavingsTaxRule::query()->orderByDesc('effective_from')->orderByDesc('id')->get()
+            'tax_rules' => SavingsTaxRule::query()->with('creator')->orderByDesc('effective_from')->orderByDesc('id')->get()
                 ->map(fn (SavingsTaxRule $rule) => $this->presentRule($rule))
                 ->all(),
         ];
@@ -121,7 +122,7 @@ class SavingsSettingController extends Controller
             'holder_type' => $rule->holder_type,
             'rate' => $rule->rate,
             'effective_from' => $rule->effective_from->toDateString(),
-            'created_by' => $rule->created_by,
+            'created_by' => SavingsUserRef::from($rule->creator),
             'created_at' => $rule->created_at,
         ];
     }

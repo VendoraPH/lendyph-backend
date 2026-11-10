@@ -30,7 +30,7 @@ class StoreSavingsProductRequest extends FormRequest
             'minimum_opening_balance' => ['sometimes', 'required', ...SavingsRules::money()],
             'maintaining_balance' => ['sometimes', 'required', ...SavingsRules::money()],
             'minimum_adb_for_interest' => ['sometimes', 'required', ...SavingsRules::money()],
-            'term_options_days' => ['required_if:kind,time_deposit', 'prohibited_unless:kind,time_deposit', 'array', 'min:1', 'max:20'],
+            'term_options_days' => ['nullable', 'required_if:kind,time_deposit', 'prohibited_unless:kind,time_deposit', 'array', 'min:1', 'max:20'],
             'term_options_days.*' => ['integer', 'between:1,3650', 'distinct'],
             'pretermination_product_id' => [
                 'nullable',

@@ -33,7 +33,7 @@ class SavingsProductController extends Controller
     #[OA\Get(
         path: '/api/savings/products',
         summary: 'Savings products',
-        description: 'In code order. Each carries `current_rates` (the rate in force today per term), `account_count` and `can_delete`. Filters: `kind`, `is_active`.',
+        description: 'In code order. Each carries `current_rates` (the rate in force today per term), `account_count` (accounts and time deposits on it) and `can_delete`. Money as two-decimal strings, rates as four-decimal strings. Filters: `kind`, `is_active`.',
         tags: ['Savings'],
         security: [['sanctum' => []]],
         parameters: [
@@ -152,7 +152,7 @@ class SavingsProductController extends Controller
             $this->books->assertCanActivate($product->kind);
         }
 
-        if (array_key_exists('term_options_days', $data)) {
+        if (is_array($data['term_options_days'] ?? null)) {
             $data['term_options_days'] = array_values(array_map('intval', $data['term_options_days']));
         }
 
@@ -207,7 +207,7 @@ class SavingsProductController extends Controller
     #[OA\Get(
         path: '/api/savings/products/{product}/rates',
         summary: 'A savings product\'s rate history',
-        description: 'Newest first. Append-only: rates are added, never changed or removed.',
+        description: 'Newest first, each with `created_by` as `{id, name}`. Append-only: rates are added, never changed or removed.',
         tags: ['Savings'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'product', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
@@ -221,7 +221,7 @@ class SavingsProductController extends Controller
     {
         $this->authorize('savings:view');
 
-        $rates = $product->rates()->orderByDesc('effective_from')->orderByDesc('id')->get();
+        $rates = $product->rates()->with('creator')->orderByDesc('effective_from')->orderByDesc('id')->get();
 
         return response()->json(['success' => true, 'data' => SavingsProductRateResource::collection($rates)->resolve($request)]);
     }
@@ -255,7 +255,7 @@ class SavingsProductController extends Controller
             'created_by' => $request->user()->id,
         ]);
 
-        return response()->json(['success' => true, 'data' => (new SavingsProductRateResource($rate->refresh()))->resolve($request)], 201);
+        return response()->json(['success' => true, 'data' => (new SavingsProductRateResource($rate->refresh()->load('creator')))->resolve($request)], 201);
     }
 
     /**

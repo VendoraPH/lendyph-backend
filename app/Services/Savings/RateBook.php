@@ -81,7 +81,7 @@ class RateBook
      * one per offered term for a time deposit product (a term with no rate
      * yet is left out).
      *
-     * @return list<array{term_days: int|null, annual_rate: string, effective_from: string}>
+     * @return list<array{id: int, term_days: int|null, annual_rate: string, effective_from: string}>
      */
     public function current(SavingsProduct $product, string $date): array
     {
@@ -96,7 +96,7 @@ class RateBook
                 ->last();
 
             if ($rate !== null) {
-                $current[] = ['term_days' => $term, 'annual_rate' => $rate->annual_rate, 'effective_from' => $rate->effective_from->toDateString()];
+                $current[] = ['id' => $rate->id, 'term_days' => $term, 'annual_rate' => $rate->annual_rate, 'effective_from' => $rate->effective_from->toDateString()];
             }
         }
 
