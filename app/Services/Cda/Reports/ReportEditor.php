@@ -24,8 +24,10 @@ use InvalidArgumentException;
  * - A calculated field is never typed.
  * - The report row is locked and must still be a draft (409 otherwise).
  *
- * Then the calculations, issues and readiness are recomputed at once, and
- * one audit row lists the fields that changed, old and new.
+ * A report that doesn't apply can't be saved (422). Then the calculations,
+ * issues and readiness are recomputed at once, and one audit row lists the
+ * fields that changed (AuditValues: never a restricted report's values or a
+ * table's rows).
  */
 final class ReportEditor
 {
@@ -43,11 +45,14 @@ final class ReportEditor
                 throw LoanWriteTransaction::conflict('This report is '.(self::STATUS_WORDS[$locked->status] ?? $locked->status).', so it can\'t be changed. '.($locked->isLocked() ? 'Reopen it first, with a reason.' : 'Return it to draft first.'));
             }
 
+            if (! $locked->applicable) {
+                throw ValidationException::withMessages(['fields' => [$locked->not_applicable_reason ?? 'This report doesn\'t apply to the cooperative for this period.']]);
+            }
+
             $definition = $this->engine->definition($locked);
             $stored = CdaReportValue::query()->where('report_id', $locked->id)->get()->keyBy('field_key');
             $errors = [];
-            $old = [];
-            $new = [];
+            $audited = [];
 
             foreach ($fields as $n => $input) {
                 $key = (string) $input['field_key'];
@@ -71,7 +76,7 @@ final class ReportEditor
                     $changes['evidence'] = $input['evidence'];
                 }
 
-                if (($input['revert'] ?? false) === true) {
+                if (filter_var($input['revert'] ?? false, FILTER_VALIDATE_BOOLEAN)) {
                     if (! $row->exists || ! $row->is_override) {
                         $errors["fields.{$n}.revert"][] = "{$label} isn't overridden.";
 
@@ -107,7 +112,12 @@ final class ReportEditor
                     continue;
                 }
 
-                $before = $row->exists ? $row->value : null;
+                $before = [
+                    'value' => $row->exists ? $row->value : null,
+                    'override' => ['is_override' => (bool) $row->is_override, 'override_reason' => $row->override_reason],
+                    'remarks' => $row->remarks,
+                    'evidence' => $row->evidence,
+                ];
                 $row->fill([...$changes, 'updated_by' => $user->id]);
 
                 if ($row->exists && ! $row->isDirty()) {
@@ -116,21 +126,31 @@ final class ReportEditor
 
                 $row->save();
                 $stored[$key] = $row;
-                $old[$key] = $before;
-                $new[$key] = $row->value;
+                $after = ['is_override' => (bool) $row->is_override, 'override_reason' => $row->override_reason];
+                $entry = [
+                    'value' => ReportEngine::same($before['value'], $row->value) ? null : [$before['value'], $row->value],
+                    'override' => $before['override'] === $after ? null : [$before['override'], $after],
+                    'remarks' => ! ReportEngine::same($before['remarks'], $row->remarks),
+                    'evidence' => ! ReportEngine::same($before['evidence'], $row->evidence),
+                ];
+
+                if ($entry['value'] !== null || $entry['override'] !== null || $entry['remarks'] || $entry['evidence']) {
+                    $audited[$key] = $entry;
+                }
             }
 
             if ($errors !== []) {
                 throw ValidationException::withMessages($errors);
             }
 
-            if ($new !== []) {
+            if ($audited !== []) {
+                [$old, $new] = AuditValues::forSave($locked, $definition, $audited);
                 AuditLogService::log(
                     'cda_report_saved',
                     $locked,
-                    ['values' => $old],
-                    ['values' => $new],
-                    sprintf('Saved %s %d: %d %s.', ReportValidator::reportName($locked), $locked->period->year, count($new), count($new) === 1 ? 'field' : 'fields'),
+                    $old,
+                    $new,
+                    sprintf('Saved %s %d: %d %s.', ReportValidator::reportName($locked), $locked->period->year, count($audited), count($audited) === 1 ? 'field' : 'fields'),
                 );
             }
 

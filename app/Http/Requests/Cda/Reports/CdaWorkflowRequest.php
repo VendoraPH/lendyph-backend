@@ -42,15 +42,15 @@ class CdaWorkflowRequest extends FormRequest
 
         return [
             'action' => ['required', 'string', Rule::in(array_keys(ReportWorkflow::ACTIONS))],
-            'reason' => [Rule::requiredIf(in_array($this->input('action'), ReportWorkflow::NEED_REASON, true)), 'nullable', 'string', 'max:1000'],
+            'reason' => [Rule::requiredIf(in_array($this->input('action'), ReportWorkflow::NEED_REASON, true)), 'nullable', 'string', 'max:500'],
             'confirm_warnings' => ['sometimes', 'boolean'],
             'stage' => [Rule::requiredIf($this->input('action') === 'set_stage'), 'nullable', 'string', Rule::in($stages)],
             'submission' => [Rule::requiredIf($this->input('action') === 'mark_submitted'), 'nullable', 'array:method,submitted_on,submitted_by_name,cda_reference_no,acknowledgment_no,remarks'],
             'submission.method' => [Rule::requiredIf($this->input('action') === 'mark_submitted'), 'nullable', 'string', Rule::in(CdaSubmission::METHODS)],
             'submission.submitted_on' => [Rule::requiredIf($this->input('action') === 'mark_submitted'), 'nullable', 'date_format:Y-m-d', 'before_or_equal:today'],
             'submission.submitted_by_name' => ['nullable', 'string', 'max:150'],
-            'submission.cda_reference_no' => ['nullable', 'string', 'max:100'],
-            'submission.acknowledgment_no' => ['nullable', 'string', 'max:100'],
+            'submission.cda_reference_no' => ['nullable', 'string', 'max:80'],
+            'submission.acknowledgment_no' => ['nullable', 'string', 'max:80'],
             'submission.remarks' => ['nullable', 'string', 'max:2000'],
         ];
     }
@@ -62,7 +62,7 @@ class CdaWorkflowRequest extends FormRequest
             'action.required' => 'Choose a workflow action.',
             'action.in' => 'That isn\'t a workflow action. Use one of: '.implode(', ', array_keys(ReportWorkflow::ACTIONS)).'.',
             'reason.required' => 'Give a reason for this step.',
-            'reason.max' => 'A reason takes up to 1,000 characters.',
+            'reason.max' => 'A reason takes up to 500 characters.',
             'confirm_warnings.boolean' => 'confirm_warnings is true or false.',
             'stage.required' => 'Choose the stage to move to.',
             'stage.in' => 'That isn\'t a stage of this report.',
@@ -74,8 +74,8 @@ class CdaWorkflowRequest extends FormRequest
             'submission.submitted_on.date_format' => 'The filing date is a date (YYYY-MM-DD).',
             'submission.submitted_on.before_or_equal' => 'The filing date can\'t be in the future.',
             'submission.submitted_by_name.max' => 'The name takes up to 150 characters.',
-            'submission.cda_reference_no.max' => 'The CDA reference number takes up to 100 characters.',
-            'submission.acknowledgment_no.max' => 'The acknowledgment number takes up to 100 characters.',
+            'submission.cda_reference_no.max' => 'The CDA reference number takes up to 80 characters.',
+            'submission.acknowledgment_no.max' => 'The acknowledgment number takes up to 80 characters.',
             'submission.remarks.max' => 'Remarks take up to 2,000 characters.',
         ];
     }

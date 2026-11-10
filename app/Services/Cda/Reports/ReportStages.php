@@ -10,7 +10,10 @@ use Illuminate\Http\Exceptions\HttpResponseException;
 /**
  * The document stages of two reports (design §5, `set_stage`), kept on the
  * report as the reserved value `_stage` (a template field key can never start
- * with "_"), so the stage travels in the snapshot.
+ * with "_"). It lives outside the snapshot: the sworn statement is signed and
+ * uploaded after it's exported, and the financial statements may still move
+ * to audited after finalize, so the screen and exports read the current
+ * stage.
  *
  * - Financial statements: draft_fs → for_external_audit → audited. Audited
  *   needs the auditor's name, accreditation number, opinion and report date,

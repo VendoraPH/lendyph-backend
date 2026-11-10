@@ -18,7 +18,8 @@ use Illuminate\Support\Carbon;
  * cooperative details pulled from Settings, the template and its definition
  * hash, every value with its source, override and remarks (table rows
  * included, so the register rows used are kept), the issues and readiness,
- * the stage, who finalized it and when. Stored as canonical JSON with its
+ * who finalized it and when. The stage (financial statements, sworn
+ * statement) lives outside it: it moves on after the export and the filing. Stored as canonical JSON with its
  * SHA-256, version by version; a reopen supersedes a version, never changes
  * or deletes it. Exports and the screen read a finalized report from here,
  * so later member, Branding or profile changes leave it as it was filed.
@@ -75,7 +76,6 @@ final class SnapshotWriter
             ],
             'profile' => $this->profile(),
             'values' => $values,
-            'stage' => ReportStages::current($report),
             'issues' => $report->issues ?? [],
             'readiness' => (int) $report->readiness,
             'readiness_breakdown' => $report->readiness_breakdown ?? [],

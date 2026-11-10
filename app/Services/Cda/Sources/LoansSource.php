@@ -35,6 +35,8 @@ final class LoansSource implements CdaSource
 {
     public const LIVE_NOTE = 'Computed from current balances: no year-end capture or daily snapshot covers this date.';
 
+    public const COUNT_NOTE = 'The daily snapshot keeps no loan count, and loans keep no completion date, so this counts the loans released by then that are still collectible today.';
+
     /** PAR n's lateness threshold, in days past due: 1 means any lateness. */
     private const PAR_DAYS_PAST = [1 => 0, 30 => 30, 90 => 90];
 
@@ -81,6 +83,11 @@ final class LoansSource implements CdaSource
             default => Rational::fromCentavos($figures['outstanding_principal'])->toFixed(2),
         };
         $what = $params['measure'] === 'total' ? 'Loans outstanding (everything owed)' : 'Loans outstanding (principal)';
+
+        if ($params['measure'] === 'count' && $figures['basis'] === 'snapshot') {
+            // Loans carry no completion date, so the count can't be rebuilt for a past day.
+            return new SourceResult($value, SourceResult::labelFor('Loans outstanding (daily snapshot)', $asOf), 'count', $asOf, true, ['basis' => 'snapshot', 'note' => self::COUNT_NOTE]);
+        }
 
         return $this->result($value, $what, $params['measure'] === 'count' ? 'count' : 'money', $asOf, $figures);
     }

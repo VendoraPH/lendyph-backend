@@ -13,11 +13,16 @@ use OverflowException;
  * and a ratio is never a float. Rounding happens only when a figure is
  * written out (toFixed), half up (away from zero), as everywhere else.
  *
- * A result too large for a 64-bit integer throws OverflowException; the
- * engine reports it as an issue instead of a wrong figure.
+ * A number is read with at most 18 significant digits (else an
+ * InvalidArgumentException, a 422 in words); a result too large for a 64-bit
+ * integer throws OverflowException, which the engine reports as an issue
+ * instead of a wrong figure. Never a TypeError.
  */
 final class Rational
 {
+    /** The most significant digits a number may have, so it never overflows. */
+    public const MAX_DIGITS = 18;
+
     private function __construct(
         public readonly int $numerator,
         public readonly int $denominator,
@@ -32,13 +37,13 @@ final class Rational
 
         $text = is_float($value) ? self::floatText($value) : trim($value);
 
-        if (preg_match('/^(-)?(\d{1,15})(?:\.(\d{1,9}))?$/', $text, $m) !== 1) {
-            throw new InvalidArgumentException("\"{$text}\" is not a number.");
+        if (! self::parse($text, $m)) {
+            throw new InvalidArgumentException("\"{$text}\" is not a number of up to ".self::MAX_DIGITS.' digits.');
         }
 
         $decimals = $m[3] ?? '';
         $denominator = 10 ** strlen($decimals);
-        $numerator = (int) $m[2] * $denominator + (int) ($decimals === '' ? 0 : $decimals);
+        $numerator = self::checked(self::checked((int) $m[2] * $denominator) + (int) ($decimals === '' ? 0 : $decimals));
 
         return self::make($m[1] === '-' ? -$numerator : $numerator, $denominator);
     }
@@ -50,7 +55,25 @@ final class Rational
             return true;
         }
 
-        return is_string($value) && preg_match('/^-?\d{1,15}(\.\d{1,9})?$/', trim($value)) === 1;
+        return is_string($value) && self::parse(trim($value), $m);
+    }
+
+    /**
+     * A decimal of up to 18 significant digits (at most 9 after the point),
+     * so its numerator always fits a 64-bit integer; leading zeros of the
+     * whole part don't count.
+     *
+     * @param  array<int, string>|null  $m
+     */
+    private static function parse(string $text, ?array &$m): bool
+    {
+        if (preg_match('/^(-)?(\d{1,30})(?:\.(\d{1,9}))?$/', $text, $m) !== 1) {
+            return false;
+        }
+
+        $whole = ltrim($m[2], '0');
+
+        return strlen($whole) + strlen($m[3] ?? '') <= self::MAX_DIGITS;
     }
 
     public static function fromCentavos(int $centavos): self
@@ -185,6 +208,13 @@ final class Rational
             throw new InvalidArgumentException('A number must be finite.');
         }
 
-        return rtrim(rtrim(number_format($value, 9, '.', ''), '0'), '.') ?: '0';
+        $whole = strlen(number_format(floor(abs($value)), 0, '.', ''));
+        $text = number_format($value, max(0, min(9, self::MAX_DIGITS - $whole)), '.', '');
+
+        if (str_contains($text, '.')) {
+            $text = rtrim(rtrim($text, '0'), '.');
+        }
+
+        return $text === '-0' ? '0' : $text;
     }
 }

@@ -36,8 +36,8 @@ class UpdateCdaSubmissionRequest extends CdaFormRequest
     public function rules(): array
     {
         return [
-            'cda_reference_no' => ['sometimes', 'nullable', 'string', 'max:100'],
-            'acknowledgment_no' => ['sometimes', 'nullable', 'string', 'max:100'],
+            'cda_reference_no' => ['sometimes', 'nullable', 'string', 'max:80'],
+            'acknowledgment_no' => ['sometimes', 'nullable', 'string', 'max:80'],
             'submitted_by_name' => ['sometimes', 'nullable', 'string', 'max:150'],
             'remarks' => ['sometimes', 'nullable', 'string', 'max:2000'],
             'method' => ['prohibited'],
@@ -52,8 +52,8 @@ class UpdateCdaSubmissionRequest extends CdaFormRequest
     public function messages(): array
     {
         return [
-            'cda_reference_no.max' => 'The CDA reference number takes up to 100 characters.',
-            'acknowledgment_no.max' => 'The acknowledgment number takes up to 100 characters.',
+            'cda_reference_no.max' => 'The CDA reference number takes up to 80 characters.',
+            'acknowledgment_no.max' => 'The acknowledgment number takes up to 80 characters.',
             'submitted_by_name.max' => 'The name takes up to 150 characters.',
             'remarks.max' => 'Remarks take up to 2,000 characters.',
             'method.prohibited' => 'How and when the report was filed is recorded by "mark as filed"; reopen the report to file it again.',

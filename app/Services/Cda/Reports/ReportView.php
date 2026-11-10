@@ -95,7 +95,7 @@ final class ReportView
             ...$base,
             'type' => $report->report_type,
             'display_status' => self::displayStatus($report),
-            'stage' => $payload['stage'] ?? ReportStages::current($report),
+            'stage' => ReportStages::current($report),
             'locked' => $report->isLocked(),
             'stale' => $report->stale_at !== null && ($report->refreshed_at === null || $report->stale_at->gt($report->refreshed_at)),
             'provisional' => $provisional,

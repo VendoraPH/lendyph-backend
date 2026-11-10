@@ -17,11 +17,13 @@ use Illuminate\Support\Facades\DB;
  *   and their membership hasn't ended by then (`membership_ended_on` empty or
  *   after it). A member with no membership date isn't counted; they are
  *   `members.missing {field: membership_date}` and a Critical issue on CAPR.
- * - `gender` unspecified is a member with no sex recorded; ages are whole
+ * - `gender` unspecified is a member with no sex recorded (empty or blank); ages are whole
  *   years on the as-of date, from the birthdate.
  * - `activity` active follows the Member Report: a member with a loan in a
  *   collectible status released on or before the day (the loan's current
  *   status, as that report reads it); inactive is everyone else counted.
+ * - `members.missing` counts the members of the day missing the field; for
+ *   the membership date, members registered by the day with none.
  * - `members.new` counts membership dates in the range; `members.ended`
  *   counts membership end dates in the range, by how it ended.
  *
@@ -95,6 +97,7 @@ final class MembersSource implements CdaSource
 
         $query = $field === 'membership_date'
             ? Borrower::query()->members()->whereNull('membership_date')
+                ->where('created_at', '<', CarbonImmutable::parse($asOf)->addDay()->toDateString())
                 ->where(fn (Builder $q) => $q->whereNull('membership_ended_on')->orWhere('membership_ended_on', '>', $asOf))
             : $this->countedOn($asOf)->where(fn (Builder $q) => $q->whereNull($field)->orWhere($field, ''));
 
@@ -119,7 +122,9 @@ final class MembersSource implements CdaSource
     private function filterByPerson(Builder $query, array $params, string $asOf): void
     {
         $query
-            ->when($params['gender'] ?? null, fn (Builder $q, string $gender) => $gender === 'unspecified' ? $q->whereNull('gender') : $q->where('gender', $gender))
+            ->when($params['gender'] ?? null, fn (Builder $q, string $gender) => $gender === 'unspecified'
+                ? $q->where(fn (Builder $none) => $none->whereNull('gender')->orWhere('gender', ''))
+                : $q->where('gender', $gender))
             ->when($params['member_type'] ?? null, fn (Builder $q, string $type) => $q->where('member_type', $type));
 
         $day = CarbonImmutable::parse($asOf);

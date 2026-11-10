@@ -18,12 +18,14 @@ use OverflowException;
  * The report engine (design §2, §4): fills a report's fields from its
  * template, keeps them, and validates them.
  *
- * - refresh(): reads every sourced field from its source, recomputes the
+ * - refresh(): on a report that is still a draft once locked (anything else
+ *   answers [] and is left alone), reads every sourced field from its source, recomputes the
  *   calculations and re-validates. Stored source values change only here:
  *   on create, on the `refresh` action, on submit_for_review and in the
  *   nightly run, never on a GET. An overridden field keeps its value; its
  *   source figure is still updated beside it. One audit row when values
- *   changed.
+ *   changed (AuditValues decides what it may hold).
+ * - A finalized or later report's stored issues are never rewritten.
  * - recompute(): after a save, the calculations, issues and readiness from
  *   the stored values, without reading sources again.
  * - freshValues(): what a refresh would give now, without writing; the
@@ -64,6 +66,11 @@ final class ReportEngine
     {
         return DB::transaction(function () use ($report, $user, $audit): array {
             $locked = CdaReport::query()->with(['template', 'period'])->whereKey($report->id)->lockForUpdate()->firstOrFail();
+
+            if ($locked->status !== CdaReport::STATUS_DRAFT) {
+                return [];
+            }
+
             $definition = $this->definition($locked);
             $context = $this->context($locked);
             $stored = $this->storedRows($locked);
@@ -104,11 +111,12 @@ final class ReportEngine
             $locked->forceFill(['refreshed_at' => $now, 'stale_at' => null])->save();
 
             if ($changed !== [] && $audit) {
+                [$old, $new] = AuditValues::forRefresh($locked, $definition, $changed);
                 AuditLogService::log(
                     'cda_report_refreshed',
                     $locked,
-                    ['values' => array_map(fn (array $pair) => $pair[0], $changed)],
-                    ['values' => array_map(fn (array $pair) => $pair[1], $changed)],
+                    $old,
+                    $new,
                     sprintf('Refreshed %s %d: %d %s changed.', ReportValidator::reportName($locked), $locked->period->year, count($changed), count($changed) === 1 ? 'figure' : 'figures'),
                     $user?->id,
                 );
@@ -118,6 +126,26 @@ final class ReportEngine
 
             return $changed;
         });
+    }
+
+    /**
+     * The issues as they stand now, from the stored values, without writing
+     * anything (a locked report keeps the issues it was finalized with).
+     *
+     * @return list<array<string, mixed>>
+     */
+    public function currentIssues(CdaReport $report): array
+    {
+        $report->loadMissing(['template', 'period']);
+        $stored = $this->storedRows($report);
+
+        return $this->validator->evaluate(
+            $report,
+            $this->definition($report),
+            array_map(fn (CdaReportValue $row) => $row->value, $stored),
+            array_filter(array_map(fn (CdaReportValue $row) => is_array($row->source_value) ? $row->source_value : null, $stored)),
+            $this->context($report),
+        )['issues'];
     }
 
     /** After a save: the calculations, issues and readiness from the stored values. */
@@ -262,6 +290,10 @@ final class ReportEngine
      */
     private function validate(CdaReport $report, ReportDefinition $definition, array $values, array $info, SourceContext $context): void
     {
+        if ($report->isLocked()) {
+            return;
+        }
+
         $result = $this->validator->evaluate($report, $definition, $values, array_filter($info), $context);
         $readiness = Readiness::of($result['checks']);
         $issues = $result['issues'];

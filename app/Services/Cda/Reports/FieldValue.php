@@ -3,6 +3,7 @@
 namespace App\Services\Cda\Reports;
 
 use InvalidArgumentException;
+use OverflowException;
 
 /**
  * How a report field's value is stored and sent (design §0, §2), by field
@@ -36,6 +37,15 @@ final class FieldValue
 
         $label = (string) ($field['label'] ?? $field['key']);
 
+        try {
+            return self::typed($field, $value, $label);
+        } catch (OverflowException) {
+            throw new InvalidArgumentException("{$label} is too large.");
+        }
+    }
+
+    private static function typed(array $field, mixed $value, string $label): mixed
+    {
         return match ($field['type']) {
             'number' => self::number($value, (int) ($field['decimals'] ?? 0), $label),
             'money' => self::decimal($value, 2, $label, 'an amount in pesos with up to 2 decimals'),

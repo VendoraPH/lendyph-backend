@@ -31,7 +31,9 @@ use Illuminate\Support\Facades\DB;
  * | (financial statements, sworn statement) | set_stage {stage} | same | prepare |
  *
  * A Critical issue blocks submit_for_review, approve and finalize; a
- * document needed at a later stage (submit) blocks only that stage. Warnings
+ * document needed at a later stage (submit) blocks only that stage, and
+ * filing (mark_submitted) is blocked by nothing else. A finalized report's
+ * stored issues are never rewritten. Warnings
  * need `confirm_warnings` to finalize, and the confirmation is audited.
  * Notices go out after commit.
  */
@@ -237,7 +239,6 @@ final class ReportWorkflow
         }
 
         $report->forceFill(['status' => CdaReport::STATUS_FINALIZED, 'sub_status' => null, 'finalized_by' => $user->id, 'finalized_at' => now()])->save();
-        $this->engine->revalidate($report);
         $snapshot = $this->snapshots->write($report, $definition, $user, $confirmWarnings && $report->warning_count > 0);
         $report->forceFill(['current_snapshot_id' => $snapshot->id])->save();
         $this->audit($report, 'finalize', CdaReport::STATUS_APPROVED, null, [
@@ -251,10 +252,14 @@ final class ReportWorkflow
         return ['report' => $report];
     }
 
+    /**
+     * Records a filing that already happened: only a document needed at
+     * filing (checked live, not stored: the report's issues stay as
+     * finalized) can stop it.
+     */
     private function markSubmitted(CdaReport $report, array $submission, User $user): array
     {
-        $this->engine->revalidate($report);
-        $blocked = $this->blocking($report, 'submit');
+        $blocked = $this->blocking($report, 'submit', $this->engine->currentIssues($report));
 
         if ($blocked !== null) {
             return $blocked;
@@ -333,10 +338,14 @@ final class ReportWorkflow
         return ['report' => $report];
     }
 
-    /** The blocking Critical issues for the action, as a refusal; null when none. */
-    private function blocking(CdaReport $report, string $stage): ?array
+    /**
+     * The blocking Critical issues for the action, as a refusal; null when none.
+     *
+     * @param  list<array<string, mixed>>|null  $issues  live issues; the stored ones by default
+     */
+    private function blocking(CdaReport $report, string $stage, ?array $issues = null): ?array
     {
-        $blocking = array_values(array_filter($report->issues ?? [], fn (array $issue) => ReportValidator::blocks($issue, $stage)));
+        $blocking = array_values(array_filter($issues ?? $report->issues ?? [], fn (array $issue) => ReportValidator::blocks($issue, $stage)));
 
         if ($blocking === []) {
             return null;

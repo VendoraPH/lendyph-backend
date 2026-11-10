@@ -119,7 +119,11 @@ final class ReportValidator
         return ['issues' => $issues, 'checks' => $checks];
     }
 
-    /** Whether an issue blocks the action: Critical, and needed by this stage or earlier. */
+    /**
+     * Whether an issue blocks the action: Critical, and needed by this stage
+     * or earlier. Recording a filing (submit) is blocked only by a document
+     * needed at filing: the filing has already happened.
+     */
     public static function blocks(array $issue, string $action): bool
     {
         if ($issue['severity'] !== 'critical') {
@@ -127,6 +131,10 @@ final class ReportValidator
         }
 
         $stage = $issue['stage'] ?? null;
+
+        if ($action === 'submit') {
+            return $stage === 'submit';
+        }
 
         return $stage === null || self::STAGES[$stage] <= self::STAGES[$action];
     }
@@ -236,8 +244,8 @@ final class ReportValidator
 
     private function compare(array $rule, ReportDefinition $definition, array $values, SourceContext $context): ?string
     {
-        [$left, $leftLabel] = $this->operand($rule['left'], $definition, $values, $context);
-        [$right, $rightLabel] = $this->operand($rule['right'], $definition, $values, $context);
+        [$left, $leftLabel, $leftHidden] = $this->operand($rule['left'], $definition, $values, $context);
+        [$right, $rightLabel, $rightHidden] = $this->operand($rule['right'], $definition, $values, $context);
 
         if ($left === null || $right === null) {
             return null;
@@ -255,14 +263,35 @@ final class ReportValidator
             'gte' => $left->compare($right) >= 0,
         };
 
-        return $holds ? null : sprintf('%s (%s) should %s %s (%s).', $leftLabel, $left->toFixed(2), self::OP_WORDS[$op], $rightLabel, $right->toFixed(2));
+        if ($holds) {
+            return null;
+        }
+
+        if ($leftHidden !== null || $rightHidden !== null) {
+            $leftWords = $leftHidden === null ? sprintf('%s (%s)', $leftLabel, $left->toFixed(2)) : "The figure in the {$leftHidden}";
+            $rightWords = $rightHidden === null ? sprintf('%s (%s)', $rightLabel, $right->toFixed(2)) : "the {$rightHidden}";
+
+            return $op === 'eq'
+                ? "{$leftWords} doesn't match {$rightWords}."
+                : sprintf('%s should %s %s.', $leftWords, self::OP_WORDS[$op], $rightHidden === null ? $rightWords : "the figure in the {$rightHidden}");
+        }
+
+        return sprintf('%s (%s) should %s %s (%s).', $leftLabel, $left->toFixed(2), self::OP_WORDS[$op], $rightLabel, $right->toFixed(2));
     }
 
     /** @return array{0: Rational|null, 1: string} */
+    /**
+     * An operand's figure, its label, and, when it is another report's figure
+     * of a restricted type (mediation, audit, tax), that report's title: the
+     * message then names the report but never shows its figure, since the
+     * issue is read by people without that report's view permission.
+     *
+     * @return array{0: Rational|null, 1: string, 2: string|null}
+     */
     private function operand(mixed $operand, ReportDefinition $definition, array $values, SourceContext $context): array
     {
         if (is_int($operand) || is_float($operand)) {
-            return [Rational::of($operand), (string) $operand];
+            return [Rational::of($operand), (string) $operand, null];
         }
 
         if (is_string($operand) && str_starts_with($operand, 'report:')) {
@@ -270,28 +299,37 @@ final class ReportValidator
             $type = Str::before($target, '.');
             $result = $this->sources->resolve('report.field', ['type' => $type, 'field' => Str::after($target, '.')], $context);
 
-            return [CalcEngine::number(is_array($result->value) ? null : $result->value), $result->label];
+            return [CalcEngine::number(is_array($result->value) ? null : $result->value), $result->label, self::restrictedTitle($type)];
         }
 
         if (is_string($operand) && str_starts_with($operand, 'source:')) {
             $result = $this->sources->resolve(substr($operand, 7), [], $context);
 
-            return [CalcEngine::number(is_array($result->value) ? null : $result->value), $result->label];
+            return [CalcEngine::number(is_array($result->value) ? null : $result->value), $result->label, null];
         }
 
         if (is_array($operand) && isset($operand['source'])) {
-            $result = $this->sources->resolve((string) $operand['source']['key'], (array) ($operand['source']['params'] ?? []), $context);
+            $key = (string) $operand['source']['key'];
+            $params = (array) ($operand['source']['params'] ?? []);
+            $result = $this->sources->resolve($key, $params, $context);
+            $hidden = $key === 'report.field' && is_string($params['type'] ?? null) ? self::restrictedTitle($params['type']) : null;
 
-            return [CalcEngine::number(is_array($result->value) ? null : $result->value), $result->label];
+            return [CalcEngine::number(is_array($result->value) ? null : $result->value), $result->label, $hidden];
         }
 
         if (is_array($operand)) {
-            return [$this->calc->evaluate($operand, $this->valueOf($definition, $values)), 'the calculated figure'];
+            return [$this->calc->evaluate($operand, $this->valueOf($definition, $values)), 'the calculated figure', null];
         }
 
         $key = is_string($operand) ? $definition->resolve($operand) : null;
 
-        return $key === null ? [null, ''] : [CalcEngine::number($values[$key] ?? null), self::label($definition->field($key))];
+        return $key === null ? [null, '', null] : [CalcEngine::number($values[$key] ?? null), self::label($definition->field($key)), null];
+    }
+
+    /** A restricted report type's title, else null. */
+    private static function restrictedTitle(string $type): ?string
+    {
+        return ReportTypes::exists($type) && ReportTypes::restriction($type) !== null ? ReportTypes::title($type) : null;
     }
 
     private function sumEquals(array $rule, ReportDefinition $definition, array $values): ?string
