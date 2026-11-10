@@ -1518,12 +1518,17 @@ final class AutomaticPoster
                 .' is not the net of '.Money::format($net).'. Nothing has been saved.');
         }
 
-        // The rows the run wrote, read in this transaction: the journal posts
-        // what the subledger holds, never a total that drifted from it.
-        $rows = DB::table('savings_transactions')
-            ->where('interest_run_id', $run->id)
-            ->selectRaw("COALESCE(SUM(CASE WHEN type = 'interest' THEN credit ELSE 0 END), 0) AS gross")
-            ->selectRaw("COALESCE(SUM(CASE WHEN type = 'withholding_tax' THEN debit ELSE 0 END), 0) AS tax")
+        // The rows the run wrote on its own branch's accounts of its own
+        // product, read in this transaction: the journal posts what the
+        // subledger holds, never a total that drifted from it, and never a row
+        // that belongs to another branch's or product's books.
+        $rows = DB::table('savings_transactions AS t')
+            ->join('savings_accounts AS a', 'a.id', '=', 't.account_id')
+            ->where('t.interest_run_id', $run->id)
+            ->where('a.branch_id', $run->branch_id)
+            ->where('a.product_id', $run->product_id)
+            ->selectRaw("COALESCE(SUM(CASE WHEN t.type = 'interest' THEN t.credit ELSE 0 END), 0) AS gross")
+            ->selectRaw("COALESCE(SUM(CASE WHEN t.type = 'withholding_tax' THEN t.debit ELSE 0 END), 0) AS tax")
             ->first();
         $rowsGross = $this->centavos((string) $rows->gross, 'interest rows', $run);
         $rowsTax = $this->centavos((string) $rows->tax, 'tax rows', $run);
@@ -1637,7 +1642,9 @@ final class AutomaticPoster
      * reversed. write() hands back the existing journal for a (postable,
      * source) key, which keeps a retry from posting twice; but a reversed one
      * handed back would let a re-post silently do nothing. A re-post after a
-     * reversal is a new subledger row, with its own key.
+     * reversal is a new subledger row, with its own key. The journal row is
+     * read under its lock, so a reversal running at the same moment can't
+     * slip between this check and the hand-back.
      *
      * @param  array{source: string, description: string, lines: list<array{account_id: int, debit: int, credit: int}>}  $posting
      * @param  array<string, mixed>  $context
@@ -1650,6 +1657,7 @@ final class AutomaticPoster
             ->where('postable_type', $postable->getMorphClass())
             ->where('postable_id', $postable->getKey())
             ->where('source', $posting['source'])
+            ->lockForUpdate()
             ->first(['id', 'journal_no', 'status']);
 
         if ($existing !== null && $existing->status === 'reversed') {
@@ -1664,8 +1672,10 @@ final class AutomaticPoster
     }
 
     /**
-     * Both legs of a transfer are in one branch, so savings deposits moves
-     * within one branch's books and no journal is needed (decision 9).
+     * The two legs of a transfer pair one to one (the ledger and a unique
+     * index keep a leg from being claimed twice), carry the same amount, and
+     * are in one branch, so savings deposits moves within one branch's books
+     * and no journal is needed (decision 9).
      *
      * @throws CannotPostToTheBooksException
      */
@@ -1679,6 +1689,16 @@ final class AutomaticPoster
         if ($other === null || $other->type !== $opposite) {
             throw CannotPostToTheBooksException::because(
                 "{$row->reference} is one leg of a transfer, and its other leg isn't recorded. Nothing has been saved.");
+        }
+
+        $out = $row->type === 'transfer_out' ? $row : $other;
+        $in = $row->type === 'transfer_in' ? $row : $other;
+
+        if ($this->centavos($out->debit, 'debit', $out) !== $this->centavos($in->credit, 'credit', $in)) {
+            throw CannotPostToTheBooksException::because(
+                "{$out->reference} and {$in->reference} are the two legs of one transfer, but they don't carry the same amount "
+                .'('.Money::format($this->centavos($out->debit, 'debit', $out)).' out and '.Money::format($this->centavos($in->credit, 'credit', $in))
+                .' in). Nothing has been saved.');
         }
 
         $branches = SavingsAccount::query()->whereIn('id', [$row->account_id, $other->account_id])->pluck('branch_id', 'id');

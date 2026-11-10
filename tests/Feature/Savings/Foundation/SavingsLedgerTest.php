@@ -134,7 +134,7 @@ class SavingsLedgerTest extends TestCase
         $account = $this->account(['interest_credited_through' => '2026-11-09']);
 
         $this->assertRefused(fn () => $this->ledger->credit($account, 'deposit', 100, ['date' => '2026-11-09', 'method' => 'cash']), 'value_date', 'already been credited');
-        $this->assertRefused(fn () => $this->ledger->debit($account, 'reversal', 100, ['value_date' => '2026-11-09']), 'value_date', 'already been credited');
+        $this->assertRefused(fn () => $this->ledger->debit($account, 'reversal', 100, ['value_date' => '2026-11-09']), 'reverses_transaction_id', 'name the row it reverses');
         $this->assertSame(0, SavingsTransaction::query()->count());
     }
 

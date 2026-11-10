@@ -126,7 +126,7 @@ class SavingsReviewFixesTest extends TestCase
     {
         $this->books();
         $account = $this->account();
-        $drifted = SavingsInterestRun::factory()->create(['branch_id' => $account->branch_id, 'status' => 'approved', 'total_gross' => '10.00', 'total_tax' => '2.00', 'total_net' => '8.00']);
+        $drifted = SavingsInterestRun::factory()->create(['product_id' => $account->product_id, 'branch_id' => $account->branch_id, 'status' => 'approved', 'total_gross' => '10.00', 'total_tax' => '2.00', 'total_net' => '8.00']);
         DB::transaction(function () use ($account, $drifted): void {
             $this->ledger->credit($account, 'interest', 999, ['value_date' => '2026-11-09', 'interest_run_id' => $drifted->id, 'created_by' => null]);
             $this->ledger->debit($account, 'withholding_tax', 200, ['value_date' => '2026-11-09', 'interest_run_id' => $drifted->id, 'created_by' => null]);
@@ -134,7 +134,7 @@ class SavingsReviewFixesTest extends TestCase
 
         $this->booksRefuse(fn () => $this->poster->savingsInterestRun($drifted, $this->admin->id), 'does not match');
 
-        $matched = SavingsInterestRun::factory()->create(['branch_id' => $account->branch_id, 'status' => 'approved', 'total_gross' => '10.00', 'total_tax' => '2.00', 'total_net' => '8.00', 'period_start' => '2026-04-01', 'period_end' => '2026-06-30']);
+        $matched = SavingsInterestRun::factory()->create(['product_id' => $account->product_id, 'branch_id' => $account->branch_id, 'status' => 'approved', 'total_gross' => '10.00', 'total_tax' => '2.00', 'total_net' => '8.00', 'period_start' => '2026-04-01', 'period_end' => '2026-06-30']);
         DB::transaction(function () use ($account, $matched): void {
             $this->ledger->credit($account, 'interest', 1_000, ['value_date' => '2026-11-09', 'interest_run_id' => $matched->id, 'created_by' => null]);
             $this->ledger->debit($account, 'withholding_tax', 200, ['value_date' => '2026-11-09', 'interest_run_id' => $matched->id, 'created_by' => null]);
@@ -169,7 +169,7 @@ class SavingsReviewFixesTest extends TestCase
 
         $other = DB::transaction(fn () => $this->ledger->credit($account, 'deposit', 100, ['method' => 'cash']));
         $this->refusedOn(fn () => $this->ledger->debit($account, 'reversal', 100, ['value_date' => '2026-11-09', 'reverses_transaction_id' => $other->id]), 'value_date', 'already been credited');
-        $this->refusedOn(fn () => $this->ledger->debit($account, 'withdrawal', 100, ['method' => 'cash', 'value_date' => '2026-11-09', 'reverses_transaction_id' => $interest->id]), 'value_date', 'already been credited');
+        $this->refusedOn(fn () => $this->ledger->debit($account, 'withdrawal', 100, ['method' => 'cash', 'value_date' => '2026-11-09', 'reverses_transaction_id' => $interest->id]), 'reverses_transaction_id', 'Only a reversal');
     }
 
     // ── L1 ──

@@ -29,9 +29,10 @@ use LogicException;
  *   never before the account opened, and never earlier than the account's
  *   latest row; `value_date` is never after `date` and never on or before
  *   `interest_credited_through` (a credited period is closed to new rows),
- *   except a `reversal` row that keeps the exact value date of the row it
- *   reverses (`reverses_transaction_id`, same account), so an interest run
- *   can be reversed;
+ *   except a valid `reversal` row (see assertReversal(): it undoes exactly
+ *   one row, opposite side, same amount, once) that keeps the exact value
+ *   date of the row it reverses, so an interest run can be reversed;
+ * - pairs a transfer leg with one other leg only (`counterpart_transaction_id`);
  *   and the accounting period of `date` must be open (PeriodGuard, 422);
  * - writes the row with `balance_after`, then the `ledger_balance` cache and,
  *   for member activity (deposits, withdrawals and transfers), the
@@ -124,7 +125,10 @@ class SavingsLedger
             ]]);
         }
 
-        [$date, $valueDate] = $this->assertDates($locked, $type, $attributes);
+        $reversed = $this->assertReversal($locked, $type, $credit, $debit, $attributes);
+        $this->assertCounterpart($attributes);
+
+        [$date, $valueDate] = $this->assertDates($locked, $reversed, $attributes);
         $this->periods->assertOpen($date, 'This savings transaction');
 
         $before = SavingsMath::signedCentavos($locked->ledger_balance);
@@ -218,7 +222,7 @@ class SavingsLedger
      *
      * @throws ValidationException
      */
-    private function assertDates(SavingsAccount $account, string $type, array $attributes): array
+    private function assertDates(SavingsAccount $account, ?SavingsTransaction $reversed, array $attributes): array
     {
         $today = CarbonImmutable::parse(now()->toDateString());
         $date = $this->dateOf($attributes['date'] ?? $today->toDateString(), 'date');
@@ -253,8 +257,9 @@ class SavingsLedger
 
         $credited = $account->interest_credited_through;
 
-        if ($credited !== null && $valueDate->toDateString() <= $credited->toDateString()
-            && ! $this->keepsTheReversedValueDate($account, $type, $attributes, $valueDate)) {
+        $keepsTheReversedValueDate = $reversed !== null && $reversed->value_date->toDateString() === $valueDate->toDateString();
+
+        if ($credited !== null && $valueDate->toDateString() <= $credited->toDateString() && ! $keepsTheReversedValueDate) {
             $this->refuse('value_date', "Interest on {$account->account_number} has already been credited through {$this->day(CarbonImmutable::parse($credited->toDateString()))}, so nothing can be value-dated on or before it.");
         }
 
@@ -262,27 +267,96 @@ class SavingsLedger
     }
 
     /**
-     * Whether a reversal row carries exactly the value date of the row it
-     * reverses, on the same account. Such a row may fall inside a credited
-     * period: it undoes a row already counted there (an interest run being
-     * reversed), so it changes no credited figure the run didn't already
-     * hold. Any other row there is refused.
+     * The row a reversal undoes, read under its own lock, or null for any
+     * other row. A reversal must undo exactly one row (422 in words
+     * otherwise):
+     *
+     * - it names the row (`reverses_transaction_id`), and only a reversal may;
+     * - the row is on the same account and is not itself a reversal;
+     * - it sits on the opposite side for exactly the same amount (in
+     *   centavos): a credit undoes a debit, a debit undoes a credit;
+     * - nothing has reversed the row yet. The unique index on
+     *   `reverses_transaction_id` settles a race; this answers the ordinary
+     *   case in words instead of a 500.
+     *
+     * Only a row that passes may keep the original's value date inside a
+     * credited period (see assertDates()).
      *
      * @param  array<string, mixed>  $attributes
+     *
+     * @throws ValidationException
      */
-    private function keepsTheReversedValueDate(SavingsAccount $account, string $type, array $attributes, CarbonImmutable $valueDate): bool
+    private function assertReversal(SavingsAccount $account, string $type, int $credit, int $debit, array $attributes): ?SavingsTransaction
     {
         $reverses = $attributes['reverses_transaction_id'] ?? null;
 
-        if ($type !== 'reversal' || $reverses === null) {
-            return false;
+        if ($type !== 'reversal') {
+            if ($reverses !== null) {
+                $this->refuse('reverses_transaction_id', 'Only a reversal row can name a row it reverses.');
+            }
+
+            return null;
         }
 
-        $original = DB::table('savings_transactions')->where('id', $reverses)->first(['account_id', 'value_date']);
+        if ($reverses === null) {
+            $this->refuse('reverses_transaction_id', 'A reversal must name the row it reverses.');
+        }
 
-        return $original !== null
-            && (int) $original->account_id === $account->id
-            && CarbonImmutable::parse($original->value_date)->toDateString() === $valueDate->toDateString();
+        $original = SavingsTransaction::query()->whereKey($reverses)->lockForUpdate()->first();
+
+        if ($original === null || $original->account_id !== $account->id) {
+            $this->refuse('reverses_transaction_id', "The row being reversed isn't a transaction on this account ({$account->account_number}).");
+        }
+
+        if ($original->type === 'reversal') {
+            $this->refuse('reverses_transaction_id', "{$original->reference} is a reversal, and a reversal can't itself be reversed.");
+        }
+
+        $originalCredit = SavingsMath::centavos($original->credit);
+        $originalDebit = SavingsMath::centavos($original->debit);
+
+        if (($credit > 0) !== ($originalDebit > 0)) {
+            $this->refuse('reverses_transaction_id', "A reversal of {$original->reference} must sit on the opposite side: "
+                .($originalCredit > 0 ? 'it added money, so its reversal takes it out.' : 'it took money out, so its reversal adds it back.'));
+        }
+
+        $expected = $originalCredit > 0 ? $originalCredit : $originalDebit;
+
+        if (max($credit, $debit) !== $expected) {
+            $this->refuse('amount', "A reversal of {$original->reference} must be for exactly ".$this->peso($expected).'.');
+        }
+
+        $existing = DB::table('savings_transactions')->where('reverses_transaction_id', $original->id)->value('reference');
+
+        if ($existing !== null) {
+            $this->refuse('reverses_transaction_id', "{$original->reference} has already been reversed by {$existing}.");
+        }
+
+        return $original;
+    }
+
+    /**
+     * A transfer leg names the leg it pairs with (`counterpart_transaction_id`)
+     * at most once: a row already claimed by another leg is refused (422). The
+     * unique index on the column settles a race.
+     *
+     * @param  array<string, mixed>  $attributes
+     *
+     * @throws ValidationException
+     */
+    private function assertCounterpart(array $attributes): void
+    {
+        $counterpart = $attributes['counterpart_transaction_id'] ?? null;
+
+        if ($counterpart === null) {
+            return;
+        }
+
+        $claimedBy = DB::table('savings_transactions')->where('counterpart_transaction_id', $counterpart)->value('reference');
+
+        if ($claimedBy !== null) {
+            $this->refuse('counterpart_transaction_id', "That transfer leg is already paired with {$claimedBy}.");
+        }
     }
 
     private function dateOf(mixed $value, string $field): CarbonImmutable

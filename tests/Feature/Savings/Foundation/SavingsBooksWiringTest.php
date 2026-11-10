@@ -122,14 +122,16 @@ class SavingsBooksWiringTest extends TestCase
 
     public function test_an_interest_run_posts_one_journal_for_its_branch(): void
     {
+        $account = $this->account();
         $run = SavingsInterestRun::factory()->create([
-            'branch_id' => $this->branch->id,
+            'product_id' => $account->product_id,
+            'branch_id' => $account->branch_id,
             'status' => 'approved',
             'total_gross' => '1234.56',
             'total_tax' => '0.00',
             'total_net' => '1234.56',
         ]);
-        $this->write($this->account(), 'credit', 'interest', 123_456, ['value_date' => '2026-11-09', 'interest_run_id' => $run->id, 'created_by' => null]);
+        $this->write($account, 'credit', 'interest', 123_456, ['value_date' => '2026-11-09', 'interest_run_id' => $run->id, 'created_by' => null]);
 
         $journal = $this->poster->savingsInterestRun($run, $this->admin->id);
 

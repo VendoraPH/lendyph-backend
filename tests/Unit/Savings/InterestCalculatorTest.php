@@ -7,6 +7,7 @@ use App\Services\Savings\InterestCalculator;
 use App\Services\Savings\SavingsMath;
 use OverflowException;
 use PHPUnit\Framework\TestCase;
+use Symfony\Component\HttpKernel\Exception\HttpException;
 
 /**
  * Average daily balance interest on an Actual/365 Fixed basis (design §5):
@@ -144,15 +145,19 @@ class InterestCalculatorTest extends TestCase
         (new InterestCalculator)->calculate(9_000_000_000_000_000, [], '2026-01-01', '2026-12-31', [$this->segment('2026-01-01', '2026-12-31', '100.0000')], 0, '0');
     }
 
-    public function test_overlapping_rate_segments_are_refused(): void
+    public function test_overlapping_rate_segments_are_a_422_in_words(): void
     {
-        $this->expectException(\InvalidArgumentException::class);
-        $this->expectExceptionMessage('overlap');
-
-        (new InterestCalculator)->calculate(100_000, [], '2026-01-01', '2026-01-31', [
-            $this->segment('2026-01-01', '2026-01-20', '1.0000'),
-            $this->segment('2026-01-15', '2026-01-31', '2.0000'),
-        ], 0, '0');
+        try {
+            (new InterestCalculator)->calculate(100_000, [], '2026-01-01', '2026-01-31', [
+                $this->segment('2026-01-01', '2026-01-20', '1.0000'),
+                $this->segment('2026-01-15', '2026-01-31', '2.0000'),
+            ], 0, '0');
+            $this->fail('Overlapping rate segments were accepted.');
+        } catch (HttpException $e) {
+            $this->assertSame(422, $e->getStatusCode());
+            $this->assertStringContainsString('Jan 15, 2026', $e->getMessage());
+            $this->assertStringContainsString('only one rate', $e->getMessage());
+        }
     }
 
     public function test_multiply_refuses_an_overflow(): void

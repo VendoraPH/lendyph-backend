@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace App\Services\Savings;
 
 use Carbon\CarbonImmutable;
-use InvalidArgumentException;
+use Symfony\Component\HttpKernel\Exception\HttpException;
 
 /**
  * Average daily balance interest, Actual/365 Fixed (design §5). Pure: the
@@ -22,8 +22,8 @@ use InvalidArgumentException;
  *   reason.
  * - tax = roundHalfUp(gross × t, 10⁶); net = gross − tax.
  * - The numerator is refused (OverflowException) when it would leave a
- *   64-bit integer, and overlapping rate segments are refused
- *   (InvalidArgumentException): a day earns one rate.
+ *   64-bit integer, and overlapping rate segments are refused (422, in
+ *   words): a day earns one rate.
  */
 final class InterestCalculator
 {
@@ -172,8 +172,8 @@ final class InterestCalculator
 
         for ($i = 1; $i < count($clipped); $i++) {
             if ($clipped[$i]['from']->lessThanOrEqualTo($clipped[$i - 1]['to'])) {
-                throw new InvalidArgumentException(
-                    'Rate segments overlap on '.$clipped[$i]['from']->toDateString().': a day can earn only one rate.');
+                throw new HttpException(422,
+                    'The interest rates overlap on '.$clipped[$i]['from']->format('M j, Y').': a day can earn only one rate.');
             }
         }
 
