@@ -40,6 +40,10 @@ class UpdateBorrowerRequest extends FormRequest
             [
                 'first_name' => $firstNameRules,
                 'last_name' => ['sometimes', 'string', 'max:255'],
+                // CDA member fields (design §1). The membership number and
+                // how a membership ended have their own routes.
+                'member_type' => ['sometimes', 'string', Rule::in(Borrower::MEMBER_TYPES)],
+                'membership_date' => ['sometimes', 'date_format:Y-m-d', 'before_or_equal:'.now()->toDateString()],
                 // One of the caller's own branches (BranchAccess; any with
                 // `branches:view_all`).
                 'branch_id' => [

@@ -767,6 +767,19 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
         require $savingsPartial;
     }
 
+    /*
+     * CDA Reports partials (routes/api/cda/*.php), in file-name order: each
+     * CDA slice adds its own file and never edits this one. Each file sets
+     * its own prefix (`/cda`, or a member route). An empty folder adds
+     * nothing.
+     */
+    $cdaPartials = glob(__DIR__.'/api/cda/*.php') ?: [];
+    sort($cdaPartials);
+
+    foreach ($cdaPartials as $cdaPartial) {
+        require $cdaPartial;
+    }
+
     // Branding (organization logo + identity printed on reports and documents)
     Route::get('/settings/branding', [BrandingController::class, 'show']);
     Route::put('/settings/branding', [BrandingController::class, 'update']);

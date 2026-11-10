@@ -32,6 +32,23 @@ class Borrower extends Model
     public const NON_MEMBER_STATUSES = ['pending', 'rejected'];
 
     /**
+     * Statuses of a person whose membership has ended (CDA design §1): they
+     * withdrew, or they died. Still members for the records (their loans,
+     * ledgers and the CDA counts of members who left), so they stay out of
+     * NON_MEMBER_STATUSES, but nothing new is started for them: payment
+     * reminders and share capital auto-credit skip them, and loans and
+     * savings already need `active`.
+     *
+     * @var list<string>
+     */
+    public const FORMER_MEMBER_STATUSES = ['withdrawn', 'deceased'];
+
+    /** @var list<string> */
+    public const MEMBER_TYPES = ['regular', 'associate'];
+
+    public const MEMBER_TYPE_REGULAR = 'regular';
+
+    /**
      * The `borrower_code` family. Named so SequenceAllocator predicts codes from
      * the same constant the hook issues them from.
      */
@@ -71,6 +88,11 @@ class Borrower extends Model
         'rejected_at',
         'rejected_by',
         'rejection_reason',
+        'membership_date',
+        'member_type',
+        'membership_number',
+        'membership_ended_on',
+        'membership_end_reason',
     ];
 
     protected function casts(): array
@@ -82,6 +104,8 @@ class Borrower extends Model
             'pledge_amount' => 'decimal:2',
             'approved_at' => 'datetime',
             'rejected_at' => 'datetime',
+            'membership_date' => 'date',
+            'membership_ended_on' => 'date',
         ];
     }
 
@@ -100,6 +124,12 @@ class Borrower extends Model
             $borrower->borrower_code = $last === null
                 ? SequenceCode::first(self::CODE_PREFIX)
                 : SequenceCode::after(self::CODE_PREFIX, $last->borrower_code, "borrowers.id {$last->id}");
+
+            // A member created with a membership date gets their membership
+            // number with it: the member code, unless one was given.
+            if ($borrower->membership_date !== null && blank($borrower->membership_number)) {
+                $borrower->membership_number = $borrower->borrower_code;
+            }
         });
 
         /**
@@ -209,6 +239,21 @@ class Borrower extends Model
     public function scopeMembers($query)
     {
         return $query->whereNotIn('status', self::NON_MEMBER_STATUSES);
+    }
+
+    /**
+     * Members whose membership hasn't ended: scopeMembers() without the
+     * withdrawn and deceased. What payment reminders and share capital
+     * auto-credit act on.
+     */
+    public function scopeCurrentMembers($query)
+    {
+        return $query->whereNotIn('status', [...self::NON_MEMBER_STATUSES, ...self::FORMER_MEMBER_STATUSES]);
+    }
+
+    public function isFormerMember(): bool
+    {
+        return in_array($this->status, self::FORMER_MEMBER_STATUSES, true);
     }
 
     public function scopeForBranch($query, int $branchId)

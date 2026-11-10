@@ -2,6 +2,7 @@
 
 namespace App\Http\Resources;
 
+use App\Models\Borrower;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 use OpenApi\Attributes as OA;
@@ -17,7 +18,12 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'full_name', type: 'string'),
         new OA\Property(property: 'first_name', type: 'string'),
         new OA\Property(property: 'last_name', type: 'string'),
-        new OA\Property(property: 'status', type: 'string', enum: ['active', 'inactive', 'blacklisted', 'pending', 'rejected']),
+        new OA\Property(property: 'status', type: 'string', enum: ['active', 'inactive', 'blacklisted', 'pending', 'rejected', 'withdrawn', 'deceased']),
+        new OA\Property(property: 'membership_date', type: 'string', format: 'date', nullable: true, description: 'When the person became a member (CDA). Set on approval or staff creation'),
+        new OA\Property(property: 'member_type', type: 'string', enum: ['regular', 'associate']),
+        new OA\Property(property: 'membership_number', type: 'string', nullable: true, description: 'Defaults to the member code'),
+        new OA\Property(property: 'membership_ended_on', type: 'string', format: 'date', nullable: true, description: 'Set when the member withdrew or died'),
+        new OA\Property(property: 'membership_end_reason', type: 'string', nullable: true),
         new OA\Property(property: 'approved_at', type: 'string', format: 'date-time', nullable: true, description: 'Set when a pending registration is approved'),
         new OA\Property(property: 'approved_by', type: 'integer', nullable: true, description: 'User id that approved the registration'),
         new OA\Property(property: 'rejected_at', type: 'string', format: 'date-time', nullable: true, description: 'Set when a pending registration is rejected'),
@@ -114,6 +120,11 @@ class BorrowerResource extends JsonResource
             'photo_url' => $photoUrl,
             'photo' => $photoUrl,
             'status' => $this->status,
+            'membership_date' => $this->membership_date?->toDateString(),
+            'member_type' => $this->member_type ?? Borrower::MEMBER_TYPE_REGULAR,
+            'membership_number' => $this->membership_number,
+            'membership_ended_on' => $this->membership_ended_on?->toDateString(),
+            'membership_end_reason' => $this->membership_end_reason,
             'approved_at' => $this->approved_at?->toIso8601String(),
             'approved_by' => $this->approved_by,
             'rejected_at' => $this->rejected_at?->toIso8601String(),

@@ -57,7 +57,9 @@ class ReminderRule extends Model
 
     /**
      * Whether the rule covers a loan in this branch, on this product, for a
-     * borrower with this status. A null branch or product covers all.
+     * borrower with this status. A null branch or product covers all. No rule
+     * covers a withdrawn or deceased member (Borrower::FORMER_MEMBER_STATUSES):
+     * nobody is reminded once their membership has ended.
      */
     public function appliesTo(?int $branchId, ?int $productId, ?string $borrowerStatus): bool
     {
@@ -66,6 +68,10 @@ class ReminderRule extends Model
         }
 
         if ($this->loan_product_id !== null && (int) $this->loan_product_id !== $productId) {
+            return false;
+        }
+
+        if (in_array($borrowerStatus, Borrower::FORMER_MEMBER_STATUSES, true)) {
             return false;
         }
 

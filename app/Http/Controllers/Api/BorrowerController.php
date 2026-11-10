@@ -15,6 +15,7 @@ use App\Services\BorrowerLoanSummaryService;
 use App\Services\BorrowerPurgeService;
 use App\Services\BorrowerSubmissionTokenService;
 use App\Services\BranchAccess;
+use App\Services\Cda\MembershipStatus;
 use App\Services\Diagnostics\ErrorDigest;
 use App\Services\GeneratedNumberWrite;
 use App\Services\MemberLedgerService;
@@ -352,6 +353,14 @@ DESC,
     {
         $attributes = $request->safe()->except('force');
 
+        // Staff creating a member makes them a member today (CDA design §1):
+        // the membership date is today in Manila, and Borrower::booted() gives
+        // the number. A public registration is an application, not yet a
+        // membership; approving it sets both.
+        if ($request->user() !== null && ! in_array($attributes['status'] ?? 'active', Borrower::NON_MEMBER_STATUSES, true)) {
+            $attributes['membership_date'] = now()->toDateString();
+        }
+
         try {
             // In one transaction so the borrower insert and the Borrower::created
             // hook (which creates the ShareCapitalPledge) are atomic — if either
@@ -558,6 +567,10 @@ DESC,
     {
         $this->authorize('borrowers:update');
 
+        if ($borrower->isFormerMember()) {
+            throw ValidationException::withMessages(['status' => MembershipStatus::endedMessage($borrower)]);
+        }
+
         $borrower->update(['status' => 'inactive']);
 
         return response()->json(['message' => 'Member deactivated successfully.']);
@@ -566,20 +579,35 @@ DESC,
     #[OA\Patch(
         path: '/api/borrowers/{id}/reactivate',
         summary: 'Reactivate borrower',
+        description: 'A withdrawn or deceased member (their membership ended) needs a `reason`; it is kept on the audit row, and the end date and reason are cleared. Any other member reactivates without one.',
         tags: ['Borrowers'],
         security: [['sanctum' => []]],
         parameters: [
             new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
         ],
+        requestBody: new OA\RequestBody(required: false, content: new OA\JsonContent(properties: [
+            new OA\Property(property: 'reason', type: 'string', maxLength: 255, description: 'Required when the membership ended'),
+        ])),
         responses: [
             new OA\Response(response: 200, description: 'Borrower reactivated'),
             new OA\Response(response: 401, description: 'Unauthenticated'),
             new OA\Response(response: 403, description: 'Forbidden'),
+            new OA\Response(response: 422, description: 'A former member without a reason'),
         ],
     )]
-    public function reactivate(Borrower $borrower): JsonResponse
+    public function reactivate(Request $request, Borrower $borrower, MembershipStatus $membership): JsonResponse
     {
         $this->authorize('borrowers:update');
+
+        if ($borrower->isFormerMember()) {
+            $membership->reactivate($borrower, (string) $request->validate([
+                'reason' => ['required', 'string', 'max:255'],
+            ], [
+                'reason.required' => 'Give a reason to reactivate a withdrawn or deceased member.',
+            ])['reason']);
+
+            return response()->json(['message' => 'Member reactivated successfully.']);
+        }
 
         $borrower->update(['status' => 'active']);
 
@@ -630,10 +658,14 @@ DESC,
             ]);
         }
 
+        // Approval makes the applicant a member today (CDA design §1): the
+        // membership date and number, where neither is set yet.
         $borrower->update([
             'status' => 'active',
             'approved_by' => $request->user()->id,
             'approved_at' => now(),
+            'membership_date' => $borrower->membership_date ?? now()->toDateString(),
+            'membership_number' => $borrower->membership_number ?? $borrower->borrower_code,
         ]);
 
         $borrower->load('branch', 'approvedBy', 'rejectedBy');
@@ -734,6 +766,13 @@ DESC,
             try {
                 /** @var Borrower $borrower */
                 $borrower = Borrower::visibleTo(request()->user())->findOrFail($id);
+
+                if ($borrower->isFormerMember()) {
+                    $failed[] = ['id' => $id, 'reason' => MembershipStatus::endedMessage($borrower)];
+
+                    continue;
+                }
+
                 $borrower->update(['status' => 'inactive']);
                 $deactivated[] = $id;
             } catch (\Throwable $e) {
