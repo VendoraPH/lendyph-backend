@@ -237,7 +237,7 @@ class AccountCloser
                 : "{$waiting} requests on it are waiting for approval. Approve, reject or cancel them first.";
         }
 
-        if (UnpostedInterestRun::holds($account->id)) {
+        if (UnpostedInterestRun::holds($account)) {
             $blockers[] = 'It is in an interest run that has not posted yet. Post or reject the run first.';
         }
 

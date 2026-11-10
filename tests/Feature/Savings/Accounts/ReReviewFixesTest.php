@@ -165,6 +165,37 @@ class ReReviewFixesTest extends TestCase
         $this->money("/api/savings/transactions/{$legs['transfer_in']['id']}/reverse", ['reason' => 'x'])->assertUnprocessable()->assertJsonValidationErrors('transaction');
     }
 
+    /**
+     * S4's RunPoster re-checks a run against every account its product,
+     * branch and period cover (RunBuilder::accounts()), lines or not, so an
+     * account covered by an unposted run without a line of its own is held
+     * too.
+     */
+    public function test_an_account_covered_by_an_unposted_run_without_a_line_is_held_too(): void
+    {
+        $account = $this->account(['opened_on' => '2026-10-15', 'last_member_activity_on' => '2026-10-15']);
+        $deposit = $this->fund($account, 50_000);
+        SavingsInterestRun::factory()->create([
+            'product_id' => $account->product_id,
+            'branch_id' => $account->branch_id,
+            'period_start' => '2026-10-01',
+            'period_end' => '2026-10-31',
+            'status' => 'draft',
+        ]);
+
+        $this->money("/api/savings/transactions/{$deposit->id}/reverse", ['reason' => 'x'])
+            ->assertUnprocessable()->assertJsonValidationErrors('transaction');
+        $this->getJson("/api/savings/accounts/{$account->id}/closing-quote")->assertJsonPath('data.can_close', false);
+
+        // An account opened after the run's period isn't covered by it.
+        $later = $this->account(['product_id' => SavingsProduct::factory()->create()->id]);
+        SavingsInterestRun::factory()->create([
+            'product_id' => $later->product_id, 'branch_id' => $later->branch_id,
+            'period_start' => '2026-10-01', 'period_end' => '2026-10-31', 'status' => 'draft',
+        ]);
+        $this->money("/api/savings/transactions/{$this->fund($later, 100)->id}/reverse", ['reason' => 'x'])->assertStatus(202);
+    }
+
     private function runHolding(SavingsAccount $account, string $status): SavingsInterestRun
     {
         $run = SavingsInterestRun::factory()->create([

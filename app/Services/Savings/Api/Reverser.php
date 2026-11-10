@@ -190,7 +190,7 @@ class Reverser
             Refuse::field('transaction', "{$account->account_number} is frozen: no money moves on it, reversals included, until it is unfrozen.");
         }
 
-        if (UnpostedInterestRun::holds($account->id)) {
+        if (UnpostedInterestRun::holds($account)) {
             Refuse::field('transaction', 'This account is in an interest run waiting to be posted. Post or reject that run first.');
         }
 
