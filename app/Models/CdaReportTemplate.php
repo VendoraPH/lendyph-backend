@@ -20,8 +20,8 @@ use LogicException;
  * - `draft` can be edited; `active` is selected for new reports
  *   (TemplateSelector) and is immutable; `retired` is never selected again.
  *   A report keeps the template it was created with.
- * - The model refuses any change to a template that isn't a draft, except
- *   moving it to `active` or `retired` (with `activated_at` or `reason`).
+ * - The model allows only draft → active and active → retired (with
+ *   `activated_at` or `reason`), and edits to a draft; nothing else.
  *
  * @property string $report_type
  * @property string $version
@@ -81,14 +81,21 @@ class CdaReportTemplate extends Model
     protected static function booted(): void
     {
         static::updating(function (CdaReportTemplate $template): void {
-            if ($template->getOriginal('status') === self::STATUS_DRAFT) {
+            $from = $template->getOriginal('status');
+            $to = $template->status;
+
+            if ($from === self::STATUS_DRAFT) {
+                if (! in_array($to, [self::STATUS_DRAFT, self::STATUS_ACTIVE], true)) {
+                    throw new LogicException("CDA template #{$template->id} is a draft: it can only be activated, not {$to}.");
+                }
+
                 return;
             }
 
             $changed = array_diff(array_keys($template->getDirty()), self::STATUS_CHANGE_FIELDS);
 
-            if ($changed !== [] || $template->getOriginal('status') === self::STATUS_RETIRED) {
-                throw new LogicException("CDA template #{$template->id} is {$template->getOriginal('status')} and can't be changed.");
+            if ($from !== self::STATUS_ACTIVE || $to !== self::STATUS_RETIRED || $changed !== []) {
+                throw new LogicException("CDA template #{$template->id} is {$from} and can't be changed; an active template can only be retired.");
             }
         });
 

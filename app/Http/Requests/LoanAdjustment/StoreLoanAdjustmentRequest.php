@@ -3,6 +3,7 @@
 namespace App\Http\Requests\LoanAdjustment;
 
 use App\Models\LoanAdjustment;
+use App\Rules\NotAFormerMember;
 use Illuminate\Contracts\Validation\Validator;
 use Illuminate\Foundation\Http\FormRequest;
 
@@ -75,6 +76,15 @@ class StoreLoanAdjustmentRequest extends FormRequest
             function (Validator $validator) {
                 $type = $this->input('adjustment_type');
                 $newValues = $this->input('new_values', []);
+
+                // A restructure or a term extension is new credit, never for a
+                // withdrawn or deceased member; a waiver or a balance
+                // adjustment only lowers what they owe (C1 re-review, L3).
+                $member = $this->route('loan')?->borrower;
+
+                if (in_array($type, ['restructure', 'term_extension'], true) && $member !== null && $member->isFormerMember()) {
+                    $validator->errors()->add('adjustment_type', NotAFormerMember::messageFor($member).' A penalty waiver or a balance adjustment is still possible.');
+                }
 
                 // Waiving penalties must be deliberate. Without this, a payload
                 // carrying neither key reaches a handler that waives every open

@@ -7,6 +7,7 @@ use App\Models\Borrower;
 use App\Models\Loan;
 use App\Rules\NoDuplicateBorrower;
 use App\Services\BranchAccess;
+use Closure;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\Validator;
@@ -43,7 +44,11 @@ class UpdateBorrowerRequest extends FormRequest
                 // CDA member fields (design §1). The membership number and
                 // how a membership ended have their own routes.
                 'member_type' => ['sometimes', 'string', Rule::in(Borrower::MEMBER_TYPES)],
-                'membership_date' => ['sometimes', 'date_format:Y-m-d', 'before_or_equal:'.now()->toDateString()],
+                'membership_date' => ['sometimes', 'date_format:Y-m-d', 'before_or_equal:'.now()->toDateString(), function (string $attribute, mixed $value, Closure $fail): void {
+                    if (in_array($this->route('borrower')?->status, Borrower::NON_MEMBER_STATUSES, true)) {
+                        $fail('Only a member has a membership date. Approve the registration first; approving sets it.');
+                    }
+                }],
                 // One of the caller's own branches (BranchAccess; any with
                 // `branches:view_all`).
                 'branch_id' => [

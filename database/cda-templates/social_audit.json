@@ -136,7 +136,7 @@
         "key": "social_audit_report",
         "category": "social_audit",
         "label": "Social audit report (signed)",
-        "stage": "finalize",
+        "stage": "submit",
         "severity": "critical"
       }
     ]
