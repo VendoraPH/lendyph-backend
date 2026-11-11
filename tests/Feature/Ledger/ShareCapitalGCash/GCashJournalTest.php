@@ -21,7 +21,8 @@ use Tests\Traits\SetupLendyPH;
  *   nothing.
  * - Cash Out, at creation, dated `transaction_date`: Dr 1020 A / Cr 1010 A−F
  *   / Cr 4090 F.
- * - The branch is the member's; a walk-in's journal has none.
+ * - The branch is the member's; a walk-in's is the branch it was recorded in,
+ *   none for head office (WalkInGCashBranchTest).
  */
 class GCashJournalTest extends TestCase
 {
@@ -133,6 +134,9 @@ class GCashJournalTest extends TestCase
             'gcash_non_member_id' => $walkIn->id,
             'type' => 'cash_out',
             'amount' => 1000,
+            // Head office, sent on purpose: with no key the admin's only
+            // branch would be used (WalkInGCashBranchTest).
+            'branch_id' => null,
         ])->assertCreated()->json('data.id');
 
         $journal = $this->journalOn(GCashTransaction::findOrFail($id), 'cash_out');

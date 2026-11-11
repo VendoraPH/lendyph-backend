@@ -51,7 +51,7 @@ class PortalServiceProvider extends ServiceProvider
         RateLimiter::for('portal-public', fn () => Limit::perMinute(120)->by('portal:public')->response($tooMany));
 
         RateLimiter::for('portal-login', fn (Request $request) => [
-            Limit::perMinutes(15, 10)->by('portal:login:'.MemberNumber::hash($request->input('member_number')))->response($tooMany),
+            Limit::perMinutes(15, 10)->by('portal:login:'.MemberNumber::limiterKey($request->input('member_number')))->response($tooMany),
             Limit::perMinute(300)->by('portal:login:all')->response($tooMany),
         ]);
 
@@ -61,7 +61,7 @@ class PortalServiceProvider extends ServiceProvider
             $step = $request->input('step_token');
             $subject = is_string($step) && $step !== ''
                 ? 'step:'.hash('sha256', $step)
-                : 'member:'.MemberNumber::hash($request->input('member_number'));
+                : MemberNumber::limiterKey($request->input('member_number'));
 
             return [
                 Limit::perMinutes(15, 10)->by('portal:codes:'.$subject)->response($tooMany),
@@ -71,6 +71,11 @@ class PortalServiceProvider extends ServiceProvider
 
         RateLimiter::for('portal', fn (Request $request) => Limit::perMinute(120)->by('portal:user:'.self::portalUserKey($request))->response($tooMany));
 
+        // The member's security actions (report a sign-in, sign out devices,
+        // change the password): per minute only, with no daily cap, so a
+        // stolen session spending the daily write budget can't block them.
+        RateLimiter::for('portal-security', fn (Request $request) => Limit::perMinute(20)->by('portal:security:'.self::portalUserKey($request))->response($tooMany));
+
         RateLimiter::for('portal-pdf', fn (Request $request) => Limit::perMinute(10)->by('portal:pdf:'.self::portalUserKey($request))->response($tooMany));
 
         RateLimiter::for('portal-writes', fn (Request $request) => [
@@ -78,13 +83,11 @@ class PortalServiceProvider extends ServiceProvider
             Limit::perDay(50)->by('portal:writes:day:'.self::portalUserKey($request))->response($tooMany),
         ]);
 
-        // Staff issuing codes: per staff user an hour, and per member a day
-        // (the raw route id: this runs before the binding). CodeDesk counts
-        // the codes themselves as well.
-        RateLimiter::for('portal-admin-codes', fn (Request $request) => [
-            Limit::perHour(30)->by('portal:admin-codes:staff:'.($request->user()?->getKey() ?? 'guest'))->response($tooMany),
-            Limit::perDay(5)->by('portal:admin-codes:member:'.(string) $request->route('borrower'))->response($tooMany),
-        ]);
+        // Staff issuing codes has no route limiter (review L4): one would run
+        // before the permission and branch checks, so a caller refused with
+        // 403 or 404 could use up a member's codes for the day. CodeDesk caps
+        // codes per member a day and per staff user an hour, in the database,
+        // after those checks.
     }
 
     private static function portalUserKey(Request $request): string

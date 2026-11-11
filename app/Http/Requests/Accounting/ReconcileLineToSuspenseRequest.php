@@ -2,7 +2,6 @@
 
 namespace App\Http\Requests\Accounting;
 
-use App\Services\BranchAccess;
 use Illuminate\Foundation\Http\FormRequest;
 
 /**
@@ -20,7 +19,6 @@ class ReconcileLineToSuspenseRequest extends FormRequest
         $user = $this->user();
 
         return $user->can('accounting:reconcile')
-            && $user->can(BranchAccess::VIEW_ALL)
             && $user->can('journals:create')
             && $user->can('journals:post');
     }

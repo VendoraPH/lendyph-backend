@@ -64,9 +64,9 @@ class PortalAuthController extends Controller
     public function login(Request $request): JsonResponse
     {
         $request->validate([
-            'member_number' => ['required', 'string', 'max:'.MemberNumber::MAX_LENGTH],
+            'member_number' => MemberNumber::rules(),
             'password' => ['required', 'string', 'max:'.PortalSettings::PASSWORD_MAX_LENGTH],
-        ]);
+        ], MemberNumber::MESSAGES);
 
         return $this->login->attempt($request->input('member_number'), $request->input('password'), $request)->toResponse();
     }
@@ -91,10 +91,10 @@ class PortalAuthController extends Controller
     public function verifyCode(Request $request): JsonResponse
     {
         $request->validate([
-            'member_number' => ['required', 'string', 'max:'.MemberNumber::MAX_LENGTH],
+            'member_number' => MemberNumber::rules(),
             'code' => ['required', 'string', 'max:40'],
             'birthdate' => ['required', 'string', 'max:10'],
-        ]);
+        ], MemberNumber::MESSAGES);
 
         return response()->json(['success' => true, 'data' => $this->codes->verify(
             $request->input('member_number'),
@@ -237,6 +237,13 @@ class PortalAuthController extends Controller
         }
 
         $before = $portalUser->terms_version;
+
+        // Accepting the version already accepted (and owed nothing newer)
+        // changes nothing and writes nothing (review L3).
+        if ($before === $current->version && ! $this->terms->requiredFor($portalUser) && ! isset($changes['ecomm_consent_at'])) {
+            return response()->json(['success' => true, 'data' => ['terms_version' => $current->version, 'terms_required' => false]]);
+        }
+
         $portalUser->forceFill($changes)->save();
 
         AuditLogService::log(

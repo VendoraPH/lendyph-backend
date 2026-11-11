@@ -24,7 +24,9 @@ use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
  * Turning an unmatched statement line into the entry the books are missing,
  * and matching the two in the same step (Phase 2, Accounting round C, C5).
  *
- * Three actions, each writing through the recorder that owns its record:
+ * Three actions, each writing through the recorder that owns its record, in
+ * the reconciliation's branch (none for an "all branches" one), so the new
+ * entry is in the books that reconciliation proves:
  *
  * - expense: money out, as an expense paid from the reconciled account
  *   ({@see ExpenseRecorder::record()}, Dr expense / Cr reconciled);
@@ -90,7 +92,7 @@ class ReconciliationActions
         return $this->act($reconciliation, $lineId, $userId, 'expense', (bool) ($data['record_anyway'] ?? false), function (
             AccountingReconciliationLine $line,
             AccountingAccount $reconciled,
-        ) use ($data, $userId): array {
+        ) use ($reconciliation, $data, $userId): array {
             if ($line->amount > 0) {
                 throw ValidationException::withMessages([
                     'line' => [
@@ -106,7 +108,7 @@ class ReconciliationActions
                 'expense_account_id' => (int) $data['expense_account_id'],
                 'amount' => -$line->amount,
                 'payment_account_id' => $reconciled->id,
-                'branch_id' => null,
+                'branch_id' => $reconciliation->branch_id,
                 'reference' => $line->external_reference,
                 'description' => $data['description'] ?? $line->description,
             ], $userId);
@@ -137,7 +139,7 @@ class ReconciliationActions
         return $this->act($reconciliation, $lineId, $userId, 'transfer', (bool) ($data['record_anyway'] ?? false), function (
             AccountingReconciliationLine $line,
             AccountingAccount $reconciled,
-        ) use ($data, $userId): array {
+        ) use ($reconciliation, $data, $userId): array {
             $counter = $this->requireMoneyAccount((int) $data['counter_account_id'], 'counter_account_id');
 
             if ($counter->id === $reconciled->id) {
@@ -157,7 +159,7 @@ class ReconciliationActions
                 'to_account_id' => $moneyIn ? $reconciled->id : $counter->id,
                 'amount' => abs($line->amount),
                 'description' => $data['description'] ?? mb_substr('Transfer from statement line: '.$line->description, 0, 500),
-                'branch_id' => null,
+                'branch_id' => $reconciliation->branch_id,
                 'reference' => $line->external_reference,
             ], $userId);
 
@@ -195,7 +197,7 @@ class ReconciliationActions
                     'source' => $reconciled->cash_kind === 'bank' ? 'bank_transaction' : 'cash_transaction',
                     'reference' => $line->external_reference ?? "REC-{$reconciliation->id}-{$line->id}",
                     'description' => mb_substr('Unidentified statement line: '.$line->description, 0, 500),
-                    'branch_id' => null,
+                    'branch_id' => $reconciliation->branch_id,
                     // No postable, as a manual entry has none. The locked
                     // statement line and its UNIQUE match are what make a
                     // double click post once.

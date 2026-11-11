@@ -25,8 +25,10 @@ Route::prefix('portal-admin')->name('portal-admin.')->group(function () {
     Route::prefix('members/{borrower}')->whereNumber('borrower')->name('members.')->group(function () {
         Route::get('/access', [PortalAccessController::class, 'show'])->name('access.show');
         Route::put('/access', [PortalAccessController::class, 'updateAccess'])->name('access.update');
-        Route::post('/invite', [PortalAccessController::class, 'invite'])->middleware('throttle:portal-admin-codes')->name('invite');
-        Route::post('/reset-code', [PortalAccessController::class, 'resetCode'])->middleware('throttle:portal-admin-codes')->name('reset-code');
+        // No route limiter: CodeDesk caps codes per member and per staff user
+        // after the permission and branch checks.
+        Route::post('/invite', [PortalAccessController::class, 'invite'])->name('invite');
+        Route::post('/reset-code', [PortalAccessController::class, 'resetCode'])->name('reset-code');
         Route::post('/unlock', [PortalAccessController::class, 'unlock'])->name('unlock');
         Route::post('/sign-out', [PortalAccessController::class, 'signOut'])->name('sign-out');
         Route::get('/communications', [PortalAccessController::class, 'communications'])->name('communications');

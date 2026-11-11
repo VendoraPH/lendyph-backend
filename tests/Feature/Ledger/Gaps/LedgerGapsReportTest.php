@@ -329,6 +329,24 @@ class LedgerGapsReportTest extends TestCase
         $this->assertSame($first->json('meta.totals'), $second->json('meta.totals'));
     }
 
+    public function test_a_walk_in_recorded_in_a_branch_is_listed_in_that_branch(): void
+    {
+        $this->seedChartOfAccounts();
+        $far = Branch::factory()->create(['name' => 'Far Branch', 'code' => 'FAR']);
+        $walkIn = GCashTransaction::factory()->forNonMember()->create([
+            'type' => 'cash_out', 'amount' => 3000, 'charge_amount' => 20, 'total_amount' => 2980,
+            'status' => 'completed', 'transaction_date' => '2026-10-06 09:00:00', 'branch_id' => $far->id,
+        ]);
+
+        $row = $this->rowsOf($this->gaps()->assertOk(), 'cash_out')[$walkIn->id] ?? null;
+        $this->assertNotNull($row);
+        $this->assertSame(['id' => $far->id, 'name' => 'Far Branch'], $row['branch']);
+        $this->assertNull($row['member']);
+
+        $this->assertArrayHasKey($walkIn->id, $this->rowsOf($this->gaps(['branch_id' => $far->id]), 'cash_out'));
+        $this->assertArrayNotHasKey($walkIn->id, $this->rowsOf($this->gaps(['branch_id' => $this->branch->id]), 'cash_out'));
+    }
+
     public function test_kind_dates_and_branch_filter_the_rows_and_their_totals(): void
     {
         $this->seedChartOfAccounts();

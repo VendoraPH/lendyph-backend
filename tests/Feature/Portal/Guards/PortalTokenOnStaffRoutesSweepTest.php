@@ -11,15 +11,16 @@ use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
 /**
- * Every authenticated staff route answers 401 to a valid member portal token
- * (portal design §8). Built from the live route list, so a staff route added
- * later is swept by default.
+ * A valid member portal token gets exactly what a guest gets on every API
+ * route outside the portal (portal design §8; review L8): 401 on every staff
+ * route, and the public answer on the public ones. Built from the live route
+ * list, so a route added later is swept by default.
  */
 class PortalTokenOnStaffRoutesSweepTest extends TestCase
 {
     use PortalTestHelpers, SetupLendyPH;
 
-    public function test_every_staff_route_refuses_a_portal_token(): void
+    public function test_a_portal_token_gets_exactly_what_a_guest_gets_on_every_non_portal_route(): void
     {
         $this->seedAndLogin();
         $this->enablePortal();
@@ -29,23 +30,31 @@ class PortalTokenOnStaffRoutesSweepTest extends TestCase
         $token = $this->portalToken($portalUser);
 
         $swept = 0;
+        $authenticated = 0;
         $leaks = [];
 
-        foreach ($this->staffRoutes() as $route) {
+        foreach ($this->nonPortalRoutes() as $route) {
             $uri = '/'.preg_replace_callback('/\{(\w+)\??\}/', fn (array $m) => $this->valueFor($route, $m[1], (string) $portalUser->borrower_id), $route->uri());
+            $staffOnly = in_array('auth:sanctum', $route->gatherMiddleware(), true);
 
             foreach (array_diff($route->methods(), ['HEAD']) as $method) {
-                $status = $this->portalJson($method, $uri, [], $token)->status();
+                $guest = $this->portalJson($method, $uri)->status();
+                $withToken = $this->portalJson($method, $uri, [], $token)->status();
                 $swept++;
 
-                if ($status !== 401) {
-                    $leaks[] = "{$method} /{$route->uri()} answered {$status}";
+                if ($staffOnly) {
+                    $authenticated++;
+                }
+
+                if ($withToken !== $guest || ($staffOnly && $withToken !== 401)) {
+                    $leaks[] = "{$method} /{$route->uri()} answered {$withToken} to a portal token and {$guest} to a guest";
                 }
             }
         }
 
-        $this->assertGreaterThan(300, $swept, 'The sweep found fewer staff routes than expected; is it reading the route list?');
-        $this->assertSame([], $leaks, "These staff routes accept a member portal token:\n  ".implode("\n  ", $leaks));
+        $this->assertGreaterThan(300, $authenticated, 'The sweep found fewer staff routes than expected; is it reading the route list?');
+        $this->assertGreaterThan($authenticated, $swept, 'The sweep covers the public routes too.');
+        $this->assertSame([], $leaks, "A portal token is treated differently from a guest on:\n  ".implode("\n  ", $leaks));
         $this->assertDatabaseHas('personal_access_tokens', ['tokenable_id' => $portalUser->id]);
     }
 
@@ -74,13 +83,12 @@ class PortalTokenOnStaffRoutesSweepTest extends TestCase
         $this->fail("No sample value for {{$parameter}} on /{$route->uri()} (pattern {$pattern}).");
     }
 
-    /** @return list<Route> */
-    private function staffRoutes(): array
+    /** Every API route outside the member portal, staff and public alike. @return list<Route> */
+    private function nonPortalRoutes(): array
     {
         return array_values(array_filter(
             Router::getRoutes()->getRoutes(),
-            fn (Route $route) => str_starts_with($route->uri(), 'api/')
-                && in_array('auth:sanctum', $route->gatherMiddleware(), true),
+            fn (Route $route) => str_starts_with($route->uri(), 'api/') && ! str_starts_with($route->uri(), 'api/portal/'),
         ));
     }
 }

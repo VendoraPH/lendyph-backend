@@ -60,7 +60,7 @@ class PortalAdminBranchSweepTest extends TestCase
 
             foreach (array_diff($route->methods(), ['HEAD']) as $method) {
                 $this->actingAs($caller);
-                $status = $this->json($method, $uri, ['identity_checked_as' => 'UMID', 'enabled' => false, 'reason' => 'administrative'])->status();
+                $status = $this->json($method, $uri, ['identity_checked_as' => 'umid', 'enabled' => false, 'reason' => 'administrative'])->status();
                 $swept++;
 
                 if ($status !== 404) {

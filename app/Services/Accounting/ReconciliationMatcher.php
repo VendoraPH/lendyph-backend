@@ -54,6 +54,15 @@ use Illuminate\Support\Facades\DB;
  * line, and a line another reconciliation's statement line has claimed is
  * never offered.
  *
+ * ## Per branch
+ *
+ * A reconciliation with a branch proves that branch's books only (owner
+ * answer 9 and the lead's decision, 2026-11-11): its worksheet, suggestions,
+ * matches and book balance read the lines on the account whose journal is in
+ * that branch, never another branch's or a journal with no branch. One with no
+ * branch ("All branches") reads every line on the account, as every
+ * reconciliation did before. The account itself is organisation-wide.
+ *
  * A ledger line already claimed by a stronger pass is never offered again, and
  * where several candidates tie, the nearest date wins and then the lowest id —
  * a total order, so the same books produce the same suggestions every time.
@@ -97,6 +106,9 @@ class ReconciliationMatcher
      * date: until then it can still clear, so it is still outstanding.
      */
     public const OUTSTANDING_DAYS_BEFORE = 180;
+
+    /** What a reconciliation with no branch reads as: it proves every branch's lines. */
+    public const ALL_BRANCHES = 'All branches';
 
     /**
      * The dates a ledger line may carry and still be matched in this
@@ -147,7 +159,7 @@ class ReconciliationMatcher
         // the two has the eager-loading methods.
         $reconciliations = EloquentCollection::make($reconciliations->all());
 
-        $reconciliations->loadMissing(['account:id,code,name', 'lines']);
+        $reconciliations->loadMissing(['account:id,code,name', 'branch:id,name', 'lines']);
 
         $ledger = $this->ledgerFor($reconciliations);
         $balances = $this->balancesFor($reconciliations);
@@ -160,11 +172,12 @@ class ReconciliationMatcher
             $start = $reconciliation->start_date->toDateString();
             $end = $reconciliation->end_date->toDateString();
 
-            $window = $this->candidatesFor($reconciliation, $ledger[$accountId] ?? new Collection);
+            $accountLedger = self::inBranch($reconciliation, $ledger[$accountId] ?? new Collection);
+            $window = $this->candidatesFor($reconciliation, $accountLedger);
 
             $rows = $this->pair($window, $reconciliation->lines);
             $rows = $this->withMatchable($rows, $window, $reconciliation);
-            $netted = $this->nettedLines($rows, $window, $ledger[$accountId] ?? new Collection, $partners, $reconciliation);
+            $netted = $this->nettedLines($rows, $window, $accountLedger, $partners, $reconciliation);
             $rows = array_map(static function (array $row) use ($netted): array {
                 $row['netted'] = $row['journal_line_id'] !== null && isset($netted[$row['journal_line_id']]);
 
@@ -175,7 +188,7 @@ class ReconciliationMatcher
             // every posting up to that day, not only the ones inside the
             // window. A balance is cumulative; the window bounds which LINES
             // are looked at, not which history counts.
-            $bookBalance = $balances[$end][$accountId] ?? 0;
+            $bookBalance = $balances[$end][self::branchKey($reconciliation)][$accountId] ?? 0;
             $difference = $bookBalance - $reconciliation->statement_balance;
 
             $presented[$reconciliation->id] = [
@@ -183,6 +196,10 @@ class ReconciliationMatcher
                 'account_id' => $accountId,
                 'account_code' => $reconciliation->account?->code,
                 'account_name' => $reconciliation->account?->name,
+                // The branch whose lines this proves; null and "All branches"
+                // for one that reads every line on the account.
+                'branch_id' => $reconciliation->branch_id,
+                'branch_name' => $reconciliation->branch_id === null ? self::ALL_BRANCHES : $reconciliation->branch?->name,
                 'period' => $reconciliation->period,
                 'start_date' => $start,
                 'end_date' => $end,
@@ -261,7 +278,9 @@ class ReconciliationMatcher
      * worksheet row's `matchable`, so the picker offers exactly what the
      * server takes.
      *
-     * Refused: a draft; a line on another account; a line dated outside the
+     * Refused: a draft; a line on another account; for a reconciliation with a
+     * branch, a line in another branch's journal or one with no branch; a line
+     * dated outside the
      * period and further than {@see self::OUTSTANDING_DAYS_BEFORE} days
      * before it or {@see self::DATE_WINDOW_DAYS} days after it; a line another
      * statement line has claimed; and, for a given statement line, a line of
@@ -289,6 +308,11 @@ class ReconciliationMatcher
         if ($line['account_id'] !== $reconciliation->accounting_account_id) {
             return "Journal line {$id} is against a different account. A reconciliation proves one account, so a "
                 .'line on another one cannot be part of it.';
+        }
+
+        if ($reconciliation->branch_id !== null && $line['branch_id'] !== $reconciliation->branch_id) {
+            return "Journal line {$id} is not in this branch's books. A branch reconciliation proves that branch's "
+                .'entries only, so an entry of another branch, or of no branch, cannot be part of it.';
         }
 
         $date = $line['date'];
@@ -599,7 +623,10 @@ class ReconciliationMatcher
         $reconciliation = $reconciliation->fresh(['lines']);
         $window = $this->candidatesFor(
             $reconciliation,
-            $this->ledgerFor(new Collection([$reconciliation]))[$reconciliation->accounting_account_id] ?? new Collection,
+            self::inBranch(
+                $reconciliation,
+                $this->ledgerFor(new Collection([$reconciliation]))[$reconciliation->accounting_account_id] ?? new Collection,
+            ),
         );
         $rows = $this->pair($window, $reconciliation->lines);
 
@@ -754,6 +781,7 @@ class ReconciliationMatcher
                 'j.reference',
                 'j.description as journal_description',
                 'j.status',
+                'j.branch_id',
                 'j.reverses_journal_id',
                 'j.reversed_by_journal_id',
                 'r.accounting_reconciliation_id as claimed_by',
@@ -779,6 +807,7 @@ class ReconciliationMatcher
             'journal_no' => $row->journal_no,
             'reference' => $row->reference,
             'status' => (string) $row->status,
+            'branch_id' => $row->branch_id === null ? null : (int) $row->branch_id,
             'claimed_by' => $row->claimed_by === null ? null : (int) $row->claimed_by,
             'claimed_by_line' => $row->claimed_by_line === null ? null : (int) $row->claimed_by_line,
             'reverses_journal_id' => $row->reverses_journal_id === null ? null : (int) $row->reverses_journal_id,
@@ -789,9 +818,11 @@ class ReconciliationMatcher
     /**
      * Signed account balances as of each distinct period end on the page.
      *
-     * One query per distinct `end_date` rather than one per reconciliation —
-     * a page of twelve monthly reconciliations across five accounts is twelve
-     * queries, not sixty.
+     * One query per distinct `end_date` and branch rather than one per
+     * reconciliation — a page of twelve monthly reconciliations across five
+     * accounts of one branch is twelve queries, not sixty. A reconciliation
+     * with a branch is balanced on that branch's journals only, as its
+     * worksheet is; an "all branches" one on every journal.
      *
      * Through TrialBalanceBuilder rather than a sum of its own. The Cash & Bank
      * screen, the dashboard and the balance sheet all read that builder, and
@@ -800,21 +831,45 @@ class ReconciliationMatcher
      * checkable.
      *
      * @param  Collection<int, AccountingReconciliation>  $reconciliations
-     * @return array<string, array<int, int>> end date => (account id => centavos)
+     * @return array<string, array<string, array<int, int>>> end date => branch key => (account id => centavos)
      */
     private function balancesFor(Collection $reconciliations): array
     {
         $balances = [];
 
-        foreach ($reconciliations->groupBy(fn (AccountingReconciliation $r): string => $r->end_date->toDateString()) as $end => $group) {
-            $balances[$end] = $this->trialBalance->signedBalances(
-                (string) $end,
-                null,
-                $group->pluck('accounting_account_id')->unique()->values()->all(),
-            );
+        foreach ($reconciliations->groupBy(fn (AccountingReconciliation $r): string => $r->end_date->toDateString()) as $end => $byEnd) {
+            foreach ($byEnd->groupBy(fn (AccountingReconciliation $r): string => self::branchKey($r)) as $key => $group) {
+                $balances[$end][$key] = $this->trialBalance->signedBalances(
+                    (string) $end,
+                    $group->first()->branch_id,
+                    $group->pluck('accounting_account_id')->unique()->values()->all(),
+                );
+            }
         }
 
         return $balances;
+    }
+
+    /** "all", or the branch id: which books a reconciliation proves. */
+    private static function branchKey(AccountingReconciliation $reconciliation): string
+    {
+        return $reconciliation->branch_id === null ? 'all' : (string) $reconciliation->branch_id;
+    }
+
+    /**
+     * The account's ledger lines this reconciliation proves: its branch's,
+     * or every one for an "all branches" reconciliation.
+     *
+     * @param  Collection<int, array<string, mixed>>  $lines
+     * @return Collection<int, array<string, mixed>>
+     */
+    private static function inBranch(AccountingReconciliation $reconciliation, Collection $lines): Collection
+    {
+        if ($reconciliation->branch_id === null) {
+            return $lines;
+        }
+
+        return $lines->filter(static fn (array $line): bool => $line['branch_id'] === $reconciliation->branch_id)->values();
     }
 
     /**

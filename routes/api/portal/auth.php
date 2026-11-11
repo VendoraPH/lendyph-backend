@@ -43,16 +43,20 @@ Route::prefix('portal')->name('portal.')->group(function () {
         Route::prefix('auth')->name('auth.')->group(function () {
             Route::post('/logout', [PortalAuthController::class, 'logout'])->name('logout');
             Route::get('/me', [PortalAuthController::class, 'me'])->name('me');
-            Route::post('/terms/accept', [PortalAuthController::class, 'acceptTerms'])->name('terms');
-            Route::post('/password/change', [PortalAuthController::class, 'changePassword'])->middleware('throttle:portal-writes')->name('password');
+            Route::post('/terms/accept', [PortalAuthController::class, 'acceptTerms'])->middleware('throttle:portal-writes')->name('terms');
+            Route::post('/password/change', [PortalAuthController::class, 'changePassword'])->middleware('throttle:portal-security')->name('password');
         });
 
         Route::prefix('security')->group(function () {
             Route::get('/sessions', [PortalSecurityController::class, 'sessions'])->name('sessions.index');
-            Route::post('/sessions/logout-others', [PortalSecurityController::class, 'logoutOthers'])->name('sessions.logout-others');
-            Route::delete('/sessions/{id}', [PortalSecurityController::class, 'destroySession'])->whereNumber('id')->name('sessions.destroy');
             Route::get('/logins', [PortalSecurityController::class, 'logins'])->name('logins.index');
-            Route::post('/logins/{id}/report', [PortalSecurityController::class, 'report'])->whereNumber('id')->name('logins.report');
+
+            // Security actions: their own per-minute limit, no daily cap.
+            Route::middleware('throttle:portal-security')->group(function () {
+                Route::post('/sessions/logout-others', [PortalSecurityController::class, 'logoutOthers'])->name('sessions.logout-others');
+                Route::delete('/sessions/{id}', [PortalSecurityController::class, 'destroySession'])->whereNumber('id')->name('sessions.destroy');
+                Route::post('/logins/{id}/report', [PortalSecurityController::class, 'report'])->whereNumber('id')->name('logins.report');
+            });
         });
     });
 });

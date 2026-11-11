@@ -148,6 +148,7 @@ class ReportExportsTest extends TestCase
         $this->value('loans.loans_outstanding', '1500.00');
         $this->value('general.contact', '<script>alert(1)</script>');
         $user = $this->exporter();
+        $user->forceFill(['first_name' => 'Liza', 'last_name' => "D'Souza"])->save();
 
         $html = app(PdfRenderer::class)->html(app(ExportContentBuilder::class)->build($this->capr, $user));
 
@@ -157,7 +158,8 @@ class ReportExportsTest extends TestCase
         $this->assertStringNotContainsString('<script>', $html);
         $this->assertStringContainsString('CY2026', $html);
         $this->assertStringContainsString('Template 2026.1', $html);
-        $this->assertStringContainsString($user->full_name, $html);
+        $this->assertStringContainsString('by Liza D&#039;Souza', $html, 'The name is escaped once, as Blade prints it.');
+        $this->assertStringNotContainsString('&amp;#039;', $html);
         $this->assertStringContainsString('Generated Nov 20, 2026', $html);
         $this->assertStringContainsString('DejaVu Sans', $html);
     }

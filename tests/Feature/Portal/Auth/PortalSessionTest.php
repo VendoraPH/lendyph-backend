@@ -2,6 +2,7 @@
 
 namespace Tests\Feature\Portal\Auth;
 
+use App\Models\AuditLog;
 use App\Models\Borrower;
 use App\Models\PortalLoginEvent;
 use App\Models\PortalUser;
@@ -241,5 +242,74 @@ class PortalSessionTest extends TestCase
         $activeToken = $this->portalToken($active);
         $this->enablePortal(['enabled' => false]);
         $this->portalJson('GET', '/api/portal/auth/me', [], $activeToken)->assertStatus(503)->assertJsonPath('code', 'portal_off');
+    }
+
+    /**
+     * Review L3: repeating a security action changes nothing and writes
+     * nothing: a second report alerts nobody, signing out no other device
+     * and accepting the same terms again write no audit row.
+     */
+    public function test_repeated_security_actions_write_only_what_changed(): void
+    {
+        $portalUser = $this->portalMember(['branch_id' => $this->branch->id]);
+        $token = $this->portalToken($portalUser);
+        $event = PortalLoginEvent::factory()->create(['portal_user_id' => $portalUser->id]);
+        $manager = User::factory()->inBranches($this->branch)->create();
+        $manager->givePermissionTo('member_portal:manage');
+
+        $this->portalJson('POST', "/api/portal/security/logins/{$event->id}/report", [], $token)->assertOk();
+        $this->portalJson('POST', "/api/portal/security/logins/{$event->id}/report", [], $token)->assertOk();
+        $this->assertSame(1, $manager->notifications()->count());
+        $this->assertSame(1, AuditLog::query()->where('action', 'portal_login_reported')->count());
+        $this->assertSame(1, $portalUser->notifications()->count());
+
+        $this->portalJson('POST', '/api/portal/security/sessions/logout-others', [], $token)->assertOk()->assertJsonPath('data.sessions_ended', 0);
+        $this->assertSame(0, AuditLog::query()->where('action', 'portal_sessions_signed_out')->count());
+
+        $version = $portalUser->terms_version;
+        $current = $this->publishTerms(['version' => 'again-1']);
+        $this->portalJson('POST', '/api/portal/auth/terms/accept', ['version' => $current->version], $token)->assertOk();
+        $this->portalJson('POST', '/api/portal/auth/terms/accept', ['version' => $current->version], $token)->assertOk();
+        $this->assertNotSame($version, $current->version);
+        $this->assertSame(1, AuditLog::query()->where('action', 'portal_terms_accepted')->count());
+    }
+
+    /** Review L3: the security actions have a per-member limit of 20 a minute. */
+    public function test_security_writes_are_limited_per_member(): void
+    {
+        $portalUser = $this->portalMember();
+        $token = $this->portalToken($portalUser);
+        $event = PortalLoginEvent::factory()->create(['portal_user_id' => $portalUser->id]);
+
+        $this->withMiddleware(ThrottleRequests::class);
+        $statuses = [];
+        for ($i = 0; $i < 21; $i++) {
+            $statuses[] = $this->portalJson('POST', "/api/portal/security/logins/{$event->id}/report", [], $token)->status();
+        }
+
+        $this->assertSame(200, $statuses[19]);
+        $this->assertSame(429, $statuses[20]);
+    }
+
+    /**
+     * Re-check, low: the security actions have their own per-minute limit
+     * with no daily cap, so a stolen session spending the write budget on
+     * no-op writes can't block them.
+     */
+    public function test_fifty_terms_acceptances_do_not_block_a_password_change(): void
+    {
+        $portalUser = $this->portalMember();
+        $token = $this->portalToken($portalUser);
+        $this->withMiddleware(ThrottleRequests::class);
+
+        for ($i = 0; $i < 50; $i++) {
+            $this->portalJson('POST', '/api/portal/auth/terms/accept', ['version' => 'any'], $token);
+        }
+
+        $this->portalJson('POST', '/api/portal/auth/password/change', [
+            'current_password' => $this->portalPassword(),
+            'password' => 'Another-pass-77',
+            'password_confirmation' => 'Another-pass-77',
+        ], $token)->assertOk();
     }
 }

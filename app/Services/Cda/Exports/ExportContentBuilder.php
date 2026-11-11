@@ -11,6 +11,7 @@ use App\Models\CdaReportValue;
 use App\Models\User;
 use App\Services\Cda\Reports\ReportStages;
 use App\Services\Cda\ReportTypes;
+use App\Services\Cda\Sources\PesosSource;
 use Carbon\CarbonImmutable;
 
 /**
@@ -25,7 +26,11 @@ use Carbon\CarbonImmutable;
  *
  * An export of a template still marked unverified (the definition the
  * snapshot froze, else the report's template) carries the "to verify" note,
- * drafts and finalized reports alike.
+ * drafts and finalized reports alike. A PESOS report also carries it while
+ * the PESOS rules behind its figures are still to verify: a stored
+ * `pesos.result` figure's `meta.to_verify` list isn't empty (the snapshot's
+ * figures once finalized), or no figure carries that flag at all. The rule
+ * is PesosSource::verified(), shared with the on-screen check.
  *
  * The document stage is always the current one (ReportStages::current()),
  * never a frozen one: financial statements read "Draft Financial
@@ -64,6 +69,7 @@ final class ExportContentBuilder
             $template = CdaReportTemplate::query()->find($snapshot->template_id) ?? $report->template;
             $definition = SnapshotReader::definition($payload) ?? (array) ($template?->definition ?? []);
             $values = SnapshotReader::values($payload);
+            $sourceValues = self::snapshotSourceValues($payload);
             $profile = SnapshotReader::profile($payload);
             $coopName = SnapshotReader::pulled($payload, 'name');
             $coopAddress = SnapshotReader::pulled($payload, 'address');
@@ -71,8 +77,9 @@ final class ExportContentBuilder
         } else {
             $template = $report->template;
             $definition = (array) ($template?->definition ?? []);
-            $values = CdaReportValue::query()->where('report_id', $report->id)->get(['field_key', 'value'])
-                ->mapWithKeys(fn (CdaReportValue $row) => [$row->field_key => $row->value])->all();
+            $rows = CdaReportValue::query()->where('report_id', $report->id)->get(['field_key', 'value', 'source_value']);
+            $values = $rows->mapWithKeys(fn (CdaReportValue $row) => [$row->field_key => $row->value])->all();
+            $sourceValues = $rows->map(fn (CdaReportValue $row) => $row->source_value)->all();
             $profile = $this->liveProfile();
             $branding = BrandingSetting::query()->orderBy('id')->first();
             $coopName = $branding?->organization_name;
@@ -119,8 +126,28 @@ final class ExportContentBuilder
             types: $this->types((array) ($definition['sections'] ?? [])),
             profile: $profile,
             excel: (array) ($definition['export']['excel'] ?? []),
-            unverified: ($definition['meta']['verified'] ?? false) !== true,
+            unverified: $report->report_type === 'pesos'
+                ? ! PesosSource::verified(($definition['meta']['verified'] ?? false) === true, $sourceValues)
+                : ($definition['meta']['verified'] ?? false) !== true,
         );
+    }
+
+    /**
+     * The stored figures' source values in a snapshot payload, whichever
+     * shape its values take (a list of rows, or rows keyed by field).
+     *
+     * @param  array<string, mixed>  $payload
+     * @return list<mixed>
+     */
+    private static function snapshotSourceValues(array $payload): array
+    {
+        $values = $payload['values'] ?? [];
+
+        if (! is_array($values)) {
+            return [];
+        }
+
+        return array_values(array_map(fn ($row) => is_array($row) ? ($row['source_value'] ?? null) : null, $values));
     }
 
     /**

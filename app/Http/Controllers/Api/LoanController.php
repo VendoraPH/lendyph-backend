@@ -368,12 +368,13 @@ DESC,
                 'borrower:id,borrower_code,first_name,middle_name,last_name,suffix,status',
                 'loanProduct:id,name',
                 'branch:id,name',
-                'openSchedules',
+                'openSchedules.postedPrincipalPayments',
+                'openSchedules.principalChanges',
                 'approvalSteps',
             );
         } else {
             $query
-                ->with('borrower', 'loanProduct', 'branch', 'createdByUser', 'amortizationSchedules', 'coMakers', 'approvalSteps')
+                ->with('borrower', 'loanProduct', 'branch', 'createdByUser', 'amortizationSchedules.postedPrincipalPayments', 'amortizationSchedules.principalChanges', 'coMakers', 'approvalSteps')
                 // Aliased count so LoanResource's extension_count reads an
                 // already-loaded value instead of firing a COUNT query per row.
                 ->withCount(['adjustments as extension_count' => fn ($q) => $q->where('adjustment_type', 'extension')]);
@@ -639,7 +640,7 @@ DESC,
         $loan->load(
             'borrower', 'loanProduct', 'branch', 'coMakers',
             'approvedByUser', 'releasedByUser', 'rejectedByUser',
-            'createdByUser', 'accountOfficer', 'amortizationSchedules',
+            'createdByUser', 'accountOfficer', 'amortizationSchedules.principalChanges', 'amortizationSchedules.postedPrincipalPayments',
             'documents',
             // For current_approver.
             'approvalSteps',
@@ -884,7 +885,7 @@ DESC,
             $request->releaseReference(),
         );
         $loan->load('borrower', 'loanProduct', 'branch', 'coMakers',
-            'approvedByUser', 'releasedByUser', 'amortizationSchedules');
+            'approvedByUser', 'releasedByUser', 'amortizationSchedules.principalChanges', 'amortizationSchedules.postedPrincipalPayments');
 
         return response()->json(['message' => 'Loan released successfully.', 'data' => new LoanResource($loan)]);
     }
@@ -1232,7 +1233,7 @@ DESC,
         $loan->refresh()->load(
             'borrower', 'loanProduct', 'branch', 'coMakers',
             'approvedByUser', 'releasedByUser', 'rejectedByUser',
-            'createdByUser', 'accountOfficer', 'amortizationSchedules',
+            'createdByUser', 'accountOfficer', 'amortizationSchedules.principalChanges', 'amortizationSchedules.postedPrincipalPayments',
             'documents', 'approvalSteps', 'sourceLoan', 'restructuredInto',
             'collaterals',
         );

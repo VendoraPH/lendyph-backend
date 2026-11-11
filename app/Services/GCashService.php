@@ -89,6 +89,9 @@ class GCashService
                 'paid_at' => $status === 'paid' ? $now : null,
                 'borrower_id' => $payload['borrower_id'] ?? null,
                 'gcash_non_member_id' => $payload['gcash_non_member_id'] ?? null,
+                // A walk-in's branch, resolved by StoreGCashTransactionRequest;
+                // a member's transaction follows the member's branch instead.
+                'branch_id' => isset($payload['gcash_non_member_id']) ? ($payload['branch_id'] ?? null) : null,
                 'transactor_user_id' => $actor->id,
                 'remarks' => $payload['remarks'] ?? null,
             ]);

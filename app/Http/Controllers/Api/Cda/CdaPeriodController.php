@@ -8,6 +8,7 @@ use App\Http\Requests\Cda\UpdateCdaPeriodRequest;
 use App\Http\Resources\Cda\CdaPresenter;
 use App\Models\CdaReport;
 use App\Models\CdaReportingPeriod;
+use App\Models\User;
 use App\Services\Cda\CdaAccess;
 use App\Services\Cda\PeriodOpener;
 use App\Services\Cda\ReportTypes;
@@ -32,13 +33,16 @@ class CdaPeriodController extends Controller
         description: 'Needs `cda:view` and `branches:view_all`. Dates are YYYY-MM-DD; `effective_deadline` is the extension, else the default; `days_remaining` counts Manila days (negative once past).',
         tags: ['CDA'],
         security: [['sanctum' => []]],
-        responses: [new OA\Response(response: 200, description: 'The periods, each with `report_count`'), new OA\Response(response: 403, description: 'Missing cda:view or branches:view_all')],
+        responses: [new OA\Response(response: 200, description: 'The periods, each with `report_count`: the reports the caller may open (mediation, audit and tax only with their view permission)'), new OA\Response(response: 403, description: 'Missing cda:view or branches:view_all')],
     )]
     public function index(Request $request): JsonResponse
     {
         $this->access->authorize($request->user(), CdaAccess::VIEW);
 
-        $periods = CdaReportingPeriod::query()->with('creator')->withCount('reports')->orderByDesc('year')->get();
+        $types = $this->access->visibleTypes($request->user());
+        $periods = CdaReportingPeriod::query()->with('creator')
+            ->withCount(['reports' => fn ($query) => $query->whereIn('report_type', $types)])
+            ->orderByDesc('year')->get();
 
         return response()->json(['success' => true, 'data' => $periods->map(fn (CdaReportingPeriod $period) => [
             ...CdaPresenter::period($period),
@@ -49,7 +53,7 @@ class CdaPeriodController extends Controller
     #[OA\Get(
         path: '/api/cda/periods/{year}',
         summary: 'One CDA reporting period with its report instances',
-        description: 'Needs `cda:view` and `branches:view_all`. Every instance is listed; one the caller may not open (mediation, audit or tax without its view permission) reads `restricted: true`.',
+        description: 'Needs `cda:view` and `branches:view_all`. Lists the instances the caller may open: a mediation, audit or tax report is left out entirely without its view permission.',
         tags: ['CDA'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'year', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
@@ -60,13 +64,13 @@ class CdaPeriodController extends Controller
         $this->access->authorize($request->user(), CdaAccess::VIEW);
         $period = $this->find($year);
 
-        return response()->json(['success' => true, 'data' => CdaPresenter::period($period, $request->user(), $this->reports($period))]);
+        return response()->json(['success' => true, 'data' => CdaPresenter::period($period, $request->user(), $this->reports($period, $request->user()))]);
     }
 
     #[OA\Post(
         path: '/api/cda/periods',
         summary: 'Open a CDA reporting period',
-        description: 'Needs `cda:prepare` and `branches:view_all`. Creates the calendar year and one report per type and part (mediation H1 and H2), each with the active template selected for it. ATIR and ABR read `applicable: false` without a valid Certificate of Tax Exemption. A second period for the same year answers 409.',
+        description: 'Needs `cda:prepare` and `branches:view_all`. Creates the calendar year and one report per type and part (mediation H1 and H2), each with the active template selected for it. ATIR and ABR read `applicable: false` without a valid Certificate of Tax Exemption. The response lists only the reports the caller may open. A second period for the same year answers 409.',
         tags: ['CDA'],
         security: [['sanctum' => []]],
         requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent(required: ['year'], properties: [new OA\Property(property: 'year', type: 'integer', example: 2026)])),
@@ -81,7 +85,7 @@ class CdaPeriodController extends Controller
     {
         $period = $opener->open((int) $request->validated('year'), $request->user());
 
-        return response()->json(['success' => true, 'data' => CdaPresenter::period($period->load('creator'), $request->user(), $this->reports($period))], 201);
+        return response()->json(['success' => true, 'data' => CdaPresenter::period($period->load('creator'), $request->user(), $this->reports($period, $request->user()))], 201);
     }
 
     #[OA\Patch(
@@ -115,7 +119,7 @@ class CdaPeriodController extends Controller
             return $period;
         });
 
-        return response()->json(['success' => true, 'message' => 'Deadline saved.', 'data' => CdaPresenter::period($period->refresh()->load('creator'), $request->user(), $this->reports($period))]);
+        return response()->json(['success' => true, 'message' => 'Deadline saved.', 'data' => CdaPresenter::period($period->refresh()->load('creator'), $request->user(), $this->reports($period, $request->user()))]);
     }
 
     private function find(int $year): CdaReportingPeriod
@@ -126,12 +130,16 @@ class CdaPeriodController extends Controller
         return $period;
     }
 
-    /** @return Collection<int, CdaReport> */
-    private function reports(CdaReportingPeriod $period)
+    /**
+     * The period's reports the viewer may open, in type and part order.
+     *
+     * @return Collection<int, CdaReport>
+     */
+    private function reports(CdaReportingPeriod $period, User $viewer): Collection
     {
         $order = array_flip(ReportTypes::ALL);
 
-        return $period->reports()->with('template')->get()
+        return $this->access->visibleReports($viewer, $period->reports()->with('template')->get())
             ->sortBy(fn (CdaReport $report) => sprintf('%02d-%d', $order[$report->report_type] ?? 99, array_search($report->part, ReportTypes::PARTS, true)))
             ->values();
     }

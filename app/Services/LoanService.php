@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Enums\TermUnit;
+use App\Models\AmortizationPrincipalChange;
 use App\Models\AmortizationSchedule;
 use App\Models\Borrower;
 use App\Models\Collateral;
@@ -2111,6 +2112,10 @@ class LoanService
                 'interest_paid' => (float) $schedule->interest_paid,
                 'penalty_paid' => (float) $schedule->penalty_paid,
             ];
+
+            // The months the period was late keep the principal they were
+            // charged on, so the Ledger keeps a line per monthly charge.
+            AmortizationPrincipalChange::record($schedule, Carbon::today()->toDateString(), (float) $schedule->principal_due, (float) $schedule->principal_paid);
 
             $schedule->update([
                 'principal_due' => $schedule->principal_paid,

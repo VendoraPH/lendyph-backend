@@ -29,6 +29,8 @@ class VoidRestoresPenaltyTest extends TestCase
 
     public function test_a_void_leaving_a_late_period_unpaid_restores_the_penalty_it_owed(): void
     {
+        // Period 1 falls due 2026-04-15: two months late on 2026-06-15.
+        $this->travelTo('2026-06-15 09:00:00');
         $loan = $this->loanWithALatePeriod();
         $late = $loan->amortizationSchedules->first();
 
@@ -38,8 +40,9 @@ class VoidRestoresPenaltyTest extends TestCase
         $chargedBefore = (float) $late->penalty_amount;
         $before = $this->loanFigures($loan);
 
-        // round(₱10,000 principal × 2%, 2): applyPenalties()'s figure.
-        $this->assertSame(200.0, $chargedBefore);
+        // round(₱10,000 principal × 2%, 2) for each of the two months late:
+        // applyPenalties()'s figure.
+        $this->assertSame(400.0, $chargedBefore);
 
         $repayment = $this->pay($loan, (float) $late->penalty_amount + (float) $late->total_due);
         $this->assertSame('paid', $late->fresh()->status);

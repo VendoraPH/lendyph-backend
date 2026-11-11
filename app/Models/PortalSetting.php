@@ -14,6 +14,12 @@ class PortalSetting extends Model
 {
     use Auditable;
 
+    /** The sign-in stand-in hash is never shown or audited. */
+    protected $hidden = ['auth_dummy_hash'];
+
+    /** @var list<string> */
+    protected array $auditRedacted = ['auth_dummy_hash'];
+
     /** Feature keys, each on by default; a feature that is off answers 403 on its routes. */
     public const FEATURES = [
         'loans', 'share_capital', 'savings', 'time_deposits', 'statements', 'documents',
