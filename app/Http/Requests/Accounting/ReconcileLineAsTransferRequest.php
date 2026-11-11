@@ -2,7 +2,6 @@
 
 namespace App\Http\Requests\Accounting;
 
-use App\Services\BranchAccess;
 use Illuminate\Foundation\Http\FormRequest;
 
 /**
@@ -10,7 +9,8 @@ use Illuminate\Foundation\Http\FormRequest;
  * account and another of the organisation's money accounts.
  *
  * Needs `cash_accounts:transfer`, as the Cash & Bank transfer does, on top of
- * reconciliation's `accounting:reconcile` + `branches:view_all`.
+ * reconciliation's `accounting:reconcile`. The transfer posts in the
+ * reconciliation's branch.
  */
 class ReconcileLineAsTransferRequest extends FormRequest
 {
@@ -19,7 +19,6 @@ class ReconcileLineAsTransferRequest extends FormRequest
         $user = $this->user();
 
         return $user->can('accounting:reconcile')
-            && $user->can(BranchAccess::VIEW_ALL)
             && $user->can('cash_accounts:transfer');
     }
 
