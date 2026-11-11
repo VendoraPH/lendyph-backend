@@ -23,6 +23,7 @@ class PortalContractTest extends TestCase
     private const LOAN_ROW = [
         'id', 'loan_account_number', 'product_name', 'display_status', 'release_date', 'maturity_date', 'principal_amount',
         'total_outstanding', 'outstanding_principal', 'overdue_amount', 'next_due_date', 'next_due_amount', 'paid_percent',
+        'penalty_months',
     ];
 
     private const SAVINGS = [
@@ -96,11 +97,11 @@ class PortalContractTest extends TestCase
         $this->assertKeys(self::LOAN_ROW, $get('/api/portal/loans')['data'][0], 'loans');
         $this->assertKeys([...self::LOAN_ROW, 'term', 'term_unit', 'frequency', 'interest_rate', 'interest_rate_frequency', 'interest_method',
             'outstanding_interest', 'outstanding_penalty', 'insurance_owed', 'total_repaid', 'principal_paid', 'interest_paid',
-            'penalty_paid', 'penalty_months'], $get("/api/portal/loans/{$loan->id}")['data'], 'loan');
+            'penalty_paid'], $get("/api/portal/loans/{$loan->id}")['data'], 'loan');
 
         $schedule = $get("/api/portal/loans/{$loan->id}/schedule")['data'];
         $this->assertKeys(['periods', 'totals'], $schedule, 'schedule');
-        $this->assertKeys(['period_number', 'due_date', 'status', 'principal', 'interest', 'penalty', 'balance'], $schedule['periods'][0], 'schedule.periods');
+        $this->assertKeys(['period_number', 'due_date', 'status', 'principal', 'interest', 'penalty', 'balance', 'penalty_months'], $schedule['periods'][0], 'schedule.periods');
         $this->assertKeys(['principal', 'interest', 'penalty', 'paid', 'insurance_owed', 'balance', 'overdue'], $schedule['totals'], 'schedule.totals');
 
         $this->assertKeys(self::PAYMENT, $get("/api/portal/loans/{$loan->id}/payments")['data'][0], 'loan payments');

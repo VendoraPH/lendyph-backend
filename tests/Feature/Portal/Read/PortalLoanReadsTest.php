@@ -2,6 +2,7 @@
 
 namespace Tests\Feature\Portal\Read;
 
+use App\Services\RepaymentService;
 use App\Services\Savings\SavingsMath;
 use Illuminate\Routing\Middleware\ThrottleRequests;
 use Tests\TestCase;
@@ -83,7 +84,7 @@ class PortalLoanReadsTest extends TestCase
     {
         $me = $this->portalMember();
         $loan = $this->releasedLoanFor($me);
-        $this->pay($loan, 12000);
+        $this->pay($loan, 15000);
 
         $staff = $this->staffGet("/api/loans/{$loan->id}/amortization-balances")->json('data');
         $mine = $this->portalJson('GET', "/api/portal/loans/{$loan->id}/schedule", [], $this->portalToken($me))->assertOk()->json('data');
@@ -137,6 +138,28 @@ class PortalLoanReadsTest extends TestCase
         $this->assertSame($this->pesos($kept['insurance_applied']), $row['insurance']);
         $this->assertSame('cash', $row['method']);
         $this->assertSame($loan->loan_account_number, $all[0]['loan_account_number']);
+    }
+
+    public function test_penalty_months_equal_the_staff_summary_and_schedule(): void
+    {
+        $me = $this->portalMember();
+        $loan = $this->releasedLoanFor($me);
+        app(RepaymentService::class)->applyPenalties($loan->fresh(), now());
+
+        $summary = $this->staffGet("/api/loans/{$loan->id}/summary")->json('data');
+        $staffRows = collect($this->staffGet("/api/loans/{$loan->id}/amortization-schedule")->json('data'))->keyBy('period_number');
+        $token = $this->portalToken($me);
+        $row = $this->portalJson('GET', '/api/portal/loans', [], $token)->assertOk()->json('data.0');
+        $detail = $this->portalJson('GET', "/api/portal/loans/{$loan->id}", [], $token)->assertOk()->json('data');
+        $periods = $this->portalJson('GET', "/api/portal/loans/{$loan->id}/schedule", [], $token)->assertOk()->json('data.periods');
+
+        $this->assertGreaterThan(0, $summary['penalty_months'], 'Periods three months back carry monthly charges.');
+        $this->assertSame($summary['penalty_months'], $row['penalty_months']);
+        $this->assertSame($summary['penalty_months'], $detail['penalty_months']);
+
+        foreach ($periods as $period) {
+            $this->assertSame($staffRows[$period['period_number']]['penalty_months'], $period['penalty_months'], "period {$period['period_number']}");
+        }
     }
 
     public function test_loans_switched_off_answer_403_in_words(): void

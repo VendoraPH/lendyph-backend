@@ -82,8 +82,6 @@ final class LoanReader
             'principal_paid' => Pesos::of($summary['principal_paid']),
             'interest_paid' => Pesos::of($summary['interest_paid']),
             'penalty_paid' => Pesos::of($summary['penalty_paid']),
-            // The monthly penalty's charge count, once the loan summary carries it.
-            'penalty_months' => $summary['penalty_months'] ?? null,
         ];
     }
 
@@ -91,7 +89,8 @@ final class LoanReader
      * The Amortization Balance tab's periods and totals, with each period's
      * status for a member: paid, partial, due (on or before today, Manila, not
      * yet late), past_due (late: past the due date and the grace period),
-     * upcoming, or closed (a period an extension or restructure closed).
+     * upcoming, or closed (a period an extension or restructure closed), and
+     * its `penalty_months` (the monthly late penalty charges in its penalty).
      *
      * @return array{periods: list<array<string, mixed>>, totals: array<string, mixed>}
      */
@@ -99,6 +98,8 @@ final class LoanReader
     {
         $data = $this->balances->forLoan($loan);
         $today = Carbon::today()->toDateString();
+        // Each period's monthly penalty charge count, as the staff schedule sends it.
+        $penaltyMonths = $loan->amortizationSchedules()->reorder()->pluck('penalty_months', 'id');
 
         $money = fn (array $parts): array => array_map(fn ($value) => Pesos::of($value), $parts);
 
@@ -110,6 +111,7 @@ final class LoanReader
             'interest' => $money($period['interest']),
             'penalty' => $money($period['penalty']),
             'balance' => Pesos::of($period['balance']),
+            'penalty_months' => (int) ($penaltyMonths[$period['id']] ?? 0),
         ], $data['periods']);
 
         $totals = $data['totals'];
@@ -190,6 +192,9 @@ final class LoanReader
             'next_due_date' => $summary['next_due_date'],
             'next_due_amount' => Pesos::of($summary['next_due_amount']),
             'paid_percent' => $this->paidPercent($loan, $summary),
+            // The monthly late penalty charges counted on the loan's late
+            // periods (the loan summary's `penalty_months`).
+            'penalty_months' => (int) $summary['penalty_months'],
         ];
     }
 

@@ -24,7 +24,7 @@ class PortalLoanController extends Controller
     #[OA\Get(
         path: '/api/portal/loans',
         summary: 'The member\'s loans',
-        description: 'Signed-in portal token; feature `loans`. Ever-released loans only, newest first: [{id, loan_account_number, product_name, display_status (the server\'s, `past_due` for a late released or ongoing loan), release_date, maturity_date, principal_amount, total_outstanding (everything owed), outstanding_principal, overdue_amount, next_due_date, next_due_amount, paid_percent (principal paid as a whole percent, floored)}]. Money is a two-decimal peso string equal to GET /loans/{id}/summary.',
+        description: 'Signed-in portal token; feature `loans`. Ever-released loans only, newest first: [{id, loan_account_number, product_name, display_status (the server\'s, `past_due` for a late released or ongoing loan), release_date, maturity_date, principal_amount, total_outstanding (everything owed), outstanding_principal, overdue_amount, next_due_date, next_due_amount, paid_percent (principal paid as a whole percent, floored), penalty_months (the monthly late penalty charges on the loan\'s late periods, the summary\'s figure)}]. Money is a two-decimal peso string equal to GET /loans/{id}/summary.',
         tags: ['Member Portal'],
         security: [['sanctum' => []]],
         responses: [new OA\Response(response: 200, description: 'The loans'), new OA\Response(response: 403, description: 'Loans are switched off')],
@@ -37,7 +37,7 @@ class PortalLoanController extends Controller
     #[OA\Get(
         path: '/api/portal/loans/{id}',
         summary: 'One of the member\'s loans',
-        description: 'Signed-in portal token; feature `loans`. The list row plus term, term_unit, frequency, interest_rate (as stored, per interest_rate_frequency, never converted or rounded), interest_rate_frequency, interest_method, outstanding_interest, outstanding_penalty, insurance_owed, total_repaid, principal_paid, interest_paid, penalty_paid and penalty_months (null until the loan summary carries it). Never payment presets, the payoff figure or the restructurable balance. 404 for another member\'s loan, a co-maker\'s loan or a draft.',
+        description: 'Signed-in portal token; feature `loans`. The list row plus term, term_unit, frequency, interest_rate (as stored, per interest_rate_frequency, never converted or rounded), interest_rate_frequency, interest_method, outstanding_interest, outstanding_penalty, insurance_owed, total_repaid, principal_paid, interest_paid, penalty_paid. Never payment presets, the payoff figure or the restructurable balance. 404 for another member\'s loan, a co-maker\'s loan or a draft.',
         tags: ['Member Portal'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
@@ -51,7 +51,7 @@ class PortalLoanController extends Controller
     #[OA\Get(
         path: '/api/portal/loans/{id}/schedule',
         summary: 'A loan\'s schedule with what each period still owes',
-        description: 'Signed-in portal token; feature `loans`. The Amortization Balance tab\'s figures: {periods[]{period_number, due_date, status (paid, partial, due, past_due, upcoming or closed; Manila today), principal{due, paid, balance}, interest{due, paid, balance}, penalty{charged, paid, balance}, balance}, totals{principal, interest, penalty, paid, insurance_owed, balance (equals the loan\'s total_outstanding), overdue}}.',
+        description: 'Signed-in portal token; feature `loans`. The Amortization Balance tab\'s figures: {periods[]{period_number, due_date, status (paid, partial, due, past_due, upcoming or closed; Manila today), principal{due, paid, balance}, interest{due, paid, balance}, penalty{charged, paid, balance}, balance, penalty_months (the monthly late penalty charges in the period\'s penalty)}, totals{principal, interest, penalty, paid, insurance_owed, balance (equals the loan\'s total_outstanding), overdue}}.',
         tags: ['Member Portal'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
