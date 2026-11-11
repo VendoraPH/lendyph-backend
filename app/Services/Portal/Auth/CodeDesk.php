@@ -294,10 +294,17 @@ final class CodeDesk
         ])->validate();
 
         [$answer, $signedIn] = DB::transaction(function () use ($code, $portalUser, $member, $input, $isActivation, $current, $request): array {
-            $code = PortalCode::query()->lockForUpdate()->findOrFail($code->getKey());
+            // The portal account first, then the code: the order issuing and
+            // verifying take, so a concurrent issue and redeem can't deadlock.
+            // The code is then checked again under its lock (a new code may
+            // have superseded it, or a new verify replaced the step).
+            $stepHash = $code->step_hash;
             $portalUser = PortalUser::query()->lockForUpdate()->findOrFail($portalUser->getKey());
+            $code = PortalCode::query()->lockForUpdate()->findOrFail($code->getKey());
 
-            if ($code->status !== PortalCode::STATUS_OPEN || $code->step_expires_at === null || $code->step_expires_at->isPast()
+            if ($code->status !== PortalCode::STATUS_OPEN || $code->portal_user_id !== $portalUser->getKey()
+                || $stepHash === null || ! hash_equals($stepHash, (string) $code->step_hash)
+                || $code->step_expires_at === null || $code->step_expires_at->isPast()
                 || ! $this->kindFits($code->kind, $portalUser, $member->fresh())) {
                 throw self::refusal('step_token', self::STEP_EXPIRED);
             }

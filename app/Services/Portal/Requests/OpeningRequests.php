@@ -112,7 +112,7 @@ final class OpeningRequests
      *
      * @throws ValidationException
      */
-    public function approve(PortalRequest $request, array $deposit, User $staff): PortalRequest
+    public function approve(PortalRequest $request, array $deposit, User $staff, ?string $message = null): PortalRequest
     {
         Borrower::query()->whereKey($request->borrower_id)->lockForUpdate()->firstOrFail();
         $locked = RequestDesk::lockOpen($request->id, [PortalRequest::STATUS_SUBMITTED, PortalRequest::STATUS_UNDER_REVIEW, PortalRequest::STATUS_NEED_INFO]);
@@ -127,7 +127,7 @@ final class OpeningRequests
             'remarks' => "Opened on member portal request {$locked->reference}",
         ], $staff);
 
-        return $this->timeline->move($locked, PortalRequest::STATUS_COMPLETED, PortalRequestEvent::ACTOR_STAFF, $staff->id, null, [
+        return $this->timeline->move($locked, PortalRequest::STATUS_COMPLETED, PortalRequestEvent::ACTOR_STAFF, $staff->id, $message, [
             'opened_account_id' => $account->id,
             'decided_by' => $staff->id,
             'decided_at' => now(),
