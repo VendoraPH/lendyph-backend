@@ -1246,16 +1246,26 @@ class LoanAdjustmentService
         // receipt still carries, so Total Paid dropped and a later void took
         // the missing penalty out of interest or principal instead.
         //
-        // The period keeps a link to this waiver, which is what stops
-        // RepaymentService::applyPenalties() charging it again on the next
-        // payment or the next night.
-        $this->selectedOpenSchedules($loan, $newValues)->each(function (AmortizationSchedule $schedule) use ($adjustment, &$before, &$after) {
+        // The period keeps a link to this waiver, and the day it cleared the
+        // penalty with the charge it left (option b, from the monthly penalty,
+        // Arvin, 2026-11-11): RepaymentService::penaltyFor() charges nothing
+        // more until a full month after that day, then a charge a month while
+        // the period stays unpaid. Waivers made before the switch have no
+        // clearing day and keep their period penalty-free (option a).
+        $clearedOn = Carbon::today()->toDateString();
+
+        $this->selectedOpenSchedules($loan, $newValues)->each(function (AmortizationSchedule $schedule) use ($adjustment, $clearedOn, &$before, &$after) {
             $charged = (float) $schedule->penalty_amount;
             $paid = (float) $schedule->penalty_paid;
             $owed = $this->penaltyOwed($schedule);
 
             if ($owed > 0) {
-                $schedule->update(['penalty_amount' => $paid, 'penalty_waiver_id' => $adjustment->id]);
+                $schedule->update([
+                    'penalty_amount' => $paid,
+                    'penalty_waiver_id' => $adjustment->id,
+                    'penalty_cleared_on' => $clearedOn,
+                    'penalty_cleared_to' => $paid,
+                ]);
 
                 $before[] = [
                     'schedule_id' => $schedule->id,

@@ -6,6 +6,7 @@ use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Support\Collection;
 
 class AmortizationSchedule extends Model
@@ -228,6 +229,9 @@ class AmortizationSchedule extends Model
         'penalty_amount',
         'penalty_paid',
         'penalty_waiver_id',
+        'penalty_months',
+        'penalty_cleared_on',
+        'penalty_cleared_to',
         'closed_by_adjustment_id',
         'closed_by_loan_id',
     ];
@@ -244,7 +248,45 @@ class AmortizationSchedule extends Model
             'interest_paid' => 'decimal:2',
             'penalty_amount' => 'decimal:2',
             'penalty_paid' => 'decimal:2',
+            'penalty_months' => 'integer',
+            'penalty_cleared_on' => 'date',
+            'penalty_cleared_to' => 'decimal:2',
         ];
+    }
+
+    /**
+     * Whether a waiver made before the monthly penalty took this period's
+     * penalty away for good (option a): it carries the waiver's link but no
+     * clearing date. A waiver made since (option b) records the day it
+     * cleared the penalty, and the months after it are charged again.
+     */
+    public function isWaivedForGood(): bool
+    {
+        return $this->penalty_waiver_id !== null && $this->penalty_cleared_on === null;
+    }
+
+    /**
+     * SQL twin of isWaivedForGood(), negated: the periods a penalty run may
+     * still charge.
+     */
+    public static function stillChargeableSql(): string
+    {
+        return '(penalty_waiver_id IS NULL OR penalty_cleared_on IS NOT NULL)';
+    }
+
+    /**
+     * The principal posted payments put on this period, with each payment's
+     * date: what RepaymentService::penaltyFor() reads to know the principal
+     * unpaid on each month's charge day. Eager-load it beside a list's periods
+     * so the late penalty a row quotes costs no query per row.
+     */
+    public function postedPrincipalPayments(): HasMany
+    {
+        return $this->hasMany(RepaymentAllocation::class, 'amortization_schedule_id')
+            ->join('repayments', 'repayments.id', '=', 'repayment_allocations.repayment_id')
+            ->where('repayments.status', 'posted')
+            ->where('repayment_allocations.principal', '>', 0)
+            ->select(['repayment_allocations.amortization_schedule_id', 'repayment_allocations.principal', 'repayments.payment_date']);
     }
 
     public function loan(): BelongsTo

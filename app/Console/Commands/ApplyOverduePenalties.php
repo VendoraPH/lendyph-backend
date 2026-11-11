@@ -36,8 +36,9 @@ class ApplyOverduePenalties extends Command
                     // no-op, and the count reported below describes work that
                     // did not happen.
                     ->whereRaw(AmortizationSchedule::penalisableSql())
-                    // A waived period is never charged again (see the service).
-                    ->whereNull('penalty_waiver_id')
+                    // A period waived before the monthly penalty is never
+                    // charged again; one waived since is (see the service).
+                    ->whereRaw(AmortizationSchedule::stillChargeableSql())
                     ->whereIn('status', AmortizationSchedule::UNPAID_STATUSES);
             })
             ->get();

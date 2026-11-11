@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Models\AmortizationSchedule;
+use App\Models\LatePenaltySetting;
 use App\Models\Loan;
 use App\Models\LoanAdjustment;
 use App\Models\Repayment;
@@ -42,6 +43,11 @@ class ExtensionPayCollectsOwedTest extends TestCase
     {
         parent::setUp();
         $this->seedAndLogin();
+
+        // Every period here falls late before the monthly penalty's switch, so
+        // it keeps the single charge these figures are written for.
+        // MonthlyLatePenaltyTest covers an extension under the monthly rule.
+        LatePenaltySetting::query()->create(['monthly_from' => '2026-12-31']);
     }
 
     /** Released on 27 Apr 2026, then the clock moves to `$extendOn`. */
