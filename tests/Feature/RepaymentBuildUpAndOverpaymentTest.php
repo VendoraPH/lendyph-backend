@@ -41,13 +41,17 @@ class RepaymentBuildUpAndOverpaymentTest extends TestCase
         ])->assertCreated();
     }
 
-    /** Every place the repayment is read: the detail, the loan's list and the payments list. */
+    /** Every place the repayment is read: the detail, the loan's list, the payments list and the repayments report. */
     private function rowsFor(int $repaymentId, Loan $loan): array
     {
+        // The report lists posted payments unless asked for voided ones.
+        $stored = DB::table('repayments')->where('id', $repaymentId)->value('status');
+
         return [
             'detail' => $this->getJson("/api/repayments/{$repaymentId}")->assertOk()->json('data'),
             'loan list' => collect($this->getJson("/api/loans/{$loan->id}/repayments")->assertOk()->json('data'))->firstWhere('id', $repaymentId),
             'list' => collect($this->getJson('/api/repayments?per_page=100')->assertOk()->json('data'))->firstWhere('id', $repaymentId),
+            'repayments report' => collect($this->getJson("/api/reports/repayments?per_page=100&status={$stored}")->assertOk()->json('data'))->firstWhere('id', $repaymentId),
         ];
     }
 
@@ -81,9 +85,11 @@ class RepaymentBuildUpAndOverpaymentTest extends TestCase
         $loan->update(['scb_amount' => 500]);
         $first = $loan->amortizationSchedules->first();
 
-        $id = $this->pay($loan, (float) $first->total_due + 750)->json('data.id');
+        $recorded = $this->pay($loan, (float) $first->total_due + 750)->json('data');
 
-        $this->assertSplit($id, $loan, ['750.00', '0.00']);
+        $this->assertSame(['750.00', '0.00'], [$recorded['build_up_credited'], $recorded['overpayment_kept']], 'The record answer');
+        $this->assertAddsUp($recorded);
+        $this->assertSplit($recorded['id'], $loan, ['750.00', '0.00']);
     }
 
     public function test_a_non_build_up_overpayment_is_kept_as_overpayment(): void
@@ -112,7 +118,9 @@ class RepaymentBuildUpAndOverpaymentTest extends TestCase
         $loan->update(['scb_amount' => 500]);
         $id = $this->pay($loan, (float) $loan->amortizationSchedules->first()->total_due + 750)->json('data.id');
 
-        $this->patchJson("/api/repayments/{$id}/void", ['void_reason' => 'Wrong loan'])->assertOk();
+        $voided = $this->patchJson("/api/repayments/{$id}/void", ['void_reason' => 'Wrong loan'])->assertOk()->json('data');
+        $this->assertSame(['750.00', '0.00'], [$voided['build_up_credited'], $voided['overpayment_kept']], 'The void answer');
+        $this->assertAddsUp($voided);
 
         $detail = $this->getJson("/api/repayments/{$id}")->assertOk()->json('data');
         $this->assertSame('voided', $detail['status']);

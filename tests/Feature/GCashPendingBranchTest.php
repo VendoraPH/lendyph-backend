@@ -7,6 +7,7 @@ use App\Models\Branch;
 use App\Models\GCashTransaction;
 use App\Models\User;
 use App\Services\BranchAccess;
+use Illuminate\Support\Facades\DB;
 use Spatie\Permission\Models\Role;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
@@ -65,6 +66,17 @@ class GCashPendingBranchTest extends TestCase
             $this->headOffice->id => [null, 'Head office'],
             $this->farMember->id => [$this->far->id, 'Far Branch'],
         ], $this->branchesOnTheReport());
+    }
+
+    public function test_a_member_row_whose_member_record_is_missing_reads_unknown_branch(): void
+    {
+        $this->actingAs($this->admin);
+        DB::statement('SET FOREIGN_KEY_CHECKS=0');
+        DB::table('borrowers')->where('id', $this->member->borrower_id)->delete();
+        DB::statement('SET FOREIGN_KEY_CHECKS=1');
+
+        $this->assertSame([null, 'Unknown branch'], $this->branchesOnTheReport()[$this->member->id]);
+        $this->assertSame([null, 'Head office'], $this->branchesOnTheReport()[$this->headOffice->id]);
     }
 
     public function test_the_branch_scope_is_unchanged(): void

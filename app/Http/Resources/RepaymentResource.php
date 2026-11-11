@@ -188,6 +188,7 @@ class RepaymentResource extends JsonResource
         $credited = (int) $credits->sum(fn ($row): int => LoanService::toCentavos((float) $row->credit));
 
         if ($credits->isEmpty() && $overpayment > 0) {
+            // scb_amount is fixed once the loan is released.
             if ($this->loan === null || (float) $this->loan->scb_amount > 0) {
                 return $unknown;
             }

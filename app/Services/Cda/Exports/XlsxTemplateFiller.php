@@ -31,8 +31,9 @@ use ZipArchive;
  * - An unverified template (ExportContent::$unverified: `meta.verified`, or
  *   PesosSource::verified() for PESOS, the other exports' rule) gets a
  *   separate "Notes" sheet at the end ("Notes (2)" when the form already has
- *   one) whose first line says so, and the document properties' Subject
- *   reads "To verify". The official form's own sheets are never touched for
+ *   one) whose first line says so, listed in `docProps/app.xml` when the
+ *   workbook has one, and the document properties' Subject reads "To
+ *   verify". The official form's own sheets are never touched for
  *   it.
  * - Refused in words (422): a part that isn't XML, holds a DOCTYPE, or
  *   unpacks to more than MAX_PART_BYTES, and rows or cells with no `r`.
@@ -69,6 +70,12 @@ final class XlsxTemplateFiller
     private const CORE_TYPE = 'application/vnd.openxmlformats-package.core-properties+xml';
 
     private const CORE_REL = 'http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties';
+
+    private const APP_PART = 'docProps/app.xml';
+
+    private const APP_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/extended-properties';
+
+    private const VT_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes';
 
     private const REL_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
 
@@ -461,6 +468,66 @@ final class XlsxTemplateFiller
         $zip->addFromString('xl/workbook.xml', (string) $workbook->saveXML());
 
         $this->addContentType($zip, '/'.$part, self::WORKSHEET_TYPE);
+        $this->listInAppProperties($zip, $name);
+    }
+
+    /**
+     * Adds the sheet to the extended properties' sheet list
+     * (`docProps/app.xml`), when the workbook has one: one more in the
+     * "Worksheets" heading pair (the only pair, when it goes by another
+     * name), and its title after the last worksheet title, before any named
+     * ranges. Left as it is when the worksheets' pair can't be told apart.
+     */
+    private function listInAppProperties(ZipArchive $zip, string $name): void
+    {
+        if ($zip->locateName(self::APP_PART) === false) {
+            return;
+        }
+
+        $app = $this->dom($this->part($zip, self::APP_PART));
+        $pairs = $app->getElementsByTagNameNS(self::APP_NS, 'HeadingPairs')->item(0);
+        $titles = $app->getElementsByTagNameNS(self::APP_NS, 'TitlesOfParts')->item(0);
+        $pairVector = $pairs?->getElementsByTagNameNS(self::VT_NS, 'vector')->item(0);
+        $titleVector = $titles?->getElementsByTagNameNS(self::VT_NS, 'vector')->item(0);
+
+        if (! $pairVector instanceof DOMElement || ! $titleVector instanceof DOMElement) {
+            return;
+        }
+
+        $variants = array_values(array_filter(iterator_to_array($pairVector->childNodes), fn ($node): bool => $node instanceof DOMElement && $node->localName === 'variant'));
+        $groups = [];
+
+        for ($i = 0; $i + 1 < count($variants); $i += 2) {
+            $count = $variants[$i + 1]->getElementsByTagNameNS(self::VT_NS, 'i4')->item(0);
+
+            if (! $count instanceof DOMElement) {
+                return;
+            }
+
+            $groups[] = ['name' => trim((string) $variants[$i]->textContent), 'count' => $count];
+        }
+
+        $sheetGroups = array_keys(array_filter($groups, fn (array $group): bool => in_array($group['name'], ['Worksheets', 'Sheets'], true)));
+        $index = count($sheetGroups) === 1 ? $sheetGroups[0] : (count($groups) === 1 ? 0 : null);
+
+        if ($index === null) {
+            return;
+        }
+
+        $offset = 0;
+
+        foreach (array_slice($groups, 0, $index + 1) as $group) {
+            $offset += (int) $group['count']->textContent;
+        }
+
+        $titleNodes = array_values(array_filter(iterator_to_array($titleVector->childNodes), fn ($node): bool => $node instanceof DOMElement && $node->localName === 'lpstr'));
+        $title = $app->createElementNS(self::VT_NS, 'vt:lpstr');
+        $title->appendChild($app->createTextNode($name));
+        isset($titleNodes[$offset]) ? $titleVector->insertBefore($title, $titleNodes[$offset]) : $titleVector->appendChild($title);
+        $titleVector->setAttribute('size', (string) (count($titleNodes) + 1));
+        $groups[$index]['count']->textContent = (string) ((int) $groups[$index]['count']->textContent + 1);
+
+        $zip->addFromString(self::APP_PART, (string) $app->saveXML());
     }
 
     private function reopen(ZipArchive $zip, string $path): void

@@ -175,7 +175,7 @@ class AccountCloser
             $account,
             $this->auditValues($before),
             $this->auditValues($account->only(array_keys($before))),
-            "Savings account {$account->account_number} closed: ".Sentence::withoutEnding((string) $data['reason']).'. Paid out '.Refuse::peso($balance).'.',
+            "Savings account {$account->account_number} closed: ".Sentence::ended((string) $data['reason']).' Paid out '.Refuse::peso($balance).'.',
         );
 
         return $result;

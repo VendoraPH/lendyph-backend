@@ -55,13 +55,13 @@ class WorkbookVerifyNoteTest extends TestCase
     }
 
     /** Gives the CAPR a template-mode template, verified or not, over the blank fixture workbook. */
-    private function useWorkbook(bool $verified, ?string $extraSheet = null): void
+    private function useWorkbook(bool $verified, ?string $extraSheet = null, ?string $appXml = null): void
     {
         $definition = $this->capr->template->definition;
         $definition['meta']['verified'] = $verified;
         $definition['export']['excel'] = ['mode' => 'template', 'draft_cell' => 'Sheet1!A1', 'cells' => ['Sheet1!C5' => 'membership.members_total', 'Sheet1!B2' => 'general.contact']];
         $path = 'cda/templates/test/official-'.uniqid().'.xlsx';
-        Storage::disk('private')->put($path, $this->workbook($extraSheet));
+        Storage::disk('private')->put($path, $this->workbook($extraSheet, $appXml));
         $template = CdaReportTemplate::query()->create([
             'report_type' => 'capr', 'version' => '2026.'.random_int(10, 99999), 'name' => 'CAPR with the official workbook',
             'effective_from' => '2026-01-01', 'definition' => $definition, 'status' => CdaReportTemplate::STATUS_DRAFT,
@@ -75,7 +75,7 @@ class WorkbookVerifyNoteTest extends TestCase
     }
 
     /** The blank fixture with a value in C5, optionally with a second sheet of this name. */
-    private function workbook(?string $extraSheet): string
+    private function workbook(?string $extraSheet, ?string $appXml = null): string
     {
         $path = tempnam(sys_get_temp_dir(), 'cda-official');
         copy(base_path('tests/Fixtures/cda/blank.xlsx'), $path);
@@ -90,6 +90,12 @@ class WorkbookVerifyNoteTest extends TestCase
                 .'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>');
             $zip->addFromString('xl/workbook.xml', str_replace('</sheets>', '<sheet name="'.$extraSheet.'" sheetId="2" r:id="rId2"/></sheets>', (string) $zip->getFromName('xl/workbook.xml')));
             $zip->addFromString('xl/_rels/workbook.xml.rels', str_replace('</Relationships>', '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>', (string) $zip->getFromName('xl/_rels/workbook.xml.rels')));
+        }
+
+        if ($appXml !== null) {
+            $zip->addFromString('docProps/app.xml', $appXml);
+            $zip->addFromString('[Content_Types].xml', str_replace('</Types>', '<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/></Types>', (string) $zip->getFromName('[Content_Types].xml')));
+            $zip->addFromString('_rels/.rels', str_replace('</Relationships>', '<Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/></Relationships>', (string) $zip->getFromName('_rels/.rels')));
         }
 
         $zip->close();
@@ -177,6 +183,37 @@ class WorkbookVerifyNoteTest extends TestCase
         $this->assertSame($verified, $unverified);
         $this->assertStringContainsString('<c r="C5"><v>77</v></c>', $unverified);
         $this->assertMatchesRegularExpression('#<c r="B2" t="inlineStr"><is><t[^>]*>Front desk</t></is></c>#', $unverified);
+    }
+
+    public function test_the_notes_sheet_joins_the_document_properties_sheet_list(): void
+    {
+        $this->useWorkbook(verified: false, appXml: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            .'<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">'
+            .'<Application>Microsoft Excel</Application>'
+            .'<HeadingPairs><vt:vector size="4" baseType="variant">'
+            .'<vt:variant><vt:lpstr>Worksheets</vt:lpstr></vt:variant><vt:variant><vt:i4>1</vt:i4></vt:variant>'
+            .'<vt:variant><vt:lpstr>Named Ranges</vt:lpstr></vt:variant><vt:variant><vt:i4>1</vt:i4></vt:variant>'
+            .'</vt:vector></HeadingPairs>'
+            .'<TitlesOfParts><vt:vector size="2" baseType="lpstr"><vt:lpstr>Sheet1</vt:lpstr><vt:lpstr>Sheet1!Print_Area</vt:lpstr></vt:vector></TitlesOfParts>'
+            .'</Properties>');
+
+        $app = $this->exportParts()['docProps/app.xml'];
+
+        $this->assertStringContainsString('<vt:variant><vt:lpstr>Worksheets</vt:lpstr></vt:variant><vt:variant><vt:i4>2</vt:i4></vt:variant>', $app);
+        $this->assertStringContainsString('<vt:variant><vt:lpstr>Named Ranges</vt:lpstr></vt:variant><vt:variant><vt:i4>1</vt:i4></vt:variant>', $app);
+        $this->assertStringContainsString('<TitlesOfParts><vt:vector size="3" baseType="lpstr"><vt:lpstr>Sheet1</vt:lpstr><vt:lpstr>Notes</vt:lpstr><vt:lpstr>Sheet1!Print_Area</vt:lpstr></vt:vector></TitlesOfParts>', $app);
+        $this->assertStringContainsString('<Application>Microsoft Excel</Application>', $app);
+    }
+
+    public function test_a_verified_template_leaves_the_document_properties_sheet_list_alone(): void
+    {
+        $appXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            .'<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">'
+            .'<HeadingPairs><vt:vector size="2" baseType="variant"><vt:variant><vt:lpstr>Worksheets</vt:lpstr></vt:variant><vt:variant><vt:i4>1</vt:i4></vt:variant></vt:vector></HeadingPairs>'
+            .'<TitlesOfParts><vt:vector size="1" baseType="lpstr"><vt:lpstr>Sheet1</vt:lpstr></vt:vector></TitlesOfParts></Properties>';
+        $this->useWorkbook(verified: true, appXml: $appXml);
+
+        $this->assertSame($appXml, $this->exportParts()['docProps/app.xml']);
     }
 
     public function test_a_workbook_that_already_has_a_notes_sheet_keeps_it(): void

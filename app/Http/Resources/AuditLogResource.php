@@ -108,10 +108,6 @@ class AuditLogResource extends JsonResource
     private const COLLATERAL_KEYS = ['collateral_id', 'inherited_collateral_ids'];
 
     /**
-     * Change-list fields that hold a journal's id: read by the journal's
-     * number ("JE-000014"), else its reference, never by its database id.
-     */
-    /**
      * Kinds whose class name doesn't read as what it holds, in the Audit Trail
      * screen's words (the frontend's `TARGET_TYPE_LABELS`): the Accounting
      * menu's names ("Journal entry", "Expense"), "GCash walk-in" (never
@@ -153,6 +149,10 @@ class AuditLogResource extends JsonResource
         'PortalAnnouncement' => 'Portal announcement',
     ];
 
+    /**
+     * Change-list fields that hold a journal's id: read by the journal's
+     * number ("JE-000014"), else its reference, never by its database id.
+     */
     private const JOURNAL_KEYS = ['journal_id', 'accounting_journal_id', 'reverses_journal_id', 'reversed_by_journal_id'];
 
     /**

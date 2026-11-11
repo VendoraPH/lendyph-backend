@@ -40,7 +40,7 @@ class CdaReportWorkflowController extends Controller
             new OA\Response(response: 200, description: 'The report after the step'),
             new OA\Response(response: 403, description: 'Missing the action\'s permission, branches:view_all or the restricted view; or approving your own submission'),
             new OA\Response(response: 409, description: 'The report\'s status changed, or a figure changed since approval'),
-            new OA\Response(response: 422, description: 'Missing reason, critical issues, unconfirmed warnings, or an invalid filing'),
+            new OA\Response(response: 422, description: 'Missing reason (or one with no letter or number), critical issues, unconfirmed warnings, or an invalid filing'),
         ],
     )]
     public function store(CdaWorkflowRequest $request, CdaReport $report, ReportWorkflow $workflow, ReportView $view): JsonResponse

@@ -8,6 +8,7 @@ use App\Models\CdaSubmission;
 use App\Services\Cda\CdaAccess;
 use App\Services\Cda\Reports\ReportStages;
 use App\Services\Cda\Reports\ReportWorkflow;
+use App\Support\Sentence;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
@@ -45,7 +46,7 @@ class CdaWorkflowRequest extends FormRequest
 
         return [
             'action' => ['required', 'string', Rule::in(array_keys(ReportWorkflow::ACTIONS))],
-            'reason' => [Rule::requiredIf(in_array($this->input('action'), ReportWorkflow::NEED_REASON, true)), 'nullable', 'string', 'max:500'],
+            'reason' => [Rule::requiredIf(in_array($this->input('action'), ReportWorkflow::NEED_REASON, true)), 'nullable', 'bail', 'string', 'max:500', 'regex:'.Sentence::HAS_WORDS],
             'confirm_warnings' => ['sometimes', 'boolean'],
             'stage' => [Rule::requiredIf($this->input('action') === 'set_stage'), 'nullable', 'string', Rule::in($stages)],
             'submission' => [Rule::requiredIf($this->input('action') === 'mark_submitted'), 'nullable', 'array:method,submitted_on,submitted_by_name,cda_reference_no,acknowledgment_no,remarks'],
@@ -66,6 +67,7 @@ class CdaWorkflowRequest extends FormRequest
             'action.in' => 'That isn\'t a workflow action. Use one of: '.implode(', ', array_keys(ReportWorkflow::ACTIONS)).'.',
             'reason.required' => 'Give a reason for this step.',
             'reason.max' => 'A reason takes up to 500 characters.',
+            'reason.regex' => Sentence::NO_WORDS,
             'confirm_warnings.boolean' => 'confirm_warnings is true or false.',
             'stage.required' => 'Choose the stage to move to.',
             'stage.in' => 'That isn\'t a stage of this report.',

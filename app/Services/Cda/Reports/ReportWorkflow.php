@@ -398,17 +398,17 @@ final class ReportWorkflow
             $new['reason'] = $reason;
         }
 
-        // The sentence ends with its own full stop, so the reason's own ending
-        // is dropped from it ("…future." never reads "…future.."); the values
-        // keep the reason as typed.
-        $inSentence = $reason === null ? '' : Sentence::withoutEnding($reason);
+        // The reason ends the sentence once ("…future." never reads
+        // "…future..", and a "?" keeps its mark); the values keep the reason
+        // as typed.
+        $ending = $reason === null ? '' : Sentence::ended($reason);
 
         AuditLogService::log(
             'cda_workflow',
             $report,
             ['status' => $from],
             $new,
-            sprintf('%s %d %s%s.', ReportValidator::reportName($report), $report->period->year, self::ACTION_WORDS[$action], $inSentence === '' ? '' : ": {$inSentence}"),
+            sprintf('%s %d %s%s', ReportValidator::reportName($report), $report->period->year, self::ACTION_WORDS[$action], $ending === '' ? '.' : ": {$ending}"),
         );
     }
 
