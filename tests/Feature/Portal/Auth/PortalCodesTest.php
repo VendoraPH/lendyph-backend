@@ -55,7 +55,7 @@ class PortalCodesTest extends TestCase
     {
         $this->actingAs($this->admin);
 
-        return $this->postJson("/api/portal-admin/members/{$member->id}/{$route}", ['identity_checked_as' => 'UMID']);
+        return $this->postJson("/api/portal-admin/members/{$member->id}/{$route}", ['identity_checked_as' => 'umid']);
     }
 
     private function numberOf(Borrower $member): string
@@ -102,7 +102,7 @@ class PortalCodesTest extends TestCase
         $stored = PortalCode::query()->where('portal_user_id', PortalUser::where('borrower_id', $member->id)->value('id'))->firstOrFail();
         $this->assertNotSame($plain, $stored->code_hash);
         $this->assertEqualsWithDelta(72, now()->diffInHours($stored->expires_at), 1);
-        $this->assertSame('UMID', $stored->identity_checked_as);
+        $this->assertSame('umid', $stored->identity_checked_as);
 
         // Nowhere in the database or the logs.
         foreach (DB::select('show tables') as $table) {

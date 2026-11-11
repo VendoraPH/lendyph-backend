@@ -7,7 +7,8 @@ use Illuminate\Database\Eloquent\Model;
 /**
  * A one-time password sent while redeeming a code, used only when
  * `portal_settings.otp_required` is on (portal design §1). Hashed; 5 minutes;
- * 5 tries.
+ * 5 tries. Bound to the code and to the step token it was sent for
+ * (`step_hash`), so a passed OTP never carries over to a later step.
  */
 class PortalOtpChallenge extends Model
 {
@@ -22,13 +23,14 @@ class PortalOtpChallenge extends Model
         'portal_code_id',
         'purpose',
         'code_hash',
+        'step_hash',
         'masked_recipient',
         'expires_at',
         'attempts',
         'verified_at',
     ];
 
-    protected $hidden = ['code_hash'];
+    protected $hidden = ['code_hash', 'step_hash'];
 
     protected function casts(): array
     {

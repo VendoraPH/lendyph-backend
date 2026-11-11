@@ -30,8 +30,8 @@ final class OtpSender
         private readonly AllowList $allowList,
     ) {}
 
-    /** Start a challenge for this code and send it. Returns the masked number. */
-    public function challenge(PortalUser $portalUser, PortalCode $code): string
+    /** Start a challenge for this code and step and send it. Returns the masked number. */
+    public function challenge(PortalUser $portalUser, PortalCode $code, string $stepHash): string
     {
         $mobile = PhilippineMobile::normalise($portalUser->borrower?->contact_number);
 
@@ -47,6 +47,7 @@ final class OtpSender
             'portal_code_id' => $code->getKey(),
             'purpose' => $code->kind,
             'code_hash' => Hash::make($otp),
+            'step_hash' => $stepHash,
             'masked_recipient' => $masked,
             'expires_at' => now()->addMinutes(PortalOtpChallenge::MINUTES),
         ]);

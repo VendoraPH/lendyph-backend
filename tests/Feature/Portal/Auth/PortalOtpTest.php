@@ -46,7 +46,7 @@ class PortalOtpTest extends TestCase
         ]);
 
         $code = (string) $this->actingAs($this->admin)
-            ->postJson("/api/portal-admin/members/{$member->id}/invite", ['identity_checked_as' => 'Passport'])
+            ->postJson("/api/portal-admin/members/{$member->id}/invite", ['identity_checked_as' => 'passport'])
             ->assertCreated()
             ->json('data.code');
 
@@ -154,5 +154,31 @@ class PortalOtpTest extends TestCase
             $this->assertDoesNotMatchRegularExpression('/(?<!\d)\d{6}(?!\d)/', $line, 'A log line holds a six-digit code: '.$line);
             $this->assertStringContainsString('63917*****67', $line);
         }
+    }
+
+    /**
+     * Review L9: a passed OTP belongs to the step it was sent for. Verifying
+     * the code again starts a new step, which needs its own OTP.
+     */
+    public function test_a_passed_otp_does_not_carry_over_to_a_new_step(): void
+    {
+        config(['reminders.drivers.sms' => 'fake', 'reminders.allow_list' => [self::MOBILE]]);
+        $fake = app(FakeDriver::class);
+        $this->app->instance(FakeDriver::class, $fake);
+        PortalSetting::query()->update(['otp_required' => true]);
+
+        [$member, $code] = $this->invitedMember();
+        $first = $this->verify($member, $code);
+        preg_match('/\b(\d{6})\b/', $fake->sentTo('sms')[0]->body, $match);
+        $this->portalJson('POST', '/api/portal/auth/codes/otp', ['step_token' => $first['step_token'], 'otp' => $match[1]])->assertOk();
+
+        $second = $this->verify($member, $code);
+
+        $this->portalJson('POST', '/api/portal/auth/codes/complete', [
+            'step_token' => $second['step_token'],
+            'password' => 'Brand-new-pass-42',
+            'password_confirmation' => 'Brand-new-pass-42',
+            'accepted_terms_version' => PortalTermsVersion::current()->version,
+        ])->assertStatus(422)->assertJsonValidationErrors('otp');
     }
 }

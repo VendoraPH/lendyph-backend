@@ -162,7 +162,7 @@ class PortalAccessAdminTest extends TestCase
         $viewer->givePermissionTo('member_portal:view');
         $this->actingAs($viewer->fresh())->getJson('/api/portal-admin/accounts?search=Zenaida')->assertOk()->assertJsonPath('data.0.contact_number', null);
 
-        $this->actingAs($this->admin)->postJson("/api/portal-admin/members/{$invited->borrower_id}/invite", ['identity_checked_as' => 'UMID'])->assertCreated();
+        $this->actingAs($this->admin)->postJson("/api/portal-admin/members/{$invited->borrower_id}/invite", ['identity_checked_as' => 'umid'])->assertCreated();
         $log = $this->getJson("/api/portal-admin/members/{$invited->borrower_id}/communications")->assertOk()->json('data');
         $this->assertSame('portal_code_issued', $log[0]['kind']);
         $this->assertSame('Code issued (activation)', $log[0]['description']);
@@ -206,7 +206,7 @@ class PortalAccessAdminTest extends TestCase
 
             foreach (array_diff($route->methods(), ['HEAD']) as $method) {
                 $this->actingAs($stranger);
-                $status = $this->json($method, $uri, ['identity_checked_as' => 'UMID', 'enabled' => false, 'reason' => 'administrative'])->status();
+                $status = $this->json($method, $uri, ['identity_checked_as' => 'umid', 'enabled' => false, 'reason' => 'administrative'])->status();
                 $swept++;
 
                 if ($status !== 403) {
@@ -235,5 +235,40 @@ class PortalAccessAdminTest extends TestCase
         $this->assertDatabaseMissing('portal_login_events', ['id' => $old->id]);
         $this->assertDatabaseHas('portal_login_events', ['id' => $recent->id]);
         $this->assertSame(0, $portalUser->tokens()->count());
+    }
+
+    /** Review L7: the ID checked is one of the valid ID types members' IDs use. */
+    public function test_the_id_checked_must_be_a_valid_id_type(): void
+    {
+        $member = Borrower::factory()->create(['branch_id' => $this->branch->id, 'birthdate' => '1980-01-01', 'status' => 'active']);
+        $this->enablePortal();
+
+        $this->actingAs($this->admin)->postJson("/api/portal-admin/members/{$member->id}/invite", ['identity_checked_as' => 'library card'])
+            ->assertStatus(422)->assertJsonValidationErrors('identity_checked_as');
+        $this->postJson("/api/portal-admin/members/{$member->id}/invite", ['identity_checked_as' => 'philippine_id'])->assertCreated();
+
+        $this->assertStringContainsString('valid ID checked: Philippine National ID (PhilSys)', (string) AuditLog::query()->where('action', 'portal_code_issued')->latest('id')->value('description'));
+    }
+
+    /**
+     * Review L4: requests that never reach the code desk (no permission,
+     * another branch) don't use up a member's codes for the day.
+     */
+    public function test_refused_requests_do_not_spend_a_members_code_budget(): void
+    {
+        $this->withMiddleware(ThrottleRequests::class);
+        $this->enablePortal();
+        $member = Borrower::factory()->create(['branch_id' => $this->branch->id, 'birthdate' => '1980-01-01', 'status' => 'active']);
+        $stranger = User::factory()->inBranches($this->branch)->create();
+        $stranger->givePermissionTo('borrowers:view');
+
+        for ($i = 0; $i < 6; $i++) {
+            $this->actingAs($stranger->fresh())->postJson("/api/portal-admin/members/{$member->id}/invite", ['identity_checked_as' => 'umid'])->assertStatus(403);
+        }
+
+        for ($i = 0; $i < 5; $i++) {
+            $this->actingAs($this->admin)->postJson("/api/portal-admin/members/{$member->id}/invite", ['identity_checked_as' => 'umid'])->assertCreated();
+        }
+        $this->postJson("/api/portal-admin/members/{$member->id}/invite", ['identity_checked_as' => 'umid'])->assertStatus(429);
     }
 }
