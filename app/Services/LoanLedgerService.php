@@ -243,14 +243,18 @@ final class LoanLedgerService
     }
 
     /**
-     * The late penalty on each period, on the first day past its grace (never
-     * before the release, for a loan released after its periods fell late).
+     * The late penalty on each period, one line per monthly charge, each on
+     * the day it fell (RepaymentService::penaltyCharges(); never before the
+     * release, for a loan released after its periods fell late, nor after
+     * today).
      *
-     * The charge is what the period carries now (its stamp is recalculated,
+     * The period's total is what it carries now (its stamp is recalculated,
      * never below what was paid on it), plus what a waiver later forgave on it
      * and what a closure wrote off with it, which their own rows take off
-     * again. A period a later extension or rebuild deleted is charged what its
-     * waiver or closure recorded, on that adjustment's day.
+     * again. The monthly charges are laid out in order until they make up
+     * that total (penaltyLines()). A period a later extension or rebuild
+     * deleted is charged what its waiver or closure recorded, on that
+     * adjustment's day.
      *
      * @param  EloquentCollection<int, AmortizationSchedule>  $schedules
      * @param  EloquentCollection<int, LoanAdjustment>  $adjustments
@@ -277,6 +281,7 @@ final class LoanLedgerService
         $events = [];
         $today = Carbon::today();
         $releasedAt = Carbon::parse($loan->released_at);
+        $schedules->loadMissing('postedPrincipalPayments');
 
         foreach ($schedules->sortBy('period_number') as $schedule) {
             $charged = $this->centavos($schedule->penalty_amount) + ($recorded[$schedule->id] ?? 0);
@@ -286,11 +291,12 @@ final class LoanLedgerService
                 continue;
             }
 
-            $lateFrom = $schedule->due_date->copy()->addDays(max(0, (int) $loan->grace_period_days) + 1)->startOfDay();
-            $date = $lateFrom->gt($today) ? $today : $lateFrom;
-            $postedAt = $date->lt($releasedAt) ? $releasedAt : $date;
+            foreach ($this->penaltyLines($loan, $schedule, $charged, $today) as $line) {
+                $date = $line['on']->gt($today) ? $today : $line['on'];
+                $postedAt = $date->lt($releasedAt) ? $releasedAt : $date;
 
-            $events[] = $this->penaltyCharge($postedAt, $schedule->id, (int) $schedule->period_number, $charged);
+                $events[] = $this->penaltyCharge($postedAt, $schedule->id, (int) $schedule->period_number, $line['centavos'], $line['number']);
+            }
         }
 
         // Periods gone since: charged on the day their waiver or closure ran.
@@ -304,12 +310,58 @@ final class LoanLedgerService
         return $events;
     }
 
-    /** @return array<string, mixed> */
-    private function penaltyCharge(CarbonInterface $postedAt, int $scheduleId, ?int $periodNumber, int $charged): array
+    /**
+     * A period's penalty total (`$charged`, centavos) as its monthly charges,
+     * in order: each charge as it fell, until they make up the total. The last
+     * line takes what the charges leave over (a charge kept at what was paid);
+     * a period with no monthly charge to show (no penalty rate, or due before
+     * an imported loan's baseline) gets one line on its first day past grace.
+     *
+     * @return list<array{on: Carbon, centavos: int, number: int}>
+     */
+    private function penaltyLines(Loan $loan, AmortizationSchedule $schedule, int $charged, Carbon $today): array
     {
+        $lines = [];
+        $left = $charged;
+
+        foreach (app(RepaymentService::class)->penaltyCharges($loan, $schedule, $today) as $charge) {
+            if ($left <= 0) {
+                break;
+            }
+
+            $amount = min($charge['centavos'], $left);
+
+            if ($amount > 0) {
+                $lines[] = ['on' => $charge['on'], 'centavos' => $amount, 'number' => $charge['number']];
+                $left -= $amount;
+            }
+        }
+
+        if ($left > 0 && $lines === []) {
+            $lateFrom = $schedule->due_date->copy()->addDays(max(0, (int) $loan->grace_period_days) + 1)->startOfDay();
+
+            return [['on' => $lateFrom, 'centavos' => $left, 'number' => 1]];
+        }
+
+        if ($left > 0) {
+            $lines[array_key_last($lines)]['centavos'] += $left;
+        }
+
+        return $lines;
+    }
+
+    /** @return array<string, mixed> */
+    private function penaltyCharge(CarbonInterface $postedAt, int $scheduleId, ?int $periodNumber, int $charged, int $number = 1): array
+    {
+        $description = match (true) {
+            $periodNumber === null => 'Late penalty',
+            $number > 1 => "Late penalty, period {$periodNumber}, month {$number}",
+            default => "Late penalty, period {$periodNumber}",
+        };
+
         return $this->event($postedAt, $postedAt, 'penalty_charge', $scheduleId, [
             'kind' => 'penalty_charge',
-            'description' => $periodNumber === null ? 'Late penalty' : "Late penalty, period {$periodNumber}",
+            'description' => $description,
             'penalty' => $charged,
         ], ['penalty' => $charged]);
     }

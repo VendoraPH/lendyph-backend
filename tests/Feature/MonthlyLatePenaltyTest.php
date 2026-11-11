@@ -119,7 +119,7 @@ class MonthlyLatePenaltyTest extends TestCase
         $this->assertPenalty(1, charged: 600, paid: 500, months: 3);
     }
 
-    public function test_a_waiver_clears_the_penalty_so_far_and_the_next_full_month_charges_again(): void
+    public function test_a_waiver_clears_the_penalty_so_far_and_the_next_due_date_anniversary_charges_again(): void
     {
         $this->nightlyOn('2026-04-20');
         $this->assertPenalty(1, charged: 400, months: 2);
@@ -129,14 +129,80 @@ class MonthlyLatePenaltyTest extends TestCase
         $this->assertPenalty(1, charged: 0, months: 2);
         $this->assertSame($adjustment->id, $this->period(1)->penalty_waiver_id);
 
-        $this->nightlyOn('2026-05-19');
-        $this->assertPenalty(1, charged: 0, months: 3);
+        // The period's monthly cycle runs on its due date, the 15th: the next
+        // charge falls on 15 May, not a full month after the waiver.
+        $this->nightlyOn('2026-05-14');
+        $this->assertPenalty(1, charged: 0, months: 2);
 
-        $this->nightlyOn('2026-05-20');
+        $this->nightlyOn('2026-05-15');
         $this->assertPenalty(1, charged: 200, months: 3);
 
-        $this->nightlyOn('2026-06-20');
+        $this->nightlyOn('2026-06-15');
         $this->assertPenalty(1, charged: 400, months: 4);
+    }
+
+    public function test_a_waiver_before_the_nightly_run_forgives_the_charge_that_fell_that_day(): void
+    {
+        $this->nightlyOn('2026-04-14');
+        $this->assertPenalty(1, charged: 200, months: 1);
+
+        // 15 April is period 1's second month; the nightly run has not stamped it.
+        $adjustment = $this->waiveOn('2026-04-15', [$this->period(1)->id], '00:05');
+
+        $audit = AuditLog::where('action', 'penalty_waived')->where('auditable_id', $adjustment->id)->sole();
+        $this->assertEqualsWithDelta(400, (float) $audit->new_values['total_waived'], 0.001);
+        $this->assertPenalty(1, charged: 0, months: 2);
+
+        $this->nightlyOn('2026-04-15');
+        $this->assertPenalty(1, charged: 0, months: 2);
+
+        $this->nightlyOn('2026-05-15');
+        $this->assertPenalty(1, charged: 200, months: 3);
+    }
+
+    public function test_the_ledger_has_one_line_per_monthly_charge_on_the_day_it_fell(): void
+    {
+        $this->nightlyOn('2026-03-10');
+        $this->assertSame([['2026-02-19', 'Late penalty, period 1', 200.0, 200.0]], $this->penaltyLines());
+
+        $this->nightlyOn('2026-05-15');
+
+        $this->assertSame([
+            ['2026-02-19', 'Late penalty, period 1', 200.0, 200.0],
+            ['2026-03-19', 'Late penalty, period 2', 200.0, 400.0],
+            ['2026-04-15', 'Late penalty, period 1, month 2', 200.0, 600.0],
+            ['2026-04-19', 'Late penalty, period 3', 200.0, 800.0],
+            ['2026-05-15', 'Late penalty, period 1, month 3', 200.0, 1000.0],
+            ['2026-05-15', 'Late penalty, period 2, month 2', 200.0, 1200.0],
+        ], $this->penaltyLines());
+
+        $this->assertLedgerClosesOnTheSummary();
+    }
+
+    public function test_the_ledger_shows_a_waiver_between_monthly_charges_and_the_charges_after_it(): void
+    {
+        $this->nightlyOn('2026-04-15');
+        $this->waiveOn('2026-04-20', [$this->period(1)->id]);
+        $this->nightlyOn('2026-05-15');
+
+        $ledger = $this->getJson("/api/loans/{$this->loan->id}/ledger")->assertOk()->json('data');
+        $lines = collect($ledger['rows'])
+            ->whereIn('kind', ['penalty_charge', 'adjustment'])
+            ->map(fn (array $row): array => [$row['date'], $row['kind'], (float) $row['penalty']])
+            ->values()
+            ->all();
+
+        $this->assertSame([
+            ['2026-02-19', 'penalty_charge', 200.0],
+            ['2026-03-19', 'penalty_charge', 200.0],
+            ['2026-04-15', 'penalty_charge', 200.0],
+            ['2026-04-19', 'penalty_charge', 200.0],
+            ['2026-04-20', 'adjustment', -400.0],
+            ['2026-05-15', 'penalty_charge', 200.0],
+            ['2026-05-15', 'penalty_charge', 200.0],
+        ], $lines);
+
+        $this->assertLedgerClosesOnTheSummary();
     }
 
     public function test_a_waiver_made_before_the_switch_keeps_its_period_penalty_free(): void
@@ -290,10 +356,42 @@ class MonthlyLatePenaltyTest extends TestCase
         return Repayment::findOrFail($id);
     }
 
-    /** @param list<int> $scheduleIds */
-    private function waiveOn(string $date, array $scheduleIds): LoanAdjustment
+    /**
+     * Each penalty line of the loan's Ledger: date, description, amount and
+     * the penalty balance after it.
+     *
+     * @return list<array{0: string, 1: string, 2: float, 3: float}>
+     */
+    private function penaltyLines(): array
     {
-        $this->travelTo(Carbon::parse("{$date} 10:00"));
+        return collect($this->getJson("/api/loans/{$this->loan->id}/ledger")->assertOk()->json('data.rows'))
+            ->where('kind', 'penalty_charge')
+            ->map(fn (array $row): array => [$row['date'], $row['description'], (float) $row['penalty'], (float) $row['balances']['penalty']])
+            ->values()
+            ->all();
+    }
+
+    /** The Ledger closes on the summary, and the statement's debits less credits are what is owed. */
+    private function assertLedgerClosesOnTheSummary(): void
+    {
+        $ledger = $this->getJson("/api/loans/{$this->loan->id}/ledger")->assertOk()->json('data');
+        $summary = $this->getJson("/api/loans/{$this->loan->id}/summary")->assertOk()->json('data');
+        $statement = $this->getJson("/api/reports/statement-of-account/{$this->loan->id}")->assertOk()->json('data');
+
+        $last = end($ledger['rows']);
+        $this->assertEqualsWithDelta((float) $summary['outstanding_penalty'], (float) $last['balances']['penalty'], 0.001);
+        $this->assertEqualsWithDelta((float) $summary['outstanding_penalty'], (float) $ledger['closing']['penalty'], 0.001);
+        $this->assertEqualsWithDelta(
+            (float) $statement['summary']['outstanding_balance'],
+            round((float) $statement['transaction_totals']['debit'] - (float) $statement['transaction_totals']['credit'], 2),
+            0.001,
+        );
+    }
+
+    /** @param list<int> $scheduleIds */
+    private function waiveOn(string $date, array $scheduleIds, string $time = '10:00'): LoanAdjustment
+    {
+        $this->travelTo(Carbon::parse("{$date} {$time}"));
 
         $id = $this->postJson("/api/loans/{$this->loan->id}/adjustments", [
             'adjustment_type' => 'penalty_waiver',

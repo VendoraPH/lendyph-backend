@@ -1249,12 +1249,24 @@ class LoanAdjustmentService
         // The period keeps a link to this waiver, and the day it cleared the
         // penalty with the charge it left (option b, from the monthly penalty,
         // Arvin, 2026-11-11): RepaymentService::penaltyFor() charges nothing
-        // more until a full month after that day, then a charge a month while
-        // the period stays unpaid. Waivers made before the switch have no
+        // more until the period's next monthly charge day, then a charge a
+        // month while it stays unpaid. Waivers made before the switch have no
         // clearing day and keep their period penalty-free (option a).
-        $clearedOn = Carbon::today()->toDateString();
+        //
+        // Each period is first charged up to today (penaltyAsOf()), so a
+        // waiver applied before the night's run forgives the month that fell
+        // today rather than leaving it uncharged for good.
+        $today = Carbon::today();
+        $clearedOn = $today->toDateString();
 
-        $this->selectedOpenSchedules($loan, $newValues)->each(function (AmortizationSchedule $schedule) use ($adjustment, $clearedOn, &$before, &$after) {
+        $this->selectedOpenSchedules($loan, $newValues)->each(function (AmortizationSchedule $schedule) use ($adjustment, $loan, $today, $clearedOn, &$before, &$after) {
+            $stamped = $this->repaymentService->penaltyAsOf($loan, $schedule, $today);
+
+            if ($stamped !== null) {
+                $schedule->penalty_amount = $stamped;
+                $schedule->penalty_months = RepaymentService::monthsLate($schedule, $today);
+            }
+
             $charged = (float) $schedule->penalty_amount;
             $paid = (float) $schedule->penalty_paid;
             $owed = $this->penaltyOwed($schedule);

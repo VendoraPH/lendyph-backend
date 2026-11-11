@@ -1434,8 +1434,10 @@ class RepaymentService
      *   keeps the one charge it had, on the principal unpaid that day, plus
      *   one for each full month after the switch date.
      * - A waiver made since the switch (option b) left the charge at what was
-     *   paid (`penalty_cleared_to`) on `penalty_cleared_on`; a charge falls
-     *   again at each full month after that day while the period is unpaid.
+     *   paid (`penalty_cleared_to`) on `penalty_cleared_on`. The period's own
+     *   monthly charges after that day are charged again while it stays
+     *   unpaid, so the next falls on its next monthly charge day and the
+     *   period keeps one monthly cycle (penaltyCharges()).
      *
      * The one definition of the charge. applyPenalties() writes it on every
      * late period, every preview reads it through penaltyAsOf(), and
@@ -1448,7 +1450,49 @@ class RepaymentService
      */
     private function penaltyFor(Loan $loan, AmortizationSchedule $schedule, Carbon $asOf): float
     {
+        $charges = collect($this->penaltyCharges($loan, $schedule, $asOf));
+
+        if ($schedule->penalty_cleared_on !== null) {
+            $clearedOn = $schedule->penalty_cleared_on->copy()->startOfDay();
+            $charged = LoanService::toCentavos((float) $schedule->penalty_cleared_to)
+                + $charges->filter(fn (array $charge): bool => $charge['on']->gt($clearedOn))->sum('centavos');
+        } else {
+            $charged = $charges->sum('centavos');
+        }
+
+        return max($charged / 100, (float) $schedule->penalty_paid);
+    }
+
+    /**
+     * Each monthly charge a late period has had by `$asOf`, in date order:
+     * the day it fell, its amount in centavos, and which charge it is (1 for
+     * the first). Waivers are not taken off: penaltyFor() does that, and the
+     * Ledger shows them as their own lines.
+     *
+     * - The first charge falls on the first day past grace, then one on each
+     *   monthly anniversary of the due date from the second month:
+     *   max(1, full months since the due date) charges.
+     * - A period already late before the switch date has its one charge (on
+     *   the principal unpaid on the switch day, dated when it fell late), then
+     *   one at each full month after the switch date.
+     * - Each charge is the penalty rate on the principal unpaid on its own
+     *   day (principalUnpaidOn()), to the centavo.
+     *
+     * None on a loan with no penalty rate, a period not late on `$asOf`, or
+     * one due before the loan's imported arrears baseline.
+     *
+     * @return list<array{on: Carbon, centavos: int, number: int}>
+     */
+    public function penaltyCharges(Loan $loan, AmortizationSchedule $schedule, Carbon $asOf): array
+    {
         $rate = (float) $loan->penalty_rate;
+
+        if ($rate <= 0
+            || ! $schedule->due_date->lt(AmortizationSchedule::pastGraceCutoff($loan->grace_period_days, $asOf))
+            || ! AmortizationSchedule::isPenalisable($loan->imported_arrears_baseline, $schedule->due_date)) {
+            return [];
+        }
+
         $day = $asOf->copy()->startOfDay();
         $unpaidOn = $this->principalUnpaidOn($schedule);
         $charge = fn (Carbon $on): int => LoanService::toCentavos(round($unpaidOn($on) / 100 * ($rate / 100), 2));
@@ -1457,38 +1501,26 @@ class RepaymentService
         $lateFrom = $dueDate->copy()->addDays(max(0, (int) $loan->grace_period_days) + 1);
         $switchDate = LatePenaltySetting::monthlyFrom();
 
-        if ($schedule->penalty_cleared_on !== null) {
-            $charged = LoanService::toCentavos((float) $schedule->penalty_cleared_to);
-            $charged += $this->monthlyCharges($schedule->penalty_cleared_on->copy()->startOfDay(), $day, $charge);
-        } elseif ($switchDate !== null && $lateFrom->lt($switchDate)) {
-            $charged = $charge($switchDate) + $this->monthlyCharges($switchDate, $day, $charge);
-        } else {
-            $charged = $charge($lateFrom);
+        if ($switchDate !== null && $lateFrom->lt($switchDate)) {
+            $charges = [['on' => $lateFrom, 'centavos' => $charge($switchDate), 'number' => 1]];
 
-            for ($month = 2; $month <= self::fullMonthsBetween($dueDate, $day); $month++) {
-                $on = $dueDate->copy()->addMonthsNoOverflow($month);
-                $charged += $charge($on->lt($lateFrom) ? $lateFrom : $on);
+            for ($month = 1; $month <= self::fullMonthsBetween($switchDate, $day); $month++) {
+                $on = $switchDate->copy()->addMonthsNoOverflow($month);
+                $charges[] = ['on' => $on, 'centavos' => $charge($on), 'number' => $month + 1];
             }
+
+            return $charges;
         }
 
-        return max($charged / 100, (float) $schedule->penalty_paid);
-    }
+        $charges = [['on' => $lateFrom, 'centavos' => $charge($lateFrom), 'number' => 1]];
 
-    /**
-     * The charges that fall at each full month after `$from`, up to `$day`,
-     * in centavos.
-     *
-     * @param  Closure(Carbon): int  $charge
-     */
-    private function monthlyCharges(Carbon $from, Carbon $day, Closure $charge): int
-    {
-        $total = 0;
-
-        for ($month = 1; $month <= self::fullMonthsBetween($from, $day); $month++) {
-            $total += $charge($from->copy()->addMonthsNoOverflow($month));
+        for ($month = 2; $month <= self::fullMonthsBetween($dueDate, $day); $month++) {
+            $on = $dueDate->copy()->addMonthsNoOverflow($month);
+            $on = $on->lt($lateFrom) ? $lateFrom : $on;
+            $charges[] = ['on' => $on, 'centavos' => $charge($on), 'number' => $month];
         }
 
-        return $total;
+        return $charges;
     }
 
     /**
