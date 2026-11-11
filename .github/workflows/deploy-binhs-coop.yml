@@ -70,6 +70,15 @@ jobs:
             echo "::warning title=Proxy secret missing::PROXY_SECRET_BINHS_STAGING is not set; the box keeps its last one, if any."
             exit 1
           fi
+          # Exactly 64 lowercase hex characters, as `openssl rand -hex 32` makes it.
+          # Anything else is refused, a pasted trailing newline included: the
+          # backend file's line 2 is the allowed-source list, and a stray newline
+          # would push it to line 3, which nothing reads.
+          secret_format='^[0-9a-f]{64}$'
+          if ! [[ $PROXY_SECRET =~ $secret_format ]]; then
+            echo "::warning title=Proxy secret not delivered::PROXY_SECRET_BINHS_STAGING is not exactly 64 lowercase hex characters (a trailing newline counts); the box keeps its last one, if any."
+            exit 1
+          fi
           umask 077
           key="$RUNNER_TEMP/vps_key"
           trap 'rm -f "$key"' EXIT
@@ -85,8 +94,14 @@ jobs:
           fi
           # Only paths in the remote command; the value is read from stdin by cat.
           remote="set -eu; umask 077; d=\"\$HOME/.lendyph-proxy-secret\"; mkdir -p \"\$d\"; chmod 700 \"\$d\"; f=\"\$d/binhs-coop-backend-staging\"; cat > \"\$f.tmp\"; if [ ! -s \"\$f.tmp\" ]; then rm -f \"\$f.tmp\"; exit 1; fi; chmod 600 \"\$f.tmp\"; mv -f \"\$f.tmp\" \"\$f\"; echo 'proxy secret delivered'"
+          # The allowed sources: IPv4 or IPv6 literals, comma-separated, on one
+          # line. Unset is delivered as empty (any source, with a warning); a
+          # malformed list is not delivered at all.
           if [ -z "${PROXY_SOURCES:-}" ]; then
             echo "::warning title=Proxy sources missing::PROXY_SOURCES_STAGING is not set; the API accepts the secret from any source."
+          elif ! printf '%s' "$PROXY_SOURCES" | python3 -I -c 'import ipaddress, sys; v = sys.stdin.read(); sys.exit(1) if ("\n" in v or "\r" in v) else [ipaddress.ip_address(p.strip()) for p in v.split(",")]' 2>/dev/null; then
+            echo "::warning title=Proxy secret not delivered::PROXY_SOURCES_STAGING must be IPv4 or IPv6 addresses, comma-separated, on one line; the box keeps its last secret and sources, if any."
+            exit 1
           fi
           for attempt in 1 2 3; do
             # Line 1 the secret, line 2 the allowed source addresses.

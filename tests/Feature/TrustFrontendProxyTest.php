@@ -156,6 +156,38 @@ it('reads the secret from LENDYPH_PROXY_SECRET and resolves unset to empty', fun
     }
 });
 
+it('strips a trailing CR or LF from the secret and the source list, so a pasted newline still matches', function (string $ending) {
+    $previous = ['secret' => getenv('LENDYPH_PROXY_SECRET'), 'sources' => getenv('LENDYPH_PROXY_SOURCES')];
+    $set = function (string $key, string $value): void {
+        putenv("{$key}={$value}");
+        $_ENV[$key] = $_SERVER[$key] = $value;
+    };
+
+    try {
+        $set('LENDYPH_PROXY_SECRET', $this->secret.$ending);
+        $set('LENDYPH_PROXY_SOURCES', PX_FRONTEND_ADDR.$ending);
+        $resolved = require __DIR__.'/../../config/trustedproxy.php';
+    } finally {
+        foreach (['LENDYPH_PROXY_SECRET' => $previous['secret'], 'LENDYPH_PROXY_SOURCES' => $previous['sources']] as $key => $value) {
+            unset($_ENV[$key], $_SERVER[$key]);
+            putenv($value === false ? $key : "{$key}={$value}");
+        }
+    }
+
+    expect($resolved['proxy_secret'])->toBe($this->secret)
+        ->and($resolved['proxy_sources'])->toBe([PX_FRONTEND_ADDR]);
+
+    config()->set('trustedproxy.proxy_secret', $resolved['proxy_secret']);
+    config()->set('trustedproxy.proxy_sources', $resolved['proxy_sources']);
+
+    $seen = probeFrom($this, PX_FRONTEND_ADDR, [
+        TrustFrontendProxy::HEADER => $this->secret,
+        'X-Forwarded-For' => PX_VISITOR_ADDR,
+    ]);
+
+    expect($seen['ip'])->toBe(PX_VISITOR_ADDR);
+})->with(['LF' => "\n", 'CR LF' => "\r\n", 'CR' => "\r"]);
+
 it('accepts the secret from a listed source address', function () {
     config()->set('trustedproxy.proxy_sources', ['198.51.100.1', PX_FRONTEND_ADDR]);
 
