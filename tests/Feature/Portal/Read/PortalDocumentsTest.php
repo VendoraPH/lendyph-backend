@@ -104,6 +104,22 @@ class PortalDocumentsTest extends TestCase
         }
     }
 
+    public function test_a_valid_id_typed_with_any_separator_or_inside_a_longer_type_is_never_listed_or_streamed(): void
+    {
+        $me = $this->portalMember();
+
+        foreach (['Valid.ID', 'valid/id', 'Valid ID (back)'] as $type) {
+            $document = $this->memberDocument($me->borrower, ['type' => $type]);
+            Storage::disk('private')->put($document->file_path, 'secret');
+
+            $this->assertNotContains($document->id, array_column($this->portalJson('GET', '/api/portal/documents', [], $this->portalToken($me))->json('data.files'), 'id'), $type);
+            $this->portalJson('GET', "/api/portal/documents/{$document->id}/download", [], $this->portalToken($me))->assertNotFound();
+        }
+
+        $other = $this->memberDocument($me->borrower, ['type' => 'Valid-until certificate']);
+        $this->assertContains($other->id, array_column($this->portalJson('GET', '/api/portal/documents', [], $this->portalToken($me))->json('data.files'), 'id'), 'Only a valid ID is left out.');
+    }
+
     public function test_a_missing_file_answers_404(): void
     {
         $me = $this->portalMember();

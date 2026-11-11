@@ -41,8 +41,9 @@ use Illuminate\Validation\ValidationException;
  * 3. **Reject, cancel, expiry**: the hold is released (or expired); no money
  *    moves.
  *
- * Lock order: idempotency row, savings account, portal request, hold, then
- * the Teller's approval or transaction, numbers and journal (savings §4).
+ * Lock order: idempotency row, savings account, portal request, member,
+ * portal account, hold, then the Teller's approval or transaction, numbers
+ * and journal (savings §4).
  */
 final class WithdrawalRequests
 {
@@ -220,17 +221,21 @@ final class WithdrawalRequests
      * Read from the rows themselves, never a model event, at staff approval
      * and again at the savings second check (WithdrawalExecutor).
      *
-     * The portal account is read under its row lock, so a payout waits for a
-     * PortalAccess::disable() in flight and then sees it. Lock order: the
-     * savings account and the request (the caller's), then the portal
-     * account, then the hold. Nothing takes them the other way round:
-     * disable() locks only the portal account, and ends the requests after
-     * it commits.
+     * The member and the portal account are both read under their row
+     * locks, member first, so a payout waits for a status change in flight
+     * (inactive, blacklisted, withdrawn, deceased: MembershipStatus::end, a
+     * deactivation, PortalAccess::disable()) and then sees it. Lock order:
+     * the savings account and the request (the caller's), then the member,
+     * then the portal account, then the hold. Nothing takes them the other
+     * way round: a membership change locks the member, then the portal
+     * account (the Borrower observer), and code issuing does the same;
+     * disable() locks only the portal account; each ends the requests only
+     * after it commits.
      */
     public static function assertStillAMember(PortalRequest $request): void
     {
+        $memberStatus = Borrower::query()->whereKey($request->borrower_id)->lockForUpdate()->value('status');
         $portalUser = PortalUser::query()->whereKey($request->portal_user_id)->lockForUpdate()->first(['id', 'status']);
-        $memberStatus = Borrower::query()->whereKey($request->borrower_id)->value('status');
 
         if ($portalUser?->status !== PortalUser::STATUS_ACTIVE || $memberStatus !== 'active') {
             Refuse::conflict(self::NOT_A_MEMBER_NOW);

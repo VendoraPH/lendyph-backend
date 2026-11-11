@@ -15,6 +15,7 @@ use App\Services\Savings\SavingsLocks;
 use App\Services\Savings\SavingsMath;
 use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Support\Facades\DB;
+use Throwable;
 
 /**
  * The system's side of portal requests (portal design §6), each change under
@@ -30,7 +31,12 @@ use Illuminate\Support\Facades\DB;
  *   nightly sweep backstops `savings:expire`'s bulk updates.
  * - **Access ended** (any reason: PortalAccess and MemberPortalAccessEnded):
  *   the member's open requests are cancelled and their holds released, and
- *   a second-check approval is cancelled, as the system.
+ *   a second-check approval is cancelled, as the system. The nightly sweep
+ *   runs it again for any portal account already turned off that still has
+ *   open requests (a crash, or a failure, between the commit and endFor), so
+ *   no hold waits for its `expires_on`. A locked account isn't access turned
+ *   off: staff unlock it, and a stranger guessing passwords must not be able
+ *   to cancel a member's request.
  *
  * Every row it writes names the system (or, for a second approval decided by
  * a checker, that checker).
@@ -46,10 +52,11 @@ final class RequestSweep
         private readonly ApprovalDesk $approvals,
     ) {}
 
-    /** @return array{expired: int, synced: int} */
+    /** @return array{ended: int, expired: int, synced: int} */
     public function run(): array
     {
         $today = now()->toDateString();
+        $ended = $this->endForAccessTurnedOff();
         $expired = 0;
         $synced = 0;
 
@@ -74,7 +81,36 @@ final class RequestSweep
                 $synced += $this->syncApproved($id) ? 1 : 0;
             });
 
-        return ['expired' => $expired, 'synced' => $synced];
+        return ['ended' => $ended, 'expired' => $expired, 'synced' => $synced];
+    }
+
+    /**
+     * endFor() for every portal account already turned off that still has an
+     * open request or a second check waiting, with the reason it was turned
+     * off. Each account is ended on its own, so one failure (reported) never
+     * stops the rest; the next night retries it.
+     */
+    public function endForAccessTurnedOff(): int
+    {
+        $ended = 0;
+
+        PortalUser::query()
+            ->where('status', PortalUser::STATUS_DISABLED)
+            ->whereIn('id', PortalRequest::query()->select('portal_user_id')
+                ->where(fn ($q) => $q->whereIn('status', RequestDesk::CANCELLABLE)
+                    ->orWhere(fn ($q) => $q->where('status', PortalRequest::STATUS_APPROVED)
+                        ->whereIn('savings_approval_id', SavingsApproval::query()->select('id')->where('status', 'pending')))))
+            ->orderBy('id')
+            ->get()
+            ->each(function (PortalUser $portalUser) use (&$ended): void {
+                try {
+                    $ended += $this->endFor($portalUser, $portalUser->disabled_reason ?? 'administrative');
+                } catch (Throwable $e) {
+                    report($e);
+                }
+            });
+
+        return $ended;
     }
 
     /** Expire one open request past its date; false when it was already decided or isn't due. */

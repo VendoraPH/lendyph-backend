@@ -10,6 +10,7 @@ use App\Services\Portal\Auth\MemberNumber;
 use App\Services\Portal\Auth\PortalSessions;
 use App\Services\Portal\Requests\RequestSweep;
 use Illuminate\Support\Facades\DB;
+use Throwable;
 
 /**
  * Turning a member's portal access off, back on, unlocking it and ending its
@@ -59,8 +60,17 @@ final class PortalAccess
         });
 
         // After commit, so the portal account lock is never held while the
-        // requests' savings account and request locks are taken.
-        DB::afterCommit(fn () => app(RequestSweep::class)->endFor($portalUser, $reason));
+        // requests' savings account and request locks are taken. Outside a
+        // transaction it runs at once; either way access is already off, so a
+        // failure is reported, never answered as a 500, and the nightly
+        // portal:requests-sweep ends the requests instead.
+        DB::afterCommit(function () use ($portalUser, $reason): void {
+            try {
+                app(RequestSweep::class)->endFor($portalUser, $reason);
+            } catch (Throwable $e) {
+                report($e);
+            }
+        });
     }
 
     public function enable(PortalUser $portalUser, int $staffId): void

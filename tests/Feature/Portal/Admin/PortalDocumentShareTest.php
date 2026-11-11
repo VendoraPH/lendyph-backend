@@ -11,6 +11,7 @@ use App\Models\Loan;
 use App\Models\Role;
 use App\Models\User;
 use App\Services\ValidIdService;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Str;
 use Spatie\Permission\PermissionRegistrar;
 use Tests\Feature\Portal\Read\PortalReadFixtures;
@@ -157,6 +158,50 @@ class PortalDocumentShareTest extends TestCase
             $document = $this->memberDocument($member->borrower, ['type' => $type], shared: false);
             $this->actingAs($this->admin)->postJson($this->shareUri($document), ['document_id' => $document->id])->assertUnprocessable();
             $this->assertNull($document->fresh()->portal_shared_at, $type);
+        }
+    }
+
+    public function test_a_valid_id_typed_with_any_separator_or_inside_a_longer_type_is_refused(): void
+    {
+        $member = $this->portalMember(['branch_id' => $this->branch->id]);
+
+        foreach (['Valid.ID', 'valid/id', 'Valid ID (back)', 'secondary-valid-id'] as $type) {
+            $document = $this->memberDocument($member->borrower, ['type' => $type], shared: false);
+            $this->actingAs($this->admin)->postJson($this->shareUri($document), ['document_id' => $document->id])
+                ->assertUnprocessable()
+                ->assertJsonPath('errors.document.0', 'A valid ID is never shared in the Member Portal.');
+            $this->assertNull($document->fresh()->portal_shared_at, $type);
+        }
+    }
+
+    public function test_the_staff_documents_list_shows_when_each_file_was_shared_to_staff_who_can_share(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-11-10 10:15:00', 'Asia/Manila'));
+        $member = $this->portalMember(['branch_id' => $this->branch->id]);
+        $shared = $this->memberDocument($member->borrower);
+        $notShared = $this->memberDocument($member->borrower, ['label' => 'Not shared'], shared: false);
+        $staff = $this->staffWith(['member_portal:manage', 'borrowers:view']);
+
+        $rows = collect($this->actingAs($staff)->getJson("/api/borrowers/{$member->borrower_id}/documents")->assertOk()->json('data'))->keyBy('id');
+
+        $this->assertSame('2026-11-10T10:15:00+08:00', $rows[$shared->id]['portal_shared_at']);
+        $this->assertArrayHasKey('portal_shared_at', $rows[$notShared->id]);
+        $this->assertNull($rows[$notShared->id]['portal_shared_at']);
+        Carbon::setTestNow();
+    }
+
+    public function test_staff_who_cannot_share_never_see_the_shared_state(): void
+    {
+        $member = $this->portalMember(['branch_id' => $this->branch->id]);
+        $this->memberDocument($member->borrower);
+        $staff = $this->staffWith(['borrowers:view', 'member_portal:view']);
+
+        $rows = $this->actingAs($staff)->getJson("/api/borrowers/{$member->borrower_id}/documents")->assertOk()->json('data');
+
+        $this->assertNotEmpty($rows);
+
+        foreach ($rows as $row) {
+            $this->assertArrayNotHasKey('portal_shared_at', $row);
         }
     }
 
