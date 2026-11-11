@@ -10,6 +10,12 @@
         h1 { font-size: 13pt; margin: 0 0 2pt 0; }
         {{-- A heading is never left at the foot of a page: dompdf honours page-break-after: avoid between blocks, so it moves to the page where its content starts. --}}
         h2 { font-size: 10pt; margin: 12pt 0 4pt 0; padding-bottom: 2pt; border-bottom: 0.6pt solid #9aa5b1; page-break-after: avoid; }
+        {{-- A table section's heading is the first row of the table's header group, which dompdf repeats on every page the table runs to. No break is allowed after a header row, so the heading and column headers never stay at the foot of a page without the first rows (dompdf would leave them there, unrepeated). --}}
+        thead { display: table-header-group; }
+        thead tr { page-break-after: avoid; }
+        table.grid { margin-top: 12pt; }
+        table.grid th.section-title { font-size: 10pt; padding: 0 0 2pt 0; background: none; border: 0; border-bottom: 0.6pt solid #9aa5b1; }
+        table.grid tr.section-gap th { padding: 0; height: 4pt; background: none; border: 0; }
         .coop { font-size: 10pt; font-weight: bold; }
         .muted { color: #52606d; }
         table { width: 100%; border-collapse: collapse; }
@@ -51,39 +57,41 @@
 @endif
 
 @foreach ($content->sections as $section)
-    <h2>{{ $section['title'] }}</h2>
-    @if ($section['kind'] === 'table')
-        @if ($section['rows'] === [])
-            <div class="muted">None recorded.</div>
-        @else
-            <table class="grid">
-                <thead>
+    @if ($section['kind'] === 'table' && $section['rows'] !== [])
+        <table class="grid">
+            <thead>
+            <tr><th class="section-title" colspan="{{ count($section['columns']) }}">{{ $section['title'] }}</th></tr>
+            <tr class="section-gap"><th colspan="{{ count($section['columns']) }}"></th></tr>
+            <tr>
+                @foreach ($section['columns'] as $column)
+                    <th>{{ $column['label'] }}</th>
+                @endforeach
+            </tr>
+            </thead>
+            <tbody>
+            @foreach ($section['rows'] as $row)
                 <tr>
-                    @foreach ($section['columns'] as $column)
-                        <th>{{ $column['label'] }}</th>
+                    @foreach ($row as $cell)
+                        <td>{{ $cell }}</td>
                     @endforeach
                 </tr>
-                </thead>
-                <tbody>
-                @foreach ($section['rows'] as $row)
+            @endforeach
+            </tbody>
+        </table>
+    @else
+        <h2>{{ $section['title'] }}</h2>
+        @if ($section['kind'] === 'table')
+            <div class="muted">None recorded.</div>
+        @else
+            <table class="fields">
+                @foreach ($section['fields'] as $field)
                     <tr>
-                        @foreach ($row as $cell)
-                            <td>{{ $cell }}</td>
-                        @endforeach
+                        <td class="label">{{ $field['label'] }}</td>
+                        <td>{{ $field['display'] }}</td>
                     </tr>
                 @endforeach
-                </tbody>
             </table>
         @endif
-    @else
-        <table class="fields">
-            @foreach ($section['fields'] as $field)
-                <tr>
-                    <td class="label">{{ $field['label'] }}</td>
-                    <td>{{ $field['display'] }}</td>
-                </tr>
-            @endforeach
-        </table>
     @endif
 @endforeach
 </body>

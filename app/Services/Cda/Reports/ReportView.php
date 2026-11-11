@@ -21,8 +21,9 @@ use App\Services\Cda\Sources\SourceCatalog;
  *
  * A finalized or later report reads entirely from its snapshot, so a later
  * member, Branding or profile change never shows on it. Only the documents
- * needed at filing are checked live (ReportEngine::issuesNow()), so a
- * missing-document Critical clears as soon as the file is uploaded.
+ * needed at filing are checked live (ReportEngine::issuesNow() and
+ * readinessNow()), so a missing-document Critical clears, and its readiness
+ * check passes, as soon as the file is uploaded.
  */
 final class ReportView
 {
@@ -42,6 +43,9 @@ final class ReportView
         $payload = $report->isLocked() && $snapshot !== null ? json_decode($snapshot->payload, true) : null;
         $rows = $payload === null ? $this->rows($report) : $payload['values'];
         $issues = $this->engine->issuesNow($report, $payload['issues'] ?? null);
+        $readiness = $payload === null
+            ? $this->engine->readinessNow($report)
+            : $this->engine->readinessNow($report, (int) ($payload['readiness'] ?? $report->readiness), (array) ($payload['readiness_breakdown'] ?? $report->readiness_breakdown ?? []));
         $editable = $report->status === CdaReport::STATUS_DRAFT && $report->applicable;
 
         $sections = [];
@@ -101,9 +105,9 @@ final class ReportView
             'locked' => $report->isLocked(),
             'stale' => $report->stale_at !== null && ($report->refreshed_at === null || $report->stale_at->gt($report->refreshed_at)),
             'provisional' => $provisional,
-            'readiness' => (int) ($payload['readiness'] ?? $report->readiness),
+            'readiness' => $readiness['readiness'],
             'readiness_label' => Readiness::LABEL,
-            'readiness_breakdown' => $payload['readiness_breakdown'] ?? $report->readiness_breakdown,
+            'readiness_breakdown' => $readiness['breakdown'],
             'critical_count' => count(array_filter($issues, fn (array $issue) => $issue['severity'] === 'critical')),
             'warning_count' => count(array_filter($issues, fn (array $issue) => $issue['severity'] === 'warning')),
             'issues' => array_values($issues),

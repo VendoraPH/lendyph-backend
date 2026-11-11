@@ -14,7 +14,9 @@ use Illuminate\Support\Collection;
  *   status (one who resigned mid-year still served); deleted rows never
  *   count.
  * - A linked officer's name and sex are the member's, read now; a finalized
- *   report keeps them in its snapshot.
+ *   report keeps them in its snapshot. `officers.list` gives the sex in
+ *   words ("Female"), with the stored key in `sex_key`, as it does the
+ *   position (`position`, `position_key`).
  * - `officers.count` counts people, so a member holding two positions counts
  *   once (an unlinked officer is one person per row). Groups: the board
  *   (chairperson, vice chairperson, members), committees, and management
@@ -68,7 +70,8 @@ final class OfficersSource implements CdaSource
 
         $rows = $this->serving($from, $to)->map(fn (CdaOfficer $officer) => [
             'name' => $officer->displayName(),
-            'sex' => $officer->displaySex(),
+            'sex' => RegisterWords::sex($officer->displaySex()),
+            'sex_key' => $officer->displaySex(),
             'position' => RegisterWords::position($officer->position),
             'position_key' => $officer->position,
             'committee' => $officer->committee,

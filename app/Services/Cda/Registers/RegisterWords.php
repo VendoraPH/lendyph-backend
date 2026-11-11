@@ -23,6 +23,12 @@ final class RegisterWords
         'other' => 'Other',
     ];
 
+    /** An officer's or member's sex: stored as a key, read and printed in words. */
+    public const SEXES = [
+        'female' => 'Female',
+        'male' => 'Male',
+    ];
+
     public const SOCIAL_CATEGORIES = [
         'education' => 'Education',
         'health' => 'Health',
@@ -53,6 +59,11 @@ final class RegisterWords
     public static function position(string $key): string
     {
         return self::POSITIONS[$key] ?? ucfirst(str_replace('_', ' ', $key));
+    }
+
+    public static function sex(?string $key): ?string
+    {
+        return $key === null || $key === '' ? null : (self::SEXES[$key] ?? ucfirst(str_replace('_', ' ', $key)));
     }
 
     public static function socialCategory(string $key): string

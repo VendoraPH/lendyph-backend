@@ -140,12 +140,23 @@ final class MembersSource implements CdaSource
         }
     }
 
+    /**
+     * A count's label: a sex reads before "members" ("Male members", "New
+     * female members"), the other filters in brackets ("Members (sex not
+     * recorded, regular, aged 18–30)").
+     */
     private function what(string $base, array $params): string
     {
+        $sex = $params['gender'] ?? null;
+
+        if (in_array($sex, ['male', 'female'], true)) {
+            $base = str_starts_with($base, 'Members')
+                ? ucfirst($sex).' members'.substr($base, strlen('Members'))
+                : str_replace(' members', " {$sex} members", $base);
+        }
+
         $parts = array_filter([
-            match ($params['gender'] ?? null) {
-                'male' => 'male', 'female' => 'female', 'unspecified' => 'sex not recorded', default => null,
-            },
+            $sex === 'unspecified' ? 'sex not recorded' : null,
             $params['member_type'] ?? null,
             $params['activity'] ?? null,
             isset($params['age_from']) || isset($params['age_to'])

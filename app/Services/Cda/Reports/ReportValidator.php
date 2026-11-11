@@ -201,6 +201,46 @@ final class ReportValidator
         return array_values(array_filter($missing));
     }
 
+    /**
+     * The readiness checks of the documents needed at one stage, read live,
+     * as evaluate() counts them: each document rule, and each listed
+     * document. A listed document a rule already checks is marked `covered`:
+     * evaluate() no longer counts it, but a report validated before that
+     * rule may have.
+     *
+     * @return list<array{id: string, component: string, section: string|null, passed: bool, covered: bool}>
+     */
+    public function documentChecks(CdaReport $report, ReportDefinition $definition, string $stage): array
+    {
+        $checks = [];
+
+        foreach ($definition->rules() as $rule) {
+            if (($rule['type'] ?? null) === 'document' && $rule['stage'] === $stage) {
+                $checks[] = [
+                    'id' => 'rule:'.$rule['id'],
+                    'component' => (string) ($rule['component'] ?? 'fields'),
+                    'section' => $this->ruleField($rule, $definition)['section'] ?? null,
+                    'passed' => $rule['severity'] === 'info' || $this->missingRuleDocument($rule, $report, $definition) === null,
+                    'covered' => false,
+                ];
+            }
+        }
+
+        foreach ($definition->documents() as $document) {
+            if ($document['stage'] === $stage) {
+                $checks[] = [
+                    'id' => 'document:'.$document['key'],
+                    'component' => 'documents',
+                    'section' => null,
+                    'passed' => $document['severity'] === 'info' || $this->missingListedDocument($document, $report) === null,
+                    'covered' => self::coveredByRule($document, $definition),
+                ];
+            }
+        }
+
+        return $checks;
+    }
+
     /** @return array{issue: array<string, mixed>, name: string, category: string, final: bool}|null */
     private function missingRuleDocument(array $rule, CdaReport $report, ReportDefinition $definition): ?array
     {
