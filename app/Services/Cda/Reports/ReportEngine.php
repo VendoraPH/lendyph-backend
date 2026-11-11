@@ -25,7 +25,9 @@ use OverflowException;
  *   nightly run, never on a GET. An overridden field keeps its value; its
  *   source figure is still updated beside it. One audit row when values
  *   changed (AuditValues decides what it may hold).
- * - A finalized or later report's stored issues are never rewritten.
+ * - A finalized or later report's stored issues are never rewritten. What
+ *   it shows (issuesNow()) is those issues with the documents needed at
+ *   filing checked live, so an upload clears its Critical at once.
  * - recompute(): after a save, the calculations, issues and readiness from
  *   the stored values, without reading sources again.
  * - freshValues(): what a refresh would give now, without writing; the
@@ -129,23 +131,36 @@ final class ReportEngine
     }
 
     /**
-     * The issues as they stand now, from the stored values, without writing
-     * anything (a locked report keeps the issues it was finalized with).
+     * The issues a report shows now. A draft, for-approval or approved
+     * report's are its stored issues. A finalized or later report keeps the
+     * issues it was finalized with (from its snapshot), except the documents
+     * needed at filing (`submit`), which are checked live: documents only,
+     * nothing else is recomputed and nothing is written.
      *
+     * @param  list<array<string, mixed>>|null  $frozen  the locked report's issues, when the caller has read them already
      * @return list<array<string, mixed>>
      */
-    public function currentIssues(CdaReport $report): array
+    public function issuesNow(CdaReport $report, ?array $frozen = null): array
+    {
+        if (! $report->isLocked()) {
+            return array_values($report->issues ?? []);
+        }
+
+        $kept = array_filter($frozen ?? $report->issues ?? [], fn (array $issue) => ($issue['stage'] ?? null) !== 'submit');
+
+        return [...array_values($kept), ...array_column($this->missingDocuments($report, 'submit'), 'issue')];
+    }
+
+    /**
+     * The documents the report still lacks, read live (ReportValidator::missingDocuments()).
+     *
+     * @return list<array{issue: array<string, mixed>, name: string, category: string, final: bool}>
+     */
+    public function missingDocuments(CdaReport $report, ?string $stage = null): array
     {
         $report->loadMissing(['template', 'period']);
-        $stored = $this->storedRows($report);
 
-        return $this->validator->evaluate(
-            $report,
-            $this->definition($report),
-            array_map(fn (CdaReportValue $row) => $row->value, $stored),
-            array_filter(array_map(fn (CdaReportValue $row) => is_array($row->source_value) ? $row->source_value : null, $stored)),
-            $this->context($report),
-        )['issues'];
+        return $this->validator->missingDocuments($report, $this->definition($report), $stage);
     }
 
     /**

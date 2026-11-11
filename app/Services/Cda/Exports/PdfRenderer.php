@@ -14,13 +14,29 @@ use Dompdf\Options;
  * JavaScript, and its file access is chrooted to the view folder, so a value
  * in a report can never make it read a file or call out. DejaVu Sans, bundled
  * with dompdf, renders the ₱ sign. "Page X of Y" is drawn on every page after
- * layout; the view's fixed footer carries the rest.
+ * layout, into the fixed footer's right column (PAGE_COLUMN_MM), which the
+ * view keeps empty; the footer's facts wrap in the left column, so the two
+ * never run into each other.
  *
  * Not final, so a test can stand in for it (the export race test).
  */
 class PdfRenderer
 {
     public const FONT = 'DejaVu Sans';
+
+    /** The page's right margin (the view's `@page`), in mm. */
+    public const MARGIN_RIGHT_MM = 14;
+
+    /** The page's bottom margin (the view's `@page`), in mm. */
+    public const MARGIN_BOTTOM_MM = 20;
+
+    /** How far the fixed footer sits below the content, into the bottom margin, in mm. */
+    public const FOOTER_DROP_MM = 12;
+
+    /** The footer's right column, kept empty for "Page X of Y", in mm. */
+    public const PAGE_COLUMN_MM = 32;
+
+    private const PT_PER_MM = 72 / 25.4;
 
     public function html(ExportContent $content): string
     {
@@ -45,7 +61,9 @@ class PdfRenderer
 
         $canvas = $dompdf->getCanvas();
         $font = $dompdf->getFontMetrics()->getFont(self::FONT);
-        $canvas->page_text($canvas->get_width() - 110, $canvas->get_height() - 28, 'Page {PAGE_NUM} of {PAGE_COUNT}', $font, 7, [0.32, 0.38, 0.43]);
+        $x = $canvas->get_width() - (self::MARGIN_RIGHT_MM + self::PAGE_COLUMN_MM - 2) * self::PT_PER_MM;
+        $y = $canvas->get_height() - (self::MARGIN_BOTTOM_MM - self::FOOTER_DROP_MM) * self::PT_PER_MM;
+        $canvas->page_text($x, $y, 'Page {PAGE_NUM} of {PAGE_COUNT}', $font, 7, [0.32, 0.38, 0.43]);
 
         return (string) $dompdf->output();
     }

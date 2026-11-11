@@ -14,7 +14,8 @@ use ZipArchive;
  * or "'Annex A'!C5") gets its value, and everything else in the workbook is
  * kept as uploaded.
  *
- * - A cell map value is `profile.<field>` (the CDA profile) or a report field
+ * - A cell map value is `profile.<field>` (the CDA profile, a chosen value
+ *   in words) or a report field
  *   reference ("section.field", or a field key only one section has). A table
  *   reference can't fill one cell and is left alone.
  * - Only a money, percent or number field with a numeric value becomes a
@@ -151,7 +152,7 @@ final class XlsxTemplateFiller
             $reference = (string) $reference;
 
             if (str_starts_with($reference, 'profile.')) {
-                $value = $content->profile[substr($reference, 8)] ?? null;
+                $value = $content->profileValue(substr($reference, 8));
                 $out[(string) $address] = [is_array($value) ? null : $value, false];
 
                 continue;

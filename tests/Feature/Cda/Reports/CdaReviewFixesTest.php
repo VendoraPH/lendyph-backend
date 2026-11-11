@@ -347,7 +347,7 @@ class CdaReviewFixesTest extends TestCase
         $definition['sections'][2]['fields'][] = ['key' => 'total_assets', 'label' => 'Total assets', 'type' => 'money'];
         $definition['rules'][] = ['id' => 'assets_match_fs', 'type' => 'compare', 'left' => 'total_assets', 'op' => 'eq', 'right' => 'report:financial_statements.statements.total_assets', 'severity' => 'warning', 'category' => 'accounting_mismatch', 'component' => 'accounting'];
         $report = $this->caprWithTestTemplate(['sections' => $definition['sections'], 'rules' => $definition['rules']]);
-        $this->report($report->period, 'financial_statements')->values()->create(['field_key' => 'statements.total_assets', 'value' => '987654.32']);
+        $this->report($report->period, 'financial_statements')->values()->updateOrCreate(['field_key' => 'statements.total_assets'], ['value' => '987654.32']);
 
         $issues = $this->save($report, [['field_key' => 'employment.total_assets', 'value' => '1000.00']], $this->cdaStaff())->assertOk()->json('data.issues');
 

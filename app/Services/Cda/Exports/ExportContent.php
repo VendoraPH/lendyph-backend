@@ -2,6 +2,8 @@
 
 namespace App\Services\Cda\Exports;
 
+use App\Services\Cda\ProfileWords;
+
 /**
  * What one export shows (CDA design §9), the same for PDF and Excel: the
  * report's header, its sections with display values, the footer facts and the
@@ -15,11 +17,16 @@ namespace App\Services\Cda\Exports;
  * raw_rows: [[raw…]]}`. `values` holds the raw value of every field key for
  * the official workbook's cell map, `types` each field key's template type
  * (money, percent, number, text, …, table), and `profile` the stored CDA
- * profile fields.
+ * profile fields. `unverified` is true when the template (from the snapshot
+ * once finalized) is still marked `meta.verified: false`; every format then
+ * prints UNVERIFIED_NOTE under the title.
  */
 final class ExportContent
 {
     public const DRAFT_MARK = 'DRAFT — not for submission';
+
+    /** Printed on every export of a template still marked `meta.verified: false` (PESOS and the v1 templates). */
+    public const UNVERIFIED_NOTE = 'Figures from an unverified template; to be checked against the official CDA form.';
 
     /**
      * @param  list<array<string, mixed>>  $sections
@@ -53,7 +60,14 @@ final class ExportContent
         public readonly array $types,
         public readonly array $profile,
         public readonly array $excel,
+        public readonly bool $unverified = false,
     ) {}
+
+    /** A profile field as the official workbook's cell shows it: a chosen value in words (ProfileWords). */
+    public function profileValue(string $field): mixed
+    {
+        return ProfileWords::of($field, $this->profile[$field] ?? null);
+    }
 
     /** The footer's facts, one line ("Page X of Y" is added per page by the renderer). */
     public function footer(): string

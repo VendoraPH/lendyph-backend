@@ -12,6 +12,8 @@ use Illuminate\Foundation\Http\FormRequest;
  */
 abstract class CdaFormRequest extends FormRequest
 {
+    use CdaAttributeWords;
+
     /** The permission this request needs, or null for the template manager (super_admin). */
     abstract protected function permission(): ?string;
 

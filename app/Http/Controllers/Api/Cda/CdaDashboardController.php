@@ -24,7 +24,7 @@ class CdaDashboardController extends Controller
     #[OA\Get(
         path: '/api/cda/periods/{year}/dashboard',
         summary: 'The CDA dashboard for a year',
-        description: 'Needs `cda:view` and `branches:view_all`. {period, readiness ("Lendy CDA Readiness", the mean of the applicable reports), readiness_label, counts, next_deadline, reports[{id, type, report_type, part, title, title_part, status, display_status, sub_status, readiness, critical, warnings, applicable, restricted, effective_deadline, days_remaining, updated_at}], issues}. Issues of reports the caller can\'t open (mediation, audit, tax) are left out.',
+        description: 'Needs `cda:view` and `branches:view_all`. {period, readiness ("Lendy CDA Readiness", the mean of the applicable reports), readiness_label, counts, next_deadline, reports[{id, type, report_type, part, title, title_part, status, display_status, sub_status, readiness, critical, warnings, applicable, restricted, effective_deadline, days_remaining, updated_at}], issues}. Reports the caller can\'t open (mediation, audit, tax without their view) are left out entirely: no row, no counts, no readiness, no next deadline and no issues. A locked report\'s documents needed at filing are checked live.',
         tags: ['CDA'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'year', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
@@ -40,7 +40,7 @@ class CdaDashboardController extends Controller
     #[OA\Get(
         path: '/api/cda/periods/{year}/calendar',
         summary: 'The CDA compliance calendar for a year',
-        description: 'Needs `cda:view` and `branches:view_all`. One row per report instance (mediation H1 and H2 separately), by effective deadline: the report row, `display_status`, `readiness` and `filed`. Deadlines are YYYY-MM-DD; `days_remaining` counts Manila days, negative once past.',
+        description: 'Needs `cda:view` and `branches:view_all`. One row per report instance the caller can open (mediation H1 and H2 separately; restricted reports without their view are left out), by effective deadline: the report row, `display_status`, `readiness` and `filed`. Deadlines are YYYY-MM-DD; `days_remaining` counts Manila days, negative once past.',
         tags: ['CDA'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'year', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],

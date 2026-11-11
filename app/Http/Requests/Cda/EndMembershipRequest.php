@@ -13,6 +13,8 @@ use Illuminate\Validation\Rule;
  */
 class EndMembershipRequest extends FormRequest
 {
+    use CdaAttributeWords;
+
     public function authorize(): bool
     {
         return $this->user()->can('borrowers:update');

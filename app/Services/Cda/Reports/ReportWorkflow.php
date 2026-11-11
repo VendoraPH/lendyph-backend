@@ -253,16 +253,16 @@ final class ReportWorkflow
     }
 
     /**
-     * Records a filing that already happened: only a document needed at
-     * filing (checked live, not stored: the report's issues stay as
-     * finalized) can stop it.
+     * Records a filing that already happened: only a Critical document needed
+     * at filing (checked live, not stored: the report's issues stay as
+     * finalized) can stop it, and the refusal names what to upload.
      */
     private function markSubmitted(CdaReport $report, array $submission, User $user): array
     {
-        $blocked = $this->blocking($report, 'submit', $this->engine->currentIssues($report));
+        $missing = array_values(array_filter($this->engine->missingDocuments($report, 'submit'), fn (array $document) => ReportValidator::blocks($document['issue'], 'submit')));
 
-        if ($blocked !== null) {
-            return $blocked;
+        if ($missing !== []) {
+            return ['blocked' => 'Upload '.self::documentList($missing).' before recording the filing.', 'issues' => array_column($missing, 'issue')];
         }
 
         if (CdaSubmission::query()->where('report_id', $report->id)->where('snapshot_id', $report->current_snapshot_id)->exists()) {
@@ -354,6 +354,25 @@ final class ReportWorkflow
         $count = count($blocking);
 
         return ['blocked' => "This report has {$count} critical ".($count === 1 ? 'issue' : 'issues').' to fix first.', 'issues' => $blocking];
+    }
+
+    /**
+     * The missing documents in one phrase ("the signed CAPR (final copy) and
+     * training certificates"). A category needed as a final copy is named
+     * once, as the final copy.
+     *
+     * @param  list<array{name: string, category: string, final: bool}>  $missing
+     */
+    private static function documentList(array $missing): string
+    {
+        $finals = array_column(array_filter($missing, fn (array $document) => $document['final']), 'category');
+        $names = array_values(array_unique(array_column(array_filter(
+            $missing,
+            fn (array $document) => $document['final'] || ! in_array($document['category'], $finals, true),
+        ), 'name')));
+        $last = array_pop($names);
+
+        return $names === [] ? (string) $last : implode(', ', $names).' and '.$last;
     }
 
     private function latestSubmission(CdaReport $report): ?CdaSubmission

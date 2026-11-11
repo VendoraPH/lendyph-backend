@@ -17,7 +17,8 @@ use ZipArchive;
  * (XmlText). Money, percents and counts are numbers with a ₱, % or plain
  * format; negative money is a signed number whose format shows it in
  * parentheses, "(₱400.00)", and as text it reads the same. Drafts carry the
- * DRAFT mark in A1.
+ * DRAFT mark in A1, and an unverified template's export the "to verify" note
+ * under the title.
  */
 final class XlsxWriter
 {
@@ -52,6 +53,10 @@ final class XlsxWriter
 
         $this->row([$this->text($content->title, self::STYLE_BOLD)]);
         $this->row([$this->text($content->periodLabel.' · '.$content->statusLabel.($content->stageLabel === null ? '' : ' · Stage: '.$content->stageLabel))]);
+
+        if ($content->unverified) {
+            $this->row([$this->text(ExportContent::UNVERIFIED_NOTE, self::STYLE_BOLD)]);
+        }
 
         foreach ($content->sections as $section) {
             $this->row([]);

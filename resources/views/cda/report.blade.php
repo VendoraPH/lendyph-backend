@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <title>{{ $content->title }} · {{ $content->periodLabel }}</title>
     <style>
-        @page { margin: 22mm 14mm 20mm 14mm; }
+        @page { margin: 22mm {{ \App\Services\Cda\Exports\PdfRenderer::MARGIN_RIGHT_MM }}mm {{ \App\Services\Cda\Exports\PdfRenderer::MARGIN_BOTTOM_MM }}mm 14mm; }
         body { font-family: "DejaVu Sans", sans-serif; font-size: 9pt; color: #1f2933; }
         h1 { font-size: 13pt; margin: 0 0 2pt 0; }
         h2 { font-size: 10pt; margin: 12pt 0 4pt 0; padding-bottom: 2pt; border-bottom: 0.6pt solid #9aa5b1; }
@@ -19,14 +19,19 @@
         table.grid td { border: 0.4pt solid #cbd2d9; }
         .watermark { position: fixed; top: 40%; left: 0; right: 0; text-align: center; font-size: 40pt; color: #d64545; opacity: 0.18; transform: rotate(-30deg); }
         .draft-banner { color: #d64545; font-weight: bold; margin-top: 3pt; }
-        .footer { position: fixed; bottom: -12mm; left: 0; right: 0; font-size: 6.5pt; color: #52606d; }
+        .unverified-note { color: #8d2b0b; font-weight: bold; margin-top: 3pt; }
+        table.footer { position: fixed; bottom: -{{ \App\Services\Cda\Exports\PdfRenderer::FOOTER_DROP_MM }}mm; left: 0; right: 0; width: 100%; font-size: 6.5pt; color: #52606d; }
+        table.footer td { padding: 0; vertical-align: top; }
+        table.footer td.footer-text { padding-right: 4mm; }
+        table.footer td.footer-page { width: {{ \App\Services\Cda\Exports\PdfRenderer::PAGE_COLUMN_MM }}mm; }
     </style>
 </head>
 <body>
 @if ($content->isDraft)
     <div class="watermark">{{ \App\Services\Cda\Exports\ExportContent::DRAFT_MARK }}</div>
 @endif
-<div class="footer">{{ $content->footer() }}</div>
+{{-- The footer's facts wrap in the left cell; the right cell stays empty for "Page X of Y", which PdfRenderer draws into it on every page. --}}
+<table class="footer"><tr><td class="footer-text">{{ $content->footer() }}</td><td class="footer-page"></td></tr></table>
 
 <div class="coop">{{ $content->coopName }}</div>
 @if ($content->coopAddress)
@@ -37,6 +42,9 @@
 @endif
 <h1>{{ $content->title }}</h1>
 <div class="muted">{{ $content->periodLabel }} · {{ $content->statusLabel }}@if ($content->stageLabel) · Stage: {{ $content->stageLabel }}@endif</div>
+@if ($content->unverified)
+    <div class="unverified-note">{{ \App\Services\Cda\Exports\ExportContent::UNVERIFIED_NOTE }}</div>
+@endif
 @if ($content->isDraft)
     <div class="draft-banner">{{ \App\Services\Cda\Exports\ExportContent::DRAFT_MARK }}</div>
 @endif

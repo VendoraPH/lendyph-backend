@@ -5,6 +5,7 @@ namespace App\Services\Cda\Reports;
 use App\Models\CdaDocument;
 use App\Models\CdaReport;
 use App\Services\Cda\Deadlines;
+use App\Services\Cda\Registers\DocumentCategories;
 use App\Services\Cda\ReportTypes;
 use App\Services\Cda\Sources\SourceContext;
 use App\Services\Cda\Sources\SourceRegistry;
@@ -29,6 +30,14 @@ use Throwable;
  * Sources that couldn't be read add a Warning, and a figure from the books
  * of a year not yet closed adds the Critical "year not closed" issue when
  * the template doesn't already check for it.
+ *
+ * A document issue names the document in words: a rule's by the template's
+ * listed document of that category ("The signed CAPR (final copy) hasn't
+ * been uploaded."), else by the category's own words; a listed document by
+ * its label, with the verb agreeing ("Training certificates haven't been
+ * uploaded."). The checks that a template, or the PESOS rules, are still to
+ * be verified read under their own category, `template_unverified`, whatever
+ * the template says.
  */
 final class ReportValidator
 {
@@ -42,6 +51,12 @@ final class ReportValidator
     ];
 
     private const PATTERN_WORDS = ['tin' => 'TIN (000-000-000-000)', 'cda_reg_no' => 'CDA registration number', 'email' => 'email address', 'phone' => 'phone number'];
+
+    /** The category of the "still to be checked against the official form" issues. */
+    public const TEMPLATE_UNVERIFIED = 'template_unverified';
+
+    /** The named checks that raise it. */
+    private const UNVERIFIED_CHECKS = ['template.verified', 'pesos.rules_verified'];
 
     private const OP_WORDS = ['eq' => 'equal', 'ne' => 'differ from', 'lt' => 'be less than', 'lte' => 'be at most', 'gt' => 'be more than', 'gte' => 'be at least'];
 
@@ -86,25 +101,35 @@ final class ReportValidator
 
         foreach ($definition->rules() as $rule) {
             $field = $this->ruleField($rule, $definition);
-            $problem = $this->runRule($rule, $report, $definition, $values, $context);
             $severity = (string) $rule['severity'];
             $component = (string) ($rule['component'] ?? 'fields');
 
-            if ($problem !== null) {
-                $issues[] = $this->issue('rule:'.$rule['id'], (string) $rule['id'], $severity, (string) $rule['category'], $component, $rule['message'] ?? $problem, $field, $rule['fix_href'] ?? null, ($rule['type'] ?? null) === 'document' ? (string) $rule['stage'] : null);
+            if (($rule['type'] ?? null) === 'document') {
+                $missing = $this->missingRuleDocument($rule, $report, $definition);
+                $problem = $missing['issue']['message'] ?? null;
+
+                if ($missing !== null) {
+                    $issues[] = $missing['issue'];
+                }
+            } else {
+                $problem = $this->runRule($rule, $report, $definition, $values, $context);
+
+                if ($problem !== null) {
+                    $issues[] = $this->issue('rule:'.$rule['id'], (string) $rule['id'], $severity, self::category($rule), $component, $rule['message'] ?? $problem, $field, $rule['fix_href'] ?? null);
+                }
             }
 
             $checks[] = ['id' => 'rule:'.$rule['id'], 'component' => $component, 'section' => $field['section'] ?? null, 'passed' => $problem === null || $severity === 'info'];
         }
 
         foreach ($definition->documents() as $document) {
-            $present = $this->documentPresent($report, (string) $document['category'], false);
+            $missing = $this->missingListedDocument($document, $report);
 
-            if (! $present) {
-                $issues[] = $this->issue('document:'.$document['key'], null, (string) $document['severity'], 'compliance_document', 'documents', ($document['label'] ?? $document['key']).' hasn\'t been uploaded.', null, '/cda/documents', (string) $document['stage']);
+            if ($missing !== null) {
+                $issues[] = $missing['issue'];
             }
 
-            $checks[] = ['id' => 'document:'.$document['key'], 'component' => 'documents', 'section' => null, 'passed' => $present || $document['severity'] === 'info'];
+            $checks[] = ['id' => 'document:'.$document['key'], 'component' => 'documents', 'section' => null, 'passed' => $missing === null || $document['severity'] === 'info'];
         }
 
         if (! $definition->hasCheck('accounting.year_closed') && collect($sourceInfo)->contains(fn ($info) => is_array($info) && ($info['meta']['year_closed'] ?? null) === false)) {
@@ -139,6 +164,123 @@ final class ReportValidator
         return $stage === null || self::STAGES[$stage] <= self::STAGES[$action];
     }
 
+    /**
+     * The documents the report still lacks, from its document rules and its
+     * listed documents, optionally only those needed at one stage: each with
+     * its issue (as evaluate() gives it), its name in words for a sentence
+     * ("the signed CAPR (final copy)", "training certificates"), its category
+     * and whether a final copy is needed. Reads the documents live.
+     *
+     * @return list<array{issue: array<string, mixed>, name: string, category: string, final: bool}>
+     */
+    public function missingDocuments(CdaReport $report, ReportDefinition $definition, ?string $stage = null): array
+    {
+        $missing = [];
+
+        foreach ($definition->rules() as $rule) {
+            if (($rule['type'] ?? null) === 'document' && ($stage === null || $rule['stage'] === $stage)) {
+                $missing[] = $this->missingRuleDocument($rule, $report, $definition);
+            }
+        }
+
+        foreach ($definition->documents() as $document) {
+            if ($stage === null || $document['stage'] === $stage) {
+                $missing[] = $this->missingListedDocument($document, $report);
+            }
+        }
+
+        return array_values(array_filter($missing));
+    }
+
+    /** @return array{issue: array<string, mixed>, name: string, category: string, final: bool}|null */
+    private function missingRuleDocument(array $rule, CdaReport $report, ReportDefinition $definition): ?array
+    {
+        $category = (string) $rule['document_category'];
+        $final = (bool) ($rule['final'] ?? false);
+
+        if ($this->documentPresent($report, $category, $final)) {
+            return null;
+        }
+
+        $label = self::documentLabel($category, $definition);
+        $name = 'the '.self::lowerFirst($label).($final ? ' (final copy)' : '');
+        $message = $rule['message'] ?? ucfirst($name).' '.self::uploadedVerb($label);
+
+        return [
+            'issue' => $this->issue('rule:'.$rule['id'], (string) $rule['id'], (string) $rule['severity'], (string) $rule['category'], (string) ($rule['component'] ?? 'fields'), $message, $this->ruleField($rule, $definition), $rule['fix_href'] ?? null, (string) $rule['stage']),
+            'name' => $name,
+            'category' => $category,
+            'final' => $final,
+        ];
+    }
+
+    /** @return array{issue: array<string, mixed>, name: string, category: string, final: bool}|null */
+    private function missingListedDocument(array $document, CdaReport $report): ?array
+    {
+        $category = (string) $document['category'];
+
+        if ($this->documentPresent($report, $category, false)) {
+            return null;
+        }
+
+        $label = (string) ($document['label'] ?? $document['key']);
+
+        return [
+            'issue' => $this->issue('document:'.$document['key'], null, (string) $document['severity'], 'compliance_document', 'documents', $label.' '.self::uploadedVerb($label), null, '/cda/documents', (string) $document['stage']),
+            'name' => (self::plural($label) ? '' : 'the ').self::lowerFirst($label),
+            'category' => $category,
+            'final' => false,
+        ];
+    }
+
+    /** A category's document in words: the template's listed document of that category, else the category's own words. */
+    private static function documentLabel(string $category, ReportDefinition $definition): string
+    {
+        foreach ($definition->documents() as $document) {
+            if (($document['category'] ?? null) === $category && is_string($document['label'] ?? null)) {
+                return $document['label'];
+            }
+        }
+
+        return DocumentCategories::label($category);
+    }
+
+    /** "hasn't been uploaded." or, for a plural, "haven't been uploaded." */
+    private static function uploadedVerb(string $label): string
+    {
+        return (self::plural($label) ? 'haven\'t' : 'hasn\'t').' been uploaded.';
+    }
+
+    /** Whether a label names more than one thing: its last word, outside brackets, is a plural ("certificates", not "CAPR" or "process"). */
+    private static function plural(string $label): bool
+    {
+        $words = preg_split('/\s+/', trim((string) preg_replace('/\([^)]*\)/', '', $label))) ?: [];
+        $last = (string) end($words);
+
+        return preg_match('/[a-z]s$/', $last) === 1 && preg_match('/(ss|us|is)$/', $last) !== 1;
+    }
+
+    /**
+     * A label inside a sentence: its first letter in lower case, unless the
+     * first word is an acronym or the label is a title ("Signed CAPR" →
+     * "signed CAPR"; "Annual Benefits Report (ABR)" stays as it is).
+     */
+    private static function lowerFirst(string $label): string
+    {
+        $words = preg_split('/\s+/', $label) ?: [];
+        $title = collect(array_slice($words, 1))->contains(fn (string $word) => preg_match('/^[A-Z][a-z]/', $word) === 1);
+
+        return ! $title && preg_match('/^[A-Z][a-z]/', $label) === 1 ? lcfirst($label) : $label;
+    }
+
+    /** A rule's issue category; the "still to be verified" checks always read under their own. */
+    private static function category(array $rule): string
+    {
+        return ($rule['type'] ?? null) === 'check' && in_array($rule['check'] ?? null, self::UNVERIFIED_CHECKS, true)
+            ? self::TEMPLATE_UNVERIFIED
+            : (string) $rule['category'];
+    }
+
     public function documentPresent(CdaReport $report, string $category, bool $final): bool
     {
         return CdaDocument::query()
@@ -169,8 +311,6 @@ final class ReportValidator
                 'compare' => $this->compare($rule, $definition, $values, $context),
                 'sum_equals' => $this->sumEquals($rule, $definition, $values),
                 'check' => $this->checks->run((string) $rule['check'], (array) ($rule['params'] ?? []), $context, $definition),
-                'document' => $this->documentPresent($report, (string) $rule['document_category'], (bool) ($rule['final'] ?? false)) ? null
-                    : 'The '.str_replace('_', ' ', (string) $rule['document_category']).' document'.(($rule['final'] ?? false) ? ' (final copy)' : '').' hasn\'t been uploaded.',
                 default => null,
             };
         } catch (OverflowException) {
