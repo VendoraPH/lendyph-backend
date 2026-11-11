@@ -10,7 +10,10 @@ use App\Models\Loan;
 use App\Models\LoanAdjustment;
 use App\Models\Repayment;
 use App\Services\RepaymentService;
+use Closure;
+use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\DB;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
@@ -641,6 +644,53 @@ class MonthlyLatePenaltyTest extends TestCase
         $this->assertEqualsWithDelta(1800, (float) $values['penalty_paid'], 0.001);
     }
 
+    public function test_the_nightly_run_and_the_summary_read_the_penalty_history_once_per_loan(): void
+    {
+        // Period 1 part-paid, then an adjustment: every period has history.
+        $this->payOn('2026-02-20', 7000);
+        $this->adjustBalanceOn('2026-02-25', 54000);
+        $this->travelTo(Carbon::parse('2026-08-20 00:10'));
+
+        // Six late periods; one read of each history for the loan.
+        $this->assertSame(2, $this->historyReads(fn () => $this->artisan('loans:apply-penalties')->assertSuccessful()));
+        $this->assertSame(2, $this->historyReads(fn () => $this->getJson("/api/loans/{$this->loan->id}/summary")->assertOk()));
+    }
+
+    public function test_a_period_an_extension_closes_keeps_a_ledger_line_per_monthly_charge(): void
+    {
+        // ₱60,000.00 for one month, due 27 May 2026: ₱1,200.00 a charge.
+        $this->travelTo(Carbon::parse('2026-04-27 09:00'));
+        $this->loan = $this->createReleasedLoan([
+            'product' => ['interest_method' => 'upon_maturity', 'term' => 1, 'frequency' => 'monthly', 'interest_rate' => 3.0],
+            'start_date' => '2026-04-27',
+        ]);
+
+        // 28 August, three months late: 31 May, 27 July and 27 August.
+        $this->nightlyOn('2026-08-28');
+        $this->assertPenalty(1, charged: 3600, months: 3);
+        $this->travelTo(Carbon::parse('2026-08-28 10:00'));
+        $this->postJson("/api/loans/{$this->loan->id}/extend", ['interest_option' => 'pay'])->assertOk();
+        $this->assertNotNull($this->period(1)->closed_by_adjustment_id);
+
+        $this->assertSame([
+            ['2026-05-31', 'Late penalty, period 1', 1200.0],
+            ['2026-07-27', 'Late penalty, period 1, month 2', 1200.0],
+            ['2026-08-27', 'Late penalty, period 1, month 3', 1200.0],
+        ], $this->periodPenaltyLines(1));
+        $this->assertLedgerClosesOnTheSummary();
+    }
+
+    public function test_a_deleted_period_takes_its_principal_history_with_it(): void
+    {
+        $this->adjustBalanceOn('2026-01-20', 54000);
+        $period = $this->period(6);
+        $this->assertSame(1, AmortizationPrincipalChange::where('amortization_schedule_id', $period->id)->count());
+
+        $period->delete();
+
+        $this->assertSame(0, AmortizationPrincipalChange::where('amortization_schedule_id', $period->id)->count());
+    }
+
     public function test_a_void_puts_back_the_monthly_charge_the_payment_covered(): void
     {
         $this->nightlyOn('2026-04-15');
@@ -826,6 +876,21 @@ class MonthlyLatePenaltyTest extends TestCase
         $this->assertEqualsWithDelta((float) $summary['total_outstanding'], (float) $summary['payoff_amount'], 0.001, 'payoff equals what is stored as owed');
         $this->assertEqualsWithDelta((float) $summary['outstanding_penalty'], (float) $row['amount_due_now']['penalty'], 0.001, 'amount due now carries the stored penalty');
         $this->assertLedgerClosesOnTheSummary();
+    }
+
+    /** Reads of the penalty's two histories (principal changes, posted principal payments) while `$run` runs. */
+    private function historyReads(Closure $run): int
+    {
+        $reads = 0;
+        DB::listen(function (QueryExecuted $query) use (&$reads): void {
+            if (preg_match('/from `(repayment_allocations|amortization_principal_changes)`/', $query->sql)) {
+                $reads++;
+            }
+        });
+
+        $run();
+
+        return $reads;
     }
 
     /** No row of the loan's Ledger leaves the running penalty balance below ₱0.00. */

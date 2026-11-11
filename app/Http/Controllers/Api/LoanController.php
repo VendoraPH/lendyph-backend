@@ -640,7 +640,7 @@ DESC,
         $loan->load(
             'borrower', 'loanProduct', 'branch', 'coMakers',
             'approvedByUser', 'releasedByUser', 'rejectedByUser',
-            'createdByUser', 'accountOfficer', 'amortizationSchedules',
+            'createdByUser', 'accountOfficer', 'amortizationSchedules.principalChanges', 'amortizationSchedules.postedPrincipalPayments',
             'documents',
             // For current_approver.
             'approvalSteps',
@@ -885,7 +885,7 @@ DESC,
             $request->releaseReference(),
         );
         $loan->load('borrower', 'loanProduct', 'branch', 'coMakers',
-            'approvedByUser', 'releasedByUser', 'amortizationSchedules');
+            'approvedByUser', 'releasedByUser', 'amortizationSchedules.principalChanges', 'amortizationSchedules.postedPrincipalPayments');
 
         return response()->json(['message' => 'Loan released successfully.', 'data' => new LoanResource($loan)]);
     }
@@ -1233,7 +1233,7 @@ DESC,
         $loan->refresh()->load(
             'borrower', 'loanProduct', 'branch', 'coMakers',
             'approvedByUser', 'releasedByUser', 'rejectedByUser',
-            'createdByUser', 'accountOfficer', 'amortizationSchedules',
+            'createdByUser', 'accountOfficer', 'amortizationSchedules.principalChanges', 'amortizationSchedules.postedPrincipalPayments',
             'documents', 'approvalSteps', 'sourceLoan', 'restructuredInto',
             'collaterals',
         );

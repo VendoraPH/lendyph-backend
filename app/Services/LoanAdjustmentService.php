@@ -822,6 +822,7 @@ class LoanAdjustmentService
     {
         return $loan->amortizationSchedules()
             ->whereIn('status', ['pending', 'partial', 'overdue'])
+            ->with(['principalChanges', 'postedPrincipalPayments'])
             ->get();
     }
 
@@ -878,6 +879,10 @@ class LoanAdjustmentService
                 'interest_paid' => (float) $schedule->interest_paid,
                 'penalty_paid' => (float) $schedule->penalty_paid,
             ];
+
+            // The months the period was late keep the principal they were
+            // charged on, so the Ledger keeps a line per monthly charge.
+            AmortizationPrincipalChange::record($schedule, Carbon::today()->toDateString(), (float) $schedule->principal_due, (float) $schedule->principal_paid, $adjustment->id);
 
             $schedule->update([
                 'principal_due' => $schedule->principal_paid,
@@ -1407,13 +1412,7 @@ class LoanAdjustmentService
             $schedule = $unpaidSchedules[$i];
             $newPrincipalDue = $centavos($schedule->principal_due) + $share;
 
-            AmortizationPrincipalChange::create([
-                'amortization_schedule_id' => $schedule->id,
-                'effective_on' => $today->toDateString(),
-                'principal_due_before' => (float) $schedule->principal_due,
-                'principal_due_after' => $newPrincipalDue / 100,
-                'loan_adjustment_id' => $adjustment->id,
-            ]);
+            AmortizationPrincipalChange::record($schedule, $today->toDateString(), (float) $schedule->principal_due, $newPrincipalDue / 100, $adjustment->id);
 
             $changes = [
                 'principal_due' => $newPrincipalDue / 100,

@@ -53,10 +53,10 @@ return new class extends Migration
         if (! Schema::hasTable('amortization_principal_changes')) {
             Schema::create('amortization_principal_changes', function (Blueprint $table): void {
                 $table->id();
-                // No foreign key: the history is append-only and outlives a
-                // period a restructure's release deletes
-                // (LoanService::clearOpenSchedules()). Indexed below.
-                $table->unsignedBigInteger('amortization_schedule_id');
+                // A deleted period (an untouched one a restructure's release
+                // or an extension clears) takes its history with it, so no
+                // row is ever read for a reused id.
+                $table->foreignId('amortization_schedule_id')->constrained()->cascadeOnDelete();
                 $table->date('effective_on');
                 $table->decimal('principal_due_before', 12, 2);
                 $table->decimal('principal_due_after', 12, 2);

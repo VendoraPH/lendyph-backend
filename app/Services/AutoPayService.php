@@ -538,6 +538,7 @@ class AutoPayService
             ->whereIn('status', ['pending', 'partial', 'overdue'])
             ->whereBetween('due_date', [$from->toDateString(), $to->toDateString()])
             ->orderBy('period_number')
+            ->with(['principalChanges', 'postedPrincipalPayments'])
             ->get();
     }
 

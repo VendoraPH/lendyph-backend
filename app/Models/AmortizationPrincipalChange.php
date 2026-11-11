@@ -35,6 +35,25 @@ class AmortizationPrincipalChange extends Model
         ];
     }
 
+    /**
+     * Record `$schedule`'s principal moving from `$before` to `$after` (pesos)
+     * on `$on`, when it moves at all.
+     */
+    public static function record(AmortizationSchedule $schedule, string $on, float $before, float $after, ?int $loanAdjustmentId = null): void
+    {
+        if (round($before, 2) === round($after, 2)) {
+            return;
+        }
+
+        static::create([
+            'amortization_schedule_id' => $schedule->id,
+            'effective_on' => $on,
+            'principal_due_before' => $before,
+            'principal_due_after' => $after,
+            'loan_adjustment_id' => $loanAdjustmentId,
+        ]);
+    }
+
     public function schedule(): BelongsTo
     {
         return $this->belongsTo(AmortizationSchedule::class, 'amortization_schedule_id');

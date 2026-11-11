@@ -1145,7 +1145,7 @@ class RepaymentService
     {
         $today = Carbon::today();
 
-        $schedules = $loan->amortizationSchedules()->get();
+        $schedules = $loan->amortizationSchedules()->with(['principalChanges', 'postedPrincipalPayments'])->get();
 
         $totalDue = $schedules->sum('total_due');
         $totalPrincipalPaid = $schedules->sum('principal_paid');
@@ -1396,6 +1396,7 @@ class RepaymentService
             ->where('due_date', '<', $lateBefore)
             ->whereIn('status', ['pending', 'partial', 'overdue'])
             ->whereRaw(AmortizationSchedule::stillChargeableSql())
+            ->with(['principalChanges', 'postedPrincipalPayments'])
             ->each(function (AmortizationSchedule $schedule) use ($loan, $asOfDate, $markOverdue) {
                 $state = $this->penaltyStateAsOf($loan, $schedule, $asOfDate);
 
