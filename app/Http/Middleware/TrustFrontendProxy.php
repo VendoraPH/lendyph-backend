@@ -24,8 +24,14 @@ use Illuminate\Http\Request;
  * address, so a browser-supplied X-Forwarded-For is ignored: the frontend's
  * nginx appends the real peer after it.
  *
+ * The secret is also accepted only from an address in
+ * config('trustedproxy.proxy_sources'), the box the frontend runs on, so a
+ * leaked secret is useless from anywhere else. An empty list accepts any
+ * source. A listed entry that isn't a valid IP never matches, so a typo fails
+ * closed.
+ *
  * Anything else (no secret configured, a secret shorter than 32 characters, a
- * missing or wrong header) falls through to the framework's TrustProxies
+ * missing or wrong header, an unlisted source) falls through to the framework's TrustProxies
  * unchanged, which is exactly today's behaviour.
  *
  * The header is removed from the request either way, before anything after
@@ -82,7 +88,29 @@ class TrustFrontendProxy extends TrustProxies
             return false;
         }
 
-        return hash_equals($secret, $sent);
+        return $this->isAllowedSource($remote) && hash_equals($secret, $sent);
+    }
+
+    /**
+     * Compares packed addresses, so one IPv6 address matches in any notation.
+     */
+    private function isAllowedSource(string $remote): bool
+    {
+        $sources = (array) config('trustedproxy.proxy_sources', []);
+
+        if ($sources === []) {
+            return true;
+        }
+
+        $packed = inet_pton($remote);
+
+        foreach ($sources as $source) {
+            if (is_string($source) && filter_var($source, FILTER_VALIDATE_IP) !== false && inet_pton($source) === $packed) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function forgetProxyHeader(Request $request): void

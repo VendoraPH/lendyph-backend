@@ -41,15 +41,31 @@ jobs:
 
         # The proxy secret, delivered by the step before this one (staging only).
         # Exported so deploy.sh's children inherit it: never echoed, never on a
-        # command line ($(cat) gets only the path).
+        # command line (sed gets only the path). Line 1 is the secret, line 2 the
+        # source addresses the API accepts it from (empty: any).
         PROXY_SECRET_FILE="$HOME/.lendyph-proxy-secret/lendyph-com-api-staging"
         if [ -s "$PROXY_SECRET_FILE" ]; then
-          LENDYPH_PROXY_SECRET="$(cat "$PROXY_SECRET_FILE")"
-          export LENDYPH_PROXY_SECRET
+          LENDYPH_PROXY_SECRET="$(sed -n 1p "$PROXY_SECRET_FILE")"
+          LENDYPH_PROXY_SOURCES="$(sed -n 2p "$PROXY_SECRET_FILE")"
+          export LENDYPH_PROXY_SECRET LENDYPH_PROXY_SOURCES
           echo "proxy secret: loaded"
         else
           echo "NOTE: no proxy secret on the box; X-Forwarded-For stays untrusted."
         fi
+        # config:cache (inside deploy.sh) rewrites bootstrap/cache/config.php at
+        # 0644, and it now holds the proxy secret. Put it back to 0640 (www-data owns
+        # it) when this script exits, also when deploy.sh fails. A user who can't
+        # chmod it gets a warning, never a failed deploy.
+        protect_config_cache() {
+          f="$DEPLOY_DIR/bootstrap/cache/config.php"
+          [ -f "$f" ] || return 0
+          if chmod 640 "$f" 2>/dev/null; then
+            echo "config cache: mode 640"
+          else
+            echo "::warning title=config.php left as is::could not chmod $f as $(id -un)"
+          fi
+        }
+        trap protect_config_cache EXIT
 
         bash "$DEPLOY_DIR/deploy.sh"
 
@@ -172,6 +188,8 @@ jobs:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+          PROXY_SOURCES: ${{ secrets.PROXY_SOURCES_STAGING }}
         run: |
           set -euo pipefail
           if [ -z "$PROXY_SECRET" ]; then
@@ -182,11 +200,24 @@ jobs:
           key="$RUNNER_TEMP/vps_key"
           trap 'rm -f "$key"' EXIT
           printf '%s\n' "$VPS_SSH_KEY" > "$key"
+          # Pin the box's host key (VPS_KNOWN_HOSTS, from ssh-keyscan). Each stored
+          # line is re-labelled with VPS_HOST, so it matches whatever name or
+          # address that secret holds. No key, no connection.
+          known="$RUNNER_TEMP/known_hosts"
+          printf '%s\n' "${VPS_KNOWN_HOSTS:-}" | awk -v h="$VPS_HOST" 'NF >= 3 && $1 !~ /^#/ { print h, $2, $3 }' > "$known"
+          if [ ! -s "$known" ]; then
+            echo "::warning title=Host key missing::VPS_KNOWN_HOSTS holds no key; the proxy secret was not delivered."
+            exit 1
+          fi
           # Only paths in the remote command; the value is read from stdin by cat.
           remote="set -eu; umask 077; d=\"\$HOME/.lendyph-proxy-secret\"; mkdir -p \"\$d\"; chmod 700 \"\$d\"; f=\"\$d/lendyph-com-api-staging\"; cat > \"\$f.tmp\"; if [ ! -s \"\$f.tmp\" ]; then rm -f \"\$f.tmp\"; exit 1; fi; chmod 600 \"\$f.tmp\"; mv -f \"\$f.tmp\" \"\$f\"; echo 'proxy secret delivered'"
+          if [ -z "${PROXY_SOURCES:-}" ]; then
+            echo "::warning title=Proxy sources missing::PROXY_SOURCES_STAGING is not set; the API accepts the secret from any source."
+          fi
           for attempt in 1 2 3; do
-            if printf '%s' "$PROXY_SECRET" | ssh -i "$key" -o BatchMode=yes -o IdentitiesOnly=yes \
-              -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$RUNNER_TEMP/known_hosts" \
+            # Line 1 the secret, line 2 the allowed source addresses.
+            if printf '%s\n%s\n' "$PROXY_SECRET" "${PROXY_SOURCES:-}" | ssh -i "$key" -o BatchMode=yes -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known" -o GlobalKnownHostsFile=/dev/null \
               -o ConnectTimeout=60 "$VPS_USER@$VPS_HOST" "$remote"; then
               exit 0
             fi

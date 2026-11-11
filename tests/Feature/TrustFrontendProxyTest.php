@@ -156,6 +156,87 @@ it('reads the secret from LENDYPH_PROXY_SECRET and resolves unset to empty', fun
     }
 });
 
+it('accepts the secret from a listed source address', function () {
+    config()->set('trustedproxy.proxy_sources', ['198.51.100.1', PX_FRONTEND_ADDR]);
+
+    $seen = probeFrom($this, PX_FRONTEND_ADDR, [
+        TrustFrontendProxy::HEADER => $this->secret,
+        'X-Forwarded-For' => PX_VISITOR_ADDR,
+    ]);
+
+    expect($seen['ip'])->toBe(PX_VISITOR_ADDR);
+});
+
+it('refuses the right secret from an address that is not listed', function () {
+    config()->set('trustedproxy.proxy_sources', ['198.51.100.1']);
+
+    $seen = probeFrom($this, PX_FRONTEND_ADDR, [
+        TrustFrontendProxy::HEADER => $this->secret,
+        'X-Forwarded-For' => PX_VISITOR_ADDR,
+    ]);
+
+    expect($seen['ip'])->toBe(PX_FRONTEND_ADDR)
+        ->and($seen['header'])->toBeFalse();
+});
+
+it('accepts any source while the list is empty', function () {
+    config()->set('trustedproxy.proxy_sources', []);
+
+    $seen = probeFrom($this, '198.51.100.99', [
+        TrustFrontendProxy::HEADER => $this->secret,
+        'X-Forwarded-For' => PX_VISITOR_ADDR,
+    ]);
+
+    expect($seen['ip'])->toBe(PX_VISITOR_ADDR);
+});
+
+it('matches a listed IPv6 source in any notation', function () {
+    config()->set('trustedproxy.proxy_sources', ['2001:db8::1']);
+
+    $seen = probeFrom($this, '2001:0db8:0000:0000:0000:0000:0000:0001', [
+        TrustFrontendProxy::HEADER => $this->secret,
+        'X-Forwarded-For' => PX_VISITOR_ADDR,
+    ]);
+
+    expect($seen['ip'])->toBe(PX_VISITOR_ADDR);
+});
+
+it('fails closed on a list that holds only a mistyped entry', function () {
+    config()->set('trustedproxy.proxy_sources', ['192.0.2.500']);
+
+    $seen = probeFrom($this, PX_FRONTEND_ADDR, [
+        TrustFrontendProxy::HEADER => $this->secret,
+        'X-Forwarded-For' => PX_VISITOR_ADDR,
+    ]);
+
+    expect($seen['ip'])->toBe(PX_FRONTEND_ADDR);
+});
+
+it('reads the source list from LENDYPH_PROXY_SOURCES and resolves unset to empty', function () {
+    $previous = getenv('LENDYPH_PROXY_SOURCES');
+    $sourcesFor = function (?string $value): array {
+        if ($value === null) {
+            putenv('LENDYPH_PROXY_SOURCES');
+            unset($_ENV['LENDYPH_PROXY_SOURCES'], $_SERVER['LENDYPH_PROXY_SOURCES']);
+        } else {
+            putenv("LENDYPH_PROXY_SOURCES={$value}");
+            $_ENV['LENDYPH_PROXY_SOURCES'] = $_SERVER['LENDYPH_PROXY_SOURCES'] = $value;
+        }
+
+        return (require __DIR__.'/../../config/trustedproxy.php')['proxy_sources'];
+    };
+
+    try {
+        expect($sourcesFor(null))->toBe([])
+            ->and($sourcesFor(''))->toBe([])
+            ->and($sourcesFor(' 192.0.2.50 , ,2001:db8::1 '))->toBe(['192.0.2.50', '2001:db8::1'])
+            ->and($sourcesFor('192.0.2.500'))->toBe(['192.0.2.500']);
+    } finally {
+        unset($_ENV['LENDYPH_PROXY_SOURCES'], $_SERVER['LENDYPH_PROXY_SOURCES']);
+        putenv($previous === false ? 'LENDYPH_PROXY_SOURCES' : "LENDYPH_PROXY_SOURCES={$previous}");
+    }
+});
+
 it('ignores a forged X-Forwarded-For from a direct caller', function () {
     $seen = probeFrom($this, '198.51.100.7', ['X-Forwarded-For' => '6.6.6.6']);
 

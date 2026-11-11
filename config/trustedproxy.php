@@ -66,4 +66,15 @@ return [
      */
     'proxy_secret' => trim((string) env('LENDYPH_PROXY_SECRET', '')),
 
+    /*
+     * The addresses the secret is accepted from: the frontend box as this API
+     * sees it, comma-separated. Empty accepts any source. Entries are kept as
+     * typed (trimmed), so a mistyped address matches nothing and fails closed
+     * rather than silently widening to "any source". Delivered with the secret.
+     */
+    'proxy_sources' => array_values(array_filter(array_map(
+        'trim',
+        explode(',', (string) env('LENDYPH_PROXY_SOURCES', ''))
+    ))),
+
 ];
