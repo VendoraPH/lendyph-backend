@@ -25,9 +25,10 @@ use OverflowException;
  *   nightly run, never on a GET. An overridden field keeps its value; its
  *   source figure is still updated beside it. One audit row when values
  *   changed (AuditValues decides what it may hold).
- * - A finalized or later report's stored issues are never rewritten. What
- *   it shows (issuesNow()) is those issues with the documents needed at
- *   filing checked live, so an upload clears its Critical at once.
+ * - A finalized or later report's stored issues and readiness are never
+ *   rewritten. What it shows (issuesNow(), readinessNow()) is those, with
+ *   the documents needed at filing checked live, so an upload clears its
+ *   Critical and counts in its readiness at once.
  * - recompute(): after a save, the calculations, issues and readiness from
  *   the stored values, without reading sources again.
  * - freshValues(): what a refresh would give now, without writing; the
@@ -149,6 +150,33 @@ final class ReportEngine
         $kept = array_filter($frozen ?? $report->issues ?? [], fn (array $issue) => ($issue['stage'] ?? null) !== 'submit');
 
         return [...array_values($kept), ...array_column($this->missingDocuments($report, 'submit'), 'issue')];
+    }
+
+    /**
+     * The readiness a report shows now, by the same rule as issuesNow(): a
+     * draft, for-approval or approved report's is its stored readiness. A
+     * finalized or later report keeps the readiness it was finalized with,
+     * except its document checks needed at filing (`submit`), which are read
+     * live (Readiness::withLiveChecks()), so the percent, the passed count
+     * and the documents breakdown follow an upload as its issues do. Nothing
+     * is written.
+     *
+     * @param  int|null  $readiness  the locked report's frozen readiness, when the caller has read it already
+     * @param  array<string, mixed>|null  $breakdown  and its frozen breakdown
+     * @return array{readiness: int, breakdown: array<string, mixed>}
+     */
+    public function readinessNow(CdaReport $report, ?int $readiness = null, ?array $breakdown = null): array
+    {
+        $readiness ??= (int) $report->readiness;
+        $breakdown ??= (array) ($report->readiness_breakdown ?? []);
+
+        if (! $report->isLocked()) {
+            return ['readiness' => $readiness, 'breakdown' => $breakdown];
+        }
+
+        $report->loadMissing(['template', 'period']);
+
+        return Readiness::withLiveChecks($readiness, $breakdown, $this->validator->documentChecks($report, $this->definition($report), 'submit'));
     }
 
     /**
