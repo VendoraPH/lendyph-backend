@@ -175,7 +175,7 @@ class CdaBrowserCheckFixesTest extends TestCase
         $messages = collect($report->issues)->keyBy('id')->map(fn (array $issue) => $issue['message']);
         $this->assertSame('The signed CAPR (final copy) hasn\'t been uploaded.', $messages['rule:signed_capr_uploaded']);
         $this->assertSame('The sworn statement of compliance (final copy) hasn\'t been uploaded.', $messages['rule:sworn_uploaded']);
-        $this->assertSame('Signed CAPR hasn\'t been uploaded.', $messages['document:signed_capr']);
+        $this->assertArrayNotHasKey('document:signed_capr', $messages->all(), 'The rule already checks the signed CAPR: one issue, in the rule\'s words.');
         $this->assertSame('Training certificates haven\'t been uploaded.', $messages['document:training_certificates']);
     }
 
@@ -235,8 +235,8 @@ class CdaBrowserCheckFixesTest extends TestCase
         $ids = collect($before['issues'])->pluck('id');
         $this->assertTrue($ids->contains('rule:signed_capr_uploaded'));
         $this->assertTrue($ids->contains('document:training_certificates'));
-        $this->assertTrue($ids->contains('document:signed_capr'));
-        $this->assertSame(3, $before['critical_count']);
+        $this->assertFalse($ids->contains('document:signed_capr'), 'The rule already checks the signed CAPR.');
+        $this->assertSame(2, $before['critical_count']);
         $infoBefore = collect($before['issues'])->firstWhere('rule_id', 'template_verified');
 
         $this->act($report, 'mark_submitted', ['submission' => ['method' => 'cais', 'submitted_on' => '2027-01-14']])->assertStatus(422)
@@ -263,6 +263,6 @@ class CdaBrowserCheckFixesTest extends TestCase
         $this->uploadFinal($report, 'certificates');
         $this->assertSame(0, $view()['critical_count']);
         $this->act($report, 'mark_submitted', ['submission' => ['method' => 'cais', 'submitted_on' => '2027-01-14']])->assertOk();
-        $this->assertSame(3, CdaReport::query()->whereKey($report->id)->value('critical_count'), 'The stored issues are never rewritten.');
+        $this->assertSame(2, CdaReport::query()->whereKey($report->id)->value('critical_count'), 'The stored issues are never rewritten.');
     }
 }
