@@ -22,6 +22,7 @@ use App\Models\SavingsTransaction;
 use App\Models\TimeDeposit;
 use App\Models\User;
 use App\Services\AuditLogModules;
+use App\Services\AuditLogService;
 use App\Services\PersonalDataKeys;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Model;
@@ -432,6 +433,11 @@ class AuditLogResource extends JsonResource
             // True when `user` is the signed-in user of an old login row that
             // recorded no user_id, rather than the row's own actor.
             'actor_inferred' => $this->resource->inferredActor() !== null,
+            // Who wrote the row: `staff` (`user`), `member` (a member's own
+            // portal action; `user` is null and `actor_label` names them) or
+            // `system` (neither).
+            'actor_type' => $this->actorType(),
+            'actor_label' => self::memberActorLabel($this->resource),
             'action' => $this->action,
             // Frontend-canonical module slug; the list's `module` filter uses
             // the same rules (AuditLogModules).
@@ -453,6 +459,35 @@ class AuditLogResource extends JsonResource
             'description' => $this->description,
             'created_at' => $this->created_at,
         ];
+    }
+
+    private function actorType(): string
+    {
+        if ($this->resource->actor_type === AuditLogService::ACTOR_MEMBER) {
+            return 'member';
+        }
+
+        return $this->resource->user_id !== null || $this->resource->inferredActor() !== null ? 'staff' : 'system';
+    }
+
+    /**
+     * "Member: <name> (<code>)" for a row a member's own portal action wrote
+     * (portal design §5), else null. Name and member number only, which round
+     * fz allows any audit reader.
+     */
+    public static function memberActorLabel(AuditLog $log): ?string
+    {
+        if ($log->actor_type !== AuditLogService::ACTOR_MEMBER) {
+            return null;
+        }
+
+        $member = $log->portalUser?->borrower;
+
+        if ($member === null) {
+            return 'Member';
+        }
+
+        return sprintf('Member: %s (%s)', $member->full_name, $member->membership_number ?: $member->borrower_code);
     }
 
     private function resolveAuditableLabel(): string

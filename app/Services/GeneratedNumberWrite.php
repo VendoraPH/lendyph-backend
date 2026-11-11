@@ -67,6 +67,9 @@ final class GeneratedNumberWrite
     /** A member's membership number, given from the member code on create. */
     public const MEMBERSHIP_NUMBER_INDEX = 'borrowers_membership_number_unique';
 
+    /** Member Portal requests, `REQ-YYYYMMDD-NNNNNN`. */
+    public const PORTAL_REQUEST_REFERENCE_INDEX = 'portal_requests_reference_unique';
+
     public const MEMBER_CONFLICT = 'Another member was created at the same moment. Submit again.';
 
     public const CO_MAKER_CONFLICT = 'Another co-maker was created at the same moment. Submit again.';
@@ -79,6 +82,8 @@ final class GeneratedNumberWrite
 
     public const MEDIATION_CONFLICT = 'Another mediation case was recorded at the same moment. Submit again.';
 
+    public const PORTAL_REQUEST_CONFLICT = 'Another request was sent at the same moment. Submit again.';
+
     private const INDEXES = [
         self::BORROWER_CODE_INDEX,
         self::CO_MAKER_CODE_INDEX,
@@ -89,6 +94,7 @@ final class GeneratedNumberWrite
         self::TIME_DEPOSIT_CERTIFICATE_INDEX,
         self::MEDIATION_CASE_NUMBER_INDEX,
         self::MEMBERSHIP_NUMBER_INDEX,
+        self::PORTAL_REQUEST_REFERENCE_INDEX,
     ];
 
     private const BACKOFF_MILLISECONDS = 20;

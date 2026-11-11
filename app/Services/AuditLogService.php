@@ -3,6 +3,8 @@
 namespace App\Services;
 
 use App\Models\AuditLog;
+use App\Models\PortalUser;
+use App\Models\User;
 use Illuminate\Database\Eloquent\Model;
 use LogicException;
 
@@ -18,6 +20,9 @@ class AuditLogService
      * the trait already calls into covers every auditable model there is.
      */
     private static bool $modelAuditingSuppressed = false;
+
+    /** `audit_logs.actor_type` for a row a member's own action wrote. */
+    public const ACTOR_MEMBER = 'member';
 
     /**
      * Run a callback with the Auditable trait's automatic rows turned off,
@@ -133,6 +138,8 @@ class AuditLogService
         ?string $description = null,
         ?int $userId = null,
         ?string $ipAddress = null,
+        ?PortalUser $member = null,
+        bool $asSystem = false,
     ): AuditLog {
         if ($auditable !== null && app()->runningUnitTests() && ! AuditLogModules::isMapped($auditable->getMorphClass())) {
             throw new LogicException(sprintf(
@@ -141,8 +148,12 @@ class AuditLogService
             ));
         }
 
+        [$staffId, $member] = $asSystem ? [null, null] : self::actor($userId, $member);
+
         return AuditLog::create([
-            'user_id' => $userId ?? auth()->id(),
+            'user_id' => $staffId,
+            'actor_type' => $member === null ? null : self::ACTOR_MEMBER,
+            'portal_user_id' => $member?->getKey(),
             'action' => $action,
             'auditable_type' => $auditable ? $auditable->getMorphClass() : null,
             'auditable_id' => $auditable?->getKey(),
@@ -152,5 +163,40 @@ class AuditLogService
             'user_agent' => self::cleanHeader(request()->userAgent()),
             'description' => $description,
         ]);
+    }
+
+    /**
+     * Who a row names (portal design §5): a staff user in `user_id`, or a
+     * member as `actor_type` member with their `portal_user_id`, or neither
+     * (System).
+     *
+     * The signed-in caller counts only when it is a staff User: under the
+     * portal guard `auth()->id()` is a portal user's id, and writing it into
+     * `user_id` (a key to `users`) would name an unrelated staff member (§0,
+     * finding 5). A signed-in PortalUser is the member actor; a public portal
+     * route (code redemption) names the member explicitly. An explicit
+     * `$userId` keeps winning, as before. `$asSystem` writes neither, for a
+     * consequence the system applies on its own (a lockout, access ended with
+     * the membership), whoever's request set it off.
+     *
+     * @return array{0: ?int, 1: ?PortalUser}
+     */
+    private static function actor(?int $userId, ?PortalUser $member): array
+    {
+        if ($userId !== null) {
+            return [$userId, null];
+        }
+
+        if ($member !== null) {
+            return [null, $member];
+        }
+
+        $caller = auth()->user();
+
+        return match (true) {
+            $caller instanceof User => [(int) $caller->getKey(), null],
+            $caller instanceof PortalUser => [null, $caller],
+            default => [null, null],
+        };
     }
 }

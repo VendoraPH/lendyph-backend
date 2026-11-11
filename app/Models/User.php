@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use App\Services\BranchAccess;
+use App\Support\StaffRouteBinding;
 use App\Traits\Auditable;
 use Database\Factories\UserFactory;
 use Illuminate\Database\Eloquent\Attributes\Hidden;
@@ -22,6 +23,19 @@ class User extends Authenticatable
 {
     /** @use HasFactory<UserFactory> */
     use Auditable, HasApiTokens, HasFactory, HasRoles, Notifiable;
+
+    /**
+     * Roles and permissions are seeded on the `web` guard, and are read on it
+     * whatever guard signed the request in.
+     *
+     * Pinned because Spatie otherwise picks the guard from
+     * `auth.defaults.guard` among the guards whose provider is `users`, and
+     * `auth:sanctum` makes that default `sanctum` for the request. While the
+     * `sanctum` guard had no provider it never matched, so `web` won by
+     * accident; once it names `users` (portal design §0, finding 1) every
+     * permission would be looked up on `sanctum`, where none exists.
+     */
+    protected string $guard_name = 'web';
 
     /**
      * Never written to `audit_logs`. See Auditable::redactForAudit().
@@ -200,19 +214,17 @@ class User extends Authenticatable
      */
     public function resolveRouteBindingQuery($query, $value, $field = null)
     {
-        $query = parent::resolveRouteBindingQuery($query, $value, $field);
-        $viewer = request()->user();
-
-        // `branches:view_all` sees everyone. Checked here rather than left to
-        // scopeVisibleTo(), whose unrestricted case adds no condition and
-        // would leave only the "is the caller" half of the OR below.
-        if (! $viewer instanceof self || app(BranchAccess::class)->for($viewer) === null) {
-            return $query;
-        }
-
-        return $query->where(fn ($q) => $q
-            ->whereKey($viewer->getKey())
-            ->orWhere(fn ($visible) => $visible->visibleTo($viewer)));
+        return StaffRouteBinding::scope(
+            parent::resolveRouteBindingQuery($query, $value, $field),
+            // `branches:view_all` sees everyone. Checked here rather than left
+            // to scopeVisibleTo(), whose unrestricted case adds no condition
+            // and would leave only the "is the caller" half of the OR below.
+            fn ($query, self $viewer) => app(BranchAccess::class)->for($viewer) === null
+                ? $query
+                : $query->where(fn ($q) => $q
+                    ->whereKey($viewer->getKey())
+                    ->orWhere(fn ($visible) => $visible->visibleTo($viewer))),
+        );
     }
 
     /**

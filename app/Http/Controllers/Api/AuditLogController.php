@@ -168,7 +168,7 @@ class AuditLogController extends Controller
 
                         fputcsv($handle, array_map(self::sanitizeCsvCell(...), [
                             $log->created_at?->toDateTimeString(),
-                            ($log->user ?? $log->inferredActor())?->full_name ?? ($log->user_id ? "User #{$log->user_id}" : 'system'),
+                            AuditLogResource::memberActorLabel($log) ?? ($log->user ?? $log->inferredActor())?->full_name ?? ($log->user_id ? "User #{$log->user_id}" : 'system'),
                             $log->action,
                             self::targetType($log->auditable_type),
                             $log->auditable_id,
@@ -217,7 +217,7 @@ class AuditLogController extends Controller
         $this->authorize('audit_logs:view');
         $this->authorize(BranchAccess::VIEW_ALL);
 
-        $auditLog->load('user', 'auditable');
+        $auditLog->load('user', 'auditable', 'portalUser.borrower');
         AuditLogResource::loadChangeNames([$auditLog]);
 
         return new AuditLogResource($auditLog);
@@ -268,7 +268,7 @@ class AuditLogController extends Controller
         $dateFrom = $filters['date_from'] ?? null;
         $dateTo = $filters['date_to'] ?? null;
 
-        return AuditLog::with('user', 'auditable')
+        return AuditLog::with('user', 'auditable', 'portalUser.borrower')
             ->when(filled($search), function ($q) use ($search) {
                 $like = LikePattern::contains($search);
 

@@ -69,8 +69,11 @@ class TimezoneShiftTest extends TestCase
             ['datetime', 'timestamp'],
         ))->map(fn ($row) => "{$row->table}.{$row->column}")->sort()->values()->all();
 
+        // mergeRecursive, not merge: a table the shift covers can also have a
+        // column added after the shift ran (EXCLUDED_COLUMNS['documents']),
+        // and merge() would let that one entry replace the table's list.
         $accountedFor = collect(TimezoneShift::COLUMNS)
-            ->merge(TimezoneShift::EXCLUDED_COLUMNS)
+            ->mergeRecursive(TimezoneShift::EXCLUDED_COLUMNS)
             ->flatMap(fn (array $columns, string $table) => array_map(
                 fn (string $column) => "{$table}.{$column}",
                 $columns,

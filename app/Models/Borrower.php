@@ -6,6 +6,7 @@ use App\Services\BranchAccess;
 use App\Services\LikePattern;
 use App\Services\SequenceCode;
 use App\Services\SignedFileLink;
+use App\Support\StaffRouteBinding;
 use App\Traits\Auditable;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -293,14 +294,15 @@ class Borrower extends Model
      * Every `{borrower}` route parameter resolves only to a borrower the
      * signed-in user may see, so another branch's member answers 404. Without
      * a signed-in user (submission-token uploads, signed links, console) the
-     * binding is unscoped.
+     * binding is unscoped; a caller who isn't staff resolves nothing
+     * (StaffRouteBinding).
      */
     public function resolveRouteBindingQuery($query, $value, $field = null)
     {
-        $query = parent::resolveRouteBindingQuery($query, $value, $field);
-        $user = request()->user();
-
-        return $user instanceof User ? $query->visibleTo($user) : $query;
+        return StaffRouteBinding::scope(
+            parent::resolveRouteBindingQuery($query, $value, $field),
+            fn ($query, User $user) => $query->visibleTo($user),
+        );
     }
 
     /**

@@ -4,6 +4,7 @@ namespace App\Models;
 
 use App\Exceptions\MalformedSequenceCodeException;
 use App\Services\SequenceCode;
+use App\Support\StaffRouteBinding;
 use App\Traits\Auditable;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -187,11 +188,9 @@ class Repayment extends Model
      */
     public function resolveRouteBindingQuery($query, $value, $field = null)
     {
-        $query = parent::resolveRouteBindingQuery($query, $value, $field);
-        $user = request()->user();
-
-        return $user instanceof User
-            ? $query->whereIn('loan_id', Loan::visibleTo($user)->select('loans.id'))
-            : $query;
+        return StaffRouteBinding::scope(
+            parent::resolveRouteBindingQuery($query, $value, $field),
+            fn ($query, User $user) => $query->whereIn('loan_id', Loan::visibleTo($user)->select('loans.id')),
+        );
     }
 }

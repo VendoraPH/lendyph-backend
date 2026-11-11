@@ -1,5 +1,6 @@
 <?php
 
+use App\Models\PortalUser;
 use App\Models\User;
 
 return [
@@ -42,6 +43,22 @@ return [
             'driver' => 'session',
             'provider' => 'users',
         ],
+
+        // The staff API's guard. Declared so its provider is `users`: left
+        // undeclared, Sanctum registers it with no provider and then accepts a
+        // token belonging to ANY model, so a member's portal token would pass
+        // `auth:sanctum` on every staff route (portal design §0, finding 1).
+        'sanctum' => [
+            'driver' => 'sanctum',
+            'provider' => 'users',
+        ],
+
+        // The Member Portal's guard: portal_users tokens only. Never accepted
+        // on a staff route, and a staff token is never accepted here.
+        'portal' => [
+            'driver' => 'sanctum',
+            'provider' => 'portal_users',
+        ],
     ],
 
     /*
@@ -65,6 +82,11 @@ return [
         'users' => [
             'driver' => 'eloquent',
             'model' => env('AUTH_MODEL', User::class),
+        ],
+
+        'portal_users' => [
+            'driver' => 'eloquent',
+            'model' => PortalUser::class,
         ],
 
         // 'users' => [

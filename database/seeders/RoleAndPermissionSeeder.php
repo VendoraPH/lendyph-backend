@@ -203,6 +203,14 @@ class RoleAndPermissionSeeder extends Seeder
             'cda:finalize', 'cda:reopen', 'cda:submit', 'cda:export', 'cda:settings',
             'cda:manage_officers', 'cda:manage_social', 'cda:manage_mediation',
             'cda:view_mediation', 'cda:view_audit', 'cda:view_tax',
+
+            // Member Portal staff side (Phase 3). admin and super_admin only,
+            // through Permission::all() below; no other role lists them.
+            // Mirrors 2026_11_11_700200_add_member_portal_permissions, which
+            // grants them on the already-migrated deployments. Members hold no
+            // permissions: the portal takes the member from the token.
+            'member_portal:view', 'member_portal:invite', 'member_portal:manage',
+            'member_portal:requests', 'member_portal:announcements', 'member_portal:settings',
         ];
 
         $guard = 'web';

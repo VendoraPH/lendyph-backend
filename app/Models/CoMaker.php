@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Support\StaffRouteBinding;
 use App\Traits\Auditable;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -81,11 +82,9 @@ class CoMaker extends Model
      */
     public function resolveRouteBindingQuery($query, $value, $field = null)
     {
-        $query = parent::resolveRouteBindingQuery($query, $value, $field);
-        $user = request()->user();
-
-        return $user instanceof User
-            ? $query->whereHas('borrower', fn ($q) => $q->visibleTo($user))
-            : $query;
+        return StaffRouteBinding::scope(
+            parent::resolveRouteBindingQuery($query, $value, $field),
+            fn ($query, User $user) => $query->whereHas('borrower', fn ($q) => $q->visibleTo($user)),
+        );
     }
 }

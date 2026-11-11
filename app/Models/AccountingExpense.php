@@ -4,6 +4,7 @@ namespace App\Models;
 
 use App\Services\BranchAccess;
 use App\Services\LikePattern;
+use App\Support\StaffRouteBinding;
 use App\Traits\Auditable;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Builder;
@@ -252,11 +253,9 @@ class AccountingExpense extends Model
      */
     public function resolveRouteBindingQuery($query, $value, $field = null)
     {
-        $query = parent::resolveRouteBindingQuery($query, $value, $field);
-        $user = request()->user();
-
-        return $user instanceof User
-            ? app(BranchAccess::class)->constrain($query, $user, $this->qualifyColumn('branch_id'))
-            : $query;
+        return StaffRouteBinding::scope(
+            parent::resolveRouteBindingQuery($query, $value, $field),
+            fn ($query, User $user) => app(BranchAccess::class)->constrain($query, $user, $this->qualifyColumn('branch_id')),
+        );
     }
 }
