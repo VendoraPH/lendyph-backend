@@ -5,6 +5,7 @@ namespace App\Services\Savings;
 use App\Models\SavingsAccount;
 use App\Models\SavingsApproval;
 use App\Models\SavingsProduct;
+use Illuminate\Database\Query\Builder;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 
@@ -50,10 +51,7 @@ class AvailableBalance
 
         $today = now()->toDateString();
 
-        $holds = DB::table('savings_holds')
-            ->whereIn('account_id', $ids)
-            ->where('status', 'active')
-            ->where(fn ($q) => $q->whereNull('expires_on')->orWhere('expires_on', '>=', $today))
+        $holds = $this->activeHolds($ids, $today)
             ->groupBy('account_id')
             ->selectRaw('account_id, SUM(amount) AS total')
             ->pluck('total', 'account_id');
@@ -91,5 +89,53 @@ class AvailableBalance
         }
 
         return $result;
+    }
+
+    /**
+     * The same breakdowns, with the holds split for a member's eye: `held`
+     * is every active hold except those of `$requestHoldTypes` (a member's own
+     * withdrawal requests), and `pending_withdrawal` is those requests plus
+     * the outflows waiting for a checker. Together they are exactly what
+     * `available` already takes off, so `available` is unchanged.
+     *
+     * @param  Collection<int, SavingsAccount>  $accounts
+     * @param  list<string>  $requestHoldTypes
+     * @return array<int, array{ledger: int, holds: int, pending: int, maintaining: int, available: int, held: int, pending_withdrawal: int}>
+     */
+    public function forManyWithRequests(Collection $accounts, array $requestHoldTypes): array
+    {
+        $breakdowns = $this->forMany($accounts);
+
+        if ($breakdowns === []) {
+            return [];
+        }
+
+        $requested = $this->activeHolds(array_keys($breakdowns), now()->toDateString())
+            ->whereIn('type', $requestHoldTypes)
+            ->groupBy('account_id')
+            ->selectRaw('account_id, SUM(amount) AS total')
+            ->pluck('total', 'account_id');
+
+        foreach ($breakdowns as $id => $b) {
+            $requests = min(SavingsMath::centavos($requested[$id] ?? 0), $b['holds']);
+            $breakdowns[$id]['held'] = $b['holds'] - $requests;
+            $breakdowns[$id]['pending_withdrawal'] = $b['pending'] + $requests;
+        }
+
+        return $breakdowns;
+    }
+
+    /**
+     * Holds that count against the balance on `$today`: active and not yet
+     * past `expires_on`.
+     *
+     * @param  list<int>  $ids
+     */
+    private function activeHolds(array $ids, string $today): Builder
+    {
+        return DB::table('savings_holds')
+            ->whereIn('account_id', $ids)
+            ->where('status', 'active')
+            ->where(fn ($q) => $q->whereNull('expires_on')->orWhere('expires_on', '>=', $today));
     }
 }

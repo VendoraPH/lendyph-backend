@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Borrower;
 use App\Models\ShareCapitalLedger;
+use App\Models\ShareCapitalPledge;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Database\Eloquent\Builder as EloquentBuilder;
 use Illuminate\Database\Query\Builder;
@@ -135,6 +136,50 @@ class ShareCapitalMemberService
             'total_debits' => $debits / 100,
             'ending_balance' => ($openingCentavos + $credits - $debits) / 100,
         ];
+    }
+
+    /**
+     * One member's pledge against what they've paid up, in whole centavos:
+     * the paid-up balance (every entry), the pledge, and what remains of it,
+     * never below ₱0.00.
+     *
+     * @return array{paid_up: float|int, pledged: float|int, remaining_pledge: float|int}
+     */
+    public function pledgePosition(int $borrowerId): array
+    {
+        $paidUp = LoanService::toCentavos((float) $this->memberPeriod($borrowerId, null, null)['ending_balance']);
+        $pledged = LoanService::toCentavos((float) (ShareCapitalPledge::query()->where('borrower_id', $borrowerId)->value('amount') ?? 0));
+
+        return [
+            'paid_up' => $paidUp / 100,
+            'pledged' => $pledged / 100,
+            'remaining_pledge' => max(0, $pledged - $paidUp) / 100,
+        ];
+    }
+
+    /**
+     * The share capital (Share Capital Build-Up) each of these loan payments
+     * credited to its member's ledger, in centavos, keyed by repayment id:
+     * the payment's own credit rows, as the loan Ledger and the collection
+     * journal count them. A void's reversing debit is not counted.
+     *
+     * @param  list<int>  $repaymentIds
+     * @return array<int, int>
+     */
+    public function buildUpCredited(array $repaymentIds): array
+    {
+        if ($repaymentIds === []) {
+            return [];
+        }
+
+        return DB::table('share_capital_ledger')
+            ->whereIn('repayment_id', $repaymentIds)
+            ->where('credit', '>', 0)
+            ->get(['repayment_id', 'credit'])
+            ->groupBy('repayment_id')
+            ->map(fn ($rows): int => $rows->sum(fn (object $row): int => LoanService::toCentavos((float) $row->credit)))
+            ->mapWithKeys(fn (int $centavos, $id): array => [(int) $id => $centavos])
+            ->all();
     }
 
     /**

@@ -8,8 +8,8 @@ use Illuminate\Validation\ValidationException;
 
 /**
  * The dates a member may ask a statement for (portal design §3): plain
- * YYYY-MM-DD days, `to` no later than today (Manila), `from` no later than
- * `to`, and at most 5 years apart. Checked only after the record was found,
+ * YYYY-MM-DD days, neither after today (Manila), `from` no later than `to`,
+ * and at most 5 years apart, checked after a missing day is filled in. Checked only after the record was found,
  * so another member's record answers 404 first.
  */
 final class StatementRange
@@ -17,37 +17,42 @@ final class StatementRange
     public const MAX_YEARS = 5;
 
     /**
-     * @return array{from: string|null, to: string|null}
+     * The statement's days, a missing one filled in first: `to` is today
+     * (Manila), `from` the later of `$earliest` (an account's opening day)
+     * and 5 years before `to`, never after `to`. Then both are checked: neither after today,
+     * `from` on or before `to`, and at most 5 years apart.
+     *
+     * @return array{from: string, to: string}
      *
      * @throws ValidationException
      */
-    public static function from(Request $request, bool $required): array
+    public static function from(Request $request, bool $required, ?string $earliest = null): array
     {
         $today = now()->toDateString();
         $presence = $required ? 'required' : 'nullable';
 
         $dates = $request->validate([
-            'from' => [$presence, 'date_format:Y-m-d'],
+            'from' => [$presence, 'date_format:Y-m-d', 'before_or_equal:'.$today],
             'to' => [$presence, 'date_format:Y-m-d', 'before_or_equal:'.$today],
         ], [
             'from.required' => 'Choose the first day of the statement.',
             'to.required' => 'Choose the last day of the statement.',
             'from.date_format' => 'The first day must be a date (YYYY-MM-DD).',
             'to.date_format' => 'The last day must be a date (YYYY-MM-DD).',
+            'from.before_or_equal' => 'The first day can\'t be after today.',
             'to.before_or_equal' => 'The last day can\'t be after today.',
         ]);
 
-        $from = $dates['from'] ?? null;
-        $to = $dates['to'] ?? null;
+        $to = $dates['to'] ?? $today;
+        $limit = CarbonImmutable::parse($to)->subYears(self::MAX_YEARS)->toDateString();
+        $from = $dates['from'] ?? min(max($earliest ?? $limit, $limit), $to);
 
-        if ($from !== null && $to !== null) {
-            if ($from > $to) {
-                throw ValidationException::withMessages(['from' => 'The first day must be on or before the last day.']);
-            }
+        if ($from > $to) {
+            throw ValidationException::withMessages(['from' => 'The first day must be on or before the last day.']);
+        }
 
-            if (CarbonImmutable::parse($from)->lt(CarbonImmutable::parse($to)->subYears(self::MAX_YEARS))) {
-                throw ValidationException::withMessages(['from' => 'A statement covers at most '.self::MAX_YEARS.' years.']);
-            }
+        if ($from < $limit) {
+            throw ValidationException::withMessages(['from' => 'A statement covers at most '.self::MAX_YEARS.' years.']);
         }
 
         return ['from' => $from, 'to' => $to];

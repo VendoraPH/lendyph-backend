@@ -9,7 +9,6 @@ use App\Models\SavingsAccount;
 use App\Models\TimeDeposit;
 use App\Services\Portal\MemberScope;
 use App\Services\Portal\PortalSettings;
-use App\Services\ValidIdService;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Carbon;
 
@@ -58,7 +57,7 @@ final class DocumentReader
     {
         return $query
             ->whereIn('documentable_type', [(new Borrower)->getMorphClass(), (new Loan)->getMorphClass()])
-            ->where('type', '!=', ValidIdService::DOCUMENT_TYPE);
+            ->where(fn (Builder $q) => ValidIdType::exclude($q));
     }
 
     public function find(int $id): Document

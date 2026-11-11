@@ -73,6 +73,21 @@ class PortalMemberReadsTest extends TestCase
         );
     }
 
+    public function test_a_short_id_number_is_masked_entirely(): void
+    {
+        $me = $this->portalMember();
+        Document::create([
+            'documentable_type' => $me->borrower->getMorphClass(), 'documentable_id' => $me->borrower_id,
+            'type' => ValidIdService::DOCUMENT_TYPE, 'label' => 'passport', 'id_number' => 'P12-345', 'side' => 'front',
+            'file_path' => "documents/valid_id/borrower/{$me->borrower_id}/front.png", 'original_filename' => 'front.png',
+            'mime_type' => 'image/png', 'file_size' => 10,
+        ]);
+
+        $fields = collect($this->portalJson('GET', '/api/portal/profile', [], $this->portalToken($me))->assertOk()->json('data.fields'));
+
+        $this->assertSame(['Passport ••••'], $fields->where('key', 'government_id')->pluck('value')->values()->all());
+    }
+
     public function test_profile_requests_switched_off_leave_nothing_editable(): void
     {
         $this->enablePortal(['features' => ['profile_requests' => false]]);

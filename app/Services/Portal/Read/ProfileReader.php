@@ -24,7 +24,7 @@ use App\Support\PhilippineMobile;
  * | email | MemberContact::maskEmail ("ju***@gmail.com") |
  * | birthdate | the year only (`birth_year`) |
  * | street address | "On file" |
- * | government ID numbers | type + last 4 ("UMID •••• 4821") |
+ * | government ID numbers | type + last 4 ("UMID •••• 4821"); a number shorter than 8 characters, type only ("Passport ••••") |
  * | income, spouse, photo, co-makers, ID images, the combined address | never |
  *
  * An allow-list: only the fields below leave the server.
@@ -37,6 +37,12 @@ final class ProfileReader
     ];
 
     public const ON_FILE = 'On file';
+
+    /**
+     * An ID number shows its last 4 characters only when it has at least
+     * this many letters and digits; a shorter one would show half of itself.
+     */
+    public const ID_TAIL_FROM_LENGTH = 8;
 
     public function __construct(private readonly PortalSettings $settings) {}
 
@@ -109,7 +115,9 @@ final class ProfileReader
                     : (MemberWords::ID_TYPE[$id->label] ?? 'ID');
                 $digits = (string) preg_replace('/[^0-9A-Za-z]/', '', (string) $id->id_number);
 
-                return $type.' •••• '.mb_substr($digits, -4);
+                return mb_strlen($digits) >= self::ID_TAIL_FROM_LENGTH
+                    ? $type.' •••• '.mb_substr($digits, -4)
+                    : $type.' ••••';
             })
             ->unique()
             ->values()

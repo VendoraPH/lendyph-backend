@@ -101,6 +101,24 @@ class PortalStatementsTest extends TestCase
         $this->portalJson('GET', "/api/portal/savings/{$account->id}/statement?from=2026-11-05&to=2026-11-01", [], $token)->assertUnprocessable();
     }
 
+    public function test_a_missing_day_is_filled_in_before_the_range_is_checked(): void
+    {
+        $me = $this->portalMember();
+        $old = $this->savingsFor($me, 100_000, ['opened_on' => '2019-01-01', 'last_member_activity_on' => '2019-01-01']);
+        $token = $this->portalToken($me);
+
+        $future = $this->portalJson('GET', "/api/portal/savings/{$old->id}/statement?from=2026-11-20", [], $token);
+        $future->assertUnprocessable();
+        $this->assertSame('The first day can\'t be after today.', $future->json('errors.from.0'));
+
+        $this->portalJson('GET', "/api/portal/savings/{$old->id}/statement?from=2019-01-01", [], $token)
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.from.0', 'A statement covers at most 5 years.');
+        $this->portalJson('GET', "/api/portal/savings/{$old->id}/statement?to=2026-11-10", [], $token)->assertOk();
+        $this->portalJson('GET', "/api/portal/savings/{$old->id}/statement", [], $token)->assertOk();
+        $this->portalJson('GET', "/api/portal/savings/{$old->id}/statement?to=2021-01-01", [], $token)->assertOk();
+    }
+
     public function test_statements_switched_off_answer_403(): void
     {
         $this->enablePortal(['features' => ['statements' => false]]);

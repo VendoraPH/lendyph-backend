@@ -8,6 +8,7 @@ use App\Models\Repayment;
 use App\Services\AmortizationBalanceService;
 use App\Services\Portal\MemberScope;
 use App\Services\RepaymentService;
+use App\Services\ShareCapitalMemberService;
 use Carbon\Carbon;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Database\Eloquent\Builder;
@@ -32,6 +33,7 @@ final class LoanReader
         private readonly MemberScope $scope,
         private readonly RepaymentService $repayments,
         private readonly AmortizationBalanceService $balances,
+        private readonly ShareCapitalMemberService $shareCapital,
     ) {}
 
     /** @return Builder<Loan> the signed-in member's ever-released loans */
@@ -142,8 +144,6 @@ final class LoanReader
             ->whereIn('loan_id', $loan === null ? $this->query()->select('loans.id') : [$loan->id])
             ->where('status', 'posted')
             ->with('loan:id,loan_account_number')
-            ->withSum('shareCapitalLedgerEntries as build_up_credit', 'credit')
-            ->withSum('shareCapitalLedgerEntries as build_up_debit', 'debit')
             ->orderByDesc('payment_date')
             ->orderByDesc('id')
             ->paginate($perPage);
@@ -155,6 +155,8 @@ final class LoanReader
      */
     public function paymentRows(Collection $rows): array
     {
+        $buildUp = $this->shareCapital->buildUpCredited($rows->map(fn (Repayment $r) => (int) $r->id)->values()->all());
+
         return $rows->map(fn (Repayment $r): array => [
             'receipt_number' => $r->receipt_number,
             'loan_account_number' => $r->loan?->loan_account_number,
@@ -164,9 +166,8 @@ final class LoanReader
             'interest' => Pesos::of($r->getRawOriginal('interest_applied')),
             'penalty' => Pesos::of($r->getRawOriginal('penalty_applied')),
             'insurance' => Pesos::of($r->getRawOriginal('insurance_applied') ?? '0'),
-            // Net, as the staff payment list's `scb_paid`: what the payment
-            // credited to share capital.
-            'build_up' => Pesos::fromCentavos(Pesos::centavos((string) ($r->build_up_credit ?? '0')) - Pesos::centavos((string) ($r->build_up_debit ?? '0'))),
+            // What the payment credited to share capital (ShareCapitalMemberService).
+            'build_up' => Pesos::fromCentavos($buildUp[$r->id] ?? 0),
             'method' => $r->method,
             'reference_number' => $r->reference_number,
         ])->values()->all();

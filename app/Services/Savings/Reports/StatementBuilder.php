@@ -20,6 +20,22 @@ class StatementBuilder
 {
     public function __construct(private readonly SavingsReports $reports) {}
 
+    /**
+     * The account's balance before `$from`: every row dated earlier, in
+     * centavos. The statement's opening balance, and the member portal
+     * passbook's.
+     */
+    public function openingBalance(SavingsAccount $account, string $from): int
+    {
+        $before = DB::table('savings_transactions')
+            ->where('account_id', $account->id)
+            ->where('date', '<', $from)
+            ->selectRaw('COALESCE(SUM(credit), 0) AS credits, COALESCE(SUM(debit), 0) AS debits')
+            ->first();
+
+        return SavingsMath::centavos($before->credits) - SavingsMath::centavos($before->debits);
+    }
+
     /** @return array<string, mixed> */
     public function build(SavingsAccount $account, ?string $dateFrom, ?string $dateTo): array
     {
@@ -27,12 +43,7 @@ class StatementBuilder
         $from = $dateFrom ?? $account->opened_on->toDateString();
         $to = $dateTo ?? CarbonImmutable::parse(now()->toDateString())->max(CarbonImmutable::parse($from))->toDateString();
 
-        $before = DB::table('savings_transactions')
-            ->where('account_id', $account->id)
-            ->where('date', '<', $from)
-            ->selectRaw('COALESCE(SUM(credit), 0) AS credits, COALESCE(SUM(debit), 0) AS debits')
-            ->first();
-        $opening = SavingsMath::centavos($before->credits) - SavingsMath::centavos($before->debits);
+        $opening = $this->openingBalance($account, $from);
 
         $running = $opening;
         $credits = 0;
