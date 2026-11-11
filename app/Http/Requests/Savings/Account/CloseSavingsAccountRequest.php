@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests\Savings\Account;
 
+use App\Support\Sentence;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
@@ -24,7 +25,7 @@ class CloseSavingsAccountRequest extends FormRequest
     {
         return [
             'date' => $this->businessDate(),
-            'reason' => ['required', 'string', 'max:500'],
+            'reason' => ['bail', 'required', 'string', 'max:500', 'regex:'.Sentence::HAS_WORDS],
             'payout_method' => ['required', 'string', Rule::in(OpenSavingsAccountRequest::PAYMENT_METHODS)],
         ];
     }
@@ -37,6 +38,7 @@ class CloseSavingsAccountRequest extends FormRequest
             'reason.required' => 'Say why the account is being closed.',
             'reason.string' => 'The reason must be text.',
             'reason.max' => 'The reason can be at most 500 characters.',
+            'reason.regex' => Sentence::NO_WORDS,
             'payout_method.required' => 'Choose how the balance is paid out: cash, bank transfer, GCash or Maya.',
             'payout_method.string' => 'Choose how the balance is paid out: cash, bank transfer, GCash or Maya.',
             'payout_method.in' => 'A closing payout is made in cash, by bank transfer, GCash or Maya.',

@@ -66,7 +66,7 @@ class GCashReportController extends Controller
         tags: ['GCash'],
         security: [['sanctum' => []]],
         responses: [
-            new OA\Response(response: 200, description: 'List with days_pending per row'),
+            new OA\Response(response: 200, description: 'List with days_pending per row. Each row\'s `branch_id` and `branch_name` are the branch whose books it posts in: the member\'s branch for a member, the recorded branch for a walk-in, and null with "Head office" for a walk-in recorded with no branch. A branch user sees their own members\' rows and every walk-in row, as before.'),
             new OA\Response(response: 403, description: 'Missing gcash:view permission'),
         ],
     )]
@@ -75,7 +75,7 @@ class GCashReportController extends Controller
         $this->authorize('gcash:view');
 
         return GCashTransactionResource::collection($this->visible(
-            $this->gcash->pendingReport()->load(['borrower', 'nonMember', 'transactor']),
+            $this->gcash->pendingReport()->load(['borrower.branch', 'nonMember', 'transactor', 'branch']),
             app(BranchAccess::class)->for(request()->user()),
         ));
     }

@@ -2,6 +2,7 @@
 
 namespace App\Http\Resources;
 
+use App\Services\LoanService;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 use OpenApi\Attributes as OA;
@@ -49,6 +50,8 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'next_principal_applied', type: 'number', description: 'Excess principal flowed to next schedule (0 when scb_amount>0)'),
         new OA\Property(property: 'overpayment', type: 'number', description: 'Unallocated remainder (frontend routes to SCB when scb_amount>0)'),
         new OA\Property(property: 'scb_paid', type: 'number', description: 'Net share capital credited FROM this payment: 0 when the loan carries no scb_amount or there was no overpayment, and back to 0 once a credited payment is voided (the reversal debit nets against its own credit).'),
+        new OA\Property(property: 'build_up_credited', type: 'string', nullable: true, example: '750.00', description: 'Share capital build-up this payment credited, from its share capital ledger credit (gross: a voided payment keeps what it credited; `scb_paid` is the net). 2-decimal string. Null when the stored data can\'t tell: overpayment on a build-up loan with no ledger credit naming the payment.'),
+        new OA\Property(property: 'overpayment_kept', type: 'string', nullable: true, example: '0.00', description: 'Advance or overpayment left as such: the stored `overpayment` less `build_up_credited`. 2-decimal string. Null whenever `build_up_credited` is. principal + interest + penalty + insurance + build_up_credited + overpayment_kept = amount_paid.'),
         new OA\Property(property: 'balance_before', type: 'number', description: 'Outstanding principal before this payment: principal only, never the insurance premium owed. The payment preview\'s `balance_before` is the outstanding balance, premium owed included. Label it "Principal balance".'),
         new OA\Property(property: 'balance_after', type: 'number', description: 'Outstanding principal after this payment: principal only, never the insurance premium owed. The payment preview\'s `balance_after` is the outstanding balance, premium owed included. Label it "Principal balance".'),
         new OA\Property(property: 'previous_balance', type: 'number', description: 'Alias for balance_before'),
@@ -139,6 +142,7 @@ class RepaymentResource extends JsonResource
             // repayment_id, so a plain sum('credit') would keep reporting the
             // original amount after voidRepayment() has already reversed it.
             'scb_paid' => (float) ($this->shareCapitalLedgerEntries->sum('credit') - $this->shareCapitalLedgerEntries->sum('debit')),
+            ...$this->buildUpAndOverpaymentKept(),
             'balance_before' => (float) $this->balance_before,
             'balance_after' => (float) $this->balance_after,
             // Frontend-canonical aliases (consumed by payments receipt page)
@@ -164,6 +168,44 @@ class RepaymentResource extends JsonResource
             'remarks' => $this->remarks,
             'created_at' => $this->created_at?->toDateTimeString(),
         ];
+    }
+
+    /**
+     * The stored overpayment, split into what this payment credited to share
+     * capital (its ledger credit rows, gross, as the Ledger reads them) and
+     * what stayed as advance or overpayment. Read from the stored rows only;
+     * nothing is recalculated. Null for both when the rows can't tell: an
+     * overpayment on a build-up loan with no credit naming the payment (one
+     * from before the automatic credit, or by a member not yet approved).
+     *
+     * @return array{build_up_credited: string|null, overpayment_kept: string|null}
+     */
+    private function buildUpAndOverpaymentKept(): array
+    {
+        $unknown = ['build_up_credited' => null, 'overpayment_kept' => null];
+        $overpayment = LoanService::toCentavos((float) $this->overpayment);
+        $credits = $this->shareCapitalLedgerEntries->filter(fn ($row): bool => (float) $row->credit > 0);
+        $credited = (int) $credits->sum(fn ($row): int => LoanService::toCentavos((float) $row->credit));
+
+        if ($credits->isEmpty() && $overpayment > 0) {
+            // scb_amount is fixed once the loan is released.
+            if ($this->loan === null || (float) $this->loan->scb_amount > 0) {
+                return $unknown;
+            }
+        }
+
+        $kept = $overpayment - $credited;
+
+        if ($kept < 0) {
+            return $unknown;
+        }
+
+        return ['build_up_credited' => self::pesos($credited), 'overpayment_kept' => self::pesos($kept)];
+    }
+
+    private static function pesos(int $centavos): string
+    {
+        return number_format($centavos / 100, 2, '.', '');
     }
 
     /** The borrower's "first last" name, or null when either part is missing (as SQL CONCAT gives). */

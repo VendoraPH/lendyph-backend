@@ -51,6 +51,9 @@ class AccountingReconciliationController extends Controller
 
     public const START_COLLIDED = 'Someone else was starting a reconciliation at the same moment. Nothing was saved; try again.';
 
+    /** A money account's kind in words, as the accounting screens read it. */
+    private const CASH_KIND_WORDS = ['cash' => 'Cash', 'bank' => 'Bank', 'gcash' => 'GCash', 'maya' => 'Maya', 'wallet' => 'Wallet'];
+
     /** The UNIQUE index on (account, `branch_scope`, period): one per account, branch and period. */
     private const PERIOD_INDEX = 'acct_recon_account_branch_period_unique';
 
@@ -155,6 +158,53 @@ class AccountingReconciliationController extends Controller
                 'to' => $page->lastItem(),
                 'total' => $page->total(),
             ],
+        ]);
+    }
+
+    #[OA\Get(
+        path: '/api/accounting/reconciliations/accounts',
+        summary: 'The accounts a reconciliation can be started on',
+        description: 'Needs `accounting:reconcile` only, so a role that reconciles without the chart of accounts can start one. Exactly the accounts `POST /accounting/reconciliations` accepts: active money accounts (cash, bank, GCash, Maya, e-wallet) that aren\'t headings, in code order. Each: `id`, `code`, `name`, `cash_kind` and `type` (the kind in words: Cash, Bank, GCash, Maya, Wallet). No balances. Money accounts are organisation-wide, so the list is the same for every branch; the branch is picked when the reconciliation starts. Writes nothing.',
+        tags: ['Accounting'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, description: 'Optional. Doesn\'t narrow the list; a branch outside the caller\'s answers 403.', schema: new OA\Schema(type: 'integer')),
+        ],
+        responses: [
+            new OA\Response(response: 200, description: '{data: [{id, code, name, cash_kind, type}]}'),
+            new OA\Response(response: 401, description: 'Unauthenticated'),
+            new OA\Response(response: 403, description: 'Missing accounting:reconcile, or a branch_id outside the caller\'s branches'),
+            new OA\Response(response: 422, description: 'A branch_id that is not a positive integer'),
+        ],
+    )]
+    public function accounts(): JsonResponse
+    {
+        $this->authorize('accounting:reconcile');
+
+        $filters = request()->validate(['branch_id' => ['nullable', 'integer', 'min:1']]);
+
+        // The accounts are organisation-wide, so a branch doesn't narrow the
+        // list; one outside the caller's branches still answers 403, as on
+        // every accounting read.
+        app(BranchAccess::class)->authorizeBranchFilter(request()->user(), $filters['branch_id'] ?? null);
+
+        // The same rule as requireMoneyAccount() on store(): postable (active,
+        // not a heading) and carrying a cash_kind.
+        $accounts = AccountingAccount::query()
+            ->whereNotNull('cash_kind')
+            ->where('is_group', false)
+            ->where('is_active', true)
+            ->orderBy('code')
+            ->get(['id', 'code', 'name', 'cash_kind']);
+
+        return response()->json([
+            'data' => $accounts->map(fn (AccountingAccount $account): array => [
+                'id' => $account->id,
+                'code' => $account->code,
+                'name' => $account->name,
+                'cash_kind' => $account->cash_kind,
+                'type' => self::CASH_KIND_WORDS[$account->cash_kind] ?? ucfirst(str_replace('_', ' ', (string) $account->cash_kind)),
+            ])->values(),
         ]);
     }
 

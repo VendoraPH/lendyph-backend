@@ -24,10 +24,18 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'paid_at', type: 'string', format: 'date-time', nullable: true),
         new OA\Property(property: 'paid_by_user_id', type: 'integer', nullable: true),
         new OA\Property(property: 'days_pending', type: 'integer', nullable: true, description: 'Whole days since transaction_date; only included by /reports/pending.'),
+        new OA\Property(property: 'branch_id', type: 'integer', nullable: true, description: 'The walk-in\'s recorded branch (null for a member\'s and for head office). On /reports/pending only: the branch the row posts in, the member\'s branch for a member.'),
+        new OA\Property(property: 'branch_name', type: 'string', nullable: true, description: 'Only included by /reports/pending: the name of that branch, "Head office" for a walk-in with none, or "Unknown branch" for a member row whose member record is missing.'),
     ],
 )]
 class GCashTransactionResource extends JsonResource
 {
+    /** A pending report row with no branch: a walk-in recorded at head office. */
+    public const HEAD_OFFICE = 'Head office';
+
+    /** A pending report row for a member whose member record is missing. */
+    public const UNKNOWN_BRANCH = 'Unknown branch';
+
     public function toArray(Request $request): array
     {
         $data = [
@@ -66,9 +74,19 @@ class GCashTransactionResource extends JsonResource
             'updated_at' => $this->updated_at?->toIso8601String(),
         ];
 
-        if ($request->routeIs('gcash.reports.pending') && $this->transaction_date) {
-            $data['days_pending'] = (int) $this->transaction_date->copy()->startOfDay()
-                ->diffInDays(now()->startOfDay());
+        if ($request->routeIs('gcash.reports.pending')) {
+            if ($this->transaction_date) {
+                $data['days_pending'] = (int) $this->transaction_date->copy()->startOfDay()
+                    ->diffInDays(now()->startOfDay());
+            }
+
+            // The branch whose books the row posts in: a member's branch for
+            // a member, the recorded branch for a walk-in, none for head office.
+            // A member row whose member record is missing can't say which.
+            $memberMissing = $this->borrower_id !== null && $this->borrower === null;
+            $branch = $this->borrower_id !== null ? $this->borrower?->branch : $this->branch;
+            $data['branch_id'] = $branch?->id;
+            $data['branch_name'] = $branch?->name ?? ($memberMissing ? self::UNKNOWN_BRANCH : self::HEAD_OFFICE);
         }
 
         return $data;
