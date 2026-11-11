@@ -9,10 +9,16 @@ use App\Models\SavingsAccount;
 use App\Models\SavingsApproval;
 use App\Models\SavingsHold;
 use App\Models\SavingsTransaction;
+use App\Services\Savings\Api\Refuse;
 use App\Services\Savings\SavingsLocks;
+use Closure;
+use Illuminate\Http\Exceptions\HttpResponseException;
+use Illuminate\Log\Events\MessageLogged;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Exceptions;
+use LogicException;
 use RuntimeException;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
@@ -167,6 +173,104 @@ class AccessEndFollowUpsTest extends TestCase
         $this->assertSame('released', SavingsHold::query()->findOrFail($request->savings_hold_id)->status);
     }
 
+    /**
+     * report() drops an HttpResponseException (such as a 409 from
+     * GeneratedNumberWrite), so every failed endFor() also leaves its own
+     * warning: ids and the exception class only, no personal data.
+     */
+    public function test_a_409_while_ending_the_requests_leaves_a_warning_on_every_path(): void
+    {
+        $logged = $this->captureLogs();
+        $account = $this->account();
+        $this->fund($account, 100_000);
+        $request = $this->submitted($this->submit($this->withdrawalBody($account, '100.00'))->assertCreated());
+        $this->failLocksWith(fn () => Refuse::conflict('Someone else is saving a record. Try again.'));
+
+        $this->freshRequest();
+        $this->actingAs($this->admin)->putJson("/api/portal-admin/members/{$this->member->id}/access", ['enabled' => false, 'reason' => 'security_concern'])
+            ->assertOk();
+        Artisan::call('portal:requests-sweep');
+
+        $expected = ['portal_user_id' => $this->portalUser->id, 'request_ids' => [$request->id], 'exception' => HttpResponseException::class];
+        $warnings = array_values(array_filter($logged(), fn (array $log): bool => $log['level'] === 'warning' && $log['message'] === 'portal endFor failed'));
+        $this->assertCount(2, $warnings, 'One from disable(), one from the sweep.');
+
+        foreach ($warnings as $warning) {
+            $this->assertSame($expected, $warning['context']);
+        }
+
+        $this->assertSame(PortalRequest::STATUS_SUBMITTED, $request->fresh()->status);
+    }
+
+    public function test_a_409_while_ending_the_requests_after_a_membership_end_leaves_a_warning(): void
+    {
+        $logged = $this->captureLogs();
+        $account = $this->account();
+        $this->fund($account, 100_000);
+        $request = $this->submitted($this->submit($this->withdrawalBody($account, '100.00'))->assertCreated());
+        $this->failLocksWith(fn () => Refuse::conflict('Someone else is saving a record. Try again.'));
+
+        $this->freshRequest();
+        $this->actingAs($this->admin)->patchJson("/api/borrowers/{$this->member->id}/end-membership", [
+            'status' => 'deceased', 'ended_on' => '2026-11-10', 'reason' => 'Reported by the family.',
+        ])->assertOk();
+
+        $warnings = array_values(array_filter($logged(), fn (array $log): bool => $log['message'] === 'portal endFor failed'));
+        $this->assertSame([['level' => 'warning', 'message' => 'portal endFor failed', 'context' => [
+            'portal_user_id' => $this->portalUser->id, 'request_ids' => [$request->id], 'exception' => HttpResponseException::class,
+        ]]], $warnings);
+    }
+
+    // Turning access back on never keeps a request from before it was turned off.
+
+    public function test_access_stays_off_while_earlier_requests_cannot_be_closed_and_returns_once_they_are(): void
+    {
+        $account = $this->account();
+        $this->fund($account, 100_000);
+        $request = $this->submitted($this->submit($this->withdrawalBody($account, '100.00'))->assertCreated());
+        $this->failLocksWith(fn () => throw new RuntimeException('Lock wait timeout exceeded'));
+
+        $this->freshRequest();
+        $this->actingAs($this->admin)->putJson("/api/portal-admin/members/{$this->member->id}/access", ['enabled' => false, 'reason' => 'security_concern'])
+            ->assertOk();
+        $this->assertSame(PortalRequest::STATUS_SUBMITTED, $request->fresh()->status);
+
+        $this->freshRequest();
+        $this->actingAs($this->admin)->putJson("/api/portal-admin/members/{$this->member->id}/access", ['enabled' => true])
+            ->assertStatus(409)
+            ->assertJsonPath('message', 'This member\'s earlier requests are still being closed. Try again in a moment.');
+        $this->assertSame(PortalUser::STATUS_DISABLED, $this->portalUser->fresh()->status, 'Access stays off.');
+        $this->assertSame(PortalRequest::STATUS_SUBMITTED, $request->fresh()->status);
+        $this->assertFalse(AuditLog::query()->where('action', 'portal_access_enabled')->exists());
+
+        $this->app->forgetInstance(SavingsLocks::class);
+        $this->freshRequest();
+        $this->actingAs($this->admin)->putJson("/api/portal-admin/members/{$this->member->id}/access", ['enabled' => true])->assertOk();
+
+        $this->assertSame(PortalUser::STATUS_ACTIVE, $this->portalUser->fresh()->status);
+        $this->assertSame(PortalRequest::STATUS_CANCELLED, $request->fresh()->status, 'Closed before access returned.');
+        $this->assertSame('released', SavingsHold::query()->findOrFail($request->savings_hold_id)->status);
+        $cancelled = AuditLog::query()->where('action', 'portal_request_cancelled')->value('id');
+        $enabled = AuditLog::query()->where('action', 'portal_access_enabled')->value('id');
+        $this->assertLessThan($enabled, $cancelled);
+    }
+
+    public function test_access_turned_back_on_after_a_clean_turn_off_needs_nothing_more(): void
+    {
+        $account = $this->account();
+        $this->fund($account, 100_000);
+        $request = $this->submitted($this->submit($this->withdrawalBody($account, '100.00'))->assertCreated());
+
+        $this->freshRequest();
+        $this->actingAs($this->admin)->putJson("/api/portal-admin/members/{$this->member->id}/access", ['enabled' => false, 'reason' => 'member_request'])
+            ->assertOk();
+        $this->assertSame(PortalRequest::STATUS_CANCELLED, $request->fresh()->status);
+
+        $this->freshRequest();
+        $this->actingAs($this->admin)->putJson("/api/portal-admin/members/{$this->member->id}/access", ['enabled' => true])->assertOk();
+        $this->assertSame(PortalUser::STATUS_ACTIVE, $this->portalUser->fresh()->status);
+    }
+
     // The member's status is read under its row lock during a payout.
 
     public function test_the_payout_locks_the_member_after_the_request_and_before_the_portal_account(): void
@@ -208,6 +312,35 @@ class AccessEndFollowUpsTest extends TestCase
 
         $this->decide($request, ['decision' => 'approve', 'payout' => $this->payout()])->assertStatus(409);
         $this->assertSame(0, SavingsTransaction::query()->where('type', 'withdrawal')->count());
+    }
+
+    /** Make every savings account lock fail the way `$fail` does. */
+    private function failLocksWith(Closure $fail): void
+    {
+        $this->app->instance(SavingsLocks::class, new class($fail) extends SavingsLocks
+        {
+            public function __construct(private readonly Closure $fail) {}
+
+            public function account(int $id): SavingsAccount
+            {
+                ($this->fail)();
+
+                throw new LogicException('The failure above always throws.');
+            }
+        });
+    }
+
+    /** @return callable(): list<array{level: string, message: string, context: array<string, mixed>}> */
+    private function captureLogs(): callable
+    {
+        $logged = [];
+        Event::listen(MessageLogged::class, function (MessageLogged $event) use (&$logged): void {
+            $logged[] = ['level' => $event->level, 'message' => $event->message, 'context' => $event->context];
+        });
+
+        return function () use (&$logged): array {
+            return $logged;
+        };
     }
 
     /** @return callable(): list<string> the tables read FOR UPDATE, in order */

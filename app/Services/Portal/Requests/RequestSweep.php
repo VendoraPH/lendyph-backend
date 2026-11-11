@@ -13,8 +13,10 @@ use App\Services\Savings\Api\ApprovalDesk;
 use App\Services\Savings\Api\Refuse;
 use App\Services\Savings\SavingsLocks;
 use App\Services\Savings\SavingsMath;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Throwable;
 
 /**
@@ -96,21 +98,63 @@ final class RequestSweep
 
         PortalUser::query()
             ->where('status', PortalUser::STATUS_DISABLED)
-            ->whereIn('id', PortalRequest::query()->select('portal_user_id')
-                ->where(fn ($q) => $q->whereIn('status', RequestDesk::CANCELLABLE)
-                    ->orWhere(fn ($q) => $q->where('status', PortalRequest::STATUS_APPROVED)
-                        ->whereIn('savings_approval_id', SavingsApproval::query()->select('id')->where('status', 'pending')))))
+            ->whereIn('id', self::stillToEnd(PortalRequest::query())->select('portal_user_id'))
             ->orderBy('id')
             ->get()
             ->each(function (PortalUser $portalUser) use (&$ended): void {
-                try {
-                    $ended += $this->endFor($portalUser, $portalUser->disabled_reason ?? 'administrative');
-                } catch (Throwable $e) {
-                    report($e);
-                }
+                $ended += $this->endForReported($portalUser, $portalUser->disabled_reason ?? 'administrative');
             });
 
         return $ended;
+    }
+
+    /**
+     * endFor(), for callers that must not fail because of it (access is
+     * already off): a failure is reported and logged, and 0 is returned; the
+     * nightly sweep retries. report() drops some exceptions (a 409
+     * HttpResponseException from GeneratedNumberWrite, a missing model, a
+     * validation error), so the warning is always written too, with ids and
+     * the exception class only: no personal data, codes or tokens.
+     */
+    public function endForReported(PortalUser $portalUser, string $reason): int
+    {
+        try {
+            return $this->endFor($portalUser, $reason);
+        } catch (Throwable $e) {
+            report($e);
+            Log::warning('portal endFor failed', [
+                'portal_user_id' => (int) $portalUser->getKey(),
+                'request_ids' => $this->idsStillToEnd($portalUser),
+                'exception' => $e::class,
+            ]);
+
+            return 0;
+        }
+    }
+
+    /**
+     * The requests endFor() ends: open ones (submitted, under review, need
+     * info), and withdrawals waiting at a pending second check.
+     *
+     * @param  Builder<PortalRequest>  $query
+     * @return Builder<PortalRequest>
+     */
+    public static function stillToEnd(Builder $query): Builder
+    {
+        return $query->where(fn ($q) => $q->whereIn('status', RequestDesk::CANCELLABLE)
+            ->orWhere(fn ($q) => $q->where('status', PortalRequest::STATUS_APPROVED)
+                ->whereIn('savings_approval_id', SavingsApproval::query()->select('id')->where('status', 'pending'))));
+    }
+
+    /** @return list<int>|null the member's requests still to end, or null when even that can't be read */
+    private function idsStillToEnd(PortalUser $portalUser): ?array
+    {
+        try {
+            return self::stillToEnd(PortalRequest::query())->where('portal_user_id', $portalUser->getKey())
+                ->orderBy('id')->pluck('id')->map(fn ($id): int => (int) $id)->all();
+        } catch (Throwable) {
+            return null;
+        }
     }
 
     /** Expire one open request past its date; false when it was already decided or isn't due. */

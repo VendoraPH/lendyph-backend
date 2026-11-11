@@ -97,7 +97,7 @@ final class ProfileRequests
      *
      * @throws ValidationException
      */
-    public function approve(PortalRequest $request, User $staff): PortalRequest
+    public function approve(PortalRequest $request, User $staff, ?string $message = null): PortalRequest
     {
         $member = Borrower::query()->whereKey($request->borrower_id)->lockForUpdate()->firstOrFail();
         $locked = RequestDesk::lockOpen($request->id, [PortalRequest::STATUS_SUBMITTED, PortalRequest::STATUS_UNDER_REVIEW, PortalRequest::STATUS_NEED_INFO]);
@@ -112,7 +112,7 @@ final class ProfileRequests
         $contactChanged = array_intersect(array_keys($values), ProfileFields::CONTACT_FIELDS) !== [];
         $member->update($values);
 
-        $this->timeline->move($locked, PortalRequest::STATUS_COMPLETED, PortalRequestEvent::ACTOR_STAFF, $staff->id, null, [
+        $this->timeline->move($locked, PortalRequest::STATUS_COMPLETED, PortalRequestEvent::ACTOR_STAFF, $staff->id, $message, [
             'decided_by' => $staff->id,
             'decided_at' => now(),
         ]);

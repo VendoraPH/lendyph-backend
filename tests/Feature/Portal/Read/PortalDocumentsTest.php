@@ -5,9 +5,12 @@ namespace Tests\Feature\Portal\Read;
 use App\Models\AuditLog;
 use App\Models\CoMaker;
 use App\Models\PortalUser;
+use App\Services\Portal\Read\ValidIdType;
 use App\Services\ValidIdService;
 use Illuminate\Routing\Middleware\ThrottleRequests;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
+use InvalidArgumentException;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
@@ -108,7 +111,7 @@ class PortalDocumentsTest extends TestCase
     {
         $me = $this->portalMember();
 
-        foreach (['Valid.ID', 'valid/id', 'Valid ID (back)'] as $type) {
+        foreach (['Valid.ID', 'valid/id', 'Valid ID (back)', 'VALİD ID'] as $type) {
             $document = $this->memberDocument($me->borrower, ['type' => $type]);
             Storage::disk('private')->put($document->file_path, 'secret');
 
@@ -118,6 +121,26 @@ class PortalDocumentsTest extends TestCase
 
         $other = $this->memberDocument($me->borrower, ['type' => 'Valid-until certificate']);
         $this->assertContains($other->id, array_column($this->portalJson('GET', '/api/portal/documents', [], $this->portalToken($me))->json('data.files'), 'id'), 'Only a valid ID is left out.');
+    }
+
+    public function test_the_valid_id_filter_takes_only_a_known_column(): void
+    {
+        $this->assertSame(0, ValidIdType::exclude(DB::table('documents')->where('type', 'Valid.ID'), 'documents.type')->count());
+
+        $this->expectException(InvalidArgumentException::class);
+        ValidIdType::exclude(DB::table('documents'), 'type) OR (1 = 1');
+    }
+
+    public function test_the_php_and_sql_checks_agree_on_non_ascii_types(): void
+    {
+        $me = $this->portalMember();
+
+        foreach (['VALİD ID', 'Válid ID', 'valid ıd', 'ВALID ID'] as $type) {
+            $document = $this->memberDocument($me->borrower, ['type' => $type]);
+            $listed = ValidIdType::exclude(DB::table('documents')->where('id', $document->id))->exists();
+
+            $this->assertSame(! ValidIdType::is($type), $listed, $type);
+        }
     }
 
     public function test_a_missing_file_answers_404(): void

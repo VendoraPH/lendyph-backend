@@ -165,7 +165,7 @@ class PortalDocumentShareTest extends TestCase
     {
         $member = $this->portalMember(['branch_id' => $this->branch->id]);
 
-        foreach (['Valid.ID', 'valid/id', 'Valid ID (back)', 'secondary-valid-id'] as $type) {
+        foreach (['Valid.ID', 'valid/id', 'Valid ID (back)', 'secondary-valid-id', 'VALİD ID'] as $type) {
             $document = $this->memberDocument($member->borrower, ['type' => $type], shared: false);
             $this->actingAs($this->admin)->postJson($this->shareUri($document), ['document_id' => $document->id])
                 ->assertUnprocessable()

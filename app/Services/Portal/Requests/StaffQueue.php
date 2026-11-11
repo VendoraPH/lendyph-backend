@@ -107,14 +107,18 @@ final class StaffQueue
             Refuse::conflict("Request {$request->reference} is waiting for its second approval in the savings approvals queue; decide it there.");
         }
 
+        // The staff's message to the member goes on the timeline and in the
+        // notice, as on every other decision.
+        $message = $input['message'] ?? null;
+
         [$locked, $status] = match ($request->type) {
-            PortalRequest::TYPE_SAVINGS_WITHDRAWAL => (function () use ($request, $input, $staff): array {
-                $result = $this->withdrawals->approve($request, $input['payout'], $staff);
+            PortalRequest::TYPE_SAVINGS_WITHDRAWAL => (function () use ($request, $input, $staff, $message): array {
+                $result = $this->withdrawals->approve($request, $input['payout'], $staff, $message);
 
                 return [$result['request'], $result['transaction'] !== null ? 201 : 202];
             })(),
-            PortalRequest::TYPE_SAVINGS_OPENING => [$this->openings->approve($request, $input['deposit'] ?? ['date' => now()->toDateString()], $staff), 201],
-            default => [$this->profiles->approve($request, $staff), 200],
+            PortalRequest::TYPE_SAVINGS_OPENING => [$this->openings->approve($request, $input['deposit'] ?? ['date' => now()->toDateString()], $staff, $message), 201],
+            default => [$this->profiles->approve($request, $staff, $message), 200],
         };
 
         // The status the approval moved it from, as read under the row lock

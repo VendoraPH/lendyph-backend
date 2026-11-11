@@ -4,13 +4,14 @@ namespace App\Services\Portal;
 
 use App\Models\Borrower;
 use App\Models\PortalCode;
+use App\Models\PortalRequest;
 use App\Models\PortalUser;
 use App\Services\AuditLogService;
 use App\Services\Portal\Auth\MemberNumber;
 use App\Services\Portal\Auth\PortalSessions;
 use App\Services\Portal\Requests\RequestSweep;
+use App\Services\Savings\Api\Refuse;
 use Illuminate\Support\Facades\DB;
-use Throwable;
 
 /**
  * Turning a member's portal access off, back on, unlocking it and ending its
@@ -21,6 +22,8 @@ use Throwable;
  */
 final class PortalAccess
 {
+    public const EARLIER_REQUESTS_OPEN = 'This member\'s earlier requests are still being closed. Try again in a moment.';
+
     public function __construct(private readonly PortalSessions $sessions) {}
 
     /**
@@ -62,24 +65,40 @@ final class PortalAccess
         // After commit, so the portal account lock is never held while the
         // requests' savings account and request locks are taken. Outside a
         // transaction it runs at once; either way access is already off, so a
-        // failure is reported, never answered as a 500, and the nightly
-        // portal:requests-sweep ends the requests instead.
-        DB::afterCommit(function () use ($portalUser, $reason): void {
-            try {
-                app(RequestSweep::class)->endFor($portalUser, $reason);
-            } catch (Throwable $e) {
-                report($e);
-            }
-        });
+        // failure is reported and logged, never answered as a 500, and the
+        // nightly portal:requests-sweep ends the requests instead.
+        DB::afterCommit(fn () => app(RequestSweep::class)->endForReported($portalUser, $reason));
     }
 
+    /**
+     * Turn access back on. First the requests from before it was turned off
+     * are ended (endFor, before the portal account is locked, as in
+     * disable()), so a clean-up that failed then can't leave one open into
+     * the new access. If any is still open after that, access stays off
+     * (409 in words) and staff try again.
+     */
     public function enable(PortalUser $portalUser, int $staffId): void
     {
+        $current = PortalUser::query()->find($portalUser->getKey());
+
+        if ($current?->status === PortalUser::STATUS_DISABLED) {
+            app(RequestSweep::class)->endForReported($current, $current->disabled_reason ?? 'administrative');
+        }
+
         DB::transaction(function () use ($portalUser, $staffId): void {
             $locked = PortalUser::query()->lockForUpdate()->findOrFail($portalUser->getKey());
 
             if ($locked->status !== PortalUser::STATUS_DISABLED) {
                 return;
+            }
+
+            $earlier = RequestSweep::stillToEnd(PortalRequest::query())
+                ->where('portal_user_id', $locked->getKey())
+                ->when($locked->disabled_at, fn ($q, $at) => $q->where('created_at', '<=', $at))
+                ->exists();
+
+            if ($earlier) {
+                Refuse::conflict(self::EARLIER_REQUESTS_OPEN);
             }
 
             $status = $locked->password === null ? PortalUser::STATUS_INVITED : PortalUser::STATUS_ACTIVE;

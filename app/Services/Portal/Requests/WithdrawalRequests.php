@@ -16,6 +16,7 @@ use App\Services\Portal\PortalSettings;
 use App\Services\Savings\Api\HoldDesk;
 use App\Services\Savings\Api\Refuse;
 use App\Services\Savings\Api\Teller;
+use App\Services\Savings\ApprovalGate;
 use App\Services\Savings\AvailableBalance;
 use App\Services\Savings\SavingsLocks;
 use App\Services\Savings\SavingsMath;
@@ -60,6 +61,7 @@ final class WithdrawalRequests
         private readonly PortalSettings $settings,
         private readonly RequestTimeline $timeline,
         private readonly RequestNumbers $numbers,
+        private readonly ApprovalGate $gate,
     ) {}
 
     /**
@@ -159,14 +161,21 @@ final class WithdrawalRequests
      *
      * @throws ValidationException
      */
-    public function approve(PortalRequest $request, array $payout, User $staff): array
+    public function approve(PortalRequest $request, array $payout, User $staff, ?string $message = null): array
     {
         $account = $this->locks->account((int) $request->savings_account_id);
         $locked = RequestDesk::lockOpen($request->id, [PortalRequest::STATUS_SUBMITTED, PortalRequest::STATUS_UNDER_REVIEW, PortalRequest::STATUS_NEED_INFO]);
         self::assertStillAMember($locked);
         $hold = $this->activeHold($locked);
 
-        $this->holds->releaseForRequest($hold, "Paid out on request {$locked->reference}", $staff);
+        // Above tier 1 nothing is paid yet: the savings approval the Teller
+        // opens reserves the money as a pending outflow, under this same
+        // account lock, so the hold hands over to it (keeping both would
+        // reserve the money twice). The reason says which happened.
+        $reason = $this->gate->needsApproval(SavingsMath::centavos($locked->amount))
+            ? "Moved to its second approval on request {$locked->reference}; the savings approval now reserves the money"
+            : "Paid out on request {$locked->reference}";
+        $this->holds->releaseForRequest($hold, $reason, $staff);
 
         $result = $this->teller->withdraw($account->id, [
             'amount' => (string) $locked->amount,
@@ -177,13 +186,13 @@ final class WithdrawalRequests
         ], $staff);
 
         if ($result['transaction'] !== null) {
-            $this->timeline->move($locked, PortalRequest::STATUS_COMPLETED, PortalRequestEvent::ACTOR_STAFF, $staff->id, null, [
+            $this->timeline->move($locked, PortalRequest::STATUS_COMPLETED, PortalRequestEvent::ACTOR_STAFF, $staff->id, $message, [
                 'savings_transaction_id' => $result['transaction']->id,
                 'decided_by' => $staff->id,
                 'decided_at' => now(),
             ]);
         } else {
-            $this->timeline->move($locked, PortalRequest::STATUS_APPROVED, PortalRequestEvent::ACTOR_STAFF, $staff->id, null, [
+            $this->timeline->move($locked, PortalRequest::STATUS_APPROVED, PortalRequestEvent::ACTOR_STAFF, $staff->id, $message, [
                 'savings_approval_id' => $result['approval']->id,
                 'decided_by' => $staff->id,
                 'decided_at' => now(),

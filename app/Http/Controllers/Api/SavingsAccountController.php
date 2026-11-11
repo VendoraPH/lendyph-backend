@@ -141,7 +141,7 @@ class SavingsAccountController extends Controller
     #[OA\Get(
         path: '/api/savings/accounts/{account}',
         summary: 'A savings account',
-        description: 'With the server\'s `balance`, `hold_amount`, `pending_amount` (outflows waiting for approval), `available_balance`, `accrued_interest` (since the last crediting, not yet credited) and `interest_credited_through`.',
+        description: 'With the server\'s `balance`, `hold_amount`, `held_for_requests` (the part of `hold_amount` held for portal withdrawal requests from members), `pending_amount` (outflows waiting for approval), `available_balance`, `accrued_interest` (since the last crediting, not yet credited) and `interest_credited_through`.',
         tags: ['Savings'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'account', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
