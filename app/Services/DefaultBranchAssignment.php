@@ -25,12 +25,13 @@ use Illuminate\Support\Facades\Log;
  *
  * The branches table has no head-office flag, so:
  * 1. the only active branch, when there is just one;
- * 2. else the one active branch marked as the main branch: its code is MAIN,
- *    HO or HQ, or its name is Main, Main Branch, Main Office, Head Office or
- *    Headquarters (case and outer spaces ignored; BranchSeeder writes
- *    "Main Branch", MAIN);
- * 3. else (none, or several marked) nobody is assigned, and every user it
- *    would have assigned is listed as skipped.
+ * 2. else the one active branch named as the main branch: Main, Main
+ *    Branch, Main Office, Head Office or Headquarters, ignoring case and
+ *    spaces (BranchSeeder writes "Main Branch"). A code alone (MAIN, HO, HQ)
+ *    never counts: a town branch can carry such a code;
+ * 3. else (none named, or several) nobody is assigned, and every user it
+ *    would have assigned is listed as skipped. The command then exits with
+ *    failure.
  *
  * ## Writes
  *
@@ -50,11 +51,8 @@ use Illuminate\Support\Facades\Log;
  */
 class DefaultBranchAssignment
 {
-    /** Branch codes that mark the main branch, upper case. */
-    public const MAIN_CODES = ['MAIN', 'HO', 'HQ'];
-
-    /** Branch names that mark the main branch, lower case. */
-    public const MAIN_NAMES = ['main', 'main branch', 'main office', 'head office', 'headquarters'];
+    /** Branch names that mark the main branch, lower case with no spaces. */
+    public const MAIN_NAMES = ['main', 'mainbranch', 'mainoffice', 'headoffice', 'headquarters'];
 
     /** Roles left alone whatever their rows say (Role::PROTECTED_KEYS). */
     private const LEFT_ALONE_ROLES = ['admin', 'super_admin'];
@@ -139,14 +137,22 @@ class DefaultBranchAssignment
             return ['branch' => $describe($active->first(), 'the only active branch'), 'reason' => null];
         }
 
-        $marked = $active->filter(fn (object $branch): bool => in_array(mb_strtoupper(trim((string) $branch->code)), self::MAIN_CODES, true)
-            || in_array(mb_strtolower(trim((string) $branch->name)), self::MAIN_NAMES, true))->values();
+        $named = $active->filter(fn (object $branch): bool => in_array(self::nameKey((string) $branch->name), self::MAIN_NAMES, true))->values();
 
-        return match ($marked->count()) {
-            1 => ['branch' => $describe($marked->first(), 'the branch marked as the main branch'), 'reason' => null],
-            0 => ['branch' => null, 'reason' => "{$active->count()} active branches and none is marked as the main branch"],
-            default => ['branch' => null, 'reason' => "{$marked->count()} active branches are marked as the main branch"],
+        return match ($named->count()) {
+            1 => ['branch' => $describe($named->first(), 'the branch named as the main branch'), 'reason' => null],
+            0 => ['branch' => null, 'reason' => "{$active->count()} active branches and none is named as the main branch"],
+            default => ['branch' => null, 'reason' => "{$named->count()} active branches are named as the main branch"],
         };
+    }
+
+    /**
+     * A branch name compared without case or spaces: " Head  OFFICE" and
+     * "HeadOffice" both read "headoffice".
+     */
+    private static function nameKey(string $name): string
+    {
+        return mb_strtolower((string) preg_replace('/\s+/u', '', $name));
     }
 
     /**
@@ -189,6 +195,13 @@ class DefaultBranchAssignment
     /**
      * Assign one user and record it. Guarded on the user still being active
      * with no branch, so one changed since it was read is left as it now is.
+     *
+     * Roles and permissions are not re-checked here. That is harmless: a
+     * branch never grants anything, it only narrows what a user without
+     * `branches:view_all` sees (BranchAccess). A user given view_all, admin or
+     * super_admin between the read and this write keeps seeing every branch,
+     * and their new branch shows only as an assignment that can be changed in
+     * Settings > Users, recorded by the audit row below.
      *
      * @param  array{id: int, name: string}  $branch
      */

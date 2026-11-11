@@ -468,6 +468,15 @@ final class Presenter
     }
 
     /**
+     * Whether the score's revision was tested or reviewed
+     * (CreditScorecardRevision::isChecked()), once per revision per request.
+     */
+    private function checked(CreditScore $score): bool
+    {
+        return $this->memo(null, "checked.{$score->revision_id}", fn (): bool => (bool) $score->revision?->isChecked());
+    }
+
+    /**
      * A value kept for the current HTTP request only, so a long-lived process
      * never answers one request, or one caller, from another's memo. Keyed by
      * the viewer when there is one, and kept only for a saved user, as
@@ -479,15 +488,6 @@ final class Presenter
      * @param  callable(): TValue  $resolve
      * @return TValue
      */
-    /**
-     * Whether the score's revision was tested or reviewed
-     * (CreditScorecardRevision::isChecked()), once per revision per request.
-     */
-    private function checked(CreditScore $score): bool
-    {
-        return $this->memo(null, "checked.{$score->revision_id}", fn (): bool => (bool) $score->revision?->isChecked());
-    }
-
     private function memo(?User $viewer, string $key, callable $resolve): mixed
     {
         $request = app()->bound('request') ? app('request') : null;

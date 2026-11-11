@@ -13,7 +13,8 @@ class AssignDefaultBranch extends Command
 {
     /**
      * The same logic the 2026_11_11_620000 migration runs on deploy, so a dry
-     * run on a database shows what it will change there.
+     * run on a database shows what it will change there. Exits with failure
+     * when there is no clear main branch and users were left unassigned.
      */
     public function handle(DefaultBranchAssignment $assignment): int
     {
@@ -46,6 +47,12 @@ class AssignDefaultBranch extends Command
             count($result['assigned']),
             count($result['skipped']),
         ));
+
+        if ($branch === null && $result['skipped'] !== []) {
+            $this->error('Nobody was assigned: name the main branch "Main Branch" or "Head Office", or assign these users in Settings > Users, then run this again.');
+
+            return self::FAILURE;
+        }
 
         return self::SUCCESS;
     }

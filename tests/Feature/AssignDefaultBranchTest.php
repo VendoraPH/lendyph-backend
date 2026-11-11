@@ -49,15 +49,16 @@ class AssignDefaultBranchTest extends TestCase
         $this->assertSame($this->branch->id, (int) DB::table('users')->where('id', $user->id)->value('branch_id'));
     }
 
-    public function test_with_several_branches_the_one_marked_main_is_used(): void
+    public function test_with_several_branches_the_one_named_main_is_used(): void
     {
-        Branch::factory()->create(['name' => 'Taytay', 'code' => 'TAY']);
+        // binhs-coop staging: "Main Branch" (MAIN) and "Tawi-tawi".
+        Branch::factory()->create(['name' => 'Tawi-tawi', 'code' => 'TAW']);
         $officer = $this->branchless('loan_officer');
         $cashier = $this->branchless('cashier');
         $auditRows = AuditLog::count();
 
         $this->artisan(self::COMMAND)
-            ->expectsOutputToContain("Main branch: Main Branch (MAIN, id {$this->branch->id}), the branch marked as the main branch.")
+            ->expectsOutputToContain("Main branch: Main Branch (MAIN, id {$this->branch->id}), the branch named as the main branch.")
             ->expectsOutputToContain('Assigned 2 user(s) to the main branch; 0 skipped.')
             ->assertSuccessful();
 
@@ -90,6 +91,32 @@ class AssignDefaultBranchTest extends TestCase
         $this->assertSame([$head->id], $this->branchIds($user));
     }
 
+    public function test_the_name_is_matched_without_case_or_spaces(): void
+    {
+        $this->branch->update(['name' => 'Binangonan', 'code' => 'BIN']);
+        $head = Branch::factory()->create(['name' => "  HEAD \t office ", 'code' => 'H01']);
+        $user = $this->branchless('cashier');
+
+        $this->artisan(self::COMMAND)->assertSuccessful();
+
+        $this->assertSame([$head->id], $this->branchIds($user));
+    }
+
+    public function test_a_main_code_on_a_town_branch_no_longer_marks_the_main_branch(): void
+    {
+        $this->branch->update(['name' => 'Binangonan', 'code' => 'MAIN']);
+        Branch::factory()->create(['name' => 'Tawi-tawi', 'code' => 'HQ']);
+        $user = $this->branchless('loan_officer');
+        $before = $this->snapshot();
+
+        $this->artisan(self::COMMAND)
+            ->expectsOutputToContain('No main branch: 2 active branches and none is named as the main branch.')
+            ->expectsOutputToContain("{$user->username} (id {$user->id}) skipped: no main branch")
+            ->assertFailed();
+
+        $this->assertSame($before, $this->snapshot());
+    }
+
     public function test_with_several_branches_and_no_main_one_the_users_are_skipped_and_listed(): void
     {
         $this->branch->update(['name' => 'Binangonan', 'code' => 'BIN']);
@@ -98,24 +125,36 @@ class AssignDefaultBranchTest extends TestCase
         $before = $this->snapshot();
 
         $this->artisan(self::COMMAND)
-            ->expectsOutputToContain('No main branch: 2 active branches and none is marked as the main branch.')
+            ->expectsOutputToContain('No main branch: 2 active branches and none is named as the main branch.')
             ->expectsOutputToContain("{$user->username} (id {$user->id}) skipped: no main branch")
             ->expectsOutputToContain('Assigned 0 user(s) to the main branch; 1 skipped.')
-            ->assertSuccessful();
+            ->expectsOutputToContain('Nobody was assigned: name the main branch "Main Branch" or "Head Office", or assign these users in Settings > Users, then run this again.')
+            ->assertFailed();
 
         $this->assertSame($before, $this->snapshot());
     }
 
-    public function test_two_branches_marked_main_are_unclear_and_skipped(): void
+    public function test_with_no_main_branch_and_nobody_to_assign_it_succeeds(): void
+    {
+        $this->branch->update(['name' => 'Binangonan', 'code' => 'BIN']);
+        Branch::factory()->create(['name' => 'Taytay', 'code' => 'TAY']);
+
+        $this->artisan(self::COMMAND)
+            ->expectsOutputToContain('No main branch: 2 active branches and none is named as the main branch.')
+            ->expectsOutputToContain('Assigned 0 user(s) to the main branch; 0 skipped.')
+            ->assertSuccessful();
+    }
+
+    public function test_two_branches_named_main_are_unclear_and_skipped(): void
     {
         Branch::factory()->create(['name' => 'Head Office', 'code' => 'HO']);
         $user = $this->branchless('loan_officer');
         $before = $this->snapshot();
 
         $this->artisan(self::COMMAND)
-            ->expectsOutputToContain('No main branch: 2 active branches are marked as the main branch.')
+            ->expectsOutputToContain('No main branch: 2 active branches are named as the main branch.')
             ->expectsOutputToContain("{$user->username} (id {$user->id}) skipped: no main branch")
-            ->assertSuccessful();
+            ->assertFailed();
 
         $this->assertSame($before, $this->snapshot());
     }
@@ -245,7 +284,7 @@ class AssignDefaultBranchTest extends TestCase
             $fromId = (int) AuditLog::max('id');
 
             DB::beginTransaction();
-            $this->artisan(self::COMMAND)->assertSuccessful();
+            $this->artisan(self::COMMAND)->assertExitCode($case === 'main branch' ? 0 : 1);
             $byCommand = $this->outcome($fromId);
             DB::rollBack();
 

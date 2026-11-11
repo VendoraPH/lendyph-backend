@@ -152,6 +152,30 @@ it('skips and lists a revision 1.0 whose weights are not the reviewed ones', fun
         ->and(ownerReviewSnapshot())->toBe($before);
 });
 
+it('lists a review another run wrote first as skipped, logs it and writes no audit row', function () {
+    withoutOwnerReview();
+    $raced = false;
+    DB::listen(function ($query) use (&$raced): void {
+        if (! $raced && str_starts_with($query->sql, 'select exists') && str_contains($query->sql, 'credit_scorecard_reviews')) {
+            $raced = true;
+            DB::table('credit_scorecard_reviews')->insert(['revision_id' => $this->revision->id, 'reviewed_on' => '2026-11-11', 'reviewed_by' => 'Another run']);
+        }
+    });
+    Log::spy();
+    $auditRows = AuditLog::count();
+
+    Artisan::call(OWNER_REVIEW_COMMAND);
+
+    expect($raced)->toBeTrue()
+        ->and(Artisan::output())->toContain("Scorecard 1.0 (id {$this->revision->id}) left as it is: reviewed by another run while the fix ran")
+        ->toContain('Marked 0 scorecard revision(s) reviewed; 1 left as they are.')
+        ->and(CreditScorecardReview::query()->sole()->reviewed_by)->toBe('Another run')
+        ->and(AuditLog::count())->toBe($auditRows);
+    Log::shouldHaveReceived('warning')->withArgs(
+        fn (string $message, array $context): bool => str_contains($message, 'reviewed by another run') && ($context['id'] ?? null) === $this->revision->id,
+    );
+});
+
 it('runs the same fix from the migration, safely twice, with the same outcome as the command', function () {
     withoutOwnerReview();
     $fromId = (int) AuditLog::max('id');

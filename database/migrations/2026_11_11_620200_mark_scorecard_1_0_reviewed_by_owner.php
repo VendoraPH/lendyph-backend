@@ -2,6 +2,7 @@
 
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
@@ -104,7 +105,12 @@ return new class extends Migration
 
         if ($this->write($revision)) {
             $result['marked'][] = $entry;
+
+            return $result;
         }
+
+        $result['skipped'][] = [...$entry, 'reason' => 'reviewed by another run while the fix ran'];
+        Log::warning('Scorecard 1.0 was reviewed by another run while the fix ran; that review was kept.', $entry);
 
         return $result;
     }
@@ -136,32 +142,32 @@ return new class extends Migration
 
     private function write(object $revision): bool
     {
-        return DB::transaction(function () use ($revision): bool {
-            $inserted = DB::table('credit_scorecard_reviews')->insertOrIgnore([
-                'revision_id' => $revision->id,
-                'reviewed_on' => self::REVIEWED_ON,
-                'reviewed_by' => self::REVIEWED_BY,
-                'note' => self::NOTE,
-            ]);
+        try {
+            DB::transaction(function () use ($revision): void {
+                DB::table('credit_scorecard_reviews')->insert([
+                    'revision_id' => $revision->id,
+                    'reviewed_on' => self::REVIEWED_ON,
+                    'reviewed_by' => self::REVIEWED_BY,
+                    'note' => self::NOTE,
+                ]);
 
-            if ($inserted === 0) {
-                return false;
-            }
+                DB::table('audit_logs')->insert([
+                    'user_id' => null,
+                    'action' => 'scorecard_reviewed',
+                    'auditable_type' => self::AUDITABLE_TYPE,
+                    'auditable_id' => $revision->id,
+                    'old_values' => json_encode(['validated' => false]),
+                    'new_values' => json_encode(['validated' => true, 'reviewed_on' => self::REVIEWED_ON, 'reviewed_by' => self::REVIEWED_BY]),
+                    'ip_address' => null,
+                    'user_agent' => null,
+                    'description' => 'System change: Scorecard 1.0 reviewed by the owner on 2026-11-11; its weights (35/25/15/10/10/5) and risk levels are kept.',
+                    'created_at' => now(),
+                ]);
+            });
+        } catch (UniqueConstraintViolationException) {
+            return false;
+        }
 
-            DB::table('audit_logs')->insert([
-                'user_id' => null,
-                'action' => 'scorecard_reviewed',
-                'auditable_type' => self::AUDITABLE_TYPE,
-                'auditable_id' => $revision->id,
-                'old_values' => json_encode(['validated' => false]),
-                'new_values' => json_encode(['validated' => true, 'reviewed_on' => self::REVIEWED_ON, 'reviewed_by' => self::REVIEWED_BY]),
-                'ip_address' => null,
-                'user_agent' => null,
-                'description' => 'System change: Scorecard 1.0 reviewed by the owner on 2026-11-11; its weights (35/25/15/10/10/5) and risk levels are kept.',
-                'created_at' => now(),
-            ]);
-
-            return true;
-        });
+        return true;
     }
 };

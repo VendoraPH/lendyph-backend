@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
@@ -20,8 +21,9 @@ use Illuminate\Support\Facades\Log;
  * doesn't is left alone and listed, since the review was of those weights.
  * One already reviewed or validated is passed over, and the unique
  * `revision_id` means a review written by another run in the meantime is
- * never doubled, so a second run changes nothing. The review writes one audit
- * row on the revision as a system change (no user, no address).
+ * never doubled: that write is listed as skipped and logged, and a second run
+ * changes nothing. The review writes one audit row on the revision as a
+ * system change (no user, no address).
  *
  * Used by `credit-scoring:mark-scorecard-reviewed` (with `--dry-run` to
  * preview a database). The 2026_11_11_620200 migration does the same on
@@ -80,7 +82,12 @@ class ScorecardOwnerReview
         if ($dryRun || $this->write($revision)) {
             $inUse = (int) DB::table('credit_scoring_settings')->orderBy('id')->value('current_revision_id') === $entry['id'];
             $result['marked'][] = [...$entry, 'in_use' => $inUse];
+
+            return $result;
         }
+
+        $result['skipped'][] = [...$entry, 'reason' => 'reviewed by another run while the fix ran'];
+        Log::warning('Scorecard 1.0 was reviewed by another run while the fix ran; that review was kept.', $entry);
 
         return $result;
     }
@@ -128,37 +135,39 @@ class ScorecardOwnerReview
     }
 
     /**
-     * Write the review and its audit row. A review another run wrote first is
-     * left as it is.
+     * Write the review and its audit row together. A plain insert: only the
+     * unique `revision_id` violation (another run wrote the review first) is
+     * caught, which rolls both back and answers false so run() lists it as
+     * skipped and logs it. Any other failure is thrown.
      */
     private function write(object $revision): bool
     {
-        return DB::transaction(function () use ($revision): bool {
-            $inserted = DB::table('credit_scorecard_reviews')->insertOrIgnore([
-                'revision_id' => $revision->id,
-                'reviewed_on' => self::REVIEWED_ON,
-                'reviewed_by' => self::REVIEWED_BY,
-                'note' => self::NOTE,
-            ]);
+        try {
+            DB::transaction(function () use ($revision): void {
+                DB::table('credit_scorecard_reviews')->insert([
+                    'revision_id' => $revision->id,
+                    'reviewed_on' => self::REVIEWED_ON,
+                    'reviewed_by' => self::REVIEWED_BY,
+                    'note' => self::NOTE,
+                ]);
 
-            if ($inserted === 0) {
-                return false;
-            }
+                DB::table('audit_logs')->insert([
+                    'user_id' => null,
+                    'action' => 'scorecard_reviewed',
+                    'auditable_type' => self::AUDITABLE_TYPE,
+                    'auditable_id' => $revision->id,
+                    'old_values' => json_encode(['validated' => false]),
+                    'new_values' => json_encode(['validated' => true, 'reviewed_on' => self::REVIEWED_ON, 'reviewed_by' => self::REVIEWED_BY]),
+                    'ip_address' => null,
+                    'user_agent' => null,
+                    'description' => 'System change: Scorecard 1.0 reviewed by the owner on 2026-11-11; its weights (35/25/15/10/10/5) and risk levels are kept.',
+                    'created_at' => now(),
+                ]);
+            });
+        } catch (UniqueConstraintViolationException) {
+            return false;
+        }
 
-            DB::table('audit_logs')->insert([
-                'user_id' => null,
-                'action' => 'scorecard_reviewed',
-                'auditable_type' => self::AUDITABLE_TYPE,
-                'auditable_id' => $revision->id,
-                'old_values' => json_encode(['validated' => false]),
-                'new_values' => json_encode(['validated' => true, 'reviewed_on' => self::REVIEWED_ON, 'reviewed_by' => self::REVIEWED_BY]),
-                'ip_address' => null,
-                'user_agent' => null,
-                'description' => 'System change: Scorecard 1.0 reviewed by the owner on 2026-11-11; its weights (35/25/15/10/10/5) and risk levels are kept.',
-                'created_at' => now(),
-            ]);
-
-            return true;
-        });
+        return true;
     }
 }

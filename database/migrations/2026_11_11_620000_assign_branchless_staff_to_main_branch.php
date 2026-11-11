@@ -14,9 +14,8 @@ return new class extends Migration
      * on its first, whatever those classes become. Polymorphic rows store the
      * full class name; there is no morph map.
      */
-    private const MAIN_CODES = ['MAIN', 'HO', 'HQ'];
-
-    private const MAIN_NAMES = ['main', 'main branch', 'main office', 'head office', 'headquarters'];
+    /** Lower case with no spaces; a code alone never marks the main branch. */
+    private const MAIN_NAMES = ['main', 'mainbranch', 'mainoffice', 'headoffice', 'headquarters'];
 
     private const LEFT_ALONE_ROLES = ['admin', 'super_admin'];
 
@@ -96,7 +95,7 @@ return new class extends Migration
      */
     private function mainBranch(): array
     {
-        $active = DB::table('branches')->where('is_active', true)->orderBy('id')->get(['id', 'name', 'code']);
+        $active = DB::table('branches')->where('is_active', true)->orderBy('id')->get(['id', 'name']);
 
         if ($active->isEmpty()) {
             return ['branch' => null, 'reason' => 'there is no active branch'];
@@ -106,13 +105,16 @@ return new class extends Migration
             return ['branch' => ['id' => (int) $active->first()->id, 'name' => (string) $active->first()->name], 'reason' => null];
         }
 
-        $marked = $active->filter(fn (object $branch): bool => in_array(mb_strtoupper(trim((string) $branch->code)), self::MAIN_CODES, true)
-            || in_array(mb_strtolower(trim((string) $branch->name)), self::MAIN_NAMES, true))->values();
+        $named = $active->filter(fn (object $branch): bool => in_array(
+            mb_strtolower((string) preg_replace('/\s+/u', '', (string) $branch->name)),
+            self::MAIN_NAMES,
+            true,
+        ))->values();
 
-        return match ($marked->count()) {
-            1 => ['branch' => ['id' => (int) $marked->first()->id, 'name' => (string) $marked->first()->name], 'reason' => null],
-            0 => ['branch' => null, 'reason' => "{$active->count()} active branches and none is marked as the main branch"],
-            default => ['branch' => null, 'reason' => "{$marked->count()} active branches are marked as the main branch"],
+        return match ($named->count()) {
+            1 => ['branch' => ['id' => (int) $named->first()->id, 'name' => (string) $named->first()->name], 'reason' => null],
+            0 => ['branch' => null, 'reason' => "{$active->count()} active branches and none is named as the main branch"],
+            default => ['branch' => null, 'reason' => "{$named->count()} active branches are named as the main branch"],
         };
     }
 
