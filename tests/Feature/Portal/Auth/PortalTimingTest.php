@@ -6,6 +6,8 @@ use App\Models\Borrower;
 use App\Models\PortalCode;
 use App\Models\PortalUser;
 use Illuminate\Routing\Middleware\ThrottleRequests;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Tests\Feature\Portal\PortalTestHelpers;
 use Tests\TestCase;
@@ -140,5 +142,25 @@ class PortalTimingTest extends TestCase
             $this->assertSame(1, $checks, "{$name}: Hash::check calls");
             $this->assertSame(0, $makes, "{$name}: Hash::make calls");
         }
+    }
+
+    /**
+     * Re-check: the stand-in hash survives a cache that keeps nothing between
+     * requests (the `array` store): it is stored with the portal settings, so
+     * a second request builds no new one.
+     */
+    public function test_the_stand_in_hash_is_kept_whatever_the_cache_store(): void
+    {
+        config(['cache.default' => 'array']);
+        $body = ['member_number' => 'NOBODY-1', 'password' => 'Anything-1'];
+
+        $this->measure('/api/portal/auth/login', $body);
+        $this->assertNotNull(DB::table('portal_settings')->value('auth_dummy_hash'));
+
+        Cache::flush();
+        [, $checks, $makes] = $this->measure('/api/portal/auth/login', $body);
+
+        $this->assertSame(1, $checks);
+        $this->assertSame(0, $makes, 'The second request reused the stored hash.');
     }
 }

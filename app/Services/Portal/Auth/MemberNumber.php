@@ -6,11 +6,14 @@ use App\Models\Borrower;
 
 /**
  * The sign-in identifier (portal design §1): the member number
- * (`membership_number`, else `borrower_code`), with case and spaces ignored.
+ * (`membership_number`, else `borrower_code`), with case and spaces ignored in
+ * what the member types.
  */
 final class MemberNumber
 {
     public const MAX_LENGTH = 40;
+
+    private const MEMO_PREFIX = 'portal.member_number.';
 
     /**
      * Printable ASCII only (review M2): a full-width or invisible character
@@ -58,7 +61,15 @@ final class MemberNumber
         return hash_hmac('sha256', 'portal-member-number|'.self::normalise($input), (string) config('app.key'));
     }
 
-    /** The member this number signs in as, or null. */
+    /**
+     * The member this number signs in as, or null.
+     *
+     * Stored numbers are canonical (`BRW-NNNNNN`, and `membership_number`
+     * copied from it or typed by staff), so the normalised input is compared
+     * with the two indexed columns directly, in one query whether or not a
+     * member is found. A membership number wins over another member's code.
+     * Resolved once per request: the limiter and the service share it.
+     */
     public static function find(mixed $input): ?Borrower
     {
         $number = self::normalise($input);
@@ -67,13 +78,25 @@ final class MemberNumber
             return null;
         }
 
-        return Borrower::query()
-            ->whereRaw("REPLACE(UPPER(membership_number), ' ', '') = ?", [$number])
-            ->first()
-            ?? Borrower::query()
-                ->where(fn ($unnumbered) => $unnumbered->whereNull('membership_number')->orWhere('membership_number', ''))
-                ->whereRaw("REPLACE(UPPER(borrower_code), ' ', '') = ?", [$number])
-                ->first();
+        $request = app()->bound('request') ? request() : null;
+        $memo = self::MEMO_PREFIX.$number;
+
+        if ($request !== null && $request->attributes->has($memo)) {
+            return $request->attributes->get($memo);
+        }
+
+        $member = Borrower::query()
+            ->where(fn ($match) => $match
+                ->where('membership_number', $number)
+                ->orWhere(fn ($unnumbered) => $unnumbered
+                    ->where('borrower_code', $number)
+                    ->where(fn ($none) => $none->whereNull('membership_number')->orWhere('membership_number', ''))))
+            ->orderByRaw('membership_number = ? desc', [$number])
+            ->first();
+
+        $request?->attributes->set($memo, $member);
+
+        return $member;
     }
 
     /** The number a member signs in with, as shown to them and to staff. */

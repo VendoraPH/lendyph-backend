@@ -61,6 +61,7 @@ class PortalUser extends Authenticatable
         'failed_attempts',
         'locked_until',
         'lockouts_cleared_at',
+        'hard_locked_at',
         'invited_by',
         'invited_at',
         'activated_at',
@@ -82,6 +83,7 @@ class PortalUser extends Authenticatable
             'disabled_at' => 'datetime',
             'locked_until' => 'datetime',
             'lockouts_cleared_at' => 'datetime',
+            'hard_locked_at' => 'datetime',
             'invited_at' => 'datetime',
             'activated_at' => 'datetime',
             'password_changed_at' => 'datetime',
@@ -114,6 +116,16 @@ class PortalUser extends Authenticatable
     public function disabler(): BelongsTo
     {
         return $this->belongsTo(User::class, 'disabled_by');
+    }
+
+    /**
+     * Whether the account is locked until staff unlock it: three lockouts in
+     * a day, whatever its status. An active account also reads `locked`; a
+     * disabled one keeps its status and reason.
+     */
+    public function isHardLocked(): bool
+    {
+        return $this->status === self::STATUS_LOCKED || $this->hard_locked_at !== null;
     }
 
     /** Whether a lockout window is running now. */

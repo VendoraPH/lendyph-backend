@@ -7,7 +7,9 @@ use App\Models\PortalLoginEvent;
 use App\Models\PortalUser;
 use App\Services\Portal\Auth\MemberNumber;
 use App\Services\Portal\Auth\PortalLogin;
+use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Routing\Middleware\ThrottleRequests;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Testing\TestResponse;
 use Tests\Feature\Portal\PortalTestHelpers;
 use Tests\TestCase;
@@ -281,5 +283,67 @@ class PortalLoginTest extends TestCase
 
         $this->assertSame(PortalUser::STATUS_ACTIVE, $portalUser->fresh()->status, 'One lockout since the unlock is not a hard lock.');
         $this->assertTrue($portalUser->fresh()->isTemporarilyLocked());
+    }
+
+    /**
+     * Re-check M2: a disabled account hard-locks after three lockouts like
+     * any other, so its password can't be guessed fifteen minutes at a time;
+     * the right password then gets the generic 401. Turning access back on
+     * clears it.
+     */
+    public function test_a_disabled_account_hard_locks_after_three_lockouts(): void
+    {
+        $this->withoutMiddleware(ThrottleRequests::class);
+        $this->seedAndLogin();
+        $portalUser = $this->portalMember(['branch_id' => $this->branch->id], ['status' => PortalUser::STATUS_DISABLED, 'disabled_reason' => 'administrative']);
+        $number = $this->memberNumber($portalUser);
+
+        for ($lockout = 0; $lockout < 3; $lockout++) {
+            for ($i = 0; $i < 5; $i++) {
+                $this->login($number, 'Wrong-pass-'.$i)->assertStatus(401);
+            }
+            $this->travel(16)->minutes();
+        }
+
+        $this->assertSame(PortalUser::STATUS_DISABLED, $portalUser->fresh()->status, 'Disabled stays disabled, with its reason.');
+        $this->assertNotNull($portalUser->fresh()->hard_locked_at);
+        $this->login($number, $this->portalPassword())->assertStatus(401)->assertExactJson(['success' => false, 'message' => PortalLogin::FAILED]);
+        $this->travel(2)->days();
+        $this->login($number, $this->portalPassword())->assertStatus(401);
+
+        $this->actingAs($this->admin)->putJson("/api/portal-admin/members/{$portalUser->borrower_id}/access", ['enabled' => true])->assertOk();
+        $this->assertNull($portalUser->fresh()->hard_locked_at);
+        $this->login($number, $this->portalPassword())->assertOk();
+    }
+
+    /**
+     * Re-check, low: the member lookup the limiter and the sign-in share is
+     * one indexed query, the same for an unknown number and a known one, and
+     * runs once per request.
+     */
+    public function test_an_unknown_and_a_known_number_run_the_same_borrower_queries(): void
+    {
+        $portalUser = $this->portalMember(['membership_number' => 'M-0077']);
+
+        $count = function (string $number): int {
+            $queries = 0;
+            DB::listen(function ($query) use (&$queries): void {
+                if (preg_match('/\bfrom `borrowers`/', $query->sql) === 1) {
+                    $queries++;
+                    $this->assertStringNotContainsString('REPLACE(', $query->sql);
+                }
+            });
+            $this->login($number, 'Wrong-pass-1')->assertStatus(401);
+            app('events')->forget(QueryExecuted::class);
+
+            return $queries;
+        };
+
+        $unknown = $count('NOBODY-77');
+        $known = $count('m-0077');
+
+        $this->assertSame(1, $unknown);
+        $this->assertSame($unknown, $known);
+        $this->assertSame(1, $portalUser->fresh()->failed_attempts);
     }
 }

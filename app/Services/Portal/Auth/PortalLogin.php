@@ -77,7 +77,7 @@ final class PortalLogin
                 return [self::failed(), null, null];
             }
 
-            if ($portalUser->status === PortalUser::STATUS_LOCKED || $portalUser->isTemporarilyLocked()) {
+            if ($portalUser->isHardLocked() || $portalUser->isTemporarilyLocked()) {
                 Hash::check($password, self::dummyHash());
                 $this->record($request, $loginHash, $portalUser->getKey(), PortalLoginEvent::OUTCOME_REFUSED_LOCKED);
 
@@ -184,15 +184,22 @@ final class PortalLogin
             ->where('created_at', '>=', $since)
             ->count();
 
-        if ($lockouts >= $settings->hard_lock_after && $portalUser->status === PortalUser::STATUS_ACTIVE) {
-            $portalUser->forceFill(['status' => PortalUser::STATUS_LOCKED])->save();
+        // Whatever the account's status (re-check M2): a disabled account
+        // keeps its status and reason and is held by `hard_locked_at`, so its
+        // password can't be guessed fifteen minutes at a time.
+        if ($lockouts >= $settings->hard_lock_after && $portalUser->hard_locked_at === null) {
+            $before = $portalUser->status;
+            $portalUser->forceFill([
+                'status' => $before === PortalUser::STATUS_ACTIVE ? PortalUser::STATUS_LOCKED : $before,
+                'hard_locked_at' => now(),
+            ])->save();
             $this->sessions->revoke($portalUser);
 
             AuditLogService::log(
                 'portal_hard_locked',
                 $portalUser,
-                ['status' => PortalUser::STATUS_ACTIVE],
-                ['status' => PortalUser::STATUS_LOCKED],
+                ['status' => $before],
+                ['status' => $portalUser->status, 'hard_locked' => true],
                 sprintf('Member portal account locked until staff unlock it, after %d lockouts in 24 hours', $lockouts),
                 asSystem: true,
             );
@@ -219,20 +226,30 @@ final class PortalLogin
 
     /**
      * The stand-in hash checked when there is no account (or it is locked), so
-     * those answers cost the same one bcrypt check as a wrong password. Built
-     * once at the configured cost and kept in the cache across requests
-     * (php-fpm keeps no statics between requests); rebuilt only when the
-     * configured cost changes.
+     * those answers cost the same one bcrypt check as a wrong password.
+     *
+     * Stored with the portal settings (`auth_dummy_hash`), so it never
+     * depends on the cache store keeping anything between requests; the cache
+     * only saves the read. Built once at the configured cost and rebuilt only
+     * when that cost changes (Hash::needsRehash).
      */
     public static function dummyHash(): string
     {
-        $hash = Cache::rememberForever(self::DUMMY_HASH_KEY, fn (): string => Hash::make(Str::random(40)));
+        $cached = Cache::get(self::DUMMY_HASH_KEY);
 
-        if (! is_string($hash) || Hash::needsRehash($hash)) {
-            $hash = Hash::make(Str::random(40));
-            Cache::forever(self::DUMMY_HASH_KEY, $hash);
+        if (is_string($cached) && ! Hash::needsRehash($cached)) {
+            return $cached;
         }
 
-        return $hash;
+        $stored = DB::table('portal_settings')->orderBy('id')->value('auth_dummy_hash');
+
+        if (! is_string($stored) || $stored === '' || Hash::needsRehash($stored)) {
+            $stored = Hash::make(Str::random(40));
+            DB::table('portal_settings')->orderBy('id')->limit(1)->update(['auth_dummy_hash' => $stored]);
+        }
+
+        Cache::forever(self::DUMMY_HASH_KEY, $stored);
+
+        return $stored;
     }
 }

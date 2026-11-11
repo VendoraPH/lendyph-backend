@@ -316,6 +316,7 @@ final class CodeDesk
                 'password_changed_at' => now(),
                 'failed_attempts' => 0,
                 'locked_until' => null,
+                'hard_locked_at' => null,
                 'lockouts_cleared_at' => now(),
             ];
 

@@ -274,7 +274,7 @@ class PortalSessionTest extends TestCase
         $this->assertSame(1, AuditLog::query()->where('action', 'portal_terms_accepted')->count());
     }
 
-    /** Review L3: the security writes share the tighter per-member write limit. */
+    /** Review L3: the security actions have a per-member limit of 20 a minute. */
     public function test_security_writes_are_limited_per_member(): void
     {
         $portalUser = $this->portalMember();
@@ -283,11 +283,33 @@ class PortalSessionTest extends TestCase
 
         $this->withMiddleware(ThrottleRequests::class);
         $statuses = [];
-        for ($i = 0; $i < 11; $i++) {
+        for ($i = 0; $i < 21; $i++) {
             $statuses[] = $this->portalJson('POST', "/api/portal/security/logins/{$event->id}/report", [], $token)->status();
         }
 
-        $this->assertSame(200, $statuses[0]);
-        $this->assertSame(429, $statuses[10]);
+        $this->assertSame(200, $statuses[19]);
+        $this->assertSame(429, $statuses[20]);
+    }
+
+    /**
+     * Re-check, low: the security actions have their own per-minute limit
+     * with no daily cap, so a stolen session spending the write budget on
+     * no-op writes can't block them.
+     */
+    public function test_fifty_terms_acceptances_do_not_block_a_password_change(): void
+    {
+        $portalUser = $this->portalMember();
+        $token = $this->portalToken($portalUser);
+        $this->withMiddleware(ThrottleRequests::class);
+
+        for ($i = 0; $i < 50; $i++) {
+            $this->portalJson('POST', '/api/portal/auth/terms/accept', ['version' => 'any'], $token);
+        }
+
+        $this->portalJson('POST', '/api/portal/auth/password/change', [
+            'current_password' => $this->portalPassword(),
+            'password' => 'Another-pass-77',
+            'password_confirmation' => 'Another-pass-77',
+        ], $token)->assertOk();
     }
 }

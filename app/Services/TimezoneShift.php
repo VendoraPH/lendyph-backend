@@ -287,7 +287,7 @@ class TimezoneShift
         'portal_settings' => ['created_at', 'updated_at'],
         'portal_terms_versions' => ['created_at', 'published_at', 'updated_at'],
         'portal_users' => [
-            'activated_at', 'created_at', 'disabled_at', 'ecomm_consent_at', 'invited_at', 'last_login_at',
+            'activated_at', 'created_at', 'disabled_at', 'ecomm_consent_at', 'hard_locked_at', 'invited_at', 'last_login_at',
             'locked_until', 'lockouts_cleared_at', 'password_changed_at', 'terms_accepted_at', 'updated_at',
         ],
         // A column added to a table the shift covers. Listed here, not in

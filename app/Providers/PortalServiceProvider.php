@@ -71,6 +71,11 @@ class PortalServiceProvider extends ServiceProvider
 
         RateLimiter::for('portal', fn (Request $request) => Limit::perMinute(120)->by('portal:user:'.self::portalUserKey($request))->response($tooMany));
 
+        // The member's security actions (report a sign-in, sign out devices,
+        // change the password): per minute only, with no daily cap, so a
+        // stolen session spending the daily write budget can't block them.
+        RateLimiter::for('portal-security', fn (Request $request) => Limit::perMinute(20)->by('portal:security:'.self::portalUserKey($request))->response($tooMany));
+
         RateLimiter::for('portal-pdf', fn (Request $request) => Limit::perMinute(10)->by('portal:pdf:'.self::portalUserKey($request))->response($tooMany));
 
         RateLimiter::for('portal-writes', fn (Request $request) => [

@@ -74,6 +74,8 @@ final class PortalAccess
                 'disabled_by' => null,
                 'failed_attempts' => 0,
                 'locked_until' => null,
+                'hard_locked_at' => null,
+                'lockouts_cleared_at' => now(),
             ])->save();
 
             AuditLogService::log(
@@ -93,23 +95,25 @@ final class PortalAccess
         return DB::transaction(function () use ($portalUser, $staffId): bool {
             $locked = PortalUser::query()->lockForUpdate()->findOrFail($portalUser->getKey());
 
-            $hardLocked = $locked->status === PortalUser::STATUS_LOCKED;
+            $hardLocked = $locked->isHardLocked();
 
             if (! $hardLocked && ! $locked->isTemporarilyLocked() && $locked->failed_attempts === 0) {
                 return false;
             }
 
+            $before = $locked->status;
             $locked->forceFill([
-                'status' => $hardLocked ? PortalUser::STATUS_ACTIVE : $locked->status,
+                'status' => $before === PortalUser::STATUS_LOCKED ? PortalUser::STATUS_ACTIVE : $before,
                 'failed_attempts' => 0,
                 'locked_until' => null,
+                'hard_locked_at' => null,
                 'lockouts_cleared_at' => now(),
             ])->save();
 
             AuditLogService::log(
                 'portal_unlocked',
                 $locked,
-                ['status' => $hardLocked ? PortalUser::STATUS_LOCKED : $locked->status],
+                ['status' => $before, 'hard_locked' => $hardLocked],
                 ['status' => $locked->status],
                 sprintf('Member portal account unlocked for %s', $this->memberLabel($locked)),
                 $staffId,
