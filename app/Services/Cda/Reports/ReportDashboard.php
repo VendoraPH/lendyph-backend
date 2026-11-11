@@ -177,8 +177,7 @@ final class ReportDashboard
     {
         $order = array_flip(ReportTypes::ALL);
 
-        return $period->reports()->with(['template', 'period'])->get()
-            ->filter(fn (CdaReport $report) => $this->access->canSeeType($viewer, $report->report_type))
+        return $this->access->visibleReports($viewer, $period->reports()->with(['template', 'period'])->get())
             ->sortBy(fn (CdaReport $report) => sprintf('%02d-%d', $order[$report->report_type] ?? 99, array_search($report->part, ReportTypes::PARTS, true)))
             ->values();
     }

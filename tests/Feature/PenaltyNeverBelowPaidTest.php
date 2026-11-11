@@ -58,8 +58,10 @@ class PenaltyNeverBelowPaidTest extends TestCase
         $this->travelTo(Carbon::parse('2026-02-21 06:05'));
         $this->artisan('loans:apply-penalties')->assertSuccessful();
 
-        // 2% of ₱7,000 is ₱140, above the ₱100 paid, so it is charged as before.
-        $this->assertPenalty(charged: 140, paid: 100);
+        // The month's charge is 2% of the ₱10,000 unpaid on the day the period
+        // fell late (the payment came after it), ₱200, above the ₱100 paid, so
+        // it is charged.
+        $this->assertPenalty(charged: 200, paid: 100);
     }
 
     private function payOn(string $date, float $amount): void

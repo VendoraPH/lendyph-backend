@@ -28,6 +28,32 @@ final class PesosSource implements CdaSource
 
     public function __construct(private readonly PesosAssessment $assessment) {}
 
+    /**
+     * Whether a PESOS report's figures are verified, one rule for the
+     * on-screen `pesos.rules_verified` check and the export's "to verify"
+     * note: the template is verified, at least one stored figure carries the
+     * PESOS rules' own "to verify" list (`meta.to_verify`), and every such
+     * list is empty.
+     *
+     * @param  iterable<mixed>  $sourceValues  the stored figures' source values
+     */
+    public static function verified(bool $templateVerified, iterable $sourceValues): bool
+    {
+        if (! $templateVerified) {
+            return false;
+        }
+
+        $flags = [];
+
+        foreach ($sourceValues as $source) {
+            if (is_array($source) && is_array($source['meta'] ?? null) && array_key_exists('to_verify', $source['meta'])) {
+                $flags[] = $source['meta']['to_verify'];
+            }
+        }
+
+        return $flags !== [] && array_all($flags, fn ($toVerify) => $toVerify === []);
+    }
+
     public function resolve(string $key, array $params, SourceContext $context): SourceResult
     {
         $field = (string) ($params['field'] ?? '');

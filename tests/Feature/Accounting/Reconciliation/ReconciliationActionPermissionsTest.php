@@ -11,9 +11,11 @@ use Tests\Traits\SetupLendyPH;
 
 /**
  * Who may record a statement line as an expense, a transfer or a suspense
- * entry: `accounting:reconcile` and `branches:view_all` (reconciliation stays
- * head office), plus the permission of the record each action writes
- * (Accounting round C, 2026-11-09).
+ * entry: `accounting:reconcile`, plus the permission of the record each action
+ * writes (Accounting round C, 2026-11-09), on a reconciliation the caller can
+ * see. The reconciliations here are "all branches" ones, which only
+ * `branches:view_all` sees (2026-11-11); BranchReconciliationTest covers
+ * branch reconciliations.
  */
 class ReconciliationActionPermissionsTest extends TestCase
 {
@@ -69,15 +71,17 @@ class ReconciliationActionPermissionsTest extends TestCase
         $this->assertNothingWritten($journals);
     }
 
-    public function test_every_action_needs_branches_view_all(): void
+    public function test_every_action_on_an_all_branches_reconciliation_needs_branches_view_all(): void
     {
         $journals = $this->journalCount();
 
         foreach ($this->bodies() as $action => $body) {
             $this->actAsUserWith(['accounting:reconcile', ...self::RECORD_PERMISSIONS[$action]]);
 
+            // Only branches:view_all sees an "all branches" reconciliation, so
+            // to a branch user it answers like a missing one.
             $this->act($action, $this->reconciliation, $this->statementLine($this->reconciliation), $body)
-                ->assertForbidden();
+                ->assertNotFound();
         }
 
         $this->assertNothingWritten($journals);
@@ -132,8 +136,15 @@ class ReconciliationActionPermissionsTest extends TestCase
 
     public function test_a_user_with_no_role_is_refused(): void
     {
-        $this->actingAs($this->userWithNoRole());
+        $user = $this->userWithNoRole();
+        $user->givePermissionTo(BranchAccess::VIEW_ALL);
+        $this->actingAs($user);
 
+        // view_all alone: the reconciliation is visible, so the answer is the
+        // missing permission's. With nothing at all it answers 404.
         $this->act('suspense', $this->reconciliation, $this->statementLine($this->reconciliation))->assertForbidden();
+
+        $this->actingAs($this->userWithNoRole());
+        $this->act('suspense', $this->reconciliation, $this->statementLine($this->reconciliation))->assertNotFound();
     }
 }

@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Accounting\MatchReconciliationRequest;
 use App\Http\Requests\Accounting\StoreReconciliationRequest;
+use App\Models\AccountingAccount;
 use App\Models\AccountingReconciliation;
 use App\Models\AccountingReconciliationLine;
 use App\Services\Accounting\ReconciliationActions;
@@ -30,10 +31,15 @@ use PDOException;
  * the Journals screen — not a correcting line this module slips in to make a
  * number look tidy.
  *
- * Every endpoint also requires `branches:view_all` (decision B2, interim
- * least privilege): a book balance is read from every branch's journals, and
- * whether a bank account belongs to a branch is not decided yet. Every seeded
- * role holding `accounting:reconcile` already holds `branches:view_all`.
+ * Per account per branch (owner answer 9 and the lead's decision,
+ * 2026-11-11). Money accounts stay organisation-wide; each reconciliation
+ * carries the branch whose journal lines it proves, picked when it starts. A
+ * caller with `accounting:reconcile` picks one of their own branches and sees
+ * and acts only on their branches' reconciliations; `branches:view_all` may
+ * also pick none ("All branches", every line on the account, as every
+ * reconciliation counted before) and sees them all. Another branch's
+ * reconciliation, or an "all branches" one to a branch user, answers 404 like
+ * a missing one (the route binding is scoped).
  */
 class AccountingReconciliationController extends Controller
 {
@@ -42,6 +48,11 @@ class AccountingReconciliationController extends Controller
     public const ALREADY_MATCHED = 'This statement line is already matched. Unmatch it first.';
 
     public const CLAIMED_MEANWHILE = 'That ledger entry was just matched to another statement line. Reload and try again.';
+
+    public const START_COLLIDED = 'Someone else was starting a reconciliation at the same moment. Nothing was saved; try again.';
+
+    /** The UNIQUE index on (account, `branch_scope`, period): one per account, branch and period. */
+    private const PERIOD_INDEX = 'acct_recon_account_branch_period_unique';
 
     /** The UNIQUE index on accounting_reconciliation_lines.matched_journal_line_id. */
     private const MATCH_INDEX = 'acct_recon_lines_journal_line_unique';
@@ -58,16 +69,19 @@ class AccountingReconciliationController extends Controller
             new OA\Parameter(name: 'page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 1)),
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15, maximum: 100)),
             new OA\Parameter(name: 'account_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, description: 'Only the reconciliations of one of the caller\'s branches (another answers 403), or `all` for the "All branches" ones (branches:view_all only, else 403). Anything else answers 422.', schema: new OA\Schema(type: 'string')),
         ],
         responses: [
-            new OA\Response(response: 200, description: 'Paginated reconciliations'),
-            new OA\Response(response: 403, description: 'Missing accounting:reconcile or branches:view_all'),
+            new OA\Response(response: 200, description: 'Paginated reconciliations of the caller\'s branches (every one, "all branches" included, for branches:view_all)'),
+            new OA\Response(response: 403, description: 'Missing accounting:reconcile, a branch_id outside the caller\'s branches, or `all` without branches:view_all'),
+            new OA\Response(response: 422, description: 'A branch_id that is neither a branch id nor `all`'),
         ],
     )]
     public function index(): JsonResponse
     {
         $this->authorize('accounting:reconcile');
-        $this->authorize(BranchAccess::VIEW_ALL);
+
+        $user = request()->user();
 
         $filters = request()->validate([
             'page' => ['nullable', 'integer', 'min:1'],
@@ -75,14 +89,34 @@ class AccountingReconciliationController extends Controller
             // `$perPage ?: $model->getPerPage()` and silently becomes 15.
             'per_page' => ['nullable', 'integer', 'min:1'],
             'account_id' => ['nullable', 'integer', 'exists:accounting_accounts,id'],
+            // A branch id, or `all` for the "All branches" reconciliations.
+            'branch_id' => ['nullable', 'regex:/^(all|[1-9][0-9]*)$/'],
+        ], [
+            'branch_id.regex' => 'Filter by a branch, or by "all" for the reconciliations of all branches.',
         ]);
+
+        $allBranches = ($filters['branch_id'] ?? null) === 'all';
+
+        // 403 rather than an empty page, as on every branch filter: only
+        // branches:view_all sees "All branches" reconciliations.
+        if ($allBranches) {
+            abort_unless($user->can(BranchAccess::VIEW_ALL), 403, 'You do not have access to the reconciliations of all branches.');
+        } else {
+            app(BranchAccess::class)->authorizeBranchFilter($user, $filters['branch_id'] ?? null);
+        }
 
         $perPage = min((int) ($filters['per_page'] ?? 15), 100);
 
         $page = AccountingReconciliation::query()
+            ->visibleTo($user)
             ->when(
                 isset($filters['account_id']),
                 fn ($q) => $q->where('accounting_account_id', $filters['account_id']),
+            )
+            ->when($allBranches, fn ($q) => $q->whereNull('branch_id'))
+            ->when(
+                isset($filters['branch_id']) && ! $allBranches,
+                fn ($q) => $q->where('branch_id', (int) $filters['branch_id']),
             )
             // A TOTAL order. The screen drains every page and a partial order
             // lets one row be served twice while another is served not at all.
@@ -127,7 +161,7 @@ class AccountingReconciliationController extends Controller
     #[OA\Post(
         path: '/api/accounting/reconciliations',
         summary: 'Start a reconciliation',
-        description: 'Records what the statement says and, optionally, its lines. A period covers at most 92 days. Writes NO journal — reconciling proves the books, it does not adjust them. One reconciliation per account per period; a second is a 422 rather than a silent second card. Amounts are INTEGER CENTAVOS, signed, positive for money in.',
+        description: 'Records what the statement says and, optionally, its lines. A period covers at most 92 days. Writes NO journal — reconciling proves the books, it does not adjust them. `branch_id` is the branch whose journal lines it proves: one of the caller\'s branches, required for a branch user; branches:view_all may leave it out or null for "All branches" (every line on the account). One reconciliation per account, branch (or all branches) and period; a second is a 422 rather than a silent second card. Amounts are INTEGER CENTAVOS, signed, positive for money in.',
         tags: ['Accounting'],
         security: [['sanctum' => []]],
         requestBody: new OA\RequestBody(
@@ -136,6 +170,7 @@ class AccountingReconciliationController extends Controller
                 required: ['account_id', 'start_date', 'end_date', 'statement_balance'],
                 properties: [
                     new OA\Property(property: 'account_id', type: 'integer', description: 'A money account — one carrying a cash_kind.'),
+                    new OA\Property(property: 'branch_id', type: 'integer', nullable: true, description: 'One of the caller\'s branches. Null or absent: all branches, branches:view_all only.'),
                     new OA\Property(property: 'period', type: 'string', nullable: true, description: 'Derived from the range when omitted: "September 2026" for a whole calendar month, otherwise the dates in words, "Sep 3 – Sep 20, 2026" ("Dec 15, 2026 – Jan 10, 2027" across a year end).'),
                     new OA\Property(property: 'start_date', type: 'string', format: 'date'),
                     new OA\Property(property: 'end_date', type: 'string', format: 'date'),
@@ -147,15 +182,15 @@ class AccountingReconciliationController extends Controller
         ),
         responses: [
             new OA\Response(response: 201, description: 'Reconciliation created, with its worksheet'),
-            new OA\Response(response: 403, description: 'Missing accounting:reconcile or branches:view_all'),
-            new OA\Response(response: 422, description: 'Not a money account, this account already has this period, or the period is longer than 92 days'),
+            new OA\Response(response: 403, description: 'Missing accounting:reconcile'),
+            new OA\Response(response: 409, description: 'A deadlock or lock wait with another save; nothing was saved'),
+            new OA\Response(response: 422, description: 'Not a money account, a branch that is not the caller\'s (or none, from a branch user), this account and branch already have this period, or the period is longer than 92 days'),
         ],
     )]
     public function store(StoreReconciliationRequest $request): JsonResponse
     {
-        $this->authorize(BranchAccess::VIEW_ALL);
-
         $data = $request->validated();
+        $branchId = filled($data['branch_id'] ?? null) ? (int) $data['branch_id'] : null;
 
         // An account with no `cash_kind` has no statement to be proved against.
         // Reconciling "Loans Receivable" against a bank statement is a question
@@ -176,6 +211,11 @@ class AccountingReconciliationController extends Controller
 
         $existing = AccountingReconciliation::query()
             ->where('accounting_account_id', $account->id)
+            ->when(
+                $branchId === null,
+                fn ($q) => $q->whereNull('branch_id'),
+                fn ($q) => $q->where('branch_id', $branchId),
+            )
             ->whereIn('period', $labels)
             ->value('period');
 
@@ -183,18 +223,63 @@ class AccountingReconciliationController extends Controller
             // The unique index refuses this anyway; catching it here turns what
             // would surface as a 500 into something the screen can render, and
             // says which of the two fields to change.
-            throw ValidationException::withMessages([
-                'period' => [
-                    "{$account->code} {$account->name} already has a reconciliation for {$existing}. "
-                    .'Open that one rather than starting a second — the screen keys its cards on the account '
-                    .'and the period, so two would render as one and quietly hide the other.',
-                ],
-            ]);
+            throw $this->alreadyReconciled($account, $existing, $branchId);
         }
 
-        $reconciliation = DB::transaction(function () use ($data, $account, $period, $request): AccountingReconciliation {
+        try {
+            $reconciliation = $this->createWithLines($data, $account, $branchId, $period, $request);
+        } catch (UniqueConstraintViolationException $e) {
+            // Two starts at once: both passed the check above, and the index
+            // refused the second. The same answer as a second start.
+            if ($e->index !== self::PERIOD_INDEX) {
+                throw $e;
+            }
+
+            throw $this->alreadyReconciled($account, $period, $branchId);
+        } catch (PDOException $e) {
+            // A deadlock or lock wait timeout: 409 with nothing saved, as
+            // LoanWriteTransaction answers, never 500.
+            if (! $this->causedByConcurrencyError($e)) {
+                throw $e;
+            }
+
+            throw LoanWriteTransaction::conflict(self::START_COLLIDED);
+        }
+
+        return response()->json(
+            ['data' => $this->matcher->present($reconciliation->refresh())],
+            201,
+        );
+    }
+
+    /** The 422 on `period` for a second reconciliation of one account, branch and period. */
+    private function alreadyReconciled(AccountingAccount $account, string $period, ?int $branchId): ValidationException
+    {
+        return ValidationException::withMessages([
+            'period' => [
+                "{$account->code} {$account->name} already has a reconciliation for {$period}. "
+                .($branchId === null ? 'It covers all branches. ' : 'It covers this branch. ')
+                .'Open that one rather than starting a second, so its matches stay in one place.',
+            ],
+        ]);
+    }
+
+    /**
+     * The reconciliation and its statement lines, in one transaction.
+     *
+     * @param  array<string, mixed>  $data
+     */
+    private function createWithLines(
+        array $data,
+        AccountingAccount $account,
+        ?int $branchId,
+        string $period,
+        StoreReconciliationRequest $request,
+    ): AccountingReconciliation {
+        return DB::transaction(function () use ($data, $account, $branchId, $period, $request): AccountingReconciliation {
             $reconciliation = AccountingReconciliation::create([
                 'accounting_account_id' => $account->id,
+                'branch_id' => $branchId,
                 'period' => $period,
                 'start_date' => $data['start_date'],
                 'end_date' => $data['end_date'],
@@ -229,11 +314,6 @@ class AccountingReconciliationController extends Controller
 
             return $reconciliation;
         });
-
-        return response()->json(
-            ['data' => $this->matcher->present($reconciliation->refresh())],
-            201,
-        );
     }
 
     #[OA\Get(
@@ -245,14 +325,13 @@ class AccountingReconciliationController extends Controller
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
         responses: [
             new OA\Response(response: 200, description: 'Reconciliation with its lines'),
-            new OA\Response(response: 403, description: 'Missing accounting:reconcile or branches:view_all'),
-            new OA\Response(response: 404, description: 'Not found'),
+            new OA\Response(response: 403, description: 'Missing accounting:reconcile'),
+            new OA\Response(response: 404, description: 'Not found, another branch\'s, or an all-branches one to a branch user'),
         ],
     )]
     public function show(AccountingReconciliation $reconciliation): JsonResponse
     {
         $this->authorize('accounting:reconcile');
-        $this->authorize(BranchAccess::VIEW_ALL);
 
         return response()->json(['data' => $this->matcher->present($reconciliation)]);
     }
@@ -267,17 +346,16 @@ class AccountingReconciliationController extends Controller
         requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent),
         responses: [
             new OA\Response(response: 200, description: 'Updated reconciliation'),
-            new OA\Response(response: 403, description: 'Missing accounting:reconcile or branches:view_all'),
+            new OA\Response(response: 403, description: 'Missing accounting:reconcile'),
+            new OA\Response(response: 404, description: 'Not found, another branch\'s, or an all-branches one to a branch user'),
             new OA\Response(response: 409, description: 'The statement line is already matched to another ledger line (unmatch it first; accept-suggestions skips such lines instead), the ledger line was claimed at the same moment, or a lock collided'),
-            new OA\Response(response: 422, description: 'A line belongs elsewhere, the journal is a draft, the ledger line is outside the period and not an outstanding item (180 days before to 5 days after), it is already claimed, or its amount or side differs from the statement line\'s'),
+            new OA\Response(response: 422, description: 'A line belongs elsewhere, the journal is a draft, the entry is in another branch\'s books than the reconciliation\'s (or in none), the ledger line is outside the period and not an outstanding item (180 days before to 5 days after), it is already claimed, or its amount or side differs from the statement line\'s'),
         ],
     )]
     public function match(
         MatchReconciliationRequest $request,
         AccountingReconciliation $reconciliation,
     ): JsonResponse {
-        $this->authorize(BranchAccess::VIEW_ALL);
-
         $acceptingSuggestions = $request->boolean('accept_suggestions');
 
         $pairings = $acceptingSuggestions
@@ -419,8 +497,9 @@ class AccountingReconciliationController extends Controller
      *
      * Derived rather than typed so the common case cannot be spelled two
      * different ways for the same month — which, given the unique index on
-     * (account, period), is the difference between "you already reconciled
-     * this" and two cards for September sitting side by side.
+     * (account, `branch_scope`, period), is the difference between "you
+     * already reconciled this" and two cards for September sitting side by
+     * side.
      */
     private function periodLabel(string $start, string $end): string
     {

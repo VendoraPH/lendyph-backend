@@ -2,8 +2,10 @@
 
 namespace App\Services\Cda;
 
+use App\Models\CdaReport;
 use App\Models\User;
 use App\Services\BranchAccess;
+use Illuminate\Support\Collection;
 
 /**
  * Who may do what in CDA Reports (CDA design §3).
@@ -89,6 +91,28 @@ final class CdaAccess
         $restriction = ReportTypes::restriction($reportType);
 
         return $restriction === null || $user->can($restriction);
+    }
+
+    /**
+     * The report types the user may see (canSeeType()), in ReportTypes order.
+     *
+     * @return list<string>
+     */
+    public function visibleTypes(User $user): array
+    {
+        return array_values(array_filter(ReportTypes::ALL, fn (string $type) => $this->canSeeType($user, $type)));
+    }
+
+    /**
+     * The reports the user may see (canSeeType()), in the order given. The
+     * dashboard, calendar and period endpoints leave the rest out entirely.
+     *
+     * @param  iterable<CdaReport>  $reports
+     * @return Collection<int, CdaReport>
+     */
+    public function visibleReports(User $user, iterable $reports): Collection
+    {
+        return collect($reports)->filter(fn (CdaReport $report) => $this->canSeeType($user, $report->report_type))->values();
     }
 
     /** 403 unless the user may see the report type. */

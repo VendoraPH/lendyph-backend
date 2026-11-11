@@ -24,6 +24,9 @@ class GCashTransaction extends Model
         'status',
         'borrower_id',
         'gcash_non_member_id',
+        // Where a walk-in transaction was done; its journal posts there. Null
+        // for a member's (the member's branch decides) and for head office.
+        'branch_id',
         'transactor_user_id',
         'remarks',
         'paid_at',
@@ -38,6 +41,7 @@ class GCashTransaction extends Model
             'charge_amount' => 'decimal:2',
             'total_amount' => 'decimal:2',
             'paid_at' => 'datetime',
+            'branch_id' => 'integer',
         ];
     }
 

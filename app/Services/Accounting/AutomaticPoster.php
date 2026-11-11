@@ -1134,7 +1134,8 @@ final class AutomaticPoster
      * transaction with source `cash_in` or `cash_out`, or null when this
      * organisation keeps no books. A Cash In posts when it is paid, dated
      * `paid_at`; a Cash Out when it is created, dated `transaction_date`.
-     * The branch is the member's; a walk-in's has none.
+     * The branch is the member's; a walk-in's is the branch it was recorded
+     * in (none for head office, and for walk-ins recorded before 2026-11-11).
      *
      * @throws CannotPostToTheBooksException for a Cash In not yet paid, figures that disagree, or an unmapped role
      */
@@ -1170,7 +1171,7 @@ final class AutomaticPoster
             'date' => $date,
             'reference' => $tx->reference_no,
             'description' => $this->describe($posting['description'], $tx->reference_no),
-            'branch_id' => $tx->borrower_id === null ? null : Borrower::query()->whereKey($tx->borrower_id)->value('branch_id'),
+            'branch_id' => $tx->borrower_id === null ? $tx->branch_id : Borrower::query()->whereKey($tx->borrower_id)->value('branch_id'),
         ], $userId);
     }
 

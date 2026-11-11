@@ -35,9 +35,11 @@ use Throwable;
  * listed document of that category ("The signed CAPR (final copy) hasn't
  * been uploaded."), else by the category's own words; a listed document by
  * its label, with the verb agreeing ("Training certificates haven't been
- * uploaded."). The checks that a template, or the PESOS rules, are still to
- * be verified read under their own category, `template_unverified`, whatever
- * the template says.
+ * uploaded."). A listed document that a document rule already checks (same
+ * category, stage and at least its severity) raises only the rule's issue
+ * and counts once in readiness. The checks that a template, or the PESOS
+ * rules, are still to be verified read under their own category,
+ * `template_unverified`, whatever the template says.
  */
 final class ReportValidator
 {
@@ -57,6 +59,9 @@ final class ReportValidator
 
     /** The named checks that raise it. */
     private const UNVERIFIED_CHECKS = ['template.verified', 'pesos.rules_verified'];
+
+    /** Severities, lowest first. */
+    private const SEVERITY_RANK = ['info' => 0, 'warning' => 1, 'critical' => 2];
 
     private const OP_WORDS = ['eq' => 'equal', 'ne' => 'differ from', 'lt' => 'be less than', 'lte' => 'be at most', 'gt' => 'be more than', 'gte' => 'be at least'];
 
@@ -123,6 +128,10 @@ final class ReportValidator
         }
 
         foreach ($definition->documents() as $document) {
+            if (self::coveredByRule($document, $definition)) {
+                continue;
+            }
+
             $missing = $this->missingListedDocument($document, $report);
 
             if ($missing !== null) {
@@ -184,7 +193,7 @@ final class ReportValidator
         }
 
         foreach ($definition->documents() as $document) {
-            if ($stage === null || $document['stage'] === $stage) {
+            if (($stage === null || $document['stage'] === $stage) && ! self::coveredByRule($document, $definition)) {
                 $missing[] = $this->missingListedDocument($document, $report);
             }
         }
@@ -231,6 +240,26 @@ final class ReportValidator
             'category' => $category,
             'final' => false,
         ];
+    }
+
+    /**
+     * Whether a document rule already checks this listed document: the same
+     * category, needed by the same stage, at the same or a higher severity.
+     * The rule's issue names the document (and asks for the final copy where
+     * the rule does), so the listed document adds no second issue or check.
+     */
+    private static function coveredByRule(array $document, ReportDefinition $definition): bool
+    {
+        foreach ($definition->rules() as $rule) {
+            if (($rule['type'] ?? null) === 'document'
+                && ($rule['document_category'] ?? null) === ($document['category'] ?? null)
+                && ($rule['stage'] ?? null) === ($document['stage'] ?? null)
+                && self::SEVERITY_RANK[(string) $rule['severity']] >= self::SEVERITY_RANK[(string) $document['severity']]) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /** A category's document in words: the template's listed document of that category, else the category's own words. */

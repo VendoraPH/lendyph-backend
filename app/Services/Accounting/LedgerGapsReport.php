@@ -14,6 +14,7 @@ use App\Models\LoanAdjustment;
 use App\Models\Repayment;
 use App\Models\ShareCapitalLedger;
 use Carbon\Carbon;
+use Illuminate\Contracts\Database\Query\Expression;
 use Illuminate\Database\Query\Builder;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
@@ -90,6 +91,13 @@ final class LedgerGapsReport
 
     /** The day a paid Cash In posts on. */
     private const CASH_IN_DATE = 'COALESCE(g.paid_at, g.transaction_date)';
+
+    /**
+     * A GCash row's branch: the member's, else the branch a walk-in was
+     * recorded in (none for head office and for walk-ins recorded before
+     * 2026-11-11), the same branch its journal posts in.
+     */
+    private const GCASH_BRANCH = 'COALESCE(b.branch_id, g.branch_id)';
 
     /** Whether imported (CSV) loans' events are listed: all events, none of them, or only them. */
     public const IMPORTED_FILTERS = ['include', 'exclude', 'only'];
@@ -225,8 +233,8 @@ final class LedgerGapsReport
                 'restructure' => [$this->selectRestructure(), ['l.released_at', true], 'l.branch_id', self::IMPORTED_LOAN],
                 'adjustment' => [$this->selectAdjustment(), ['a.applied_at', true], 'l.branch_id', self::IMPORTED_LOAN],
                 'share_capital' => [$this->selectShareCapital(), ['s.date', false], 'b.branch_id', null],
-                'cash_in' => [$this->selectGCash('cash_in', 'paid', self::CASH_IN_DATE), [self::CASH_IN_DATE, true], 'b.branch_id', null],
-                'cash_out' => [$this->selectGCash('cash_out', 'completed', 'g.transaction_date'), ['g.transaction_date', true], 'b.branch_id', null],
+                'cash_in' => [$this->selectGCash('cash_in', 'paid', self::CASH_IN_DATE), [self::CASH_IN_DATE, true], DB::raw(self::GCASH_BRANCH), null],
+                'cash_out' => [$this->selectGCash('cash_out', 'completed', 'g.transaction_date'), ['g.transaction_date', true], DB::raw(self::GCASH_BRANCH), null],
             };
 
             $this->narrow($select, $filters, $branches, $date[0], $date[1], $branch, $imported);
@@ -244,7 +252,7 @@ final class LedgerGapsReport
      * @param  array{from?: string|null, to?: string|null, imported?: string|null}  $filters
      * @param  int|list<int>|null  $branches
      */
-    private function narrow(Builder $part, array $filters, int|array|null $branches, string $dateColumn, bool $isTimestamp, string $branchColumn, ?string $imported): void
+    private function narrow(Builder $part, array $filters, int|array|null $branches, string $dateColumn, bool $isTimestamp, string|Expression $branchColumn, ?string $imported): void
     {
         $from = $filters['from'] ?? null;
         $to = $filters['to'] ?? null;
@@ -408,7 +416,7 @@ final class LedgerGapsReport
             ->where('g.status', $status)
             ->whereNotExists($this->journal(GCashTransaction::class, 'g.id', $type))
             ->selectRaw('? AS kind, g.id AS record_id, g.reference_no AS reference', [$type])
-            ->selectRaw("DATE({$dateColumn}) AS event_date, b.branch_id, g.borrower_id")
+            ->selectRaw("DATE({$dateColumn}) AS event_date, ".self::GCASH_BRANCH.' AS branch_id, g.borrower_id')
             ->selectRaw('CAST(ROUND(g.amount * 100) AS SIGNED) AS amount')
             ->selectRaw("'none' AS posted")
             ->selectRaw("CASE WHEN g.borrower_id IS NULL THEN 'walk_in' ELSE NULL END AS detail");

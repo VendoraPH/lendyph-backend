@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Enums\TermUnit;
 use App\Exceptions\CannotPostToTheBooksException;
+use App\Models\AmortizationPrincipalChange;
 use App\Models\AmortizationSchedule;
 use App\Models\Loan;
 use App\Models\LoanAdjustment;
@@ -821,6 +822,7 @@ class LoanAdjustmentService
     {
         return $loan->amortizationSchedules()
             ->whereIn('status', ['pending', 'partial', 'overdue'])
+            ->with(['principalChanges', 'postedPrincipalPayments'])
             ->get();
     }
 
@@ -877,6 +879,10 @@ class LoanAdjustmentService
                 'interest_paid' => (float) $schedule->interest_paid,
                 'penalty_paid' => (float) $schedule->penalty_paid,
             ];
+
+            // The months the period was late keep the principal they were
+            // charged on, so the Ledger keeps a line per monthly charge.
+            AmortizationPrincipalChange::record($schedule, Carbon::today()->toDateString(), (float) $schedule->principal_due, (float) $schedule->principal_paid, $adjustment->id);
 
             $schedule->update([
                 'principal_due' => $schedule->principal_paid,
@@ -1246,16 +1252,54 @@ class LoanAdjustmentService
         // receipt still carries, so Total Paid dropped and a later void took
         // the missing penalty out of interest or principal instead.
         //
-        // The period keeps a link to this waiver, which is what stops
-        // RepaymentService::applyPenalties() charging it again on the next
-        // payment or the next night.
-        $this->selectedOpenSchedules($loan, $newValues)->each(function (AmortizationSchedule $schedule) use ($adjustment, &$before, &$after) {
+        // The period keeps a link to this waiver, and a checkpoint on the day
+        // it cleared the penalty with the charge it left (option b, from the
+        // monthly penalty, Arvin, 2026-11-11):
+        // RepaymentService::penaltyStateAsOf() charges nothing more until the
+        // period's next monthly charge day, then a charge a month while it
+        // stays unpaid. Waivers made before the switch have no checkpoint and
+        // keep their period penalty-free (option a), and a new waiver on such
+        // a period leaves it so.
+        //
+        // Each period is first charged up to today, so a waiver applied before
+        // the night's run forgives the month that fell today rather than
+        // leaving it uncharged for good.
+        $today = Carbon::today();
+
+        $this->selectedOpenSchedules($loan, $newValues)->each(function (AmortizationSchedule $schedule) use ($adjustment, $loan, $today, &$before, &$after) {
+            $waivedForGood = $schedule->isWaivedForGood();
+            $state = $this->repaymentService->penaltyStateAsOf($loan, $schedule, $today);
+
+            if ($state !== null) {
+                $schedule->penalty_amount = $state['amount'];
+                $schedule->penalty_months = $state['months'];
+            }
+
             $charged = (float) $schedule->penalty_amount;
             $paid = (float) $schedule->penalty_paid;
             $owed = $this->penaltyOwed($schedule);
 
             if ($owed > 0) {
-                $schedule->update(['penalty_amount' => $paid, 'penalty_waiver_id' => $adjustment->id]);
+                if ($waivedForGood) {
+                    $schedule->penalty_amount = $paid;
+                } elseif (! $this->repaymentService->penaltyCheckpoint($loan, $schedule, $today, $paid)) {
+                    // A period the rule leaves alone today (not late by it, or
+                    // before an imported loan's baseline) still gets the
+                    // waiver's checkpoint, so it never turns into option (a),
+                    // with the charges it really has today.
+                    $charges = count($this->repaymentService->penaltyCharges($loan, $schedule, $today));
+
+                    $schedule->fill([
+                        'penalty_amount' => $paid,
+                        'penalty_months' => $charges,
+                        'penalty_checkpoint_on' => $today->toDateString(),
+                        'penalty_checkpoint_amount' => $paid,
+                        'penalty_checkpoint_months' => $charges,
+                    ]);
+                }
+
+                $schedule->penalty_waiver_id = $adjustment->id;
+                $schedule->save();
 
                 $before[] = [
                     'schedule_id' => $schedule->id,
@@ -1353,6 +1397,13 @@ class LoanAdjustmentService
             return;
         }
 
+        // Each period's change is kept in its principal history
+        // (AmortizationPrincipalChange), from today: the late penalty charges
+        // each month on the principal owed on its own day, so the months
+        // already charged keep the principal before this adjustment, up or
+        // down, and only later months use the new one.
+        $today = Carbon::today();
+
         foreach ($this->balanceAdjustmentShares($amount, $unpaid) as $i => $share) {
             if ($share === 0) {
                 continue;
@@ -1360,6 +1411,9 @@ class LoanAdjustmentService
 
             $schedule = $unpaidSchedules[$i];
             $newPrincipalDue = $centavos($schedule->principal_due) + $share;
+
+            AmortizationPrincipalChange::record($schedule, $today->toDateString(), (float) $schedule->principal_due, $newPrincipalDue / 100, $adjustment->id);
+
             $changes = [
                 'principal_due' => $newPrincipalDue / 100,
                 'total_due' => ($newPrincipalDue + $centavos($schedule->interest_due)) / 100,

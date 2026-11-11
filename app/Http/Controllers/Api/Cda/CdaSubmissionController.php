@@ -41,7 +41,7 @@ class CdaSubmissionController extends Controller
         $period = CdaReportingPeriod::query()->where('year', $year)->first();
         abort_if($period === null, 404, "There is no CDA reporting period for {$year}.");
 
-        $visible = array_values(array_filter(ReportTypes::ALL, fn (string $type) => $this->access->canSeeType($request->user(), $type)));
+        $visible = $this->access->visibleTypes($request->user());
         $rows = CdaSubmission::query()->with(['report', 'snapshot'])
             ->whereHas('report', fn ($q) => $q->where('period_id', $period->id)->whereIn('report_type', $visible))
             ->orderByDesc('submitted_on')->orderByDesc('id')->get();

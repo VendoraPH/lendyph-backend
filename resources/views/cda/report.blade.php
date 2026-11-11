@@ -8,7 +8,8 @@
         @page { margin: 22mm {{ \App\Services\Cda\Exports\PdfRenderer::MARGIN_RIGHT_MM }}mm {{ \App\Services\Cda\Exports\PdfRenderer::MARGIN_BOTTOM_MM }}mm 14mm; }
         body { font-family: "DejaVu Sans", sans-serif; font-size: 9pt; color: #1f2933; }
         h1 { font-size: 13pt; margin: 0 0 2pt 0; }
-        h2 { font-size: 10pt; margin: 12pt 0 4pt 0; padding-bottom: 2pt; border-bottom: 0.6pt solid #9aa5b1; }
+        {{-- A heading is never left at the foot of a page: dompdf honours page-break-after: avoid between blocks, so it moves to the page where its content starts. --}}
+        h2 { font-size: 10pt; margin: 12pt 0 4pt 0; padding-bottom: 2pt; border-bottom: 0.6pt solid #9aa5b1; page-break-after: avoid; }
         .coop { font-size: 10pt; font-weight: bold; }
         .muted { color: #52606d; }
         table { width: 100%; border-collapse: collapse; }

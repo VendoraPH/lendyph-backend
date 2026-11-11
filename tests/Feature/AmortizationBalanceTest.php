@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Models\AmortizationSchedule;
 use App\Models\Borrower;
+use App\Models\LatePenaltySetting;
 use App\Models\Loan;
 use App\Models\LoanProduct;
 use App\Models\User;
@@ -119,6 +120,9 @@ class AmortizationBalanceTest extends TestCase
     public function test_overdue_periods_carry_their_penalty_and_make_up_the_overdue_total(): void
     {
         // Periods 1 and 2 are past their grace period; period 3 is not late yet.
+        // Both fell late before the monthly penalty's switch, so each keeps its
+        // single charge (MonthlyLatePenaltyTest covers the monthly rule).
+        LatePenaltySetting::query()->create(['monthly_from' => today()->toDateString()]);
         $loan = $this->createReleasedLoan(['start_date' => now()->subMonths(3)->toDateString()]);
         $this->artisan('loans:apply-penalties')->assertSuccessful();
 
