@@ -29,7 +29,9 @@ use Throwable;
  * shows its figures, readiness and issues at once (CAPR's unclosed-year
  * Critical included) instead of 0% "not started". A report whose refresh
  * fails is logged and left for the `refresh` action or the nightly run; the
- * period stays open. ensure() refreshes only a year it opened itself.
+ * period stays open. ensure() refreshes only a year it opened itself; the
+ * year-end capture opens with openIfMissing() and refreshes after its own
+ * capture commits, so the reports read the capture.
  */
 final class PeriodOpener
 {
@@ -63,25 +65,44 @@ final class PeriodOpener
     /** The year's period, opened (as the system) and computed when there is none. */
     public function ensure(int $year): CdaReportingPeriod
     {
-        $existing = CdaReportingPeriod::query()->where('year', $year)->first();
+        [$period, $opened] = $this->openIfMissing($year);
 
-        if ($existing !== null) {
-            return $existing;
+        if ($opened) {
+            $this->refreshReports($period);
         }
-
-        try {
-            $period = DB::transaction(fn () => $this->create($year, null));
-        } catch (UniqueConstraintViolationException) {
-            return CdaReportingPeriod::query()->where('year', $year)->firstOrFail();
-        }
-
-        $this->refreshReports($period, null);
 
         return $period;
     }
 
-    /** Fill and validate each applicable report of a period just opened. */
-    private function refreshReports(CdaReportingPeriod $period, ?User $user): void
+    /**
+     * The year's period, opened (as the system) when there is none, without
+     * computing it: whether this call opened it comes back with it, so a
+     * caller that writes more onto the period first (the year-end capture)
+     * runs refreshReports() once that has committed.
+     *
+     * @return array{0: CdaReportingPeriod, 1: bool} the period, and whether this call opened it
+     */
+    public function openIfMissing(int $year): array
+    {
+        $existing = CdaReportingPeriod::query()->where('year', $year)->first();
+
+        if ($existing !== null) {
+            return [$existing, false];
+        }
+
+        try {
+            return [DB::transaction(fn () => $this->create($year, null)), true];
+        } catch (UniqueConstraintViolationException) {
+            return [CdaReportingPeriod::query()->where('year', $year)->firstOrFail(), false];
+        }
+    }
+
+    /**
+     * Fill and validate each applicable report of a period just opened, one
+     * transaction per report. A report whose refresh fails is logged and
+     * left for the `refresh` action or the nightly run.
+     */
+    public function refreshReports(CdaReportingPeriod $period, ?User $user = null): void
     {
         $reports = CdaReport::query()->where('period_id', $period->id)->where('applicable', true)->orderBy('id')->get();
 

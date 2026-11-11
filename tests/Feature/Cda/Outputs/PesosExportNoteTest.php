@@ -11,7 +11,10 @@ use App\Services\Cda\Exports\ExportContentBuilder;
 use App\Services\Cda\Exports\PdfRenderer;
 use App\Services\Cda\PeriodOpener;
 use App\Services\Cda\Pesos\PesosEngine;
+use App\Services\Cda\Reports\NamedChecks;
+use App\Services\Cda\Reports\ReportDefinition;
 use App\Services\Cda\Reports\ReportEngine;
+use App\Services\Cda\Sources\SourceContext;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Tests\Feature\Cda\Foundation\CdaTestHelpers;
@@ -145,6 +148,24 @@ class PesosExportNoteTest extends TestCase
         CdaReportValue::query()->where('report_id', $this->pesos->id)->delete();
 
         $this->assertNote(true, 'Without a figure carrying the rules\' flag, the note stays.');
+    }
+
+    public function test_the_on_screen_check_agrees_with_the_export_note(): void
+    {
+        $period = $this->pesos->period()->firstOrFail();
+        $check = fn (): ?string => app(NamedChecks::class)->run('pesos.rules_verified', [], new SourceContext($period), new ReportDefinition(['sections' => []]));
+
+        foreach ([[false, false, true], [false, true, true], [true, false, true], [true, true, false]] as [$template, $rules, $note]) {
+            $this->markTemplateVerified($template);
+            $this->markRulesVerified($rules);
+            $label = 'template '.($template ? 'verified' : 'unverified').', rules '.($rules ? 'verified' : 'to verify');
+
+            $this->assertSame($note, $check() !== null, "The pesos.rules_verified check, {$label}.");
+            $this->assertSame($note, $this->content()->unverified, "The export note, {$label}.");
+        }
+
+        CdaReportValue::query()->where('report_id', $this->pesos->id)->delete();
+        $this->assertNotNull($check(), 'Without a figure carrying the rules\' flag, the check stays open, as the note does.');
     }
 
     public function test_a_finalized_pesos_report_reads_both_flags_from_its_snapshot(): void

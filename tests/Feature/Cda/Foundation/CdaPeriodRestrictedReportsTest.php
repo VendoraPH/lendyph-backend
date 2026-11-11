@@ -115,6 +115,25 @@ class CdaPeriodRestrictedReportsTest extends TestCase
         }
     }
 
+    public function test_saving_a_period_extension_answers_with_only_the_reports_the_caller_may_open(): void
+    {
+        $this->postJson('/api/cda/periods', ['year' => 2026])->assertCreated();
+        $this->overrideRestrictedDeadlines(2026);
+        $body = ['extended_deadline' => '2027-06-30', 'extension_reference' => 'CDA extension letter 2027-06'];
+
+        foreach (self::VIEWS as $view => $spec) {
+            $without = $this->userWith([CdaAccess::SETTINGS, BranchAccess::VIEW_ALL, ...self::allViewsBut($view)]);
+            $response = $this->actingAs($without)->patchJson('/api/cda/periods/2026', $body)->assertOk()
+                ->assertJsonPath('data.extended_deadline', '2027-06-30');
+            $this->assertLeftOut($response, $spec['types'], $view, 'PATCH /cda/periods/2026');
+            $this->assertCount(11 - self::restrictedRowCount($view), $response->json('data.reports'));
+
+            $with = $this->userWith([CdaAccess::SETTINGS, BranchAccess::VIEW_ALL, $view]);
+            $response = $this->actingAs($with)->patchJson('/api/cda/periods/2026', $body)->assertOk();
+            $this->assertShown($response, $spec['types'], $view, 'PATCH /cda/periods/2026');
+        }
+    }
+
     public function test_the_period_list_counts_only_the_reports_the_caller_may_open(): void
     {
         $this->postJson('/api/cda/periods', ['year' => 2026])->assertCreated();

@@ -11,6 +11,7 @@ use App\Models\CdaReportValue;
 use App\Models\User;
 use App\Services\Cda\Reports\ReportStages;
 use App\Services\Cda\ReportTypes;
+use App\Services\Cda\Sources\PesosSource;
 use Carbon\CarbonImmutable;
 
 /**
@@ -28,7 +29,8 @@ use Carbon\CarbonImmutable;
  * drafts and finalized reports alike. A PESOS report also carries it while
  * the PESOS rules behind its figures are still to verify: a stored
  * `pesos.result` figure's `meta.to_verify` list isn't empty (the snapshot's
- * figures once finalized), or no figure carries that flag at all.
+ * figures once finalized), or no figure carries that flag at all. The rule
+ * is PesosSource::verified(), shared with the on-screen check.
  *
  * The document stage is always the current one (ReportStages::current()),
  * never a frozen one: financial statements read "Draft Financial
@@ -124,8 +126,9 @@ final class ExportContentBuilder
             types: $this->types((array) ($definition['sections'] ?? [])),
             profile: $profile,
             excel: (array) ($definition['export']['excel'] ?? []),
-            unverified: ($definition['meta']['verified'] ?? false) !== true
-                || ($report->report_type === 'pesos' && ! self::pesosRulesVerified($sourceValues)),
+            unverified: $report->report_type === 'pesos'
+                ? ! PesosSource::verified(($definition['meta']['verified'] ?? false) === true, $sourceValues)
+                : ($definition['meta']['verified'] ?? false) !== true,
         );
     }
 
@@ -145,23 +148,6 @@ final class ExportContentBuilder
         }
 
         return array_values(array_map(fn ($row) => is_array($row) ? ($row['source_value'] ?? null) : null, $values));
-    }
-
-    /**
-     * Whether the PESOS rules behind the figures are verified: at least one
-     * figure carries the rules' "to verify" list (PesosSource's
-     * `meta.to_verify`) and every such list is empty.
-     *
-     * @param  list<mixed>  $sourceValues
-     */
-    private static function pesosRulesVerified(array $sourceValues): bool
-    {
-        $flags = array_values(array_filter(
-            $sourceValues,
-            fn ($source) => is_array($source) && is_array($source['meta'] ?? null) && array_key_exists('to_verify', $source['meta']),
-        ));
-
-        return $flags !== [] && array_all($flags, fn (array $source) => $source['meta']['to_verify'] === []);
     }
 
     /**

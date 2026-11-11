@@ -137,7 +137,15 @@ class ExportIntegrationTest extends TestCase
         $rows = $this->sheetRows($sheet);
         $members = array_values(array_filter($rows, fn (array $row) => ($row[0] ?? null) === 'Total members'));
         $this->assertSame([['Total members', '120']], $members, 'Total members reads the snapshot\'s 120.');
-        $this->assertNotContains('999', array_merge(...$rows), 'No cell carries the live 999.');
+        $footer = 'checksum '.$snapshot->checksum;
+        foreach (array_merge(...$rows) as $cell) {
+            if (str_contains($cell, $footer)) {
+                $this->assertStringNotContainsString('999', str_replace($footer, '', $cell), 'The footer carries no live 999 besides the checksum.');
+
+                continue;
+            }
+            $this->assertStringNotContainsString('999', $cell, "No cell carries the live 999: \"{$cell}\".");
+        }
         $this->assertSame($snapshot->id, $version->snapshot_id);
     }
 

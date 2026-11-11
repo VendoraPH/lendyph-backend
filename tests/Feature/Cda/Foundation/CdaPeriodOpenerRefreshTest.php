@@ -102,6 +102,15 @@ class CdaPeriodOpenerRefreshTest extends TestCase
         $this->assertNotNull($period->year_end_captured_at);
         $this->assertNull($period->created_by, 'The capture opens the year as the system.');
         $this->assertRefreshedExcept($period, null);
+
+        $capr = CdaReport::query()->where('period_id', $period->id)->where('report_type', 'capr')->firstOrFail();
+        $this->assertNull(
+            collect($capr->issues)->firstWhere('rule_id', 'classification_captured'),
+            'CAPR is refreshed after the capture is saved, so it never warns that the capture hasn\'t run.',
+        );
+        $outstanding = $capr->values()->where('field_key', 'loans.loans_outstanding')->firstOrFail();
+        $this->assertSame('capture', $outstanding->source_value['meta']['basis'] ?? null, 'CAPR reads its loans from the year-end capture.');
+        $this->assertFalse($outstanding->source_value['provisional'], 'Figures from the capture aren\'t provisional.');
     }
 
     public function test_opening_a_year_still_answers_201_when_one_reports_refresh_fails(): void
