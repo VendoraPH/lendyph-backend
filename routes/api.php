@@ -700,6 +700,9 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
          * needs a posting permission.
          */
         Route::get('/reconciliations', [AccountingReconciliationController::class, 'index']);
+        // The accounts a reconciliation can start on, on accounting:reconcile
+        // alone (no chart_of_accounts:view). A literal, before the wildcard.
+        Route::get('/reconciliations/accounts', [AccountingReconciliationController::class, 'accounts']);
         Route::post('/reconciliations', [AccountingReconciliationController::class, 'store']);
         Route::get('/reconciliations/{reconciliation}', [AccountingReconciliationController::class, 'show'])
             ->whereNumber('reconciliation');

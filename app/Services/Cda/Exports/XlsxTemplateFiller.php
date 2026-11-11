@@ -28,6 +28,12 @@ use ZipArchive;
  *   returned notes.
  * - `calcChain.xml` is dropped (with its content type and relationship) and
  *   the workbook is set to recalculate on open (`fullCalcOnLoad`).
+ * - An unverified template (ExportContent::$unverified: `meta.verified`, or
+ *   PesosSource::verified() for PESOS, the other exports' rule) gets a
+ *   separate "Notes" sheet at the end ("Notes (2)" when the form already has
+ *   one) whose first line says so, and the document properties' Subject
+ *   reads "To verify". The official form's own sheets are never touched for
+ *   it.
  * - Refused in words (422): a part that isn't XML, holds a DOCTYPE, or
  *   unpacks to more than MAX_PART_BYTES, and rows or cells with no `r`.
  */
@@ -39,7 +45,30 @@ final class XlsxTemplateFiller
 
     public const NO_DRAFT_CELL = "This template's official workbook has no cell for the DRAFT mark, so a draft can't be exported from it. A super admin can set export.excel.draft_cell in a new template version; a finalized report exports without it.";
 
+    /** The sheet an unverified template's export adds at the end. */
+    public const NOTES_SHEET = 'Notes';
+
+    /** The Notes sheet's first line. */
+    public const NOT_VERIFIED_LINE = 'Template not yet verified against the official CDA form';
+
+    /** The document properties' Subject on an unverified template's export. */
+    public const TO_VERIFY_SUBJECT = 'To verify';
+
     private const NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
+
+    private const CONTENT_TYPES_NS = 'http://schemas.openxmlformats.org/package/2006/content-types';
+
+    private const CORE_NS = 'http://schemas.openxmlformats.org/package/2006/metadata/core-properties';
+
+    private const DC_NS = 'http://purl.org/dc/elements/1.1/';
+
+    private const WORKSHEET_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml';
+
+    private const WORKSHEET_REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet';
+
+    private const CORE_TYPE = 'application/vnd.openxmlformats-package.core-properties+xml';
+
+    private const CORE_REL = 'http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties';
 
     private const REL_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
 
@@ -110,6 +139,18 @@ final class XlsxTemplateFiller
 
             $this->dropCalcChain($zip);
             $zip->close();
+
+            if ($content->unverified) {
+                // libzip can't read back a part changed in the same session,
+                // so each step that reads what the last one wrote reopens it.
+                $this->reopen($zip, $path);
+                $this->addNotesSheet($zip);
+                $zip->close();
+
+                $this->reopen($zip, $path);
+                $this->markToVerify($zip);
+                $zip->close();
+            }
 
             $names = array_keys($missing);
             sort($names);
@@ -372,6 +413,179 @@ final class XlsxTemplateFiller
 
         $calcPr?->setAttribute('fullCalcOnLoad', '1');
         $zip->addFromString('xl/workbook.xml', (string) $workbook->saveXML());
+    }
+
+    /**
+     * Appends the Notes sheet: its own part, relationship, content type and
+     * place last in the workbook. Existing sheets, their ids and order stay.
+     */
+    private function addNotesSheet(ZipArchive $zip): void
+    {
+        $workbook = $this->dom($this->part($zip, 'xl/workbook.xml'));
+        $sheetsElement = $workbook->getElementsByTagNameNS(self::NS, 'sheets')->item(0);
+
+        if (! $sheetsElement instanceof DOMElement) {
+            abort(422, self::INVALID);
+        }
+
+        $names = [];
+        $maxSheetId = 0;
+
+        foreach ($workbook->getElementsByTagNameNS(self::NS, 'sheet') as $sheet) {
+            $names[] = mb_strtolower($sheet->getAttribute('name'));
+            $maxSheetId = max($maxSheetId, (int) $sheet->getAttribute('sheetId'));
+        }
+
+        $name = self::NOTES_SHEET;
+
+        for ($n = 2; in_array(mb_strtolower($name), $names, true); $n++) {
+            $name = self::NOTES_SHEET." ({$n})";
+        }
+
+        $n = 1;
+
+        while ($zip->locateName("xl/worksheets/sheet{$n}.xml") !== false) {
+            $n++;
+        }
+
+        $part = "xl/worksheets/sheet{$n}.xml";
+        $zip->addFromString($part, self::notesSheetXml());
+
+        $rels = $this->dom($this->part($zip, 'xl/_rels/workbook.xml.rels'));
+        $relId = $this->addRelationship($rels, self::WORKSHEET_REL, "worksheets/sheet{$n}.xml");
+        $zip->addFromString('xl/_rels/workbook.xml.rels', (string) $rels->saveXML());
+
+        $sheet = $this->element($workbook, 'sheet', ['name' => $name, 'sheetId' => (string) ($maxSheetId + 1)]);
+        $sheet->setAttributeNS(self::REL_NS, 'r:id', $relId);
+        $sheetsElement->appendChild($sheet);
+        $zip->addFromString('xl/workbook.xml', (string) $workbook->saveXML());
+
+        $this->addContentType($zip, '/'.$part, self::WORKSHEET_TYPE);
+    }
+
+    private function reopen(ZipArchive $zip, string $path): void
+    {
+        if ($zip->open($path) !== true) {
+            throw new RuntimeException('The filled workbook could not be reopened.');
+        }
+    }
+
+    /** The Notes sheet: the "not yet verified" line, then the exports' own note. */
+    private static function notesSheetXml(): string
+    {
+        $rows = '';
+
+        foreach ([self::NOT_VERIFIED_LINE, ExportContent::UNVERIFIED_NOTE] as $i => $line) {
+            $r = $i + 1;
+            $rows .= "<row r=\"{$r}\"><c r=\"A{$r}\" t=\"inlineStr\"><is><t xml:space=\"preserve\">"
+                .htmlspecialchars($line, ENT_XML1 | ENT_QUOTES, 'UTF-8').'</t></is></c></row>';
+        }
+
+        return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'."\n"
+            .'<worksheet xmlns="'.self::NS.'"><sheetData>'.$rows.'</sheetData></worksheet>';
+    }
+
+    /**
+     * Sets the document properties' Subject to "To verify", in the workbook's
+     * own core properties part, or in a new one when it has none.
+     */
+    private function markToVerify(ZipArchive $zip): void
+    {
+        $rels = $this->dom($this->part($zip, '_rels/.rels'));
+        $target = null;
+
+        foreach ($rels->getElementsByTagNameNS(self::PKG_REL_NS, 'Relationship') as $rel) {
+            if ($rel->getAttribute('Type') === self::CORE_REL) {
+                $target = ltrim((string) $rel->getAttribute('Target'), '/');
+            }
+        }
+
+        $target ??= 'docProps/core.xml';
+
+        if ($zip->locateName($target) !== false) {
+            $core = $this->dom($this->part($zip, $target));
+        } else {
+            $core = $this->dom('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                .'<cp:coreProperties xmlns:cp="'.self::CORE_NS.'" xmlns:dc="'.self::DC_NS.'"/>');
+            $this->addContentType($zip, '/'.$target, self::CORE_TYPE);
+        }
+
+        if (! $this->hasRelationship($rels, self::CORE_REL)) {
+            $this->addRelationship($rels, self::CORE_REL, $target);
+            $zip->addFromString('_rels/.rels', (string) $rels->saveXML());
+        }
+
+        $root = $core->documentElement;
+
+        if ($root === null) {
+            abort(422, self::INVALID);
+        }
+
+        $subject = $core->getElementsByTagNameNS(self::DC_NS, 'subject')->item(0);
+
+        if (! $subject instanceof DOMElement) {
+            $subject = $root->appendChild($core->createElementNS(self::DC_NS, 'dc:subject'));
+        }
+
+        $subject->textContent = self::TO_VERIFY_SUBJECT;
+        $zip->addFromString($target, (string) $core->saveXML());
+    }
+
+    private function hasRelationship(DOMDocument $rels, string $type): bool
+    {
+        foreach ($rels->getElementsByTagNameNS(self::PKG_REL_NS, 'Relationship') as $rel) {
+            if ($rel->getAttribute('Type') === $type) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /** Adds a relationship under an unused id and returns the id. */
+    private function addRelationship(DOMDocument $rels, string $type, string $target): string
+    {
+        $ids = [];
+
+        foreach ($rels->getElementsByTagNameNS(self::PKG_REL_NS, 'Relationship') as $rel) {
+            $ids[] = $rel->getAttribute('Id');
+        }
+
+        $n = count($ids) + 1;
+
+        while (in_array("rId{$n}", $ids, true)) {
+            $n++;
+        }
+
+        $root = $rels->documentElement;
+
+        if ($root === null) {
+            abort(422, self::INVALID);
+        }
+
+        $rel = $rels->createElementNS(self::PKG_REL_NS, 'Relationship');
+        $rel->setAttribute('Id', "rId{$n}");
+        $rel->setAttribute('Type', $type);
+        $rel->setAttribute('Target', $target);
+        $root->appendChild($rel);
+
+        return "rId{$n}";
+    }
+
+    private function addContentType(ZipArchive $zip, string $partName, string $contentType): void
+    {
+        $types = $this->dom($this->part($zip, '[Content_Types].xml'));
+        $root = $types->documentElement;
+
+        if ($root === null) {
+            abort(422, self::INVALID);
+        }
+
+        $override = $types->createElementNS(self::CONTENT_TYPES_NS, 'Override');
+        $override->setAttribute('PartName', $partName);
+        $override->setAttribute('ContentType', $contentType);
+        $root->appendChild($override);
+        $zip->addFromString('[Content_Types].xml', (string) $types->saveXML());
     }
 
     /** @param  array<string, string>  $attributes */

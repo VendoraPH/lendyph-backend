@@ -9,6 +9,7 @@ use App\Models\User;
 use App\Services\AuditLogService;
 use App\Services\Cda\CdaAccess;
 use App\Services\LoanWriteTransaction;
+use App\Support\Sentence;
 use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Support\Facades\DB;
 
@@ -397,12 +398,17 @@ final class ReportWorkflow
             $new['reason'] = $reason;
         }
 
+        // The sentence ends with its own full stop, so the reason's own ending
+        // is dropped from it ("…future." never reads "…future.."); the values
+        // keep the reason as typed.
+        $inSentence = $reason === null ? '' : Sentence::withoutEnding($reason);
+
         AuditLogService::log(
             'cda_workflow',
             $report,
             ['status' => $from],
             $new,
-            sprintf('%s %d %s%s.', ReportValidator::reportName($report), $report->period->year, self::ACTION_WORDS[$action], $reason === null ? '' : ": {$reason}"),
+            sprintf('%s %d %s%s.', ReportValidator::reportName($report), $report->period->year, self::ACTION_WORDS[$action], $inSentence === '' ? '' : ": {$inSentence}"),
         );
     }
 

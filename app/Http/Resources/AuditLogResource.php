@@ -111,6 +111,48 @@ class AuditLogResource extends JsonResource
      * Change-list fields that hold a journal's id: read by the journal's
      * number ("JE-000014"), else its reference, never by its database id.
      */
+    /**
+     * Kinds whose class name doesn't read as what it holds, in the Audit Trail
+     * screen's words (the frontend's `TARGET_TYPE_LABELS`): the Accounting
+     * menu's names ("Journal entry", "Expense"), "GCash walk-in" (never
+     * "non-member") and the module records. A target with nothing to name it
+     * by reads this way ("Journal entry #2"), so the screen's "Created:
+     * <record>" and the target heading say the same; so does the CSV's Target
+     * Type. Display only: stored rows keep the class name.
+     */
+    private const TYPE_WORDS = [
+        'AccountingJournal' => 'Journal entry',
+        'AccountingJournalLine' => 'Journal entry line',
+        'AccountingAccount' => 'Account',
+        'AccountingAccountMapping' => 'Account mapping',
+        'AccountingAllowancePosting' => 'Allowance for credit losses posting',
+        'AccountingExpense' => 'Expense',
+        'AccountingExpensePayment' => 'Expense payment',
+        'AccountingOpeningBalance' => 'Opening balance',
+        'AccountingYearClose' => 'Year-end close',
+        'GCashNonMember' => 'GCash walk-in',
+        'CsvImportRun' => 'Data import',
+        'SavingsApproval' => 'Savings approval request',
+        'SavingsSetting' => 'Savings settings',
+        'ReminderSetting' => 'Reminder settings',
+        'ReminderBranchSetting' => 'Branch reminder settings',
+        'BorrowerNotificationPreference' => 'Member reminder preferences',
+        'CdaSetting' => 'CDA settings',
+        'CdaReportValue' => 'CDA report figure',
+        'CdaReportSnapshot' => 'CDA report version',
+        'CdaSubmission' => 'CDA filing',
+        'CdaOfficerTraining' => 'Officer training',
+        'CdaSocialProgram' => 'Social program',
+        'CdaMediationCase' => 'Mediation case',
+        'CdaNoticeSent' => 'CDA notice',
+        'PortalUser' => 'Portal account',
+        'PortalCode' => 'Portal code',
+        'PortalSetting' => 'Member Portal settings',
+        'PortalTermsVersion' => 'Portal terms',
+        'PortalRequest' => 'Portal request',
+        'PortalAnnouncement' => 'Portal announcement',
+    ];
+
     private const JOURNAL_KEYS = ['journal_id', 'accounting_journal_id', 'reverses_journal_id', 'reversed_by_journal_id'];
 
     /**
@@ -539,8 +581,8 @@ class AuditLogResource extends JsonResource
     }
 
     /**
-     * A target with nothing to name it by: its class in words and its id, e.g.
-     * "Accounting journal #557" or "Member #12".
+     * A target with nothing to name it by: its kind in words and its id, e.g.
+     * "Journal entry #557" or "Member #12".
      */
     private function fallbackLabel(): string
     {
@@ -554,10 +596,15 @@ class AuditLogResource extends JsonResource
      * `Borrower…` reads "Member…" and `CoMaker` reads "Co-maker", CamelCase is
      * split into words, and only the first word keeps its capitals ("GCash"
      * keeps them anywhere). The CDA models read "CDA document", "CDA officer".
-     * The CSV export reads the same.
+     * A kind in self::TYPE_WORDS reads the screen's own words instead. The CSV
+     * export reads the same.
      */
     public static function typeInWords(string $basename): string
     {
+        if (isset(self::TYPE_WORDS[$basename])) {
+            return self::TYPE_WORDS[$basename];
+        }
+
         $named = str_replace('CoMaker', 'Co-maker', (string) preg_replace('/^Borrower/', 'Member', $basename));
         $words = explode(' ', (string) preg_replace('/([a-z])([A-Z])/', '$1 $2', $named));
 

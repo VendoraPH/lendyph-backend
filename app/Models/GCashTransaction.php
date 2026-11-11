@@ -64,6 +64,12 @@ class GCashTransaction extends Model
         return $this->belongsTo(GCashNonMember::class, 'gcash_non_member_id')->withTrashed();
     }
 
+    /** The branch a walk-in transaction was done in (null for a member's and for head office). */
+    public function branch(): BelongsTo
+    {
+        return $this->belongsTo(Branch::class);
+    }
+
     public function transactor(): BelongsTo
     {
         return $this->belongsTo(User::class, 'transactor_user_id');

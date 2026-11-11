@@ -16,6 +16,7 @@ use App\Services\Savings\AvailableBalance;
 use App\Services\Savings\SavingsLedger;
 use App\Services\Savings\SavingsLocks;
 use App\Services\Savings\SavingsMath;
+use App\Support\Sentence;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -174,7 +175,7 @@ class AccountCloser
             $account,
             $this->auditValues($before),
             $this->auditValues($account->only(array_keys($before))),
-            "Savings account {$account->account_number} closed: {$data['reason']}. Paid out ".Refuse::peso($balance).'.',
+            "Savings account {$account->account_number} closed: ".Sentence::withoutEnding((string) $data['reason']).'. Paid out '.Refuse::peso($balance).'.',
         );
 
         return $result;

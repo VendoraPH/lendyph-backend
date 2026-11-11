@@ -343,7 +343,7 @@ it('names a target with no label by its class in words', function () {
         return $this->getJson("/api/audit-logs/{$row->id}")->assertOk()->json('data.target.label');
     };
 
-    expect($label($journal->getMorphClass(), $journal->id))->toBe("Accounting journal #{$journal->id}")
+    expect($label($journal->getMorphClass(), $journal->id))->toBe("Journal entry #{$journal->id}")
         ->and($label(Borrower::class, 999991))->toBe('Member #999991')
         ->and($label(CoMaker::class, 999992))->toBe('Co-maker #999992')
         ->and($label(LoanApprovalStep::class, 999993))->toBe('Loan approval step #999993')
