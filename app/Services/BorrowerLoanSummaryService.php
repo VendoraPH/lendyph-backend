@@ -52,11 +52,34 @@ class BorrowerLoanSummaryService
      */
     public function summarize(Borrower $borrower, User $viewer): array
     {
+        return $this->build($borrower, $viewer);
+    }
+
+    /**
+     * The same figures for the member themself (the Member Portal): every one
+     * of the member's own loans, whichever branch holds it, since a member
+     * always sees their own loans. Equal to summarize() for a viewer who sees
+     * every branch.
+     *
+     * @return array{total_borrowed: float|int, total_outstanding: float, outstanding_principal: float, overdue_amount: float, total_paid: float|int, insurance_paid: float|int, current_loans: int, counts: array<string, int>}
+     */
+    public function forMember(Borrower $borrower): array
+    {
+        return $this->build($borrower, null);
+    }
+
+    /**
+     * Without a viewer, every loan of the member's counts (forMember()).
+     *
+     * @return array{total_borrowed: float|int, total_outstanding: float, outstanding_principal: float, overdue_amount: float, total_paid: float|int, insurance_paid: float|int, current_loans: int, counts: array<string, int>}
+     */
+    private function build(Borrower $borrower, ?User $viewer): array
+    {
+        $visible = fn ($query) => $viewer === null ? $query : $query->visibleTo($viewer);
         $counts = array_fill_keys(self::STATUSES, 0);
         $borrowed = 0;
 
-        $rows = $borrower->loans()
-            ->visibleTo($viewer)
+        $rows = $visible($borrower->loans())
             ->reorder()
             ->selectRaw('status, COUNT(*) as loan_count, COALESCE(SUM(principal_amount), 0) as principal')
             ->groupBy('status')
@@ -71,14 +94,13 @@ class BorrowerLoanSummaryService
         }
 
         $owed = $this->totals->for(
-            Loan::query()
-                ->visibleTo($viewer)
+            $visible(Loan::query())
                 ->where('loans.borrower_id', $borrower->id)
                 ->whereIn('loans.status', Loan::COLLECTIBLE_STATUSES),
         );
 
         $paid = Repayment::query()
-            ->whereIn('loan_id', $borrower->loans()->visibleTo($viewer)->reorder()->select('loans.id'))
+            ->whereIn('loan_id', $visible($borrower->loans())->reorder()->select('loans.id'))
             ->where('status', 'posted')
             ->selectRaw('COALESCE(SUM(amount_paid), 0) as amount_paid, COALESCE(SUM(insurance_applied), 0) as insurance_applied')
             ->first();
