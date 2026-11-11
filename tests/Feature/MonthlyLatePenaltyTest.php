@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Models\AmortizationPrincipalChange;
 use App\Models\AmortizationSchedule;
 use App\Models\AuditLog;
 use App\Models\LatePenaltySetting;
@@ -418,6 +419,228 @@ class MonthlyLatePenaltyTest extends TestCase
         $this->assertPenalty(1, charged: 400, months: 2);
     }
 
+    public function test_a_payment_dated_before_a_balance_adjustment_is_charged_as_of_its_own_date(): void
+    {
+        // 20 May: period 1 has its charges of 19 Feb, 15 Apr and 15 May,
+        // 3 × ₱200.00 = ₱600.00. The adjustment that day takes ₱6,000.00 off
+        // the ₱60,000.00 unpaid, ₱1,000.00 a period: period 1 owes ₱9,000.00.
+        $this->nightlyOn('2026-05-20');
+        $this->adjustBalanceOn('2026-05-20', 54000);
+        $this->assertEqualsWithDelta(9000, (float) $this->period(1)->principal_due, 0.001);
+
+        // Recorded on 25 May, dated 20 April. On 20 April period 1 had two
+        // charges, 2% of ₱10,000.00 each: ₱400.00. The payment takes that,
+        // ₱1,800.00 interest and ₱5,000.00 principal.
+        $this->travelTo(Carbon::parse('2026-05-25 10:00'));
+        $id = $this->postJson("/api/loans/{$this->loan->id}/repayments", [
+            'amount_paid' => 7200,
+            'payment_date' => '2026-04-20',
+        ])->assertCreated()->json('data.id');
+        $this->assertEqualsWithDelta(400, (float) Repayment::findOrFail($id)->penalty_applied, 0.001);
+
+        // As of 25 May: ₱200.00 (19 Feb) + ₱200.00 (15 Apr), then 15 May on
+        // the ₱10,000.00 owed that day less the ₱5,000.00 paid on 20 April:
+        // ₱100.00. ₱500.00 charged, ₱400.00 paid.
+        $this->assertPenalty(1, charged: 500, paid: 400, months: 3);
+        $this->assertOwedAgreesEverywhere();
+
+        // 15 June: on the ₱9,000.00 owed since the adjustment, less ₱5,000.00
+        // paid: 2% of ₱4,000.00 = ₱80.00, so ₱580.00.
+        $this->nightlyOn('2026-06-15');
+        $this->assertPenalty(1, charged: 580, paid: 400, months: 4);
+    }
+
+    public function test_a_void_after_a_balance_adjustment_charges_each_month_on_the_principal_then_owed(): void
+    {
+        // 20 February: ₱200.00 penalty, ₱1,800.00 interest, ₱5,000.00 principal.
+        $payment = $this->payOn('2026-02-20', 7000);
+
+        // ₱200.00 (19 Feb, on ₱10,000.00) + ₱100.00 (15 Apr, on ₱5,000.00).
+        $this->nightlyOn('2026-04-15');
+        $this->assertPenalty(1, charged: 300, paid: 200, months: 2);
+
+        // 20 April: ₱55,000.00 unpaid to ₱49,500.00. Period 1 (₱5,000.00 of
+        // it) takes ₱500.00 off and owes ₱9,500.00; the others ₱1,000.00 each.
+        $this->adjustBalanceOn('2026-04-20', 49500);
+        $this->assertEqualsWithDelta(9500, (float) $this->period(1)->principal_due, 0.001);
+
+        // 15 May: 2% of ₱9,500.00 less ₱5,000.00 paid = ₱90.00, so ₱390.00.
+        $this->nightlyOn('2026-05-15');
+        $this->assertPenalty(1, charged: 390, paid: 200, months: 3);
+
+        $this->nightlyOn('2026-05-20');
+        $this->travelTo(Carbon::parse('2026-05-20 10:00'));
+        app(RepaymentService::class)->voidRepayment($payment, 'Keyed twice', $this->admin);
+
+        // As if the payment never was: ₱200.00 (19 Feb) + ₱200.00 (15 Apr, on
+        // ₱10,000.00, before the adjustment) + ₱190.00 (15 May, on ₱9,500.00).
+        $this->assertPenalty(1, charged: 590, paid: 0, months: 3);
+        $this->assertOwedAgreesEverywhere();
+    }
+
+    public function test_two_balance_adjustments_on_a_period_each_charge_their_own_months(): void
+    {
+        // 15 August: 6 × ₱200.00 on ₱10,000.00.
+        $this->nightlyOn('2026-08-15');
+        $this->adjustBalanceOn('2026-08-20', 30000);
+        // 15 September on ₱5,000.00: ₱100.00.
+        $this->nightlyOn('2026-09-15');
+        $this->assertPenalty(1, charged: 1300, months: 7);
+
+        // ₱30,000.00 back up to ₱60,000.00: period 1 owes ₱10,000.00 again.
+        $this->adjustBalanceOn('2026-09-20', 60000);
+        // 15 October on ₱10,000.00: ₱200.00.
+        $this->nightlyOn('2026-10-15');
+        $this->assertPenalty(1, charged: 1500, months: 8);
+
+        $this->assertSame(
+            [['2026-08-20', 10000.0, 5000.0], ['2026-09-20', 5000.0, 10000.0]],
+            AmortizationPrincipalChange::where('amortization_schedule_id', $this->period(1)->id)
+                ->orderBy('id')
+                ->get()
+                ->map(fn (AmortizationPrincipalChange $c): array => [$c->effective_on->toDateString(), (float) $c->principal_due_before, (float) $c->principal_due_after])
+                ->all(),
+        );
+
+        // Each month's line is the charge as it fell.
+        $this->assertSame([
+            ['2026-02-19', 'Late penalty, period 1', 200.0],
+            ['2026-04-15', 'Late penalty, period 1, month 2', 200.0],
+            ['2026-05-15', 'Late penalty, period 1, month 3', 200.0],
+            ['2026-06-15', 'Late penalty, period 1, month 4', 200.0],
+            ['2026-07-15', 'Late penalty, period 1, month 5', 200.0],
+            ['2026-08-15', 'Late penalty, period 1, month 6', 200.0],
+            ['2026-09-15', 'Late penalty, period 1, month 7', 100.0],
+            ['2026-10-15', 'Late penalty, period 1, month 8', 200.0],
+        ], $this->periodPenaltyLines(1));
+        $this->assertLedgerClosesOnTheSummary();
+    }
+
+    public function test_an_adjustment_then_a_waiver_then_a_void_of_an_earlier_payment(): void
+    {
+        // 20 February: ₱200.00 penalty, ₱1,800.00 interest, ₱5,000.00 principal.
+        $payment = $this->payOn('2026-02-20', 7000);
+        $this->nightlyOn('2026-04-15');
+
+        // Period 1 to ₱9,500.00, as in the void test above.
+        $this->adjustBalanceOn('2026-04-20', 49500);
+
+        // 25 April: ₱300.00 charged, ₱200.00 paid: the waiver forgives ₱100.00
+        // and keeps ₱200.00.
+        $this->waiveOn('2026-04-25', [$this->period(1)->id]);
+        $this->assertPenalty(1, charged: 200, paid: 200, months: 2);
+
+        // 15 May: ₱200.00 + 2% of (₱9,500.00 − ₱5,000.00) = ₱290.00.
+        $this->nightlyOn('2026-05-15');
+        $this->assertPenalty(1, charged: 290, paid: 200, months: 3);
+
+        $this->nightlyOn('2026-05-20');
+        $this->travelTo(Carbon::parse('2026-05-20 10:00'));
+        app(RepaymentService::class)->voidRepayment($payment, 'Keyed twice', $this->admin);
+
+        // The ₱200.00 the waiver kept is owed again, and 15 May is on the
+        // whole ₱9,500.00: ₱190.00. ₱390.00.
+        $this->assertPenalty(1, charged: 390, paid: 0, months: 3);
+        $this->assertPenaltyBalanceNeverNegative();
+        $this->assertOwedAgreesEverywhere();
+    }
+
+    public function test_the_ledger_balance_stays_at_or_above_zero_with_an_adjustment_between_two_waivers(): void
+    {
+        // 15 April: ₱400.00, waived on 20 April.
+        $this->nightlyOn('2026-04-15');
+        $this->waiveOn('2026-04-20', [$this->period(1)->id]);
+
+        // 1 May: ₱60,000.00 to ₱12,000.00, every period to ₱2,000.00.
+        $this->adjustBalanceOn('2026-05-01', 12000);
+
+        // 15 May: 2% of ₱2,000.00 = ₱40.00, waived on 20 May.
+        $this->nightlyOn('2026-05-15');
+        $this->waiveOn('2026-05-20', [$this->period(1)->id]);
+        $this->nightlyOn('2026-06-15');
+        $this->assertPenalty(1, charged: 40, months: 4);
+
+        $this->assertSame([
+            ['2026-02-19', 'Late penalty, period 1', 200.0],
+            ['2026-04-15', 'Late penalty, period 1, month 2', 200.0],
+            ['2026-05-15', 'Late penalty, period 1, month 3', 40.0],
+            ['2026-06-15', 'Late penalty, period 1, month 4', 40.0],
+        ], $this->periodPenaltyLines(1));
+        $this->assertPenaltyBalanceNeverNegative();
+        $this->assertLedgerClosesOnTheSummary();
+    }
+
+    public function test_the_floor_at_penalty_paid_is_on_the_whole_charge_after_an_adjustment(): void
+    {
+        $this->nightlyOn('2026-03-20');
+        $this->period(1)->update(['penalty_amount' => 500, 'penalty_paid' => 500]);
+
+        // ₱60,000.00 to ₱30,000.00 on 20 April: period 1 owes ₱5,000.00.
+        $this->nightlyOn('2026-04-15');
+        $this->adjustBalanceOn('2026-04-20', 30000);
+
+        // ₱200.00 + ₱200.00 + 2% of ₱5,000.00 = ₱500.00, not above the ₱500.00 paid.
+        $this->nightlyOn('2026-05-15');
+        $this->assertPenalty(1, charged: 500, paid: 500, months: 3);
+
+        // + ₱100.00 on 15 June: ₱600.00.
+        $this->nightlyOn('2026-06-15');
+        $this->assertPenalty(1, charged: 600, paid: 500, months: 4);
+    }
+
+    public function test_a_waiver_on_a_period_not_late_writes_the_charges_it_really_has(): void
+    {
+        $this->travelTo(Carbon::parse('2026-03-01 10:00'));
+        $this->period(6)->update(['penalty_amount' => 100, 'penalty_months' => 3]);
+
+        $this->waiveOn('2026-03-01', [$this->period(6)->id]);
+
+        $period = $this->period(6);
+        $this->assertSame(0, $period->penalty_months);
+        $this->assertSame(0, $period->penalty_checkpoint_months);
+        $this->assertEqualsWithDelta(0, (float) $period->penalty_amount, 0.001);
+    }
+
+    public function test_the_payment_preview_after_a_balance_adjustment_equals_the_payment(): void
+    {
+        $this->nightlyOn('2026-08-15');
+        $this->adjustBalanceOn('2026-08-20', 30000);
+
+        // No run since 15 August: the payment charges 15 September itself.
+        $this->travelTo(Carbon::parse('2026-09-20 10:00'));
+        $preview = $this->postJson("/api/loans/{$this->loan->id}/repayments/preview", [
+            'amount_paid' => 50000,
+            'payment_date' => '2026-09-20',
+        ])->assertOk()->json('data');
+        $repayment = $this->payOn('2026-09-20', 50000);
+
+        $this->assertEqualsWithDelta((float) $repayment->penalty_applied, (float) $preview['total_penalty'], 0.001);
+        // Period 1: 6 × ₱200.00 + 2% of ₱5,000.00 = ₱1,300.00, all paid.
+        $this->assertPenalty(1, charged: 1300, paid: 1300, months: 7);
+    }
+
+    public function test_the_extension_preview_after_a_balance_adjustment_equals_the_extension(): void
+    {
+        // ₱60,000.00 for one month, due 27 May 2026, late from 31 May.
+        $this->travelTo(Carbon::parse('2026-04-27 09:00'));
+        $this->loan = $this->createReleasedLoan([
+            'product' => ['interest_method' => 'upon_maturity', 'term' => 1, 'frequency' => 'monthly', 'interest_rate' => 3.0],
+            'start_date' => '2026-04-27',
+        ]);
+
+        // 10 June: ₱60,000.00 to ₱30,000.00.
+        $this->adjustBalanceOn('2026-06-10', 30000);
+
+        // 30 July: ₱1,200.00 (31 May, on ₱60,000.00) + ₱600.00 (27 July, on ₱30,000.00).
+        $this->travelTo(Carbon::parse('2026-07-30 10:00'));
+        $preview = $this->getJson("/api/loans/{$this->loan->id}/extension-preview?interest_option=pay")->assertOk()->json('data');
+        $this->postJson("/api/loans/{$this->loan->id}/extend", ['interest_option' => 'pay'])->assertOk();
+        $values = LoanAdjustment::where('loan_id', $this->loan->id)->where('adjustment_type', 'extension')->sole()->new_values;
+
+        $this->assertEqualsWithDelta(1800, (float) $preview['collect_now']['penalty_part'], 0.001);
+        $this->assertEqualsWithDelta(1800, (float) $values['penalty_paid'], 0.001);
+    }
+
     public function test_a_void_puts_back_the_monthly_charge_the_payment_covered(): void
     {
         $this->nightlyOn('2026-04-15');
@@ -603,6 +826,14 @@ class MonthlyLatePenaltyTest extends TestCase
         $this->assertEqualsWithDelta((float) $summary['total_outstanding'], (float) $summary['payoff_amount'], 0.001, 'payoff equals what is stored as owed');
         $this->assertEqualsWithDelta((float) $summary['outstanding_penalty'], (float) $row['amount_due_now']['penalty'], 0.001, 'amount due now carries the stored penalty');
         $this->assertLedgerClosesOnTheSummary();
+    }
+
+    /** No row of the loan's Ledger leaves the running penalty balance below ₱0.00. */
+    private function assertPenaltyBalanceNeverNegative(): void
+    {
+        foreach ($this->getJson("/api/loans/{$this->loan->id}/ledger")->assertOk()->json('data.rows') as $row) {
+            $this->assertGreaterThanOrEqual(0, (float) $row['balances']['penalty'], "{$row['date']} {$row['description']}");
+        }
     }
 
     /** A waiver applied before the switch: its link, with no checkpoint. */

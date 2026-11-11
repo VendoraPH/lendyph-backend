@@ -369,11 +369,12 @@ DESC,
                 'loanProduct:id,name',
                 'branch:id,name',
                 'openSchedules.postedPrincipalPayments',
+                'openSchedules.principalChanges',
                 'approvalSteps',
             );
         } else {
             $query
-                ->with('borrower', 'loanProduct', 'branch', 'createdByUser', 'amortizationSchedules.postedPrincipalPayments', 'coMakers', 'approvalSteps')
+                ->with('borrower', 'loanProduct', 'branch', 'createdByUser', 'amortizationSchedules.postedPrincipalPayments', 'amortizationSchedules.principalChanges', 'coMakers', 'approvalSteps')
                 // Aliased count so LoanResource's extension_count reads an
                 // already-loaded value instead of firing a COUNT query per row.
                 ->withCount(['adjustments as extension_count' => fn ($q) => $q->where('adjustment_type', 'extension')]);

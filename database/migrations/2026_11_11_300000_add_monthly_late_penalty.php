@@ -10,7 +10,7 @@ return new class extends Migration
 {
     /**
      * The late penalty is charged every month a period stays unpaid (owner's
-     * answer, Arvin, 2026-11-11). RepaymentService::penaltyFor() holds the rule.
+     * answer, Arvin, 2026-11-11). RepaymentService::penaltyStateAsOf() holds the rule.
      *
      * - `late_penalty_settings.monthly_from` is the switch date: today in
      *   Manila, stored on a deployment that already holds amortization
@@ -22,13 +22,18 @@ return new class extends Migration
      *   charges counted in the period's penalty figure, for the screen
      *   (Penalty: N month(s)).
      * - `penalty_checkpoint_on`, `penalty_checkpoint_amount` and
-     *   `penalty_checkpoint_months` fix what a period had been charged by a
-     *   day: the charge and the number of charges in it. A penalty waiver
-     *   made from now on (option b) leaves the charge at what was paid, and a
-     *   balance adjustment keeps the charge worked on the old principal; the
-     *   months after that day are charged on the period as it then stands. A
-     *   waiver made before the switch has no checkpoint and keeps its period
-     *   penalty-free (option a).
+     *   `penalty_checkpoint_months` are a penalty waiver's checkpoint (option
+     *   b, from now on): the day it cleared the penalty, the charge it left
+     *   (what was paid) and the number of charges by then. Months after that
+     *   day are charged again. A waiver made before the switch has no
+     *   checkpoint and keeps its period penalty-free (option a).
+     * - `amortization_principal_changes` is the append-only history of a
+     *   period's `principal_due`: one row for each period a balance
+     *   adjustment restates, from that day. Each month is charged on the
+     *   principal owed on its own day, so an adjustment never changes a month
+     *   already charged. No backfill: periods with no row keep their current
+     *   principal, as adjustments made before the switch did under the
+     *   once-only rule.
      *
      * No charge is changed here. Storing the switch date writes one system
      * audit row, naming the date and how many open periods were already late.
@@ -42,6 +47,23 @@ return new class extends Migration
                 $table->date('penalty_checkpoint_on')->nullable()->after('penalty_waiver_id');
                 $table->decimal('penalty_checkpoint_amount', 12, 2)->nullable()->after('penalty_checkpoint_on');
                 $table->unsignedSmallInteger('penalty_checkpoint_months')->nullable()->after('penalty_checkpoint_amount');
+            });
+        }
+
+        if (! Schema::hasTable('amortization_principal_changes')) {
+            Schema::create('amortization_principal_changes', function (Blueprint $table): void {
+                $table->id();
+                // No foreign key: the history is append-only and outlives a
+                // period a restructure's release deletes
+                // (LoanService::clearOpenSchedules()). Indexed below.
+                $table->unsignedBigInteger('amortization_schedule_id');
+                $table->date('effective_on');
+                $table->decimal('principal_due_before', 12, 2);
+                $table->decimal('principal_due_after', 12, 2);
+                $table->foreignId('loan_adjustment_id')->nullable()->constrained()->restrictOnDelete();
+                $table->timestamp('created_at')->nullable();
+
+                $table->index(['amortization_schedule_id', 'effective_on'], 'principal_changes_schedule_effective_index');
             });
         }
 
@@ -99,6 +121,7 @@ return new class extends Migration
     public function down(): void
     {
         Schema::dropIfExists('late_penalty_settings');
+        Schema::dropIfExists('amortization_principal_changes');
 
         if (Schema::hasColumn('amortization_schedules', 'penalty_months')) {
             Schema::table('amortization_schedules', function (Blueprint $table): void {

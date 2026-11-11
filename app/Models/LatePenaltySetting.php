@@ -9,7 +9,7 @@ use Illuminate\Support\Carbon;
  * The day the late penalty became a monthly charge on this deployment (the
  * 2026-11-11 migration stores it). A period already late before it keeps its
  * one charge and adds one for each full month after it; every other period is
- * charged once per month late (RepaymentService::penaltyFor()). A deployment
+ * charged once per month late (RepaymentService::penaltyStateAsOf()). A deployment
  * with no row has no period from before the switch.
  */
 class LatePenaltySetting extends Model

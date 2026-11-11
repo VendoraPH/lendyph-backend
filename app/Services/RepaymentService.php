@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Models\AmortizationPrincipalChange;
 use App\Models\AmortizationSchedule;
 use App\Models\Borrower;
 use App\Models\LatePenaltySetting;
@@ -1438,12 +1439,15 @@ class RepaymentService
      * - A period already late before the switch date (LatePenaltySetting)
      *   keeps the one charge it had, on the principal unpaid that day, plus
      *   one for each full month after the switch date.
-     * - A checkpoint (penaltyCheckpoint()) fixes what the period had been
-     *   charged by its day, and how many charges that was. Only the period's
-     *   own charges after that day are added, on the period as it now
-     *   stands: after a waiver (option b) the next falls on its next monthly
-     *   charge day, and after a balance adjustment the months already charged
-     *   keep the old principal.
+     * - A waiver's checkpoint (penaltyCheckpoint(), option b) fixes what the
+     *   period kept on its day, and how many charges that was. Only the
+     *   period's own charges after that day are added, so the next falls on
+     *   its next monthly charge day. As of a day before the waiver, the
+     *   charges up to that day count, never more than the waiver kept.
+     * - A balance adjustment needs no checkpoint: each month is charged on
+     *   the principal owed on its own day (principalUnpaidOn()), so the months
+     *   before it keep the old principal.
+     * - The floor at what was paid applies to the whole figure.
      *
      * The one definition of the charge. applyPenalties() writes it on every
      * late period, every preview reads it through penaltyAsOf(), and
@@ -1468,8 +1472,14 @@ class RepaymentService
 
         $charges = collect($this->penaltyCharges($loan, $schedule, $asOf));
 
-        if ($schedule->penalty_checkpoint_on !== null) {
-            $checkpointOn = $schedule->penalty_checkpoint_on->copy()->startOfDay();
+        $checkpointOn = $schedule->penalty_checkpoint_on?->copy()->startOfDay();
+
+        if ($checkpointOn !== null && $asOf->copy()->startOfDay()->lt($checkpointOn)) {
+            // As of a day before the waiver: the charges up to that day, never
+            // more than the waiver kept (a payment or void dated before it).
+            $charged = min($charges->sum('centavos'), LoanService::toCentavos((float) $schedule->penalty_checkpoint_amount));
+            $months = $charges->count();
+        } elseif ($checkpointOn !== null) {
             $after = $charges->filter(fn (array $charge): bool => $charge['on']->gt($checkpointOn));
             $charged = LoanService::toCentavos((float) $schedule->penalty_checkpoint_amount) + $after->sum('centavos');
             $months = (int) $schedule->penalty_checkpoint_months + $after->count();
@@ -1485,15 +1495,14 @@ class RepaymentService
     }
 
     /**
-     * Charge `$schedule` up to `$on` and fix that as its checkpoint, before
-     * something changes what later months are worked on: a balance
-     * adjustment that restates its principal (the charge it had stays), or a
-     * waiver (`$keep`: the charge it leaves, what was paid). Sets the
-     * attributes and leaves the save to the caller. Returns false, writing
-     * nothing, on a period penaltyStateAsOf() leaves alone: one not late yet
-     * has no month to keep, and one waived for good stays so (option a).
+     * A waiver's checkpoint (option b): charge `$schedule` up to `$on` and
+     * keep `$keep` (what was paid, the charge the waiver leaves) with the
+     * number of charges so far, so later months are added from there. Sets
+     * the attributes and leaves the save to the caller. Returns false,
+     * writing nothing, on a period penaltyStateAsOf() leaves alone: one not
+     * late yet, or one waived for good, which stays so (option a).
      */
-    public function penaltyCheckpoint(Loan $loan, AmortizationSchedule $schedule, Carbon $on, ?float $keep = null): bool
+    public function penaltyCheckpoint(Loan $loan, AmortizationSchedule $schedule, Carbon $on, float $keep): bool
     {
         $state = $this->penaltyStateAsOf($loan, $schedule, $on);
 
@@ -1501,7 +1510,7 @@ class RepaymentService
             return false;
         }
 
-        $amount = $keep ?? $state['amount'];
+        $amount = $keep;
 
         $schedule->fill([
             'penalty_amount' => $amount,
@@ -1532,9 +1541,15 @@ class RepaymentService
      * None on a loan with no penalty rate, a period not late on `$asOf`, or
      * one due before the loan's imported arrears baseline.
      *
+     * `$asCharged` works each charge as it was charged on its day: a payment
+     * voided since still counts as paid on the days before its void. The
+     * Ledger weighs the months it shows against the payments it shows with
+     * it; every figure owed is worked without it, as if a void's payment never
+     * was.
+     *
      * @return list<array{on: Carbon, centavos: int, number: int}>
      */
-    public function penaltyCharges(Loan $loan, AmortizationSchedule $schedule, Carbon $asOf): array
+    public function penaltyCharges(Loan $loan, AmortizationSchedule $schedule, Carbon $asOf, bool $asCharged = false): array
     {
         $rate = (float) $loan->penalty_rate;
 
@@ -1545,7 +1560,7 @@ class RepaymentService
         }
 
         $day = $asOf->copy()->startOfDay();
-        $unpaidOn = $this->principalUnpaidOn($schedule);
+        $unpaidOn = $this->principalUnpaidOn($schedule, $asCharged);
         $charge = fn (Carbon $on): int => LoanService::toCentavos(round($unpaidOn($on) / 100 * ($rate / 100), 2));
 
         $dueDate = $schedule->due_date->copy()->startOfDay();
@@ -1575,28 +1590,43 @@ class RepaymentService
     }
 
     /**
-     * The principal unpaid on a period on a given day, in centavos: what is
-     * unpaid now plus the principal of posted payments dated that day or
-     * later. A payment on a charge's own day comes after the charge, as a
-     * payment's own penalty step runs before its allocation. Principal paid
-     * with no allocation row (an imported loan's history) counts as paid
-     * before every charge. A list eager-loads the payments
-     * (AmortizationSchedule::postedPrincipalPayments()); otherwise they are
-     * read here.
+     * The principal unpaid on a period on a given day, in centavos: the
+     * period's `principal_due` as it stood that day, less the principal of
+     * posted payments dated before it.
+     *
+     * - The principal that day comes from its history
+     *   (AmortizationSchedule::principalChanges()): the latest change dated
+     *   before the day; before the first change, that change's principal
+     *   before it; with no change, the current `principal_due`.
+     * - Anything recorded on a charge's own day (a payment, an adjustment)
+     *   comes after that day's charge, as a payment's own penalty step runs
+     *   before its allocation, and the night's run before the day's work.
+     * - Principal paid with no allocation row (an imported loan's history)
+     *   counts as paid before every charge.
+     *
+     * - `$asCharged`: a voided payment also counts as paid on the days after
+     *   its date up to the day it was voided (penaltyCharges()).
+     *
+     * A list eager-loads both histories; otherwise they are read here.
      *
      * @return Closure(Carbon): int
      */
-    private function principalUnpaidOn(AmortizationSchedule $schedule): Closure
+    private function principalUnpaidOn(AmortizationSchedule $schedule, bool $asCharged = false): Closure
     {
-        $due = LoanService::toCentavos((float) $schedule->principal_due);
+        $dueNow = LoanService::toCentavos((float) $schedule->principal_due);
         $paid = LoanService::toCentavos((float) $schedule->principal_paid);
-        $unpaidNow = max(0, $due - $paid);
 
-        if ($paid <= 0) {
-            return fn (Carbon $on): int => $unpaidNow;
-        }
+        $changes = ($schedule->relationLoaded('principalChanges')
+            ? $schedule->principalChanges
+            : $schedule->principalChanges()->get())
+            ->map(fn (AmortizationPrincipalChange $change): array => [
+                'on' => $change->effective_on->copy()->startOfDay(),
+                'before' => LoanService::toCentavos((float) $change->principal_due_before),
+                'after' => LoanService::toCentavos((float) $change->principal_due_after),
+            ])
+            ->values();
 
-        $payments = ($schedule->relationLoaded('postedPrincipalPayments')
+        $payments = $paid <= 0 ? collect() : ($schedule->relationLoaded('postedPrincipalPayments')
             ? $schedule->postedPrincipalPayments
             : $schedule->postedPrincipalPayments()->get())
             ->map(fn (RepaymentAllocation $row): array => [
@@ -1604,9 +1634,38 @@ class RepaymentService
                 'principal' => LoanService::toCentavos((float) $row->principal),
             ]);
 
-        return fn (Carbon $on): int => min($due, $unpaidNow + $payments
-            ->filter(fn (array $payment): bool => $payment['on']->gte($on))
-            ->sum('principal'));
+        $unallocated = max(0, $paid - $payments->sum('principal'));
+
+        if ($asCharged) {
+            $payments = $payments->concat(($schedule->relationLoaded('voidedPrincipalPayments')
+                ? $schedule->voidedPrincipalPayments
+                : $schedule->voidedPrincipalPayments()->get())
+                ->map(fn (RepaymentAllocation $row): array => [
+                    'on' => Carbon::parse($row->payment_date)->startOfDay(),
+                    'principal' => LoanService::toCentavos((float) $row->principal),
+                    'until' => Carbon::parse($row->voided_at)->startOfDay(),
+                ]));
+        }
+
+        $dueOn = function (Carbon $on) use ($changes, $dueNow): int {
+            if ($changes->isEmpty()) {
+                return $dueNow;
+            }
+
+            $latest = $changes->filter(fn (array $change): bool => $change['on']->lt($on))->last();
+
+            return $latest === null ? $changes->first()['before'] : $latest['after'];
+        };
+
+        return function (Carbon $on) use ($dueOn, $payments, $unallocated): int {
+            $due = $dueOn($on);
+            $paidBefore = $unallocated + $payments
+                ->filter(fn (array $payment): bool => $payment['on']->lt($on)
+                    && (! isset($payment['until']) || $on->lte($payment['until'])))
+                ->sum('principal');
+
+            return max(0, $due - $paidBefore);
+        };
     }
 
     /**

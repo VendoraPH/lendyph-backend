@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Enums\TermUnit;
 use App\Exceptions\CannotPostToTheBooksException;
+use App\Models\AmortizationPrincipalChange;
 use App\Models\AmortizationSchedule;
 use App\Models\Loan;
 use App\Models\LoanAdjustment;
@@ -1279,12 +1280,16 @@ class LoanAdjustmentService
                 } elseif (! $this->repaymentService->penaltyCheckpoint($loan, $schedule, $today, $paid)) {
                     // A period the rule leaves alone today (not late by it, or
                     // before an imported loan's baseline) still gets the
-                    // waiver's checkpoint, so it never turns into option (a).
+                    // waiver's checkpoint, so it never turns into option (a),
+                    // with the charges it really has today.
+                    $charges = count($this->repaymentService->penaltyCharges($loan, $schedule, $today));
+
                     $schedule->fill([
                         'penalty_amount' => $paid,
+                        'penalty_months' => $charges,
                         'penalty_checkpoint_on' => $today->toDateString(),
                         'penalty_checkpoint_amount' => $paid,
-                        'penalty_checkpoint_months' => (int) $schedule->penalty_months,
+                        'penalty_checkpoint_months' => $charges,
                     ]);
                 }
 
@@ -1387,11 +1392,11 @@ class LoanAdjustmentService
             return;
         }
 
-        // The late penalty already charged was worked on the principal before
-        // this adjustment and stays as it is, whether the principal goes up or
-        // down: each changed period is charged up to today on its old
-        // principal and keeps that as its checkpoint, and only the months
-        // after today are worked on the new one (penaltyStateAsOf()).
+        // Each period's change is kept in its principal history
+        // (AmortizationPrincipalChange), from today: the late penalty charges
+        // each month on the principal owed on its own day, so the months
+        // already charged keep the principal before this adjustment, up or
+        // down, and only later months use the new one.
         $today = Carbon::today();
 
         foreach ($this->balanceAdjustmentShares($amount, $unpaid) as $i => $share) {
@@ -1400,8 +1405,16 @@ class LoanAdjustmentService
             }
 
             $schedule = $unpaidSchedules[$i];
-            $this->repaymentService->penaltyCheckpoint($loan, $schedule, $today);
             $newPrincipalDue = $centavos($schedule->principal_due) + $share;
+
+            AmortizationPrincipalChange::create([
+                'amortization_schedule_id' => $schedule->id,
+                'effective_on' => $today->toDateString(),
+                'principal_due_before' => (float) $schedule->principal_due,
+                'principal_due_after' => $newPrincipalDue / 100,
+                'loan_adjustment_id' => $adjustment->id,
+            ]);
+
             $changes = [
                 'principal_due' => $newPrincipalDue / 100,
                 'total_due' => ($newPrincipalDue + $centavos($schedule->interest_due)) / 100,

@@ -279,7 +279,7 @@ class AmortizationSchedule extends Model
 
     /**
      * The principal posted payments put on this period, with each payment's
-     * date: what RepaymentService::penaltyFor() reads to know the principal
+     * date: what RepaymentService::penaltyStateAsOf() reads to know the principal
      * unpaid on each month's charge day. Eager-load it beside a list's periods
      * so the late penalty a row quotes costs no query per row.
      */
@@ -290,6 +290,30 @@ class AmortizationSchedule extends Model
             ->where('repayments.status', 'posted')
             ->where('repayment_allocations.principal', '>', 0)
             ->select(['repayment_allocations.amortization_schedule_id', 'repayment_allocations.repayment_id', 'repayment_allocations.principal', 'repayments.payment_date']);
+    }
+
+    /**
+     * The principal voided payments had put on this period, with each
+     * payment's date and when it was voided: how the Ledger weighs the months
+     * it shows as they were charged (RepaymentService::penaltyCharges()).
+     */
+    public function voidedPrincipalPayments(): HasMany
+    {
+        return $this->hasMany(RepaymentAllocation::class, 'amortization_schedule_id')
+            ->join('repayments', 'repayments.id', '=', 'repayment_allocations.repayment_id')
+            ->where('repayments.status', 'voided')
+            ->where('repayment_allocations.principal', '>', 0)
+            ->select(['repayment_allocations.amortization_schedule_id', 'repayment_allocations.repayment_id', 'repayment_allocations.principal', 'repayments.payment_date', 'repayments.voided_at']);
+    }
+
+    /**
+     * The history of this period's `principal_due`, oldest first
+     * (AmortizationPrincipalChange). Eager-load it beside a list's periods,
+     * like postedPrincipalPayments().
+     */
+    public function principalChanges(): HasMany
+    {
+        return $this->hasMany(AmortizationPrincipalChange::class)->orderBy('effective_on')->orderBy('id');
     }
 
     public function loan(): BelongsTo

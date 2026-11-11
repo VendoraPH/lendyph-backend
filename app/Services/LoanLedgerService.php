@@ -281,7 +281,7 @@ final class LoanLedgerService
         $events = [];
         $today = Carbon::today();
         $releasedAt = Carbon::parse($loan->released_at);
-        $schedules->loadMissing('postedPrincipalPayments');
+        $schedules->loadMissing(['postedPrincipalPayments', 'voidedPrincipalPayments', 'principalChanges']);
 
         foreach ($schedules->sortBy('period_number') as $schedule) {
             $charged = $this->centavos($schedule->penalty_amount) + ($recorded[$schedule->id] ?? 0);
@@ -322,12 +322,13 @@ final class LoanLedgerService
      *   the monthly penalty: a period waived for good (option a), and one with
      *   at most one charge in it (late before the switch with none since, or
      *   stamped by the once-only rule). No monthly line is made up for them.
-     * - Otherwise the charges after the period's checkpoint (or after its
-     *   first charge, when it has none) are shown as worked. The charges up to
-     *   it share what is left of the total in proportion to their worked
-     *   amounts: the period no longer records them one by one (a balance
-     *   adjustment has since restated the principal they were worked on), and
-     *   the last of them takes the rounding.
+     * - Otherwise the charges after the period's waiver checkpoint (or after
+     *   its first charge, when it has none) are shown as worked. The charges
+     *   up to it share what is left of the total in proportion to their
+     *   amounts as charged on their days (the period's principal history, and
+     *   a payment voided since still counted until its void, as the Ledger
+     *   shows it), so the split is what was charged and the last of them
+     *   takes any rounding.
      *
      * @return list<array{on: Carbon, centavos: int, number: int}>
      */
@@ -341,7 +342,11 @@ final class LoanLedgerService
             return $single;
         }
 
-        $charges = array_slice(app(RepaymentService::class)->penaltyCharges($loan, $schedule, $today), 0, $months);
+        $repayments = app(RepaymentService::class);
+        $charges = array_slice($repayments->penaltyCharges($loan, $schedule, $today), 0, $months);
+        // The months up to the checkpoint are weighed as they were charged,
+        // beside the payments the Ledger shows with them.
+        $asCharged = array_column(array_slice($repayments->penaltyCharges($loan, $schedule, $today, asCharged: true), 0, $months), 'centavos', 'number');
 
         if (count($charges) < 2) {
             return $single;
@@ -355,7 +360,7 @@ final class LoanLedgerService
             $isBefore = $checkpointOn === null ? $index === 0 : $charge['on']->lte($checkpointOn);
 
             if ($isBefore) {
-                $upTo[] = $charge;
+                $upTo[] = [...$charge, 'centavos' => $asCharged[$charge['number']] ?? $charge['centavos']];
             } elseif ($charge['centavos'] > 0) {
                 $after[] = $charge;
             }
