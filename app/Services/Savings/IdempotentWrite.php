@@ -2,9 +2,11 @@
 
 namespace App\Services\Savings;
 
+use App\Models\PortalIdempotencyKey;
 use App\Models\SavingsIdempotencyKey;
 use App\Services\GeneratedNumberWrite;
 use Closure;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -32,6 +34,12 @@ use LogicException;
  * Usage in a controller:
  *
  *     return $idempotent->run($request, fn () => response()->json([...], 201));
+ *
+ * **Stores.** The key is kept per caller in a store: `savings` (the default:
+ * `savings_idempotency_keys`, keyed on the staff user) or `portal`
+ * (`portal_idempotency_keys`, keyed on the signed-in portal user; a member's
+ * portal request, portal design §6). Both have the same shape, so a key one
+ * caller used never collides with another caller's.
  */
 class IdempotentWrite
 {
@@ -41,18 +49,37 @@ class IdempotentWrite
 
     public const KEY_INDEX = 'savings_idempotency_keys_user_id_key_unique';
 
+    public const STORE_SAVINGS = 'savings';
+
+    public const STORE_PORTAL = 'portal';
+
+    /**
+     * Each store's model, owner column and unique index on (owner, key).
+     *
+     * @var array<string, array{0: class-string<Model>, 1: string, 2: string}>
+     */
+    private const STORES = [
+        self::STORE_SAVINGS => [SavingsIdempotencyKey::class, 'user_id', self::KEY_INDEX],
+        self::STORE_PORTAL => [PortalIdempotencyKey::class, 'portal_user_id', 'portal_idempotency_keys_portal_user_id_key_unique'],
+    ];
+
     /**
      * @param  Closure(): JsonResponse  $write
+     * @param  string  $store  self::STORE_SAVINGS (staff) or self::STORE_PORTAL (the signed-in member)
      *
      * @throws ValidationException
      */
-    public function run(Request $request, Closure $write, string $conflictMessage = GeneratedNumberWrite::SAVINGS_CONFLICT): JsonResponse
+    public function run(Request $request, Closure $write, string $conflictMessage = GeneratedNumberWrite::SAVINGS_CONFLICT, string $store = self::STORE_SAVINGS): JsonResponse
     {
+        if (! isset(self::STORES[$store])) {
+            throw new LogicException("\"{$store}\" is not an idempotency store.");
+        }
+
         $key = $this->keyOf($request);
         $userId = (int) $request->user()->getKey();
         $hash = $this->hashOf($request);
 
-        $stored = $this->stored($userId, $key);
+        $stored = $this->stored($store, $userId, $key);
 
         if ($stored !== null) {
             return $this->replay($stored, $hash);
@@ -60,11 +87,11 @@ class IdempotentWrite
 
         try {
             return GeneratedNumberWrite::run(
-                fn (): JsonResponse => DB::transaction(fn (): JsonResponse => $this->attempt($userId, $key, $hash, $write)),
+                fn (): JsonResponse => DB::transaction(fn (): JsonResponse => $this->attempt($store, $userId, $key, $hash, $write)),
                 $conflictMessage,
             );
         } catch (UniqueConstraintViolationException $e) {
-            $stored = $e->index === self::KEY_INDEX ? $this->stored($userId, $key) : null;
+            $stored = $e->index === self::STORES[$store][2] ? $this->stored($store, $userId, $key) : null;
 
             if ($stored === null) {
                 throw $e;
@@ -76,10 +103,11 @@ class IdempotentWrite
         }
     }
 
-    private function attempt(int $userId, string $key, string $hash, Closure $write): JsonResponse
+    private function attempt(string $store, int $userId, string $key, string $hash, Closure $write): JsonResponse
     {
-        $row = SavingsIdempotencyKey::query()->create([
-            'user_id' => $userId,
+        [$model, $owner] = self::STORES[$store];
+        $row = $model::query()->create([
+            $owner => $userId,
             'key' => $key,
             'request_hash' => $hash,
         ]);
@@ -87,7 +115,7 @@ class IdempotentWrite
         $response = $write();
 
         if (! $response instanceof JsonResponse) {
-            throw new LogicException('An idempotent savings write must answer with JSON.');
+            throw new LogicException('An idempotent write must answer with JSON.');
         }
 
         if ($response->getStatusCode() >= 400) {
@@ -141,13 +169,15 @@ class IdempotentWrite
         return array_map($this->canonical(...), $value);
     }
 
-    private function stored(int $userId, string $key): ?SavingsIdempotencyKey
+    private function stored(string $store, int $userId, string $key): SavingsIdempotencyKey|PortalIdempotencyKey|null
     {
-        return SavingsIdempotencyKey::query()->where('user_id', $userId)->where('key', $key)->first();
+        [$model, $owner] = self::STORES[$store];
+
+        return $model::query()->where($owner, $userId)->where('key', $key)->first();
     }
 
     /** @throws ValidationException */
-    private function replay(SavingsIdempotencyKey $stored, string $hash): JsonResponse
+    private function replay(SavingsIdempotencyKey|PortalIdempotencyKey $stored, string $hash): JsonResponse
     {
         if (! hash_equals($stored->request_hash, $hash)) {
             throw ValidationException::withMessages(['idempotency_key' => [

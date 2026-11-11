@@ -10,9 +10,11 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 /**
- * An amount held on an account (design §1): a legal or manual hold, or (v2)
- * one a loan places (`loan_retention`, with `source_type`/`source_id`). An
- * active hold not yet past `expires_on` reduces the available balance.
+ * An amount held on an account (design §1): a legal or manual hold, one a
+ * member's portal withdrawal request places (`member_request`, with
+ * `source_type`/`source_id` naming the PortalRequest; portal design §6), or
+ * (v2) one a loan places (`loan_retention`). An active hold not yet past
+ * `expires_on` reduces the available balance.
  *
  * @property int $id
  * @property int $account_id
@@ -25,7 +27,9 @@ class SavingsHold extends Model
     /** @use HasFactory<SavingsHoldFactory> */
     use Auditable, HasFactory;
 
-    public const TYPES = ['legal', 'manual', 'loan_retention'];
+    public const TYPE_MEMBER_REQUEST = 'member_request';
+
+    public const TYPES = ['legal', 'manual', 'loan_retention', self::TYPE_MEMBER_REQUEST];
 
     public const STATUS_ACTIVE = 'active';
 
