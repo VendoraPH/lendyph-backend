@@ -4,6 +4,7 @@ namespace App\Listeners\Portal;
 
 use App\Services\Portal\MemberPortalAccessEnded;
 use App\Services\Portal\Requests\RequestSweep;
+use Illuminate\Support\Facades\DB;
 
 /**
  * When a member's portal access ends with their membership (withdrawn or
@@ -15,8 +16,16 @@ class EndPortalRequestsWhenAccessEnds
 {
     public function __construct(private readonly RequestSweep $sweep) {}
 
+    /**
+     * Run once the membership change commits: it holds the member and
+     * portal account rows, and ending the requests takes the savings account
+     * and request locks, which a payout takes before the portal account.
+     */
     public function handle(MemberPortalAccessEnded $event): void
     {
-        $this->sweep->endFor($event->portalUser, $event->reason);
+        $portalUser = $event->portalUser;
+        $reason = $event->reason;
+
+        DB::afterCommit(fn () => $this->sweep->endFor($portalUser, $reason));
     }
 }

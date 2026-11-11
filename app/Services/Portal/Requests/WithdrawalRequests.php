@@ -219,10 +219,17 @@ final class WithdrawalRequests
      * the portal account and the member must both still be active (409).
      * Read from the rows themselves, never a model event, at staff approval
      * and again at the savings second check (WithdrawalExecutor).
+     *
+     * The portal account is read under its row lock, so a payout waits for a
+     * PortalAccess::disable() in flight and then sees it. Lock order: the
+     * savings account and the request (the caller's), then the portal
+     * account, then the hold. Nothing takes them the other way round:
+     * disable() locks only the portal account, and ends the requests after
+     * it commits.
      */
     public static function assertStillAMember(PortalRequest $request): void
     {
-        $portalUser = PortalUser::query()->find($request->portal_user_id, ['id', 'status']);
+        $portalUser = PortalUser::query()->whereKey($request->portal_user_id)->lockForUpdate()->first(['id', 'status']);
         $memberStatus = Borrower::query()->whereKey($request->borrower_id)->value('status');
 
         if ($portalUser?->status !== PortalUser::STATUS_ACTIVE || $memberStatus !== 'active') {

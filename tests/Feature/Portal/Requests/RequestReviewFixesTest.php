@@ -122,6 +122,61 @@ class RequestReviewFixesTest extends TestCase
         $this->assertSame(PortalRequest::STATUS_APPROVED, $request->fresh()->status);
     }
 
+    /**
+     * The payout reads the portal account under its row lock, after the
+     * account and the request (lock order: account, request, portal user,
+     * hold), so it waits for a disable() in flight and sees its outcome.
+     */
+    public function test_the_payout_reads_the_portal_account_under_its_lock_after_the_account_and_request(): void
+    {
+        $account = $this->account();
+        $this->fund($account, 100_000);
+        $request = $this->submitted($this->submit($this->withdrawalBody($account, '100.00'))->assertCreated());
+
+        $locks = [];
+        DB::listen(function ($query) use (&$locks): void {
+            $sql = strtolower($query->sql);
+
+            if (str_contains($sql, 'for update')) {
+                preg_match('/from `(\w+)`/', $sql, $table);
+                $locks[] = $table[1] ?? '?';
+            }
+        });
+
+        $this->decide($request, ['decision' => 'approve', 'payout' => $this->payout()])->assertCreated();
+
+        $at = fn (string $table): int|false => array_search($table, $locks, true);
+        $this->assertNotFalse($at('portal_users'), 'The portal account is read with FOR UPDATE: '.implode(', ', $locks));
+        $this->assertLessThan($at('portal_users'), $at('savings_accounts'));
+        $this->assertLessThan($at('portal_users'), $at('portal_requests'));
+        $this->assertGreaterThan($at('portal_users'), $at('savings_holds'));
+    }
+
+    /**
+     * A membership ended inside a transaction (which holds the member and
+     * portal account rows) ends the member's requests only once it commits,
+     * so it never takes the savings account and request locks while holding
+     * those rows: the opposite order to a payout.
+     */
+    public function test_requests_end_only_after_the_membership_end_commits(): void
+    {
+        $account = $this->account();
+        $this->fund($account, 100_000);
+        $request = $this->submitted($this->submit($this->withdrawalBody($account, '100.00'))->assertCreated());
+
+        $this->freshRequest();
+        $this->actingAs($this->admin);
+        DB::transaction(function () use ($request): void {
+            $this->member->refresh()->update(['status' => 'deceased']);
+
+            $this->assertSame(PortalRequest::STATUS_SUBMITTED, $request->fresh()->status, 'Nothing is ended before the commit.');
+            $this->assertSame('active', SavingsHold::query()->findOrFail($request->savings_hold_id)->status);
+        });
+
+        $this->assertSame(PortalRequest::STATUS_CANCELLED, $request->fresh()->status);
+        $this->assertSame('released', SavingsHold::query()->findOrFail($request->savings_hold_id)->status);
+    }
+
     // L1: a member's request hold blocking a close says what to do.
 
     public function test_a_close_blocked_by_a_member_request_hold_says_decide_the_request(): void

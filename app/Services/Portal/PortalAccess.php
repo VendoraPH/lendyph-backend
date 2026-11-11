@@ -58,7 +58,9 @@ final class PortalAccess
             );
         });
 
-        app(RequestSweep::class)->endFor($portalUser, $reason);
+        // After commit, so the portal account lock is never held while the
+        // requests' savings account and request locks are taken.
+        DB::afterCommit(fn () => app(RequestSweep::class)->endFor($portalUser, $reason));
     }
 
     public function enable(PortalUser $portalUser, int $staffId): void
