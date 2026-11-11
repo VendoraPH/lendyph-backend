@@ -27,8 +27,10 @@ use InvalidArgumentException;
  * - `rates` and `totals` (required, booked, gap = required − booked).
  * Money is integer centavos, as AllowanceCalculator gives it.
  *
- * The period is opened (as the system) when there is none. The first capture
- * stands: a second run for the year changes nothing. One system audit row.
+ * The period is opened (as the system) when there is none, and its reports
+ * are computed once the capture has committed, so they read it (and still
+ * computed if the capture fails). The first
+ * capture stands: a second run for the year changes nothing. One system audit row.
  * Only the scheduled run on Dec 31 is `exact`; a backfill on a later day is
  * kept with `exact: false` (C1 review, H2).
  */
@@ -90,8 +92,24 @@ final class YearEndCapture
                 : "{$asOf} has passed, so its balances can't be read any more. Run it again with --backfill to keep today's balances, marked as not exact.");
         }
 
-        $period = $this->opener->ensure((int) $match[1]);
+        [$period, $opened] = $this->opener->openIfMissing((int) $match[1]);
 
+        try {
+            return $this->store($period, $asOf, $exact, $ranAt);
+        } finally {
+            if ($opened) {
+                $this->opener->refreshReports($period);
+            }
+        }
+    }
+
+    /**
+     * Keeps the capture on the period, unless one stands already.
+     *
+     * @return array{period: CdaReportingPeriod, captured: bool}
+     */
+    private function store(CdaReportingPeriod $period, string $asOf, bool $exact, string $ranAt): array
+    {
         return DB::transaction(function () use ($period, $asOf, $exact, $ranAt): array {
             /** @var CdaReportingPeriod $locked */
             $locked = CdaReportingPeriod::query()->whereKey($period->id)->lockForUpdate()->firstOrFail();

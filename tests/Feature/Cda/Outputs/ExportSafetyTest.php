@@ -60,8 +60,13 @@ class ExportSafetyTest extends TestCase
         CdaReportValue::query()->updateOrCreate(['report_id' => $this->capr->id, 'field_key' => $fieldKey], ['value' => $value]);
     }
 
+    /**
+     * Only these negative figures are stored: the figures the opened year
+     * computed are cleared first, so a ₱0.00 could only come from them.
+     */
     private function negativeFigures(): void
     {
+        CdaReportValue::query()->where('report_id', $this->capr->id)->delete();
         $this->value('financial.net_surplus', '-400.00');
         $this->value('loan_classification', [
             ['label' => 'Adjusted', 'loan_count' => 1, 'outstanding_principal' => '-1500.50', 'rate_percent' => '5.00', 'required' => '-75.03'],

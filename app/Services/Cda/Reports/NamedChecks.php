@@ -9,6 +9,7 @@ use App\Services\Accounting\BalanceSheetBuilder;
 use App\Services\Accounting\TrialBalanceBuilder;
 use App\Services\Cda\Registers\TrainingCompliance;
 use App\Services\Cda\Sources\AccountingSource;
+use App\Services\Cda\Sources\PesosSource;
 use App\Services\Cda\Sources\SourceContext;
 use App\Services\Cda\Sources\SourceRegistry;
 use App\Services\Cda\Sources\SourceResult;
@@ -151,8 +152,12 @@ final class NamedChecks
     {
         $pesos = CdaReport::query()->with('template')->where('period_id', $context->period->id)->where('report_type', 'pesos')->first();
 
-        return ($pesos?->template?->isVerified() ?? false) ? null
-            : 'The PESOS indicators are placeholders until checked against the official MC 2025-12 tool.';
+        $verified = $pesos !== null && PesosSource::verified(
+            (bool) ($pesos->template?->isVerified() ?? false),
+            $pesos->values()->pluck('source_value'),
+        );
+
+        return $verified ? null : 'The PESOS indicators are placeholders until checked against the official MC 2025-12 tool.';
     }
 
     /** @param  list<string>  $items */
