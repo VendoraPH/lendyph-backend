@@ -411,7 +411,7 @@ class RepaymentService
         // to clean up on a later void, is never written.
         $scbCredit = $overpayment / 100;
 
-        if ($hasScb && $overpayment > 0 && ! in_array($loan->borrower->status, Borrower::NON_MEMBER_STATUSES, true)) {
+        if ($overpayment > 0 && self::creditsBuildUp($loan)) {
             ShareCapitalLedger::create([
                 'borrower_id' => $loan->borrower_id,
                 'repayment_id' => $repayment->id,
@@ -503,6 +503,10 @@ class RepaymentService
             $premiumAfter = LoanService::toCentavos((float) $loan->insurance_remaining_balance);
             $allocations = $this->previewedAllocations($repayment);
             $overpaymentCentavos = LoanService::toCentavos((float) $repayment->overpayment);
+            // The share capital credit the payment itself wrote (creditsBuildUp()),
+            // rolled back with it: the same code path that records the payment.
+            $buildUpCentavos = (int) ShareCapitalLedger::where('repayment_id', $repayment->id)->where('credit', '>', 0)->get()
+                ->sum(fn (ShareCapitalLedger $row): int => LoanService::toCentavos((float) $row->credit));
             $buildUpOnly = $this->overpaymentIsTheBuildUp(
                 $loan,
                 $overpaymentCentavos,
@@ -519,6 +523,9 @@ class RepaymentService
                 'total_interest' => (float) $repayment->interest_applied,
                 'total_penalty' => (float) $repayment->penalty_applied,
                 'excess' => (float) $repayment->overpayment,
+                // How `excess` will be credited, as the recorded repayment reads it.
+                'build_up_credited' => number_format($buildUpCentavos / 100, 2, '.', ''),
+                'overpayment_kept' => number_format(($overpaymentCentavos - $buildUpCentavos) / 100, 2, '.', ''),
                 // The insurance premium owed on the loan, collected first.
                 'allocated_to_insurance' => (float) $repayment->insurance_applied,
                 'total_insurance' => (float) $repayment->insurance_applied,
@@ -1909,5 +1916,20 @@ class RepaymentService
 
             $schedule->save();
         }
+    }
+
+    /**
+     * Whether a payment's overpayment on this loan becomes a share capital
+     * build-up credit: the loan carries a build-up (`scb_amount`, fixed once
+     * the loan is released) and the member isn't a pending or rejected
+     * applicant, who can't hold share capital (the same gate as
+     * StoreShareCapitalLedgerRequest::memberBorrowerRule()). Recording a
+     * payment credits by this rule, its preview runs that same code, and
+     * RepaymentResource reads a stored row's split by it.
+     */
+    public static function creditsBuildUp(Loan $loan): bool
+    {
+        return (float) $loan->scb_amount > 0
+            && ! in_array($loan->borrower?->status, Borrower::NON_MEMBER_STATUSES, true);
     }
 }
