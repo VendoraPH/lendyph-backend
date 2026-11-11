@@ -43,6 +43,8 @@ class StoreAccountingAccountRequest extends FormRequest
             'is_active' => ['sometimes', 'boolean'],
             'parent_id' => ['nullable', 'integer', Rule::exists('accounting_accounts', 'id')],
             'cash_kind' => ['nullable', Rule::in(AccountRules::CASH_KINDS)],
+            // Required with a `cash_kind`; see validateAccountBranch().
+            'branch_id' => $this->branchRule(),
             // Optional. Left out, the saving hook derives it from `type` and
             // `cash_kind` — see CashFlowCategories. Unlike `normal_balance`
             // above this IS accepted from a client, because it is a judgement
@@ -72,6 +74,7 @@ class StoreAccountingAccountRequest extends FormRequest
     {
         $validator->after(function (Validator $v): void {
             $this->validateAccountShape($v);
+            $this->validateAccountBranch($v);
         });
     }
 }

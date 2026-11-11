@@ -4,8 +4,11 @@ namespace App\Http\Requests\Accounting;
 
 use App\Models\AccountingAccount;
 use App\Models\AccountingAccountMapping;
+use App\Models\AccountingReconciliation;
 use App\Services\Accounting\AccountRules;
+use App\Services\BranchAccess;
 use Illuminate\Contracts\Validation\Validator;
+use Illuminate\Validation\Rule;
 use Tests\Feature\AccountingReparentMappedAccountTest;
 
 /**
@@ -63,6 +66,90 @@ trait ValidatesAccountShape
             $this->assertMappedRolesKeepTheirPlace($validator, $existing, $parentId);
             $this->assertMappedRolesKeepAnAllowedCode($validator, $existing, $code);
         }
+    }
+
+    /**
+     * Every money account belongs to a branch, whose staff reconcile it, and
+     * no other account does (owner answer 9, 2026-11-11).
+     *
+     * - A new money account needs a branch, and so does an account that
+     *   becomes one. An existing money account with no branch yet (one the
+     *   data fix could not place) keeps working for its other edits, but its
+     *   branch can't be cleared once set.
+     * - An account that holds no money takes no branch. One that stops holding
+     *   money leaves its branch (the controller clears it).
+     * - The branch can change only while the account has no reconciliation,
+     *   so a reconciliation never starts proving another branch's books.
+     *
+     * Which branches may be named is the `branch_id` rule's job
+     * ({@see self::branchRule()}).
+     *
+     * @param  AccountingAccount|null  $existing  the row being updated, if any
+     */
+    protected function validateAccountBranch(Validator $validator, ?AccountingAccount $existing = null): void
+    {
+        if ($validator->errors()->hasAny(['cash_kind', 'branch_id'])) {
+            return;
+        }
+
+        $cashKind = $this->finalCashKind($existing);
+        $sent = $this->has('branch_id');
+        $branchId = $sent ? $this->input('branch_id') : $existing?->branch_id;
+        $branchId = ($branchId === null || $branchId === '') ? null : (int) $branchId;
+
+        if ($cashKind === null) {
+            if ($sent && $branchId !== null) {
+                $validator->errors()->add(
+                    'branch_id',
+                    'Only a money account belongs to a branch. This account holds no money, so leave its branch empty.',
+                );
+            }
+
+            $branchId = null;
+        } elseif ($branchId === null && ($existing === null || $existing->cash_kind === null || $sent)) {
+            $validator->errors()->add(
+                'branch_id',
+                'A money account belongs to a branch: pick the branch whose staff reconcile it.',
+            );
+
+            return;
+        }
+
+        if ($existing === null || $branchId === $existing->branch_id) {
+            return;
+        }
+
+        if ($existing->branch_id !== null && AccountingReconciliation::query()->where('accounting_account_id', $existing->id)->exists()) {
+            $validator->errors()->add(
+                $cashKind === null ? 'cash_kind' : 'branch_id',
+                "{$existing->code} {$existing->name} already has a reconciliation, so it stays with its branch. "
+                .'Its reconciliations prove that branch\'s books; open a new money account for the other branch instead.',
+            );
+        }
+    }
+
+    /** The `cash_kind` the account will hold after the save, null for none. */
+    public function finalCashKind(?AccountingAccount $existing = null): ?string
+    {
+        $existing ??= $this->route('account');
+        $cashKind = $this->finalValue('cash_kind', $existing?->cash_kind);
+
+        return ($cashKind === null || $cashKind === '') ? null : (string) $cashKind;
+    }
+
+    /**
+     * `branch_id`: a branch the caller can see, so a branch user can only
+     * place an account in their own branches.
+     *
+     * @return list<mixed>
+     */
+    protected function branchRule(): array
+    {
+        return [
+            'nullable',
+            'integer',
+            app(BranchAccess::class)->constrainBranchExists(Rule::exists('branches', 'id'), $this->user()),
+        ];
     }
 
     /** "an asset code", "an income code", for the code-and-type message. */

@@ -11,9 +11,12 @@ use Tests\Traits\SetupLendyPH;
 
 /**
  * Who may record a statement line as an expense, a transfer or a suspense
- * entry: `accounting:reconcile` and `branches:view_all` (reconciliation stays
- * head office), plus the permission of the record each action writes
- * (Accounting round C, 2026-11-09).
+ * entry: `accounting:reconcile`, plus the permission of the record each action
+ * writes (Accounting round C, 2026-11-09), on a reconciliation the caller can
+ * see (owner answer 9, 2026-11-11: the account's branch, or any for
+ * `branches:view_all`). These reconciliations are on accounts with no branch,
+ * so the callers here hold `branches:view_all`; BranchReconciliationTest
+ * covers branch users.
  */
 class ReconciliationActionPermissionsTest extends TestCase
 {
@@ -69,15 +72,17 @@ class ReconciliationActionPermissionsTest extends TestCase
         $this->assertNothingWritten($journals);
     }
 
-    public function test_every_action_needs_branches_view_all(): void
+    public function test_every_action_on_an_account_with_no_branch_needs_branches_view_all(): void
     {
         $journals = $this->journalCount();
 
         foreach ($this->bodies() as $action => $body) {
             $this->actAsUserWith(['accounting:reconcile', ...self::RECORD_PERMISSIONS[$action]]);
 
+            // Only branches:view_all sees an account with no branch, so its
+            // reconciliation answers like a missing one (owner answer 9).
             $this->act($action, $this->reconciliation, $this->statementLine($this->reconciliation), $body)
-                ->assertForbidden();
+                ->assertNotFound();
         }
 
         $this->assertNothingWritten($journals);
@@ -132,8 +137,15 @@ class ReconciliationActionPermissionsTest extends TestCase
 
     public function test_a_user_with_no_role_is_refused(): void
     {
-        $this->actingAs($this->userWithNoRole());
+        $user = $this->userWithNoRole();
+        $user->givePermissionTo(BranchAccess::VIEW_ALL);
+        $this->actingAs($user);
 
+        // view_all only, so the reconciliation is visible and the answer is
+        // the permission's; without it the hidden account answers 404.
         $this->act('suspense', $this->reconciliation, $this->statementLine($this->reconciliation))->assertForbidden();
+
+        $this->actingAs($this->userWithNoRole());
+        $this->act('suspense', $this->reconciliation, $this->statementLine($this->reconciliation))->assertNotFound();
     }
 }

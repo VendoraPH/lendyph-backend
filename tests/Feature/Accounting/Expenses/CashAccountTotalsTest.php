@@ -75,6 +75,9 @@ class CashAccountTotalsTest extends TestCase
         $this->postSimpleJournal('1010', '3010', 1000, ['branch_id' => $this->branch->id]);
         $this->postSimpleJournal('1010', '3010', 20000, ['branch_id' => $this->far->id]);
         $this->postSimpleJournal('1040', '3010', 300000, ['branch_id' => null]);
+        // Cash & Bank lists a money account to its own branch's staff (owner
+        // answer 9, 2026-11-11), so the branch user sees 1010 once it has one.
+        AccountingAccount::query()->whereKey($this->account('1010'))->update(['branch_id' => $this->branch->id]);
 
         $user = User::factory()->inBranches($this->branch)->create();
         $user->assignRole('loan_officer');

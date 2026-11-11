@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use App\Services\Accounting\ReconciliationMatcher;
+use App\Services\BranchAccess;
 use App\Traits\Auditable;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -80,5 +81,38 @@ class AccountingReconciliation extends Model
     public function scopeNewestFirst(Builder $query): Builder
     {
         return $query->orderByDesc('end_date')->orderByDesc('id');
+    }
+
+    /**
+     * The reconciliations $user may see: those on a money account of one of
+     * $user's branches (owner answer 9, 2026-11-11). One on an account with no
+     * branch is for `branches:view_all` only, which sees them all.
+     */
+    public function scopeVisibleTo(Builder $query, User $user): Builder
+    {
+        $branchIds = app(BranchAccess::class)->for($user);
+
+        if ($branchIds === null) {
+            return $query;
+        }
+
+        return $query->whereIn(
+            $this->qualifyColumn('accounting_account_id'),
+            AccountingAccount::query()->select('id')->whereIn('branch_id', $branchIds),
+        );
+    }
+
+    /**
+     * Every `{reconciliation}` route parameter resolves only to one $user may
+     * see ({@see self::scopeVisibleTo()}): another branch's answers 404 before
+     * any validation runs, like a missing one. Without a signed-in user the
+     * binding is unscoped.
+     */
+    public function resolveRouteBindingQuery($query, $value, $field = null)
+    {
+        $query = parent::resolveRouteBindingQuery($query, $value, $field);
+        $user = request()->user();
+
+        return $user instanceof User ? $this->scopeVisibleTo($query, $user) : $query;
     }
 }

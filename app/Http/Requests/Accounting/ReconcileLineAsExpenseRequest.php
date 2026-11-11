@@ -2,16 +2,16 @@
 
 namespace App\Http\Requests\Accounting;
 
-use App\Services\BranchAccess;
 use Illuminate\Foundation\Http\FormRequest;
 
 /**
  * Recording an unmatched statement line (money out) as an expense paid from
  * the reconciled account.
  *
- * Reconciliation is head office (`accounting:reconcile` + `branches:view_all`),
- * and the expense it writes needs the same `expenses:create` the Expenses
- * screen does (Accounting round C, 2026-11-09).
+ * Needs `accounting:reconcile`, and the expense it writes needs the same
+ * `expenses:create` the Expenses screen does (Accounting round C,
+ * 2026-11-09). Another branch's reconciliation answers 404 (the route binding
+ * is scoped, owner answer 9).
  */
 class ReconcileLineAsExpenseRequest extends FormRequest
 {
@@ -20,7 +20,6 @@ class ReconcileLineAsExpenseRequest extends FormRequest
         $user = $this->user();
 
         return $user->can('accounting:reconcile')
-            && $user->can(BranchAccess::VIEW_ALL)
             && $user->can('expenses:create');
     }
 

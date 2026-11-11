@@ -2,7 +2,10 @@
 
 namespace Tests\Feature;
 
+use App\Models\AccountingAccount;
 use App\Models\AccountingExpense;
+use App\Models\AccountingReconciliation;
+use App\Models\AccountingReconciliationLine;
 use App\Models\Borrower;
 use App\Models\Branch;
 use App\Models\Collateral;
@@ -42,6 +45,7 @@ class BranchAccessRouteSweepTest extends TestCase
     private const BOUND_PARAMETERS = [
         'loan', 'borrower', 'repayment', 'loanAdjustment', 'coMaker', 'document',
         'collateral', 'pledge', 'journal', 'expense', 'user', 'transaction',
+        'reconciliation',
     ];
 
     public function test_every_route_bound_to_a_branch_owned_record_answers_404_to_another_branch(): void
@@ -83,9 +87,9 @@ class BranchAccessRouteSweepTest extends TestCase
 
     /**
      * Decision B2: every report, accounting report, chart of accounts
-     * balance and audit log route answers 403 to a branch user naming a
-     * branch outside theirs (and the audit trail and reconciliations to any
-     * caller without `branches:view_all`), whatever other
+     * balance, reconciliation and audit log route answers 403 to a branch
+     * user naming a branch outside theirs (and the audit trail to any caller
+     * without `branches:view_all`), whatever other
      * permissions they hold. Built from the live route list, so a report
      * added later is swept by default.
      */
@@ -173,6 +177,23 @@ class BranchAccessRouteSweepTest extends TestCase
         ]);
         $farUser = User::factory()->inBranches($far)->create();
         $farUser->assignRole('viewer');
+        $farBank = AccountingAccount::query()->whereKey($this->account('1040'))->firstOrFail();
+        $farBank->update(['branch_id' => $far->id]);
+        $reconciliation = AccountingReconciliation::create([
+            'accounting_account_id' => $farBank->id,
+            'period' => 'September 2026',
+            'start_date' => '2026-09-01',
+            'end_date' => '2026-09-30',
+            'statement_balance' => 0,
+            'created_by' => $this->admin->id,
+        ]);
+        $statementLine = AccountingReconciliationLine::create([
+            'accounting_reconciliation_id' => $reconciliation->id,
+            'date' => '2026-09-12',
+            'description' => 'Service charge',
+            'amount' => -15000,
+            'created_by' => $this->admin->id,
+        ]);
 
         return [
             'loan' => $loan->id,
@@ -194,6 +215,8 @@ class BranchAccessRouteSweepTest extends TestCase
                 'transactor_user_id' => $this->admin->id,
                 'status' => 'pending',
             ])->id,
+            'reconciliation' => $reconciliation->id,
+            'line' => $statementLine->id,
         ];
     }
 
