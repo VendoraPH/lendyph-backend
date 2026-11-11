@@ -39,6 +39,18 @@ jobs:
         DEPLOY_DIR=/var/www/lendyph-com-api-staging
         DEPLOY_BRANCH=development
 
+        # The proxy secret, delivered by the step before this one (staging only).
+        # Exported so deploy.sh's children inherit it: never echoed, never on a
+        # command line ($(cat) gets only the path).
+        PROXY_SECRET_FILE="$HOME/.lendyph-proxy-secret/lendyph-com-api-staging"
+        if [ -s "$PROXY_SECRET_FILE" ]; then
+          LENDYPH_PROXY_SECRET="$(cat "$PROXY_SECRET_FILE")"
+          export LENDYPH_PROXY_SECRET
+          echo "proxy secret: loaded"
+        else
+          echo "NOTE: no proxy secret on the box; X-Forwarded-For stays untrusted."
+        fi
+
         bash "$DEPLOY_DIR/deploy.sh"
 
         # --- Did this deploy actually land? -----------------------------------------
@@ -145,6 +157,44 @@ jobs:
         echo "Staging API deployed at $(date)"
 
     steps:
+      # The proxy secret (staging only). It reaches the box over this SSH session's
+      # STDIN, never in a command line: appleboy/ssh-action sends `envs:` as export
+      # lines inside the remote `bash -c` script, and /proc/<pid>/cmdline is readable
+      # by every user on this shared box for the whole deploy. It lands in a 0600
+      # file in the deploy user's home, outside every web root; the deploy step
+      # below exports it before deploy.sh (config:cache / pm2 restart --update-env).
+      # Never fatal: without it the app keeps ignoring X-Forwarded-For, as today.
+      - name: Deliver the proxy secret (staging only)
+        id: proxy_secret
+        continue-on-error: true
+        env:
+          PROXY_SECRET: ${{ secrets.PROXY_SECRET_LENDYPH_STAGING }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PROXY_SECRET" ]; then
+            echo "::warning title=Proxy secret missing::PROXY_SECRET_LENDYPH_STAGING is not set; the box keeps its last one, if any."
+            exit 1
+          fi
+          umask 077
+          key="$RUNNER_TEMP/vps_key"
+          trap 'rm -f "$key"' EXIT
+          printf '%s\n' "$VPS_SSH_KEY" > "$key"
+          # Only paths in the remote command; the value is read from stdin by cat.
+          remote="set -eu; umask 077; d=\"\$HOME/.lendyph-proxy-secret\"; mkdir -p \"\$d\"; chmod 700 \"\$d\"; f=\"\$d/lendyph-com-api-staging\"; cat > \"\$f.tmp\"; if [ ! -s \"\$f.tmp\" ]; then rm -f \"\$f.tmp\"; exit 1; fi; chmod 600 \"\$f.tmp\"; mv -f \"\$f.tmp\" \"\$f\"; echo 'proxy secret delivered'"
+          for attempt in 1 2 3; do
+            if printf '%s' "$PROXY_SECRET" | ssh -i "$key" -o BatchMode=yes -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$RUNNER_TEMP/known_hosts" \
+              -o ConnectTimeout=60 "$VPS_USER@$VPS_HOST" "$remote"; then
+              exit 0
+            fi
+            echo "attempt $attempt to deliver the proxy secret failed"
+            [ "$attempt" -lt 3 ] && sleep 60
+          done
+          exit 1
+
       - name: Deploy via SSH
         id: deploy
         uses: appleboy/ssh-action@v1
@@ -316,3 +366,7 @@ jobs:
             echo "attempt ${attempt}/${ATTEMPTS}: ${problem} — retrying in 10s"
             sleep 10
           done
+
+      - name: Warn if the proxy secret was not delivered
+        if: ${{ !cancelled() && steps.proxy_secret.outcome == 'failure' }}
+        run: echo "::warning title=Proxy secret not delivered::The deploy ran with the box's previous proxy secret, or none (X-Forwarded-For stays untrusted)."

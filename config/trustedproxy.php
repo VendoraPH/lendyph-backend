@@ -54,4 +54,16 @@ return [
         explode(',', (string) env('TRUSTED_PROXIES', ''))
     ))),
 
+    /*
+     * The shared secret the frontend's server-side proxy sends in the
+     * X-Lendyph-Proxy header (App\Http\Middleware\TrustFrontendProxy). A
+     * request carrying it is trusted for X-Forwarded-For from its calling
+     * address, for that request only. Empty, or shorter than 32 characters,
+     * means the feature is off and nothing changes.
+     *
+     * Each deployment's frontend and API share one value. On staging the deploy
+     * workflow exports it before `artisan config:cache`, so no .env holds it.
+     */
+    'proxy_secret' => trim((string) env('LENDYPH_PROXY_SECRET', '')),
+
 ];

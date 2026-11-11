@@ -12,10 +12,12 @@ use App\Http\Middleware\Portal\RequirePortalTerms;
 use App\Http\Middleware\RejectInvalidUtf8;
 use App\Http\Middleware\RequirePasswordChange;
 use App\Http\Middleware\SecurityHeaders;
+use App\Http\Middleware\TrustFrontendProxy;
 use Illuminate\Auth\AuthenticationException;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
+use Illuminate\Http\Middleware\TrustProxies;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Middleware\SubstituteBindings;
 use Illuminate\Routing\Middleware\ThrottleRequests;
@@ -52,7 +54,7 @@ return Application::configure(basePath: dirname(__DIR__))
         // requests, and this host also runs unrelated third-party apps, so its
         // public IP is not a safe entry — nor is loopback. Turning it on needs
         // the frontend to authenticate itself as the proxy with a
-        // server-side-only shared secret; that is filed separately. The
+        // server-side-only shared secret; that is TrustFrontendProxy below. The
         // limiter split in AppServiceProvider fixes the reported bug on its
         // own, without this. See config/trustedproxy.php.
         //
@@ -69,6 +71,11 @@ return Application::configure(basePath: dirname(__DIR__))
         // browser-supplied `X-Forwarded-For: 6.6.6.6` becomes
         // "6.6.6.6, <browser-ip>" and the real browser IP is still what wins.
         $middleware->trustProxies(headers: Request::HEADER_X_FORWARDED_FOR);
+
+        // The frontend proves it is the proxy with a server-only shared secret
+        // (config/trustedproxy.php `proxy_secret`). With the secret unset this
+        // subclass is the framework's TrustProxies, unchanged.
+        $middleware->replace(TrustProxies::class, TrustFrontendProxy::class);
 
         // Keep the optional-auth middleware AHEAD of ThrottleRequests.
         //
