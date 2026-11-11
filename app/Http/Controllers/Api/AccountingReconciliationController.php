@@ -5,7 +5,6 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Accounting\MatchReconciliationRequest;
 use App\Http\Requests\Accounting\StoreReconciliationRequest;
-use App\Models\AccountingAccount;
 use App\Models\AccountingReconciliation;
 use App\Models\AccountingReconciliationLine;
 use App\Services\Accounting\ReconciliationActions;
@@ -31,14 +30,10 @@ use PDOException;
  * the Journals screen — not a correcting line this module slips in to make a
  * number look tidy.
  *
- * Per branch (owner answer 9, 2026-11-11): each money account belongs to a
- * branch, and a caller with `accounting:reconcile` sees and reconciles only the
- * accounts of their own branches. `branches:view_all` sees every one, and is
- * the only caller who sees an account with no branch. Another branch's
- * reconciliation answers 404 like a missing one (the route binding is
- * scoped), and another branch's account reads like a missing account. A
- * reconciliation works with its account's branch's journal lines only
- * ({@see ReconciliationMatcher}).
+ * Every endpoint also requires `branches:view_all` (decision B2, interim
+ * least privilege): a book balance is read from every branch's journals, and
+ * whether a bank account belongs to a branch is not decided yet. Every seeded
+ * role holding `accounting:reconcile` already holds `branches:view_all`.
  */
 class AccountingReconciliationController extends Controller
 {
@@ -62,48 +57,32 @@ class AccountingReconciliationController extends Controller
         parameters: [
             new OA\Parameter(name: 'page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 1)),
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15, maximum: 100)),
-            new OA\Parameter(name: 'account_id', in: 'query', required: false, description: 'One of the caller\'s accounts; another branch\'s reads like a missing one (422).', schema: new OA\Schema(type: 'integer')),
-            new OA\Parameter(name: 'branch_id', in: 'query', required: false, description: 'Reconciliations of one of the caller\'s branches\' accounts (another answers 403).', schema: new OA\Schema(type: 'integer')),
+            new OA\Parameter(name: 'account_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
         ],
         responses: [
-            new OA\Response(response: 200, description: 'Paginated reconciliations, only those on the caller\'s branches\' accounts (all of them for branches:view_all)'),
-            new OA\Response(response: 403, description: 'Missing accounting:reconcile, or a branch_id outside the caller\'s branches'),
+            new OA\Response(response: 200, description: 'Paginated reconciliations'),
+            new OA\Response(response: 403, description: 'Missing accounting:reconcile or branches:view_all'),
         ],
     )]
     public function index(): JsonResponse
     {
         $this->authorize('accounting:reconcile');
-
-        $user = request()->user();
-        $access = app(BranchAccess::class);
-
-        // Before validation, so a branch outside the caller's answers 403
-        // whatever else the query holds.
-        $access->authorizeBranchFilter($user, request()->query('branch_id'));
+        $this->authorize(BranchAccess::VIEW_ALL);
 
         $filters = request()->validate([
             'page' => ['nullable', 'integer', 'min:1'],
             // `min:1`: `?per_page=0` reaches Builder::paginate() as
             // `$perPage ?: $model->getPerPage()` and silently becomes 15.
             'per_page' => ['nullable', 'integer', 'min:1'],
-            'account_id' => ['nullable', 'integer', AccountingAccount::visibleExistsRule($user)],
-            'branch_id' => ['nullable', 'integer', 'min:1'],
+            'account_id' => ['nullable', 'integer', 'exists:accounting_accounts,id'],
         ]);
 
         $perPage = min((int) ($filters['per_page'] ?? 15), 100);
 
         $page = AccountingReconciliation::query()
-            ->visibleTo($user)
             ->when(
                 isset($filters['account_id']),
                 fn ($q) => $q->where('accounting_account_id', $filters['account_id']),
-            )
-            ->when(
-                isset($filters['branch_id']),
-                fn ($q) => $q->whereIn(
-                    'accounting_account_id',
-                    AccountingAccount::query()->select('id')->where('branch_id', (int) $filters['branch_id']),
-                ),
             )
             // A TOTAL order. The screen drains every page and a partial order
             // lets one row be served twice while another is served not at all.
@@ -156,7 +135,7 @@ class AccountingReconciliationController extends Controller
             content: new OA\JsonContent(
                 required: ['account_id', 'start_date', 'end_date', 'statement_balance'],
                 properties: [
-                    new OA\Property(property: 'account_id', type: 'integer', description: 'A money account — one carrying a cash_kind — of one of the caller\'s branches (any, for branches:view_all). Another branch\'s reads like a missing one.'),
+                    new OA\Property(property: 'account_id', type: 'integer', description: 'A money account — one carrying a cash_kind.'),
                     new OA\Property(property: 'period', type: 'string', nullable: true, description: 'Derived from the range when omitted: "September 2026" for a whole calendar month, otherwise the dates in words, "Sep 3 – Sep 20, 2026" ("Dec 15, 2026 – Jan 10, 2027" across a year end).'),
                     new OA\Property(property: 'start_date', type: 'string', format: 'date'),
                     new OA\Property(property: 'end_date', type: 'string', format: 'date'),
@@ -168,12 +147,14 @@ class AccountingReconciliationController extends Controller
         ),
         responses: [
             new OA\Response(response: 201, description: 'Reconciliation created, with its worksheet'),
-            new OA\Response(response: 403, description: 'Missing accounting:reconcile'),
-            new OA\Response(response: 422, description: 'Not a money account, not one of the caller\'s accounts (the same message as a missing one), this account already has this period, or the period is longer than 92 days'),
+            new OA\Response(response: 403, description: 'Missing accounting:reconcile or branches:view_all'),
+            new OA\Response(response: 422, description: 'Not a money account, this account already has this period, or the period is longer than 92 days'),
         ],
     )]
     public function store(StoreReconciliationRequest $request): JsonResponse
     {
+        $this->authorize(BranchAccess::VIEW_ALL);
+
         $data = $request->validated();
 
         // An account with no `cash_kind` has no statement to be proved against.
@@ -264,13 +245,14 @@ class AccountingReconciliationController extends Controller
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
         responses: [
             new OA\Response(response: 200, description: 'Reconciliation with its lines'),
-            new OA\Response(response: 403, description: 'Missing accounting:reconcile'),
-            new OA\Response(response: 404, description: 'Not found, or on another branch\'s account'),
+            new OA\Response(response: 403, description: 'Missing accounting:reconcile or branches:view_all'),
+            new OA\Response(response: 404, description: 'Not found'),
         ],
     )]
     public function show(AccountingReconciliation $reconciliation): JsonResponse
     {
         $this->authorize('accounting:reconcile');
+        $this->authorize(BranchAccess::VIEW_ALL);
 
         return response()->json(['data' => $this->matcher->present($reconciliation)]);
     }
@@ -285,16 +267,17 @@ class AccountingReconciliationController extends Controller
         requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent),
         responses: [
             new OA\Response(response: 200, description: 'Updated reconciliation'),
-            new OA\Response(response: 403, description: 'Missing accounting:reconcile'),
-            new OA\Response(response: 404, description: 'Not found, or on another branch\'s account'),
+            new OA\Response(response: 403, description: 'Missing accounting:reconcile or branches:view_all'),
             new OA\Response(response: 409, description: 'The statement line is already matched to another ledger line (unmatch it first; accept-suggestions skips such lines instead), the ledger line was claimed at the same moment, or a lock collided'),
-            new OA\Response(response: 422, description: 'A line belongs elsewhere, the journal is a draft, the entry is in another branch\'s books than the account\'s, the ledger line is outside the period and not an outstanding item (180 days before to 5 days after), it is already claimed, or its amount or side differs from the statement line\'s'),
+            new OA\Response(response: 422, description: 'A line belongs elsewhere, the journal is a draft, the ledger line is outside the period and not an outstanding item (180 days before to 5 days after), it is already claimed, or its amount or side differs from the statement line\'s'),
         ],
     )]
     public function match(
         MatchReconciliationRequest $request,
         AccountingReconciliation $reconciliation,
     ): JsonResponse {
+        $this->authorize(BranchAccess::VIEW_ALL);
+
         $acceptingSuggestions = $request->boolean('accept_suggestions');
 
         $pairings = $acceptingSuggestions

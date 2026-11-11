@@ -860,9 +860,7 @@ class AccountingChartOfAccountsTest extends TestCase
         $this->actingAs($this->userWithRole('viewer'));
 
         $this->getJson('/api/accounting/accounts')->assertForbidden();
-        // An account that holds no money, so the answer is the permission's
-        // (a money account with no branch is view_all's and answers 404).
-        $this->getJson('/api/accounting/accounts/'.$this->id('5030'))->assertForbidden();
+        $this->getJson('/api/accounting/accounts/'.$this->id('1010'))->assertForbidden();
         $this->getJson('/api/accounting/settings/account-mapping')->assertForbidden();
     }
 

@@ -37,11 +37,6 @@ class AccountingAccountResource extends JsonResource
             'is_group' => (bool) $this->is_group,
             'is_active' => (bool) $this->is_active,
             'cash_kind' => $this->cash_kind,
-            // The branch whose staff reconcile this money account (owner
-            // answer 9, 2026-11-11). Null on an account that holds no money,
-            // and on a money account whose branch is not set yet.
-            'branch_id' => $this->branch_id,
-            'branch_name' => $this->branch_id === null ? null : $this->branch?->name,
             // Which section of the cash flow statement a movement through this
             // account lands in. Emitted on every account, not only on request,
             // because the point of storing it is that somebody reviews it —

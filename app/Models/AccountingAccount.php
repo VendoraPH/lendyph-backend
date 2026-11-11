@@ -4,15 +4,12 @@ namespace App\Models;
 
 use App\Services\Accounting\AccountRules;
 use App\Services\Accounting\CashFlowCategories;
-use App\Services\BranchAccess;
 use App\Traits\Auditable;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
-use Illuminate\Validation\Rule;
-use Illuminate\Validation\Rules\Exists;
 
 /**
  * One line of the chart of accounts.
@@ -27,7 +24,6 @@ use Illuminate\Validation\Rules\Exists;
  * @property bool $is_group
  * @property bool $is_active
  * @property string|null $cash_kind
- * @property int|null $branch_id
  * @property string|null $cash_flow_category
  * @property string|null $description
  * @property int|null $created_by
@@ -65,10 +61,6 @@ class AccountingAccount extends Model
         'is_group',
         'is_active',
         'cash_kind',
-        // The branch whose staff reconcile this money account (owner answer
-        // 9, 2026-11-11). Set on money accounts only; see
-        // StoreAccountingAccountRequest.
-        'branch_id',
         // Which activity a movement through this account belongs to. Fillable
         // because it is EDITABLE — the seeded value is a default and the whole
         // design assumes an accountant will disagree with some of them. See
@@ -85,7 +77,6 @@ class AccountingAccount extends Model
             'is_group' => 'boolean',
             'is_active' => 'boolean',
             'parent_id' => 'integer',
-            'branch_id' => 'integer',
             'created_by' => 'integer',
         ];
     }
@@ -141,12 +132,6 @@ class AccountingAccount extends Model
     public function children(): HasMany
     {
         return $this->hasMany(self::class, 'parent_id');
-    }
-
-    /** The branch that reconciles this money account. None on other accounts. */
-    public function branch(): BelongsTo
-    {
-        return $this->belongsTo(Branch::class);
     }
 
     public function creator(): BelongsTo
@@ -226,63 +211,5 @@ class AccountingAccount extends Model
     public function scopePostable(Builder $query): Builder
     {
         return $query->where('is_active', true)->where('is_group', false);
-    }
-
-    /**
-     * The accounts $user may see (owner answer 9, 2026-11-11): every account
-     * that holds no money, and the money accounts of $user's branches. A money
-     * account with no branch is for `branches:view_all` only, which sees every
-     * account.
-     */
-    public function scopeVisibleTo(Builder $query, User $user): Builder
-    {
-        $branchIds = app(BranchAccess::class)->for($user);
-
-        if ($branchIds === null) {
-            return $query;
-        }
-
-        return $query->where(fn (Builder $q) => $q
-            ->whereNull($this->qualifyColumn('cash_kind'))
-            ->orWhereIn($this->qualifyColumn('branch_id'), $branchIds));
-    }
-
-    /**
-     * Whether $user may see this account, by the rule of
-     * {@see self::scopeVisibleTo()}.
-     */
-    public function isVisibleTo(User $user): bool
-    {
-        return $this->cash_kind === null
-            || app(BranchAccess::class)->canSee($user, $this->branch_id);
-    }
-
-    /**
-     * `exists` on the accounts $user may see ({@see self::scopeVisibleTo()}),
-     * so another branch's money account fails with the same message as a
-     * missing one. Unscoped without a user or with `branches:view_all`.
-     */
-    public static function visibleExistsRule(?User $user): Exists
-    {
-        $rule = Rule::exists('accounting_accounts', 'id');
-        $branchIds = $user === null ? null : app(BranchAccess::class)->for($user);
-
-        return $branchIds === null
-            ? $rule
-            : $rule->where(fn ($q) => $q->whereNull('cash_kind')->orWhereIn('branch_id', $branchIds));
-    }
-
-    /**
-     * Every `{account}` route parameter resolves only to an account $user may
-     * see ({@see self::scopeVisibleTo()}): another branch's money account
-     * answers 404 before any validation runs. Without a signed-in user the
-     * binding is unscoped.
-     */
-    public function resolveRouteBindingQuery($query, $value, $field = null)
-    {
-        $query = parent::resolveRouteBindingQuery($query, $value, $field);
-        $user = request()->user();
-
-        return $user instanceof User ? $this->scopeVisibleTo($query, $user) : $query;
     }
 }

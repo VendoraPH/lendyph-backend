@@ -50,7 +50,7 @@ class AccountingAccountController extends Controller
     #[OA\Get(
         path: '/api/accounting/accounts',
         summary: 'List chart of accounts',
-        description: 'One page of the chart, in code order — which is statement order, because codes are fixed-width numeric strings. Returns the raw Laravel paginator envelope ({data, links, meta}); clients drain it by following `meta.last_page`. `balance` covers the caller\'s branches only (every branch, unbranched journals included, for branches:view_all). Money accounts of another branch, and money accounts with no branch, are listed for branches:view_all only; each row carries `branch_id` and `branch_name`.',
+        description: 'One page of the chart, in code order — which is statement order, because codes are fixed-width numeric strings. Returns the raw Laravel paginator envelope ({data, links, meta}); clients drain it by following `meta.last_page`. `balance` covers the caller\'s branches only (every branch, unbranched journals included, for branches:view_all).',
         tags: ['Accounting'],
         security: [['sanctum' => []]],
         parameters: [
@@ -80,9 +80,6 @@ class AccountingAccountController extends Controller
         $perPage = min((int) ($filters['per_page'] ?? 15), 100);
 
         $accounts = AccountingAccount::query()
-            // Another branch's money accounts are left off (owner answer 9).
-            ->visibleTo(request()->user())
-            ->with('branch:id,name')
             // One extra query for the whole page instead of one per row. The
             // alternative is an `exists` per account inside the resource, which
             // is 60 queries on a default chart and invisible until production.
@@ -98,7 +95,7 @@ class AccountingAccountController extends Controller
     #[OA\Post(
         path: '/api/accounting/accounts',
         summary: 'Create an account',
-        description: '`normal_balance` is derived from `type` and `is_contra` and is ignored if sent. The code must agree with the type (1xxx asset, 2xxx liability, 3xxx equity, 4xxx income, 5xxx expense), a parent must be a group of the same type, and a group cannot carry `cash_kind`. A money account (one with a `cash_kind`) needs a `branch_id` of one of the caller\'s branches; any other account takes none.',
+        description: '`normal_balance` is derived from `type` and `is_contra` and is ignored if sent. The code must agree with the type (1xxx asset, 2xxx liability, 3xxx equity, 4xxx income, 5xxx expense), a parent must be a group of the same type, and a group cannot carry `cash_kind`.',
         tags: ['Accounting'],
         security: [['sanctum' => []]],
         requestBody: new OA\RequestBody(
@@ -114,7 +111,6 @@ class AccountingAccountController extends Controller
                     new OA\Property(property: 'is_active', type: 'boolean', example: true),
                     new OA\Property(property: 'parent_id', type: 'integer', nullable: true, example: 1),
                     new OA\Property(property: 'cash_kind', type: 'string', nullable: true, enum: ['cash', 'bank', 'gcash', 'maya', 'wallet']),
-                    new OA\Property(property: 'branch_id', type: 'integer', nullable: true, description: 'Required with a cash_kind: the branch, one of the caller\'s, whose staff reconcile this money account. Refused on an account that holds no money.'),
                 ],
             ),
         ),
@@ -132,7 +128,7 @@ class AccountingAccountController extends Controller
             ['created_by' => $request->user()?->id],
         ));
 
-        $account->load('branch:id,name')->loadCount('journalLines');
+        $account->loadCount('journalLines');
 
         return (new AccountingAccountResource($account))
             ->response()
@@ -142,7 +138,7 @@ class AccountingAccountController extends Controller
     #[OA\Get(
         path: '/api/accounting/cash-accounts',
         summary: 'The money accounts, with their balances',
-        description: "Cash on hand, bank accounts, GCash and Maya — every account carrying a `cash_kind` — in code order, with `balance` in integer CENTAVOS. Returns the raw Laravel paginator envelope ({data, links, meta}). `meta.totals` covers every money account, not the page: `balance` (the headline total) and `by_kind` (cash, bank, gcash, maya and wallet), in centavos and in the same branch scope as each row's balance. Balances come from the SAME TrialBalanceBuilder aggregate the trial balance and the chart of accounts read, so this screen cannot drift from them. INACTIVE money accounts are included — see the method. `balance` covers the caller's branches only (every branch, unbranched journals included, for branches:view_all). Only the money accounts of the caller's branches are listed and totalled (every one for branches:view_all, including one with no branch); each row carries `branch_id` and `branch_name`.",
+        description: "Cash on hand, bank accounts, GCash and Maya — every account carrying a `cash_kind` — in code order, with `balance` in integer CENTAVOS. Returns the raw Laravel paginator envelope ({data, links, meta}). `meta.totals` covers every money account, not the page: `balance` (the headline total) and `by_kind` (cash, bank, gcash, maya and wallet), in centavos and in the same branch scope as each row's balance. Balances come from the SAME TrialBalanceBuilder aggregate the trial balance and the chart of accounts read, so this screen cannot drift from them. INACTIVE money accounts are included — see the method. `balance` covers the caller's branches only (every branch, unbranched journals included, for branches:view_all).",
         tags: ['Accounting'],
         security: [['sanctum' => []]],
         parameters: [
@@ -194,10 +190,6 @@ class AccountingAccountController extends Controller
         $perPage = min((int) ($filters['per_page'] ?? 15), 100);
 
         $accounts = AccountingAccount::query()
-            // The caller's branches' money accounts only; every one for
-            // branches:view_all (owner answer 9).
-            ->visibleTo(request()->user())
-            ->with('branch:id,name')
             ->withCount('journalLines')
             // The money accounts are exactly the ones carrying a `cash_kind`,
             // which is what the dedicated index on that column exists for.
@@ -241,7 +233,6 @@ class AccountingAccountController extends Controller
          * all pages and the trial balance's money accounts.
          */
         $kinds = AccountingAccount::query()
-            ->visibleTo(request()->user())
             ->whereNotNull('cash_kind')
             ->where('is_group', false)
             ->pluck('cash_kind', 'id');
@@ -309,7 +300,7 @@ class AccountingAccountController extends Controller
         ],
         responses: [
             new OA\Response(response: 200, description: 'Account details'),
-            new OA\Response(response: 404, description: 'Not found, or another branch\'s money account'),
+            new OA\Response(response: 404, description: 'Not found'),
         ],
     )]
     public function show(AccountingAccount $account): AccountingAccountResource
@@ -320,7 +311,7 @@ class AccountingAccountController extends Controller
             'branch_id' => ['nullable', 'integer', 'min:1'],
         ]);
 
-        $account->load('branch:id,name')->loadCount('journalLines');
+        $account->loadCount('journalLines');
         $this->attachBalances(new Collection([$account]), $filters['branch_id'] ?? null);
 
         return new AccountingAccountResource($account);
@@ -329,7 +320,7 @@ class AccountingAccountController extends Controller
     #[OA\Put(
         path: '/api/accounting/accounts/{id}',
         summary: 'Update an account',
-        description: 'Partial. Any field left out keeps its stored value, and the cross-field rules are checked against what the account will BE after the save. `normal_balance` is re-derived whenever `type` or `is_contra` changes. A money account keeps a `branch_id` of one of the caller\'s branches; it can move to another branch only until it has a reconciliation, and an account that stops holding money leaves its branch. Another branch\'s money account answers 404.',
+        description: 'Partial. Any field left out keeps its stored value, and the cross-field rules are checked against what the account will BE after the save. `normal_balance` is re-derived whenever `type` or `is_contra` changes.',
         tags: ['Accounting'],
         security: [['sanctum' => []]],
         parameters: [
@@ -344,18 +335,9 @@ class AccountingAccountController extends Controller
     )]
     public function update(UpdateAccountingAccountRequest $request, AccountingAccount $account): AccountingAccountResource
     {
-        $data = $request->validated();
+        $account->update($request->validated());
 
-        // Only a money account belongs to a branch: one that stops holding
-        // money leaves its branch (refused while it has a reconciliation, see
-        // UpdateAccountingAccountRequest).
-        if ($request->finalCashKind() === null) {
-            $data['branch_id'] = null;
-        }
-
-        $account->update($data);
-
-        $account->refresh()->load('branch:id,name')->loadCount('journalLines');
+        $account->refresh()->loadCount('journalLines');
 
         return new AccountingAccountResource($account);
     }

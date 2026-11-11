@@ -45,8 +45,6 @@ class UpdateAccountingAccountRequest extends FormRequest
             'is_active' => ['sometimes', 'boolean'],
             'parent_id' => ['sometimes', 'nullable', 'integer', Rule::exists('accounting_accounts', 'id')],
             'cash_kind' => ['sometimes', 'nullable', Rule::in(AccountRules::CASH_KINDS)],
-            // See validateAccountBranch().
-            'branch_id' => ['sometimes', ...$this->branchRule()],
             /*
              * The cash flow classification, and THIS is the endpoint that makes
              * the defaults reviewable rather than decreed.
@@ -77,7 +75,6 @@ class UpdateAccountingAccountRequest extends FormRequest
     {
         $validator->after(function (Validator $v): void {
             $this->validateAccountShape($v, $this->account());
-            $this->validateAccountBranch($v, $this->account());
         });
     }
 

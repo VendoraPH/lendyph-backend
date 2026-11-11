@@ -355,8 +355,7 @@ class AccountingAccountFieldsTest extends TestCase
             'parent_id' => $this->account('1000'),
         ]);
 
-        // A money account belongs to a branch (owner answer 9, 2026-11-11).
-        $this->putJson("/api/accounting/accounts/{$spare->id}", ['cash_kind' => 'wallet', 'branch_id' => $this->branch->id])
+        $this->putJson("/api/accounting/accounts/{$spare->id}", ['cash_kind' => 'wallet'])
             ->assertOk()
             ->assertJsonPath('data.cash_kind', 'wallet');
     }

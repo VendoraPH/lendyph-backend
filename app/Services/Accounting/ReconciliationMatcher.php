@@ -54,16 +54,6 @@ use Illuminate\Support\Facades\DB;
  * line, and a line another reconciliation's statement line has claimed is
  * never offered.
  *
- * ## Per branch
- *
- * A money account that belongs to a branch is reconciled with that branch's
- * books only (owner answer 9, 2026-11-11): its worksheet, suggestions, matches
- * and book balance read the journal lines on the account whose journal is in
- * the account's branch. Lines in another branch's journals, and lines in
- * journals with no branch, are left out for every reader, so the figures never
- * depend on who reads them. An account with no branch (only `branches:view_all`
- * sees one) keeps every line on it, as before.
- *
  * A ledger line already claimed by a stronger pass is never offered again, and
  * where several candidates tie, the nearest date wins and then the lowest id —
  * a total order, so the same books produce the same suggestions every time.
@@ -157,7 +147,7 @@ class ReconciliationMatcher
         // the two has the eager-loading methods.
         $reconciliations = EloquentCollection::make($reconciliations->all());
 
-        $reconciliations->loadMissing(['account:id,code,name,branch_id', 'account.branch:id,name', 'lines']);
+        $reconciliations->loadMissing(['account:id,code,name', 'lines']);
 
         $ledger = $this->ledgerFor($reconciliations);
         $balances = $this->balancesFor($reconciliations);
@@ -193,10 +183,6 @@ class ReconciliationMatcher
                 'account_id' => $accountId,
                 'account_code' => $reconciliation->account?->code,
                 'account_name' => $reconciliation->account?->name,
-                // The branch whose books this reconciliation proves, from its
-                // account; null for an account with no branch.
-                'branch_id' => $reconciliation->account?->branch_id,
-                'branch_name' => $reconciliation->account?->branch?->name,
                 'period' => $reconciliation->period,
                 'start_date' => $start,
                 'end_date' => $end,
@@ -275,9 +261,7 @@ class ReconciliationMatcher
      * worksheet row's `matchable`, so the picker offers exactly what the
      * server takes.
      *
-     * Refused: a draft; a line on another account; a line in another
-     * branch's books than the account's, or in a journal with no branch, when
-     * the account belongs to a branch; a line dated outside the
+     * Refused: a draft; a line on another account; a line dated outside the
      * period and further than {@see self::OUTSTANDING_DAYS_BEFORE} days
      * before it or {@see self::DATE_WINDOW_DAYS} days after it; a line another
      * statement line has claimed; and, for a given statement line, a line of
@@ -305,11 +289,6 @@ class ReconciliationMatcher
         if ($line['account_id'] !== $reconciliation->accounting_account_id) {
             return "Journal line {$id} is against a different account. A reconciliation proves one account, so a "
                 .'line on another one cannot be part of it.';
-        }
-
-        if ($line['account_branch_id'] !== null && $line['branch_id'] !== $line['account_branch_id']) {
-            return "Journal line {$id} is not in the books of this account's branch. A branch reconciles its own "
-                .'entries, so an entry in another branch\'s books, or in no branch\'s, cannot be part of it.';
         }
 
         $date = $line['date'];
@@ -725,8 +704,6 @@ class ReconciliationMatcher
         return self::ledgerQuery()
             ->whereIn('l.accounting_account_id', $accountIds)
             ->whereIn('j.status', AccountingJournal::HISTORICAL_STATUSES)
-            // The account's branch's books only, when it has a branch.
-            ->where(static fn (Builder $q) => $q->whereNull('a.branch_id')->orWhereColumn('j.branch_id', 'a.branch_id'))
             // Plain comparisons on a DATE column, so the index on `j.date`
             // stays usable. whereDate() would wrap it in a function and force a
             // full scan of the journal table.
@@ -755,15 +732,13 @@ class ReconciliationMatcher
     }
 
     /**
-     * Journal lines with their journal, its reversal links, the branch of the
-     * account they are on, and the statement line (and its reconciliation), if
-     * any, that has claimed them.
+     * Journal lines with their journal, its reversal links, and the statement
+     * line (and its reconciliation), if any, that has claimed them.
      */
     private static function ledgerQuery(): Builder
     {
         return DB::table('accounting_journal_lines as l')
             ->join('accounting_journals as j', 'j.id', '=', 'l.accounting_journal_id')
-            ->join('accounting_accounts as a', 'a.id', '=', 'l.accounting_account_id')
             // Which reconciliation, if any, has claimed the line. The UNIQUE
             // index on `matched_journal_line_id` keeps this to one row.
             ->leftJoin('accounting_reconciliation_lines as r', 'r.matched_journal_line_id', '=', 'l.id')
@@ -779,8 +754,6 @@ class ReconciliationMatcher
                 'j.reference',
                 'j.description as journal_description',
                 'j.status',
-                'j.branch_id',
-                'a.branch_id as account_branch_id',
                 'j.reverses_journal_id',
                 'j.reversed_by_journal_id',
                 'r.accounting_reconciliation_id as claimed_by',
@@ -806,8 +779,6 @@ class ReconciliationMatcher
             'journal_no' => $row->journal_no,
             'reference' => $row->reference,
             'status' => (string) $row->status,
-            'branch_id' => $row->branch_id === null ? null : (int) $row->branch_id,
-            'account_branch_id' => $row->account_branch_id === null ? null : (int) $row->account_branch_id,
             'claimed_by' => $row->claimed_by === null ? null : (int) $row->claimed_by,
             'claimed_by_line' => $row->claimed_by_line === null ? null : (int) $row->claimed_by_line,
             'reverses_journal_id' => $row->reverses_journal_id === null ? null : (int) $row->reverses_journal_id,
@@ -818,11 +789,9 @@ class ReconciliationMatcher
     /**
      * Signed account balances as of each distinct period end on the page.
      *
-     * One query per distinct `end_date` and account branch rather than one
-     * per reconciliation — a page of twelve monthly reconciliations across
-     * five accounts of one branch is twelve queries, not sixty. An account
-     * that belongs to a branch is balanced on that branch's journals only, as
-     * its worksheet is; one with no branch on every journal.
+     * One query per distinct `end_date` rather than one per reconciliation —
+     * a page of twelve monthly reconciliations across five accounts is twelve
+     * queries, not sixty.
      *
      * Through TrialBalanceBuilder rather than a sum of its own. The Cash & Bank
      * screen, the dashboard and the balance sheet all read that builder, and
@@ -837,16 +806,12 @@ class ReconciliationMatcher
     {
         $balances = [];
 
-        foreach ($reconciliations->groupBy(fn (AccountingReconciliation $r): string => $r->end_date->toDateString()) as $end => $byEnd) {
-            $balances[$end] = [];
-
-            foreach ($byEnd->groupBy(fn (AccountingReconciliation $r): string => (string) $r->account?->branch_id) as $branchId => $group) {
-                $balances[$end] += $this->trialBalance->signedBalances(
-                    (string) $end,
-                    $branchId === '' ? null : (int) $branchId,
-                    $group->pluck('accounting_account_id')->unique()->values()->all(),
-                );
-            }
+        foreach ($reconciliations->groupBy(fn (AccountingReconciliation $r): string => $r->end_date->toDateString()) as $end => $group) {
+            $balances[$end] = $this->trialBalance->signedBalances(
+                (string) $end,
+                null,
+                $group->pluck('accounting_account_id')->unique()->values()->all(),
+            );
         }
 
         return $balances;

@@ -2,7 +2,6 @@
 
 namespace App\Http\Requests\Accounting;
 
-use App\Models\AccountingAccount;
 use App\Services\Accounting\Money;
 use App\Services\Accounting\ReconciliationMatcher;
 use Carbon\CarbonImmutable;
@@ -45,9 +44,8 @@ class StoreReconciliationRequest extends FormRequest
     {
         return [
             // Checked as a MONEY account in the controller — an account with no
-            // `cash_kind` has no statement to be proved against. Another
-            // branch's money account fails like a missing one (owner answer 9).
-            'account_id' => ['required', 'integer', AccountingAccount::visibleExistsRule($this->user())],
+            // `cash_kind` has no statement to be proved against.
+            'account_id' => ['required', 'integer', 'exists:accounting_accounts,id'],
             // Optional: derived from the range when absent, so the common case
             // ("September 2026") needs no typing and cannot be typed two
             // different ways for the same month.

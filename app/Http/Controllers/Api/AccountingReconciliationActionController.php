@@ -21,10 +21,8 @@ use OpenApi\Attributes as OA;
  * Each action is still a deliberate entry someone chose, never an adjustment
  * the module slips in to make a difference close.
  *
- * Every route needs `accounting:reconcile`, checked in the form requests
- * together with the record's permission. Another branch's reconciliation
- * answers 404 (owner answer 9, 2026-11-11), and the record is written in the
- * reconciled account's branch. Each
+ * Every route needs `accounting:reconcile` + `branches:view_all` (head office),
+ * checked in the form requests together with the record's permission. Each
  * answers 201 with the reconciliation exactly as GET
  * /accounting/reconciliations/{id} answers it, plus a `created` block naming
  * the new record and its journal.
@@ -39,7 +37,7 @@ class AccountingReconciliationActionController extends Controller
     #[OA\Post(
         path: '/api/accounting/reconciliations/{reconciliation}/lines/{line}/expense',
         summary: 'Record a statement line as an expense',
-        description: 'Money out only (`amount` < 0). Records an expense of −`amount` centavos paid from the reconciled account (Dr expense / Cr reconciled), dated the line\'s date, in the reconciled account\'s branch (none for an account with no branch), reference = the line\'s `external_reference`, and matches the line to the new bank or cash line. Needs accounting:reconcile and expenses:create.',
+        description: 'Money out only (`amount` < 0). Records an expense of −`amount` centavos paid from the reconciled account (Dr expense / Cr reconciled), dated the line\'s date, no branch, reference = the line\'s `external_reference`, and matches the line to the new bank or cash line. Needs accounting:reconcile, branches:view_all and expenses:create.',
         tags: ['Accounting'],
         security: [['sanctum' => []]],
         parameters: [
@@ -57,8 +55,8 @@ class AccountingReconciliationActionController extends Controller
         )),
         responses: [
             new OA\Response(response: 201, description: '{data: reconciliation, created: {type: "expense", id, journal_id, journal_no}}'),
-            new OA\Response(response: 403, description: 'Missing accounting:reconcile or expenses:create'),
-            new OA\Response(response: 404, description: 'The reconciliation is another branch\'s, or the line does not belong to it'),
+            new OA\Response(response: 403, description: 'Missing accounting:reconcile, branches:view_all or expenses:create'),
+            new OA\Response(response: 404, description: 'The line does not belong to this reconciliation'),
             new OA\Response(response: 409, description: 'This statement line is already matched'),
             new OA\Response(response: 422, description: 'Money in, a line the books already hold (unless record_anyway), a closed period, the line outside the reconciliation\'s dates, or a wrong account'),
         ],
@@ -73,7 +71,7 @@ class AccountingReconciliationActionController extends Controller
     #[OA\Post(
         path: '/api/accounting/reconciliations/{reconciliation}/lines/{line}/transfer',
         summary: 'Record a statement line as a transfer',
-        description: 'Money in moves from the counter account into the reconciled one; money out the other way. |`amount`| centavos, dated the line\'s date, in the reconciled account\'s branch. The counter account must be a money account other than the reconciled one, in the same branch. Needs accounting:reconcile and cash_accounts:transfer.',
+        description: 'Money in moves from the counter account into the reconciled one; money out the other way. |`amount`| centavos, dated the line\'s date, no branch. The counter account must be a money account other than the reconciled one. Needs accounting:reconcile, branches:view_all and cash_accounts:transfer.',
         tags: ['Accounting'],
         security: [['sanctum' => []]],
         parameters: [
@@ -90,10 +88,10 @@ class AccountingReconciliationActionController extends Controller
         )),
         responses: [
             new OA\Response(response: 201, description: '{data: reconciliation, created: {type: "transfer", id, journal_id, journal_no}}'),
-            new OA\Response(response: 403, description: 'Missing accounting:reconcile or cash_accounts:transfer'),
-            new OA\Response(response: 404, description: 'The reconciliation is another branch\'s, or the line does not belong to it'),
+            new OA\Response(response: 403, description: 'Missing accounting:reconcile, branches:view_all or cash_accounts:transfer'),
+            new OA\Response(response: 404, description: 'The line does not belong to this reconciliation'),
             new OA\Response(response: 409, description: 'This statement line is already matched'),
-            new OA\Response(response: 422, description: 'A line the books already hold (unless record_anyway), a closed period, the line outside the reconciliation\'s dates, or a wrong counter account (not a money account, the reconciled one, or another branch\'s)'),
+            new OA\Response(response: 422, description: 'A line the books already hold (unless record_anyway), a closed period, the line outside the reconciliation\'s dates, or a wrong counter account'),
         ],
     )]
     public function transfer(ReconcileLineAsTransferRequest $request, AccountingReconciliation $reconciliation, int $line): JsonResponse
@@ -106,7 +104,7 @@ class AccountingReconciliationActionController extends Controller
     #[OA\Post(
         path: '/api/accounting/reconciliations/{reconciliation}/lines/{line}/suspense',
         summary: 'Record a statement line to Suspense',
-        description: 'Posts a journal immediately: money in Dr reconciled / Cr suspense, money out Dr suspense / Cr reconciled. Source bank_transaction on a bank account, cash_transaction otherwise; dated the line\'s date, in the reconciled account\'s branch, reference = `external_reference` or "REC-<reconciliation id>-<line id>". Needs accounting:reconcile, journals:create and journals:post.',
+        description: 'Posts a journal immediately: money in Dr reconciled / Cr suspense, money out Dr suspense / Cr reconciled. Source bank_transaction on a bank account, cash_transaction otherwise; dated the line\'s date, no branch, reference = `external_reference` or "REC-<reconciliation id>-<line id>". Needs accounting:reconcile, branches:view_all, journals:create and journals:post.',
         tags: ['Accounting'],
         security: [['sanctum' => []]],
         parameters: [
@@ -121,8 +119,8 @@ class AccountingReconciliationActionController extends Controller
         )),
         responses: [
             new OA\Response(response: 201, description: '{data: reconciliation, created: {type: "journal", id, journal_id, journal_no}}'),
-            new OA\Response(response: 403, description: 'Missing accounting:reconcile, journals:create or journals:post'),
-            new OA\Response(response: 404, description: 'The reconciliation is another branch\'s, or the line does not belong to it'),
+            new OA\Response(response: 403, description: 'Missing accounting:reconcile, branches:view_all, journals:create or journals:post'),
+            new OA\Response(response: 404, description: 'The line does not belong to this reconciliation'),
             new OA\Response(response: 409, description: 'This statement line is already matched'),
             new OA\Response(response: 422, description: 'A line the books already hold (unless record_anyway), a closed period, the line outside the reconciliation\'s dates, or no Suspense account mapped'),
         ],

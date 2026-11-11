@@ -336,11 +336,6 @@ class BranchScopedReportsTest extends TestCase
         $expense = $this->account('5030');
         $balanceIn = fn (TestResponse $page, int $id) => collect($page->json('data'))->firstWhere('id', $id)['balance'];
 
-        // A money account is listed to the staff of its own branch (owner
-        // answer 9, 2026-11-11); its balance still follows the caller's
-        // branches.
-        $this->putJson("/api/accounting/accounts/{$cash}", ['branch_id' => $this->branch->id])->assertOk();
-
         $this->actingAs($this->branchUser());
 
         $this->assertSame(10000, $balanceIn($this->getJson('/api/accounting/accounts?per_page=100')->assertOk(), $expense));
@@ -504,12 +499,7 @@ class BranchScopedReportsTest extends TestCase
         $this->assertSame('Far Branch (HQ edit)', $this->far->fresh()->name);
     }
 
-    /**
-     * Owner answer 9 (2026-11-11) replaces the interim head-office rule: a
-     * branch user reconciles their own branch's money accounts, and one on an
-     * account with no branch stays with `branches:view_all`.
-     */
-    public function test_reconciliation_follows_the_accounts_branch(): void
+    public function test_reconciliation_needs_view_all(): void
     {
         $this->seedChartOfAccounts();
         $payload = [
@@ -525,21 +515,16 @@ class BranchScopedReportsTest extends TestCase
         $reconciler->givePermissionTo('accounting:reconcile');
         $this->actingAs($reconciler);
 
-        $this->getJson('/api/accounting/reconciliations')->assertOk()->assertJsonCount(0, 'data');
-        $this->getJson("/api/accounting/reconciliations/{$id}")->assertNotFound();
-        $this->postJson('/api/accounting/reconciliations', [...$payload, 'start_date' => '2026-10-01', 'end_date' => '2026-10-31'])
-            ->assertUnprocessable()
-            ->assertJsonValidationErrors('account_id');
-        $this->postJson("/api/accounting/reconciliations/{$id}/match", ['accept_suggestions' => true])->assertNotFound();
+        $this->getJson('/api/accounting/reconciliations')->assertForbidden();
+        $this->getJson("/api/accounting/reconciliations/{$id}")->assertForbidden();
+        $this->postJson('/api/accounting/reconciliations', [...$payload, 'start_date' => '2026-10-01', 'end_date' => '2026-10-31'])->assertForbidden();
+        $this->postJson("/api/accounting/reconciliations/{$id}/match", ['accept_suggestions' => true])->assertForbidden();
 
-        $this->actingAs($this->admin);
-        $this->putJson('/api/accounting/accounts/'.$this->account('1040'), ['branch_id' => $this->branch->id])->assertOk();
+        $reconciler->givePermissionTo(BranchAccess::VIEW_ALL);
         $this->actingAs($reconciler->fresh());
 
-        $this->getJson('/api/accounting/reconciliations')->assertOk()->assertJsonCount(1, 'data');
+        $this->getJson('/api/accounting/reconciliations')->assertOk();
         $this->getJson("/api/accounting/reconciliations/{$id}")->assertOk();
-        $this->postJson('/api/accounting/reconciliations', [...$payload, 'start_date' => '2026-10-01', 'end_date' => '2026-10-31'])->assertCreated();
-        $this->getJson("/api/accounting/reconciliations?branch_id={$this->far->id}")->assertForbidden();
     }
 
     public function test_every_seeded_role_that_can_reconcile_holds_view_all(): void
