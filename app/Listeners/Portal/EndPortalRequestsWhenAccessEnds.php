@@ -5,6 +5,7 @@ namespace App\Listeners\Portal;
 use App\Services\Portal\MemberPortalAccessEnded;
 use App\Services\Portal\Requests\RequestSweep;
 use Illuminate\Support\Facades\DB;
+use Throwable;
 
 /**
  * When a member's portal access ends with their membership (withdrawn or
@@ -19,13 +20,22 @@ class EndPortalRequestsWhenAccessEnds
     /**
      * Run once the membership change commits: it holds the member and
      * portal account rows, and ending the requests takes the savings account
-     * and request locks, which a payout takes before the portal account.
+     * and request locks, which a payout takes before the member and the
+     * portal account. The membership has ended by then, so a failure is
+     * reported, never answered as a 500, and the nightly
+     * portal:requests-sweep ends the requests instead.
      */
     public function handle(MemberPortalAccessEnded $event): void
     {
         $portalUser = $event->portalUser;
         $reason = $event->reason;
 
-        DB::afterCommit(fn () => $this->sweep->endFor($portalUser, $reason));
+        DB::afterCommit(function () use ($portalUser, $reason): void {
+            try {
+                $this->sweep->endFor($portalUser, $reason);
+            } catch (Throwable $e) {
+                report($e);
+            }
+        });
     }
 }

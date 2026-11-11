@@ -135,6 +135,38 @@ class AccessEndFollowUpsTest extends TestCase
         $this->assertSame('released', SavingsHold::query()->findOrFail($request->savings_hold_id)->status);
     }
 
+    public function test_a_membership_end_still_answers_normally_when_ending_the_requests_fails_and_the_sweep_finishes_it(): void
+    {
+        Exceptions::fake();
+        $account = $this->account();
+        $this->fund($account, 100_000);
+        $request = $this->submitted($this->submit($this->withdrawalBody($account, '100.00'))->assertCreated());
+
+        $this->app->instance(SavingsLocks::class, new class extends SavingsLocks
+        {
+            public function account(int $id): SavingsAccount
+            {
+                throw new RuntimeException('Lock wait timeout exceeded');
+            }
+        });
+
+        $this->freshRequest();
+        $this->actingAs($this->admin)->patchJson("/api/borrowers/{$this->member->id}/end-membership", [
+            'status' => 'deceased', 'ended_on' => '2026-11-10', 'reason' => 'Reported by the family.',
+        ])->assertOk()->assertJsonPath('data.status', 'deceased');
+
+        Exceptions::assertReported(fn (RuntimeException $e): bool => $e->getMessage() === 'Lock wait timeout exceeded');
+        $this->assertSame([PortalUser::STATUS_DISABLED, PortalUser::REASON_DECEASED], [$this->portalUser->fresh()->status, $this->portalUser->fresh()->disabled_reason]);
+        $this->assertSame(PortalRequest::STATUS_SUBMITTED, $request->fresh()->status, 'Left for the sweep.');
+
+        $this->app->forgetInstance(SavingsLocks::class);
+        Artisan::call('portal:requests-sweep');
+
+        $this->assertSame(PortalRequest::STATUS_CANCELLED, $request->fresh()->status);
+        $this->assertSame('Cancelled: the membership ended.', $request->events()->orderByDesc('id')->value('message'));
+        $this->assertSame('released', SavingsHold::query()->findOrFail($request->savings_hold_id)->status);
+    }
+
     // The member's status is read under its row lock during a payout.
 
     public function test_the_payout_locks_the_member_after_the_request_and_before_the_portal_account(): void
