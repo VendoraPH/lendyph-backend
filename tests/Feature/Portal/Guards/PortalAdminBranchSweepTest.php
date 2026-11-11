@@ -4,6 +4,7 @@ namespace Tests\Feature\Portal\Guards;
 
 use App\Models\Borrower;
 use App\Models\Branch;
+use App\Models\PortalAnnouncement;
 use App\Models\PortalRequest;
 use App\Models\PortalUser;
 use App\Models\Role;
@@ -38,6 +39,8 @@ class PortalAdminBranchSweepTest extends TestCase
         $fixtures = [
             'borrower' => $farMember->borrower_id,
             'request' => PortalRequest::factory()->create(['portal_user_id' => $farMember->id])->id,
+            // An announcement to the far branch only (slice P3).
+            'announcement' => PortalAnnouncement::factory()->create(['audience' => PortalAnnouncement::AUDIENCE_BRANCH, 'branch_ids' => [$far->id], 'status' => PortalAnnouncement::STATUS_DRAFT])->id,
         ];
         $caller = $this->branchCallerWithEveryOtherPermission();
 
