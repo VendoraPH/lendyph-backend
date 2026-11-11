@@ -176,6 +176,15 @@ class PortalRequestController extends Controller
     public function store(Request $request, IdempotentWrite $idempotent): JsonResponse
     {
         $portalUser = $this->scope->portalUser();
+
+        // A retry of a request already sent gets its stored answer, even when
+        // today's checks (a profile change since applied) would now refuse it.
+        $replayed = $idempotent->replayed($request, IdempotentWrite::STORE_PORTAL);
+
+        if ($replayed !== null) {
+            return $replayed;
+        }
+
         $validated = $this->desk->validate($portalUser, $request->all());
 
         return $idempotent->run($request, function () use ($portalUser, $validated): JsonResponse {

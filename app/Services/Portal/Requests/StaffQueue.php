@@ -117,7 +117,10 @@ final class StaffQueue
             default => [$this->profiles->approve($request, $staff), 200],
         };
 
-        $this->audit($locked, $before, $staff, $input['message'] ?? null);
+        // The status the approval moved it from, as read under the row lock
+        // (the timeline row the move wrote), not the copy the caller loaded.
+        $from = (string) ($locked->events()->orderByDesc('id')->value('from_status') ?? $before);
+        $this->audit($locked, $from, $staff, $input['message'] ?? null);
 
         return ['request' => $locked, 'status' => $status];
     }

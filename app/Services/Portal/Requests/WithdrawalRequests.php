@@ -3,6 +3,7 @@
 namespace App\Services\Portal\Requests;
 
 use App\Http\Requests\Savings\SavingsRules;
+use App\Models\Borrower;
 use App\Models\PortalRequest;
 use App\Models\PortalRequestEvent;
 use App\Models\PortalUser;
@@ -47,6 +48,8 @@ final class WithdrawalRequests
 {
     /** The portal's payout methods, and the savings payment method each one is (staff choose the actual one at payout). */
     public const METHODS = ['cash_pickup' => 'cash', 'bank_transfer' => 'bank_transfer', 'gcash' => 'gcash'];
+
+    public const NOT_A_MEMBER_NOW = 'This member\'s portal access or membership isn\'t active, so the request can\'t be paid. Reject it instead.';
 
     public function __construct(
         private readonly SavingsLocks $locks,
@@ -159,6 +162,7 @@ final class WithdrawalRequests
     {
         $account = $this->locks->account((int) $request->savings_account_id);
         $locked = RequestDesk::lockOpen($request->id, [PortalRequest::STATUS_SUBMITTED, PortalRequest::STATUS_UNDER_REVIEW, PortalRequest::STATUS_NEED_INFO]);
+        $this->assertStillAMember($locked);
         $hold = $this->activeHold($locked);
 
         $this->holds->releaseForRequest($hold, "Paid out on request {$locked->reference}", $staff);
@@ -207,6 +211,21 @@ final class WithdrawalRequests
         }
 
         return $this->holds->releaseForRequest($hold, $reason, $staff);
+    }
+
+    /**
+     * No payout once the member's portal access or membership has ended,
+     * even where a bulk update skipped the events that cancel the request:
+     * the portal account and the member must both still be active (409).
+     */
+    private function assertStillAMember(PortalRequest $request): void
+    {
+        $portalUser = PortalUser::query()->find($request->portal_user_id, ['id', 'status']);
+        $memberStatus = Borrower::query()->whereKey($request->borrower_id)->value('status');
+
+        if ($portalUser?->status !== PortalUser::STATUS_ACTIVE || $memberStatus !== 'active') {
+            Refuse::conflict(self::NOT_A_MEMBER_NOW);
+        }
     }
 
     /** The request's hold, still holding money today; 409 otherwise. */

@@ -3,7 +3,9 @@
 namespace App\Services\Savings;
 
 use App\Models\PortalIdempotencyKey;
+use App\Models\PortalUser;
 use App\Models\SavingsIdempotencyKey;
+use App\Models\User;
 use App\Services\GeneratedNumberWrite;
 use Closure;
 use Illuminate\Database\Eloquent\Model;
@@ -76,7 +78,7 @@ class IdempotentWrite
         }
 
         $key = $this->keyOf($request);
-        $userId = (int) $request->user()->getKey();
+        $userId = $this->ownerId($request, $store);
         $hash = $this->hashOf($request);
 
         $stored = $this->stored($store, $userId, $key);
@@ -101,6 +103,42 @@ class IdempotentWrite
         } catch (RefusedWrite $refused) {
             return $refused->response;
         }
+    }
+
+    /**
+     * The stored answer when this key was already used by this caller, or
+     * null when it is new. For a write whose own checks depend on the state
+     * now (a request already decided would fail them): ask this first, so a
+     * retry gets the stored answer instead of a fresh refusal. The same key
+     * with another request is 422, as in run().
+     *
+     * @throws ValidationException
+     */
+    public function replayed(Request $request, string $store = self::STORE_SAVINGS): ?JsonResponse
+    {
+        if (! isset(self::STORES[$store])) {
+            throw new LogicException("\"{$store}\" is not an idempotency store.");
+        }
+
+        $stored = $this->stored($store, $this->ownerId($request, $store), $this->keyOf($request));
+
+        return $stored === null ? null : $this->replay($stored, $this->hashOf($request));
+    }
+
+    /**
+     * The caller's id for this store: a staff User for the savings store, a
+     * PortalUser for the portal store. Anything else is a programming error.
+     */
+    private function ownerId(Request $request, string $store): int
+    {
+        $caller = $request->user();
+        $expected = $store === self::STORE_PORTAL ? PortalUser::class : User::class;
+
+        if (! $caller instanceof $expected) {
+            throw new LogicException("The {$store} idempotency store is keyed on a ".class_basename($expected).'; this caller is '.($caller === null ? 'nobody' : class_basename($caller)).'.');
+        }
+
+        return (int) $caller->getKey();
     }
 
     private function attempt(string $store, int $userId, string $key, string $hash, Closure $write): JsonResponse

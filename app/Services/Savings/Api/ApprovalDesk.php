@@ -5,10 +5,12 @@ namespace App\Services\Savings\Api;
 use App\Models\SavingsAccount;
 use App\Models\SavingsApproval;
 use App\Models\User;
+use App\Services\AuditLogService;
 use App\Services\GeneratedNumberWrite;
 use App\Services\Savings\ApprovalGate;
 use App\Services\Savings\Approvals\ApprovalExecutor;
 use App\Services\Savings\SavingsLocks;
+use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 use Symfony\Component\HttpKernel\Exception\HttpException;
@@ -147,6 +149,33 @@ class ApprovalDesk
             'decided_at' => now(),
             'live_key' => null,
         ]));
+    }
+
+    /**
+     * Cancel a pending approval as the system (no maker, no checker), with a
+     * reason in words: a member's portal request whose access ended (portal
+     * design §1). The automatic audit row would name whoever's request set it
+     * off, so it is replaced by one system row. 409 when it is no longer
+     * pending or its day has passed (the nightly jobs settle those).
+     *
+     * @throws HttpResponseException
+     */
+    public function cancelAsSystem(SavingsApproval $approval, string $reason): SavingsApproval
+    {
+        return AuditLogService::withoutModelAuditing(function () use ($approval, $reason): SavingsApproval {
+            $cancelled = $this->decide($approval, fn (SavingsApproval $locked) => $locked->update([
+                'status' => 'cancelled',
+                'decided_by' => null,
+                'decision_reason' => $reason,
+                'decided_at' => now(),
+                'live_key' => null,
+            ]));
+
+            AuditLogService::log('savings_approval_cancelled', $cancelled, ['status' => 'pending'], ['status' => 'cancelled'],
+                "Approval request #{$cancelled->id} was cancelled: {$reason}", asSystem: true);
+
+            return $cancelled;
+        });
     }
 
     /**

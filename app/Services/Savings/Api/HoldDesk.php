@@ -9,6 +9,7 @@ use App\Models\User;
 use App\Services\Savings\SavingsLocks;
 use App\Services\Savings\SavingsMath;
 use Illuminate\Validation\ValidationException;
+use LogicException;
 
 /**
  * Holds (design §2). Every hold is written under its account's row lock, so
@@ -29,6 +30,9 @@ use Illuminate\Validation\ValidationException;
  */
 class HoldDesk
 {
+    /** The hold types staff place by hand. */
+    public const STAFF_TYPES = ['legal', 'manual'];
+
     public function __construct(private readonly SavingsLocks $locks) {}
 
     /**
@@ -38,6 +42,10 @@ class HoldDesk
      */
     public function place(int $accountId, array $data, User $user): SavingsHold
     {
+        if (! in_array($data['type'], self::STAFF_TYPES, true)) {
+            throw new LogicException("Staff place only legal or manual holds, never \"{$data['type']}\".");
+        }
+
         $account = $this->locks->account($accountId);
 
         if ($account->isClosed()) {
@@ -119,6 +127,10 @@ class HoldDesk
      */
     public function releaseForRequest(SavingsHold $hold, string $reason, ?User $user): SavingsHold
     {
+        if ($hold->type !== SavingsHold::TYPE_MEMBER_REQUEST) {
+            throw new LogicException("Hold #{$hold->id} is a {$hold->type} hold, not a member request's.");
+        }
+
         return $this->releaseLocked($hold, $reason, $user?->id, forRequest: true);
     }
 

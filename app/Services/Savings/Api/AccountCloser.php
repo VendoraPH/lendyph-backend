@@ -211,10 +211,18 @@ class AccountCloser
             $blockers[] = 'The account is frozen. Unfreeze it before closing it.';
         }
 
-        $held = SavingsHold::query()->where('account_id', $account->id)->holding(now()->toDateString())->sum('amount');
+        $holding = SavingsHold::query()->where('account_id', $account->id)->holding(now()->toDateString());
+        $requested = SavingsMath::centavos((clone $holding)->where('type', SavingsHold::TYPE_MEMBER_REQUEST)->sum('amount'));
+        $held = SavingsMath::centavos((clone $holding)->where('type', '!=', SavingsHold::TYPE_MEMBER_REQUEST)->sum('amount'));
 
-        if (SavingsMath::centavos($held) > 0) {
-            $blockers[] = 'It has an active hold of '.Refuse::peso(SavingsMath::centavos($held)).'. Release the hold first.';
+        if ($held > 0) {
+            $blockers[] = 'It has an active hold of '.Refuse::peso($held).'. Release the hold first.';
+        }
+
+        // A member's portal withdrawal request reserves its money with a hold
+        // that only deciding the request releases (portal design §6).
+        if ($requested > 0) {
+            $blockers[] = 'A member\'s portal withdrawal request is holding '.Refuse::peso($requested).'. Decide the member\'s request first.';
         }
 
         $ownRows = SavingsTransaction::query()->where('account_id', $account->id);
