@@ -27,7 +27,7 @@ final class ScorecardEditor
 
     /**
      * The `ScorecardConfig` shape, plus `risk_bands`, `version` and
-     * `validated`.
+     * `validated` (tested or reviewed, CreditScorecardRevision::isChecked()).
      *
      * @return array<string, mixed>
      */
@@ -37,7 +37,7 @@ final class ScorecardEditor
 
         return [
             'version' => $revision->version,
-            'validated' => (bool) $revision->validated,
+            'validated' => $revision->isChecked(),
             'categories' => array_map(fn (array $c) => [
                 'key' => $c['key'],
                 'label' => $c['label'],

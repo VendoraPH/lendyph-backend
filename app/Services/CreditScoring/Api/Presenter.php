@@ -133,7 +133,7 @@ final class Presenter
             'status' => $score->status,
             'limited_history' => (bool) $score->limited_history,
             'confidence_reason' => $score->confidence_reason,
-            'validated' => (bool) $score->revision?->validated,
+            'validated' => $this->checked($score),
             'previous_score' => $score->previous_score,
             'context' => $score->context,
             'loan_id' => $score->loan_id === null ? null : (int) $score->loan_id,
@@ -170,7 +170,7 @@ final class Presenter
             'calculated_at' => self::time($score->calculated_at),
             'status' => $score->status,
             'limited_history' => (bool) $score->limited_history,
-            'validated' => (bool) $score->revision?->validated,
+            'validated' => $this->checked($score),
             'previous_score' => $score->previous_score,
             'context' => $score->context,
             'loan_id' => $score->loan_id === null ? null : (int) $score->loan_id,
@@ -465,6 +465,15 @@ final class Presenter
 
             return $this->scope->seesFinancialsFrom($viewer, $member, $profileId === null ? null : (int) $profileId);
         });
+    }
+
+    /**
+     * Whether the score's revision was tested or reviewed
+     * (CreditScorecardRevision::isChecked()), once per revision per request.
+     */
+    private function checked(CreditScore $score): bool
+    {
+        return $this->memo(null, "checked.{$score->revision_id}", fn (): bool => (bool) $score->revision?->isChecked());
     }
 
     /**

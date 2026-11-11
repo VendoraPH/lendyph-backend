@@ -1,7 +1,7 @@
 <?php
 
 /**
- * Credit scorecard revisions, credit scores, their factors and credit
+ * Credit scorecard revisions, their reviews, credit scores, their factors and credit
  * decisions are never changed once written. Their models throw on update()
  * and delete(), but a bulk query skips the model, so this guard fails on any
  * statement under app/ that bulk-updates or deletes one of them:
@@ -16,9 +16,9 @@
  * relation and calls update(), delete(), forceDelete() or truncate() is an
  * offender, and so is raw SQL that names an immutable table.
  */
-const IMMUTABLE_CREDIT_MODELS = ['CreditScorecardRevision', 'CreditScore', 'CreditScoreFactor', 'CreditDecision'];
+const IMMUTABLE_CREDIT_MODELS = ['CreditScorecardRevision', 'CreditScorecardReview', 'CreditScore', 'CreditScoreFactor', 'CreditDecision'];
 
-const IMMUTABLE_CREDIT_TABLES = ['credit_scorecard_revisions', 'credit_scores', 'credit_score_factors', 'credit_decisions'];
+const IMMUTABLE_CREDIT_TABLES = ['credit_scorecard_revisions', 'credit_scorecard_reviews', 'credit_scores', 'credit_score_factors', 'credit_decisions'];
 
 /**
  * The names of the relations under app/Models that return an immutable
@@ -68,7 +68,7 @@ function bulkWritesToImmutableCreditRows(string $source, array $relations = []):
 }
 
 it('reads the relations that return an immutable credit model', function () {
-    expect(relationsToImmutableCreditModels())->toContain('factors', 'revision', 'currentRevision', 'creditScore');
+    expect(relationsToImmutableCreditModels())->toContain('factors', 'revision', 'currentRevision', 'creditScore', 'review');
 });
 
 it('catches bulk writes to the immutable credit rows, and lets the rest through', function (string $source, bool $offends) {

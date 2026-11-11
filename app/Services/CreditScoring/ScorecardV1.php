@@ -11,8 +11,12 @@ namespace App\Services\CreditScoring;
  * here.
  *
  * The weights are the Credit Scoring task's own starting framework (35, 25,
- * 15, 10, 10 and 5 points) and are marked unvalidated: they have not yet been
- * tested against the cooperative's own default and delinquency outcomes.
+ * 15, 10, 10 and 5 points). The stored row says they are unvalidated (not
+ * yet tested against the cooperative's own default and delinquency
+ * outcomes), and it stays as written; the owner reviewed the weights and risk
+ * levels and kept them on 2026-11-11, recorded beside it as a
+ * CreditScorecardReview (ScorecardOwnerReview), so the API reports 1.0 as
+ * checked.
  *
  * Each factor maps a raw value to points through `bands`, tried in order:
  * - `at_least`: the first band whose threshold the value reaches;

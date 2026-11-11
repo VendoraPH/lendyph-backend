@@ -74,7 +74,7 @@ it('shapes the credit profile', function () {
         ->and($data['status'])->toBe('scored')
         ->and($data['context'])->toBe('nightly')
         ->and($data['loan_id'])->toBeNull()
-        ->and($data['validated'])->toBeFalse()
+        ->and($data['validated'])->toBeTrue()
         ->and($data['borrower_name'])->toBe($this->member->full_name)
         ->and($data['category_breakdown'])->toHaveCount(6)
         ->and(collect($data['category_breakdown'])->pluck('category')->all())->toBe(['Repayment Behaviour', 'Payment Capacity', 'Credit Exposure', 'Stability', 'Lendy Relationship', 'Application Quality'])
