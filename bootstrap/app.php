@@ -4,6 +4,11 @@ use App\Http\Middleware\AllowAuthOrSubmissionToken;
 use App\Http\Middleware\CheckTokenExpiry;
 use App\Http\Middleware\EnsureUserIsActive;
 use App\Http\Middleware\OptionalSanctumAuth;
+use App\Http\Middleware\Portal\CheckPortalTokenExpiry;
+use App\Http\Middleware\Portal\EnsurePortalFeature;
+use App\Http\Middleware\Portal\EnsurePortalMemberActive;
+use App\Http\Middleware\Portal\EnsurePortalToken;
+use App\Http\Middleware\Portal\RequirePortalTerms;
 use App\Http\Middleware\RejectInvalidUtf8;
 use App\Http\Middleware\RequirePasswordChange;
 use App\Http\Middleware\SecurityHeaders;
@@ -146,6 +151,18 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->prependToPriorityList(SubstituteBindings::class, EnsureUserIsActive::class);
         $middleware->prependToPriorityList(SubstituteBindings::class, RequirePasswordChange::class);
 
+        // The Member Portal's post-auth gates, for the same reason and in the
+        // same place: ahead of SubstituteBindings, behind the throttles (portal
+        // design §5). Portal routes bind nothing implicitly, so this guards
+        // against one that ever does: a staff token, an idle token or a member
+        // whose access ended is refused before any model is resolved, and the
+        // portal limiter still sees the PortalUser `auth:portal` attached.
+        // Asserted on the gathered stack in PortalRouteStackTest.
+        $middleware->prependToPriorityList(SubstituteBindings::class, EnsurePortalToken::class);
+        $middleware->prependToPriorityList(SubstituteBindings::class, CheckPortalTokenExpiry::class);
+        $middleware->prependToPriorityList(SubstituteBindings::class, EnsurePortalMemberActive::class);
+        $middleware->prependToPriorityList(SubstituteBindings::class, RequirePortalTerms::class);
+
         // An API guest is answered, never redirected. The framework default
         // sends every guest to route('login'), which this API-only app does
         // not have, so an unauthenticated api/* call without
@@ -164,6 +181,7 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->alias([
             'role' => RoleMiddleware::class,
             'permission' => PermissionMiddleware::class,
+            'portal.feature' => EnsurePortalFeature::class,
         ]);
 
         $middleware->api(prepend: [

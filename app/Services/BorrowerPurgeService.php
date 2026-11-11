@@ -4,10 +4,12 @@ namespace App\Services;
 
 use App\Models\Borrower;
 use App\Models\CsvImportRow;
+use App\Models\PortalUser;
 use App\Services\CsvImport\CsvImportRowRedactor;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Validation\ValidationException;
 
 /**
  * Deletes a borrower and everything that hangs off it.
@@ -37,6 +39,8 @@ use Illuminate\Support\Facades\Storage;
  */
 class BorrowerPurgeService
 {
+    public const HAS_PORTAL_ACCOUNT = 'This member has a member portal account, so the record can\'t be deleted. Turn off portal access instead.';
+
     public function __construct(private readonly CsvImportRowRedactor $redactor) {}
 
     /**
@@ -52,6 +56,16 @@ class BorrowerPurgeService
      */
     public function purge(Borrower $borrower, bool $audit = true): void
     {
+        // A member portal account is kept for good (its sign-in history and the
+        // audit rows naming it), and `portal_users.borrower_id` restricts the
+        // delete. Refused in words before anything is touched (portal design
+        // §0, finding 9).
+        if (PortalUser::query()->where('borrower_id', $borrower->getKey())->exists()) {
+            throw ValidationException::withMessages([
+                'borrower' => [self::HAS_PORTAL_ACCOUNT],
+            ]);
+        }
+
         $disk = Storage::disk('private');
 
         /*

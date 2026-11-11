@@ -6,6 +6,7 @@ use App\Exceptions\PostedJournalIsImmutableException;
 use App\Http\Resources\JournalEntryResource;
 use App\Services\BranchAccess;
 use App\Services\Savings\SavingsJournalGuard;
+use App\Support\StaffRouteBinding;
 use App\Traits\Auditable;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
@@ -463,11 +464,9 @@ class AccountingJournal extends Model
      */
     public function resolveRouteBindingQuery($query, $value, $field = null)
     {
-        $query = parent::resolveRouteBindingQuery($query, $value, $field);
-        $user = request()->user();
-
-        return $user instanceof User
-            ? app(BranchAccess::class)->constrain($query, $user, $this->qualifyColumn('branch_id'))
-            : $query;
+        return StaffRouteBinding::scope(
+            parent::resolveRouteBindingQuery($query, $value, $field),
+            fn ($query, User $user) => app(BranchAccess::class)->constrain($query, $user, $this->qualifyColumn('branch_id')),
+        );
     }
 }

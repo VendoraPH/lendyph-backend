@@ -116,6 +116,20 @@ Route::post('/borrowers/{borrower}/photo', [BorrowerController::class, 'uploadPh
 Route::post('/borrowers/{borrower}/valid-ids', [BorrowerController::class, 'uploadValidId'])
     ->middleware([AllowAuthOrSubmissionToken::class, 'throttle:registration-uploads', CheckTokenExpiry::class, EnsureUserIsActive::class, RequirePasswordChange::class]);
 
+/*
+ * Member Portal, member side (routes/api/portal/*.php), in file-name order,
+ * OUTSIDE the staff group below: these routes take a portal token (or none)
+ * and never a staff token, and the staff group never takes a portal token.
+ * Each file sets the `/portal` prefix and its own middleware
+ * (App\Http\Middleware\Portal\PortalStack). An empty folder adds nothing.
+ */
+$portalPartials = glob(__DIR__.'/api/portal/*.php') ?: [];
+sort($portalPartials);
+
+foreach ($portalPartials as $portalPartial) {
+    require $portalPartial;
+}
+
 // Protected routes
 //
 // RequirePasswordChange runs LAST of the three, and the order is the point.
@@ -778,6 +792,18 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
 
     foreach ($cdaPartials as $cdaPartial) {
         require $cdaPartial;
+    }
+
+    /*
+     * Member Portal, staff side (routes/api/portal-admin/*.php), in file-name
+     * order: each portal slice adds its own file and never edits this one.
+     * Each file sets the `/portal-admin` prefix. An empty folder adds nothing.
+     */
+    $portalAdminPartials = glob(__DIR__.'/api/portal-admin/*.php') ?: [];
+    sort($portalAdminPartials);
+
+    foreach ($portalAdminPartials as $portalAdminPartial) {
+        require $portalAdminPartial;
     }
 
     // Branding (organization logo + identity printed on reports and documents)

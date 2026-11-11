@@ -6,6 +6,7 @@ use App\Enums\InterestRateFrequency;
 use App\Enums\TermUnit;
 use App\Services\BranchAccess;
 use App\Services\SequenceCode;
+use App\Support\StaffRouteBinding;
 use App\Traits\Auditable;
 use Carbon\Carbon;
 use Closure;
@@ -842,10 +843,10 @@ class Loan extends Model
      */
     public function resolveRouteBindingQuery($query, $value, $field = null)
     {
-        $query = parent::resolveRouteBindingQuery($query, $value, $field);
-        $user = request()->user();
-
-        return $user instanceof User ? $query->visibleTo($user) : $query;
+        return StaffRouteBinding::scope(
+            parent::resolveRouteBindingQuery($query, $value, $field),
+            fn ($query, User $user) => $query->visibleTo($user),
+        );
     }
 
     /**

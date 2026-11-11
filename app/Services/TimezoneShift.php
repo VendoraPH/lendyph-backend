@@ -274,6 +274,27 @@ class TimezoneShift
         'cda_social_programs' => ['created_at', 'updated_at'],
         'cda_submissions' => ['created_at', 'updated_at'],
         'time_deposits' => ['created_at', 'updated_at'],
+        // Added 2026-11-11 with the Member Portal (Phase 3), well after the
+        // cutover, for the same reason. `portal_requests.expires_on` is a DATE.
+        'portal_announcement_reads' => ['read_at'],
+        'portal_announcements' => ['created_at', 'expires_at', 'publish_at', 'updated_at'],
+        'portal_codes' => ['created_at', 'expires_at', 'step_expires_at', 'used_at'],
+        'portal_idempotency_keys' => ['created_at'],
+        'portal_login_events' => ['created_at', 'reported_at'],
+        'portal_otp_challenges' => ['created_at', 'expires_at', 'verified_at'],
+        'portal_request_events' => ['created_at'],
+        'portal_requests' => ['created_at', 'decided_at', 'updated_at'],
+        'portal_settings' => ['created_at', 'updated_at'],
+        'portal_terms_versions' => ['created_at', 'published_at', 'updated_at'],
+        'portal_users' => [
+            'activated_at', 'created_at', 'disabled_at', 'ecomm_consent_at', 'invited_at', 'last_login_at',
+            'locked_until', 'password_changed_at', 'terms_accepted_at', 'updated_at',
+        ],
+        // A column added to a table the shift covers. Listed here, not in
+        // COLUMNS, because it was added after the one-shot shift ran, and
+        // because the shift reads COLUMNS on a fresh database before this
+        // column exists. The rest of `documents` stays in COLUMNS.
+        'documents' => ['portal_shared_at'],
         // The shift's own bookkeeping, written after the cutover by definition.
         'timezone_shifts' => ['completed_at', 'cutover_at', 'started_at'],
     ];

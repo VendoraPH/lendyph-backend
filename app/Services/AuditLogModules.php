@@ -53,6 +53,12 @@ use App\Models\LoanAdjustment;
 use App\Models\LoanApprovalStep;
 use App\Models\LoanLedgerEntry;
 use App\Models\LoanProduct;
+use App\Models\PortalAnnouncement;
+use App\Models\PortalCode;
+use App\Models\PortalRequest;
+use App\Models\PortalSetting;
+use App\Models\PortalTermsVersion;
+use App\Models\PortalUser;
 use App\Models\ReminderBranchSetting;
 use App\Models\ReminderPause;
 use App\Models\ReminderRule;
@@ -200,6 +206,15 @@ class AuditLogModules
         CdaSocialProgram::class => 'cda',
         CdaMediationCase::class => 'cda',
         CdaNoticeSent::class => 'cda',
+        // Member Portal (Phase 3): access, codes, settings, terms, requests and
+        // announcements. A member's own actions are filed here too, through
+        // the portal user or record they act on.
+        PortalUser::class => 'member_portal',
+        PortalCode::class => 'member_portal',
+        PortalSetting::class => 'member_portal',
+        PortalTermsVersion::class => 'member_portal',
+        PortalRequest::class => 'member_portal',
+        PortalAnnouncement::class => 'member_portal',
         // Deliberately system: an import run is housekeeping, not a record
         // any module's screen shows.
         CsvImportRun::class => self::UNMAPPED,

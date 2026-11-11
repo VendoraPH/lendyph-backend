@@ -28,6 +28,8 @@ class AuditLog extends Model
 
     protected $fillable = [
         'user_id',
+        'actor_type',
+        'portal_user_id',
         'action',
         'auditable_type',
         'auditable_id',
@@ -117,6 +119,12 @@ class AuditLog extends Model
     public function user(): BelongsTo
     {
         return $this->belongsTo(User::class);
+    }
+
+    /** The member who wrote the row, when `actor_type` is member. */
+    public function portalUser(): BelongsTo
+    {
+        return $this->belongsTo(PortalUser::class);
     }
 
     public function auditable(): MorphTo

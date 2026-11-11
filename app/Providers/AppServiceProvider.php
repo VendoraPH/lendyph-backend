@@ -3,6 +3,8 @@
 namespace App\Providers;
 
 use App\Models\CsvImportRun;
+use App\Models\PortalUser;
+use App\Models\User;
 use App\Services\BorrowerSubmissionTokenService;
 use App\Services\CsvImport\CsvImportUploadService;
 use App\Services\CsvImport\ImportErrorDigest;
@@ -168,8 +170,13 @@ class AppServiceProvider extends ServiceProvider
         // here; instead, the RoleAndPermissionSeeder gives the admin role
         // every permission directly, so this hook only matters as a safety
         // net for the platform team.
+        //
+        // Staff only: a member's PortalUser has no roles, and asking it
+        // hasRole() would answer 500 to a Gate check rather than "no" (portal
+        // design §0, finding 3). Anyone who isn't a staff User falls through
+        // to the permission checks, which grant them nothing.
         Gate::before(function ($user) {
-            return $user->hasRole('super_admin') ? true : null;
+            return $user instanceof User && $user->hasRole('super_admin') ? true : null;
         });
 
         /**
@@ -330,7 +337,19 @@ class AppServiceProvider extends ServiceProvider
 
         // API rate limiters
         RateLimiter::for('api', function (Request $request) {
-            $key = $request->user()?->id ?: $request->ip();
+            $caller = $request->user();
+
+            // Member Portal routes carry their own limiters, keyed on the
+            // member (portal design §5). Metering them here as well would put
+            // every member who isn't signed in into one per-IP bucket, which is
+            // the Next.js proxy's address for everyone (§0, finding 8).
+            if ($request->routeIs('portal.*')) {
+                return Limit::none();
+            }
+
+            // A portal user's id is not a staff id: portal user 7 and staff user
+            // 7 must not share one bucket (§0, finding 4).
+            $key = $caller instanceof PortalUser ? 'portal:'.$caller->getKey() : ($caller?->getKey() ?: $request->ip());
 
             // Signed file reads get their own bucket rather than a raised
             // global ceiling: a photo-heavy list render must not be able to

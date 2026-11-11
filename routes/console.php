@@ -99,3 +99,14 @@ sort($cdaSchedules);
 foreach ($cdaSchedules as $cdaSchedule) {
     require $cdaSchedule;
 }
+
+/*
+ * Member Portal schedules (routes/console/portal/*.php), in file-name order:
+ * each portal slice adds its own file. All run on Asia/Manila time.
+ */
+$portalSchedules = glob(__DIR__.'/console/portal/*.php') ?: [];
+sort($portalSchedules);
+
+foreach ($portalSchedules as $portalSchedule) {
+    require $portalSchedule;
+}

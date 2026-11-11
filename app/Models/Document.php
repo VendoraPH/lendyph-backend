@@ -4,6 +4,7 @@ namespace App\Models;
 
 use App\Services\Cda\Registers\DocumentRepository;
 use App\Services\SignedFileLink;
+use App\Support\StaffRouteBinding;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -92,13 +93,18 @@ class Document extends Model
      */
     public function resolveRouteBindingQuery($query, $value, $field = null)
     {
-        $query = parent::resolveRouteBindingQuery($query, $value, $field);
-        $user = request()->user();
+        return StaffRouteBinding::scope(
+            parent::resolveRouteBindingQuery($query, $value, $field),
+            fn ($query, User $user) => $this->constrainBindingForStaff($query, $user),
+        );
+    }
 
-        if (! $user instanceof User) {
-            return $query;
-        }
-
+    /**
+     * A document a staff user may reach: its member's (or co-maker's member's,
+     * or loan's) branch is theirs, or it is a CDA file they may download.
+     */
+    private function constrainBindingForStaff($query, User $user)
+    {
         return $query->where(fn ($files) => $files
             ->whereHasMorph(
                 'documentable',

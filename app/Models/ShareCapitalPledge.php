@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Support\StaffRouteBinding;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -67,11 +68,9 @@ class ShareCapitalPledge extends Model
      */
     public function resolveRouteBindingQuery($query, $value, $field = null)
     {
-        $query = parent::resolveRouteBindingQuery($query, $value, $field);
-        $user = request()->user();
-
-        return $user instanceof User
-            ? $query->whereHas('borrower', fn ($q) => $q->visibleTo($user))
-            : $query;
+        return StaffRouteBinding::scope(
+            parent::resolveRouteBindingQuery($query, $value, $field),
+            fn ($query, User $user) => $query->whereHas('borrower', fn ($q) => $q->visibleTo($user)),
+        );
     }
 }
