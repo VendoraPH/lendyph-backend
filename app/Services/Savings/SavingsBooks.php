@@ -27,8 +27,10 @@ use Illuminate\Validation\ValidationException;
  * contra or cash account and of the role's type; a role already mapped is
  * kept (an administrator's choice is never changed); anything uncertain is
  * skipped with the reason. Each account added and each role mapped writes one
- * audit row as a system change (no user). No chart, nothing written. Posted
- * journals are never touched.
+ * audit row: a system change (no user) from the command and the migration, or
+ * in the name of the staff member who pressed "Set up savings in the books"
+ * in Savings Settings. No chart, nothing written. Posted journals are never
+ * touched.
  *
  * The 2026_11_10_500200 migration does the same on deploy, written with the
  * query builder alone, and only on a chart that already has 2050 (the
@@ -118,14 +120,15 @@ class SavingsBooks
 
             throw ValidationException::withMessages(['is_active' => [
                 'The product can\'t be turned on yet: the '.AccountingAccountMapping::labelList($missing)
-                .' posting '.($one ? 'role has' : 'roles have').' no account. Set '.($one ? 'it' : 'them')
-                .' in Accounting → Settings → Default Accounts, or ask your system administrator to prepare the savings books.',
+                .' posting '.($one ? 'role has' : 'roles have').' no account. Set up savings in the books from Savings Settings first.',
             ]]);
         }
     }
 
     /**
      * Add and map everything that can be, or with `$dryRun` only say what.
+     * `$userId` is who asked, written on the audit rows; null is the system
+     * (the command and the migration).
      *
      * @return array{
      *     chart: bool,
@@ -135,7 +138,7 @@ class SavingsBooks
      *     skipped: list<array{role: string, reason: string}>,
      * }
      */
-    public function prepare(bool $dryRun): array
+    public function prepare(bool $dryRun, ?int $userId = null): array
     {
         $result = ['chart' => false, 'created' => [], 'mapped' => [], 'kept' => [], 'skipped' => []];
 
@@ -145,9 +148,9 @@ class SavingsBooks
 
         $result['chart'] = true;
 
-        $work = function () use ($dryRun, &$result): void {
+        $work = function () use ($dryRun, $userId, &$result): void {
             foreach (self::ROLES as $role) {
-                $this->handle($role, $dryRun, $result);
+                $this->handle($role, $dryRun, $userId, $result);
             }
         };
 
@@ -177,7 +180,7 @@ class SavingsBooks
     /**
      * @param  array{chart: bool, created: list<mixed>, mapped: list<mixed>, kept: list<mixed>, skipped: list<mixed>}  $result
      */
-    private function handle(string $role, bool $dryRun, array &$result): void
+    private function handle(string $role, bool $dryRun, ?int $userId, array &$result): void
     {
         $mapped = DB::table('accounting_account_mappings')->where('role', $role)->first();
 
@@ -203,13 +206,13 @@ class SavingsBooks
         if ($account === null) {
             $spec = self::NEW_ACCOUNTS[$role];
             $result['created'][] = ['role' => $role, 'code' => $spec['code'], 'name' => $spec['name'], 'type' => $spec['type']];
-            $account = $dryRun ? (object) ['id' => null, 'code' => $spec['code'], 'name' => $spec['name']] : $this->create($role, $spec);
+            $account = $dryRun ? (object) ['id' => null, 'code' => $spec['code'], 'name' => $spec['name']] : $this->create($role, $spec, $userId);
         }
 
         $result['mapped'][] = ['role' => $role, 'code' => $account->code, 'name' => $account->name];
 
         if (! $dryRun) {
-            $this->map($role, $account);
+            $this->map($role, $account, $userId);
         }
     }
 
@@ -282,6 +285,12 @@ class SavingsBooks
             && $account->cash_kind === null;
     }
 
+    /** An audit description: "System change: …" for the system, else the sentence itself. */
+    private function said(?int $userId, string $sentence): string
+    {
+        return $userId === null ? "System change: {$sentence}" : ucfirst($sentence);
+    }
+
     private function normalize(string $name): string
     {
         return trim(preg_replace('/[^a-z0-9]+/', ' ', strtolower($name)) ?? '');
@@ -290,7 +299,7 @@ class SavingsBooks
     /**
      * @param  array{code: string, name: string, type: string, parent: string, normal_balance: string, cash_flow_category: string}  $spec
      */
-    private function create(string $role, array $spec): object
+    private function create(string $role, array $spec, ?int $userId): object
     {
         $now = now();
         $parent = DB::table('accounting_accounts')
@@ -310,13 +319,13 @@ class SavingsBooks
             'is_active' => true,
             'cash_kind' => null,
             'cash_flow_category' => $spec['cash_flow_category'],
-            'created_by' => null,
+            'created_by' => $userId,
             'created_at' => $now,
             'updated_at' => $now,
         ]);
 
         DB::table('audit_logs')->insert([
-            'user_id' => null,
+            'user_id' => $userId,
             'action' => self::AUDIT_ACCOUNT_ADDED,
             'auditable_type' => AccountingAccount::class,
             'auditable_id' => $id,
@@ -324,14 +333,14 @@ class SavingsBooks
             'new_values' => json_encode(['code' => $spec['code'], 'name' => $spec['name'], 'type' => $spec['type'], 'parent_code' => $parent === null ? null : $spec['parent']]),
             'ip_address' => null,
             'user_agent' => null,
-            'description' => "System change: added account {$spec['code']} {$spec['name']} ({$spec['type']}) for ".self::PURPOSES[$role].', '.self::DECIDED.'.',
+            'description' => $this->said($userId, "added account {$spec['code']} {$spec['name']} ({$spec['type']}) for ".self::PURPOSES[$role].', '.self::DECIDED.'.'),
             'created_at' => $now,
         ]);
 
         return (object) ['id' => $id, 'code' => $spec['code'], 'name' => $spec['name']];
     }
 
-    private function map(string $role, object $account): void
+    private function map(string $role, object $account, ?int $userId): void
     {
         $now = now();
 
@@ -343,7 +352,7 @@ class SavingsBooks
         ]);
 
         DB::table('audit_logs')->insert([
-            'user_id' => null,
+            'user_id' => $userId,
             'action' => self::AUDIT_ROLE_MAPPED,
             'auditable_type' => AccountingAccountMapping::class,
             'auditable_id' => $id,
@@ -351,8 +360,8 @@ class SavingsBooks
             'new_values' => json_encode(['role' => $role, 'account_code' => $account->code, 'account_name' => $account->name]),
             'ip_address' => null,
             'user_agent' => null,
-            'description' => 'System change: the '.AccountingAccountMapping::label($role).' role ('.self::PURPOSES[$role]
-                .") now posts to {$account->code} {$account->name}, ".self::DECIDED.'.',
+            'description' => $this->said($userId, 'the '.AccountingAccountMapping::label($role).' role ('.self::PURPOSES[$role]
+                .") now posts to {$account->code} {$account->name}, ".self::DECIDED.'.'),
             'created_at' => $now,
         ]);
     }

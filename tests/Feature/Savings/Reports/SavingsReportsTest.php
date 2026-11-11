@@ -167,6 +167,77 @@ class SavingsReportsTest extends TestCase
             ->assertJsonPath('totals.payout_amount', '10200.00');
     }
 
+    /**
+     * Browser check (Phase 3, S5): a settled TD counted in "To pay out". The
+     * rows still list every placement maturing in the period, with its
+     * status (`listed_count`); every other total counts only what is still
+     * owed (active, or matured and not settled yet).
+     */
+    public function test_time_deposit_maturity_totals_count_only_placements_still_owed(): void
+    {
+        $make = fn (string $status, string $instruction = 'payout') => TimeDeposit::factory()->create([
+            'borrower_id' => Borrower::factory()->create(['branch_id' => $this->branch->id])->id,
+            'principal' => '10000.00', 'net_interest' => '100.00', 'maturity_amount' => '10100.00',
+            'maturity_instruction' => $instruction, 'maturity_date' => '2026-12-05', 'status' => $status,
+        ]);
+        $make('active');
+        $make('matured', 'rollover_principal');
+        $make('withdrawn');
+        $make('rolled_over', 'rollover_principal');
+        $make('preterminated');
+
+        $this->actingAs($this->reader)->getJson('/api/reports/savings/time-deposit-maturities?date_from=2026-12-01&date_to=2026-12-31')->assertOk()
+            ->assertJsonPath('meta.total', 4)
+            ->assertJsonPath('totals.listed_count', 4)
+            ->assertJsonPath('totals.count', 2)
+            ->assertJsonPath('totals.total_principal', '20000.00')
+            ->assertJsonPath('totals.total_net_interest', '200.00')
+            ->assertJsonPath('totals.total_maturity_amount', '20200.00')
+            ->assertJsonPath('totals.payout_amount', '10200.00')
+            ->assertJsonPath('meta.totals.payout_amount', '10200.00');
+    }
+
+    /**
+     * Browser check (Phase 3, S5): the CSV's Status column read `active`.
+     * Statuses, types, methods and instructions read in the screens' words.
+     */
+    public function test_csv_exports_read_statuses_types_and_methods_in_words(): void
+    {
+        $account = $this->openAccount($this->product, 100_000);
+        $this->onDay('2026-11-02');
+        $this->deposit($account, 20_000, ['method' => 'bank_transfer']);
+        TimeDeposit::factory()->create([
+            'borrower_id' => Borrower::factory()->create(['branch_id' => $this->branch->id])->id,
+            'maturity_instruction' => 'rollover_principal', 'maturity_date' => '2026-11-20', 'status' => 'rolled_over',
+            'annual_rate' => '3.5000',
+        ]);
+        foreach (['10.0000', '0.0500'] as $rate) {
+            TimeDeposit::factory()->create([
+                'borrower_id' => Borrower::factory()->create(['branch_id' => $this->branch->id])->id,
+                'maturity_date' => '2026-11-21', 'status' => 'active', 'annual_rate' => $rate,
+            ]);
+        }
+        $exporter = $this->userWith(['reports:export', 'savings:view']);
+        $this->withoutMiddleware(ThrottleRequests::class);
+
+        $balances = $this->actingAs($exporter)->get('/api/reports/savings/balances/export')->assertOk()->streamedContent();
+        $transactions = $this->actingAs($exporter)->get('/api/reports/savings/transactions/export?date_from=2026-11-01&date_to=2026-11-02')->assertOk()->streamedContent();
+        $maturities = $this->actingAs($exporter)->get('/api/reports/savings/time-deposit-maturities/export?date_from=2026-11-01&date_to=2026-11-30')->assertOk()->streamedContent();
+
+        $this->assertStringContainsString(',Active,', $balances);
+        $this->assertStringNotContainsString(',active,', $balances);
+        $this->assertStringContainsString(',Deposit,Cash,', $transactions);
+        $this->assertStringContainsString(',Deposit,"Bank transfer",', $transactions);
+        $this->assertStringNotContainsString(',deposit,', $transactions);
+        $this->assertStringContainsString(',"Roll over principal, pay out interest","Rolled over"', $maturities);
+        // Rates read as the screen shows them: never padded, never rounded.
+        $this->assertStringContainsString(',3.5%,', $maturities);
+        $this->assertStringNotContainsString('3.5000%', $maturities);
+        $this->assertStringContainsString(',10%,', $maturities);
+        $this->assertStringContainsString(',0.05%,', $maturities);
+        $this->assertStringNotContainsString('0.0500%', $maturities);
+    }
+
     public function test_interest_postings_in_the_period(): void
     {
         $make = fn (string $start, string $end, string $status, ?string $postedAt, string $gross) => SavingsInterestRun::factory()->create([

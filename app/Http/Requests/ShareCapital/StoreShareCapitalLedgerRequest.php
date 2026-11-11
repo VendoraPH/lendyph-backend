@@ -6,6 +6,7 @@ use App\Http\Requests\Concerns\ReferenceNumberMessages;
 use App\Models\Borrower;
 use App\Services\BranchAccess;
 use App\Services\ShareCapitalService;
+use Closure;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\Rules\Exists;
@@ -22,7 +23,13 @@ class StoreShareCapitalLedgerRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'borrower_id' => ['required', 'integer', $this->memberBorrowerRule()],
+            'borrower_id' => ['required', 'integer', $this->memberBorrowerRule(), function (string $attribute, mixed $value, Closure $fail): void {
+                // A withdrawn member settled their share capital to leave; a
+                // deceased member's estate still settles here (C1 review, M1).
+                if (Borrower::query()->whereKey((int) $value)->value('status') === 'withdrawn') {
+                    $fail('This member withdrew from the cooperative, so no share capital is recorded for them. Reactivate the membership first, with a reason.');
+                }
+            }],
             'date' => ['required', 'date', 'before_or_equal:today'],
             'description' => ['required', 'string', 'max:255'],
             'type' => ['required', 'in:credit,debit'],

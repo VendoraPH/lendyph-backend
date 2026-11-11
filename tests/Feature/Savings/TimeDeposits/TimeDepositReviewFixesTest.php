@@ -4,6 +4,7 @@ namespace Tests\Feature\Savings\TimeDeposits;
 
 use App\Models\AccountingJournal;
 use App\Models\AuditLog;
+use App\Models\SavingsAccount;
 use App\Models\SavingsProduct;
 use App\Models\TimeDeposit;
 use App\Services\Accounting\AutomaticPoster;
@@ -244,12 +245,12 @@ class DeadlockingSettlement extends Settlement
 {
     public static ?int $failOn = null;
 
-    public function settle(TimeDeposit $locked, string $date, string $action, ?string $payoutMethod, ?int $userId, ?string $nextInstruction = null, ?string $postMaturityTaxRate = null): array
+    public function settle(TimeDeposit $locked, string $date, string $action, ?string $payoutMethod, ?int $userId, ?string $nextInstruction = null, ?string $postMaturityTaxRate = null, ?SavingsAccount $payoutAccount = null): array
     {
         if ($locked->id === self::$failOn) {
             throw new QueryException('mysql', 'update `time_deposits` set `status` = ?', [], new PDOException('SQLSTATE[40001]: Serialization failure: 1213 Deadlock found when trying to get lock; try restarting transaction'));
         }
 
-        return parent::settle($locked, $date, $action, $payoutMethod, $userId, $nextInstruction, $postMaturityTaxRate);
+        return parent::settle($locked, $date, $action, $payoutMethod, $userId, $nextInstruction, $postMaturityTaxRate, $payoutAccount);
     }
 }

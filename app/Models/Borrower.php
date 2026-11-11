@@ -35,9 +35,13 @@ class Borrower extends Model
      * Statuses of a person whose membership has ended (CDA design §1): they
      * withdrew, or they died. Still members for the records (their loans,
      * ledgers and the CDA counts of members who left), so they stay out of
-     * NON_MEMBER_STATUSES, but nothing new is started for them: payment
-     * reminders and share capital auto-credit skip them, and loans and
-     * savings already need `active`.
+     * NON_MEMBER_STATUSES, but no new credit or activity starts for them:
+     * - a loan is not created for them, nor with them as co-maker, and their
+     *   loan is not edited, restructured or released (NotAFormerMember);
+     * - a withdrawn member gets no share capital entry or pledge change; a
+     *   deceased member's stay allowed, so the estate can be settled;
+     * - payment reminders and share capital auto-credit skip them;
+     * - a savings account needs `active`.
      *
      * @var list<string>
      */
@@ -141,6 +145,17 @@ class Borrower extends Model
          * The member / non-member split is made on READ instead — see
          * Borrower::scopeMembers() and ShareCapitalPledge::scopeForMembers().
          */
+        // The first membership date a member is given brings their membership
+        // number with it (the member code), unless they already have one or
+        // another member already holds that code as their number.
+        static::updating(function (Borrower $borrower): void {
+            if ($borrower->isDirty('membership_date') && $borrower->getOriginal('membership_date') === null
+                && $borrower->membership_date !== null && blank($borrower->membership_number)
+                && ! static::query()->where('membership_number', $borrower->borrower_code)->whereKeyNot($borrower->id)->exists()) {
+                $borrower->membership_number = $borrower->borrower_code;
+            }
+        });
+
         static::created(function (Borrower $borrower) {
             $borrower->shareCapitalPledge()->create([
                 'amount' => $borrower->pledge_amount ?? 0,

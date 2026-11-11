@@ -1723,6 +1723,10 @@ class LoanService
 
         $loan->setRawAttributes($current->getAttributes(), true);
 
+        // No release to a former member, as member or co-maker, re-checked
+        // under the loan lock (C1 review, L2).
+        app(Cda\FormerMemberGuard::class)->assertReleasable($loan);
+
         if (array_diff(CollateralAttacher::heldBy($loan), $lockedCollateralIds) !== []) {
             throw LoanWriteTransaction::conflict();
         }

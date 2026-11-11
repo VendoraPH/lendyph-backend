@@ -260,7 +260,7 @@ class TimezoneShift
         // cutover, for the same reason. Their business dates are DATEs.
         'cda_document_versions' => ['created_at'],
         'cda_documents' => ['created_at', 'updated_at'],
-        'cda_mediation_cases' => ['created_at', 'updated_at'],
+        'cda_mediation_cases' => ['created_at', 'deleted_at', 'updated_at'],
         'cda_notices_sent' => ['sent_at'],
         'cda_officer_trainings' => ['created_at', 'updated_at'],
         'cda_officers' => ['created_at', 'deleted_at', 'updated_at'],

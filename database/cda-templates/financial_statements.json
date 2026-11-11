@@ -202,7 +202,7 @@
         "key": "audited_fs",
         "category": "financial_statements",
         "label": "Audited financial statements (signed)",
-        "stage": "finalize",
+        "stage": "submit",
         "severity": "critical"
       }
     ],

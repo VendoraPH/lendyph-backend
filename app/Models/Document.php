@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Services\Cda\Registers\DocumentRepository;
 use App\Services\SignedFileLink;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Model;
@@ -78,7 +79,12 @@ class Document extends Model
     /**
      * Every `{document}` route parameter resolves only to a document whose
      * owner the signed-in user may see: a borrower or loan in their branches,
-     * or a co-maker whose borrower is. Another branch's document answers 404.
+     * or a co-maker whose borrower is. On the signed download route only
+     * (`files.document`), also a CDA document's version file (uploads and
+     * exports) under CdaAccess: `cda:view` with `branches:view_all`, plus the
+     * view permission of a mediation, audit or tax file; the member document
+     * routes (`/documents/{document}`) never reach a CDA file. Anything else
+     * answers 404.
      *
      * Without a signed-in user the binding is unscoped, which is what keeps
      * the signed `/files/documents/{document}` links working: the signature
@@ -93,13 +99,16 @@ class Document extends Model
             return $query;
         }
 
-        return $query->whereHasMorph(
-            'documentable',
-            [Borrower::class, CoMaker::class, Loan::class],
-            fn ($owner, string $type) => match ($type) {
-                CoMaker::class => $owner->whereHas('borrower', fn ($q) => $q->visibleTo($user)),
-                default => $owner->visibleTo($user),
-            },
-        );
+        return $query->where(fn ($files) => $files
+            ->whereHasMorph(
+                'documentable',
+                [Borrower::class, CoMaker::class, Loan::class],
+                fn ($owner, string $type) => match ($type) {
+                    CoMaker::class => $owner->whereHas('borrower', fn ($q) => $q->visibleTo($user)),
+                    default => $owner->visibleTo($user),
+                },
+            )
+            ->when(request()->routeIs('files.document'), fn ($cda) => $cda
+                ->orWhereIn('documents.id', app(DocumentRepository::class)->downloadableFileIds($user))));
     }
 }

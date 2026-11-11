@@ -4,6 +4,7 @@ namespace App\Http\Requests\Loan;
 
 use App\Http\Requests\Concerns\ReferenceNumberMessages;
 use App\Http\Requests\Loan\Concerns\ValidatesReleaseInsurance;
+use App\Services\Cda\FormerMemberGuard;
 use Illuminate\Contracts\Validation\Validator;
 use Illuminate\Foundation\Http\FormRequest;
 
@@ -74,6 +75,23 @@ class ReleaseLoanRequest extends FormRequest
     public function withValidator(Validator $validator): void
     {
         $this->validateInsuranceCombination($validator);
+
+        // No release while the member or a co-maker is a former member (C1
+        // review, H1 and M2). LoanService::release() checks again under the
+        // loan lock.
+        $validator->after(function (Validator $validator): void {
+            $loan = $this->route('loan');
+
+            if ($loan === null) {
+                return;
+            }
+
+            foreach (app(FormerMemberGuard::class)->releaseRefusals($loan) as $field => $messages) {
+                foreach ($messages as $message) {
+                    $validator->errors()->add($field, $message);
+                }
+            }
+        });
     }
 
     /**

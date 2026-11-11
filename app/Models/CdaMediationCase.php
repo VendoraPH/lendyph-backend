@@ -7,6 +7,7 @@ use Database\Factories\CdaMediationCaseFactory;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Support\Carbon;
 
 /**
@@ -21,6 +22,7 @@ use Illuminate\Support\Carbon;
  *   retry instead of failing.
  * - A case has no period: it belongs to each half it overlaps
  *   (scopeOverlapping()).
+ * - Deleting is soft, and a deleted case's number is never given again.
  *
  * @property string $case_number
  * @property Carbon $filed_on
@@ -29,7 +31,7 @@ use Illuminate\Support\Carbon;
 class CdaMediationCase extends Model
 {
     /** @use HasFactory<CdaMediationCaseFactory> */
-    use Auditable, HasFactory;
+    use Auditable, HasFactory, SoftDeletes;
 
     public const NUMBER_PREFIX = 'MC';
 
@@ -62,7 +64,8 @@ class CdaMediationCase extends Model
 
             $year = Carbon::parse($case->filed_on ?? now())->year;
             $prefix = sprintf('%s-%d-', self::NUMBER_PREFIX, $year);
-            $last = static::query()->where('case_number', 'like', $prefix.'%')->lockForUpdate()
+            // Deleted cases included: a deleted case's number is never reused.
+            $last = static::withTrashed()->where('case_number', 'like', $prefix.'%')->lockForUpdate()
                 ->pluck('case_number')
                 ->map(fn (string $number) => (int) substr($number, strlen($prefix)))
                 ->max() ?? 0;

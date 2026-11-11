@@ -69,7 +69,7 @@
         "key": "performance_audit_report",
         "category": "performance_audit",
         "label": "Performance audit report (signed)",
-        "stage": "finalize",
+        "stage": "submit",
         "severity": "critical"
       }
     ]
