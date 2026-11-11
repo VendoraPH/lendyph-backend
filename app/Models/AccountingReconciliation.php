@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use App\Services\Accounting\ReconciliationMatcher;
+use App\Services\BranchAccess;
 use App\Traits\Auditable;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -20,6 +21,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
  *
  * @property int $id
  * @property int $accounting_account_id
+ * @property int|null $branch_id
  * @property string $period
  * @property string $start_date
  * @property string $end_date
@@ -36,6 +38,9 @@ class AccountingReconciliation extends Model
 
     protected $fillable = [
         'accounting_account_id',
+        // The branch whose journal lines this reconciliation proves; null for
+        // "all branches", every line on the account (2026-11-11).
+        'branch_id',
         'period',
         'start_date',
         'end_date',
@@ -55,6 +60,7 @@ class AccountingReconciliation extends Model
             // back as a string and the screen's `formatCentavos` gets text.
             'statement_balance' => 'integer',
             'accounting_account_id' => 'integer',
+            'branch_id' => 'integer',
             'created_by' => 'integer',
         ];
     }
@@ -62,6 +68,12 @@ class AccountingReconciliation extends Model
     public function account(): BelongsTo
     {
         return $this->belongsTo(AccountingAccount::class, 'accounting_account_id');
+    }
+
+    /** The branch whose lines this proves. None for an "all branches" reconciliation. */
+    public function branch(): BelongsTo
+    {
+        return $this->belongsTo(Branch::class);
     }
 
     /** The lines off the external statement. The ledger side is read live. */
@@ -80,5 +92,29 @@ class AccountingReconciliation extends Model
     public function scopeNewestFirst(Builder $query): Builder
     {
         return $query->orderByDesc('end_date')->orderByDesc('id');
+    }
+
+    /**
+     * The reconciliations $user may see: those of $user's branches. An "all
+     * branches" reconciliation (no branch) is for `branches:view_all` only,
+     * which sees every one.
+     */
+    public function scopeVisibleTo(Builder $query, User $user): Builder
+    {
+        return app(BranchAccess::class)->constrain($query, $user, $this->qualifyColumn('branch_id'));
+    }
+
+    /**
+     * Every `{reconciliation}` route parameter resolves only to one $user may
+     * see ({@see self::scopeVisibleTo()}): another branch's answers 404 before
+     * any validation runs, like a missing one. Without a signed-in user the
+     * binding is unscoped.
+     */
+    public function resolveRouteBindingQuery($query, $value, $field = null)
+    {
+        $query = parent::resolveRouteBindingQuery($query, $value, $field);
+        $user = request()->user();
+
+        return $user instanceof User ? $this->scopeVisibleTo($query, $user) : $query;
     }
 }

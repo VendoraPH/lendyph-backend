@@ -4,9 +4,11 @@ namespace App\Http\Requests\Accounting;
 
 use App\Services\Accounting\Money;
 use App\Services\Accounting\ReconciliationMatcher;
+use App\Services\BranchAccess;
 use Carbon\CarbonImmutable;
 use Illuminate\Contracts\Validation\Validator;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Rule;
 
 /**
  * Starting a reconciliation for one money account and one period.
@@ -46,6 +48,14 @@ class StoreReconciliationRequest extends FormRequest
             // Checked as a MONEY account in the controller — an account with no
             // `cash_kind` has no statement to be proved against.
             'account_id' => ['required', 'integer', 'exists:accounting_accounts,id'],
+            // The branch whose journal lines this reconciliation proves, one
+            // of the caller's own. Null or absent: "all branches", for
+            // `branches:view_all` only (see withValidator()). Another branch
+            // fails like a missing one.
+            'branch_id' => [
+                'nullable', 'integer',
+                app(BranchAccess::class)->constrainBranchExists(Rule::exists('branches', 'id'), $this->user()),
+            ],
             // Optional: derived from the range when absent, so the common case
             // ("September 2026") needs no typing and cannot be typed two
             // different ways for the same month.
@@ -84,6 +94,14 @@ class StoreReconciliationRequest extends FormRequest
     {
         $validator->after(function (Validator $v): void {
             if ($v->errors()->isNotEmpty()) {
+                return;
+            }
+
+            // A branch user reconciles their own branches' lines; only head
+            // office reconciles all branches at once.
+            if (! filled($this->input('branch_id')) && ! $this->user()->can(BranchAccess::VIEW_ALL)) {
+                $v->errors()->add('branch_id', 'Pick the branch whose entries this reconciliation proves.');
+
                 return;
             }
 
