@@ -46,6 +46,75 @@ jobs:
     name: Deploy binhs-coop API ${{ github.event_name == 'workflow_dispatch' && inputs.environment || (github.ref_name == 'main' && 'production' || 'staging') }}
     runs-on: ubuntu-latest
     steps:
+      # The proxy secret (staging only). It reaches the box over this SSH session's
+      # STDIN, never in a command line: appleboy/ssh-action sends `envs:` as export
+      # lines inside the remote `bash -c` script, and /proc/<pid>/cmdline is readable
+      # by every user on this shared box for the whole deploy. It lands in a 0600
+      # file in the deploy user's home, outside every web root; the deploy step
+      # below exports it before deploy.sh (config:cache / pm2 restart --update-env).
+      # Never fatal: without it the app keeps ignoring X-Forwarded-For, as today.
+      - name: Deliver the proxy secret (staging only)
+        id: proxy_secret
+        if: env.TARGET == 'staging'
+        continue-on-error: true
+        env:
+          PROXY_SECRET: ${{ secrets.PROXY_SECRET_BINHS_STAGING }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+          PROXY_SOURCES: ${{ secrets.PROXY_SOURCES_STAGING }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PROXY_SECRET" ]; then
+            echo "::warning title=Proxy secret missing::PROXY_SECRET_BINHS_STAGING is not set; the box keeps its last one, if any."
+            exit 1
+          fi
+          # Exactly 64 lowercase hex characters, as `openssl rand -hex 32` makes it.
+          # Anything else is refused, a pasted trailing newline included: the
+          # backend file's line 2 is the allowed-source list, and a stray newline
+          # would push it to line 3, which nothing reads.
+          secret_format='^[0-9a-f]{64}$'
+          if ! [[ $PROXY_SECRET =~ $secret_format ]]; then
+            echo "::warning title=Proxy secret not delivered::PROXY_SECRET_BINHS_STAGING is not exactly 64 lowercase hex characters (a trailing newline counts); the box keeps its last one, if any."
+            exit 1
+          fi
+          umask 077
+          key="$RUNNER_TEMP/vps_key"
+          trap 'rm -f "$key"' EXIT
+          printf '%s\n' "$VPS_SSH_KEY" > "$key"
+          # Pin the box's host key (VPS_KNOWN_HOSTS, from ssh-keyscan). Each stored
+          # line is re-labelled with VPS_HOST, so it matches whatever name or
+          # address that secret holds. No key, no connection.
+          known="$RUNNER_TEMP/known_hosts"
+          printf '%s\n' "${VPS_KNOWN_HOSTS:-}" | awk -v h="$VPS_HOST" 'NF >= 3 && $1 !~ /^#/ { print h, $2, $3 }' > "$known"
+          if [ ! -s "$known" ]; then
+            echo "::warning title=Host key missing::VPS_KNOWN_HOSTS holds no key; the proxy secret was not delivered."
+            exit 1
+          fi
+          # Only paths in the remote command; the value is read from stdin by cat.
+          remote="set -eu; umask 077; d=\"\$HOME/.lendyph-proxy-secret\"; mkdir -p \"\$d\"; chmod 700 \"\$d\"; f=\"\$d/binhs-coop-backend-staging\"; cat > \"\$f.tmp\"; if [ ! -s \"\$f.tmp\" ]; then rm -f \"\$f.tmp\"; exit 1; fi; chmod 600 \"\$f.tmp\"; mv -f \"\$f.tmp\" \"\$f\"; echo 'proxy secret delivered'"
+          # The allowed sources: IPv4 or IPv6 literals, comma-separated, on one
+          # line. Unset is delivered as empty (any source, with a warning); a
+          # malformed list is not delivered at all.
+          if [ -z "${PROXY_SOURCES:-}" ]; then
+            echo "::warning title=Proxy sources missing::PROXY_SOURCES_STAGING is not set; the API accepts the secret from any source."
+          elif ! printf '%s' "$PROXY_SOURCES" | python3 -I -c 'import ipaddress, sys; v = sys.stdin.read(); sys.exit(1) if ("\n" in v or "\r" in v) else [ipaddress.ip_address(p.strip()) for p in v.split(",")]' 2>/dev/null; then
+            echo "::warning title=Proxy secret not delivered::PROXY_SOURCES_STAGING must be IPv4 or IPv6 addresses, comma-separated, on one line; the box keeps its last secret and sources, if any."
+            exit 1
+          fi
+          for attempt in 1 2 3; do
+            # Line 1 the secret, line 2 the allowed source addresses.
+            if printf '%s\n%s\n' "$PROXY_SECRET" "${PROXY_SOURCES:-}" | ssh -i "$key" -o BatchMode=yes -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known" -o GlobalKnownHostsFile=/dev/null \
+              -o ConnectTimeout=60 "$VPS_USER@$VPS_HOST" "$remote"; then
+              exit 0
+            fi
+            echo "attempt $attempt to deliver the proxy secret failed"
+            [ "$attempt" -lt 3 ] && sleep 60
+          done
+          exit 1
+
       - name: Deploy to VPS via SSH
         id: deploy
         uses: appleboy/ssh-action@v1
@@ -72,6 +141,33 @@ jobs:
             else
               DEPLOY_DIR=/var/www/binhs-coop-backend-staging
               DEPLOY_BRANCH=development
+              # The proxy secret, delivered by the step before this one (staging only).
+              # Exported so deploy.sh's children inherit it: never echoed, never on a
+              # command line (sed gets only the path). Line 1 is the secret, line 2 the
+              # source addresses the API accepts it from (empty: any).
+              PROXY_SECRET_FILE="$HOME/.lendyph-proxy-secret/binhs-coop-backend-staging"
+              if [ -s "$PROXY_SECRET_FILE" ]; then
+                LENDYPH_PROXY_SECRET="$(sed -n 1p "$PROXY_SECRET_FILE")"
+                LENDYPH_PROXY_SOURCES="$(sed -n 2p "$PROXY_SECRET_FILE")"
+                export LENDYPH_PROXY_SECRET LENDYPH_PROXY_SOURCES
+                echo "proxy secret: loaded"
+              else
+                echo "NOTE: no proxy secret on the box; X-Forwarded-For stays untrusted."
+              fi
+              # config:cache (inside deploy.sh) rewrites bootstrap/cache/config.php at
+              # 0644, and it now holds the proxy secret. Put it back to 0640 (www-data owns
+              # it) when this script exits, also when deploy.sh fails. A user who can't
+              # chmod it gets a warning, never a failed deploy.
+              protect_config_cache() {
+                f="$DEPLOY_DIR/bootstrap/cache/config.php"
+                [ -f "$f" ] || return 0
+                if chmod 640 "$f" 2>/dev/null; then
+                  echo "config cache: mode 640"
+                else
+                  echo "::warning title=config.php left as is::could not chmod $f as $(id -un)"
+                fi
+              }
+              trap protect_config_cache EXIT
             fi
 
             bash "$DEPLOY_DIR/deploy.sh"
@@ -195,6 +291,33 @@ jobs:
             else
               DEPLOY_DIR=/var/www/binhs-coop-backend-staging
               DEPLOY_BRANCH=development
+              # The proxy secret, delivered by the step before this one (staging only).
+              # Exported so deploy.sh's children inherit it: never echoed, never on a
+              # command line (sed gets only the path). Line 1 is the secret, line 2 the
+              # source addresses the API accepts it from (empty: any).
+              PROXY_SECRET_FILE="$HOME/.lendyph-proxy-secret/binhs-coop-backend-staging"
+              if [ -s "$PROXY_SECRET_FILE" ]; then
+                LENDYPH_PROXY_SECRET="$(sed -n 1p "$PROXY_SECRET_FILE")"
+                LENDYPH_PROXY_SOURCES="$(sed -n 2p "$PROXY_SECRET_FILE")"
+                export LENDYPH_PROXY_SECRET LENDYPH_PROXY_SOURCES
+                echo "proxy secret: loaded"
+              else
+                echo "NOTE: no proxy secret on the box; X-Forwarded-For stays untrusted."
+              fi
+              # config:cache (inside deploy.sh) rewrites bootstrap/cache/config.php at
+              # 0644, and it now holds the proxy secret. Put it back to 0640 (www-data owns
+              # it) when this script exits, also when deploy.sh fails. A user who can't
+              # chmod it gets a warning, never a failed deploy.
+              protect_config_cache() {
+                f="$DEPLOY_DIR/bootstrap/cache/config.php"
+                [ -f "$f" ] || return 0
+                if chmod 640 "$f" 2>/dev/null; then
+                  echo "config cache: mode 640"
+                else
+                  echo "::warning title=config.php left as is::could not chmod $f as $(id -un)"
+                fi
+              }
+              trap protect_config_cache EXIT
             fi
 
             bash "$DEPLOY_DIR/deploy.sh"
@@ -404,3 +527,7 @@ jobs:
             echo "attempt ${attempt}/${ATTEMPTS}: ${problem} — retrying in 10s"
             sleep 10
           done
+
+      - name: Warn if the proxy secret was not delivered
+        if: ${{ !cancelled() && steps.proxy_secret.outcome == 'failure' }}
+        run: echo "::warning title=Proxy secret not delivered::The deploy ran with the box's previous proxy secret, or none (X-Forwarded-For stays untrusted)."
