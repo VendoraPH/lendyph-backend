@@ -136,6 +136,7 @@ class PortalLoanReadsTest extends TestCase
         $this->assertSame($this->pesos($kept['interest_applied']), $row['interest']);
         $this->assertSame($this->pesos($kept['penalty_applied']), $row['penalty']);
         $this->assertSame($this->pesos($kept['insurance_applied']), $row['insurance']);
+        $this->assertSame($this->pesos($kept['scb_paid']), $row['build_up']);
         $this->assertSame('cash', $row['method']);
         $this->assertSame($loan->loan_account_number, $all[0]['loan_account_number']);
     }

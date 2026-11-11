@@ -71,6 +71,27 @@ class PortalSavingsReadsTest extends TestCase
         $this->assertArrayNotHasKey('remarks', $mine);
     }
 
+    public function test_a_member_request_hold_reads_as_a_pending_withdrawal(): void
+    {
+        $me = $this->portalMember();
+        $account = $this->savingsFor($me, 800_000);
+        foreach ([['legal', '1000.00'], ['member_request', '2500.00']] as [$type, $amount]) {
+            SavingsHold::create([
+                'account_id' => $account->id, 'type' => $type, 'amount' => $amount, 'reason' => 'Test hold',
+                'placed_on' => '2026-11-10', 'expires_on' => '2026-11-17', 'status' => 'active',
+            ]);
+        }
+
+        $staff = $this->staffGet("/api/savings/accounts/{$account->id}")->json('data');
+        $mine = $this->portalJson('GET', "/api/portal/savings/{$account->id}", [], $this->portalToken($me))->assertOk()->json('data');
+
+        $this->assertSame('3500.00', $staff['hold_amount']);
+        $this->assertSame('1000.00', $mine['held']);
+        $this->assertSame('2500.00', $mine['pending_withdrawal']);
+        $this->assertSame($staff['available_balance'], $mine['available_balance']);
+        $this->assertSame('4000.00', $mine['withdrawable']);
+    }
+
     public function test_a_dormant_or_frozen_account_is_not_withdrawable_in_the_portal(): void
     {
         $me = $this->portalMember();

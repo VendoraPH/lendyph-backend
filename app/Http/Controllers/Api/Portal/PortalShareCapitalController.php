@@ -61,7 +61,7 @@ class PortalShareCapitalController extends Controller
     #[OA\Get(
         path: '/api/portal/share-capital/statement',
         summary: 'The member\'s Share Capital Statement (PDF)',
-        description: 'Signed-in portal token; features `share_capital` and `statements`. `from` and `to` (YYYY-MM-DD) are required, `to` no later than today (Manila), at most 5 years apart (422 in words). Built by the staff Share Capital Statement, as an A4 PDF attachment. At most 10 PDFs a minute. Audited.',
+        description: 'Signed-in portal token; features `share_capital` and `statements`. `from` and `to` (YYYY-MM-DD) are required, neither after today (Manila), at most 5 years apart (422 in words). Built by the staff Share Capital Statement, as an A4 PDF attachment. At most 10 PDFs a minute. Audited.',
         tags: ['Member Portal'],
         security: [['sanctum' => []]],
         parameters: [
@@ -76,7 +76,7 @@ class PortalShareCapitalController extends Controller
         $member = $this->scope->portalUser()->borrower;
 
         return $download->statement(
-            $statements->shareCapitalStatement($member, (string) $range['from'], (string) $range['to']),
+            $statements->shareCapitalStatement($member, $range['from'], $range['to']),
             $member,
             ['kind' => 'share_capital_statement', 'from' => $range['from'], 'to' => $range['to']],
         );

@@ -8,7 +8,6 @@ use App\Models\Document;
 use App\Models\Loan;
 use App\Models\User;
 use App\Services\AuditLogService;
-use App\Services\ValidIdService;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -27,16 +26,18 @@ final class DocumentSharing
     public const CO_MAKER = 'A co-maker\'s files are never shared in the Member Portal.';
 
     /**
-     * The file with this id among the member's own files, their loans' files
-     * and their co-makers' files (refused later, in words); otherwise 404.
+     * The file with this id among the member's own files, the files of the
+     * member's ever-released loans the staff user can see (a loan left in a
+     * branch outside theirs answers 404, as it does on the loan pages) and
+     * the member's co-makers' files (refused later, in words); otherwise 404.
      */
-    public function find(Borrower $member, int $documentId): Document
+    public function find(Borrower $member, int $documentId, User $staff): Document
     {
         return Document::query()
             ->where(fn (Builder $owner) => $owner
                 ->where(fn (Builder $q) => $q->where('documentable_type', $member->getMorphClass())->where('documentable_id', $member->getKey()))
                 ->orWhere(fn (Builder $q) => $q->where('documentable_type', (new Loan)->getMorphClass())
-                    ->whereIn('documentable_id', Loan::query()->where('borrower_id', $member->getKey())->select('id')))
+                    ->whereIn('documentable_id', Loan::query()->visibleTo($staff)->where('borrower_id', $member->getKey())->whereIn('status', Loan::EVER_RELEASED_STATUSES)->select('loans.id')))
                 ->orWhere(fn (Builder $q) => $q->where('documentable_type', (new CoMaker)->getMorphClass())
                     ->whereIn('documentable_id', CoMaker::query()->where('borrower_id', $member->getKey())->select('id'))))
             ->findOrFail($documentId);
@@ -92,7 +93,7 @@ final class DocumentSharing
     private function assertShareable(Document $document): void
     {
         $message = match (true) {
-            $document->type === ValidIdService::DOCUMENT_TYPE => self::VALID_ID,
+            ValidIdType::is($document->type) => self::VALID_ID,
             $document->documentable_type === (new CoMaker)->getMorphClass() => self::CO_MAKER,
             default => null,
         };

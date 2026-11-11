@@ -93,7 +93,7 @@ class PortalSavingsController extends Controller
     #[OA\Get(
         path: '/api/portal/savings/{id}/statement',
         summary: 'A savings statement (PDF)',
-        description: 'Signed-in portal token; features `savings` and `statements`. `from` and `to` (YYYY-MM-DD) are optional (the account\'s opening day through today), `to` no later than today (Manila), at most 5 years apart (422 in words). Built by the savings statement, as an A4 PDF attachment. At most 10 PDFs a minute. Audited.',
+        description: 'Signed-in portal token; features `savings` and `statements`. `from` and `to` (YYYY-MM-DD) are optional: `to` defaults to today and `from` to the account\'s opening day or 5 years before `to`, whichever is later. Neither may be after today (Manila), and they are at most 5 years apart (422 in words). Built by the savings statement, as an A4 PDF attachment. At most 10 PDFs a minute. Audited.',
         tags: ['Member Portal'],
         security: [['sanctum' => []]],
         parameters: [
@@ -106,7 +106,7 @@ class PortalSavingsController extends Controller
     public function statement(Request $request, int $id, PortalStatements $statements, PortalDownload $download): Response
     {
         $account = $this->savings->findAccount($id);
-        $range = StatementRange::from($request, false);
+        $range = StatementRange::from($request, false, $account->opened_on?->toDateString());
         $document = $statements->savingsStatement($account, $range['from'], $range['to']);
 
         return $download->statement($document, $account, ['kind' => 'savings_statement', 'from' => $range['from'], 'to' => $range['to']]);

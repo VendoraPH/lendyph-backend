@@ -3,7 +3,6 @@
 namespace App\Services\Portal\Read;
 
 use App\Models\ShareCapitalLedger;
-use App\Models\ShareCapitalPledge;
 use App\Services\Portal\MemberScope;
 use App\Services\ShareCapitalMemberService;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
@@ -23,8 +22,8 @@ final class ShareCapitalReader
     ) {}
 
     /**
-     * `remaining_pledge`: the pledge less the paid-up balance, in centavos,
-     * never below ₱0.00.
+     * The paid-up balance, the pledge and what remains of it come from
+     * ShareCapitalMemberService::pledgePosition().
      *
      * @return array{paid_up: string, pledged: string, remaining_pledge: string, total_contributions: string, last_contribution: array{date: string, amount: string}|null}
      */
@@ -32,8 +31,7 @@ final class ShareCapitalReader
     {
         $memberId = $this->scope->borrowerId();
         $period = $this->members->memberPeriod($memberId, null, null);
-        $paidUp = Pesos::centavos($period['ending_balance']);
-        $pledged = Pesos::centavos((string) (ShareCapitalPledge::query()->where('borrower_id', $memberId)->value('amount') ?? '0'));
+        $pledge = $this->members->pledgePosition($memberId);
 
         $last = ShareCapitalLedger::query()
             ->where('borrower_id', $memberId)
@@ -43,9 +41,9 @@ final class ShareCapitalReader
             ->first(['date', 'credit']);
 
         return [
-            'paid_up' => Pesos::fromCentavos($paidUp),
-            'pledged' => Pesos::fromCentavos($pledged),
-            'remaining_pledge' => Pesos::fromCentavos(max(0, $pledged - $paidUp)),
+            'paid_up' => Pesos::of($pledge['paid_up']),
+            'pledged' => Pesos::of($pledge['pledged']),
+            'remaining_pledge' => Pesos::of($pledge['remaining_pledge']),
             'total_contributions' => Pesos::of($period['total_credits']),
             'last_contribution' => $last === null ? null : [
                 'date' => $last->date->toDateString(),

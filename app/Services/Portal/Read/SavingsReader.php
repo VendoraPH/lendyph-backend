@@ -11,6 +11,7 @@ use App\Services\Portal\MemberScope;
 use App\Services\Savings\AccruedInterest;
 use App\Services\Savings\AvailableBalance;
 use App\Services\Savings\RateBook;
+use App\Services\Savings\Reports\StatementBuilder;
 use App\Services\Savings\TimeDeposits\Settlement;
 use App\Services\Savings\TimeDeposits\TimeDepositPresenter;
 use Carbon\CarbonImmutable;
@@ -27,10 +28,11 @@ use Illuminate\Support\Facades\DB;
  * AccruedInterest, the rate from RateBook, the passbook's running balance
  * from the rows, and a time deposit's figures through TimeDepositPresenter.
  *
- * - `held`: holds other than the member's own withdrawal requests;
- *   `pending_withdrawal`: the member's withdrawal requests still held plus
- *   outflows waiting for a checker. Together they are what AvailableBalance
- *   already takes off, so `available_balance` is unchanged.
+ * - `held` and `pending_withdrawal`: AvailableBalance's split of what it takes
+ *   off (forManyWithRequests): the member's own withdrawal requests read as
+ *   pending withdrawals, beside outflows waiting for a checker.
+ * - The passbook's opening balance is the savings statement's
+ *   (StatementBuilder::openingBalance).
  * - `withdrawable`: the available balance on an active account, which
  *   already keeps the maintaining balance (never taken off twice); "0.00" on
  *   a dormant, frozen or closed one, where the member must visit the branch.
@@ -46,6 +48,7 @@ final class SavingsReader
         private readonly AccruedInterest $accrued,
         private readonly RateBook $rates,
         private readonly TimeDepositPresenter $timeDeposits,
+        private readonly StatementBuilder $statements,
     ) {}
 
     /** @return Builder<SavingsAccount> */
@@ -105,17 +108,15 @@ final class SavingsReader
         $ids = $accounts->pluck('id')->all();
         $today = now()->toDateString();
 
-        $breakdowns = $this->available->forMany($accounts);
+        $breakdowns = $this->available->forManyWithRequests($accounts, [SavingsHold::TYPE_MEMBER_REQUEST]);
         $open = $accounts->reject(fn (SavingsAccount $a) => $a->isClosed())->values();
         $accrued = $open->isEmpty() ? [] : $this->accrued->forMany($open);
-        $requestHolds = $this->memberRequestHolds($ids, $today);
         $lastDays = DB::table('savings_transactions')->whereIn('account_id', $ids)->groupBy('account_id')
             ->selectRaw('account_id, MAX(date) AS last_day')->pluck('last_day', 'account_id');
         $rates = [];
 
-        return $accounts->map(function (SavingsAccount $a) use ($breakdowns, $accrued, $requestHolds, $lastDays, $today, &$rates): array {
+        return $accounts->map(function (SavingsAccount $a) use ($breakdowns, $accrued, $lastDays, $today, &$rates): array {
             $b = $breakdowns[$a->id];
-            $requested = min($requestHolds[$a->id] ?? 0, $b['holds']);
             $available = $a->isClosed() ? 0 : $b['available'];
             $rates[$a->product_id] ??= $this->rates->rateOn($a->product_id, null, $today);
 
@@ -125,8 +126,8 @@ final class SavingsReader
                 'product_name' => $a->product?->name,
                 'status' => $a->status,
                 'ledger_balance' => Pesos::fromCentavos($b['ledger']),
-                'held' => Pesos::fromCentavos($b['holds'] - $requested),
-                'pending_withdrawal' => Pesos::fromCentavos($b['pending'] + $requested),
+                'held' => Pesos::fromCentavos($b['held']),
+                'pending_withdrawal' => Pesos::fromCentavos($b['pending_withdrawal']),
                 'maintaining_balance' => Pesos::fromCentavos($b['maintaining']),
                 'available_balance' => Pesos::fromCentavos($available),
                 'withdrawable' => Pesos::fromCentavos($a->status === SavingsAccount::STATUS_ACTIVE ? $available : 0),
@@ -161,13 +162,7 @@ final class SavingsReader
             ->orderByDesc('id')
             ->paginate($perPage);
 
-        $opening = 0;
-
-        if ($from !== null) {
-            $sums = $base()->where('date', '<', $from)->toBase()
-                ->selectRaw('COALESCE(SUM(credit), 0) AS credits, COALESCE(SUM(debit), 0) AS debits')->first();
-            $opening = Pesos::centavos((string) $sums->credits) - Pesos::centavos((string) $sums->debits);
-        }
+        $opening = $from === null ? 0 : $this->statements->openingBalance($account, $from);
 
         return ['page' => $page, 'opening_balance' => Pesos::fromCentavos($opening)];
     }
@@ -232,25 +227,5 @@ final class SavingsReader
             'maturity_instruction' => $figures['maturity_instruction'],
             'status' => $figures['status'],
         ];
-    }
-
-    /**
-     * Active, unexpired member-request holds per account, in centavos.
-     *
-     * @param  list<int>  $ids
-     * @return array<int, int>
-     */
-    private function memberRequestHolds(array $ids, string $today): array
-    {
-        return DB::table('savings_holds')
-            ->whereIn('account_id', $ids)
-            ->where('type', SavingsHold::TYPE_MEMBER_REQUEST)
-            ->where('status', 'active')
-            ->where(fn ($q) => $q->whereNull('expires_on')->orWhere('expires_on', '>=', $today))
-            ->groupBy('account_id')
-            ->selectRaw('account_id, SUM(amount) AS total')
-            ->pluck('total', 'account_id')
-            ->map(fn ($total) => Pesos::centavos((string) $total))
-            ->all();
     }
 }

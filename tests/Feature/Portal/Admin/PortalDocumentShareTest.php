@@ -7,6 +7,7 @@ use App\Models\Borrower;
 use App\Models\Branch;
 use App\Models\CoMaker;
 use App\Models\Document;
+use App\Models\Loan;
 use App\Models\Role;
 use App\Models\User;
 use App\Services\ValidIdService;
@@ -118,6 +119,45 @@ class PortalDocumentShareTest extends TestCase
             ->postJson("/api/portal-admin/members/{$member->borrower_id}/documents/share", ['document_id' => $document->id])
             ->assertNotFound();
         $this->assertNull($document->fresh()->portal_shared_at);
+    }
+
+    public function test_a_loan_file_in_a_branch_the_caller_cant_see_answers_404(): void
+    {
+        $member = $this->portalMember(['branch_id' => $this->branch->id]);
+        $loan = $this->releasedLoanFor($member);
+        Loan::query()->whereKey($loan->id)->update(['branch_id' => Branch::factory()->create()->id]);
+        $document = $this->memberDocument($loan->fresh(), [], shared: false);
+        $staff = $this->staffWith(['member_portal:manage', 'borrowers:view']);
+
+        $this->actingAs($staff)->postJson("/api/portal-admin/members/{$member->borrower_id}/documents/share", ['document_id' => $document->id])->assertNotFound();
+        $this->actingAs($staff)->postJson("/api/portal-admin/members/{$member->borrower_id}/documents/unshare", ['document_id' => $document->id])->assertNotFound();
+        $this->assertNull($document->fresh()->portal_shared_at);
+    }
+
+    public function test_another_members_loan_file_and_a_drafts_file_answer_404(): void
+    {
+        $member = $this->portalMember(['branch_id' => $this->branch->id]);
+        $other = $this->portalMember(['branch_id' => $this->branch->id]);
+        $othersLoanFile = $this->memberDocument($this->releasedLoanFor($other), [], shared: false);
+        $draftFile = $this->memberDocument($this->draftLoanFor($member), [], shared: false);
+
+        foreach ([$othersLoanFile, $draftFile] as $document) {
+            $this->actingAs($this->admin)
+                ->postJson("/api/portal-admin/members/{$member->borrower_id}/documents/share", ['document_id' => $document->id])
+                ->assertNotFound();
+            $this->assertNull($document->fresh()->portal_shared_at);
+        }
+    }
+
+    public function test_a_valid_id_spelled_another_way_is_refused(): void
+    {
+        $member = $this->portalMember(['branch_id' => $this->branch->id]);
+
+        foreach (['Valid ID', 'valid-id', 'VALID_ID'] as $type) {
+            $document = $this->memberDocument($member->borrower, ['type' => $type], shared: false);
+            $this->actingAs($this->admin)->postJson($this->shareUri($document), ['document_id' => $document->id])->assertUnprocessable();
+            $this->assertNull($document->fresh()->portal_shared_at, $type);
+        }
     }
 
     /** The share route under the file's own member (the loan's member for a loan's file, the co-maker's member for a co-maker's). */

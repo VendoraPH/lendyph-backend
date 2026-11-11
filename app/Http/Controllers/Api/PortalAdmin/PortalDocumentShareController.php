@@ -22,7 +22,7 @@ class PortalDocumentShareController extends Controller
     #[OA\Post(
         path: '/api/portal-admin/members/{borrower}/documents/share',
         summary: 'Share a member\'s file in their Member Portal',
-        description: 'Needs member_portal:manage and borrowers:view. `document_id`: one of the member\'s own files or a file of one of their loans, which becomes downloadable in the member\'s portal. 404 for any other file; 422 in words for a valid ID or a co-maker\'s file. Sharing again changes nothing. Audited. {id, shared, portal_shared_at}.',
+        description: 'Needs member_portal:manage and borrowers:view. `document_id`: one of the member\'s own files or a file of one of their released loans in the caller\'s branches, which becomes downloadable in the member\'s portal. 404 for any other file; 422 in words for a valid ID or a co-maker\'s file. Sharing again changes nothing. Audited. {id, shared, portal_shared_at}.',
         tags: ['Member Portal (staff)'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'borrower', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
@@ -39,7 +39,7 @@ class PortalDocumentShareController extends Controller
     public function share(Request $request, Borrower $borrower): JsonResponse
     {
         $this->authorizeSharing();
-        $document = $this->sharing->find($borrower, $this->documentId($request));
+        $document = $this->sharing->find($borrower, $this->documentId($request), $request->user());
 
         return response()->json(['success' => true, 'data' => $this->sharing->share($document, $request->user())]);
     }
@@ -63,7 +63,7 @@ class PortalDocumentShareController extends Controller
     public function unshare(Request $request, Borrower $borrower): JsonResponse
     {
         $this->authorizeSharing();
-        $document = $this->sharing->find($borrower, $this->documentId($request));
+        $document = $this->sharing->find($borrower, $this->documentId($request), $request->user());
 
         return response()->json(['success' => true, 'data' => $this->sharing->unshare($document)]);
     }

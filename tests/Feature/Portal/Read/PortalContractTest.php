@@ -2,7 +2,17 @@
 
 namespace Tests\Feature\Portal\Read;
 
+use App\Models\Collateral;
+use App\Models\CollateralType;
+use App\Models\CoMaker;
+use App\Models\Document;
+use App\Models\Loan;
+use App\Models\Repayment;
+use App\Models\User;
 use App\Notifications\PortalNotice;
+use App\Services\Portal\Pdf\PortalPdf;
+use App\Services\Portal\Pdf\PortalStatements;
+use App\Services\ValidIdService;
 use Illuminate\Routing\Middleware\ThrottleRequests;
 use Illuminate\Support\Carbon;
 use Tests\TestCase;
@@ -18,7 +28,16 @@ class PortalContractTest extends TestCase
 {
     use PortalReadFixtures, SetupLendyPH;
 
-    private const FORBIDDEN = '/(^|_)(remarks?|notes?|approval|approvals|approved|journal|journals|score|scores|risk|flags?|officer|collateral|collaterals|photo|url|password|token|spouse|income|birthdate|address)(_|$)|_by$|^created_by|^borrower_id$/';
+    private const FORBIDDEN = '/(^|_)(remarks?|notes?|approval|approvals|approved|journal|journals|score|scores|risk|flags?|officer|collateral|collaterals|photo|photos|image|images|url|password|token|spouse|income|birthdate|address|mobile|email|comaker|comakers)(_|$)|co_?makers?|valid_?id|id_number|contact_number|birth_?date|_by$|^created_by|^borrower_id$/';
+
+    /** Values seeded on the member's records that no portal answer or PDF may carry. */
+    private const SECRETS = [
+        'mobile' => '09171234567', 'mobile digits' => '9171234567', 'email' => 'juana.secret@gmail.com',
+        'birthdate' => '1988-03-14', 'street' => '77 Secretstreet Avenue', 'valid ID number' => 'VID-77889900',
+        'account officer' => 'Zebulon', 'co-maker' => 'Quixote', 'collateral' => 'TCT-SECRET-4411',
+        'loan remarks' => 'REMARK-LOAN-SECRET', 'payment remarks' => 'REMARK-PAY-SECRET', 'savings remarks' => 'REMARK-SAVINGS-SECRET',
+        'monthly income' => '87654.32', 'spouse' => 'Spousename',
+    ];
 
     private const LOAN_ROW = [
         'id', 'loan_account_number', 'product_name', 'display_status', 'release_date', 'maturity_date', 'principal_amount',
@@ -141,13 +160,7 @@ class PortalContractTest extends TestCase
         $this->memberDocument($me->borrower);
         $token = $this->portalToken($me);
 
-        $uris = [
-            '/api/portal/dashboard', '/api/portal/membership', '/api/portal/profile', '/api/portal/loans', "/api/portal/loans/{$loan->id}",
-            "/api/portal/loans/{$loan->id}/schedule", "/api/portal/loans/{$loan->id}/payments", '/api/portal/payments',
-            '/api/portal/share-capital', '/api/portal/share-capital/transactions', '/api/portal/savings', "/api/portal/savings/{$account->id}",
-            "/api/portal/savings/{$account->id}/transactions", '/api/portal/time-deposits', "/api/portal/time-deposits/{$deposit->id}",
-            '/api/portal/documents', '/api/portal/notifications', '/api/portal/notifications/unread-count',
-        ];
+        $uris = $this->readUris($loan->id, $account->id, $deposit->id);
         $leaks = [];
 
         foreach ($uris as $uri) {
@@ -155,6 +168,76 @@ class PortalContractTest extends TestCase
         }
 
         $this->assertSame([], $leaks);
+    }
+
+    public function test_no_answer_or_pdf_carries_the_members_private_details(): void
+    {
+        $me = $this->portalMember([
+            'contact_number' => '09171234567', 'email' => 'juana.secret@gmail.com', 'birthdate' => '1988-03-14',
+            'street_address' => '77 Secretstreet Avenue', 'address' => '77 Secretstreet Avenue, San Roque',
+            'monthly_income' => '87654.32', 'spouse_first_name' => 'Spousename',
+        ]);
+        $loan = $this->releasedLoanFor($me);
+        $officer = User::factory()->create(['first_name' => 'Zebulon', 'last_name' => 'Officer']);
+        Loan::query()->whereKey($loan->id)->update(['account_officer_id' => $officer->id, 'approval_remarks' => 'REMARK-LOAN-SECRET']);
+        $coMaker = CoMaker::create(['borrower_id' => $me->borrower_id, 'first_name' => 'Quixote', 'last_name' => 'Comaker', 'relationship_to_borrower' => 'friend', 'status' => 'active']);
+        $loan->coMakers()->attach($coMaker->id);
+        $collateral = Collateral::create(['borrower_id' => $me->borrower_id, 'collateral_type_id' => CollateralType::factory()->create()->id, 'detail_value' => 'TCT-SECRET-4411', 'amount' => '50000.00']);
+        $loan->collaterals()->attach($collateral->id, ['snapshot_value' => '50000.00', 'attached_at' => now()]);
+        $payment = $this->pay($loan, 5000)->json('data');
+        Repayment::query()->whereKey($payment['id'])->update(['remarks' => 'REMARK-PAY-SECRET']);
+        $account = $this->savingsFor($me, 300_000, ['remarks' => 'REMARK-SAVINGS-SECRET']);
+        $deposit = $this->timeDepositFor($me);
+        $this->shareCapital($me, '2026-01-10', '1500.00');
+        Document::create([
+            'documentable_type' => $me->borrower->getMorphClass(), 'documentable_id' => $me->borrower_id,
+            'type' => ValidIdService::DOCUMENT_TYPE, 'label' => 'umid', 'id_number' => 'VID-77889900', 'side' => 'front',
+            'file_path' => "documents/valid_id/borrower/{$me->borrower_id}/front.png", 'original_filename' => 'front.png',
+            'mime_type' => 'image/png', 'file_size' => 10,
+        ]);
+        $this->memberDocument($me->borrower);
+        $token = $this->portalToken($me);
+
+        $bodies = [];
+
+        foreach ($this->readUris($loan->id, $account->id, $deposit->id) as $uri) {
+            $bodies[$uri] = (string) $this->portalJson('GET', $uri, [], $token)->assertOk()->getContent();
+        }
+
+        $statements = app(PortalStatements::class);
+        $pdf = app(PortalPdf::class);
+        $loan = $loan->fresh();
+        $bodies['loan statement PDF'] = $pdf->html($statements->loan($loan));
+        $bodies['share capital statement PDF'] = $pdf->html($statements->shareCapitalStatement($me->borrower, '2026-01-01', '2026-11-10'));
+        $bodies['share capital certificate PDF'] = $pdf->html($statements->shareCapitalCertificate($me->borrower, '2026-11-10'));
+        $bodies['savings statement PDF'] = $pdf->html($statements->savingsStatement($account->fresh(), null, null));
+        $bodies['time deposit certificate PDF'] = $pdf->html($statements->timeDepositCertificate($deposit->fresh()));
+
+        $leaks = [];
+
+        foreach ($bodies as $where => $body) {
+            $text = html_entity_decode(json_encode(json_decode($body), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: $body);
+
+            foreach (self::SECRETS as $what => $secret) {
+                if (str_contains($text, $secret) || str_contains($body, $secret)) {
+                    $leaks[] = "{$where} carries the {$what}";
+                }
+            }
+        }
+
+        $this->assertSame([], $leaks);
+    }
+
+    /** @return list<string> every signed-in JSON read */
+    private function readUris(int $loanId, int $accountId, int $depositId): array
+    {
+        return [
+            '/api/portal/dashboard', '/api/portal/membership', '/api/portal/profile', '/api/portal/loans', "/api/portal/loans/{$loanId}",
+            "/api/portal/loans/{$loanId}/schedule", "/api/portal/loans/{$loanId}/payments", '/api/portal/payments',
+            '/api/portal/share-capital', '/api/portal/share-capital/transactions', '/api/portal/savings', "/api/portal/savings/{$accountId}",
+            "/api/portal/savings/{$accountId}/transactions", '/api/portal/time-deposits', "/api/portal/time-deposits/{$depositId}",
+            '/api/portal/documents', '/api/portal/notifications', '/api/portal/notifications/unread-count',
+        ];
     }
 
     /** @param  list<string>  $leaks */
@@ -176,7 +259,7 @@ class PortalContractTest extends TestCase
     /** The branch's own address and phone are public facts on the membership card. */
     private function allowed(string $path, string $key): bool
     {
-        return str_ends_with($path, '/membership.data.branch') && $key === 'address';
+        return str_ends_with($path, '/membership.data.branch') && in_array($key, ['address', 'contact_number'], true);
     }
 
     /**
