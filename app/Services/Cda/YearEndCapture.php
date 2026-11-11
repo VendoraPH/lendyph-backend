@@ -11,6 +11,7 @@ use App\Services\AuditLogService;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use InvalidArgumentException;
+use Throwable;
 
 /**
  * The year-end capture of the loan book (CDA design §7). Loan balances can't
@@ -29,7 +30,8 @@ use InvalidArgumentException;
  *
  * The period is opened (as the system) when there is none, and its reports
  * are computed once the capture has committed, so they read it (and still
- * computed if the capture fails). The first
+ * computed if the capture fails; a failed refresh is reported and never
+ * masks the capture's result or error). The first
  * capture stands: a second run for the year changes nothing. One system audit row.
  * Only the scheduled run on Dec 31 is `exact`; a backfill on a later day is
  * kept with `exact: false` (C1 review, H2).
@@ -98,8 +100,23 @@ final class YearEndCapture
             return $this->store($period, $asOf, $exact, $ranAt);
         } finally {
             if ($opened) {
-                $this->opener->refreshReports($period);
+                $this->refreshReports($period);
             }
+        }
+    }
+
+    /**
+     * Computes the newly opened period's reports. A failure here (loading the
+     * reports included) is reported and goes no further: it runs in the
+     * capture's `finally`, where a throw would mask the capture's own result
+     * or replace its error.
+     */
+    private function refreshReports(CdaReportingPeriod $period): void
+    {
+        try {
+            $this->opener->refreshReports($period);
+        } catch (Throwable $e) {
+            report($e);
         }
     }
 
