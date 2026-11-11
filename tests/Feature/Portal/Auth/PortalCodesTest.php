@@ -166,6 +166,52 @@ class PortalCodesTest extends TestCase
         $this->portalJson('POST', '/api/portal/auth/login', ['member_number' => $number, 'password' => 'Brand-new-pass-42'])->assertOk();
     }
 
+    /**
+     * Issuing and verifying lock the portal account, then its codes; so
+     * does redeeming, so a concurrent issue and redeem can't deadlock.
+     */
+    public function test_redeeming_locks_the_portal_account_before_the_code(): void
+    {
+        $member = $this->newMember();
+        $code = (string) $this->invite($member)->json('data.code');
+        $step = (string) $this->verify($member, $code)->assertOk()->json('data.step_token');
+
+        $locks = [];
+        DB::listen(function ($query) use (&$locks): void {
+            $sql = strtolower($query->sql);
+
+            if (str_contains($sql, 'for update') && preg_match('/from `(\w+)`/', $sql, $table) === 1) {
+                $locks[] = $table[1];
+            }
+        });
+
+        $this->complete($step)->assertOk();
+
+        $this->assertSame(['portal_users', 'portal_codes'], array_slice(array_values(array_unique($locks)), 0, 2), implode(', ', $locks));
+    }
+
+    /** A new code issued while the redeem waits for the portal account supersedes the step: the redeem is refused. */
+    public function test_a_code_superseded_while_the_redeem_waits_is_refused_under_the_lock(): void
+    {
+        $member = $this->newMember();
+        $code = (string) $this->invite($member)->json('data.code');
+        $step = (string) $this->verify($member, $code)->assertOk()->json('data.step_token');
+        $portalUserId = (int) PortalUser::where('borrower_id', $member->id)->value('id');
+
+        $superseded = false;
+        DB::listen(function ($query) use (&$superseded, $portalUserId): void {
+            if (! $superseded && str_contains(strtolower($query->sql), 'from `portal_users`') && str_contains(strtolower($query->sql), 'for update')) {
+                $superseded = true;
+                DB::table('portal_codes')->where('portal_user_id', $portalUserId)->where('status', PortalCode::STATUS_OPEN)
+                    ->update(['status' => PortalCode::STATUS_SUPERSEDED, 'live_key' => null, 'step_hash' => null, 'step_expires_at' => null]);
+            }
+        });
+
+        $this->complete($step)->assertStatus(422);
+        $this->assertTrue($superseded);
+        $this->assertNull(PortalUser::query()->findOrFail($portalUserId)->password, 'No password was set.');
+    }
+
     public function test_the_code_refusal_is_byte_identical_for_an_unknown_and_a_known_member(): void
     {
         $member = $this->newMember();

@@ -50,7 +50,7 @@ class Presenter
 
         $accounts = $this->models($accounts);
         $accounts->loadMissing(['borrower', 'branch:id,name', 'product:id,code,name,kind']);
-        $breakdowns = $this->available->forMany($accounts);
+        $breakdowns = $this->available->forManyWithRequests($accounts, [SavingsHold::TYPE_MEMBER_REQUEST]);
         $open = $accounts->reject(fn (SavingsAccount $a) => $a->isClosed())->values();
         $accrued = $open->isEmpty() ? [] : $this->accrued->forMany($open);
 
@@ -68,6 +68,8 @@ class Presenter
             'status' => $a->status,
             'balance' => SavingsMath::pesos($breakdowns[$a->id]['ledger']),
             'hold_amount' => SavingsMath::pesos($breakdowns[$a->id]['holds']),
+            // Of hold_amount, what members' portal withdrawal requests hold (the member sees it as "Pending withdrawal").
+            'held_for_requests' => SavingsMath::pesos($breakdowns[$a->id]['holds'] - $breakdowns[$a->id]['held']),
             'pending_amount' => SavingsMath::pesos($breakdowns[$a->id]['pending']),
             'available_balance' => $a->isClosed() ? '0.00' : SavingsMath::pesos($breakdowns[$a->id]['available']),
             'accrued_interest' => SavingsMath::pesos($accrued[$a->id]['gross'] ?? 0),

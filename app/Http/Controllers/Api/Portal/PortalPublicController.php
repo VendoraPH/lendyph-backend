@@ -3,10 +3,12 @@
 namespace App\Http\Controllers\Api\Portal;
 
 use App\Http\Controllers\Controller;
+use App\Models\BrandingSetting;
 use App\Services\Portal\Auth\PasswordRules;
 use App\Services\Portal\PortalSettings;
 use App\Services\Portal\PortalTerms;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Facades\Storage;
 use OpenApi\Attributes as OA;
 
 /**
@@ -24,7 +26,7 @@ class PortalPublicController extends Controller
     #[OA\Get(
         path: '/api/portal/config',
         summary: 'Member Portal configuration',
-        description: 'Public. Answers while the portal is off, with `enabled: false`. `password_rules` describes the password rule; `terms` is the current version (null when none is published); `features` maps each part of the portal to on or off. No secrets.',
+        description: 'Public. Answers while the portal is off, with `enabled: false`. `logo_url` is `/branding/logo` when a logo is stored, else null; `password_rules` describes the password rule; `terms` is the current version (null when none is published); `features` maps each part of the portal to on or off. No secrets.',
         tags: ['Member Portal'],
         responses: [new OA\Response(response: 200, description: '{enabled, portal_name, logo_url, welcome_message, support_contact, password_rules, otp_required, session_minutes, idle_minutes, terms, features, dashboard_cards}')],
     )]
@@ -36,7 +38,7 @@ class PortalPublicController extends Controller
         return response()->json(['success' => true, 'data' => [
             'enabled' => $settings->enabled,
             'portal_name' => $settings->portal_name,
-            'logo_url' => '/branding/logo',
+            'logo_url' => $this->logoUrl(),
             'welcome_message' => $settings->welcome_message,
             'support_contact' => $settings->support_contact,
             'password_rules' => $this->passwords->describe(),
@@ -47,6 +49,18 @@ class PortalPublicController extends Controller
             'features' => $this->settings->features($settings),
             'dashboard_cards' => array_values($settings->dashboard_cards ?? []),
         ]]);
+    }
+
+    /**
+     * The logo's stream route, only when a logo is stored (the route answers
+     * 404 otherwise, by the same check), so the member pages never fetch one
+     * that isn't there.
+     */
+    private function logoUrl(): ?string
+    {
+        $path = BrandingSetting::current()->logo_path;
+
+        return $path && Storage::disk('public')->exists($path) ? '/branding/logo' : null;
     }
 
     #[OA\Get(

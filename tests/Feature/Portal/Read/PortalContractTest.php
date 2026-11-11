@@ -15,6 +15,7 @@ use App\Services\Portal\Pdf\PortalStatements;
 use App\Services\ValidIdService;
 use Illuminate\Routing\Middleware\ThrottleRequests;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\DB;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
@@ -37,6 +38,11 @@ class PortalContractTest extends TestCase
         'account officer' => 'Zebulon', 'co-maker' => 'Quixote', 'collateral' => 'TCT-SECRET-4411',
         'loan remarks' => 'REMARK-LOAN-SECRET', 'payment remarks' => 'REMARK-PAY-SECRET', 'savings remarks' => 'REMARK-SAVINGS-SECRET',
         'monthly income' => '87654.32', 'spouse' => 'Spousename',
+        'savings transaction remarks' => 'REMARK-SAVINGS-ROW-SECRET',
+        // The forms the PDFs print, so a leak can't hide behind formatting.
+        'printed monthly income' => '₱87,654.32', 'grouped monthly income' => '87,654.32',
+        'printed birthdate' => '14 Mar 1988', 'long birthdate' => 'March 14, 1988', 'short birthdate' => 'Mar 14, 1988',
+        'valid ID number without separators' => 'VID77889900', 'valid ID digits' => '77889900',
     ];
 
     private const LOAN_ROW = [
@@ -187,6 +193,9 @@ class PortalContractTest extends TestCase
         $payment = $this->pay($loan, 5000)->json('data');
         Repayment::query()->whereKey($payment['id'])->update(['remarks' => 'REMARK-PAY-SECRET']);
         $account = $this->savingsFor($me, 300_000, ['remarks' => 'REMARK-SAVINGS-SECRET']);
+        // The rows the passbook and the savings statement read carry their own remarks.
+        $this->deposit($account, 25_000);
+        $this->assertGreaterThan(0, DB::table('savings_transactions')->where('account_id', $account->id)->update(['remarks' => 'REMARK-SAVINGS-ROW-SECRET']));
         $deposit = $this->timeDepositFor($me);
         $this->shareCapital($me, '2026-01-10', '1500.00');
         Document::create([

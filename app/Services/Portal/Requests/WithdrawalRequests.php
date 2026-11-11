@@ -16,6 +16,7 @@ use App\Services\Portal\PortalSettings;
 use App\Services\Savings\Api\HoldDesk;
 use App\Services\Savings\Api\Refuse;
 use App\Services\Savings\Api\Teller;
+use App\Services\Savings\ApprovalGate;
 use App\Services\Savings\AvailableBalance;
 use App\Services\Savings\SavingsLocks;
 use App\Services\Savings\SavingsMath;
@@ -41,8 +42,9 @@ use Illuminate\Validation\ValidationException;
  * 3. **Reject, cancel, expiry**: the hold is released (or expired); no money
  *    moves.
  *
- * Lock order: idempotency row, savings account, portal request, hold, then
- * the Teller's approval or transaction, numbers and journal (savings §4).
+ * Lock order: idempotency row, savings account, portal request, member,
+ * portal account, hold, then the Teller's approval or transaction, numbers
+ * and journal (savings §4).
  */
 final class WithdrawalRequests
 {
@@ -59,6 +61,7 @@ final class WithdrawalRequests
         private readonly PortalSettings $settings,
         private readonly RequestTimeline $timeline,
         private readonly RequestNumbers $numbers,
+        private readonly ApprovalGate $gate,
     ) {}
 
     /**
@@ -158,14 +161,21 @@ final class WithdrawalRequests
      *
      * @throws ValidationException
      */
-    public function approve(PortalRequest $request, array $payout, User $staff): array
+    public function approve(PortalRequest $request, array $payout, User $staff, ?string $message = null): array
     {
         $account = $this->locks->account((int) $request->savings_account_id);
         $locked = RequestDesk::lockOpen($request->id, [PortalRequest::STATUS_SUBMITTED, PortalRequest::STATUS_UNDER_REVIEW, PortalRequest::STATUS_NEED_INFO]);
         self::assertStillAMember($locked);
         $hold = $this->activeHold($locked);
 
-        $this->holds->releaseForRequest($hold, "Paid out on request {$locked->reference}", $staff);
+        // Above tier 1 nothing is paid yet: the savings approval the Teller
+        // opens reserves the money as a pending outflow, under this same
+        // account lock, so the hold hands over to it (keeping both would
+        // reserve the money twice). The reason says which happened.
+        $reason = $this->gate->needsApproval(SavingsMath::centavos($locked->amount))
+            ? "Moved to its second approval on request {$locked->reference}; the savings approval now reserves the money"
+            : "Paid out on request {$locked->reference}";
+        $this->holds->releaseForRequest($hold, $reason, $staff);
 
         $result = $this->teller->withdraw($account->id, [
             'amount' => (string) $locked->amount,
@@ -176,13 +186,13 @@ final class WithdrawalRequests
         ], $staff);
 
         if ($result['transaction'] !== null) {
-            $this->timeline->move($locked, PortalRequest::STATUS_COMPLETED, PortalRequestEvent::ACTOR_STAFF, $staff->id, null, [
+            $this->timeline->move($locked, PortalRequest::STATUS_COMPLETED, PortalRequestEvent::ACTOR_STAFF, $staff->id, $message, [
                 'savings_transaction_id' => $result['transaction']->id,
                 'decided_by' => $staff->id,
                 'decided_at' => now(),
             ]);
         } else {
-            $this->timeline->move($locked, PortalRequest::STATUS_APPROVED, PortalRequestEvent::ACTOR_STAFF, $staff->id, null, [
+            $this->timeline->move($locked, PortalRequest::STATUS_APPROVED, PortalRequestEvent::ACTOR_STAFF, $staff->id, $message, [
                 'savings_approval_id' => $result['approval']->id,
                 'decided_by' => $staff->id,
                 'decided_at' => now(),
@@ -220,17 +230,21 @@ final class WithdrawalRequests
      * Read from the rows themselves, never a model event, at staff approval
      * and again at the savings second check (WithdrawalExecutor).
      *
-     * The portal account is read under its row lock, so a payout waits for a
-     * PortalAccess::disable() in flight and then sees it. Lock order: the
-     * savings account and the request (the caller's), then the portal
-     * account, then the hold. Nothing takes them the other way round:
-     * disable() locks only the portal account, and ends the requests after
-     * it commits.
+     * The member and the portal account are both read under their row
+     * locks, member first, so a payout waits for a status change in flight
+     * (inactive, blacklisted, withdrawn, deceased: MembershipStatus::end, a
+     * deactivation, PortalAccess::disable()) and then sees it. Lock order:
+     * the savings account and the request (the caller's), then the member,
+     * then the portal account, then the hold. Nothing takes them the other
+     * way round: a membership change locks the member, then the portal
+     * account (the Borrower observer), and code issuing does the same;
+     * disable() locks only the portal account; each ends the requests only
+     * after it commits.
      */
     public static function assertStillAMember(PortalRequest $request): void
     {
+        $memberStatus = Borrower::query()->whereKey($request->borrower_id)->lockForUpdate()->value('status');
         $portalUser = PortalUser::query()->whereKey($request->portal_user_id)->lockForUpdate()->first(['id', 'status']);
-        $memberStatus = Borrower::query()->whereKey($request->borrower_id)->value('status');
 
         if ($portalUser?->status !== PortalUser::STATUS_ACTIVE || $memberStatus !== 'active') {
             Refuse::conflict(self::NOT_A_MEMBER_NOW);

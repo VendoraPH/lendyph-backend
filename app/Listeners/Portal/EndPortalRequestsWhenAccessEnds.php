@@ -19,13 +19,16 @@ class EndPortalRequestsWhenAccessEnds
     /**
      * Run once the membership change commits: it holds the member and
      * portal account rows, and ending the requests takes the savings account
-     * and request locks, which a payout takes before the portal account.
+     * and request locks, which a payout takes before the member and the
+     * portal account. The membership has ended by then, so a failure is
+     * reported and logged (endForReported), never answered as a 500, and the
+     * nightly portal:requests-sweep ends the requests instead.
      */
     public function handle(MemberPortalAccessEnded $event): void
     {
         $portalUser = $event->portalUser;
         $reason = $event->reason;
 
-        DB::afterCommit(fn () => $this->sweep->endFor($portalUser, $reason));
+        DB::afterCommit(fn () => $this->sweep->endForReported($portalUser, $reason));
     }
 }

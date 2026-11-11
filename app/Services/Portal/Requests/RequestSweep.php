@@ -13,8 +13,11 @@ use App\Services\Savings\Api\ApprovalDesk;
 use App\Services\Savings\Api\Refuse;
 use App\Services\Savings\SavingsLocks;
 use App\Services\Savings\SavingsMath;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use Throwable;
 
 /**
  * The system's side of portal requests (portal design §6), each change under
@@ -30,7 +33,12 @@ use Illuminate\Support\Facades\DB;
  *   nightly sweep backstops `savings:expire`'s bulk updates.
  * - **Access ended** (any reason: PortalAccess and MemberPortalAccessEnded):
  *   the member's open requests are cancelled and their holds released, and
- *   a second-check approval is cancelled, as the system.
+ *   a second-check approval is cancelled, as the system. The nightly sweep
+ *   runs it again for any portal account already turned off that still has
+ *   open requests (a crash, or a failure, between the commit and endFor), so
+ *   no hold waits for its `expires_on`. A locked account isn't access turned
+ *   off: staff unlock it, and a stranger guessing passwords must not be able
+ *   to cancel a member's request.
  *
  * Every row it writes names the system (or, for a second approval decided by
  * a checker, that checker).
@@ -46,10 +54,11 @@ final class RequestSweep
         private readonly ApprovalDesk $approvals,
     ) {}
 
-    /** @return array{expired: int, synced: int} */
+    /** @return array{ended: int, expired: int, synced: int} */
     public function run(): array
     {
         $today = now()->toDateString();
+        $ended = $this->endForAccessTurnedOff();
         $expired = 0;
         $synced = 0;
 
@@ -74,7 +83,78 @@ final class RequestSweep
                 $synced += $this->syncApproved($id) ? 1 : 0;
             });
 
-        return ['expired' => $expired, 'synced' => $synced];
+        return ['ended' => $ended, 'expired' => $expired, 'synced' => $synced];
+    }
+
+    /**
+     * endFor() for every portal account already turned off that still has an
+     * open request or a second check waiting, with the reason it was turned
+     * off. Each account is ended on its own, so one failure (reported) never
+     * stops the rest; the next night retries it.
+     */
+    public function endForAccessTurnedOff(): int
+    {
+        $ended = 0;
+
+        PortalUser::query()
+            ->where('status', PortalUser::STATUS_DISABLED)
+            ->whereIn('id', self::stillToEnd(PortalRequest::query())->select('portal_user_id'))
+            ->orderBy('id')
+            ->get()
+            ->each(function (PortalUser $portalUser) use (&$ended): void {
+                $ended += $this->endForReported($portalUser, $portalUser->disabled_reason ?? 'administrative');
+            });
+
+        return $ended;
+    }
+
+    /**
+     * endFor(), for callers that must not fail because of it (access is
+     * already off): a failure is reported and logged, and 0 is returned; the
+     * nightly sweep retries. report() drops some exceptions (a 409
+     * HttpResponseException from GeneratedNumberWrite, a missing model, a
+     * validation error), so the warning is always written too, with ids and
+     * the exception class only: no personal data, codes or tokens.
+     */
+    public function endForReported(PortalUser $portalUser, string $reason): int
+    {
+        try {
+            return $this->endFor($portalUser, $reason);
+        } catch (Throwable $e) {
+            report($e);
+            Log::warning('portal endFor failed', [
+                'portal_user_id' => (int) $portalUser->getKey(),
+                'request_ids' => $this->idsStillToEnd($portalUser),
+                'exception' => $e::class,
+            ]);
+
+            return 0;
+        }
+    }
+
+    /**
+     * The requests endFor() ends: open ones (submitted, under review, need
+     * info), and withdrawals waiting at a pending second check.
+     *
+     * @param  Builder<PortalRequest>  $query
+     * @return Builder<PortalRequest>
+     */
+    public static function stillToEnd(Builder $query): Builder
+    {
+        return $query->where(fn ($q) => $q->whereIn('status', RequestDesk::CANCELLABLE)
+            ->orWhere(fn ($q) => $q->where('status', PortalRequest::STATUS_APPROVED)
+                ->whereIn('savings_approval_id', SavingsApproval::query()->select('id')->where('status', 'pending'))));
+    }
+
+    /** @return list<int>|null the member's requests still to end, or null when even that can't be read */
+    private function idsStillToEnd(PortalUser $portalUser): ?array
+    {
+        try {
+            return self::stillToEnd(PortalRequest::query())->where('portal_user_id', $portalUser->getKey())
+                ->orderBy('id')->pluck('id')->map(fn ($id): int => (int) $id)->all();
+        } catch (Throwable) {
+            return null;
+        }
     }
 
     /** Expire one open request past its date; false when it was already decided or isn't due. */
