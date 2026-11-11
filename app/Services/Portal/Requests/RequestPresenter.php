@@ -45,7 +45,7 @@ final class RequestPresenter
             PortalRequest::TYPE_SAVINGS_WITHDRAWAL => 'withdrawal of '.$this->peso($request->amount).' from '.($this->account($request)?->account_number ?? 'a savings account'),
             PortalRequest::TYPE_SAVINGS_OPENING => 'new '.($this->product($request)?->name ?? 'savings').' account with '.$this->peso($request->amount),
             default => 'profile change ('.implode(', ', array_map(
-                fn (string $field): string => strtolower(ProfileFields::FIELDS[$field] ?? $field),
+                fn (string $field): string => strtolower(ProfileFields::LABELS[$field] ?? $field),
                 array_keys($request->details ?? []),
             )).')',
         };

@@ -3,16 +3,25 @@
 namespace App\Services\Portal\Read;
 
 use App\Models\PortalUser;
+use App\Services\Portal\Announcements\AnnouncementFeed;
+use App\Services\Portal\PortalSettings;
 use Illuminate\Notifications\DatabaseNotification;
 
 /**
  * The member's in-app notices (portal design §1, §7), database channel only.
  * A notice's link is sent only when it is a `/member/...` path, so a stored
  * link can never send the member off the portal.
+ *
+ * The bell's announcement count is the announcement pages' own unread count
+ * (AnnouncementFeed, on AnnouncementAudience), and 0 while announcements are
+ * switched off, when those pages answer 403: the bell and the pages agree.
  */
 final class NotificationReader
 {
-    public function __construct(private readonly AnnouncementAudience $announcements) {}
+    public function __construct(
+        private readonly AnnouncementFeed $announcements,
+        private readonly PortalSettings $settings,
+    ) {}
 
     /** @return array{id: string, category: string|null, title: string|null, body: string|null, created_at: mixed, read_at: mixed, link: string|null} */
     public function present(DatabaseNotification $notice): array
@@ -34,7 +43,7 @@ final class NotificationReader
     public function unreadCount(PortalUser $portalUser): array
     {
         $notices = $portalUser->unreadNotifications()->count();
-        $announcements = $this->announcements->unreadBy($portalUser)->count();
+        $announcements = $this->settings->featureOn('announcements') ? $this->announcements->unreadCount($portalUser) : 0;
 
         return ['notifications' => $notices, 'announcements' => $announcements, 'total' => $notices + $announcements];
     }

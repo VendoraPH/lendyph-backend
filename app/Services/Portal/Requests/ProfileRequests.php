@@ -8,6 +8,7 @@ use App\Models\PortalRequestEvent;
 use App\Models\PortalUser;
 use App\Models\User;
 use App\Services\Portal\PortalNotices;
+use App\Services\Portal\Read\ProfileReader;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Validation\ValidationException;
 
@@ -39,11 +40,11 @@ final class ProfileRequests
     public function validated(PortalUser $portalUser, mixed $details): array
     {
         $details = is_array($details) ? $details : [];
-        $unknown = array_diff(array_keys($details), array_keys(ProfileFields::FIELDS));
+        $unknown = array_diff(array_keys($details), ProfileReader::EDITABLE_FIELDS);
 
         if ($unknown !== []) {
             throw ValidationException::withMessages(['details' => [
-                'Only these can be changed in the portal: '.implode(', ', array_map('strtolower', ProfileFields::FIELDS)).'. Visit your branch for anything else.',
+                'Only these can be changed in the portal: '.implode(', ', array_map('strtolower', ProfileFields::labels())).'. Visit your branch for anything else.',
             ]]);
         }
 

@@ -4,22 +4,23 @@ namespace App\Services\Portal\Requests;
 
 use App\Http\Requests\Borrower\Concerns\HasBorrowerRules;
 use App\Models\Borrower;
-use App\Services\Reminders\MemberContact;
-use App\Support\PhilippineMobile;
+use App\Services\Portal\Read\MemberWords;
+use App\Services\Portal\Read\ProfileReader;
 
 /**
- * The member fields a portal profile change may ask for (portal design §6),
- * checked by the same rules staff edits go through (HasBorrowerRules: the
- * formats, a unique email, and a required field that can't be cleared), and
- * shown to the member masked as the portal profile masks them (§1): mobile
- * and email masked, the street line "On file".
+ * The member fields a portal profile change may ask for (portal design §6):
+ * the profile's own list (ProfileReader::EDITABLE_FIELDS), checked by the
+ * same rules staff edits go through (HasBorrowerRules: the formats, a unique
+ * email, and a required field that can't be cleared), and shown to the
+ * member masked by the profile's own masking (ProfileReader, §1) and in its
+ * words (MemberWords).
  */
 final class ProfileFields
 {
     use HasBorrowerRules;
 
-    /** Field => label, in the order they are shown. */
-    public const FIELDS = [
+    /** Each editable field's label (ProfileReader::EDITABLE_FIELDS), the profile page's words. */
+    public const LABELS = [
         'street_address' => 'Street address',
         'barangay' => 'Barangay',
         'city' => 'City or municipality',
@@ -33,8 +34,6 @@ final class ProfileFields
     /** Changes that are security-relevant: the member is told when they're applied. */
     public const CONTACT_FIELDS = ['contact_number', 'email'];
 
-    public const ON_FILE = 'On file';
-
     /**
      * The member update rules for these fields, for this member.
      *
@@ -44,7 +43,23 @@ final class ProfileFields
     {
         $rules = $this->requireMemberFields($this->sharedBorrowerRules($member->id), creating: false);
 
-        return array_intersect_key($rules, self::FIELDS);
+        return array_intersect_key($rules, array_flip(ProfileReader::EDITABLE_FIELDS));
+    }
+
+    /**
+     * Field => label, in the profile's order.
+     *
+     * @return array<string, string>
+     */
+    public static function labels(): array
+    {
+        $labels = [];
+
+        foreach (ProfileReader::EDITABLE_FIELDS as $field) {
+            $labels[$field] = self::LABELS[$field] ?? $field;
+        }
+
+        return $labels;
     }
 
     /** @return array<string, string> */
@@ -59,7 +74,7 @@ final class ProfileFields
         ];
 
         foreach (['city', 'province', 'contact_number', 'civil_status'] as $field) {
-            $messages["{$field}.required"] = 'The '.strtolower(self::FIELDS[$field]).' can\'t be left empty.';
+            $messages["{$field}.required"] = 'The '.strtolower(self::LABELS[$field]).' can\'t be left empty.';
         }
 
         $prefixed = [];
@@ -71,17 +86,18 @@ final class ProfileFields
         return $prefixed;
     }
 
-    /** A value as the member sees it: the §1 masking. */
-    public function masked(string $field, mixed $value): ?string
+    /** A value as the member sees it: the profile's §1 masking and words. */
+    public function shown(string $field, mixed $value): ?string
     {
-        if ($value === null || (is_string($value) && trim($value) === '')) {
+        if (blank($value)) {
             return null;
         }
 
         return match ($field) {
-            'contact_number' => PhilippineMobile::mask((string) $value),
-            'email' => MemberContact::maskEmail((string) $value),
-            'street_address' => self::ON_FILE,
+            'contact_number' => ProfileReader::maskedMobile((string) $value),
+            'email' => ProfileReader::maskedEmail((string) $value),
+            'street_address' => ProfileReader::maskedStreet((string) $value),
+            'civil_status' => MemberWords::of(MemberWords::CIVIL_STATUS, (string) $value),
             default => (string) $value,
         };
     }
@@ -97,7 +113,7 @@ final class ProfileFields
     {
         $rows = [];
 
-        foreach (self::FIELDS as $field => $label) {
+        foreach (self::labels() as $field => $label) {
             if (! array_key_exists($field, $requested)) {
                 continue;
             }
@@ -105,8 +121,8 @@ final class ProfileFields
             $rows[] = [
                 'field' => $field,
                 'label' => $label,
-                'current' => $full ? $this->plain($current[$field] ?? null) : $this->masked($field, $current[$field] ?? null),
-                'requested' => $full ? $this->plain($requested[$field]) : $this->masked($field, $requested[$field]),
+                'current' => $full ? $this->plain($current[$field] ?? null) : $this->shown($field, $current[$field] ?? null),
+                'requested' => $full ? $this->plain($requested[$field]) : $this->shown($field, $requested[$field]),
             ];
         }
 

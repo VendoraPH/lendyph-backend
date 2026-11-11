@@ -3,6 +3,7 @@
 namespace App\Services\Portal\Read;
 
 use App\Models\SavingsAccount;
+use App\Models\SavingsHold;
 use App\Models\SavingsTransaction;
 use App\Models\TimeDeposit;
 use App\Services\LikePattern;
@@ -36,9 +37,6 @@ use Illuminate\Support\Facades\DB;
  */
 final class SavingsReader
 {
-    /** The savings hold type of a member's withdrawal request (slice P3's `HoldDesk::placeForRequest`). */
-    public const MEMBER_REQUEST_HOLD = 'member_request';
-
     /** A time deposit this many days or fewer from maturity is "maturing soon". */
     public const MATURING_SOON_DAYS = 30;
 
@@ -246,7 +244,7 @@ final class SavingsReader
     {
         return DB::table('savings_holds')
             ->whereIn('account_id', $ids)
-            ->where('type', self::MEMBER_REQUEST_HOLD)
+            ->where('type', SavingsHold::TYPE_MEMBER_REQUEST)
             ->where('status', 'active')
             ->where(fn ($q) => $q->whereNull('expires_on')->orWhere('expires_on', '>=', $today))
             ->groupBy('account_id')

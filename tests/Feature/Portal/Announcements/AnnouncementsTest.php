@@ -160,4 +160,36 @@ class AnnouncementsTest extends TestCase
 
         $this->asMember('GET', '/api/portal/announcements')->assertForbidden()->assertJsonPath('code', 'feature_off');
     }
+
+    /**
+     * The bell and the announcement pages count the same unread
+     * announcements for the same member, before and after reading one; with
+     * announcements switched off the bell counts none, as the pages answer
+     * 403.
+     */
+    public function test_the_bell_counts_the_unread_announcements_the_announcements_page_shows(): void
+    {
+        $far = Branch::factory()->create();
+        $first = PortalAnnouncement::factory()->create(['title' => 'All']);
+        PortalAnnouncement::factory()->create(['title' => 'Mine', 'audience' => 'branch', 'branch_ids' => [$this->branch->id]]);
+        PortalAnnouncement::factory()->create(['title' => 'Regulars', 'audience' => 'member_type', 'member_types' => ['regular']]);
+        PortalAnnouncement::factory()->create(['title' => 'Far', 'audience' => 'branch', 'branch_ids' => [$far->id]]);
+        PortalAnnouncement::factory()->create(['title' => 'Later', 'publish_at' => now()->addDay()]);
+        PortalAnnouncement::factory()->create(['title' => 'Over', 'expires_at' => now()->subMinute()]);
+
+        $page = $this->asMember('GET', '/api/portal/announcements')->assertOk();
+        $unreadOnPage = count(array_filter($page->json('data'), fn (array $row) => $row['read_at'] === null));
+        $this->assertSame(3, $unreadOnPage);
+        $this->assertSame($unreadOnPage, $page->json('meta.unread'));
+        $this->asMember('GET', '/api/portal/notifications/unread-count')->assertOk()->assertJsonPath('data.announcements', $unreadOnPage);
+
+        $this->asMember('POST', "/api/portal/announcements/{$first->id}/read")->assertOk();
+        $after = $this->asMember('GET', '/api/portal/announcements')->json('meta.unread');
+        $this->assertSame(2, $after);
+        $this->asMember('GET', '/api/portal/notifications/unread-count')->assertJsonPath('data.announcements', $after);
+
+        $this->enablePortal(['features' => ['announcements' => false]]);
+        $this->asMember('GET', '/api/portal/announcements')->assertForbidden();
+        $this->asMember('GET', '/api/portal/notifications/unread-count')->assertOk()->assertJsonPath('data.announcements', 0);
+    }
 }

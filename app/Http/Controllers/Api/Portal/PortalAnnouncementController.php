@@ -34,7 +34,7 @@ class PortalAnnouncementController extends Controller
     public function index(): JsonResponse
     {
         $portalUser = $this->scope->portalUser();
-        $page = $this->feed->visibleTo($portalUser->borrower)
+        $page = $this->feed->visibleTo($portalUser)
             ->orderByDesc('pinned')
             ->orderByRaw('COALESCE(publish_at, created_at) DESC')
             ->orderByDesc('id')

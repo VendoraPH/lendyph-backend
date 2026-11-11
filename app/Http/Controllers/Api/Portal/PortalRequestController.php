@@ -128,10 +128,10 @@ class PortalRequestController extends Controller
                 'minimum_opening_balance' => (string) $p->minimum_opening_balance,
             ])->all(),
             'profile_fields' => $types[PortalRequest::TYPE_PROFILE_UPDATE]
-                ? collect(ProfileFields::FIELDS)->map(fn (string $label, string $field): array => [
+                ? collect(ProfileFields::labels())->map(fn (string $label, string $field): array => [
                     'field' => $field,
                     'label' => $label,
-                    'current' => $fields->masked($field, $member->{$field}),
+                    'current' => $fields->shown($field, $member->{$field}),
                 ])->values()->all()
                 : [],
         ]]);
