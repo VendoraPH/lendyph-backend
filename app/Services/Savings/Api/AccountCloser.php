@@ -12,6 +12,7 @@ use App\Services\Accounting\PeriodGuard;
 use App\Services\AuditLogService;
 use App\Services\Savings\AccruedInterest;
 use App\Services\Savings\ApprovalGate;
+use App\Services\Savings\AvailableBalance;
 use App\Services\Savings\SavingsLedger;
 use App\Services\Savings\SavingsLocks;
 use App\Services\Savings\SavingsMath;
@@ -47,6 +48,7 @@ class AccountCloser
         private readonly PeriodGuard $periods,
         private readonly Teller $teller,
         private readonly LargeTransactionAlert $alert,
+        private readonly AvailableBalance $available,
     ) {}
 
     /**
@@ -211,9 +213,10 @@ class AccountCloser
             $blockers[] = 'The account is frozen. Unfreeze it before closing it.';
         }
 
-        $holding = SavingsHold::query()->where('account_id', $account->id)->holding(now()->toDateString());
-        $requested = SavingsMath::centavos((clone $holding)->where('type', SavingsHold::TYPE_MEMBER_REQUEST)->sum('amount'));
-        $held = SavingsMath::centavos((clone $holding)->where('type', '!=', SavingsHold::TYPE_MEMBER_REQUEST)->sum('amount'));
+        // The held / member-request split is AvailableBalance's own.
+        $split = $this->available->forManyWithRequests(collect([$account]), [SavingsHold::TYPE_MEMBER_REQUEST])[$account->id];
+        $held = $split['held'];
+        $requested = $split['pending_withdrawal'] - $split['pending'];
 
         if ($held > 0) {
             $blockers[] = 'It has an active hold of '.Refuse::peso($held).'. Release the hold first.';
