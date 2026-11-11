@@ -2,6 +2,7 @@
 
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
 /**
@@ -61,8 +62,31 @@ return new class extends Migration
         }
     }
 
+    /**
+     * Back to one reconciliation per account and period. Refused, before
+     * anything changes, while a period has been reconciled more than once
+     * (per branch, or per branch and for all branches): the old index can't
+     * hold both, and dropping one would lose its statement and matches.
+     */
     public function down(): void
     {
+        $twice = DB::table('accounting_reconciliations as r')
+            ->join('accounting_accounts as a', 'a.id', '=', 'r.accounting_account_id')
+            ->groupBy('r.accounting_account_id', 'a.code', 'a.name', 'r.period')
+            ->havingRaw('count(*) > 1')
+            ->orderBy('a.code')
+            ->orderBy('r.period')
+            ->get(['a.code', 'a.name', 'r.period']);
+
+        if ($twice->isNotEmpty()) {
+            throw new RuntimeException(
+                'Cannot roll back the per-branch reconciliation change: '
+                .$twice->map(fn (object $row): string => "{$row->code} {$row->name} has more than one reconciliation for {$row->period}")->implode('; ')
+                .'. The old rule allows one per account and period, so the extra ones would have to go, with their '
+                .'statement lines and matches. Nothing was changed.',
+            );
+        }
+
         if (! Schema::hasIndex('accounting_reconciliations', self::OLD_UNIQUE)) {
             Schema::table('accounting_reconciliations', function (Blueprint $table) {
                 $table->unique(['accounting_account_id', 'period'], self::OLD_UNIQUE);

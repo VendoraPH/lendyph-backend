@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Accounting\MatchReconciliationRequest;
 use App\Http\Requests\Accounting\StoreReconciliationRequest;
+use App\Models\AccountingAccount;
 use App\Models\AccountingReconciliation;
 use App\Models\AccountingReconciliationLine;
 use App\Services\Accounting\ReconciliationActions;
@@ -48,6 +49,9 @@ class AccountingReconciliationController extends Controller
 
     public const CLAIMED_MEANWHILE = 'That ledger entry was just matched to another statement line. Reload and try again.';
 
+    /** The UNIQUE index on (account, `branch_scope`, period): one per account, branch and period. */
+    private const PERIOD_INDEX = 'acct_recon_account_branch_period_unique';
+
     /** The UNIQUE index on accounting_reconciliation_lines.matched_journal_line_id. */
     private const MATCH_INDEX = 'acct_recon_lines_journal_line_unique';
 
@@ -63,11 +67,12 @@ class AccountingReconciliationController extends Controller
             new OA\Parameter(name: 'page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 1)),
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15, maximum: 100)),
             new OA\Parameter(name: 'account_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
-            new OA\Parameter(name: 'branch_id', in: 'query', required: false, description: 'Only the reconciliations of one of the caller\'s branches (another answers 403).', schema: new OA\Schema(type: 'integer')),
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, description: 'Only the reconciliations of one of the caller\'s branches (another answers 403), or `all` for the "All branches" ones (branches:view_all only, else 403). Anything else answers 422.', schema: new OA\Schema(type: 'string')),
         ],
         responses: [
             new OA\Response(response: 200, description: 'Paginated reconciliations of the caller\'s branches (every one, "all branches" included, for branches:view_all)'),
-            new OA\Response(response: 403, description: 'Missing accounting:reconcile, or a branch_id outside the caller\'s branches'),
+            new OA\Response(response: 403, description: 'Missing accounting:reconcile, a branch_id outside the caller\'s branches, or `all` without branches:view_all'),
+            new OA\Response(response: 422, description: 'A branch_id that is neither a branch id nor `all`'),
         ],
     )]
     public function index(): JsonResponse
@@ -75,7 +80,6 @@ class AccountingReconciliationController extends Controller
         $this->authorize('accounting:reconcile');
 
         $user = request()->user();
-        app(BranchAccess::class)->authorizeBranchFilter($user, request()->query('branch_id'));
 
         $filters = request()->validate([
             'page' => ['nullable', 'integer', 'min:1'],
@@ -83,8 +87,21 @@ class AccountingReconciliationController extends Controller
             // `$perPage ?: $model->getPerPage()` and silently becomes 15.
             'per_page' => ['nullable', 'integer', 'min:1'],
             'account_id' => ['nullable', 'integer', 'exists:accounting_accounts,id'],
-            'branch_id' => ['nullable', 'integer', 'min:1'],
+            // A branch id, or `all` for the "All branches" reconciliations.
+            'branch_id' => ['nullable', 'regex:/^(all|[1-9][0-9]*)$/'],
+        ], [
+            'branch_id.regex' => 'Filter by a branch, or by "all" for the reconciliations of all branches.',
         ]);
+
+        $allBranches = ($filters['branch_id'] ?? null) === 'all';
+
+        // 403 rather than an empty page, as on every branch filter: only
+        // branches:view_all sees "All branches" reconciliations.
+        if ($allBranches) {
+            abort_unless($user->can(BranchAccess::VIEW_ALL), 403, 'You do not have access to the reconciliations of all branches.');
+        } else {
+            app(BranchAccess::class)->authorizeBranchFilter($user, $filters['branch_id'] ?? null);
+        }
 
         $perPage = min((int) ($filters['per_page'] ?? 15), 100);
 
@@ -94,8 +111,9 @@ class AccountingReconciliationController extends Controller
                 isset($filters['account_id']),
                 fn ($q) => $q->where('accounting_account_id', $filters['account_id']),
             )
+            ->when($allBranches, fn ($q) => $q->whereNull('branch_id'))
             ->when(
-                isset($filters['branch_id']),
+                isset($filters['branch_id']) && ! $allBranches,
                 fn ($q) => $q->where('branch_id', (int) $filters['branch_id']),
             )
             // A TOTAL order. The screen drains every page and a partial order
@@ -202,16 +220,52 @@ class AccountingReconciliationController extends Controller
             // The unique index refuses this anyway; catching it here turns what
             // would surface as a 500 into something the screen can render, and
             // says which of the two fields to change.
-            throw ValidationException::withMessages([
-                'period' => [
-                    "{$account->code} {$account->name} already has a reconciliation for {$existing}. "
-                    .($branchId === null ? 'It covers all branches. ' : 'It covers this branch. ')
-                    .'Open that one rather than starting a second, so its matches stay in one place.',
-                ],
-            ]);
+            throw $this->alreadyReconciled($account, $existing, $branchId);
         }
 
-        $reconciliation = DB::transaction(function () use ($data, $account, $branchId, $period, $request): AccountingReconciliation {
+        try {
+            $reconciliation = $this->createWithLines($data, $account, $branchId, $period, $request);
+        } catch (UniqueConstraintViolationException $e) {
+            // Two starts at once: both passed the check above, and the index
+            // refused the second. The same answer as a second start.
+            if ($e->index !== self::PERIOD_INDEX) {
+                throw $e;
+            }
+
+            throw $this->alreadyReconciled($account, $period, $branchId);
+        }
+
+        return response()->json(
+            ['data' => $this->matcher->present($reconciliation->refresh())],
+            201,
+        );
+    }
+
+    /** The 422 on `period` for a second reconciliation of one account, branch and period. */
+    private function alreadyReconciled(AccountingAccount $account, string $period, ?int $branchId): ValidationException
+    {
+        return ValidationException::withMessages([
+            'period' => [
+                "{$account->code} {$account->name} already has a reconciliation for {$period}. "
+                .($branchId === null ? 'It covers all branches. ' : 'It covers this branch. ')
+                .'Open that one rather than starting a second, so its matches stay in one place.',
+            ],
+        ]);
+    }
+
+    /**
+     * The reconciliation and its statement lines, in one transaction.
+     *
+     * @param  array<string, mixed>  $data
+     */
+    private function createWithLines(
+        array $data,
+        AccountingAccount $account,
+        ?int $branchId,
+        string $period,
+        StoreReconciliationRequest $request,
+    ): AccountingReconciliation {
+        return DB::transaction(function () use ($data, $account, $branchId, $period, $request): AccountingReconciliation {
             $reconciliation = AccountingReconciliation::create([
                 'accounting_account_id' => $account->id,
                 'branch_id' => $branchId,
@@ -249,11 +303,6 @@ class AccountingReconciliationController extends Controller
 
             return $reconciliation;
         });
-
-        return response()->json(
-            ['data' => $this->matcher->present($reconciliation->refresh())],
-            201,
-        );
     }
 
     #[OA\Get(
@@ -437,8 +486,9 @@ class AccountingReconciliationController extends Controller
      *
      * Derived rather than typed so the common case cannot be spelled two
      * different ways for the same month — which, given the unique index on
-     * (account, period), is the difference between "you already reconciled
-     * this" and two cards for September sitting side by side.
+     * (account, `branch_scope`, period), is the difference between "you
+     * already reconciled this" and two cards for September sitting side by
+     * side.
      */
     private function periodLabel(string $start, string $end): string
     {

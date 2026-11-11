@@ -10,6 +10,8 @@ use App\Models\Branch;
 use App\Services\BranchAccess;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
+use RuntimeException;
 use Tests\TestCase;
 use Tests\Traits\PostsJournals;
 use Tests\Traits\SetupLendyPH;
@@ -303,5 +305,99 @@ class BranchReconciliationTest extends TestCase
         $answer->assertJsonPath('data.book_balance', 236200)
             ->assertJsonPath('data.difference', 0)
             ->assertJsonPath('data.is_reconciled', true);
+    }
+
+    public function test_two_starts_at_once_answer_the_same_422_as_a_second_start(): void
+    {
+        // The second request passes the duplicate check before the first
+        // commits; the unique index then refuses it, and it must read the same.
+        AccountingReconciliation::creating(function (AccountingReconciliation $reconciliation): void {
+            if (DB::table('accounting_reconciliations')->where('accounting_account_id', $reconciliation->accounting_account_id)->exists()) {
+                return;
+            }
+
+            DB::table('accounting_reconciliations')->insert([
+                'accounting_account_id' => $reconciliation->accounting_account_id,
+                'branch_id' => $reconciliation->branch_id,
+                'period' => $reconciliation->period,
+                'start_date' => '2026-09-01',
+                'end_date' => '2026-09-30',
+                'statement_balance' => 0,
+            ]);
+        });
+
+        $this->postJson('/api/accounting/reconciliations', $this->payload($this->branch->id))
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('period');
+
+        // The rival row was written inside this request's transaction here,
+        // so it rolled back with it; nothing of this request was kept.
+        $this->assertSame(0, AccountingReconciliation::query()->count());
+    }
+
+    public function test_the_migration_will_not_roll_back_over_a_period_reconciled_twice(): void
+    {
+        $this->reconciliationFor($this->branch->id);
+        $this->reconciliationFor(null);
+
+        $migration = require database_path('migrations/2026_11_11_400000_add_branch_id_to_accounting_reconciliations.php');
+
+        try {
+            $migration->down();
+            $this->fail('down() went ahead over a period reconciled twice.');
+        } catch (RuntimeException $e) {
+            $this->assertStringContainsString('1040 Bank Accounts has more than one reconciliation for September 2026', $e->getMessage());
+        }
+
+        $this->assertTrue(Schema::hasColumn('accounting_reconciliations', 'branch_id'));
+    }
+
+    public function test_the_list_filter_validates_its_branch_and_takes_all_for_all_branches(): void
+    {
+        $own = $this->reconciliationFor($this->branch->id);
+        $all = $this->reconciliationFor(null);
+
+        $this->getJson('/api/accounting/reconciliations?branch_id=main')->assertUnprocessable()->assertJsonValidationErrors('branch_id');
+        $this->assertSame(
+            [$all->id],
+            array_column($this->getJson('/api/accounting/reconciliations?branch_id=all')->assertOk()->json('data'), 'id'),
+        );
+        $this->assertSame(
+            [$own->id],
+            array_column($this->getJson("/api/accounting/reconciliations?branch_id={$this->branch->id}")->assertOk()->json('data'), 'id'),
+        );
+
+        $this->actAsUserWith(['accounting:reconcile']);
+        $this->getJson('/api/accounting/reconciliations?branch_id=all')->assertForbidden();
+        $this->getJson('/api/accounting/reconciliations?branch_id=main')->assertUnprocessable();
+    }
+
+    public function test_a_line_matched_on_one_side_is_claimed_for_the_other(): void
+    {
+        $deposit = $this->deposit(40000, $this->branch->id);
+        $statement = [['date' => '2026-09-10', 'description' => 'Deposit', 'amount' => 40000]];
+        $branchSide = $this->reconciliationFor($this->branch->id, $statement);
+        $allSide = $this->reconciliationFor(null, $statement);
+        $line = $this->bankLineOf($deposit);
+
+        foreach ([[$branchSide, $allSide], [$allSide, $branchSide]] as [$first, $second]) {
+            $this->postJson("/api/accounting/reconciliations/{$first->id}/match", [
+                'matches' => [['line_id' => $this->statementLine($first)->id, 'journal_line_id' => $line]],
+            ])->assertOk();
+
+            $row = collect($this->getJson("/api/accounting/reconciliations/{$second->id}")->assertOk()->json('data.lines'))
+                ->firstWhere('journal_line_id', $line);
+            $this->assertNotNull($row, 'The claimed line left the other worksheet.');
+            $this->assertNotSame('possible', $row['match']);
+            $this->assertFalse($row['matchable']);
+
+            $this->postJson("/api/accounting/reconciliations/{$second->id}/match", [
+                'matches' => [['line_id' => $this->statementLine($second)->id, 'journal_line_id' => $line]],
+            ])->assertUnprocessable()->assertJsonValidationErrors('matches');
+
+            $this->postJson("/api/accounting/reconciliations/{$first->id}/match", [
+                'matches' => [['line_id' => $this->statementLine($first)->id, 'journal_line_id' => null]],
+            ])->assertOk();
+        }
     }
 }

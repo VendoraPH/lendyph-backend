@@ -46,6 +46,9 @@ class GCashTransactionResource extends JsonResource
                 'borrower_code' => $this->borrower->borrower_code,
             ]),
             'gcash_non_member_id' => $this->gcash_non_member_id,
+            // The branch a walk-in transaction was done in; null for a
+            // member's and for head office.
+            'branch_id' => $this->branch_id,
             'non_member' => $this->whenLoaded('nonMember', fn () => [
                 'id' => $this->nonMember->id,
                 'full_name' => $this->nonMember->full_name,

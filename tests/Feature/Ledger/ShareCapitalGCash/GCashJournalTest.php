@@ -21,7 +21,8 @@ use Tests\Traits\SetupLendyPH;
  *   nothing.
  * - Cash Out, at creation, dated `transaction_date`: Dr 1020 A / Cr 1010 A−F
  *   / Cr 4090 F.
- * - The branch is the member's; a walk-in's journal has none.
+ * - The branch is the member's; a walk-in's is the branch it was recorded in,
+ *   none for head office (WalkInGCashBranchTest).
  */
 class GCashJournalTest extends TestCase
 {
