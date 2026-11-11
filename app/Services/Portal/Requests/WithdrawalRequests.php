@@ -162,7 +162,7 @@ final class WithdrawalRequests
     {
         $account = $this->locks->account((int) $request->savings_account_id);
         $locked = RequestDesk::lockOpen($request->id, [PortalRequest::STATUS_SUBMITTED, PortalRequest::STATUS_UNDER_REVIEW, PortalRequest::STATUS_NEED_INFO]);
-        $this->assertStillAMember($locked);
+        self::assertStillAMember($locked);
         $hold = $this->activeHold($locked);
 
         $this->holds->releaseForRequest($hold, "Paid out on request {$locked->reference}", $staff);
@@ -217,8 +217,10 @@ final class WithdrawalRequests
      * No payout once the member's portal access or membership has ended,
      * even where a bulk update skipped the events that cancel the request:
      * the portal account and the member must both still be active (409).
+     * Read from the rows themselves, never a model event, at staff approval
+     * and again at the savings second check (WithdrawalExecutor).
      */
-    private function assertStillAMember(PortalRequest $request): void
+    public static function assertStillAMember(PortalRequest $request): void
     {
         $portalUser = PortalUser::query()->find($request->portal_user_id, ['id', 'status']);
         $memberStatus = Borrower::query()->whereKey($request->borrower_id)->value('status');

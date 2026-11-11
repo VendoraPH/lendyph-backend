@@ -95,6 +95,33 @@ class RequestReviewFixesTest extends TestCase
         $this->decide($first, ['decision' => 'reject', 'message' => 'Membership inactive.'])->assertOk();
     }
 
+    public function test_the_second_check_pays_nothing_once_a_bulk_update_ended_the_membership(): void
+    {
+        $account = $this->account();
+        $this->fund($account, 3_000_000);
+        $request = $this->submitted($this->submit($this->withdrawalBody($account, '20000.00'))->assertCreated());
+        $this->decide($request, ['decision' => 'approve', 'payout' => $this->payout()])->assertStatus(202);
+        $approvalId = $request->fresh()->savings_approval_id;
+
+        // A query-builder update fires no model events, so nothing cancelled the approval.
+        DB::table('borrowers')->where('id', $this->member->id)->update(['status' => 'deceased']);
+
+        $this->freshRequest();
+        $this->actingAs($this->checker())->postJson("/api/savings/approvals/{$approvalId}/approve")
+            ->assertStatus(409)
+            ->assertJsonPath('message', 'This member\'s portal access or membership isn\'t active, so the request can\'t be paid. Reject it instead.');
+
+        DB::table('borrowers')->where('id', $this->member->id)->update(['status' => 'active']);
+        DB::table('portal_users')->where('id', $this->portalUser->id)->update(['status' => PortalUser::STATUS_DISABLED]);
+        $this->freshRequest();
+        $this->actingAs($this->checker())->postJson("/api/savings/approvals/{$approvalId}/approve")->assertStatus(409);
+
+        $this->assertSame('pending', SavingsApproval::query()->findOrFail($approvalId)->status);
+        $this->assertSame(0, SavingsTransaction::query()->where('type', 'withdrawal')->count());
+        $this->assertSame('30000.00', $this->balanceOf($account));
+        $this->assertSame(PortalRequest::STATUS_APPROVED, $request->fresh()->status);
+    }
+
     // L1: a member's request hold blocking a close says what to do.
 
     public function test_a_close_blocked_by_a_member_request_hold_says_decide_the_request(): void
