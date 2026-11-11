@@ -23,6 +23,10 @@ use Carbon\CarbonImmutable;
  *   its current snapshot only (SnapshotReader): its values, frozen profile
  *   and template. A later member or Branding change never shows.
  *
+ * An export of a template still marked unverified (the definition the
+ * snapshot froze, else the report's template) carries the "to verify" note,
+ * drafts and finalized reports alike.
+ *
  * The document stage is always the current one (ReportStages::current()),
  * never a frozen one: financial statements read "Draft Financial
  * Statements" until they are audited, even after finalize, and a sworn
@@ -115,6 +119,7 @@ final class ExportContentBuilder
             types: $this->types((array) ($definition['sections'] ?? [])),
             profile: $profile,
             excel: (array) ($definition['export']['excel'] ?? []),
+            unverified: ($definition['meta']['verified'] ?? false) !== true,
         );
     }
 

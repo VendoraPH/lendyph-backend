@@ -11,7 +11,7 @@ use Tests\Traits\SetupLendyPH;
 
 /**
  * A mediation document stays out of the Audit Trail (C1 re-review, M1 and
- * L4): the row's target reads "Cda document #N", never the live title, for
+ * L4): the row's target reads "CDA document #N", never the live title, for
  * the document and its versions, to a reader of the trail who can't see
  * mediation; and a document moved into or out of mediation keeps its titles
  * out of the rows of that move. An ordinary document keeps its title.
@@ -58,7 +58,7 @@ class CdaMediationAuditLabelTest extends TestCase
         }
 
         $labels = collect($this->trailRows($mediation))->pluck('target.label')->unique()->sort()->values()->all();
-        $this->assertContains("Cda document #{$mediation->id}", $labels);
+        $this->assertContains("CDA document #{$mediation->id}", $labels);
         $this->assertCount(2, $labels, 'The document and its version each read by type and id.');
 
         $this->assertSame(['Signed CAPR 2026'], collect($this->trailRows($normal))->pluck('target.label')->unique()->values()->all());

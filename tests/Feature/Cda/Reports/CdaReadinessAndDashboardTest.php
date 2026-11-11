@@ -17,8 +17,9 @@ use Tests\Traits\SetupLendyPH;
  * breakdown by section and component. The nightly `cda:revalidate` refreshes
  * drafts only, with one audit row per report whose values changed. The
  * dashboard (§3): the period's "Lendy CDA Readiness", counts, the next
- * deadline, a row per report, and the issues, without the issues of reports
- * the caller can't open. The calendar: one row per instance.
+ * deadline, a row per report, and the issues, leaving out the reports the
+ * caller can't open (CdaBrowserCheckFixesTest covers that in full). The
+ * calendar: one row per instance.
  */
 class CdaReadinessAndDashboardTest extends TestCase
 {
@@ -68,12 +69,15 @@ class CdaReadinessAndDashboardTest extends TestCase
         $report = $this->caprWithTestTemplate();
         $other = CdaReport::query()->where('period_id', $report->period_id)->where('report_type', 'social_audit')->sole();
         $other->forceFill(['status' => CdaReport::STATUS_FINALIZED])->save();
+        $otherValues = fn () => CdaReportValue::query()->where('report_id', $other->id)->orderBy('id')->get(['field_key', 'value', 'refreshed_at'])->toArray();
+        $untouched = $otherValues();
+        Carbon::setTestNow(now()->addMinutes(5));
 
         auth()->forgetUser();
         $this->artisan('cda:revalidate')->assertSuccessful();
         $audits = fn () => AuditLog::query()->where('action', 'cda_report_refreshed')->where('auditable_id', $report->id)->count();
         $this->assertSame(1, $audits(), 'Only the first refresh changed values.');
-        $this->assertSame(0, CdaReportValue::query()->where('report_id', $other->id)->count());
+        $this->assertSame($untouched, $otherValues(), 'The finalized report is left alone.');
 
         $this->member();
         $this->artisan('cda:revalidate')->assertSuccessful();
@@ -91,35 +95,34 @@ class CdaReadinessAndDashboardTest extends TestCase
         CdaReport::query()->where('period_id', $report->period_id)->where('id', '!=', $report->id)->get()
             ->each(fn (CdaReport $r) => $engine->refresh($r));
 
-        $viewer = $this->userWith(['branches:view_all', CdaAccess::VIEW]);
+        $viewer = $this->userWith(['branches:view_all', CdaAccess::VIEW, CdaAccess::VIEW_MEDIATION, CdaAccess::VIEW_TAX]);
         $data = $this->actingAs($viewer)->getJson('/api/cda/periods/2026/dashboard')->assertOk()->json('data');
 
         $this->assertSame('Lendy CDA Readiness', $data['readiness_label']);
         $this->assertSame(2026, $data['period']['year']);
-        $this->assertCount(11, $data['reports']);
-        $applicable = CdaReport::query()->where('period_id', $report->period_id)->where('applicable', true)->get();
+        $this->assertCount(9, $data['reports'], 'Without cda:view_audit, the financial statements and performance audit are left out.');
+        $applicable = CdaReport::query()->where('period_id', $report->period_id)->where('applicable', true)
+            ->whereNotIn('report_type', ['financial_statements', 'performance_audit'])->get();
         $this->assertSame((int) round($applicable->avg('readiness')), $data['readiness']);
-        $this->assertSame(9, $data['counts']['applicable']);
+        $this->assertSame(7, $data['counts']['applicable']);
 
         $capr = collect($data['reports'])->firstWhere('report_type', 'capr');
         $this->assertSame(['id', 'type', 'report_type', 'part', 'title', 'title_part', 'status', 'display_status', 'sub_status', 'readiness', 'critical', 'warnings', 'applicable', 'restricted', 'effective_deadline', 'days_remaining', 'updated_at'], array_keys($capr));
         $this->assertSame('validation_failed', $capr['display_status']);
         $this->assertSame('2027-04-30', $capr['effective_deadline']);
 
-        $mediation = collect($data['reports'])->where('report_type', 'mediation');
-        $this->assertTrue($mediation->every(fn ($row) => $row['restricted'] === true));
+        $this->assertTrue(collect($data['reports'])->every(fn ($row) => $row['restricted'] === false));
         $issueTypes = collect($data['issues'])->pluck('report_type')->unique();
         $this->assertTrue($issueTypes->contains('capr'));
-        $this->assertFalse($issueTypes->contains('mediation'));
         $this->assertFalse($issueTypes->contains('financial_statements'));
         $this->assertSame('mediation', $data['next_deadline']['report_type']);
         $this->assertSame('2027-01-30', $data['next_deadline']['effective_deadline']);
 
-        $auditor = $this->userWith(['branches:view_all', CdaAccess::VIEW, CdaAccess::VIEW_AUDIT]);
+        $auditor = $this->userWith(['branches:view_all', CdaAccess::VIEW, CdaAccess::VIEW_AUDIT, CdaAccess::VIEW_MEDIATION, CdaAccess::VIEW_TAX]);
         $issueTypes = collect($this->actingAs($auditor)->getJson('/api/cda/periods/2026/dashboard')->json('data.issues'))->pluck('report_type')->unique();
         $this->assertTrue($issueTypes->contains('financial_statements'));
 
-        $calendar = $this->actingAs($viewer)->getJson('/api/cda/periods/2026/calendar')->assertOk()->json('data');
+        $calendar = $this->getJson('/api/cda/periods/2026/calendar')->assertOk()->json('data');
         $this->assertCount(11, $calendar);
         $this->assertSame(['2026-07-30', '2027-01-30'], collect($calendar)->where('report_type', 'mediation')->pluck('effective_deadline')->sort()->values()->all());
         $this->assertSame(collect($calendar)->pluck('effective_deadline')->sort()->values()->all(), collect($calendar)->pluck('effective_deadline')->all());

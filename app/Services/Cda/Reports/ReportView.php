@@ -20,7 +20,9 @@ use App\Services\Cda\Sources\SourceCatalog;
  * can take now.
  *
  * A finalized or later report reads entirely from its snapshot, so a later
- * member, Branding or profile change never shows on it.
+ * member, Branding or profile change never shows on it. Only the documents
+ * needed at filing are checked live (ReportEngine::issuesNow()), so a
+ * missing-document Critical clears as soon as the file is uploaded.
  */
 final class ReportView
 {
@@ -39,7 +41,7 @@ final class ReportView
         $snapshot = ReportWorkflow::snapshotOf($report);
         $payload = $report->isLocked() && $snapshot !== null ? json_decode($snapshot->payload, true) : null;
         $rows = $payload === null ? $this->rows($report) : $payload['values'];
-        $issues = $payload === null ? ($report->issues ?? []) : $payload['issues'];
+        $issues = $this->engine->issuesNow($report, $payload['issues'] ?? null);
         $editable = $report->status === CdaReport::STATUS_DRAFT && $report->applicable;
 
         $sections = [];

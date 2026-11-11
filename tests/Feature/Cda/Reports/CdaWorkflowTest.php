@@ -264,7 +264,7 @@ class CdaWorkflowTest extends TestCase
 
         $this->act($report, 'finalize', ['confirm_warnings' => true])->assertOk();
         $this->act($report, 'mark_submitted', ['submission' => ['method' => 'cais', 'submitted_on' => '2027-01-14']])->assertStatus(422)
-            ->assertJsonPath('message', 'This report has 1 critical issue to fix first.');
+            ->assertJsonPath('message', 'Upload the Cooperative Annual Progress Report (CAPR) (final copy) before recording the filing.');
 
         $document = CdaDocument::factory()->create(['period_id' => $report->period_id, 'category' => 'capr', 'report_id' => $report->id]);
         CdaDocumentVersion::factory()->create(['cda_document_id' => $document->id, 'final_key' => (string) $document->id]);

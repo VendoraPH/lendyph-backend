@@ -16,12 +16,17 @@ use Illuminate\Support\Collection;
  * The CDA dashboard and calendar (design §3, §10), read from the stored
  * readiness and issues (a GET never refreshes anything).
  *
+ * Reports the caller can't open (mediation, audit or tax without its view)
+ * are left out entirely: no row, no counts, no readiness, no next deadline
+ * and no issues, so the header never counts what the caller can't see.
+ *
  * - Readiness: "Lendy CDA Readiness", the mean of the applicable reports.
  * - Counts by display status, applicable reports, critical and warnings.
  * - The next deadline: the nearest one still to come among the reports not
  *   yet filed.
- * - A row per report, and every issue, except the issues of reports the
- *   caller can't open (mediation, audit or tax without its view).
+ * - A row per report, and every issue. A locked report's documents needed
+ *   at filing are checked live (ReportEngine::issuesNow()); its other
+ *   issues stay as finalized.
  * - A finalized report whose accounting year was reopened afterwards raises
  *   a Warning.
  *
@@ -32,25 +37,29 @@ final class ReportDashboard
     /** Filed or beyond: no longer counts towards a deadline. */
     private const FILED = [CdaReport::STATUS_SUBMITTED, CdaReport::STATUS_ACCEPTED];
 
-    public function __construct(private readonly CdaAccess $access) {}
+    public function __construct(
+        private readonly CdaAccess $access,
+        private readonly ReportEngine $engine,
+    ) {}
 
     /** @return array<string, mixed> */
     public function dashboard(CdaReportingPeriod $period, User $viewer): array
     {
-        $reports = $this->reports($period);
+        $reports = $this->reports($period, $viewer);
+        $current = $reports->mapWithKeys(fn (CdaReport $report) => [$report->id => $this->engine->issuesNow($report)]);
         $applicable = $reports->where('applicable', true);
         $yearClosed = AccountingSource::yearClosed((int) $period->year);
         $rows = [];
         $issues = [];
 
         foreach ($reports as $report) {
-            $rows[] = $this->row($report, $period, $viewer);
+            $rows[] = $this->row($report, $period, $viewer, $current[$report->id]);
 
-            if (! $this->access->canSeeType($viewer, $report->report_type) || ! $report->applicable) {
+            if (! $report->applicable) {
                 continue;
             }
 
-            foreach ($report->issues ?? [] as $issue) {
+            foreach ($current[$report->id] as $issue) {
                 $issues[] = [...$issue, 'report_id' => (int) $report->id, 'report_type' => $report->report_type, 'part' => $report->part];
             }
 
@@ -79,8 +88,8 @@ final class ReportDashboard
                 'total' => $reports->count(),
                 'applicable' => $applicable->count(),
                 'by_status' => collect($rows)->countBy('display_status')->all(),
-                'critical' => (int) $applicable->sum('critical_count'),
-                'warnings' => (int) $applicable->sum('warning_count'),
+                'critical' => $applicable->sum(fn (CdaReport $report) => self::count($current[$report->id], 'critical')),
+                'warnings' => $applicable->sum(fn (CdaReport $report) => self::count($current[$report->id], 'warning')),
                 'filed' => $applicable->whereIn('status', self::FILED)->count(),
             ],
             'next_deadline' => $upcoming === null ? null : [
@@ -100,7 +109,7 @@ final class ReportDashboard
     /** @return list<array<string, mixed>> */
     public function calendar(CdaReportingPeriod $period, User $viewer): array
     {
-        return $this->reports($period)
+        return $this->reports($period, $viewer)
             ->map(fn (CdaReport $report) => [
                 ...CdaPresenter::reportRow($report, $period, $viewer),
                 'display_status' => ReportView::displayStatus($report),
@@ -113,7 +122,8 @@ final class ReportDashboard
     }
 
     /** @return array<string, mixed> */
-    private function row(CdaReport $report, CdaReportingPeriod $period, User $viewer): array
+    /** @param  list<array<string, mixed>>  $issues  the report's issues as they stand now */
+    private function row(CdaReport $report, CdaReportingPeriod $period, User $viewer, array $issues): array
     {
         $effective = Deadlines::effective($report, $period);
 
@@ -128,8 +138,8 @@ final class ReportDashboard
             'display_status' => ReportView::displayStatus($report),
             'sub_status' => $report->sub_status,
             'readiness' => (int) $report->readiness,
-            'critical' => (int) $report->critical_count,
-            'warnings' => (int) $report->warning_count,
+            'critical' => self::count($issues, 'critical'),
+            'warnings' => self::count($issues, 'warning'),
             'applicable' => (bool) $report->applicable,
             'restricted' => ! $this->access->canSeeType($viewer, $report->report_type),
             'effective_deadline' => $effective,
@@ -152,12 +162,23 @@ final class ReportDashboard
         return collect($values)->contains(fn ($row) => ($row['source_value']['meta']['year_closed'] ?? null) === true);
     }
 
-    /** @return Collection<int, CdaReport> */
-    private function reports(CdaReportingPeriod $period): Collection
+    /** @param  list<array<string, mixed>>  $issues */
+    private static function count(array $issues, string $severity): int
+    {
+        return count(array_filter($issues, fn (array $issue) => $issue['severity'] === $severity));
+    }
+
+    /**
+     * The period's reports the viewer may open, in type and part order.
+     *
+     * @return Collection<int, CdaReport>
+     */
+    private function reports(CdaReportingPeriod $period, User $viewer): Collection
     {
         $order = array_flip(ReportTypes::ALL);
 
-        return $period->reports()->with('template')->get()
+        return $period->reports()->with(['template', 'period'])->get()
+            ->filter(fn (CdaReport $report) => $this->access->canSeeType($viewer, $report->report_type))
             ->sortBy(fn (CdaReport $report) => sprintf('%02d-%d', $order[$report->report_type] ?? 99, array_search($report->part, ReportTypes::PARTS, true)))
             ->values();
     }

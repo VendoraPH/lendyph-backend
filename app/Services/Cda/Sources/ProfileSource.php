@@ -3,11 +3,14 @@
 namespace App\Services\Cda\Sources;
 
 use App\Models\CdaRegulatoryProfile;
+use App\Services\Cda\ProfileWords;
 
 /**
  * A field of the regulatory profile (CDA design §2), `profile.field {name}`:
  * CDA's own registration, type, TIN, CTE and contact fields. Dates read
- * YYYY-MM-DD. Current values; a finalized report freezes them.
+ * YYYY-MM-DD; a chosen value (category, asset size, CTE status) reads in
+ * words (ProfileWords), with its stored key in `meta.key`. Current values;
+ * a finalized report freezes them.
  */
 final class ProfileSource implements CdaSource
 {
@@ -35,6 +38,8 @@ final class ProfileSource implements CdaSource
             return new SourceResult($value?->toDateString(), self::LABEL, 'date');
         }
 
-        return new SourceResult($value, self::LABEL, $name === 'satellite_offices' ? 'count' : 'text');
+        $words = ProfileWords::of($name, $value);
+
+        return new SourceResult($words, self::LABEL, $name === 'satellite_offices' ? 'count' : 'text', meta: $words === $value ? [] : ['key' => $value]);
     }
 }

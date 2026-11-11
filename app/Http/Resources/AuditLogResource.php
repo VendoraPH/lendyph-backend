@@ -518,7 +518,8 @@ class AuditLogResource extends JsonResource
      * A class name in words, the rule of the frontend's `auditTargetType()`:
      * `Borrower…` reads "Member…" and `CoMaker` reads "Co-maker", CamelCase is
      * split into words, and only the first word keeps its capitals ("GCash"
-     * keeps them anywhere). The CSV export reads the same.
+     * keeps them anywhere). The CDA models read "CDA document", "CDA officer".
+     * The CSV export reads the same.
      */
     public static function typeInWords(string $basename): string
     {
@@ -529,6 +530,10 @@ class AuditLogResource extends JsonResource
             if ($i > 0 && $word !== 'GCash') {
                 $words[$i] = strtolower($word);
             }
+        }
+
+        if ($words[0] === 'Cda' && count($words) > 1) {
+            $words[0] = 'CDA';
         }
 
         return implode(' ', $words);

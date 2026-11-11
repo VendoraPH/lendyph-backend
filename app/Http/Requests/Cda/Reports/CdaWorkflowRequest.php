@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests\Cda\Reports;
 
+use App\Http\Requests\Cda\CdaAttributeWords;
 use App\Models\CdaReport;
 use App\Models\CdaSubmission;
 use App\Services\Cda\CdaAccess;
@@ -19,6 +20,8 @@ use Illuminate\Validation\Rule;
  */
 class CdaWorkflowRequest extends FormRequest
 {
+    use CdaAttributeWords;
+
     public function authorize(): bool
     {
         $access = app(CdaAccess::class);

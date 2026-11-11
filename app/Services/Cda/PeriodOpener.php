@@ -7,10 +7,12 @@ use App\Models\CdaReport;
 use App\Models\CdaReportingPeriod;
 use App\Models\CdaSetting;
 use App\Models\User;
+use App\Services\Cda\Reports\ReportEngine;
 use App\Services\LoanWriteTransaction;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Support\Facades\DB;
+use Throwable;
 
 /**
  * Opens a reporting period (CDA design §3): the calendar year, its annual
@@ -20,6 +22,14 @@ use Illuminate\Support\Facades\DB;
  * kept with `applicable: false` without a valid CTE.
  *
  * One period per year: a second answers 409, decided by the unique index.
+ *
+ * When staff open a year (open()), each applicable report is refreshed once
+ * the period is committed (ReportEngine::refresh()), so the new year shows
+ * its figures, readiness and issues at once (CAPR's unclosed-year Critical
+ * included) instead of 0% "not started". A report whose refresh fails is
+ * logged and left for the `refresh` action or the nightly run; the period
+ * stays open. ensure(), the year-end capture's fallback, opens without
+ * refreshing: the nightly `cda:revalidate` fills those reports.
  */
 final class PeriodOpener
 {
@@ -29,6 +39,7 @@ final class PeriodOpener
         private readonly Deadlines $deadlines,
         private readonly TemplateSelector $templates,
         private readonly Applicability $applicability,
+        private readonly ReportEngine $engine,
     ) {}
 
     /** @throws HttpResponseException 409 when the year is open already */
@@ -39,10 +50,14 @@ final class PeriodOpener
         }
 
         try {
-            return DB::transaction(fn () => $this->create($year, $user));
+            $period = DB::transaction(fn () => $this->create($year, $user));
         } catch (UniqueConstraintViolationException) {
             throw LoanWriteTransaction::conflict(self::DUPLICATE);
         }
+
+        $this->refreshReports($period, $user);
+
+        return $period;
     }
 
     /** The year's period, opened (as the system) when there is none. */
@@ -58,6 +73,20 @@ final class PeriodOpener
             return DB::transaction(fn () => $this->create($year, null));
         } catch (UniqueConstraintViolationException) {
             return CdaReportingPeriod::query()->where('year', $year)->firstOrFail();
+        }
+    }
+
+    /** Fill and validate each applicable report of a period just opened. */
+    private function refreshReports(CdaReportingPeriod $period, ?User $user): void
+    {
+        $reports = CdaReport::query()->where('period_id', $period->id)->where('applicable', true)->orderBy('id')->get();
+
+        foreach ($reports as $report) {
+            try {
+                $this->engine->refresh($report, $user);
+            } catch (Throwable $e) {
+                report($e);
+            }
         }
     }
 

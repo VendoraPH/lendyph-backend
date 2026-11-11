@@ -280,7 +280,7 @@ class CdaCaprSourcesTest extends TestCase
     public function test_report_field_reads_another_reports_value(): void
     {
         $fs = $this->report($this->period, 'financial_statements');
-        $fs->values()->create(['field_key' => 'statements.total_assets', 'value' => '1234.50']);
+        $fs->values()->updateOrCreate(['field_key' => 'statements.total_assets'], ['value' => '1234.50']);
 
         $result = $this->resolve('report.field', ['type' => 'financial_statements', 'field' => 'statements.total_assets']);
         $this->assertSame('1234.50', $result->value);

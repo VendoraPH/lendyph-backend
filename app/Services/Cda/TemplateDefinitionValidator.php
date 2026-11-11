@@ -65,10 +65,14 @@ final class TemplateDefinitionValidator
 
     public const SEVERITIES = ['critical', 'warning', 'info'];
 
-    /** The nine validation categories of the CDA Data Validation Engine task. */
+    /**
+     * The nine validation categories of the CDA Data Validation Engine task,
+     * plus `template_unverified` ("Template not yet verified"), which the
+     * template and PESOS verification checks always read under.
+     */
     public const CATEGORIES = [
         'missing_required_data', 'invalid_data', 'accounting_mismatch', 'member_data', 'loan_data',
-        'officer_data', 'training', 'compliance_document', 'financial_data',
+        'officer_data', 'training', 'compliance_document', 'financial_data', 'template_unverified',
     ];
 
     public const COMPONENTS = ['fields', 'sources', 'documents', 'accounting', 'approvals'];
