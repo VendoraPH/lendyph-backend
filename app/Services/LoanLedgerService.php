@@ -311,43 +311,95 @@ final class LoanLedgerService
     }
 
     /**
-     * A period's penalty total (`$charged`, centavos) as its monthly charges,
-     * in order: each charge as it fell, until they make up the total. The last
-     * line takes what the charges leave over (a charge kept at what was paid);
-     * a period with no monthly charge to show (no penalty rate, or due before
-     * an imported loan's baseline) gets one line on its first day past grace.
+     * A period's penalty total (`$charged`, centavos: what it carries plus
+     * what waivers forgave and closures wrote off) as one line per monthly
+     * charge counted in it (`penalty_months`), each on the day it fell
+     * (RepaymentService::penaltyCharges()). Every line is ₱0.00 or more and
+     * the lines add up to the total, so the closing and the running penalty
+     * balance hold.
+     *
+     * - One line for the whole total, on the first day past grace, as before
+     *   the monthly penalty: a period waived for good (option a), and one with
+     *   at most one charge in it (late before the switch with none since, or
+     *   stamped by the once-only rule). No monthly line is made up for them.
+     * - Otherwise the charges after the period's checkpoint (or after its
+     *   first charge, when it has none) are shown as worked. The charges up to
+     *   it share what is left of the total in proportion to their worked
+     *   amounts: the period no longer records them one by one (a balance
+     *   adjustment has since restated the principal they were worked on), and
+     *   the last of them takes the rounding.
      *
      * @return list<array{on: Carbon, centavos: int, number: int}>
      */
     private function penaltyLines(Loan $loan, AmortizationSchedule $schedule, int $charged, Carbon $today): array
     {
-        $lines = [];
-        $left = $charged;
+        $lateFrom = $schedule->due_date->copy()->addDays(max(0, (int) $loan->grace_period_days) + 1)->startOfDay();
+        $single = [['on' => $lateFrom, 'centavos' => $charged, 'number' => 1]];
+        $months = (int) $schedule->penalty_months;
 
-        foreach (app(RepaymentService::class)->penaltyCharges($loan, $schedule, $today) as $charge) {
-            if ($left <= 0) {
-                break;
+        if ($schedule->isWaivedForGood() || $months <= 1) {
+            return $single;
+        }
+
+        $charges = array_slice(app(RepaymentService::class)->penaltyCharges($loan, $schedule, $today), 0, $months);
+
+        if (count($charges) < 2) {
+            return $single;
+        }
+
+        $checkpointOn = $schedule->penalty_checkpoint_on?->copy()->startOfDay();
+        $upTo = [];
+        $after = [];
+
+        foreach ($charges as $index => $charge) {
+            $isBefore = $checkpointOn === null ? $index === 0 : $charge['on']->lte($checkpointOn);
+
+            if ($isBefore) {
+                $upTo[] = $charge;
+            } elseif ($charge['centavos'] > 0) {
+                $after[] = $charge;
             }
+        }
 
-            $amount = min($charge['centavos'], $left);
+        $upToTotal = $charged - array_sum(array_column($after, 'centavos'));
+
+        if ($upTo === [] || $upToTotal < 0) {
+            return $single;
+        }
+
+        return [...$this->shareOut($upTo, $upToTotal), ...$after];
+    }
+
+    /**
+     * `$total` centavos over `$charges` in proportion to their worked amounts,
+     * the last taking the rounding; all on the first when none was worked.
+     * Lines of ₱0.00 are left out, but one line always stays.
+     *
+     * @param  non-empty-list<array{on: Carbon, centavos: int, number: int}>  $charges
+     * @return non-empty-list<array{on: Carbon, centavos: int, number: int}>
+     */
+    private function shareOut(array $charges, int $total): array
+    {
+        $worked = array_sum(array_column($charges, 'centavos'));
+
+        if ($worked <= 0) {
+            return [[...$charges[0], 'centavos' => $total]];
+        }
+
+        $lines = [];
+        $left = $total;
+        $last = array_key_last($charges);
+
+        foreach ($charges as $index => $charge) {
+            $amount = $index === $last ? $left : intdiv($total * $charge['centavos'], $worked);
+            $left -= $amount;
 
             if ($amount > 0) {
-                $lines[] = ['on' => $charge['on'], 'centavos' => $amount, 'number' => $charge['number']];
-                $left -= $amount;
+                $lines[] = [...$charge, 'centavos' => $amount];
             }
         }
 
-        if ($left > 0 && $lines === []) {
-            $lateFrom = $schedule->due_date->copy()->addDays(max(0, (int) $loan->grace_period_days) + 1)->startOfDay();
-
-            return [['on' => $lateFrom, 'centavos' => $left, 'number' => 1]];
-        }
-
-        if ($left > 0) {
-            $lines[array_key_last($lines)]['centavos'] += $left;
-        }
-
-        return $lines;
+        return $lines === [] ? [[...$charges[0], 'centavos' => $total]] : $lines;
     }
 
     /** @return array<string, mixed> */

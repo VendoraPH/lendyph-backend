@@ -1246,25 +1246,27 @@ class LoanAdjustmentService
         // receipt still carries, so Total Paid dropped and a later void took
         // the missing penalty out of interest or principal instead.
         //
-        // The period keeps a link to this waiver, and the day it cleared the
-        // penalty with the charge it left (option b, from the monthly penalty,
-        // Arvin, 2026-11-11): RepaymentService::penaltyFor() charges nothing
-        // more until the period's next monthly charge day, then a charge a
-        // month while it stays unpaid. Waivers made before the switch have no
-        // clearing day and keep their period penalty-free (option a).
+        // The period keeps a link to this waiver, and a checkpoint on the day
+        // it cleared the penalty with the charge it left (option b, from the
+        // monthly penalty, Arvin, 2026-11-11):
+        // RepaymentService::penaltyStateAsOf() charges nothing more until the
+        // period's next monthly charge day, then a charge a month while it
+        // stays unpaid. Waivers made before the switch have no checkpoint and
+        // keep their period penalty-free (option a), and a new waiver on such
+        // a period leaves it so.
         //
-        // Each period is first charged up to today (penaltyAsOf()), so a
-        // waiver applied before the night's run forgives the month that fell
-        // today rather than leaving it uncharged for good.
+        // Each period is first charged up to today, so a waiver applied before
+        // the night's run forgives the month that fell today rather than
+        // leaving it uncharged for good.
         $today = Carbon::today();
-        $clearedOn = $today->toDateString();
 
-        $this->selectedOpenSchedules($loan, $newValues)->each(function (AmortizationSchedule $schedule) use ($adjustment, $loan, $today, $clearedOn, &$before, &$after) {
-            $stamped = $this->repaymentService->penaltyAsOf($loan, $schedule, $today);
+        $this->selectedOpenSchedules($loan, $newValues)->each(function (AmortizationSchedule $schedule) use ($adjustment, $loan, $today, &$before, &$after) {
+            $waivedForGood = $schedule->isWaivedForGood();
+            $state = $this->repaymentService->penaltyStateAsOf($loan, $schedule, $today);
 
-            if ($stamped !== null) {
-                $schedule->penalty_amount = $stamped;
-                $schedule->penalty_months = RepaymentService::monthsLate($schedule, $today);
+            if ($state !== null) {
+                $schedule->penalty_amount = $state['amount'];
+                $schedule->penalty_months = $state['months'];
             }
 
             $charged = (float) $schedule->penalty_amount;
@@ -1272,12 +1274,22 @@ class LoanAdjustmentService
             $owed = $this->penaltyOwed($schedule);
 
             if ($owed > 0) {
-                $schedule->update([
-                    'penalty_amount' => $paid,
-                    'penalty_waiver_id' => $adjustment->id,
-                    'penalty_cleared_on' => $clearedOn,
-                    'penalty_cleared_to' => $paid,
-                ]);
+                if ($waivedForGood) {
+                    $schedule->penalty_amount = $paid;
+                } elseif (! $this->repaymentService->penaltyCheckpoint($loan, $schedule, $today, $paid)) {
+                    // A period the rule leaves alone today (not late by it, or
+                    // before an imported loan's baseline) still gets the
+                    // waiver's checkpoint, so it never turns into option (a).
+                    $schedule->fill([
+                        'penalty_amount' => $paid,
+                        'penalty_checkpoint_on' => $today->toDateString(),
+                        'penalty_checkpoint_amount' => $paid,
+                        'penalty_checkpoint_months' => (int) $schedule->penalty_months,
+                    ]);
+                }
+
+                $schedule->penalty_waiver_id = $adjustment->id;
+                $schedule->save();
 
                 $before[] = [
                     'schedule_id' => $schedule->id,
@@ -1375,12 +1387,20 @@ class LoanAdjustmentService
             return;
         }
 
+        // The late penalty already charged was worked on the principal before
+        // this adjustment and stays as it is, whether the principal goes up or
+        // down: each changed period is charged up to today on its old
+        // principal and keeps that as its checkpoint, and only the months
+        // after today are worked on the new one (penaltyStateAsOf()).
+        $today = Carbon::today();
+
         foreach ($this->balanceAdjustmentShares($amount, $unpaid) as $i => $share) {
             if ($share === 0) {
                 continue;
             }
 
             $schedule = $unpaidSchedules[$i];
+            $this->repaymentService->penaltyCheckpoint($loan, $schedule, $today);
             $newPrincipalDue = $centavos($schedule->principal_due) + $share;
             $changes = [
                 'principal_due' => $newPrincipalDue / 100,

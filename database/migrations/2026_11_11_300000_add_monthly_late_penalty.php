@@ -18,13 +18,17 @@ return new class extends Migration
      *   had and adds one for each full month after the switch. A fresh
      *   database has no such period, so it stores no date and every period
      *   follows the monthly rule.
-     * - `amortization_schedules.penalty_months` is the month count last
-     *   charged, for the screen (Penalty: N month(s) late).
-     * - `penalty_cleared_on` and `penalty_cleared_to` record a penalty waiver
-     *   made from now on (option b): the day it cleared the penalty and the
-     *   charge it left (what was already paid). Months after it are charged
-     *   again. A waiver made before the switch has neither and keeps its
-     *   period penalty-free (option a).
+     * - `amortization_schedules.penalty_months` is the number of monthly
+     *   charges counted in the period's penalty figure, for the screen
+     *   (Penalty: N month(s)).
+     * - `penalty_checkpoint_on`, `penalty_checkpoint_amount` and
+     *   `penalty_checkpoint_months` fix what a period had been charged by a
+     *   day: the charge and the number of charges in it. A penalty waiver
+     *   made from now on (option b) leaves the charge at what was paid, and a
+     *   balance adjustment keeps the charge worked on the old principal; the
+     *   months after that day are charged on the period as it then stands. A
+     *   waiver made before the switch has no checkpoint and keeps its period
+     *   penalty-free (option a).
      *
      * No charge is changed here. Storing the switch date writes one system
      * audit row, naming the date and how many open periods were already late.
@@ -35,8 +39,9 @@ return new class extends Migration
         if (! Schema::hasColumn('amortization_schedules', 'penalty_months')) {
             Schema::table('amortization_schedules', function (Blueprint $table): void {
                 $table->unsignedSmallInteger('penalty_months')->default(0)->after('penalty_paid');
-                $table->date('penalty_cleared_on')->nullable()->after('penalty_waiver_id');
-                $table->decimal('penalty_cleared_to', 12, 2)->nullable()->after('penalty_cleared_on');
+                $table->date('penalty_checkpoint_on')->nullable()->after('penalty_waiver_id');
+                $table->decimal('penalty_checkpoint_amount', 12, 2)->nullable()->after('penalty_checkpoint_on');
+                $table->unsignedSmallInteger('penalty_checkpoint_months')->nullable()->after('penalty_checkpoint_amount');
             });
         }
 
@@ -57,9 +62,17 @@ return new class extends Migration
             DB::table('late_penalty_settings')->insert(['monthly_from' => $switchDate]);
 
             // Open periods already late the day before the switch, by the
-            // grace rule (AmortizationSchedule::pastGraceCutoff()).
+            // grace rule (AmortizationSchedule::pastGraceCutoff()), that the
+            // nightly run charges (loans:apply-penalties): on a collectible
+            // loan with a penalty rate, after any imported arrears baseline,
+            // and not waived. Spelled out so the count never moves with
+            // those classes.
             $alreadyLate = DB::table('amortization_schedules as s')
                 ->join('loans as l', 'l.id', '=', 's.loan_id')
+                ->whereIn('l.status', ['released', 'ongoing'])
+                ->where('l.penalty_rate', '>', 0)
+                ->whereRaw('(l.imported_arrears_baseline IS NULL OR s.due_date >= l.imported_arrears_baseline)')
+                ->whereNull('s.penalty_waiver_id')
                 ->whereIn('s.status', ['pending', 'partial', 'overdue'])
                 ->whereRaw('s.due_date < DATE_SUB(DATE_SUB(?, INTERVAL 1 DAY), INTERVAL GREATEST(COALESCE(l.grace_period_days, 0), 0) DAY)', [$switchDate])
                 ->count();
@@ -89,7 +102,7 @@ return new class extends Migration
 
         if (Schema::hasColumn('amortization_schedules', 'penalty_months')) {
             Schema::table('amortization_schedules', function (Blueprint $table): void {
-                $table->dropColumn(['penalty_months', 'penalty_cleared_on', 'penalty_cleared_to']);
+                $table->dropColumn(['penalty_months', 'penalty_checkpoint_on', 'penalty_checkpoint_amount', 'penalty_checkpoint_months']);
             });
         }
     }

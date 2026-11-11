@@ -76,19 +76,20 @@ class MonthlyLatePenaltyTest extends TestCase
 
         // Periods 1 and 2 were late before the switch: their one charge stays,
         // with nothing more until a full month after 10 April. Period 3 falls
-        // late after it and follows the monthly rule.
+        // late after it and follows the monthly rule. `penalty_months` counts
+        // the charges in each figure.
         $this->nightlyOn('2026-05-05');
-        $this->assertPenalty(1, charged: 200, months: 2);
+        $this->assertPenalty(1, charged: 200, months: 1);
         $this->assertPenalty(2, charged: 200, months: 1);
         $this->assertPenalty(3, charged: 200, months: 1);
 
         $this->nightlyOn('2026-05-15');
-        $this->assertPenalty(1, charged: 400, months: 3);
+        $this->assertPenalty(1, charged: 400, months: 2);
         $this->assertPenalty(2, charged: 400, months: 2);
         $this->assertPenalty(3, charged: 200, months: 1);
 
         $this->nightlyOn('2026-06-15');
-        $this->assertPenalty(1, charged: 600, months: 4);
+        $this->assertPenalty(1, charged: 600, months: 3);
         $this->assertPenalty(3, charged: 400, months: 2);
         $this->assertPenalty(4, charged: 200, months: 1);
     }
@@ -211,13 +212,210 @@ class MonthlyLatePenaltyTest extends TestCase
         $this->waiveOn('2026-04-20', [$this->period(1)->id]);
 
         // As a waiver applied before the switch was recorded: the waiver link only.
-        $this->period(1)->update(['penalty_cleared_on' => null, 'penalty_cleared_to' => null]);
+        $this->forgetWaiverCheckpoint(1);
 
         $this->nightlyOn('2026-07-20');
         $this->assertPenalty(1, charged: 0);
 
         $this->payOn('2026-07-21', 1000);
         $this->assertPenalty(1, charged: 0);
+    }
+
+    public function test_penalty_months_counts_the_charges_in_a_pre_switch_periods_figure(): void
+    {
+        LatePenaltySetting::query()->create(['monthly_from' => '2026-10-01']);
+
+        // Period 1 is eight months late on 20 October, with its one charge.
+        $this->nightlyOn('2026-10-20');
+        $this->assertPenalty(1, charged: 200, months: 1);
+        $this->assertSame(1, $this->getJson("/api/loans/{$this->loan->id}/summary")->json('data.penalty_months'));
+
+        // 1 November, a full month after the switch: its second charge.
+        $this->nightlyOn('2026-11-01');
+        $this->assertPenalty(1, charged: 400, months: 2);
+        $this->assertSame(2, $this->getJson("/api/loans/{$this->loan->id}/summary")->json('data.penalty_months'));
+        $this->assertSame(2, $this->getJson("/api/loans/{$this->loan->id}/amortization-schedule")->json('data.0.penalty_months'));
+        $this->assertSame([
+            ['2026-02-19', 'Late penalty, period 1', 200.0],
+            ['2026-11-01', 'Late penalty, period 1, month 2', 200.0],
+        ], $this->periodPenaltyLines(1));
+    }
+
+    public function test_a_balance_reduction_keeps_the_months_charged_and_charges_the_next_on_the_new_principal(): void
+    {
+        // 15 August: period 1 is six months late, 6 × ₱200.00.
+        $this->nightlyOn('2026-08-15');
+        $this->assertPenalty(1, charged: 1200, months: 6);
+
+        // ₱60,000.00 unpaid to ₱30,000.00: each of the six periods loses ₱5,000.00.
+        $this->adjustBalanceOn('2026-08-20', 30000);
+        $this->assertEqualsWithDelta(5000, (float) $this->period(1)->principal_due, 0.001);
+
+        $this->nightlyOn('2026-08-21');
+        $this->assertPenalty(1, charged: 1200, months: 6);
+
+        // 15 September: 2% of the ₱5,000.00 now unpaid.
+        $this->nightlyOn('2026-09-15');
+        $this->assertPenalty(1, charged: 1300, months: 7);
+        $this->assertLedgerClosesOnTheSummary();
+    }
+
+    public function test_a_balance_increase_keeps_the_months_charged_and_charges_the_next_on_the_new_principal(): void
+    {
+        $this->nightlyOn('2026-08-15');
+
+        // ₱60,000.00 to ₱90,000.00: each period gains ₱5,000.00.
+        $this->adjustBalanceOn('2026-08-20', 90000);
+        $this->assertEqualsWithDelta(15000, (float) $this->period(1)->principal_due, 0.001);
+
+        $this->nightlyOn('2026-08-21');
+        $this->assertPenalty(1, charged: 1200, months: 6);
+
+        // 15 September: 2% of ₱15,000.00.
+        $this->nightlyOn('2026-09-15');
+        $this->assertPenalty(1, charged: 1500, months: 7);
+        $this->assertLedgerClosesOnTheSummary();
+    }
+
+    public function test_a_void_charges_the_months_up_to_today_not_up_to_the_payment_date(): void
+    {
+        // Released 15 March: period 1 falls due 15 April, late from 19 April.
+        $this->travelTo(Carbon::parse('2026-03-15 09:00'));
+        $this->loan = $this->createReleasedLoan(['start_date' => '2026-03-15']);
+
+        // 15 June, two months late: ₱400.00 penalty, ₱1,800.00 interest, ₱10,000.00 principal.
+        $repayment = $this->payOn('2026-06-15', 12200);
+        $this->assertSame('paid', $this->period(1)->status);
+
+        $this->nightlyOn('2026-08-20');
+        $this->travelTo(Carbon::parse('2026-08-20 10:00'));
+        app(RepaymentService::class)->voidRepayment($repayment, 'Keyed twice', $this->admin);
+
+        // 20 August: four months late, 4 × ₱200.00.
+        $this->assertPenalty(1, charged: 800, paid: 0, months: 4);
+        $this->assertOwedAgreesEverywhere();
+    }
+
+    public function test_a_partial_void_of_a_principal_payment_puts_the_later_months_back_up(): void
+    {
+        // 20 February: ₱200.00 penalty, ₱1,800.00 interest, ₱3,000.00 principal.
+        $this->payOn('2026-02-20', 5000);
+        // 1 March: ₱2,000.00 more principal, leaving ₱5,000.00 unpaid.
+        $second = $this->payOn('2026-03-01', 2000);
+
+        // ₱200.00 on 19 February, then 2% of ₱5,000.00 on 15 April and 15 May.
+        $this->nightlyOn('2026-05-15');
+        $this->assertPenalty(1, charged: 400, paid: 200, months: 3);
+
+        // The night's run on 20 May charges period 4, late from 19 May.
+        $this->nightlyOn('2026-05-20');
+        $this->travelTo(Carbon::parse('2026-05-20 10:00'));
+        app(RepaymentService::class)->voidRepayment($second, 'Keyed twice', $this->admin);
+
+        // Without the ₱2,000.00, ₱7,000.00 was unpaid on 15 April and 15 May: ₱140.00 each.
+        $this->assertSame('partial', $this->period(1)->status);
+        $this->assertPenalty(1, charged: 480, paid: 200, months: 3);
+        $this->assertOwedAgreesEverywhere();
+    }
+
+    public function test_a_backdated_payment_leaves_the_penalty_charged_up_to_today(): void
+    {
+        $this->nightlyOn('2026-05-20');
+
+        // Recorded on 20 May, dated 1 March: it pays period 1's one charge as
+        // it stood then, ₱200.00, and ₱100.00 of its interest.
+        $this->travelTo(Carbon::parse('2026-05-20 10:00'));
+        $this->postJson("/api/loans/{$this->loan->id}/repayments", [
+            'amount_paid' => 300,
+            'payment_date' => '2026-03-01',
+        ])->assertCreated();
+
+        // On 20 May period 1 is three months late.
+        $this->assertPenalty(1, charged: 600, paid: 200, months: 3);
+        $this->assertPenalty(2, charged: 400, months: 2);
+        $this->assertOwedAgreesEverywhere();
+    }
+
+    public function test_a_period_a_pre_switch_waiver_made_penalty_free_stays_free_after_a_void_and_a_new_waiver(): void
+    {
+        $this->nightlyOn('2026-04-15');
+        $payment = $this->payOn('2026-04-16', 100);
+        $this->waiveOn('2026-04-20', [$this->period(1)->id]);
+        $this->forgetWaiverCheckpoint(1);
+
+        // After the switch the payment is voided: the ₱100.00 it paid is owed again.
+        $this->travelTo(Carbon::parse('2026-04-25 10:00'));
+        app(RepaymentService::class)->voidRepayment($payment, 'Keyed twice', $this->admin);
+        $this->assertPenalty(1, charged: 100, paid: 0);
+
+        $this->waiveOn('2026-04-28', [$this->period(1)->id]);
+        $this->assertNull($this->period(1)->penalty_checkpoint_on);
+
+        $this->nightlyOn('2026-07-20');
+        $this->assertPenalty(1, charged: 0);
+    }
+
+    public function test_the_ledger_keeps_one_line_for_a_period_late_before_the_switch_with_no_charge_since(): void
+    {
+        LatePenaltySetting::query()->create(['monthly_from' => '2026-04-10']);
+
+        // As the once-only rule stamped it before the switch, before the
+        // principal it was worked on came down.
+        $this->period(1)->update(['penalty_amount' => 250, 'penalty_months' => 0, 'status' => 'overdue']);
+        $this->travelTo(Carbon::parse('2026-05-20 10:00'));
+
+        $this->assertSame([['2026-02-19', 'Late penalty, period 1', 250.0]], $this->periodPenaltyLines(1));
+    }
+
+    public function test_the_ledger_keeps_one_line_for_a_period_waived_for_good(): void
+    {
+        $this->nightlyOn('2026-04-15');
+        $this->waiveOn('2026-04-20', [$this->period(1)->id]);
+        $this->forgetWaiverCheckpoint(1);
+        $this->nightlyOn('2026-06-20');
+
+        $this->assertSame([['2026-02-19', 'Late penalty, period 1', 400.0]], $this->periodPenaltyLines(1));
+
+        $rows = $this->getJson("/api/loans/{$this->loan->id}/ledger")->assertOk()->json('data.rows');
+        foreach ($rows as $row) {
+            $this->assertGreaterThanOrEqual(0, (float) $row['balances']['penalty'], $row['description']);
+        }
+        $this->assertLedgerClosesOnTheSummary();
+    }
+
+    public function test_due_dates_on_the_31st_and_at_the_end_of_february_count_full_months_to_the_capped_day(): void
+    {
+        $this->travelTo(Carbon::parse('2026-01-31 09:00'));
+        $this->loan = $this->createReleasedLoan(['start_date' => '2026-01-31']);
+        $this->assertSame(['2026-02-28', '2026-03-31', '2026-04-30'], array_slice(
+            $this->loan->amortizationSchedules->sortBy('period_number')->map(fn (AmortizationSchedule $s): string => $s->due_date->toDateString())->values()->all(),
+            0,
+            3,
+        ));
+
+        // Period 1, due 28 February: a full month is 28 March, two are 28 April.
+        $this->nightlyOn('2026-04-27');
+        $this->assertPenalty(1, charged: 200, months: 1);
+        $this->nightlyOn('2026-04-28');
+        $this->assertPenalty(1, charged: 400, months: 2);
+
+        // Period 2, due 31 March: one month is 30 April, two are 31 May.
+        $this->nightlyOn('2026-05-30');
+        $this->assertPenalty(2, charged: 200, months: 1);
+        $this->nightlyOn('2026-05-31');
+        $this->assertPenalty(2, charged: 400, months: 2);
+    }
+
+    public function test_a_due_date_on_29_february_counts_full_months_from_the_29th(): void
+    {
+        $this->travelTo(Carbon::parse('2028-01-29 09:00'));
+        $this->loan = $this->createReleasedLoan(['start_date' => '2028-01-29']);
+        $this->assertSame('2028-02-29', $this->period(1)->due_date->toDateString());
+
+        $this->nightlyOn('2028-04-28');
+        $this->assertPenalty(1, charged: 200, months: 1);
+        $this->nightlyOn('2028-04-29');
+        $this->assertPenalty(1, charged: 400, months: 2);
     }
 
     public function test_a_void_puts_back_the_monthly_charge_the_payment_covered(): void
@@ -320,6 +518,11 @@ class MonthlyLatePenaltyTest extends TestCase
 
     public function test_the_migration_stores_today_in_manila_as_the_switch_date_once_with_one_audit_row(): void
     {
+        // Left out of the count, as the nightly run leaves them: a loan with no
+        // penalty rate and one no longer collectible.
+        $this->createReleasedLoan(['start_date' => '2026-01-15', 'product' => ['penalty_rate' => 0]]);
+        $this->createReleasedLoan(['start_date' => '2026-01-15'])->update(['status' => 'completed']);
+
         $this->travelTo(Carbon::parse('2026-11-11 15:30', 'Asia/Manila'));
         $migration = require database_path('migrations/2026_11_11_300000_add_monthly_late_penalty.php');
 
@@ -369,6 +572,56 @@ class MonthlyLatePenaltyTest extends TestCase
             ->map(fn (array $row): array => [$row['date'], $row['description'], (float) $row['penalty'], (float) $row['balances']['penalty']])
             ->values()
             ->all();
+    }
+
+    /**
+     * The Ledger's penalty lines for one period: date, description and amount.
+     *
+     * @return list<array{0: string, 1: string, 2: float}>
+     */
+    private function periodPenaltyLines(int $period): array
+    {
+        $prefix = "Late penalty, period {$period}";
+
+        return collect($this->getJson("/api/loans/{$this->loan->id}/ledger")->assertOk()->json('data.rows'))
+            ->where('kind', 'penalty_charge')
+            ->filter(fn (array $row): bool => $row['description'] === $prefix || str_starts_with($row['description'], "{$prefix},"))
+            ->map(fn (array $row): array => [$row['date'], $row['description'], (float) $row['penalty']])
+            ->values()
+            ->all();
+    }
+
+    /**
+     * The penalty stored, the summary, the Ledger and the loan row agree: the
+     * stored figures are those a payment today would charge.
+     */
+    private function assertOwedAgreesEverywhere(): void
+    {
+        $summary = $this->getJson("/api/loans/{$this->loan->id}/summary")->assertOk()->json('data');
+        $row = $this->getJson("/api/loans/{$this->loan->id}")->assertOk()->json('data');
+
+        $this->assertEqualsWithDelta((float) $summary['total_outstanding'], (float) $summary['payoff_amount'], 0.001, 'payoff equals what is stored as owed');
+        $this->assertEqualsWithDelta((float) $summary['outstanding_penalty'], (float) $row['amount_due_now']['penalty'], 0.001, 'amount due now carries the stored penalty');
+        $this->assertLedgerClosesOnTheSummary();
+    }
+
+    /** A waiver applied before the switch: its link, with no checkpoint. */
+    private function forgetWaiverCheckpoint(int $period): void
+    {
+        $this->period($period)->update(['penalty_checkpoint_on' => null, 'penalty_checkpoint_amount' => null, 'penalty_checkpoint_months' => null]);
+    }
+
+    private function adjustBalanceOn(string $date, float $targetPrincipalBalance): void
+    {
+        $this->travelTo(Carbon::parse("{$date} 10:00"));
+
+        $id = $this->postJson("/api/loans/{$this->loan->id}/adjustments", [
+            'adjustment_type' => 'balance_adjustment',
+            'new_values' => ['target_principal_balance' => $targetPrincipalBalance, 'reason' => 'Agreed settlement'],
+        ])->assertCreated()->json('data.id');
+
+        $this->patchJson("/api/loan-adjustments/{$id}/approve")->assertOk();
+        $this->patchJson("/api/loan-adjustments/{$id}/apply")->assertOk()->assertJsonPath('data.status', 'applied');
     }
 
     /** The Ledger closes on the summary, and the statement's debits less credits are what is owed. */

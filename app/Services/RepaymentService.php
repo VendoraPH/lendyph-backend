@@ -380,6 +380,16 @@ class RepaymentService
             $loan->update(['status' => 'ongoing']);
         }
 
+        // A payment dated before today took each period's penalty as of its
+        // own date (step 1). The periods it leaves open owe the months since
+        // too, so they are charged again as of today, as the nightly run
+        // would, each status left as the allocation set it.
+        $today = Carbon::today();
+
+        if ($paymentDate->lt($today)) {
+            $this->applyPenalties($loan, $today, markOverdue: false);
+        }
+
         // Share capital build-up: on an SCB-bearing loan, whatever the
         // allocation loop above could not apply to the current schedule
         // becomes a share capital credit instead of sitting as unallocated
@@ -1181,8 +1191,9 @@ class RepaymentService
             'outstanding_penalty' => $owed['penalty'] / 100,
             // Frontend reads `penalty_amount` meaning the remaining penalty to collect.
             'penalty_amount' => $owed['penalty'] / 100,
-            // The most months late of any open late period, as last charged
-            // (applyPenalties()): the screen's "Penalty: N month(s) late".
+            // The most monthly charges counted in any open late period's
+            // penalty, as last charged (applyPenalties()): the screen's
+            // "Penalty: N month(s)".
             'penalty_months' => (int) ($overdueSchedules->max('penalty_months') ?? 0),
             // The insurance premium the release left owed, still owed: part of
             // what the loan owes, as in LoanResource's `total_payable`.
@@ -1364,13 +1375,15 @@ class RepaymentService
      * this method overwrites the charge rather than adding to it, so passing
      * over it once would only have moved the waiver's undoing to the next
      * payment or the next night. A period waived since is charged again for
-     * the months after its waiver (penaltyFor()).
+     * the months after its waiver (penaltyStateAsOf()).
      *
-     * It overwrites the charge with penaltyFor()'s figure as of `$asOfDate`,
-     * and the month count with it, so running it twice on one day charges
-     * the month once.
+     * It overwrites the charge with penaltyStateAsOf()'s figure as of
+     * `$asOfDate`, and the number of charges in it, so running it twice on
+     * one day charges the month once. `$markOverdue` false leaves each
+     * period's status as it is: the re-charge to today after a backdated
+     * payment (recordRepaymentOnLockedLoan()).
      */
-    public function applyPenalties(Loan $loan, Carbon $asOfDate): void
+    public function applyPenalties(Loan $loan, Carbon $asOfDate, bool $markOverdue = true): void
     {
         if ((float) $loan->penalty_rate <= 0) {
             return;
@@ -1382,47 +1395,39 @@ class RepaymentService
             ->where('due_date', '<', $lateBefore)
             ->whereIn('status', ['pending', 'partial', 'overdue'])
             ->whereRaw(AmortizationSchedule::stillChargeableSql())
-            ->each(function (AmortizationSchedule $schedule) use ($loan, $asOfDate) {
-                $penalty = $this->penaltyAsOf($loan, $schedule, $asOfDate);
+            ->each(function (AmortizationSchedule $schedule) use ($loan, $asOfDate, $markOverdue) {
+                $state = $this->penaltyStateAsOf($loan, $schedule, $asOfDate);
 
-                if ($penalty === null) {
+                if ($state === null) {
                     return;
                 }
 
                 $schedule->update([
-                    'penalty_amount' => $penalty,
-                    'penalty_months' => self::monthsLate($schedule, $asOfDate),
-                    'status' => 'overdue',
+                    'penalty_amount' => $state['amount'],
+                    'penalty_months' => $state['months'],
+                    ...($markOverdue ? ['status' => 'overdue'] : []),
                 ]);
             });
     }
 
     /**
      * The penalty applyPenalties() charges `$schedule` as of `$asOfDate`, or
-     * null when it leaves the period alone: no penalty rate, a closed or
-     * waived period, one not yet late past its grace, or one due before the
-     * loan's imported arrears baseline. Pure: writes nothing, so a preview
-     * (AutoPayService::preview()) quotes what a payment will charge.
+     * null when it leaves the period alone: no penalty rate, a closed period
+     * or one waived for good, one not yet late past its grace, or one due
+     * before the loan's imported arrears baseline. Pure: writes nothing, so a
+     * preview (AutoPayService::preview()) quotes what a payment will charge.
      */
     public function penaltyAsOf(Loan $loan, AmortizationSchedule $schedule, Carbon $asOfDate): ?float
     {
-        $penaltyRate = (float) $loan->penalty_rate;
-
-        if ($penaltyRate <= 0
-            || $schedule->isWaivedForGood()
-            || ! in_array($schedule->status, ['pending', 'partial', 'overdue'], true)
-            || ! $schedule->due_date->lt(AmortizationSchedule::pastGraceCutoff($loan->grace_period_days, $asOfDate))
-            || ! AmortizationSchedule::isPenalisable($loan->imported_arrears_baseline, $schedule->due_date)) {
-            return null;
-        }
-
-        return $this->penaltyFor($loan, $schedule, $asOfDate);
+        return $this->penaltyStateAsOf($loan, $schedule, $asOfDate)['amount'] ?? null;
     }
 
     /**
-     * The penalty a late period owes on `$asOf`: one charge of the loan's
-     * `penalty_rate` percent of the principal then unpaid on it, to the
-     * centavo, for each month it is late (owner's answer, Arvin, 2026-11-11).
+     * The penalty a late period owes on `$asOf` and the number of monthly
+     * charges counted in it (`penalty_months`), or null where penaltyAsOf()
+     * is. One charge of the loan's `penalty_rate` percent of the principal
+     * then unpaid on it, to the centavo, for each month it is late (owner's
+     * answer, Arvin, 2026-11-11).
      *
      * - The first charge falls on the first day past grace, the next ones at
      *   each full month after the due date: max(1, full months since the due
@@ -1433,40 +1438,86 @@ class RepaymentService
      * - A period already late before the switch date (LatePenaltySetting)
      *   keeps the one charge it had, on the principal unpaid that day, plus
      *   one for each full month after the switch date.
-     * - A waiver made since the switch (option b) left the charge at what was
-     *   paid (`penalty_cleared_to`) on `penalty_cleared_on`. The period's own
-     *   monthly charges after that day are charged again while it stays
-     *   unpaid, so the next falls on its next monthly charge day and the
-     *   period keeps one monthly cycle (penaltyCharges()).
+     * - A checkpoint (penaltyCheckpoint()) fixes what the period had been
+     *   charged by its day, and how many charges that was. Only the period's
+     *   own charges after that day are added, on the period as it now
+     *   stands: after a waiver (option b) the next falls on its next monthly
+     *   charge day, and after a balance adjustment the months already charged
+     *   keep the old principal.
      *
      * The one definition of the charge. applyPenalties() writes it on every
      * late period, every preview reads it through penaltyAsOf(), and
-     * reverseAllocation() puts it back on a late period a void leaves fully
-     * unpaid, so none of them can disagree about what a period owes.
+     * reverseAllocation() puts it back on a period a void reopens, so none of
+     * them can disagree about what a period owes.
      *
      * Never below what was already paid toward it: a charge under its own
      * payments would leave a receipt carrying penalty the period no longer
      * says was owed.
+     *
+     * @return array{amount: float, months: int}|null
      */
-    private function penaltyFor(Loan $loan, AmortizationSchedule $schedule, Carbon $asOf): float
+    public function penaltyStateAsOf(Loan $loan, AmortizationSchedule $schedule, Carbon $asOf): ?array
     {
-        $charges = collect($this->penaltyCharges($loan, $schedule, $asOf));
-
-        if ($schedule->penalty_cleared_on !== null) {
-            $clearedOn = $schedule->penalty_cleared_on->copy()->startOfDay();
-            $charged = LoanService::toCentavos((float) $schedule->penalty_cleared_to)
-                + $charges->filter(fn (array $charge): bool => $charge['on']->gt($clearedOn))->sum('centavos');
-        } else {
-            $charged = $charges->sum('centavos');
+        if ((float) $loan->penalty_rate <= 0
+            || $schedule->isWaivedForGood()
+            || ! in_array($schedule->status, ['pending', 'partial', 'overdue'], true)
+            || ! $schedule->due_date->lt(AmortizationSchedule::pastGraceCutoff($loan->grace_period_days, $asOf))
+            || ! AmortizationSchedule::isPenalisable($loan->imported_arrears_baseline, $schedule->due_date)) {
+            return null;
         }
 
-        return max($charged / 100, (float) $schedule->penalty_paid);
+        $charges = collect($this->penaltyCharges($loan, $schedule, $asOf));
+
+        if ($schedule->penalty_checkpoint_on !== null) {
+            $checkpointOn = $schedule->penalty_checkpoint_on->copy()->startOfDay();
+            $after = $charges->filter(fn (array $charge): bool => $charge['on']->gt($checkpointOn));
+            $charged = LoanService::toCentavos((float) $schedule->penalty_checkpoint_amount) + $after->sum('centavos');
+            $months = (int) $schedule->penalty_checkpoint_months + $after->count();
+        } else {
+            $charged = $charges->sum('centavos');
+            $months = $charges->count();
+        }
+
+        return [
+            'amount' => max($charged / 100, (float) $schedule->penalty_paid),
+            'months' => $months,
+        ];
+    }
+
+    /**
+     * Charge `$schedule` up to `$on` and fix that as its checkpoint, before
+     * something changes what later months are worked on: a balance
+     * adjustment that restates its principal (the charge it had stays), or a
+     * waiver (`$keep`: the charge it leaves, what was paid). Sets the
+     * attributes and leaves the save to the caller. Returns false, writing
+     * nothing, on a period penaltyStateAsOf() leaves alone: one not late yet
+     * has no month to keep, and one waived for good stays so (option a).
+     */
+    public function penaltyCheckpoint(Loan $loan, AmortizationSchedule $schedule, Carbon $on, ?float $keep = null): bool
+    {
+        $state = $this->penaltyStateAsOf($loan, $schedule, $on);
+
+        if ($state === null) {
+            return false;
+        }
+
+        $amount = $keep ?? $state['amount'];
+
+        $schedule->fill([
+            'penalty_amount' => $amount,
+            'penalty_months' => $state['months'],
+            'penalty_checkpoint_on' => $on->toDateString(),
+            'penalty_checkpoint_amount' => $amount,
+            'penalty_checkpoint_months' => $state['months'],
+        ]);
+
+        return true;
     }
 
     /**
      * Each monthly charge a late period has had by `$asOf`, in date order:
      * the day it fell, its amount in centavos, and which charge it is (1 for
-     * the first). Waivers are not taken off: penaltyFor() does that, and the
+     * the first). Waivers are not taken off: penaltyStateAsOf() does that, and the
      * Ledger shows them as their own lines.
      *
      * - The first charge falls on the first day past grace, then one on each
@@ -1556,16 +1607,6 @@ class RepaymentService
         return fn (Carbon $on): int => min($due, $unpaidNow + $payments
             ->filter(fn (array $payment): bool => $payment['on']->gte($on))
             ->sum('principal'));
-    }
-
-    /**
-     * How many months late a period is on `$asOf` by the monthly rule:
-     * max(1, full months since its due date). The figure applyPenalties()
-     * stores as `penalty_months` beside the charge.
-     */
-    public static function monthsLate(AmortizationSchedule $schedule, Carbon $asOf): int
-    {
-        return max(1, self::fullMonthsBetween($schedule->due_date->copy()->startOfDay(), $asOf->copy()->startOfDay()));
     }
 
     /**
@@ -1724,11 +1765,18 @@ class RepaymentService
     /**
      * Take back exactly what this payment put on each period, from its
      * allocation rows. Periods it did not reach are not touched.
+     *
+     * Each period it reopens is charged its late penalty as of today, the day
+     * of the void, the same figure a payment today and the nightly run work
+     * out: the months since the payment are owed too, and with the voided
+     * principal unpaid again, the months after the payment go back up.
+     * Winding the charge back to the payment's own date left the stored
+     * penalty below what the loan owed until the next run.
      */
     private function reverseAllocation(Repayment $repayment): void
     {
         $loan = $repayment->loan;
-        $paymentDate = $repayment->payment_date;
+        $today = Carbon::today();
 
         $schedules = AmortizationSchedule::whereIn('id', $repayment->allocations->pluck('amortization_schedule_id'))
             ->get()
@@ -1747,9 +1795,8 @@ class RepaymentService
         // that label back on a schedule the exclusion exists to keep clean —
         // and the loans screen would start showing a migrated member as newly
         // delinquent because someone voided a mistyped receipt.
-        $lateBefore = AmortizationSchedule::pastGraceCutoff($loan->grace_period_days, $paymentDate);
+        $lateBefore = AmortizationSchedule::pastGraceCutoff($loan->grace_period_days, $today);
         $arrearsBaseline = $loan->imported_arrears_baseline;
-        $penaltyRate = (float) $loan->penalty_rate;
 
         foreach ($repayment->allocations as $allocation) {
             $schedule = $schedules[$allocation->amortization_schedule_id];
@@ -1758,33 +1805,46 @@ class RepaymentService
             $schedule->interest_paid = max(0, round((float) $schedule->interest_paid - (float) $allocation->interest, 2));
             $schedule->principal_paid = max(0, round((float) $schedule->principal_paid - (float) $allocation->principal, 2));
 
+            // The payment being voided is still posted inside this
+            // transaction; the penalty is worked as if it never was.
+            $schedule->setRelation('postedPrincipalPayments', $schedule->postedPrincipalPayments()
+                ->where('repayment_allocations.repayment_id', '!=', $repayment->id)
+                ->get());
+
             // Recalculate schedule status
-            if ($schedule->principal_paid == 0 && $schedule->interest_paid == 0 && $schedule->penalty_paid == 0) {
+            $fullyUnpaid = $schedule->principal_paid == 0 && $schedule->interest_paid == 0 && $schedule->penalty_paid == 0;
+
+            if ($fullyUnpaid) {
                 $isLate = $schedule->due_date->lt($lateBefore)
                     && AmortizationSchedule::isPenalisable($arrearsBaseline, $schedule->due_date);
 
                 $schedule->status = $isLate ? 'overdue' : 'pending';
-
-                // A late period owes the penalty applyPenalties() charges it,
-                // from the same method, so the loan owes again exactly what it
-                // owed before the payment. Setting 0 and waiting for the next
-                // payment or the nightly run to recharge it left the period
-                // overdue with no penalty, and the loan's total payable short
-                // by that charge, in between. A period that is not late owes
-                // none, and nor does any period of a loan with no penalty rate.
-                //
-                // Except on a period a waiver from before the switch made
-                // penalty-free, which applyPenalties() never charges again.
-                // There the charge the waiver kept stands, owed again now that
-                // the payment that covered it is void. A waiver made since
-                // keeps that charge through penaltyFor() too.
-                if (! $schedule->isWaivedForGood()) {
-                    $charges = $isLate && $penaltyRate > 0;
-                    $schedule->penalty_amount = $charges ? $this->penaltyFor($loan, $schedule, $paymentDate) : 0;
-                    $schedule->penalty_months = $charges ? self::monthsLate($schedule, $paymentDate) : 0;
-                }
             } else {
                 $schedule->status = 'partial';
+            }
+
+            // A late period owes the penalty applyPenalties() charges it,
+            // from the same method. Setting 0 and waiting for the next payment
+            // or the nightly run to recharge it left the period overdue with no
+            // penalty, and the loan's total payable short by that charge, in
+            // between. A fully unpaid period that is not late owes none, and
+            // nor does any period of a loan with no penalty rate.
+            //
+            // Except on a period a waiver from before the switch made
+            // penalty-free, which applyPenalties() never charges again. There
+            // the charge the waiver kept stands, owed again now that the
+            // payment that covered it is void. A waiver made since keeps that
+            // charge through its checkpoint (penaltyStateAsOf()).
+            if (! $schedule->isWaivedForGood()) {
+                $state = $this->penaltyStateAsOf($loan, $schedule, $today);
+
+                if ($state !== null) {
+                    $schedule->penalty_amount = $state['amount'];
+                    $schedule->penalty_months = $state['months'];
+                } elseif ($fullyUnpaid) {
+                    $schedule->penalty_amount = 0;
+                    $schedule->penalty_months = 0;
+                }
             }
 
             $schedule->save();

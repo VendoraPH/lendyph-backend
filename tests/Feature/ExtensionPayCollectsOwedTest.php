@@ -37,17 +37,25 @@ class ExtensionPayCollectsOwedTest extends TestCase
 
     private const INTEREST = 1800.00;
 
+    /** One late penalty charge: 2% of the ₱60,000.00 unpaid. */
     private const PENALTY = 1200.00;
+
+    /**
+     * On 30 July: due 27 May, late from 31 May (the first ₱1,200.00), and
+     * 27 July is two full months after the due date (the second ₱1,200.00).
+     * 27 June, one full month, adds no charge: 1 month late is 1 charge.
+     */
+    private const PENALTY_ON_30_JULY = 2 * self::PENALTY;
 
     protected function setUp(): void
     {
         parent::setUp();
         $this->seedAndLogin();
 
-        // Every period here falls late before the monthly penalty's switch, so
-        // it keeps the single charge these figures are written for.
-        // MonthlyLatePenaltyTest covers an extension under the monthly rule.
-        LatePenaltySetting::query()->create(['monthly_from' => '2026-12-31']);
+        // The monthly penalty is in force for every period here (a switch
+        // date before them all). test_a_period_late_before_the_switch_collects_its_one_charge
+        // moves it after the due date.
+        LatePenaltySetting::query()->create(['monthly_from' => '2026-01-01']);
     }
 
     /** Released on 27 Apr 2026, then the clock moves to `$extendOn`. */
@@ -162,8 +170,8 @@ class ExtensionPayCollectsOwedTest extends TestCase
         $adjustment = $this->extend($loan, 'pay');
 
         $repayment = Repayment::where('loan_id', $loan->id)->sole();
-        $this->assertEqualsWithDelta(self::PENALTY + self::INTEREST, (float) $repayment->amount_paid, 0.001);
-        $this->assertEqualsWithDelta(self::PENALTY, (float) $repayment->penalty_applied, 0.001);
+        $this->assertEqualsWithDelta(self::PENALTY_ON_30_JULY + self::INTEREST, (float) $repayment->amount_paid, 0.001);
+        $this->assertEqualsWithDelta(self::PENALTY_ON_30_JULY, (float) $repayment->penalty_applied, 0.001);
         $this->assertEqualsWithDelta(self::INTEREST, (float) $repayment->interest_applied, 0.001);
         $this->assertEqualsWithDelta(0.00, (float) $repayment->principal_applied, 0.001);
 
@@ -174,7 +182,7 @@ class ExtensionPayCollectsOwedTest extends TestCase
         $this->assertSame($adjustment->id, $old->closed_by_adjustment_id);
         $this->assertEqualsWithDelta(self::INTEREST, (float) $old->interest_paid, 0.001);
         $this->assertEqualsWithDelta((float) $old->interest_due, (float) $old->interest_paid, 0.001);
-        $this->assertEqualsWithDelta(self::PENALTY, (float) $old->penalty_paid, 0.001);
+        $this->assertEqualsWithDelta(self::PENALTY_ON_30_JULY, (float) $old->penalty_paid, 0.001);
         $this->assertEqualsWithDelta((float) $old->penalty_amount, (float) $old->penalty_paid, 0.001);
 
         // Only principal moves; the new period owes the fresh interest alone.
@@ -189,9 +197,9 @@ class ExtensionPayCollectsOwedTest extends TestCase
         $this->assertEqualsWithDelta(0.00, (float) $values['carry_interest'], 0.001);
         $this->assertEqualsWithDelta(3 * self::INTEREST, (float) $values['fresh_interest'], 0.001);
         $this->assertEqualsWithDelta(self::INTEREST, (float) $values['interest_paid'], 0.001);
-        $this->assertEqualsWithDelta(self::PENALTY, (float) $values['penalty_paid'], 0.001);
+        $this->assertEqualsWithDelta(self::PENALTY_ON_30_JULY, (float) $values['penalty_paid'], 0.001);
         $this->assertEqualsWithDelta(0.00, (float) $values['insurance_paid'], 0.001);
-        $this->assertEqualsWithDelta(self::PENALTY + self::INTEREST, (float) $values['amount_collected'], 0.001);
+        $this->assertEqualsWithDelta(self::PENALTY_ON_30_JULY + self::INTEREST, (float) $values['amount_collected'], 0.001);
         $this->assertSame($repayment->id, $values['repayment_id']);
     }
 
@@ -306,7 +314,7 @@ class ExtensionPayCollectsOwedTest extends TestCase
 
         $payment = collect($ledger['rows'])->firstWhere('repayment_id', $repayment->id);
         $this->assertNotNull($payment, 'the collection has a ledger row');
-        $this->assertEqualsWithDelta(self::PENALTY, $payment['penalty'], 0.001);
+        $this->assertEqualsWithDelta(self::PENALTY_ON_30_JULY, $payment['penalty'], 0.001);
         $this->assertEqualsWithDelta(self::INTEREST, $payment['interest'], 0.001);
 
         $last = end($ledger['rows']);
@@ -346,7 +354,8 @@ class ExtensionPayCollectsOwedTest extends TestCase
 
     public function test_a_partly_paid_penalty_collects_only_what_is_left_of_it(): void
     {
-        // ₱1,200.00 charged, ₱500.00 paid today: ₱700.00 + ₱1,800.00.
+        // ₱2,400.00 charged (two charges by 30 July), ₱500.00 paid today:
+        // ₱1,900.00 + ₱1,800.00 = ₱3,700.00.
         $loan = $this->oneMonthLoan('2026-07-30');
         $first = $this->pay($loan, 500.00);
         $this->assertEqualsWithDelta(500.00, (float) $first->penalty_applied, 0.001, 'setup: the ₱500.00 went to penalty');
@@ -354,7 +363,20 @@ class ExtensionPayCollectsOwedTest extends TestCase
         $preview = $this->preview($loan->fresh(), 'pay');
         $adjustment = $this->extend($loan->fresh(), 'pay');
 
-        $this->assertPreviewEqualsRecorded($preview, $adjustment, ['amount' => 2500.00, 'insurance' => 0.00, 'penalty' => 700.00, 'interest' => 1800.00]);
+        $this->assertPreviewEqualsRecorded($preview, $adjustment, ['amount' => 3700.00, 'insurance' => 0.00, 'penalty' => 1900.00, 'interest' => 1800.00]);
+    }
+
+    public function test_a_period_late_before_the_switch_collects_its_one_charge(): void
+    {
+        // Late from 31 May, before a 1 July switch: its one ₱1,200.00 stays,
+        // and the next charge would fall on 1 August, after 30 July.
+        LatePenaltySetting::query()->sole()->update(['monthly_from' => '2026-07-01']);
+        $loan = $this->oneMonthLoan('2026-07-30');
+
+        $preview = $this->preview($loan, 'pay');
+        $adjustment = $this->extend($loan, 'pay');
+
+        $this->assertPreviewEqualsRecorded($preview, $adjustment, ['amount' => 3000.00, 'insurance' => 0.00, 'penalty' => 1200.00, 'interest' => 1800.00]);
     }
 
     public function test_an_overdue_loan_inside_its_grace_collects_no_penalty(): void
@@ -372,13 +394,15 @@ class ExtensionPayCollectsOwedTest extends TestCase
 
     public function test_odd_centavos_are_collected_exactly(): void
     {
-        // ₱61,234.57 at 3%: ₱1,837.04 interest; 2% penalty: ₱1,224.69.
+        // ₱61,234.57 at 3%: ₱1,837.04 interest. 2% penalty: ₱1,224.69 a
+        // charge (₱1,224.6914 rounded), two charges by 30 July: ₱2,449.38.
+        // ₱2,449.38 + ₱1,837.04 = ₱4,286.42.
         $loan = $this->oneMonthLoan('2026-07-30', 61234.57);
 
         $preview = $this->preview($loan, 'pay');
         $adjustment = $this->extend($loan, 'pay');
 
-        $this->assertPreviewEqualsRecorded($preview, $adjustment, ['amount' => 3061.73, 'insurance' => 0.00, 'penalty' => 1224.69, 'interest' => 1837.04]);
+        $this->assertPreviewEqualsRecorded($preview, $adjustment, ['amount' => 4286.42, 'insurance' => 0.00, 'penalty' => 2449.38, 'interest' => 1837.04]);
         $this->assertEqualsWithDelta(61234.57, (float) $this->newPeriod($loan)->principal_due, 0.001);
     }
 

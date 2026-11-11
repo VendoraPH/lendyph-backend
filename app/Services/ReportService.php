@@ -898,8 +898,10 @@ class ReportService
     {
         return $this->releasesQuery($filters)
             // `amortizationSchedules` is what makes outstanding_balance real —
-            // without it every row serialised as 0.
-            ->with('borrower', 'branch', 'loanProduct', 'amortizationSchedules')
+            // without it every row serialised as 0. Their posted principal
+            // payments let each row's amount due now work its late penalty
+            // without a query per period.
+            ->with('borrower', 'branch', 'loanProduct', 'amortizationSchedules.postedPrincipalPayments')
             ->paginate($filters['per_page'] ?? 15);
     }
 

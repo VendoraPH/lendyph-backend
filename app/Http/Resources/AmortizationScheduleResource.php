@@ -22,7 +22,7 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'total_due', type: 'number'),
         new OA\Property(property: 'share_capital_build_up', type: 'number', description: 'The loan\'s `scb_amount` for this period; 0 on a period closed early (AmortizationSchedule::isClosedEarly(): by an extension, an adjustment, or a restructure into a new loan)'),
         new OA\Property(property: 'total_payment', type: 'number', description: '`total_due` plus `share_capital_build_up`, in whole centavos'),
-        new OA\Property(property: 'penalty_months', type: 'integer', description: 'Months late as the penalty was last charged: max(1, full months since the due date) while late; 0 when never charged'),
+        new OA\Property(property: 'penalty_months', type: 'integer', description: 'The number of monthly late penalty charges counted in the period\'s penalty, as last charged; 0 when never charged'),
         new OA\Property(property: 'remaining_balance', type: 'number'),
         new OA\Property(property: 'status', type: 'string', enum: ['pending', 'paid', 'partial', 'overdue']),
         new OA\Property(property: 'principal', type: 'number', description: 'Alias for principal_due'),
