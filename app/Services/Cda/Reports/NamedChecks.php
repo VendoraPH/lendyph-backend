@@ -105,10 +105,6 @@ final class NamedChecks
      */
     private function trainingIncomplete(SourceContext $context): ?string
     {
-        if (! class_exists(TrainingCompliance::class)) {
-            return 'Officer trainings can\'t be checked until the officers register is available.';
-        }
-
         $from = $context->date('period_start');
         $to = $context->date('period_end');
         $compliance = app(TrainingCompliance::class);

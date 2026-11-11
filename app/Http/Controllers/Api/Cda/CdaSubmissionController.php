@@ -29,7 +29,7 @@ class CdaSubmissionController extends Controller
     #[OA\Get(
         path: '/api/cda/periods/{year}/submissions',
         summary: 'The year\'s filings with CDA',
-        description: 'Needs `cda:view` and `branches:view_all`. Filings of reports the caller can\'t open (mediation, audit, tax without the view) are left out. Each: the report, the snapshot filed (version, checksum), method, submitted_on, submitted_by_name, recorded_by, cda_reference_no, acknowledgment_no, status, remarks and `proof` (the final proof of submission with its signed `url`, or null).',
+        description: 'Needs `cda:view` and `branches:view_all`. Filings of reports the caller can\'t open (mediation, audit, tax without the view) are left out. Each: the report, the snapshot filed (version, checksum), method, submitted_on, submitted_by_name, recorded_by, cda_reference_no, acknowledgment_no, status, remarks and `proof` (the final proof of submission, its signed `url` null for a caller who may not open it; or null when none is uploaded).',
         tags: ['CDA'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'year', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
@@ -46,7 +46,7 @@ class CdaSubmissionController extends Controller
             ->whereHas('report', fn ($q) => $q->where('period_id', $period->id)->whereIn('report_type', $visible))
             ->orderByDesc('submitted_on')->orderByDesc('id')->get();
 
-        return response()->json(['success' => true, 'data' => $rows->map(fn (CdaSubmission $row) => $this->present($row))->all()]);
+        return response()->json(['success' => true, 'data' => $rows->map(fn (CdaSubmission $row) => $this->present($row, $request->user()))->all()]);
     }
 
     #[OA\Put(
@@ -72,11 +72,17 @@ class CdaSubmissionController extends Controller
             $submission->save();
         }
 
-        return response()->json(['success' => true, 'message' => 'Filing saved.', 'data' => $this->present($submission->refresh()->load(['report', 'snapshot']))]);
+        return response()->json(['success' => true, 'message' => 'Filing saved.', 'data' => $this->present($submission->refresh()->load(['report', 'snapshot']), $request->user())]);
     }
 
-    /** @return array<string, mixed> */
-    private function present(CdaSubmission $row): array
+    /**
+     * A filing as the API sends it. `proof` is the final proof of submission
+     * (C3's SubmissionProofs), whose signed `url` is null for a viewer who
+     * can't open it.
+     *
+     * @return array<string, mixed>
+     */
+    private function present(CdaSubmission $row, User $viewer): array
     {
         /** @var CdaReport $report */
         $report = $row->report;
@@ -97,7 +103,7 @@ class CdaSubmissionController extends Controller
             'acknowledgment_no' => $row->acknowledgment_no,
             'status' => $row->status,
             'remarks' => $row->remarks,
-            'proof' => class_exists(SubmissionProofs::class) ? app(SubmissionProofs::class)->present($row) : null,
+            'proof' => app(SubmissionProofs::class)->present($row, $viewer),
             'created_at' => $row->created_at,
             'updated_at' => $row->updated_at,
         ];
