@@ -18,6 +18,11 @@ use Illuminate\Support\Facades\Route;
 | own `cda:*` permission (CdaAccess, checked in the controllers and form
 | requests); mediation needs `cda:view_mediation` / `cda:manage_mediation`,
 | and restricted documents their view permission. Ids are numeric.
+|
+| Parameter names never reuse a branch-owned record's name (`document`,
+| `borrower`, `loan`, `user`, …): BranchAccessRouteSweepTest binds those to
+| the member models. A CDA document is `{cdaDocument}`; it belongs to no
+| branch (CDA access needs branches:view_all).
 */
 Route::prefix('cda')->group(function () {
     Route::get('/officers', [CdaOfficerController::class, 'index']);
@@ -42,9 +47,9 @@ Route::prefix('cda')->group(function () {
 
     Route::get('/periods/{year}/documents', [CdaDocumentController::class, 'index'])->whereNumber('year');
     Route::post('/periods/{year}/documents', [CdaDocumentController::class, 'store'])->whereNumber('year');
-    Route::get('/documents/{document}/versions', [CdaDocumentController::class, 'versions'])->whereNumber('document');
-    Route::post('/documents/{document}/versions', [CdaDocumentController::class, 'addVersion'])->whereNumber('document');
-    Route::post('/documents/{document}/withdraw', [CdaDocumentController::class, 'withdraw'])->whereNumber('document');
+    Route::get('/documents/{cdaDocument}/versions', [CdaDocumentController::class, 'versions'])->whereNumber('cdaDocument');
+    Route::post('/documents/{cdaDocument}/versions', [CdaDocumentController::class, 'addVersion'])->whereNumber('cdaDocument');
+    Route::post('/documents/{cdaDocument}/withdraw', [CdaDocumentController::class, 'withdraw'])->whereNumber('cdaDocument');
 
     Route::post('/submissions/{submission}/proof', [CdaSubmissionProofController::class, 'store'])->whereNumber('submission');
 });

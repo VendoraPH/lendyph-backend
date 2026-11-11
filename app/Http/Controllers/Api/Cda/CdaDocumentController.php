@@ -150,10 +150,10 @@ class CdaDocumentController extends Controller
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
         responses: [new OA\Response(response: 200, description: '{success, data: version[], meta: {document}}'), new OA\Response(response: 403, description: 'Missing cda:view or branches:view_all'), new OA\Response(response: 404, description: 'No such document, or one the caller may not see (mediation, audit, tax)')],
     )]
-    public function versions(Request $request, int $document): JsonResponse
+    public function versions(Request $request, int $cdaDocument): JsonResponse
     {
         $this->access->authorize($request->user(), CdaAccess::VIEW);
-        $found = $this->find($request->user(), $document);
+        $found = $this->find($request->user(), $cdaDocument);
         $users = RegisterPresenter::usersFor([$found]);
 
         return response()->json([
@@ -178,9 +178,9 @@ class CdaDocumentController extends Controller
         ]))),
         responses: [new OA\Response(response: 201, description: '{success, message, data: document}'), new OA\Response(response: 403, description: 'Missing cda:upload, branches:view_all or the register\'s write permission'), new OA\Response(response: 404, description: 'No such document, or one the caller may not see (mediation, audit, tax)'), new OA\Response(response: 409, description: 'The document is withdrawn, or is a report export (export the report again)'), new OA\Response(response: 422, description: 'Refused, in words')],
     )]
-    public function addVersion(CdaVersionRequest $request, int $document): JsonResponse
+    public function addVersion(CdaVersionRequest $request, int $cdaDocument): JsonResponse
     {
-        $found = $this->find($request->user(), $document);
+        $found = $this->find($request->user(), $cdaDocument);
         $this->refuseExport($found);
         $this->documents->authorizeWrite($request->user(), $found->category, $found->subject_type);
         $data = $request->validated();
@@ -200,10 +200,10 @@ class CdaDocumentController extends Controller
         requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent(required: ['reason'], properties: [new OA\Property(property: 'reason', type: 'string')])),
         responses: [new OA\Response(response: 200, description: '{success, message, data: document}'), new OA\Response(response: 403, description: 'Missing cda:upload, branches:view_all or the register\'s write permission'), new OA\Response(response: 404, description: 'No such document, or one the caller may not see (mediation, audit, tax)'), new OA\Response(response: 409, description: 'Already withdrawn, or a report export (export the report again)'), new OA\Response(response: 422, description: 'No reason')],
     )]
-    public function withdraw(Request $request, int $document): JsonResponse
+    public function withdraw(Request $request, int $cdaDocument): JsonResponse
     {
         $this->access->authorize($request->user(), CdaAccess::UPLOAD);
-        $found = $this->find($request->user(), $document);
+        $found = $this->find($request->user(), $cdaDocument);
         $this->refuseExport($found);
         $this->documents->authorizeWrite($request->user(), $found->category, $found->subject_type);
         $reason = (string) $request->validate(
