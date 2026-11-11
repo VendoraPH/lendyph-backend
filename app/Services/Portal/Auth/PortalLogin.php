@@ -10,6 +10,7 @@ use App\Services\Portal\PortalNotices;
 use App\Services\Portal\PortalSettings;
 use App\Services\Portal\PortalTerms;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Str;
@@ -22,8 +23,10 @@ use Illuminate\Support\Str;
  *   password, and a locked account.
  * - While an account is locked the password is not even checked, so a
  *   lockout can't confirm a password.
- * - Only a correct password on a disabled account or an inactive member gets
- *   a 403 in words.
+ * - Only a correct password on an account that isn't locked, when the account
+ *   is disabled or the member inactive, gets a 403 in words. A wrong password
+ *   on a disabled account counts toward the lockout like any other.
+ * - Every path runs exactly one bcrypt check, so timing reveals nothing.
  * - 5 failures in a row lock it for 15 minutes; 3 lockouts in 24 hours lock
  *   it until staff unlock it (both settings).
  * - Every attempt is a `portal_login_events` row, not an audit row; a success
@@ -39,7 +42,7 @@ final class PortalLogin
 
     public const PORTAL_OFF = 'The member portal is not available right now.';
 
-    private static ?string $dummyHash = null;
+    private const DUMMY_HASH_KEY = 'portal:auth:dummy-hash';
 
     public function __construct(
         private readonly PortalSettings $settings,
@@ -63,6 +66,10 @@ final class PortalLogin
         $result = DB::transaction(function () use ($member, $password, $request, $loginHash): array {
             $portalUser = $member === null ? null : PortalUser::query()->where('borrower_id', $member->getKey())->lockForUpdate()->first();
 
+            // Exactly one bcrypt check on every path (review M1), so the time an
+            // answer takes tells nothing about the account. A missing or
+            // locked account is checked against the stand-in hash; a locked
+            // one never against its own, so a lockout can't confirm a password.
             if ($portalUser === null || $portalUser->password === null) {
                 Hash::check($password, self::dummyHash());
                 $this->record($request, $loginHash, $portalUser?->getKey(), PortalLoginEvent::OUTCOME_FAILED);
@@ -71,23 +78,24 @@ final class PortalLogin
             }
 
             if ($portalUser->status === PortalUser::STATUS_LOCKED || $portalUser->isTemporarilyLocked()) {
+                Hash::check($password, self::dummyHash());
                 $this->record($request, $loginHash, $portalUser->getKey(), PortalLoginEvent::OUTCOME_REFUSED_LOCKED);
 
                 return [self::failed(), null, null];
             }
 
-            $correct = Hash::check($password, $portalUser->password);
-
-            if ($portalUser->status === PortalUser::STATUS_DISABLED) {
-                $this->record($request, $loginHash, $portalUser->getKey(), $correct ? PortalLoginEvent::OUTCOME_DISABLED : PortalLoginEvent::OUTCOME_FAILED);
-
-                return [$correct ? PortalAnswer::refused(403, self::DISABLED, 'portal_access_disabled') : self::failed(), null, null];
-            }
-
-            if (! $correct) {
+            // A wrong password counts toward the lockout whatever the
+            // account's state, a disabled one included (review M2).
+            if (! Hash::check($password, $portalUser->password)) {
                 $this->countFailure($portalUser, $request, $loginHash);
 
                 return [self::failed(), null, null];
+            }
+
+            if ($portalUser->status === PortalUser::STATUS_DISABLED) {
+                $this->record($request, $loginHash, $portalUser->getKey(), PortalLoginEvent::OUTCOME_DISABLED);
+
+                return [PortalAnswer::refused(403, self::DISABLED, 'portal_access_disabled'), null, null];
             }
 
             /** @var Borrower $member */
@@ -163,10 +171,17 @@ final class PortalLogin
             asSystem: true,
         );
 
+        // Only lockouts since the last staff unlock or code reset count
+        // (review L5).
+        $since = now()->subDay();
+        if ($portalUser->lockouts_cleared_at !== null && $portalUser->lockouts_cleared_at->gt($since)) {
+            $since = $portalUser->lockouts_cleared_at;
+        }
+
         $lockouts = PortalLoginEvent::query()
             ->where('portal_user_id', $portalUser->getKey())
             ->where('outcome', PortalLoginEvent::OUTCOME_LOCKED_OUT)
-            ->where('created_at', '>=', now()->subDay())
+            ->where('created_at', '>=', $since)
             ->count();
 
         if ($lockouts >= $settings->hard_lock_after && $portalUser->status === PortalUser::STATUS_ACTIVE) {
@@ -203,11 +218,21 @@ final class PortalLogin
     }
 
     /**
-     * A hash to check against when there is no account, so an unknown member
-     * number costs the same time as a wrong password.
+     * The stand-in hash checked when there is no account (or it is locked), so
+     * those answers cost the same one bcrypt check as a wrong password. Built
+     * once at the configured cost and kept in the cache across requests
+     * (php-fpm keeps no statics between requests); rebuilt only when the
+     * configured cost changes.
      */
     public static function dummyHash(): string
     {
-        return self::$dummyHash ??= Hash::make(Str::random(40));
+        $hash = Cache::rememberForever(self::DUMMY_HASH_KEY, fn (): string => Hash::make(Str::random(40)));
+
+        if (! is_string($hash) || Hash::needsRehash($hash)) {
+            $hash = Hash::make(Str::random(40));
+            Cache::forever(self::DUMMY_HASH_KEY, $hash);
+        }
+
+        return $hash;
     }
 }

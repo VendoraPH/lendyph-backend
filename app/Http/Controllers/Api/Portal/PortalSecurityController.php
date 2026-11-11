@@ -77,7 +77,9 @@ class PortalSecurityController extends Controller
         $portalUser = $this->scope->portalUser();
         $count = $this->sessions->revoke($portalUser, $this->currentTokenId());
 
-        AuditLogService::log('portal_sessions_signed_out', $portalUser, null, ['sessions_ended' => $count], 'Member signed out every other device');
+        if ($count > 0) {
+            AuditLogService::log('portal_sessions_signed_out', $portalUser, null, ['sessions_ended' => $count], 'Member signed out every other device');
+        }
 
         return response()->json(['success' => true, 'data' => ['sessions_ended' => $count]]);
     }
@@ -113,7 +115,7 @@ class PortalSecurityController extends Controller
     #[OA\Post(
         path: '/api/portal/security/logins/{id}/report',
         summary: 'Report a sign-in the member doesn\'t recognise',
-        description: 'Signed-in portal token. Marks it reported, signs out every other device, tells branch staff who hold member_portal:manage, and answers `password_change_required: true` so the screen asks for a new password. 404 for another member\'s sign-in. Audited.',
+        description: 'Signed-in portal token. Marks it reported, signs out every other device, tells branch staff who hold member_portal:manage, and answers `password_change_required: true` so the screen asks for a new password. Reporting the same sign-in again only signs out other devices. 404 for another member\'s sign-in. Audited the first time.',
         tags: ['Member Portal'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
@@ -125,12 +127,15 @@ class PortalSecurityController extends Controller
 
         $result = DB::transaction(function () use ($portalUser, $id): array {
             $event = PortalLoginEvent::query()->where('portal_user_id', $portalUser->getKey())->lockForUpdate()->findOrFail($id);
+            $count = $this->sessions->revoke($portalUser, $this->currentTokenId());
 
-            if ($event->reported_at === null) {
-                $event->forceFill(['reported_at' => now()])->save();
+            // Reporting the same sign-in again ends other sessions but alerts
+            // nobody and writes nothing new (review L3).
+            if ($event->reported_at !== null) {
+                return ['reported_at' => $event->reported_at, 'sessions_ended' => $count, 'password_change_required' => true];
             }
 
-            $count = $this->sessions->revoke($portalUser, $this->currentTokenId());
+            $event->forceFill(['reported_at' => now()])->save();
 
             AuditLogService::log(
                 'portal_login_reported',

@@ -78,6 +78,7 @@ return new class extends Migration
             $table->foreignId('disabled_by')->nullable()->constrained('users')->restrictOnDelete();
             $table->unsignedSmallInteger('failed_attempts')->default(0);
             $table->timestamp('locked_until')->nullable();
+            $table->timestamp('lockouts_cleared_at')->nullable();
             $table->foreignId('invited_by')->nullable()->constrained('users')->restrictOnDelete();
             $table->timestamp('invited_at')->nullable();
             $table->timestamp('activated_at')->nullable();
@@ -115,6 +116,7 @@ return new class extends Migration
             $table->foreignId('portal_code_id')->nullable()->constrained('portal_codes')->restrictOnDelete();
             $table->string('purpose', 20);
             $table->string('code_hash');
+            $table->char('step_hash', 64)->nullable();
             $table->string('masked_recipient', 64)->nullable();
             $table->timestamp('expires_at');
             $table->unsignedTinyInteger('attempts')->default(0);

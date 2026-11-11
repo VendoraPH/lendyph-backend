@@ -172,4 +172,17 @@ class PortalRouteStackTest extends TestCase
 
         return null;
     }
+
+    /** Review L3 and L4: which routes carry the write limit, and that no per-member limiter precedes the permission check. */
+    public function test_member_security_writes_carry_the_write_limit_and_staff_code_routes_no_route_limiter(): void
+    {
+        foreach (['portal.auth.password', 'portal.auth.terms', 'portal.sessions.destroy', 'portal.sessions.logout-others', 'portal.logins.report'] as $name) {
+            $this->assertContains('throttle:portal-writes', Router::getRoutes()->getByName($name)->gatherMiddleware(), "{$name} lacks the write limit.");
+        }
+
+        foreach (['portal-admin.members.invite', 'portal-admin.members.reset-code'] as $name) {
+            $limiters = array_filter(Router::getRoutes()->getByName($name)->gatherMiddleware(), fn ($m) => is_string($m) && str_starts_with($m, 'throttle:portal'));
+            $this->assertSame([], array_values($limiters), "{$name} meters before its permission check.");
+        }
+    }
 }

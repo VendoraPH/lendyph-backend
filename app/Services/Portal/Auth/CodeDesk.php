@@ -52,6 +52,23 @@ final class CodeDesk
 
     public const STEP_MINUTES = 15;
 
+    /**
+     * The valid ID types a staff member may say they checked: the same keys
+     * and words members' valid IDs use (the frontend's VALID_ID_OPTIONS).
+     */
+    public const IDENTITY_TYPES = [
+        'philippine_id' => 'Philippine National ID (PhilSys)',
+        'drivers_license' => 'Driver\'s License',
+        'passport' => 'Passport',
+        'sss' => 'SSS ID',
+        'umid' => 'UMID',
+        'voters_id' => 'Voter\'s ID',
+        'postal_id' => 'Postal ID',
+        'prc_id' => 'PRC ID',
+        'tin_id' => 'TIN ID',
+        'others' => 'Others',
+    ];
+
     public const CODES_PER_MEMBER_PER_DAY = 5;
 
     public const CODES_PER_STAFF_PER_HOUR = 30;
@@ -121,7 +138,7 @@ final class CodeDesk
                     $kind === PortalCode::KIND_ACTIVATION ? 'Portal activation' : 'Portal password reset',
                     $this->access->memberLabel($portalUser),
                     $expiresAt->copy()->timezone('Asia/Manila')->format('j M Y, g:i A'),
-                    $identityCheckedAs,
+                    self::IDENTITY_TYPES[$identityCheckedAs] ?? $identityCheckedAs,
                 ),
                 (int) $staff->getKey(),
             );
@@ -155,13 +172,15 @@ final class CodeDesk
                 return null;
             }
 
+            // One bcrypt check on every path, expired included (review M1).
             if ($open->expires_at->isPast()) {
+                Hash::check($normalised, PortalLogin::dummyHash());
                 $open->forceFill(['status' => PortalCode::STATUS_EXPIRED, 'live_key' => null, 'step_hash' => null, 'step_expires_at' => null])->save();
 
                 return null;
             }
 
-            $codeMatches = $normalised !== '' && Hash::check($normalised, $open->code_hash);
+            $codeMatches = Hash::check($normalised, $open->code_hash) && $normalised !== '';
             $birthdateMatches = $this->birthdateMatches($member, $birthdate);
 
             if (! $codeMatches || ! $birthdateMatches) {
@@ -198,7 +217,7 @@ final class CodeDesk
             'kind' => $open->kind,
             'first_name' => (string) $member->first_name,
             'otp_required' => $otpRequired,
-            'sent_to' => $otpRequired ? $this->otp->challenge($portalUser, $open) : null,
+            'sent_to' => $otpRequired ? $this->otp->challenge($portalUser, $open, hash('sha256', $step)) : null,
             'terms' => ['version' => $this->terms->current()?->version],
         ];
     }
@@ -210,6 +229,7 @@ final class CodeDesk
         $verified = DB::transaction(function () use ($code, $otp): bool {
             $challenge = PortalOtpChallenge::query()
                 ->where('portal_code_id', $code->getKey())
+                ->where('step_hash', $code->step_hash)
                 ->whereNull('verified_at')
                 ->orderByDesc('id')
                 ->lockForUpdate()
@@ -247,7 +267,13 @@ final class CodeDesk
         $portalUser = $code->portalUser;
         $member = $portalUser->borrower;
 
-        if ($this->settings->current()->otp_required && ! PortalOtpChallenge::query()->where('portal_code_id', $code->getKey())->whereNotNull('verified_at')->exists()) {
+        $otpPassed = PortalOtpChallenge::query()
+            ->where('portal_code_id', $code->getKey())
+            ->where('step_hash', $code->step_hash)
+            ->whereNotNull('verified_at')
+            ->exists();
+
+        if ($this->settings->current()->otp_required && ! $otpPassed) {
             throw self::refusal('otp', self::OTP_NEEDED);
         }
 
@@ -290,6 +316,7 @@ final class CodeDesk
                 'password_changed_at' => now(),
                 'failed_attempts' => 0,
                 'locked_until' => null,
+                'lockouts_cleared_at' => now(),
             ];
 
             if ($isActivation) {

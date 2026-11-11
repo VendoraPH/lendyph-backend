@@ -12,6 +12,33 @@ final class MemberNumber
 {
     public const MAX_LENGTH = 40;
 
+    /**
+     * Printable ASCII only (review M2): a full-width or invisible character
+     * would otherwise reach the same member under another spelling, and
+     * another limiter key.
+     */
+    public const MESSAGES = [
+        'member_number.regex' => 'Enter your member number using the letters, numbers and dashes printed on your slip.',
+    ];
+
+    /** @return list<string> */
+    public static function rules(): array
+    {
+        return ['required', 'string', 'max:'.self::MAX_LENGTH, 'regex:/^[\x20-\x7E]+$/'];
+    }
+
+    /**
+     * The per-member limiter key: the member found when the number reaches
+     * one, so every spelling of it shares one bucket, else the normalised
+     * input's keyed hash.
+     */
+    public static function limiterKey(mixed $input): string
+    {
+        $member = self::find($input);
+
+        return $member === null ? 'input:'.self::hash($input) : 'member:'.$member->getKey();
+    }
+
     public static function normalise(mixed $input): string
     {
         if (! is_string($input)) {

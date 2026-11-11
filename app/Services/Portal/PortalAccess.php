@@ -103,6 +103,7 @@ final class PortalAccess
                 'status' => $hardLocked ? PortalUser::STATUS_ACTIVE : $locked->status,
                 'failed_attempts' => 0,
                 'locked_until' => null,
+                'lockouts_cleared_at' => now(),
             ])->save();
 
             AuditLogService::log(

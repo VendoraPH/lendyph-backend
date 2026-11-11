@@ -111,12 +111,12 @@ class PortalAccessController extends Controller
     #[OA\Post(
         path: '/api/portal-admin/members/{borrower}/invite',
         summary: 'Issue an activation code (shown once)',
-        description: 'Needs member_portal:invite. `identity_checked_as` is the valid ID type the staff member checked (recorded in the audit row). 201 {code (XXXX-XXXX-XXXX), kind, expires_at, slip{title, member_name, member_number, code, expires_at, expires_at_text, portal_path, instructions[]}}, sent with no-store: the code is never shown again, logged or audited. Supersedes an open code. 422 when the member isn\'t active, has no birthdate, has access turned off, or no terms are published; 409 when the member already uses the portal ("issue a reset code"); 429 after 5 codes for the member in 24 hours or 30 by the caller in an hour.',
+        description: 'Needs member_portal:invite. `identity_checked_as` is the valid ID type the staff member checked, one of the member valid ID keys (recorded in the audit row in words). 201 {code (XXXX-XXXX-XXXX), kind, expires_at, slip{title, member_name, member_number, code, expires_at, expires_at_text, portal_path, instructions[]}}, sent with no-store: the code is never shown again, logged or audited. Supersedes an open code. 422 when the member isn\'t active, has no birthdate, has access turned off, or no terms are published; 409 when the member already uses the portal ("issue a reset code"); 429 after 5 codes for the member in 24 hours or 30 by the caller in an hour, counted after the permission and branch checks.',
         tags: ['Member Portal (staff)'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'borrower', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
         requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent(required: ['identity_checked_as'], properties: [
-            new OA\Property(property: 'identity_checked_as', type: 'string', example: 'UMID'),
+            new OA\Property(property: 'identity_checked_as', type: 'string', enum: ['philippine_id', 'drivers_license', 'passport', 'sss', 'umid', 'voters_id', 'postal_id', 'prc_id', 'tin_id', 'others']),
         ])),
         responses: [
             new OA\Response(response: 201, description: 'The code, once'),
@@ -138,7 +138,7 @@ class PortalAccessController extends Controller
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'borrower', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
         requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent(required: ['identity_checked_as'], properties: [
-            new OA\Property(property: 'identity_checked_as', type: 'string', example: 'UMID'),
+            new OA\Property(property: 'identity_checked_as', type: 'string', enum: ['philippine_id', 'drivers_license', 'passport', 'sss', 'umid', 'voters_id', 'postal_id', 'prc_id', 'tin_id', 'others']),
         ])),
         responses: [new OA\Response(response: 201, description: 'The code, once'), new OA\Response(response: 422, description: 'In words'), new OA\Response(response: 429, description: 'Too many codes')],
     )]
@@ -243,8 +243,11 @@ class PortalAccessController extends Controller
         $this->authorize('member_portal:invite');
 
         $validated = $request->validate([
-            'identity_checked_as' => ['required', 'string', 'max:64'],
-        ], ['identity_checked_as.required' => 'Tick that you checked the member\'s valid ID, and say which ID it was.']);
+            'identity_checked_as' => ['required', 'string', Rule::in(array_keys(CodeDesk::IDENTITY_TYPES))],
+        ], [
+            'identity_checked_as.required' => 'Tick that you checked the member\'s valid ID, and say which ID it was.',
+            'identity_checked_as.in' => 'Choose the valid ID you checked from the list.',
+        ]);
 
         $issued = $this->codes->issue($borrower, $kind, trim((string) $validated['identity_checked_as']), $request->user());
 
