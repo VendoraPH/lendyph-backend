@@ -140,16 +140,79 @@ class WalkInGCashBranchTest extends TestCase
         $this->assertSame(0, GCashTransaction::query()->count());
     }
 
-    public function test_view_all_may_pick_any_branch_or_none_for_head_office(): void
+    public function test_view_all_may_pick_any_branch_or_an_explicit_none_for_head_office(): void
     {
         $this->teller([$this->branch], [BranchAccess::VIEW_ALL]);
 
         $far = $this->walkInCashIn(['branch_id' => $this->far->id]);
         $this->assertSame($this->far->id, $this->journalOf($far)->branch_id);
 
-        $headOffice = $this->walkInCashIn(['amount' => 1200]);
+        // `branch_id: null` sent on purpose is head office.
+        $headOffice = $this->walkInCashIn(['amount' => 1200, 'branch_id' => null]);
         $this->assertNull($headOffice->branch_id);
         $this->assertNull($this->journalOf($headOffice)->branch_id);
+    }
+
+    public function test_view_all_with_one_assigned_branch_and_no_branch_key_defaults_to_it(): void
+    {
+        $this->teller([$this->branch], [BranchAccess::VIEW_ALL]);
+
+        $tx = $this->walkInCashIn();
+
+        $this->assertSame($this->branch->id, $tx->branch_id);
+        $this->assertSame($this->branch->id, $this->journalOf($tx)->branch_id);
+    }
+
+    public function test_view_all_with_no_or_several_assigned_branches_and_no_key_defaults_to_none(): void
+    {
+        foreach ([[], [$this->branch, $this->far]] as $i => $branches) {
+            $this->teller($branches, [BranchAccess::VIEW_ALL]);
+
+            $tx = $this->walkInCashIn(['amount' => 1000 + $i]);
+
+            $this->assertNull($tx->branch_id);
+            $this->assertNull($this->journalOf($tx)->branch_id);
+        }
+    }
+
+    public function test_another_branchs_id_reads_like_a_branch_that_does_not_exist(): void
+    {
+        $this->teller([$this->branch]);
+        $body = ['gcash_non_member_id' => $this->walkIn->id, 'type' => 'cash_in', 'amount' => 1000];
+
+        $missing = $this->postJson('/api/gcash/transactions', $body + ['branch_id' => 999999])
+            ->assertUnprocessable()
+            ->json('errors.branch_id');
+        $other = $this->postJson('/api/gcash/transactions', $body + ['branch_id' => $this->far->id])
+            ->assertUnprocessable()
+            ->json('errors.branch_id');
+
+        $this->assertSame($missing, $other);
+        $this->assertSame(0, GCashTransaction::query()->count());
+    }
+
+    public function test_a_walk_in_cash_out_posts_in_its_branch(): void
+    {
+        $this->teller([$this->far]);
+
+        $tx = $this->walkInCashIn(['type' => 'cash_out']);
+
+        $this->assertSame('cash_out', $tx->type);
+        $this->assertSame($this->far->id, $tx->branch_id);
+        $this->assertSame($this->far->id, $this->journalOf($tx)->branch_id);
+    }
+
+    public function test_a_pending_cash_in_saved_with_no_branch_still_posts_with_none_when_paid(): void
+    {
+        $tx = GCashTransaction::factory()->forNonMember()->create([
+            'type' => 'cash_in', 'amount' => 1000, 'charge_amount' => 20, 'total_amount' => 1020,
+            'status' => 'pending', 'paid_at' => null, 'branch_id' => null,
+        ]);
+
+        $this->teller([$this->branch]);
+        $this->patchJson("/api/gcash/transactions/{$tx->id}/paid")->assertOk();
+
+        $this->assertNull($this->journalOf($tx)->branch_id);
     }
 
     public function test_a_pending_cash_in_posts_in_its_recorded_branch_when_paid(): void
@@ -165,7 +228,7 @@ class WalkInGCashBranchTest extends TestCase
 
     public function test_a_journal_with_no_branch_stays_an_all_branches_item(): void
     {
-        $headOffice = $this->walkInCashIn();
+        $headOffice = $this->walkInCashIn(['branch_id' => null]);
         $this->assertNull($this->journalOf($headOffice)->branch_id);
 
         $payload = [

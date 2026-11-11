@@ -123,7 +123,7 @@ class GCashTransactionController extends Controller
                     new OA\Property(property: 'amount', type: 'number'),
                     new OA\Property(property: 'is_pending', type: 'boolean', description: 'Cash In only — when true, status starts as pending and charge is deferred from income.'),
                     new OA\Property(property: 'remarks', type: 'string', nullable: true, maxLength: 2000),
-                    new OA\Property(property: 'branch_id', type: 'integer', nullable: true, description: 'Walk-in only: the branch where it is done, one of the caller\'s. Defaults to the caller\'s only branch; required when they hold several; refused (422) when they hold none. branches:view_all may pick any branch, or none for head office. Refused on a member\'s transaction, which follows the member\'s branch. The journal posts in this branch.'),
+                    new OA\Property(property: 'branch_id', type: 'integer', nullable: true, description: 'Walk-in only: the branch where it is done, one of the caller\'s. Defaults to the caller\'s only branch; required when they hold several; refused (422) when they hold none. branches:view_all may pick any branch; with no key it defaults to their only assigned branch (none when they have no or several), and an explicit null means head office (none). Refused on a member\'s transaction, which follows the member\'s branch. The journal posts in this branch.'),
                 ],
             ),
         ),
@@ -136,10 +136,7 @@ class GCashTransactionController extends Controller
     )]
     public function store(StoreGCashTransactionRequest $request): JsonResponse
     {
-        $tx = $this->gcash->createTransaction(
-            ['branch_id' => $request->walkInBranchId()] + $request->validated(),
-            $request->user(),
-        );
+        $tx = $this->gcash->createTransaction($request->validated(), $request->user());
         $tx->load(['borrower', 'nonMember', 'transactor']);
 
         return (new GCashTransactionResource($tx))

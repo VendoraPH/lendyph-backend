@@ -134,6 +134,9 @@ class GCashJournalTest extends TestCase
             'gcash_non_member_id' => $walkIn->id,
             'type' => 'cash_out',
             'amount' => 1000,
+            // Head office, sent on purpose: with no key the admin's only
+            // branch would be used (WalkInGCashBranchTest).
+            'branch_id' => null,
         ])->assertCreated()->json('data.id');
 
         $journal = $this->journalOn(GCashTransaction::findOrFail($id), 'cash_out');

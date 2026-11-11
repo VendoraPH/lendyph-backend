@@ -11,6 +11,7 @@ use App\Services\BranchAccess;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
+use PDOException;
 use RuntimeException;
 use Tests\TestCase;
 use Tests\Traits\PostsJournals;
@@ -332,6 +333,19 @@ class BranchReconciliationTest extends TestCase
 
         // The rival row was written inside this request's transaction here,
         // so it rolled back with it; nothing of this request was kept.
+        $this->assertSame(0, AccountingReconciliation::query()->count());
+    }
+
+    public function test_a_deadlock_on_start_answers_409_in_words_with_nothing_saved(): void
+    {
+        AccountingReconciliation::creating(function (): void {
+            throw new PDOException('SQLSTATE[40001]: Serialization failure: 1213 Deadlock found when trying to get lock; try restarting transaction');
+        });
+
+        $this->postJson('/api/accounting/reconciliations', $this->payload($this->branch->id))
+            ->assertConflict()
+            ->assertJsonPath('message', 'Someone else was starting a reconciliation at the same moment. Nothing was saved; try again.');
+
         $this->assertSame(0, AccountingReconciliation::query()->count());
     }
 

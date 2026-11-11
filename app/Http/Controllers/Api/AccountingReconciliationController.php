@@ -49,6 +49,8 @@ class AccountingReconciliationController extends Controller
 
     public const CLAIMED_MEANWHILE = 'That ledger entry was just matched to another statement line. Reload and try again.';
 
+    public const START_COLLIDED = 'Someone else was starting a reconciliation at the same moment. Nothing was saved; try again.';
+
     /** The UNIQUE index on (account, `branch_scope`, period): one per account, branch and period. */
     private const PERIOD_INDEX = 'acct_recon_account_branch_period_unique';
 
@@ -181,6 +183,7 @@ class AccountingReconciliationController extends Controller
         responses: [
             new OA\Response(response: 201, description: 'Reconciliation created, with its worksheet'),
             new OA\Response(response: 403, description: 'Missing accounting:reconcile'),
+            new OA\Response(response: 409, description: 'A deadlock or lock wait with another save; nothing was saved'),
             new OA\Response(response: 422, description: 'Not a money account, a branch that is not the caller\'s (or none, from a branch user), this account and branch already have this period, or the period is longer than 92 days'),
         ],
     )]
@@ -233,6 +236,14 @@ class AccountingReconciliationController extends Controller
             }
 
             throw $this->alreadyReconciled($account, $period, $branchId);
+        } catch (PDOException $e) {
+            // A deadlock or lock wait timeout: 409 with nothing saved, as
+            // LoanWriteTransaction answers, never 500.
+            if (! $this->causedByConcurrencyError($e)) {
+                throw $e;
+            }
+
+            throw LoanWriteTransaction::conflict(self::START_COLLIDED);
         }
 
         return response()->json(

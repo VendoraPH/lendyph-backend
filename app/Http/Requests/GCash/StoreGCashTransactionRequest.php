@@ -14,6 +14,9 @@ class StoreGCashTransactionRequest extends FormRequest
     use ExcludesRejectedBorrowers;
     use HasGCashQuoteRules;
 
+    /** Set by resolveBranch() once validation has passed. */
+    private ?int $resolvedBranchId = null;
+
     public function authorize(): bool
     {
         return $this->user()->can('gcash:transact');
@@ -77,39 +80,38 @@ class StoreGCashTransactionRequest extends FormRequest
                     return;
                 }
 
-                $this->checkBranch($validator);
+                $this->resolveBranch($validator);
             },
         ];
     }
 
     /**
-     * The branch a walk-in transaction is recorded in, for its journal (O4
-     * review, 2026-11-11): the one sent, else the caller's only branch. Null
-     * for a member's transaction (the member's branch decides) and for a
-     * `branches:view_all` caller who picks none (head office).
+     * The validated data, with `branch_id` set to the branch the transaction
+     * is recorded in ({@see self::resolveBranch()}): worked out once, after
+     * validation, so what is checked and what is saved can't differ.
      */
-    public function walkInBranchId(): ?int
+    public function validated($key = null, $default = null)
     {
-        if (! $this->filled('gcash_non_member_id')) {
-            return null;
-        }
-
-        if ($this->filled('branch_id')) {
-            return (int) $this->input('branch_id');
-        }
-
-        $branchIds = app(BranchAccess::class)->for($this->user());
-
-        return $branchIds !== null && count($branchIds) === 1 ? $branchIds[0] : null;
+        return data_get(['branch_id' => $this->resolvedBranchId] + parent::validated(), $key, $default);
     }
 
     /**
-     * A member's transaction takes no branch. A walk-in's needs one the
-     * caller holds: picked when they hold several, refused when they hold
-     * none. `branches:view_all` may pick any branch, or none.
+     * The branch a walk-in transaction is recorded in, for its journal (O4
+     * review, 2026-11-11), or an error. A member's transaction takes no
+     * branch (the member's decides), and sending one is refused.
+     *
+     * - A branch sent is used (the rule above already limits it to the
+     *   caller's own branches).
+     * - `branches:view_all`: no `branch_id` key means their only assigned
+     *   branch, or none when they have no assigned branch or several;
+     *   `branch_id: null` sent on purpose means head office (none).
+     * - Anyone else: their only branch; refused when they have several
+     *   (pick one) or none.
      */
-    private function checkBranch(Validator $validator): void
+    private function resolveBranch(Validator $validator): void
     {
+        $this->resolvedBranchId = null;
+
         if ($validator->errors()->has('branch_id')) {
             return;
         }
@@ -122,9 +124,21 @@ class StoreGCashTransactionRequest extends FormRequest
             return;
         }
 
-        $branchIds = app(BranchAccess::class)->for($this->user());
+        if ($this->filled('branch_id')) {
+            $this->resolvedBranchId = (int) $this->input('branch_id');
 
-        if ($branchIds === null || $this->filled('branch_id')) {
+            return;
+        }
+
+        $user = $this->user();
+        $branchIds = app(BranchAccess::class)->for($user);
+
+        if ($branchIds === null) {
+            if (! $this->has('branch_id')) {
+                $assigned = BranchAccess::assignedBranchIds($user, $user->branches()->pluck('branches.id'));
+                $this->resolvedBranchId = count($assigned) === 1 ? $assigned[0] : null;
+            }
+
             return;
         }
 
@@ -135,6 +149,8 @@ class StoreGCashTransactionRequest extends FormRequest
             );
         } elseif (count($branchIds) > 1) {
             $validator->errors()->add('branch_id', 'Pick the branch where this walk-in transaction is done.');
+        } else {
+            $this->resolvedBranchId = $branchIds[0];
         }
     }
 }
