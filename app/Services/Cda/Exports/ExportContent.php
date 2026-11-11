@@ -5,7 +5,9 @@ namespace App\Services\Cda\Exports;
 /**
  * What one export shows (CDA design §9), the same for PDF and Excel: the
  * report's header, its sections with display values, the footer facts and the
- * DRAFT mark. Built by ExportContentBuilder from live values (drafts) or the
+ * DRAFT mark, and the report's current document stage (financial
+ * statements, sworn statement), which lives outside the snapshot. Built by
+ * ExportContentBuilder from live values (drafts) or the
  * snapshot (finalized and later).
  *
  * `sections`: each `{key, title, kind: fields|table, fields: [{key, label,
@@ -35,6 +37,7 @@ final class ExportContent
         public readonly ?string $coopAddress,
         public readonly ?string $registrationNo,
         public readonly string $statusLabel,
+        public readonly ?string $stageLabel,
         public readonly bool $isDraft,
         public readonly ?int $snapshotId,
         public readonly ?int $snapshotVersion,

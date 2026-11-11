@@ -51,7 +51,7 @@ final class XlsxWriter
         }
 
         $this->row([$this->text($content->title, self::STYLE_BOLD)]);
-        $this->row([$this->text($content->periodLabel.' · '.$content->statusLabel)]);
+        $this->row([$this->text($content->periodLabel.' · '.$content->statusLabel.($content->stageLabel === null ? '' : ' · Stage: '.$content->stageLabel))]);
 
         foreach ($content->sections as $section) {
             $this->row([]);

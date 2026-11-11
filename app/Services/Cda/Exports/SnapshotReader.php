@@ -9,13 +9,17 @@ use App\Models\CdaReportSnapshot;
  * exports and the PESOS trend. The payload is C2's canonical JSON; this is the
  * one place C4 reads it, so a change of shape is fixed here.
  *
- * - `values`: a list of `{field_key, value, …}`, or a map of field_key →
- *   value (or → `{value, …}`).
- * - `profile`: RegulatoryProfileView::present() as frozen at finalize:
- *   `stored` (the CDA profile fields) and `pulled` (`name`, `address`,
- *   `contact`, … each `{value, source}`).
- * - `template`: optionally `{version, definition}`; otherwise the snapshot's
- *   `template_id` names the template, which is immutable once active.
+ * - `values`: C2's SnapshotWriter writes a map of field_key → `{value,
+ *   source_key, …}`; a list of `{field_key, value}` is read too.
+ * - `profile`: `stored` (the CDA profile fields) and `pulled` (`name`,
+ *   `address`, `contact`, `branch_count`), each a plain value as
+ *   SnapshotWriter freezes it, or `{value, source}`.
+ * - `template`: `{id, name, version, verified, definition_hash}`. The
+ *   definition itself isn't in the payload, so the snapshot's `template_id`
+ *   names it (a template is immutable once active); a `definition` there
+ *   would be read first.
+ * - The document stage is not in the snapshot (ReportStages): exports read
+ *   the current one.
  *
  * Nothing here falls back to live data: a figure the snapshot doesn't hold
  * reads as missing, so a later member or Branding change never shows in a

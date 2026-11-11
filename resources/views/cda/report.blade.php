@@ -36,7 +36,7 @@
     <div class="muted">CDA Registration No. {{ $content->registrationNo }}</div>
 @endif
 <h1>{{ $content->title }}</h1>
-<div class="muted">{{ $content->periodLabel }} · {{ $content->statusLabel }}</div>
+<div class="muted">{{ $content->periodLabel }} · {{ $content->statusLabel }}@if ($content->stageLabel) · Stage: {{ $content->stageLabel }}@endif</div>
 @if ($content->isDraft)
     <div class="draft-banner">{{ \App\Services\Cda\Exports\ExportContent::DRAFT_MARK }}</div>
 @endif

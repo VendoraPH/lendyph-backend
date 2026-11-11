@@ -9,6 +9,7 @@ use App\Models\CdaReportSnapshot;
 use App\Models\CdaReportTemplate;
 use App\Models\CdaReportValue;
 use App\Models\User;
+use App\Services\Cda\Reports\ReportStages;
 use App\Services\Cda\ReportTypes;
 use Carbon\CarbonImmutable;
 
@@ -22,12 +23,19 @@ use Carbon\CarbonImmutable;
  *   its current snapshot only (SnapshotReader): its values, frozen profile
  *   and template. A later member or Branding change never shows.
  *
+ * The document stage is always the current one (ReportStages::current()),
+ * never a frozen one: financial statements read "Draft Financial
+ * Statements" until they are audited, even after finalize, and a sworn
+ * statement's first export is what makes it "Generated".
+ *
  * Field keys are "section.field"; a table section's rows are stored under the
  * section's key.
  */
 final class ExportContentBuilder
 {
     public const TIMEZONE = 'Asia/Manila';
+
+    public const DRAFT_FS_TITLE = 'Draft Financial Statements';
 
     private const STATUS_LABELS = [
         CdaReport::STATUS_DRAFT => 'Draft',
@@ -69,17 +77,29 @@ final class ExportContentBuilder
         }
 
         $period = $report->period;
+        $stage = ReportStages::current($report);
+        $title = ReportTypes::title($report->report_type);
+
+        if ($report->report_type === 'financial_statements' && $stage !== 'audited') {
+            $title = self::DRAFT_FS_TITLE;
+        }
+
+        if ($report->report_type === 'sworn_statement') {
+            $stage ??= 'generated';
+        }
+
         $periodLabel = 'CY'.$period->year.($report->part === ReportTypes::ANNUAL ? '' : ' · '.(ReportTypes::PART_TITLES[$report->part] ?? $report->part));
 
         return new ExportContent(
             reportId: (int) $report->id,
             reportType: $report->report_type,
-            title: ReportTypes::title($report->report_type),
+            title: $title,
             periodLabel: $periodLabel,
             coopName: filled($coopName) ? (string) $coopName : ValueFormatter::EMPTY,
             coopAddress: filled($coopAddress) ? (string) $coopAddress : null,
             registrationNo: filled($profile['cda_registration_no'] ?? null) ? (string) $profile['cda_registration_no'] : null,
             statusLabel: self::STATUS_LABELS[$report->status] ?? $report->status,
+            stageLabel: $stage === null ? null : (ReportStages::WORDS[$stage] ?? $stage),
             isDraft: $snapshot === null,
             snapshotId: $snapshot?->id,
             snapshotVersion: $snapshot === null ? null : (int) $snapshot->version,

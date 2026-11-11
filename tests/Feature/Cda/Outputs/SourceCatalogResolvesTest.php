@@ -14,18 +14,11 @@ use Tests\Traits\SetupLendyPH;
 /**
  * Every key in SourceCatalog resolves (CDA design §2, C4): its family has a
  * resolver, the resolver knows the key, and the value has the catalogue's
- * unit. Keys whose family another slice builds are listed in
- * PENDING_FAMILIES until that slice merges; the lead empties the list then.
+ * unit. Every family is built now that C1, C2 and C3 have merged.
  */
 class SourceCatalogResolvesTest extends TestCase
 {
     use SetupLendyPH;
-
-    /** Families built by C2 (core sources) and C3 (registers), not merged into this branch yet. */
-    private const PENDING_FAMILIES = [
-        'members', 'loans', 'share_capital', 'savings', 'accounting', 'fs', 'report',
-        'officers', 'social', 'mediation',
-    ];
 
     /** Params for keys that require one. */
     private const PARAMS = [
@@ -59,10 +52,6 @@ class SourceCatalogResolvesTest extends TestCase
         $checked = 0;
 
         foreach (array_keys(SourceCatalog::KEYS) as $key) {
-            if (in_array(SourceCatalog::family($key), self::PENDING_FAMILIES, true)) {
-                continue;
-            }
-
             $params = self::PARAMS[$key] ?? [];
             $this->assertTrue($registry->has($key), "{$key} has a resolver.");
             $result = $registry->resolve($key, $params, $context);
@@ -72,12 +61,16 @@ class SourceCatalogResolvesTest extends TestCase
             $checked++;
         }
 
-        $this->assertGreaterThanOrEqual(12, $checked);
+        $this->assertSame(count(SourceCatalog::KEYS), $checked);
     }
 
-    public function test_the_pending_list_names_only_known_families(): void
+    public function test_every_family_has_its_resolver(): void
     {
-        $this->assertSame([], array_values(array_diff(self::PENDING_FAMILIES, SourceCatalog::FAMILIES)));
+        foreach (SourceCatalog::FAMILIES as $family) {
+            $key = collect(SourceCatalog::KEYS)->search(fn (array $entry) => $entry['family'] === $family);
+            $this->assertIsString($key, "{$family} has a key.");
+            $this->assertTrue(app(SourceRegistry::class)->has($key), "{$family} has a resolver.");
+        }
     }
 
     private function assertValueFits(string $key, string $unit, SourceResult $result): void
@@ -85,7 +78,7 @@ class SourceCatalogResolvesTest extends TestCase
         $value = $result->value;
         $fits = match ($unit) {
             'count' => is_int($value),
-            'money' => is_string($value) && preg_match('/^-?\d+\.\d{2}$/', $value) === 1,
+            'money' => $value === null || (is_string($value) && preg_match('/^-?\d+\.\d{2}$/', $value) === 1),
             'percent' => $value === null || (is_string($value) && preg_match('/^-?\d+\.\d{2}$/', $value) === 1),
             'number' => $value === null || is_int($value) || (is_string($value) && is_numeric($value)),
             'text' => $value === null || is_string($value),

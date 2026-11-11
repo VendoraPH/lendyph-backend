@@ -8,6 +8,8 @@ use App\Models\CdaReport;
 use App\Models\Document;
 use App\Models\User;
 use App\Services\AuditLogService;
+use App\Services\Cda\Registers\DocumentCategories;
+use App\Services\Cda\Reports\ReportStages;
 use App\Services\LoanWriteTransaction;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
@@ -31,11 +33,14 @@ use Throwable;
  * - One audit row (`cda_export_generated`) per export, with the format,
  *   version, draft mark, snapshot and SHA-256.
  *
+ * - A sworn statement's first export sets its stage to "generated"
+ *   (ReportStages::markGenerated(), under the report's lock).
+ *
  * Drafts' file names end in `-DRAFT`.
  */
 final class ReportExporter
 {
-    public const CATEGORY = 'report_export';
+    public const CATEGORY = DocumentCategories::REPORT_EXPORT;
 
     public const FORMATS = ['pdf', 'xlsx'];
 
@@ -54,6 +59,7 @@ final class ReportExporter
         private readonly XlsxWriter $xlsx,
         private readonly XlsxTemplateFiller $filler,
         private readonly ExportSupport $support,
+        private readonly ReportStages $stages,
     ) {}
 
     public function export(CdaReport $report, string $format, User $user): CdaDocumentVersion
@@ -171,6 +177,8 @@ final class ReportExporter
             'notes' => $note,
             'uploaded_by' => $user->id,
         ]);
+
+        $this->stages->markGenerated($locked);
 
         AuditLogService::log('cda_export_generated', $locked, null, [
             'format' => $format,
