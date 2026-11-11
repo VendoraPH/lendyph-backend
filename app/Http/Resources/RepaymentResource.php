@@ -2,8 +2,9 @@
 
 namespace App\Http\Resources;
 
+use App\Models\Borrower;
 use App\Services\LoanService;
-use App\Services\RepaymentService;
+use Carbon\CarbonImmutable;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 use OpenApi\Attributes as OA;
@@ -51,7 +52,7 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'next_principal_applied', type: 'number', description: 'Excess principal flowed to next schedule (0 when scb_amount>0)'),
         new OA\Property(property: 'overpayment', type: 'number', description: 'Unallocated remainder (frontend routes to SCB when scb_amount>0)'),
         new OA\Property(property: 'scb_paid', type: 'number', description: 'Net share capital credited FROM this payment: 0 when the loan carries no scb_amount or there was no overpayment, and back to 0 once a credited payment is voided (the reversal debit nets against its own credit).'),
-        new OA\Property(property: 'build_up_credited', type: 'string', nullable: true, example: '750.00', description: 'Share capital build-up this payment credited, from its share capital ledger credit (gross: a voided payment keeps what it credited; `scb_paid` is the net). 2-decimal string. Null when the stored data can\'t tell: overpayment on a build-up loan with no ledger credit naming the payment, unless the member is still a pending or rejected applicant (then 0.00).'),
+        new OA\Property(property: 'build_up_credited', type: 'string', nullable: true, example: '750.00', description: 'Share capital build-up this payment credited, from its share capital ledger credit (gross: a voided payment keeps what it credited; `scb_paid` is the net). 2-decimal string. Null when the stored data can\'t tell: overpayment on a build-up loan with no ledger credit naming the payment, unless the member is a pending or rejected applicant and the payment was recorded from 2026-11-08 (Manila), once member status edits were locked (then 0.00).'),
         new OA\Property(property: 'overpayment_kept', type: 'string', nullable: true, example: '0.00', description: 'Advance or overpayment left as such: the stored `overpayment` less `build_up_credited`. 2-decimal string. Null whenever `build_up_credited` is. principal + interest + penalty + insurance + build_up_credited + overpayment_kept = amount_paid.'),
         new OA\Property(property: 'balance_before', type: 'number', description: 'Outstanding principal before this payment: principal only, never the insurance premium owed. The payment preview\'s `balance_before` is the outstanding balance, premium owed included. Label it "Principal balance".'),
         new OA\Property(property: 'balance_after', type: 'number', description: 'Outstanding principal after this payment: principal only, never the insurance premium owed. The payment preview\'s `balance_after` is the outstanding balance, premium owed included. Label it "Principal balance".'),
@@ -89,6 +90,16 @@ use OpenApi\Attributes as OA;
 )]
 class RepaymentResource extends JsonResource
 {
+    /**
+     * When a member's status stopped being editable, in Manila time. Until
+     * #226 (merged 2026-11-07 22:45 Manila) a member edit could set `status`,
+     * so a member who is pending or rejected now may have been active when an
+     * older payment was made. The cutoff is the first whole day after that
+     * merge, so no payment recorded before the lock reached a deployment
+     * counts as proof.
+     */
+    public const MEMBER_STATUS_LOCKED_FROM = '2026-11-08 00:00:00';
+
     public function toArray(Request $request): array
     {
         // Map backend status 'posted' to frontend 'completed' for badge color matching
@@ -175,13 +186,17 @@ class RepaymentResource extends JsonResource
      * The stored overpayment, split into what this payment credited to share
      * capital (its ledger credit rows, gross, as the Ledger reads them) and
      * what stayed as advance or overpayment. Read from the stored rows only;
-     * nothing is recalculated. An overpayment with no credit naming the
-     * payment stayed as overpayment when the payment couldn't have credited
-     * one (RepaymentService::creditsBuildUp(): no build-up on the loan, or a
-     * member who is still a pending or rejected applicant, so never a member
-     * when it was paid). Otherwise the rows can't tell (a payment from before
-     * the automatic credit, or one made before the member was approved), and
-     * both are null.
+     * nothing is recalculated.
+     *
+     * An overpayment with no credit naming the payment stayed as overpayment
+     * when the stored data proves the payment couldn't have credited one: the
+     * loan carries no build-up, or the member is a pending or rejected
+     * applicant (RepaymentService::creditsBuildUp()'s rule) and the payment was
+     * recorded once member status edits were locked
+     * (self::MEMBER_STATUS_LOCKED_FROM). Otherwise the rows can't tell (a
+     * payment from before the automatic credit, by a member whose status has
+     * changed since, or one made before the member was approved), and both
+     * are null.
      *
      * @return array{build_up_credited: string|null, overpayment_kept: string|null}
      */
@@ -193,7 +208,7 @@ class RepaymentResource extends JsonResource
         $credited = (int) $credits->sum(fn ($row): int => LoanService::toCentavos((float) $row->credit));
 
         // scb_amount is fixed once the loan is released.
-        if ($credits->isEmpty() && $overpayment > 0 && ($this->loan === null || RepaymentService::creditsBuildUp($this->loan))) {
+        if ($credits->isEmpty() && $overpayment > 0 && ($this->loan === null || ((float) $this->loan->scb_amount > 0 && ! $this->provesNoCredit()))) {
             return $unknown;
         }
 
@@ -204,6 +219,22 @@ class RepaymentResource extends JsonResource
         }
 
         return ['build_up_credited' => self::pesos($credited), 'overpayment_kept' => self::pesos($kept)];
+    }
+
+    /**
+     * Whether the stored data proves this build-up loan payment credited no
+     * share capital: its member is a pending or rejected applicant now, and it
+     * was recorded once a member's status could no longer be edited, so the
+     * member was one then too.
+     */
+    private function provesNoCredit(): bool
+    {
+        $member = $this->loan?->borrower;
+
+        return $member !== null
+            && in_array($member->status, Borrower::NON_MEMBER_STATUSES, true)
+            && $this->created_at !== null
+            && $this->created_at->gte(CarbonImmutable::parse(self::MEMBER_STATUS_LOCKED_FROM, 'Asia/Manila'));
     }
 
     private static function pesos(int $centavos): string

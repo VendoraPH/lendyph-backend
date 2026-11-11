@@ -3,6 +3,8 @@
 namespace Tests\Feature;
 
 use App\Models\Loan;
+use App\Services\RepaymentService;
+use ErrorException;
 use Illuminate\Support\Facades\DB;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
@@ -91,5 +93,56 @@ class RepaymentPreviewBuildUpSplitTest extends TestCase
 
         $this->assertDatabaseCount('share_capital_ledger', 0);
         $this->assertDatabaseCount('repayments', 0);
+    }
+
+    /** A build-up payment with ₱750.00 extra by a member now pending, recorded at $recordedAt (Manila). */
+    private function pendingMemberPaymentRecordedAt(string $recordedAt): int
+    {
+        $loan = $this->loan(buildUp: true, memberStatus: 'pending');
+        $id = $this->postJson("/api/loans/{$loan->id}/repayments", [
+            'payment_date' => now()->toDateString(),
+            'amount_paid' => round((float) $loan->amortizationSchedules->first()->total_due + 750, 2),
+            'method' => 'cash',
+        ])->assertCreated()->json('data.id');
+        DB::table('repayments')->where('id', $id)->update(['created_at' => $recordedAt]);
+
+        return $id;
+    }
+
+    /** @return array<string, array{0: string, 1: array{0: string|null, 1: string|null}}> */
+    public static function recordedAt(): array
+    {
+        return [
+            'before member status edits were locked' => ['2026-11-06 10:00:00', [null, null]],
+            'on the day the lock was merged (22:45 Manila)' => ['2026-11-07 21:00:00', [null, null]],
+            'after the lock' => ['2026-11-08 00:00:00', ['0.00', '750.00']],
+        ];
+    }
+
+    /**
+     * Until #226 (merged 2026-11-07 22:45 Manila) a member edit could set
+     * `status`, so a member who is pending or rejected now may have been
+     * active when an older payment was made, before the automatic credit.
+     * Only a payment recorded once status edits were locked proves that the
+     * member couldn't be credited.
+     *
+     * @param  array{0: string|null, 1: string|null}  $expected
+     */
+    #[DataProvider('recordedAt')]
+    public function test_a_pending_members_payment_reads_no_build_up_only_once_status_edits_were_locked(string $recordedAt, array $expected): void
+    {
+        $id = $this->pendingMemberPaymentRecordedAt($recordedAt);
+
+        $detail = $this->getJson("/api/repayments/{$id}")->assertOk()->json('data');
+        $this->assertSame($expected, [$detail['build_up_credited'], $detail['overpayment_kept']]);
+    }
+
+    public function test_the_credit_rule_reads_the_member_as_recording_always_has(): void
+    {
+        $loan = $this->loan(buildUp: true);
+        $loan->setRelation('borrower', null);
+
+        $this->expectException(ErrorException::class);
+        RepaymentService::creditsBuildUp($loan);
     }
 }

@@ -1924,12 +1924,11 @@ class RepaymentService
      * the loan is released) and the member isn't a pending or rejected
      * applicant, who can't hold share capital (the same gate as
      * StoreShareCapitalLedgerRequest::memberBorrowerRule()). Recording a
-     * payment credits by this rule, its preview runs that same code, and
-     * RepaymentResource reads a stored row's split by it.
+     * payment credits by this rule and its preview runs that same code.
      */
     public static function creditsBuildUp(Loan $loan): bool
     {
         return (float) $loan->scb_amount > 0
-            && ! in_array($loan->borrower?->status, Borrower::NON_MEMBER_STATUSES, true);
+            && ! in_array($loan->borrower->status, Borrower::NON_MEMBER_STATUSES, true);
     }
 }
