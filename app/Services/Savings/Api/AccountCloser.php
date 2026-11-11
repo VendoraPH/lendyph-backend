@@ -12,6 +12,7 @@ use App\Services\Accounting\PeriodGuard;
 use App\Services\AuditLogService;
 use App\Services\Savings\AccruedInterest;
 use App\Services\Savings\ApprovalGate;
+use App\Services\Savings\AvailableBalance;
 use App\Services\Savings\SavingsLedger;
 use App\Services\Savings\SavingsLocks;
 use App\Services\Savings\SavingsMath;
@@ -47,6 +48,7 @@ class AccountCloser
         private readonly PeriodGuard $periods,
         private readonly Teller $teller,
         private readonly LargeTransactionAlert $alert,
+        private readonly AvailableBalance $available,
     ) {}
 
     /**
@@ -211,10 +213,19 @@ class AccountCloser
             $blockers[] = 'The account is frozen. Unfreeze it before closing it.';
         }
 
-        $held = SavingsHold::query()->where('account_id', $account->id)->holding(now()->toDateString())->sum('amount');
+        // The held / member-request split is AvailableBalance's own.
+        $split = $this->available->forManyWithRequests(collect([$account]), [SavingsHold::TYPE_MEMBER_REQUEST])[$account->id];
+        $held = $split['held'];
+        $requested = $split['pending_withdrawal'] - $split['pending'];
 
-        if (SavingsMath::centavos($held) > 0) {
-            $blockers[] = 'It has an active hold of '.Refuse::peso(SavingsMath::centavos($held)).'. Release the hold first.';
+        if ($held > 0) {
+            $blockers[] = 'It has an active hold of '.Refuse::peso($held).'. Release the hold first.';
+        }
+
+        // A member's portal withdrawal request reserves its money with a hold
+        // that only deciding the request releases (portal design §6).
+        if ($requested > 0) {
+            $blockers[] = 'A member\'s portal withdrawal request is holding '.Refuse::peso($requested).'. Decide the member\'s request first.';
         }
 
         $ownRows = SavingsTransaction::query()->where('account_id', $account->id);

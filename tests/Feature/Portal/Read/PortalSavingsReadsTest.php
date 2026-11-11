@@ -75,7 +75,7 @@ class PortalSavingsReadsTest extends TestCase
     {
         $me = $this->portalMember();
         $account = $this->savingsFor($me, 800_000);
-        foreach ([['legal', '1000.00'], ['member_request', '2500.00']] as [$type, $amount]) {
+        foreach ([['legal', '1000.00'], [SavingsHold::TYPE_MEMBER_REQUEST, '2500.00']] as [$type, $amount]) {
             SavingsHold::create([
                 'account_id' => $account->id, 'type' => $type, 'amount' => $amount, 'reason' => 'Test hold',
                 'placed_on' => '2026-11-10', 'expires_on' => '2026-11-17', 'status' => 'active',

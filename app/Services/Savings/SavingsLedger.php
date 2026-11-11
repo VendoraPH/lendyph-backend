@@ -4,6 +4,7 @@ namespace App\Services\Savings;
 
 use App\Models\SavingsAccount;
 use App\Models\SavingsTransaction;
+use App\Models\User;
 use App\Services\Accounting\PeriodGuard;
 use App\Services\AuditLogService;
 use Carbon\CarbonImmutable;
@@ -175,7 +176,7 @@ class SavingsLedger
             'time_deposit_id' => $attributes['time_deposit_id'] ?? null,
             'interest_run_id' => $attributes['interest_run_id'] ?? null,
             'approval_id' => $attributes['approval_id'] ?? null,
-            'created_by' => array_key_exists('created_by', $attributes) ? $attributes['created_by'] : auth()->id(),
+            'created_by' => array_key_exists('created_by', $attributes) ? $attributes['created_by'] : $this->signedInStaffId(),
         ]);
 
         $changes = ['ledger_balance' => SavingsMath::pesos($after), 'updated_at' => now()];
@@ -389,5 +390,17 @@ class SavingsLedger
     private function peso(int $centavos): string
     {
         return ($centavos < 0 ? '-' : '').'₱'.number_format(abs($centavos) / 100, 2);
+    }
+
+    /**
+     * The signed-in staff user's id, or null. Under the portal guard the
+     * signed-in caller is a member (a PortalUser), whose id must never land in
+     * `created_by`, a key to `users` (portal design §0, finding 5).
+     */
+    private function signedInStaffId(): ?int
+    {
+        $caller = auth()->user();
+
+        return $caller instanceof User ? (int) $caller->getKey() : null;
     }
 }

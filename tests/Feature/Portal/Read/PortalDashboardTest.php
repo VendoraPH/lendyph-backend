@@ -84,7 +84,9 @@ class PortalDashboardTest extends TestCase
         $this->assertSame($due->count(), $data['next_payment']['loans_count']);
 
         $this->assertSame(1, $data['pending_requests']);
-        $this->assertSame(['notifications' => 1, 'announcements' => 4], $data['unread']);
+        // The fixture's deposits, release and payments also leave money notices (slice P3's observers).
+        $this->assertGreaterThan(1, $me->unreadNotifications()->count());
+        $this->assertSame(['notifications' => $me->unreadNotifications()->count(), 'announcements' => 4], $data['unread']);
         $this->assertSame(1, $data['documents']);
         $this->assertCount(3, $data['announcements']);
         $this->assertLessThanOrEqual(5, count($data['recent_activity']));

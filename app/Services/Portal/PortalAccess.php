@@ -8,6 +8,7 @@ use App\Models\PortalUser;
 use App\Services\AuditLogService;
 use App\Services\Portal\Auth\MemberNumber;
 use App\Services\Portal\Auth\PortalSessions;
+use App\Services\Portal\Requests\RequestSweep;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -23,7 +24,9 @@ final class PortalAccess
 
     /**
      * Staff turn access off (with a reason) or back on. Disabling revokes every
-     * token and closes any open code.
+     * token and closes any open code, then, whatever the reason, ends the
+     * member's open portal requests: cancelled, holds released and a
+     * second-check approval cancelled, as the system (RequestSweep::endFor).
      */
     public function disable(PortalUser $portalUser, string $reason, ?int $staffId): void
     {
@@ -54,6 +57,10 @@ final class PortalAccess
                 $staffId,
             );
         });
+
+        // After commit, so the portal account lock is never held while the
+        // requests' savings account and request locks are taken.
+        DB::afterCommit(fn () => app(RequestSweep::class)->endFor($portalUser, $reason));
     }
 
     public function enable(PortalUser $portalUser, int $staffId): void
