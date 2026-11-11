@@ -25,8 +25,9 @@ use Illuminate\Support\Collection;
  * - The next deadline: the nearest one still to come among the reports not
  *   yet filed.
  * - A row per report, and every issue. A locked report's documents needed
- *   at filing are checked live (ReportEngine::issuesNow()); its other
- *   issues stay as finalized.
+ *   at filing are checked live (ReportEngine::issuesNow() and
+ *   readinessNow()), in its issues, its readiness and the period's mean;
+ *   its other issues and checks stay as finalized.
  * - A finalized report whose accounting year was reopened afterwards raises
  *   a Warning.
  *
@@ -47,13 +48,14 @@ final class ReportDashboard
     {
         $reports = $this->reports($period, $viewer);
         $current = $reports->mapWithKeys(fn (CdaReport $report) => [$report->id => $this->engine->issuesNow($report)]);
+        $readiness = $reports->mapWithKeys(fn (CdaReport $report) => [$report->id => $this->engine->readinessNow($report)['readiness']]);
         $applicable = $reports->where('applicable', true);
         $yearClosed = AccountingSource::yearClosed((int) $period->year);
         $rows = [];
         $issues = [];
 
         foreach ($reports as $report) {
-            $rows[] = $this->row($report, $period, $viewer, $current[$report->id]);
+            $rows[] = $this->row($report, $period, $viewer, $current[$report->id], $readiness[$report->id]);
 
             if (! $report->applicable) {
                 continue;
@@ -82,7 +84,7 @@ final class ReportDashboard
 
         return [
             'period' => CdaPresenter::period($period),
-            'readiness' => Readiness::mean($applicable->map(fn (CdaReport $report) => (int) $report->readiness)->values()->all()),
+            'readiness' => Readiness::mean($applicable->map(fn (CdaReport $report) => $readiness[$report->id])->values()->all()),
             'readiness_label' => Readiness::LABEL,
             'counts' => [
                 'total' => $reports->count(),
@@ -113,7 +115,7 @@ final class ReportDashboard
             ->map(fn (CdaReport $report) => [
                 ...CdaPresenter::reportRow($report, $period, $viewer),
                 'display_status' => ReportView::displayStatus($report),
-                'readiness' => (int) $report->readiness,
+                'readiness' => $this->engine->readinessNow($report)['readiness'],
                 'filed' => in_array($report->status, self::FILED, true),
             ])
             ->sortBy(fn (array $row) => $row['effective_deadline'].sprintf('%010d', $row['id']))
@@ -121,9 +123,12 @@ final class ReportDashboard
             ->all();
     }
 
-    /** @return array<string, mixed> */
-    /** @param  list<array<string, mixed>>  $issues  the report's issues as they stand now */
-    private function row(CdaReport $report, CdaReportingPeriod $period, User $viewer, array $issues): array
+    /**
+     * @param  list<array<string, mixed>>  $issues  the report's issues as they stand now
+     * @param  int  $readiness  and its readiness (ReportEngine::readinessNow())
+     * @return array<string, mixed>
+     */
+    private function row(CdaReport $report, CdaReportingPeriod $period, User $viewer, array $issues, int $readiness): array
     {
         $effective = Deadlines::effective($report, $period);
 
@@ -137,7 +142,7 @@ final class ReportDashboard
             'status' => $report->status,
             'display_status' => ReportView::displayStatus($report),
             'sub_status' => $report->sub_status,
-            'readiness' => (int) $report->readiness,
+            'readiness' => $readiness,
             'critical' => self::count($issues, 'critical'),
             'warnings' => self::count($issues, 'warning'),
             'applicable' => (bool) $report->applicable,

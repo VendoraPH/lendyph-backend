@@ -66,7 +66,8 @@ class CdaRegisterSourcesTest extends TestCase
 
         $this->assertSame('table', $list->unit);
         $this->assertSame(['Rosa Lim', 'Left Mid Year', 'Pedro Cruz'], array_column($list->value, 'name'));
-        $this->assertSame(['female', 'female', 'male'], array_column($list->value, 'sex'));
+        $this->assertSame(['Female', 'Female', 'Male'], array_column($list->value, 'sex'));
+        $this->assertSame(['female', 'female', 'male'], array_column($list->value, 'sex_key'));
         $this->assertSame('Chairperson', $list->value[0]['position']);
         $this->assertSame('2025-03-01', $list->value[0]['term_start']);
         $this->assertSame('Officers register · as of Dec 31, 2026', $list->label);
