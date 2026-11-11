@@ -76,6 +76,30 @@ class ExportIntegrationTest extends TestCase
         return $snapshot;
     }
 
+    /**
+     * The sheet's rows, each as its cells' values: a number's `<v>`, an
+     * inline string's text.
+     *
+     * @return list<list<string>>
+     */
+    private function sheetRows(string $sheet): array
+    {
+        $xml = simplexml_load_string($sheet);
+        $xml->registerXPathNamespace('s', 'http://schemas.openxmlformats.org/spreadsheetml/2006/main');
+        $rows = [];
+
+        foreach ($xml->xpath('//s:sheetData/s:row') as $row) {
+            $row->registerXPathNamespace('s', 'http://schemas.openxmlformats.org/spreadsheetml/2006/main');
+            $values = array_map(
+                fn ($cell) => (string) ($cell->v ?? '') !== '' ? (string) $cell->v : (string) ($cell->is->t ?? ''),
+                $row->xpath('s:c'),
+            );
+            $rows[] = $values;
+        }
+
+        return $rows;
+    }
+
     private function html(CdaReport $report): string
     {
         return app(PdfRenderer::class)->html(app(ExportContentBuilder::class)->build($report->fresh(), $this->admin));
@@ -110,8 +134,10 @@ class ExportIntegrationTest extends TestCase
         $zip->close();
         unlink($path);
 
-        $this->assertStringContainsString('<v>120</v>', $sheet);
-        $this->assertStringNotContainsString('999', $sheet);
+        $rows = $this->sheetRows($sheet);
+        $members = array_values(array_filter($rows, fn (array $row) => ($row[0] ?? null) === 'Total members'));
+        $this->assertSame([['Total members', '120']], $members, 'Total members reads the snapshot\'s 120.');
+        $this->assertNotContains('999', array_merge(...$rows), 'No cell carries the live 999.');
         $this->assertSame($snapshot->id, $version->snapshot_id);
     }
 

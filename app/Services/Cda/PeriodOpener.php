@@ -23,13 +23,13 @@ use Throwable;
  *
  * One period per year: a second answers 409, decided by the unique index.
  *
- * When staff open a year (open()), each applicable report is refreshed once
- * the period is committed (ReportEngine::refresh()), so the new year shows
- * its figures, readiness and issues at once (CAPR's unclosed-year Critical
- * included) instead of 0% "not started". A report whose refresh fails is
- * logged and left for the `refresh` action or the nightly run; the period
- * stays open. ensure(), the year-end capture's fallback, opens without
- * refreshing: the nightly `cda:revalidate` fills those reports.
+ * Whoever opens a year, staff (open()) or the Dec 31 capture (ensure()),
+ * each applicable report is refreshed once the period is committed
+ * (ReportEngine::refresh(), one transaction per report), so the new year
+ * shows its figures, readiness and issues at once (CAPR's unclosed-year
+ * Critical included) instead of 0% "not started". A report whose refresh
+ * fails is logged and left for the `refresh` action or the nightly run; the
+ * period stays open. ensure() refreshes only a year it opened itself.
  */
 final class PeriodOpener
 {
@@ -60,7 +60,7 @@ final class PeriodOpener
         return $period;
     }
 
-    /** The year's period, opened (as the system) when there is none. */
+    /** The year's period, opened (as the system) and computed when there is none. */
     public function ensure(int $year): CdaReportingPeriod
     {
         $existing = CdaReportingPeriod::query()->where('year', $year)->first();
@@ -70,10 +70,14 @@ final class PeriodOpener
         }
 
         try {
-            return DB::transaction(fn () => $this->create($year, null));
+            $period = DB::transaction(fn () => $this->create($year, null));
         } catch (UniqueConstraintViolationException) {
             return CdaReportingPeriod::query()->where('year', $year)->firstOrFail();
         }
+
+        $this->refreshReports($period, null);
+
+        return $period;
     }
 
     /** Fill and validate each applicable report of a period just opened. */

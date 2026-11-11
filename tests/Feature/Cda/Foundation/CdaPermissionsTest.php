@@ -145,8 +145,8 @@ class CdaPermissionsTest extends TestCase
 
         $this->actingAs($this->userWith(['cda:view', BranchAccess::VIEW_ALL]));
         $rows = collect($this->getJson('/api/cda/periods/2026')->assertOk()->json('data.reports'))->keyBy(fn ($r) => $r['report_type'].':'.$r['part']);
-        $this->assertTrue($rows['mediation:h1']['restricted']);
-        $this->assertTrue($rows['atir:annual']['restricted']);
+        $this->assertArrayNotHasKey('mediation:h1', $rows, 'A restricted report is left out of the period, not marked.');
+        $this->assertArrayNotHasKey('atir:annual', $rows);
         $this->assertFalse($rows['capr:annual']['restricted']);
     }
 
