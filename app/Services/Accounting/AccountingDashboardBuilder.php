@@ -6,6 +6,7 @@ use App\Models\AccountingAccount;
 use App\Models\AccountingJournal;
 use App\Models\AccountingPeriod;
 use App\Services\PortfolioOutstanding;
+use App\Services\Savings\Reports\GlControl;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\Query\Builder;
 use Illuminate\Support\Collection;
@@ -49,6 +50,7 @@ final class AccountingDashboardBuilder
         private TrialBalanceBuilder $trialBalance,
         private IncomeStatementBuilder $incomeStatement,
         private PortfolioOutstanding $portfolio,
+        private GlControl $savingsControl,
     ) {}
 
     /**
@@ -106,6 +108,38 @@ final class AccountingDashboardBuilder
                 $months,
             ),
             'recent_journals' => $this->recentJournals($asOf, $branchId),
+            ...$this->savingsGl($asOf, $branchId),
+        ];
+    }
+
+    /**
+     * The savings GL control (the Savings task's TASK 62) as of `as_of`, in
+     * the dashboard's branch scope: `savings_gl_differs` is true when any
+     * branch's savings or time deposit subledger differs from GL 2050 or 2060,
+     * and `savings_gl_control` carries the day and the total difference in ₱
+     * (a two-decimal string). Both are null while savings is not in use.
+     *
+     * @param  int|list<int>|null  $branchId
+     * @return array{savings_gl_differs: bool|null, savings_gl_control: array{as_of: string, difference: string, differences: int}|null}
+     */
+    private function savingsGl(string $asOf, int|array|null $branchId): array
+    {
+        if (! $this->savingsControl->hasSavings()) {
+            return ['savings_gl_differs' => null, 'savings_gl_control' => null];
+        }
+
+        $control = $this->savingsControl->build(
+            CarbonImmutable::parse($asOf)->toDateString(),
+            is_int($branchId) ? [$branchId] : $branchId,
+        );
+
+        return [
+            'savings_gl_differs' => ! $control['is_balanced'],
+            'savings_gl_control' => [
+                'as_of' => $control['as_of'],
+                'difference' => $control['totals']['difference'],
+                'differences' => $control['differences'],
+            ],
         ];
     }
 

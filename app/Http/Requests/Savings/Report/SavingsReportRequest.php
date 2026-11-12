@@ -3,16 +3,19 @@
 namespace App\Http\Requests\Savings\Report;
 
 use App\Services\BranchAccess;
+use App\Services\Savings\Dashboard\DepositFigures;
 use App\Services\Savings\Reports\SavingsReports;
 use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Rule;
 use Illuminate\Validation\Validator;
 
 /**
  * The filters every `/reports/savings/*` endpoint shares, and the savings
  * reports' own copy of ReportController::reportFilters(): `date_from`,
- * `date_to`, `as_of` (not after today), `branch_id` and `per_page` (1 to
- * 1,000), a period of at most 10 years, and the branch scope. A `branch_id`
+ * `date_to`, `as_of` (not after today), `branch_id`, `product_id` (a savings
+ * product), `group_by` (the summary: `branch` or `product`) and `per_page` (1
+ * to 1,000), a period of at most 10 years, and the branch scope. A `branch_id`
  * outside the caller's branches is refused (403); without one, a caller
  * without `branches:view_all` reports on their own branches only
  * (`branch_ids`). Needs `reports:view` and `savings:view`.
@@ -42,6 +45,8 @@ class SavingsReportRequest extends FormRequest
             'date_to' => array_values(array_filter(['nullable', 'date_format:Y-m-d', $this->filled('date_from') ? 'after_or_equal:date_from' : null])),
             'as_of' => ['nullable', 'date_format:Y-m-d', 'before_or_equal:'.now()->toDateString()],
             'branch_id' => ['nullable', 'integer', 'min:1'],
+            'product_id' => ['nullable', 'integer', 'min:1', Rule::exists('savings_products', 'id')],
+            'group_by' => ['nullable', Rule::in(DepositFigures::GROUPS)],
             'per_page' => ['nullable', 'integer', 'min:1', 'max:1000'],
             'page' => ['nullable', 'integer', 'min:1'],
         ];
@@ -58,6 +63,10 @@ class SavingsReportRequest extends FormRequest
             'as_of.before_or_equal' => 'The "as of" date can\'t be after today.',
             'branch_id.integer' => 'Choose a branch from the list.',
             'branch_id.min' => 'Choose a branch from the list.',
+            'product_id.integer' => 'Choose a product from the list.',
+            'product_id.min' => 'Choose a product from the list.',
+            'product_id.exists' => 'Choose a product from the list.',
+            'group_by.in' => 'Group the summary by branch or by product.',
             'per_page.integer' => 'Show between 1 and 1,000 rows a page.',
             'per_page.min' => 'Show between 1 and 1,000 rows a page.',
             'per_page.max' => 'Show between 1 and 1,000 rows a page.',
