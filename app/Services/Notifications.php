@@ -47,12 +47,23 @@ use Throwable;
  */
 final class Notifications
 {
-    public function __construct(private BranchAccess $branchAccess) {}
+    /**
+     * An approved loan waits at its release step (gap round B2). Kept here
+     * with the event that sends it; its stored `type` is this key.
+     */
+    public const LOAN_READY_FOR_RELEASE = 'loan_ready_for_release';
+
+    public function __construct(
+        private BranchAccess $branchAccess,
+        private ApprovalAssignees $assignees,
+    ) {}
 
     /**
-     * A loan reached an approval step: tell the holders of that step's role.
-     * Only active roles count, as in LoanApprovalChainService::canAct(); admin
-     * and super_admin are not told about every step they could bypass.
+     * A loan reached an approval step: tell the user it was forwarded to,
+     * while they still hold it (ApprovalAssignees), else the holders of that
+     * step's role. Only active roles count, as in
+     * LoanApprovalChainService::canAct(); admin and super_admin are not told
+     * about every step they could bypass.
      *
      * @param  list<int>  $skipUserIds  users already told about this move by another notification
      */
@@ -61,7 +72,7 @@ final class Notifications
         $this->deliver(
             $loan,
             $actor,
-            fn (): Collection => $this->roleHolders($step->role)->reject(fn (User $user) => in_array((int) $user->getKey(), $skipUserIds, true)),
+            fn (): Collection => $this->stepHolders($loan, $step)->reject(fn (User $user) => in_array((int) $user->getKey(), $skipUserIds, true)),
             fn (): StaffNotification => new StaffNotification(
                 StaffNotification::APPROVAL_NEEDED,
                 'Loan awaiting your approval',
@@ -86,6 +97,65 @@ final class Notifications
                 ['loan_id' => (int) $loan->getKey()],
             ),
         );
+
+        $this->readyForRelease($loan, $actor);
+    }
+
+    /**
+     * An approved loan waits at its release step: tell the user that step was
+     * forwarded to, or else its role's holders who hold `loans:release`. The
+     * creator and the officer are left out, since loan_approved just told
+     * them. A loan with no pending release step (no chain) tells nobody. The
+     * step is read after the commit, as the chain left it.
+     */
+    private function readyForRelease(Loan $loan, ?User $actor): void
+    {
+        $step = null;
+        $releaseStep = function () use ($loan, &$step): ?LoanApprovalStep {
+            return $step ??= $loan->approvalSteps()
+                ->where('round', (int) ($loan->approvalSteps()->max('round') ?? 1))
+                ->where('kind', LoanApprovalStep::KIND_RELEASE)
+                ->where('status', LoanApprovalStep::STATUS_PENDING)
+                ->orderBy('step_order')
+                ->first();
+        };
+
+        $this->deliver(
+            $loan,
+            $actor,
+            function () use ($loan, $releaseStep): Collection {
+                $release = $releaseStep();
+
+                if ($release === null) {
+                    return collect();
+                }
+
+                $told = array_values(array_filter([$loan->created_by, $loan->account_officer_id], fn ($id) => $id !== null));
+
+                return $this->stepHolders($loan, $release)
+                    ->filter(fn (User $user) => $user->can('loans:release'))
+                    ->reject(fn (User $user) => in_array((int) $user->getKey(), array_map('intval', $told), true));
+            },
+            fn (): StaffNotification => new StaffNotification(
+                self::LOAN_READY_FOR_RELEASE,
+                'Loan ready for release',
+                sprintf('%s for %s (%s) is approved and waiting at the "%s" step for release.', $this->loanLabel($loan), $this->borrowerName($loan), $this->peso($loan->principal_amount), $releaseStep()?->name),
+                $this->loanUrl($loan),
+                ['loan_id' => (int) $loan->getKey(), 'approval_step_id' => $releaseStep() === null ? null : (int) $releaseStep()->getKey()],
+            ),
+        );
+    }
+
+    /**
+     * The step's assignee while they still hold it, else its role's holders.
+     *
+     * @return Collection<int, User>
+     */
+    private function stepHolders(Loan $loan, LoanApprovalStep $step): Collection
+    {
+        $assignee = $this->assignees->effectiveAssignee($step, $loan);
+
+        return $assignee === null ? $this->assignees->roleHolders($step->role) : collect([$assignee]);
     }
 
     public function loanRejected(Loan $loan, ?User $actor = null, ?string $remarks = null): void
@@ -454,22 +524,6 @@ final class Notifications
         $ids = array_values(array_unique(array_map('intval', array_filter($ids, fn ($id) => $id !== null))));
 
         return $ids === [] ? collect() : $this->recipientQuery()->whereKey($ids)->get()->toBase();
-    }
-
-    /**
-     * Active users holding the role named `$roleName` while that role is
-     * active (admin and super_admin always count, as in User::activeRoles()).
-     * Matched on the name directly, never through hasRole($string), for the
-     * reason LoanApprovalChainService::canAct() gives.
-     *
-     * @return Collection<int, User>
-     */
-    private function roleHolders(string $roleName): Collection
-    {
-        return $this->recipientQuery()
-            ->whereHas('roles', fn (Builder $roles) => $this->activeRole($roles)->where('name', $roleName))
-            ->get()
-            ->toBase();
     }
 
     /**

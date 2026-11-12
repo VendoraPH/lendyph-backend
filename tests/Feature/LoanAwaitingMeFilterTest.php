@@ -155,7 +155,11 @@ class LoanAwaitingMeFilterTest extends TestCase
         $this->assertSame([], $this->awaitingIdsFor($this->userWithRoles('bod1')));
     }
 
-    public function test_loans_outside_review_are_never_listed(): void
+    /**
+     * An approved loan waits on its release step's role, for a user holding
+     * `loans:release` (gap round B2); no other status outside review is listed.
+     */
+    public function test_loans_outside_review_are_listed_only_at_their_release_step(): void
     {
         // Approved, with its release step pending for the cashier.
         $approved = $this->submittedLoan();
@@ -168,7 +172,7 @@ class LoanAwaitingMeFilterTest extends TestCase
         $draft = $this->submittedLoan();
         Loan::whereKey($draft->id)->update(['status' => 'draft']);
 
-        $this->assertSame([], $this->awaitingIdsFor($this->userWithRoles('cashier')));
+        $this->assertSame([$approved->id], $this->awaitingIdsFor($this->userWithRoles('cashier')));
         $this->assertSame([], $this->awaitingIdsFor($this->userWithRoles('manager')));
     }
 

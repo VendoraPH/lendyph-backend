@@ -5,11 +5,13 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Loan;
 use App\Models\LoanApprovalStep;
+use App\Models\Role;
 use App\Models\User;
 use App\Services\LoanApprovalChainService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Str;
 use OpenApi\Attributes as OA;
 
 /**
@@ -89,7 +91,10 @@ class LoanApprovalStepController extends Controller
         requestBody: new OA\RequestBody(
             required: false,
             content: new OA\JsonContent(
-                properties: [new OA\Property(property: 'remarks', type: 'string', nullable: true, maxLength: 2000)],
+                properties: [
+                    new OA\Property(property: 'remarks', type: 'string', nullable: true, maxLength: 2000),
+                    new OA\Property(property: 'forward_to_user_id', type: 'integer', nullable: true, description: 'Forward the next step to this user (GET /loans/{loan}/approval/forward-candidates lists who). Checked against the next step: active, holding its role (active) and `loans:view`, seeing the loan\'s branch, not the caller, not the restructure\'s creator on the last approve step, and holding `loans:release` on the release step. Otherwise 422 on this field, in words.'),
+                ],
             ),
         ),
         responses: [
@@ -98,7 +103,7 @@ class LoanApprovalStepController extends Controller
             new OA\Response(response: 403, description: "Requesting user does not hold the step's role"),
             new OA\Response(response: 404, description: 'Step does not belong to this loan'),
             new OA\Response(response: 409, description: 'Another decision on this loan (a step sign-off, a send-back, or a direct approve or reject) was saved at the same time, or the write deadlocked; nothing was written and nobody was notified. Message: "Another change to this loan was saved at the same time. Reload and try again."'),
-            new OA\Response(response: 422, description: 'Step is not pending, or loan is not in for_review'),
+            new OA\Response(response: 422, description: 'Step is not pending, loan is not in for_review, or `forward_to_user_id` can\'t be given the next step'),
         ],
     )]
     public function approve(Request $request, Loan $loan, LoanApprovalStep $approvalStep): JsonResponse
@@ -107,9 +112,16 @@ class LoanApprovalStepController extends Controller
 
         $validated = $request->validate([
             'remarks' => ['nullable', 'string', 'max:2000'],
+            'forward_to_user_id' => ['nullable', 'integer', 'min:1'],
         ]);
 
-        $this->chain->approve($loan, $approvalStep, $request->user(), $validated['remarks'] ?? null);
+        $this->chain->approve(
+            $loan,
+            $approvalStep,
+            $request->user(),
+            $validated['remarks'] ?? null,
+            isset($validated['forward_to_user_id']) ? (int) $validated['forward_to_user_id'] : null,
+        );
 
         return response()->json([
             'message' => 'Approval step signed off.',
@@ -172,12 +184,74 @@ class LoanApprovalStepController extends Controller
         ]);
     }
 
+    #[OA\Get(
+        path: '/api/loans/{loan}/approval/forward-candidates',
+        summary: 'Who the next approval step can be forwarded to',
+        description: 'For a draft, the step its submit would make pending (from the configured chain); in review, the step after the pending one. The caller must be able to submit the draft, or to act on the pending step. `users` are the users that step can be forwarded to (the rule `forward_to_user_id` is checked by), by name, as `{id, name}` only. `next_step` is null, and `users` empty, when the pending step is the last.',
+        tags: ['Loans'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'loan', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
+        ],
+        responses: [
+            new OA\Response(
+                response: 200,
+                description: 'The next step and its candidates',
+                content: new OA\JsonContent(properties: [
+                    new OA\Property(property: 'data', type: 'object', properties: [
+                        new OA\Property(property: 'next_step', type: 'object', nullable: true, properties: [
+                            new OA\Property(property: 'name', type: 'string', example: 'Manager'),
+                            new OA\Property(property: 'role', type: 'string', example: 'manager'),
+                            new OA\Property(property: 'role_label', type: 'string', example: 'Manager'),
+                            new OA\Property(property: 'kind', type: 'string', enum: ['submit', 'approve', 'release']),
+                        ]),
+                        new OA\Property(property: 'users', type: 'array', items: new OA\Items(properties: [
+                            new OA\Property(property: 'id', type: 'integer'),
+                            new OA\Property(property: 'name', type: 'string'),
+                        ], type: 'object')),
+                    ]),
+                ]),
+            ),
+            new OA\Response(response: 401, description: 'Unauthenticated'),
+            new OA\Response(response: 403, description: 'The caller can\'t submit the draft or act on the pending step'),
+            new OA\Response(response: 404, description: 'No such loan, or outside the caller\'s branches'),
+            new OA\Response(response: 422, description: 'The loan is neither a draft nor for approval'),
+        ],
+    )]
+    public function forwardCandidates(Request $request, Loan $loan): JsonResponse
+    {
+        $this->authorize('loans:view');
+
+        $user = $request->user();
+        $target = $this->chain->forwardTarget($loan, $user);
+
+        if ($target === null) {
+            return response()->json(['data' => ['next_step' => null, 'users' => []]]);
+        }
+
+        $step = $target['step'];
+        $role = Role::query()->where('name', $step->role)->get()->first(fn (Role $role) => $role->name === $step->role);
+
+        return response()->json(['data' => [
+            'next_step' => [
+                'name' => $step->name,
+                'role' => $step->role,
+                'role_label' => $role?->auditLabel() ?? Str::headline($step->role),
+                'kind' => $step->kind,
+            ],
+            'users' => $this->chain->forwardCandidates($loan, $step, $target['last_approve'], $user)
+                ->map(fn (User $candidate) => ['id' => (int) $candidate->id, 'name' => $candidate->full_name])
+                ->values()
+                ->all(),
+        ]]);
+    }
+
     /**
      * @return array{current_steps: list<array<string, mixed>>, rounds: list<array<string, mixed>>}
      */
     private function state(Loan $loan, ?User $viewer): array
     {
-        $steps = $loan->approvalSteps()->with('actedByUser')->get();
+        $steps = $loan->approvalSteps()->with(['actedByUser', 'assignee.roles', 'assignee.permissions'])->get();
 
         if ($steps->isEmpty()) {
             return ['current_steps' => [], 'rounds' => []];
@@ -275,6 +349,11 @@ class LoanApprovalStepController extends Controller
             // directly. `acted_by_id` carries the id for anything that needs it.
             'acted_by' => $step->actedByUser?->full_name,
             'acted_by_id' => $step->acted_by,
+
+            // Who the step was forwarded to, by name only, or null.
+            'assigned_to' => $step->assignee === null
+                ? null
+                : ['id' => (int) $step->assignee->id, 'name' => $step->assignee->full_name],
 
             // The server's full answer, not just the client's role check: a step
             // is only actionable if the viewer holds the role AND the step is
