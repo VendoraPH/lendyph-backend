@@ -243,7 +243,8 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
         Route::get('/recent-transactions', [DashboardController::class, 'recentTransactions']);
     });
 
-    // Fees
+    // Fees (the formula check first, so `fees/{fee}` never catches it)
+    Route::post('/fees/formula-check', [FeeController::class, 'formulaCheck']);
     Route::apiResource('fees', FeeController::class);
 
     // Loan Products

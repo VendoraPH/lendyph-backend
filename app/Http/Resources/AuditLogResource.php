@@ -854,15 +854,31 @@ class AuditLogResource extends JsonResource
 
     /**
      * A fee's `value` read by the `type` of the row it belongs to: a percentage
-     * or a formula's rate as a percent, a fixed fee in pesos. Null (so it reads
-     * as stored) when that row's type isn't known.
+     * or a formula's rate as a percent, a fixed fee in pesos, and a formula
+     * written out as "Formula: <the formula>" (its stored 0 is never shown as
+     * "0%"). Null (so it reads as stored) when that row's type isn't known.
+     * `formula_expression` itself reads as the text.
      *
      * @param  array<string, mixed>|null  $row
      */
     private function feeValueInWords(string $field, mixed $value, ?array $row): ?string
     {
-        if ($field !== 'value' || $this->auditable_type !== Fee::class || ! is_numeric($value)) {
+        if ($this->auditable_type !== Fee::class) {
             return null;
+        }
+
+        if ($field === 'formula_expression') {
+            return is_string($value) ? $value : null;
+        }
+
+        if ($field !== 'value' || ! is_numeric($value)) {
+            return null;
+        }
+
+        $expression = $row['formula_expression'] ?? null;
+
+        if (($row['type'] ?? null) === 'formula' && is_string($expression) && trim($expression) !== '') {
+            return 'Formula: '.$expression;
         }
 
         return match ($row['type'] ?? null) {

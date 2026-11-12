@@ -7,6 +7,7 @@ use App\Http\Requests\Fee\Concerns\LimitsFeeValuePlaces;
 use App\Http\Requests\Fee\Concerns\ValidatesFormulaFields;
 use Illuminate\Contracts\Validation\Validator;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Rule;
 
 class StoreFeeRequest extends FormRequest
 {
@@ -22,7 +23,8 @@ class StoreFeeRequest extends FormRequest
         return [
             'name' => ['required', 'string', 'max:255', 'unique:fees,name'],
             'type' => ['required', $this->feeTypeRule()],
-            'value' => ['required', 'numeric', 'min:0', $this->feeValuePlacesRule($this->input('type'))],
+            // A formula written out needs no rate: it's stored as 0.
+            'value' => [Rule::requiredIf(fn (): bool => ! $this->writesFormula()), 'numeric', 'min:0', $this->feeValuePlacesRule($this->input('type'))],
             ...$this->formulaFieldRules(),
             'applicable_product_ids' => ['nullable', 'array'],
             'applicable_product_ids.*' => ['integer', 'exists:loan_products,id'],

@@ -2358,7 +2358,10 @@ class LoanService
      * Rebuild deduction inputs from stored deduction items so a recompute
      * applies percentage and formula fees off their original rate
      * (`original_value`), not the previously computed peso amount. A formula
-     * item keeps its per-month flag and bounds.
+     * item keeps its per-month flag and bounds, and one charged from a written
+     * formula keeps its snapshot (`formula_expression`, `formula_inputs`,
+     * `raw_amount`), so it is read from what it was charged with
+     * (FeeAmount::formulaFields()), never from today's fee.
      *
      * @param  array<int, array{name: string, amount: float|int|string, type: string, original_value?: float|int|string}>  $items
      * @return array<int, array{name: string, amount: float|int|string, type: string}>
@@ -2748,8 +2751,12 @@ class LoanService
      * - the totals, in whole centavos; `net_proceeds` is null and `error`
      *   carries the refusal when the deductions are more than the principal:
      *   the create's message when the stated ones alone are, the release's
-     *   when the configured fees take them over. In the body rather than as a
-     *   422, so the rest of the preview still shows.
+     *   when the configured fees take them over, or a written-formula fee
+     *   that can't be worked out for this loan (it divides by zero, or goes
+     *   below ₱0.00 or above the largest amount), naming the fee, with no
+     *   configured fees listed. In the body rather than as a 422, so the rest
+     *   of the preview still shows while the form is filled in; the release
+     *   and its previews answer that fee's 422.
      *
      * @param  array<string, mixed>  $input
      * @return array{items: list<array<string, mixed>>, stated_total: float|int, configured_fees: list<array<string, mixed>>, configured_total: float|int, total_deductions: float|int, net_proceeds: float|int|null, error: string|null}
@@ -2767,17 +2774,30 @@ class LoanService
             $stated += $this->toCentavos((float) $item['amount']);
         }
 
-        $configuredFees = app(LoanReleaseFeeService::class)->itemsFor((new Loan)->forceFill([
-            'loan_product_id' => $product->id,
-            'principal_amount' => $principal / 100,
-            // The term a per-month formula fee multiplies by: the form's, in
-            // the product's unit, as the saved loan will carry it.
-            'term' => $input['term'] ?? null,
-            'term_unit' => $termUnit,
-            'start_date' => $input['start_date'] ?? null,
-            'maturity_date' => $maturity?->toDateString(),
-            'deductions' => $items,
-        ]));
+        $feeError = null;
+
+        try {
+            $configuredFees = app(LoanReleaseFeeService::class)->itemsFor((new Loan)->forceFill([
+                'loan_product_id' => $product->id,
+                'principal_amount' => $principal / 100,
+                // The term a per-month formula fee multiplies by: the form's, in
+                // the product's unit, as the saved loan will carry it.
+                'term' => $input['term'] ?? null,
+                'term_unit' => $termUnit,
+                // The rate a written formula's Interest Rate reads: the form's,
+                // else the product's, per the product's rate period, as
+                // createLoan() stores them.
+                'interest_rate' => $input['interest_rate'] ?? $product->interest_rate,
+                'interest_rate_frequency' => $product->interest_rate_frequency,
+                'start_date' => $input['start_date'] ?? null,
+                'maturity_date' => $maturity?->toDateString(),
+                'deductions' => $items,
+            ]));
+        } catch (ValidationException $e) {
+            $feeError = $e->errors()['fees'][0] ?? throw $e;
+            $configuredFees = [];
+        }
+
         $configured = 0;
 
         foreach ($configuredFees as $fee) {
@@ -2788,6 +2808,7 @@ class LoanService
 
         $error = match (true) {
             $stated > $principal => self::DEDUCTIONS_EXCEED_PRINCIPAL,
+            $feeError !== null => $feeError,
             $total > $principal => LoanReleaseFeeService::overrunMessage($configured / 100, $total / 100, $principal / 100),
             default => null,
         };
