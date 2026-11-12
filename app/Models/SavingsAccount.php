@@ -45,6 +45,19 @@ class SavingsAccount extends Model
 
     public const STATUS_CLOSED = 'closed';
 
+    /**
+     * Where an account's money comes from (gap round S1), stored as the key;
+     * `other` also keeps the member's own words in `source_of_funds_other`.
+     */
+    public const SOURCES_OF_FUNDS = [
+        'salary' => 'Salary',
+        'business' => 'Business',
+        'remittance' => 'Remittance',
+        'pension' => 'Pension',
+        'savings' => 'Savings',
+        'other' => 'Other',
+    ];
+
     public const STATUSES = [self::STATUS_ACTIVE, self::STATUS_DORMANT, self::STATUS_FROZEN, self::STATUS_CLOSED];
 
     protected $fillable = [
@@ -63,6 +76,11 @@ class SavingsAccount extends Model
         'closed_by',
         'open_key',
         'remarks',
+        // Opening details (gap round S1).
+        'account_officer_id',
+        'source_of_funds',
+        'source_of_funds_other',
+        'beneficiary',
         'created_by',
     ];
 
@@ -79,6 +97,8 @@ class SavingsAccount extends Model
             'interest_credited_through' => 'date',
             'closed_on' => 'date',
             'closed_by' => 'integer',
+            'account_officer_id' => 'integer',
+            'beneficiary' => 'array',
             'created_by' => 'integer',
         ];
     }
@@ -107,6 +127,11 @@ class SavingsAccount extends Model
     public function branch(): BelongsTo
     {
         return $this->belongsTo(Branch::class);
+    }
+
+    public function accountOfficer(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'account_officer_id');
     }
 
     public function transactions(): HasMany

@@ -25,6 +25,8 @@ use Illuminate\Validation\ValidationException;
  * - **What can be reversed:** deposits, withdrawals and transfers. Interest,
  *   tax, closing and time deposit rows, and reversals themselves, have their
  *   own journals and are refused (422).
+ * - **Fees:** a withdrawal is reversed with its excess-withdrawal fee row,
+ *   both rows and both journals, as one operation. A fee alone is refused.
  * - **Transfers:** both legs are reversed together, so the member's two
  *   accounts stay whole. The request is anchored on the incoming leg, whose
  *   pending reversal reserves the money on the account that received it.
@@ -40,7 +42,18 @@ use Illuminate\Validation\ValidationException;
  */
 class Reverser
 {
+    /**
+     * Rows a reversal can be asked for. An excess-withdrawal `fee` is
+     * reversed only with its withdrawal (one linked operation), never alone;
+     * a `share_capital_transfer` is never reversed (like a time deposit or
+     * closing row: a correction is a share capital entry plus a deposit).
+     */
     public const REVERSIBLE = ['deposit', 'withdrawal', 'transfer_in', 'transfer_out'];
+
+    public const FEE_ALONE = 'An excess-withdrawal fee is reversed only with its withdrawal. Reverse the withdrawal instead.';
+
+    /** Rows whose own `savings` journal a reversal reverses. */
+    private const OWN_JOURNAL = ['deposit', 'withdrawal', 'fee'];
 
     private const MONEY_IN = ['deposit', 'transfer_in'];
 
@@ -61,6 +74,10 @@ class Reverser
     /** @throws ValidationException */
     public function request(SavingsTransaction $target, string $reason, User $user): SavingsApproval
     {
+        if ($target->type === 'fee') {
+            Refuse::field('transaction', self::FEE_ALONE);
+        }
+
         if (! in_array($target->type, self::REVERSIBLE, true) || $target->time_deposit_id !== null || $target->interest_run_id !== null) {
             Refuse::field('transaction', 'Only deposits, withdrawals and transfers can be reversed. Interest, tax, closing, time deposit and reversal lines carry their own entries.');
         }
@@ -143,7 +160,7 @@ class Reverser
                 $reversals[$leg->id] = $this->ledger->credit($account, 'reversal', $amount, $attributes);
             }
 
-            if (in_array($leg->type, ['deposit', 'withdrawal'], true)) {
+            if (in_array($leg->type, self::OWN_JOURNAL, true)) {
                 $this->poster->reverseFor($leg, 'savings', $checker->id, "Reversed by {$reversals[$leg->id]->reference}: {$reason}");
             }
         }
@@ -152,12 +169,20 @@ class Reverser
     }
 
     /**
-     * The row and, for a transfer, its other leg: the incoming leg first.
+     * The row and, for a transfer, its other leg: the incoming leg first. A
+     * withdrawal comes with its excess-withdrawal fee row, if it carried one,
+     * so the two are reversed together.
      *
      * @return Collection<int, SavingsTransaction>
      */
     private function legs(SavingsTransaction $row): Collection
     {
+        if ($row->type === 'withdrawal') {
+            $fee = SavingsTransaction::query()->where('fee_for_transaction_id', $row->id)->first();
+
+            return $fee === null ? collect([$row]) : collect([$row, $fee]);
+        }
+
         $other = match ($row->type) {
             'transfer_in' => $row->counterpart_transaction_id === null ? null : SavingsTransaction::query()->find($row->counterpart_transaction_id),
             'transfer_out' => SavingsTransaction::query()->where('counterpart_transaction_id', $row->id)->first(),

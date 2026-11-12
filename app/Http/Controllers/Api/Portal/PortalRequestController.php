@@ -103,7 +103,7 @@ class PortalRequestController extends Controller
         $openKeys = PortalRequest::query()->whereIn('live_key', $accounts->map(fn (SavingsAccount $a) => 'w:'.$a->id))->pluck('live_key')->all();
 
         $products = $types[PortalRequest::TYPE_SAVINGS_OPENING]
-            ? $openings->openProducts()
+            ? $openings->openProducts($member)
                 ->whereNotIn('id', SavingsAccount::query()->select('product_id')->where('borrower_id', $member->id)->whereNotNull('open_key'))
                 ->orderBy('name')
                 ->get(['id', 'name', 'minimum_opening_balance'])

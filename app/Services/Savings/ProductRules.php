@@ -1,0 +1,316 @@
+<?php
+
+namespace App\Services\Savings;
+
+use App\Models\Borrower;
+use App\Models\Branch;
+use App\Models\SavingsAccount;
+use App\Models\SavingsApproval;
+use App\Models\SavingsHold;
+use App\Models\SavingsProduct;
+use App\Services\Savings\Api\Refuse;
+use Carbon\CarbonImmutable;
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\ValidationException;
+
+/**
+ * A savings product's own rules (gap round S1, new records only), in one
+ * place. Every refusal is 422 in words with ₱ amounts, on `amount` (or the
+ * field the caller names), and on `product_id` for eligibility.
+ *
+ * - **Money in from the member** ({@see self::assertCanDeposit()}): the
+ *   product takes deposits, the amount is within its minimum and maximum
+ *   deposit, and the balance stays within its maximum balance. A transfer's
+ *   target checks only that it takes deposits and the maximum balance
+ *   ({@see self::assertCanReceiveTransfer()}). Never applied to interest,
+ *   time deposit payouts, reversals or closing: those callers don't ask.
+ * - **Money out** ({@see self::assertCanWithdraw()}): the product allows
+ *   withdrawals, the amount is within its minimum and maximum withdrawal,
+ *   and the month's free withdrawals are not used up. Beyond them it returns
+ *   the excess-withdrawal fee, or refuses when the product charges none. A
+ *   transfer's source checks that the product allows transfers and the
+ *   maximum withdrawal ({@see self::assertCanTransferOut()}).
+ * - **Eligibility** ({@see self::assertEligible()}): the member's type and
+ *   branch are among the product's (null: all).
+ *
+ * The monthly count ({@see self::withdrawalsInMonth()}) is read under the
+ * account's row lock: withdrawals, their approvals and members' request holds
+ * are only ever written under it, so the count is exact.
+ */
+final class ProductRules
+{
+    /** @throws ValidationException */
+    public function assertCanDeposit(SavingsAccount $account, int $centavos, bool $openingDeposit = false, string $field = 'amount'): void
+    {
+        $product = $this->productOf($account);
+
+        if (! $product->allow_deposits) {
+            Refuse::field($field, "{$product->name} takes no deposits.");
+        }
+
+        $min = $this->limit($product->min_deposit);
+        $max = $this->limit($product->max_deposit);
+
+        // The opening deposit has its own minimum (the minimum opening balance).
+        if (! $openingDeposit && $min !== null && $centavos < $min) {
+            Refuse::field($field, "A deposit to {$product->name} is at least ".Refuse::peso($min).'.');
+        }
+
+        if ($max !== null && $centavos > $max) {
+            Refuse::field($field, "A deposit to {$product->name} is at most ".Refuse::peso($max).'.');
+        }
+
+        $this->assertWithinMaxBalance($account, $product, $centavos, $field);
+    }
+
+    /** @throws ValidationException */
+    public function assertCanReceiveTransfer(SavingsAccount $to, int $centavos, string $field = 'amount'): void
+    {
+        $product = $this->productOf($to);
+
+        if (! $product->allow_deposits) {
+            Refuse::field($field, "{$to->account_number} is a {$product->name} account, which takes no deposits, so it can't receive a transfer.");
+        }
+
+        $this->assertWithinMaxBalance($to, $product, $centavos, $field);
+    }
+
+    /** @throws ValidationException */
+    public function assertCanTransferOut(SavingsAccount $from, int $centavos, string $field = 'amount'): void
+    {
+        $product = $this->productOf($from);
+
+        if (! $product->allow_transfers) {
+            Refuse::field($field, "{$product->name} doesn't allow transfers to other accounts.");
+        }
+
+        $max = $this->limit($product->max_withdrawal);
+
+        if ($max !== null && $centavos > $max) {
+            Refuse::field($field, "A transfer out of {$product->name} is at most ".Refuse::peso($max).', its maximum withdrawal.');
+        }
+    }
+
+    /**
+     * Check a withdrawal of `$centavos` dated `$date` and return the
+     * excess-withdrawal fee it carries, in centavos (0 within the free
+     * count). `$exceptApprovalId` is the approval being carried out, left out
+     * of the count.
+     *
+     * @throws ValidationException
+     */
+    public function assertCanWithdraw(SavingsAccount $account, int $centavos, string $date, ?int $exceptApprovalId = null, string $field = 'amount'): int
+    {
+        $product = $this->productOf($account);
+
+        if (! $product->allow_withdrawals) {
+            Refuse::field($field, "{$product->name} doesn't allow withdrawals.");
+        }
+
+        $min = $this->limit($product->min_withdrawal);
+        $max = $this->limit($product->max_withdrawal);
+
+        if ($min !== null && $centavos < $min) {
+            Refuse::field($field, "A withdrawal from {$product->name} is at least ".Refuse::peso($min).'.');
+        }
+
+        if ($max !== null && $centavos > $max) {
+            Refuse::field($field, "A withdrawal from {$product->name} is at most ".Refuse::peso($max).'.');
+        }
+
+        return $this->withdrawalFee($account, $date, $exceptApprovalId, $field);
+    }
+
+    /**
+     * The excess-withdrawal fee a withdrawal dated `$date` carries now: 0
+     * within the product's free withdrawals for that month (or when it has no
+     * free count), its fee beyond them, and a refusal beyond them when it
+     * charges no fee.
+     *
+     * @throws ValidationException
+     */
+    public function withdrawalFee(SavingsAccount $account, string $date, ?int $exceptApprovalId = null, string $field = 'amount'): int
+    {
+        $product = $this->productOf($account);
+        $free = $product->free_withdrawals_per_month;
+
+        if ($free === null) {
+            return 0;
+        }
+
+        $used = $this->withdrawalsInMonth($account, $date, $exceptApprovalId);
+
+        if ($used < $free) {
+            return 0;
+        }
+
+        $fee = $this->limit($product->excess_withdrawal_fee);
+
+        if ($fee === null) {
+            $month = CarbonImmutable::parse($date)->format('F Y');
+
+            Refuse::field($field, "{$product->name} allows {$free} free ".($free === 1 ? 'withdrawal' : 'withdrawals')
+                ." a month, and {$account->account_number} has used ".($free === 1 ? 'it' : 'them')." for {$month}. "
+                .'The product charges no fee for more, so this withdrawal is refused.');
+        }
+
+        return $fee;
+    }
+
+    /**
+     * Withdrawals counted against the free count for the Manila calendar month
+     * of `$date`: posted withdrawals dated in that month that are not
+     * reversed (a time deposit's funding is not a withdrawal), plus pending
+     * withdrawal approvals dated in it, plus members' open portal withdrawal
+     * requests placed in it (their active request holds), leaving out
+     * `$exceptApprovalId`, the approval being carried out.
+     */
+    public function withdrawalsInMonth(SavingsAccount $account, string $date, ?int $exceptApprovalId = null): int
+    {
+        $day = CarbonImmutable::parse($date);
+        $from = $day->startOfMonth()->toDateString();
+        $to = $day->endOfMonth()->toDateString();
+
+        $posted = DB::table('savings_transactions AS t')
+            ->where('t.account_id', $account->id)
+            ->where('t.type', 'withdrawal')
+            ->whereNull('t.time_deposit_id')
+            ->whereBetween('t.date', [$from, $to])
+            ->whereNotExists(fn ($q) => $q->from('savings_transactions AS r')->whereColumn('r.reverses_transaction_id', 't.id'))
+            ->count();
+
+        $pending = SavingsApproval::query()
+            ->where('account_id', $account->id)
+            ->where('kind', 'withdrawal')
+            ->where('status', 'pending')
+            ->where(fn ($q) => $q->whereNull('expires_at')->orWhere('expires_at', '>', now()))
+            ->when($exceptApprovalId !== null, fn ($q) => $q->whereKeyNot($exceptApprovalId))
+            ->get(['id', 'payload'])
+            ->filter(function (SavingsApproval $approval) use ($from, $to): bool {
+                $on = (string) ($approval->payload['date'] ?? '');
+
+                return $on >= $from && $on <= $to;
+            })
+            ->count();
+
+        $requested = DB::table('savings_holds')
+            ->where('account_id', $account->id)
+            ->where('type', SavingsHold::TYPE_MEMBER_REQUEST)
+            ->where('status', 'active')
+            ->where(fn ($q) => $q->whereNull('expires_on')->orWhere('expires_on', '>=', now()->toDateString()))
+            ->whereBetween('placed_on', [$from, $to])
+            ->count();
+
+        return $posted + $pending + $requested;
+    }
+
+    /**
+     * Refuses (422 on `$field`) a member the product isn't offered to.
+     *
+     * @throws ValidationException
+     */
+    public function assertEligible(Borrower $member, SavingsProduct $product, string $field = 'product_id'): void
+    {
+        $problem = $this->eligibilityProblem($member, $product);
+
+        if ($problem !== null) {
+            Refuse::field($field, $problem);
+        }
+    }
+
+    public function isEligible(Borrower $member, SavingsProduct $product): bool
+    {
+        return $this->eligibilityProblem($member, $product) === null;
+    }
+
+    /** Why the product isn't offered to this member, in words, or null when it is. */
+    public function eligibilityProblem(Borrower $member, SavingsProduct $product): ?string
+    {
+        $types = $product->eligible_member_types;
+
+        if ($types !== null && ! in_array($member->member_type, $types, true)) {
+            $words = implode(' and ', array_map(fn (string $t) => self::memberTypeWords($t), $types));
+            $theirs = $member->member_type === null ? 'no member type recorded' : 'is '.self::article($member->member_type).' '.self::memberTypeWords($member->member_type).' member';
+
+            return "{$product->name} is open only to {$words} members, and {$member->full_name} "
+                .($member->member_type === null ? 'has ' : '').$theirs.'.';
+        }
+
+        $branches = $product->eligible_branch_ids;
+
+        if ($branches !== null && ! in_array((int) $member->branch_id, array_map('intval', $branches), true)) {
+            $branch = $member->branch_id === null ? null : Branch::query()->whereKey($member->branch_id)->value('name');
+
+            return $branch === null
+                ? "{$product->name} is offered only in some branches, and {$member->full_name} has no branch yet."
+                : "{$product->name} is not offered in {$branch}.";
+        }
+
+        return null;
+    }
+
+    /**
+     * Narrow a products query to those offered to the member (type and
+     * branch), as {@see self::isEligible()} reads them.
+     *
+     * @param  Builder<SavingsProduct>  $query
+     * @return Builder<SavingsProduct>
+     */
+    public static function constrainEligible(Builder $query, Borrower $member): Builder
+    {
+        $table = $query->getModel()->getTable();
+
+        return $query
+            ->where(fn ($q) => $q->whereNull("{$table}.eligible_member_types")
+                ->when($member->member_type !== null, fn ($q) => $q->orWhereJsonContains("{$table}.eligible_member_types", $member->member_type)))
+            ->where(fn ($q) => $q->whereNull("{$table}.eligible_branch_ids")
+                ->when($member->branch_id !== null, fn ($q) => $q->orWhereJsonContains("{$table}.eligible_branch_ids", (int) $member->branch_id)));
+    }
+
+    public static function memberTypeWords(string $type): string
+    {
+        return match ($type) {
+            'regular' => 'regular',
+            'associate' => 'associate',
+            default => str_replace('_', ' ', $type),
+        };
+    }
+
+    /** @throws ValidationException */
+    private function assertWithinMaxBalance(SavingsAccount $account, SavingsProduct $product, int $centavos, string $field): void
+    {
+        $max = $this->limit($product->max_balance);
+
+        if ($max === null) {
+            return;
+        }
+
+        $balance = SavingsMath::signedCentavos($account->ledger_balance);
+
+        if ($balance + $centavos > $max) {
+            Refuse::field($field, "That would take {$account->account_number} to ".Refuse::peso($balance + $centavos)
+                .", above {$product->name}'s maximum balance of ".Refuse::peso($max).'. It can take up to '.Refuse::peso(max(0, $max - $balance)).' more.');
+        }
+    }
+
+    private function productOf(SavingsAccount $account): SavingsProduct
+    {
+        $product = $account->relationLoaded('product') ? $account->product : null;
+
+        return $product instanceof SavingsProduct && $product->id === $account->product_id
+            ? $product
+            : SavingsProduct::query()->findOrFail($account->product_id);
+    }
+
+    /** A nullable peso limit in centavos, or null for none. */
+    private function limit(mixed $pesos): ?int
+    {
+        return $pesos === null ? null : SavingsMath::centavos($pesos);
+    }
+
+    private static function article(string $type): string
+    {
+        return in_array(strtolower($type[0] ?? ''), ['a', 'e', 'i', 'o', 'u'], true) ? 'an' : 'a';
+    }
+}

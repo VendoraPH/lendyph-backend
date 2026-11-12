@@ -5,12 +5,14 @@ namespace App\Http\Requests\Savings;
 use App\Models\SavingsProduct;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\Validator;
 
 /**
  * `POST /savings/products` (savings:settings and branches:view_all). `annual_interest_rate` becomes
  * the first rate row from today (one per offered term on a time deposit
  * product). Time deposit fields are refused on a regular product. Turning it
  * on at once (`is_active`) is checked against the books by the controller.
+ * The product rules (limits, switches, eligibility) are SavingsProductRuleFields'.
  */
 class StoreSavingsProductRequest extends FormRequest
 {
@@ -37,12 +39,18 @@ class StoreSavingsProductRequest extends FormRequest
             ],
             'annual_interest_rate' => ['required', ...SavingsRules::rate('interest rate')],
             'is_active' => ['sometimes', 'boolean'],
+            ...SavingsProductRuleFields::rules(null, $this->user()),
         ];
+    }
+
+    public function withValidator(Validator $validator): void
+    {
+        SavingsProductRuleFields::checkPairs($validator, null);
     }
 
     /** @return array<string, string> */
     public function messages(): array
     {
-        return SavingsProductMessages::all();
+        return [...SavingsProductMessages::all(), ...SavingsProductRuleFields::messages()];
     }
 }

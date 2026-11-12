@@ -12,7 +12,8 @@ use Illuminate\Support\Facades\DB;
 /**
  * What a member can take out now (design §4): the ledger balance, less active
  * holds not yet past `expires_on`, less pending outflow approvals not yet
- * expired (withdrawals and closes, and reversals of a credit), less the
+ * expired (withdrawals and closes, with any excess-withdrawal fee they
+ * reserve, and reversals of a credit), less the
  * product's maintaining balance, never below ₱0.00. The API shows it and the
  * withdrawal guard checks it; both read this one class.
  *
@@ -64,7 +65,7 @@ class AvailableBalance
             ->where(fn ($q) => $q->whereIn('a.kind', SavingsApproval::OUTFLOW_KINDS)
                 ->orWhere(fn ($q) => $q->where('a.kind', 'reversal')->where('t.credit', '>', 0)))
             ->groupBy('a.account_id')
-            ->selectRaw('a.account_id AS account_id, SUM(a.amount) AS total')
+            ->selectRaw('a.account_id AS account_id, SUM(a.amount + a.fee_amount) AS total')
             ->pluck('total', 'account_id');
 
         $maintaining = SavingsProduct::query()

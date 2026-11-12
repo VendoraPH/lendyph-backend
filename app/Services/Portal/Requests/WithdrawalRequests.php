@@ -18,6 +18,7 @@ use App\Services\Savings\Api\Refuse;
 use App\Services\Savings\Api\Teller;
 use App\Services\Savings\ApprovalGate;
 use App\Services\Savings\AvailableBalance;
+use App\Services\Savings\ProductRules;
 use App\Services\Savings\SavingsLocks;
 use App\Services\Savings\SavingsMath;
 use Illuminate\Validation\Rule;
@@ -28,8 +29,10 @@ use Illuminate\Validation\ValidationException;
  * Savings: no second ledger and no second approval engine.
  *
  * 1. **Submit** (the member, inside IdempotentWrite's portal store): lock the
- *    account, check it pays out and the amount is within what can be
- *    withdrawn now (AvailableBalance, read under the lock), insert the request
+ *    account, check it pays out, the product's withdrawal rules and the
+ *    month's free count (ProductRules, gap round S1), and that the amount
+ *    plus any excess-withdrawal fee is within what can be withdrawn now
+ *    (AvailableBalance, read under the lock), insert the request
  *    (`live_key` `w:{account}`), then place a `member_request` hold
  *    (HoldDesk::placeForRequest), which reserves the money at once.
  * 2. **Approve** (staff, inside the savings IdempotentWrite): lock the
@@ -62,6 +65,7 @@ final class WithdrawalRequests
         private readonly RequestTimeline $timeline,
         private readonly RequestNumbers $numbers,
         private readonly ApprovalGate $gate,
+        private readonly ProductRules $rules,
     ) {}
 
     /**
@@ -125,10 +129,13 @@ final class WithdrawalRequests
             Refuse::conflict("You already have an open withdrawal request on {$account->account_number}. Cancel it, or wait for your branch's decision.");
         }
 
+        $fee = $this->rules->assertCanWithdraw($account, $centavos, now()->toDateString(), null, 'details.amount');
         $free = $this->available->for($account);
 
-        if ($centavos > $free) {
-            Refuse::field('details.amount', Refuse::peso($centavos).' is more than the '.Refuse::peso($free)." you can withdraw from {$account->account_number} now.");
+        if ($centavos + $fee > $free) {
+            Refuse::field('details.amount', $fee === 0
+                ? Refuse::peso($centavos).' is more than the '.Refuse::peso($free)." you can withdraw from {$account->account_number} now."
+                : Refuse::peso($centavos).' plus the '.Refuse::peso($fee).' excess-withdrawal fee is more than the '.Refuse::peso($free)." you can withdraw from {$account->account_number} now.");
         }
 
         $expiresOn = now()->addDays(max(1, (int) ($this->settings->current()->withdrawal_hold_days ?? 7)))->toDateString();

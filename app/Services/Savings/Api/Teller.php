@@ -10,6 +10,7 @@ use App\Services\Accounting\AutomaticPoster;
 use App\Services\Accounting\PeriodGuard;
 use App\Services\Savings\ApprovalGate;
 use App\Services\Savings\AvailableBalance;
+use App\Services\Savings\ProductRules;
 use App\Services\Savings\SavingsLedger;
 use App\Services\Savings\SavingsLocks;
 use App\Services\Savings\SavingsMath;
@@ -24,7 +25,12 @@ use Illuminate\Validation\ValidationException;
  * the journal last (step 7).
  *
  * - A deposit is taken on an active or dormant account (it reactivates a
- *   dormant one), never on a frozen or closed one.
+ *   dormant one), never on a frozen or closed one, within the product's
+ *   rules (ProductRules: allow-deposits, the deposit limits, the maximum
+ *   balance).
+ * - A withdrawal follows the product's withdrawal rules and the month's free
+ *   count; beyond it an excess-withdrawal fee posts as a linked `fee` row,
+ *   and the money available must cover the amount plus the fee.
  * - A withdrawal leaves only an active account, up to its available balance
  *   (AvailableBalance, read under the lock, so it is exact). Above tier 1 it
  *   opens an approval instead, which reserves the amount at once.
@@ -42,6 +48,7 @@ class Teller
         private readonly ApprovalGate $gate,
         private readonly PeriodGuard $periods,
         private readonly LargeTransactionAlert $alert,
+        private readonly ProductRules $rules,
     ) {}
 
     /**
@@ -61,7 +68,10 @@ class Teller
             Refuse::field('account', "{$account->account_number} is frozen. Unfreeze it before taking a deposit.");
         }
 
-        $row = $this->ledger->credit($account, 'deposit', SavingsMath::centavos($data['amount']), $this->attributes($data, $user->id));
+        $centavos = SavingsMath::centavos($data['amount']);
+        $this->rules->assertCanDeposit($account, $centavos);
+
+        $row = $this->ledger->credit($account, 'deposit', $centavos, $this->attributes($data, $user->id));
         $this->poster->savingsTransaction($row, $user->id);
         $this->alert->afterPosting($row, [$user->id]);
 
@@ -82,7 +92,8 @@ class Teller
         $centavos = SavingsMath::centavos($data['amount']);
 
         $this->assertCanPayOut($account);
-        $this->assertAvailable($account, $centavos);
+        $fee = $this->rules->assertCanWithdraw($account, $centavos, $data['date']);
+        $this->assertAvailable($account, $centavos + $fee);
 
         if ($this->gate->needsApproval($centavos)) {
             $this->assertNotBeforeLatest($account, $data['date']);
@@ -90,6 +101,7 @@ class Teller
 
             return ['transaction' => null, 'approval' => $this->gate->open('withdrawal', $centavos, [
                 'account_id' => $account->id,
+                'fee_amount' => $fee,
                 'payload' => [
                     'date' => $data['date'],
                     'payment_method' => $data['payment_method'],
@@ -99,26 +111,60 @@ class Teller
             ], $user->id)];
         }
 
-        return ['transaction' => $this->postWithdrawal($account, $centavos, $data, $user->id, null, $user->id), 'approval' => null];
+        return ['transaction' => $this->postWithdrawal($account, $centavos, $data, $user->id, null, $user->id, [], $fee), 'approval' => null];
     }
 
     /**
-     * Write a withdrawal already checked (by withdraw() or, once approved, by
-     * the WithdrawalExecutor) and post its journal.
+     * Write a withdrawal whose money was checked (by withdraw() or, once
+     * approved, by the WithdrawalExecutor) and post its journal. The product
+     * rules are checked again here, under the lock, since the approval path
+     * skips withdraw(): the limits, and the month's free count without the
+     * approval being carried out. Beyond the free count the excess-withdrawal
+     * fee posts as its own `fee` row linked to the withdrawal, with its own
+     * journal, in the same write. `$expectedFee` is the fee the caller
+     * checked the money for (what an approval reserved); a different fee now
+     * answers 409 in words.
      *
      * @param  array{date: string, payment_method: string, reference?: string|null, remarks?: string|null}  $data
      * @param  list<int|null>  $otherDeciders  checkers who approved it before the poster (not alerted)
+     *
+     * @throws ValidationException
      */
-    public function postWithdrawal(SavingsAccount $account, int $centavos, array $data, int $makerId, ?int $approvalId, int $posterId, array $otherDeciders = []): SavingsTransaction
+    public function postWithdrawal(SavingsAccount $account, int $centavos, array $data, int $makerId, ?int $approvalId, int $posterId, array $otherDeciders = [], ?int $expectedFee = null): SavingsTransaction
     {
+        $fee = $this->rules->assertCanWithdraw($account, $centavos, $data['date'], $approvalId);
+
+        if ($expectedFee !== null && $fee !== $expectedFee) {
+            Refuse::conflict(self::feeChanged($fee, $expectedFee));
+        }
+
         $row = $this->ledger->debit($account, 'withdrawal', $centavos, [
             ...$this->attributes($data, $makerId),
             'approval_id' => $approvalId,
         ]);
         $this->poster->savingsTransaction($row, $posterId);
+
+        if ($fee > 0) {
+            $feeRow = $this->ledger->debit($account, 'fee', $fee, [
+                'date' => $data['date'],
+                'remarks' => "Excess-withdrawal fee on {$row->reference}",
+                'approval_id' => $approvalId,
+                'fee_for_transaction_id' => $row->id,
+                'created_by' => $makerId,
+            ]);
+            $this->poster->savingsTransaction($feeRow, $posterId);
+        }
+
         $this->alert->afterPosting($row, [$makerId, $posterId, ...$otherDeciders]);
 
         return $row;
+    }
+
+    /** The 409 for an approval whose excess-withdrawal fee is no longer the one it reserved. */
+    public static function feeChanged(int $now, int $reserved): string
+    {
+        return 'The excess-withdrawal fee on this request is now '.Refuse::peso($now).', not the '.Refuse::peso($reserved)
+            .' it reserved. Reject it and make a new request.';
     }
 
     /**
@@ -141,6 +187,7 @@ class Teller
         $centavos = SavingsMath::centavos($data['amount']);
 
         $this->assertCanPayOut($from);
+        $this->rules->assertCanTransferOut($from, $centavos);
 
         if ($to->borrower_id !== $from->borrower_id) {
             Refuse::field('to_account_id', "{$to->account_number} belongs to another member. A transfer goes only between the same member's own accounts.");
@@ -154,6 +201,7 @@ class Teller
             Refuse::field('to_account_id', "{$to->account_number} is {$to->status} and can't receive a transfer.");
         }
 
+        $this->rules->assertCanReceiveTransfer($to, $centavos);
         $this->assertAvailable($from, $centavos);
 
         $attributes = [

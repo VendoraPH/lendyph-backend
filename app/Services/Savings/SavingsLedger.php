@@ -66,7 +66,8 @@ class SavingsLedger
      *
      * @param  string  $type  deposit, transfer_in, interest or reversal
      * @param  array<string, mixed>  $attributes  date, value_date, method, external_reference, remarks, counterpart_transaction_id,
-     *                                            reverses_transaction_id, time_deposit_id, interest_run_id, approval_id, created_by, reference,
+     *                                            reverses_transaction_id, time_deposit_id, interest_run_id, approval_id, fee_for_transaction_id
+     *                                            (a fee row's withdrawal), created_by, reference,
      *                                            member_activity. `date` defaults to today and `value_date` to `date`; `created_by` defaults
      *                                            to the signed-in user (pass null for the system); `reference` to the next SVT number;
      *                                            `member_activity` to true (false: the member didn't make this row, so it neither counts
@@ -82,7 +83,7 @@ class SavingsLedger
     /**
      * Take money from an account.
      *
-     * @param  string  $type  withdrawal, transfer_out, withholding_tax, closing or reversal
+     * @param  string  $type  withdrawal, transfer_out, withholding_tax, closing, fee, share_capital_transfer or reversal
      * @param  array<string, mixed>  $attributes  as for {@see self::credit()}
      *
      * @throws ValidationException
@@ -176,6 +177,7 @@ class SavingsLedger
             'time_deposit_id' => $attributes['time_deposit_id'] ?? null,
             'interest_run_id' => $attributes['interest_run_id'] ?? null,
             'approval_id' => $attributes['approval_id'] ?? null,
+            'fee_for_transaction_id' => $this->feeFor($locked, $type, $attributes),
             'created_by' => array_key_exists('created_by', $attributes) ? $attributes['created_by'] : $this->signedInStaffId(),
         ]);
 
@@ -365,6 +367,35 @@ class SavingsLedger
         if ($claimedBy !== null) {
             $this->refuse('counterpart_transaction_id', "That transfer leg is already paired with {$claimedBy}.");
         }
+    }
+
+    /**
+     * The withdrawal a `fee` row is charged on (gap round S1): a `fee` row
+     * must name one withdrawal on the same account, and only a `fee` row may.
+     *
+     * @param  array<string, mixed>  $attributes
+     *
+     * @throws LogicException
+     */
+    private function feeFor(SavingsAccount $account, string $type, array $attributes): ?int
+    {
+        $for = $attributes['fee_for_transaction_id'] ?? null;
+
+        if ($type !== 'fee') {
+            if ($for !== null) {
+                throw new LogicException('Only a fee row names the withdrawal it was charged on.');
+            }
+
+            return null;
+        }
+
+        $withdrawal = $for === null ? null : DB::table('savings_transactions')->where('id', $for)->first(['account_id', 'type']);
+
+        if ($withdrawal === null || (int) $withdrawal->account_id !== $account->id || $withdrawal->type !== 'withdrawal') {
+            throw new LogicException('A fee row must name the withdrawal on its own account that it was charged on.');
+        }
+
+        return (int) $for;
     }
 
     private function dateOf(mixed $value, string $field): CarbonImmutable

@@ -9,6 +9,7 @@ use App\Services\LoanWriteTransaction;
 use App\Services\Savings\Approvals\ApprovalExecutor;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
 use LogicException;
 use Symfony\Component\HttpKernel\Exception\HttpException;
 
@@ -83,9 +84,10 @@ class ApprovalGate
     /**
      * Open a pending approval. Always at least one checker: a kind that is
      * always approved (a reversal) opens one below tier 1 too. A second live
-     * approval with the same `live_key` answers 409.
+     * approval with the same `live_key` answers 409. `fee_amount` (centavos)
+     * is an excess-withdrawal fee it reserves beside `$centavos`.
      *
-     * @param  array{account_id?: int|null, time_deposit_id?: int|null, target_transaction_id?: int|null, payload?: array<string, mixed>|null, live_key?: string|null}  $attributes
+     * @param  array{account_id?: int|null, time_deposit_id?: int|null, target_transaction_id?: int|null, payload?: array<string, mixed>|null, live_key?: string|null, fee_amount?: int}  $attributes
      */
     public function open(string $kind, int $centavos, array $attributes, int $requestedBy): SavingsApproval
     {
@@ -115,6 +117,7 @@ class ApprovalGate
             'time_deposit_id' => $attributes['time_deposit_id'] ?? null,
             'target_transaction_id' => $attributes['target_transaction_id'] ?? null,
             'amount' => SavingsMath::pesos($centavos),
+            'fee_amount' => SavingsMath::pesos((int) ($attributes['fee_amount'] ?? 0)),
             'payload' => $attributes['payload'] ?? null,
             'required_checkers' => max(1, $this->requiredCheckers($centavos)),
             'status' => 'pending',
@@ -147,15 +150,37 @@ class ApprovalGate
         return 'App\\Services\\Savings\\Approvals\\'.Str::studly($kind).'Executor';
     }
 
-    /** The executor for a kind, from the container. */
-    public function executor(string $kind): ApprovalExecutor
+    /** Whether a kind has its executor yet (a kind can be registered before its slice adds one). */
+    public static function hasExecutor(string $kind): bool
     {
         $class = self::executorClass($kind);
 
-        if (! in_array($kind, SavingsApproval::KINDS, true) || ! class_exists($class) || ! is_subclass_of($class, ApprovalExecutor::class)) {
-            throw new LogicException("There is no approval executor for \"{$kind}\" ({$class}).");
+        return in_array($kind, SavingsApproval::KINDS, true) && class_exists($class) && is_subclass_of($class, ApprovalExecutor::class);
+    }
+
+    /**
+     * The executor for a kind, from the container. A registered kind with no
+     * executor yet (registered ahead of the slice that carries it out) is
+     * refused in words (422 on `approval`), never a 500, and nothing changes.
+     * A kind that isn't registered at all is a programming error.
+     *
+     * @throws ValidationException
+     * @throws LogicException
+     */
+    public function executor(string $kind): ApprovalExecutor
+    {
+        if (! in_array($kind, SavingsApproval::KINDS, true)) {
+            throw new LogicException("\"{$kind}\" is not a savings approval kind.");
         }
 
-        return app($class);
+        if (! self::hasExecutor($kind)) {
+            $words = str_replace('_', ' ', $kind);
+
+            throw ValidationException::withMessages(['approval' => [
+                "A {$words} request can't be carried out yet: this version has no way to complete it. Reject or cancel it instead.",
+            ]]);
+        }
+
+        return app(self::executorClass($kind));
     }
 }

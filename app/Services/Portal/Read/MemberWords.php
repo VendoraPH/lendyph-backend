@@ -43,6 +43,8 @@ final class MemberWords
         'withholding_tax' => 'Withholding tax',
         'closing' => 'Account closing',
         'reversal' => 'Correction',
+        'fee' => 'Excess-withdrawal fee',
+        'share_capital_transfer' => 'Transfer to share capital',
     ];
 
     public const MATURITY_INSTRUCTION = [

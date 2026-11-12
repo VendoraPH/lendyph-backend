@@ -21,6 +21,7 @@ use Illuminate\Support\Carbon;
  * @property int|null $time_deposit_id
  * @property int|null $target_transaction_id
  * @property string $amount
+ * @property string $fee_amount the excess-withdrawal fee it reserves beside `amount` (₱0.00 when none)
  * @property array<string, mixed>|null $payload
  * @property int $required_checkers
  * @property string $status
@@ -33,10 +34,18 @@ class SavingsApproval extends Model
     /** @use HasFactory<SavingsApprovalFactory> */
     use Auditable, HasFactory;
 
-    public const KINDS = ['withdrawal', 'close', 'td_payout', 'pretermination', 'reversal'];
+    /**
+     * `share_capital_transfer` and `reactivation` are registered for the gap
+     * round's later slices; until their executors exist, approving one
+     * answers 422 in words (ApprovalGate::executor()).
+     */
+    public const KINDS = ['withdrawal', 'close', 'td_payout', 'pretermination', 'reversal', 'share_capital_transfer', 'reactivation'];
 
-    /** Kinds whose amount leaves the account while pending. A reversal does when it reverses a credit. */
-    public const OUTFLOW_KINDS = ['withdrawal', 'close'];
+    /**
+     * Kinds whose amount (plus `fee_amount`) leaves the account while
+     * pending. A reversal does when it reverses a credit.
+     */
+    public const OUTFLOW_KINDS = ['withdrawal', 'close', 'share_capital_transfer'];
 
     public const STATUSES = ['pending', 'approved', 'rejected', 'cancelled', 'expired'];
 
@@ -46,6 +55,7 @@ class SavingsApproval extends Model
         'time_deposit_id',
         'target_transaction_id',
         'amount',
+        'fee_amount',
         'payload',
         'required_checkers',
         'status',
@@ -66,6 +76,7 @@ class SavingsApproval extends Model
             'time_deposit_id' => 'integer',
             'target_transaction_id' => 'integer',
             'amount' => 'decimal:2',
+            'fee_amount' => 'decimal:2',
             'payload' => 'array',
             'required_checkers' => 'integer',
             'requested_by' => 'integer',
