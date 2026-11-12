@@ -17,7 +17,9 @@ use Illuminate\Validation\Rule;
  * stage?, submission?} (design §5). The caller needs `branches:view_all`,
  * the action's own permission (ReportWorkflow::ACTIONS) and the report's
  * restricted view, checked before validation so they get 403, never field
- * errors. An unknown action needs only `cda:view` to be told it's unknown.
+ * errors. A return also needs `cda:review` or the pending review step's role
+ * (ReportWorkflow::returnRefusal()), checked here too, so that 403 comes
+ * before a field error or a stale-status 409. An unknown action needs only `cda:view` to be told it's unknown.
  */
 class CdaWorkflowRequest extends FormRequest
 {
@@ -33,6 +35,11 @@ class CdaWorkflowRequest extends FormRequest
 
         if ($report instanceof CdaReport) {
             $access->authorizeType($this->user(), $report->report_type);
+
+            if ($action === 'return') {
+                $refusal = ReportWorkflow::returnRefusal($report, $this->user());
+                abort_if($refusal !== null, 403, (string) $refusal);
+            }
         }
 
         return true;
@@ -48,6 +55,7 @@ class CdaWorkflowRequest extends FormRequest
             'action' => ['required', 'string', Rule::in(array_keys(ReportWorkflow::ACTIONS))],
             'reason' => [Rule::requiredIf(in_array($this->input('action'), ReportWorkflow::NEED_REASON, true)), 'nullable', 'bail', 'string', 'max:500', 'regex:'.Sentence::HAS_WORDS],
             'confirm_warnings' => ['sometimes', 'boolean'],
+            'step_id' => ['nullable', 'integer'],
             'stage' => [Rule::requiredIf($this->input('action') === 'set_stage'), 'nullable', 'string', Rule::in($stages)],
             'submission' => [Rule::requiredIf($this->input('action') === 'mark_submitted'), 'nullable', 'array:method,submitted_on,submitted_by_name,cda_reference_no,acknowledgment_no,remarks'],
             'submission.method' => [Rule::requiredIf($this->input('action') === 'mark_submitted'), 'nullable', 'string', Rule::in(CdaSubmission::METHODS)],
@@ -68,7 +76,8 @@ class CdaWorkflowRequest extends FormRequest
             'reason.required' => 'Give a reason for this step.',
             'reason.max' => 'A reason takes up to 500 characters.',
             'reason.regex' => Sentence::NO_WORDS,
-            'confirm_warnings.boolean' => 'confirm_warnings is true or false.',
+            'confirm_warnings.boolean' => 'Say whether to go ahead despite the warnings.',
+            'step_id.integer' => 'Choose the review step to approve.',
             'stage.required' => 'Choose the stage to move to.',
             'stage.in' => 'That isn\'t a stage of this report.',
             'submission.required' => 'Record how and when the report was filed.',

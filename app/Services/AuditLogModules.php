@@ -20,6 +20,7 @@ use App\Models\AuditLog;
 use App\Models\Borrower;
 use App\Models\BorrowerNotificationPreference;
 use App\Models\Branch;
+use App\Models\CdaComplianceRequirement;
 use App\Models\CdaDocument;
 use App\Models\CdaDocumentVersion;
 use App\Models\CdaMediationCase;
@@ -214,6 +215,7 @@ class AuditLogModules
         CdaSocialProgram::class => 'cda',
         CdaMediationCase::class => 'cda',
         CdaNoticeSent::class => 'cda',
+        CdaComplianceRequirement::class => 'cda',
         // Member Portal (Phase 3): access, codes, settings, terms, requests and
         // announcements. A member's own actions are filed here too, through
         // the portal user or record they act on.

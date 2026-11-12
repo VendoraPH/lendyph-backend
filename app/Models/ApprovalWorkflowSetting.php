@@ -35,6 +35,13 @@ class ApprovalWorkflowSetting extends Model
 
     public const TYPE_POLICY_EXCEPTION = 'policy_exception';
 
+    /**
+     * The CDA report review chain (gap round B6): approve-only steps
+     * {id, name, role, kind: approve, status?}, copied onto a report at
+     * submit for review. None saved means the single review.
+     */
+    public const TYPE_CDA = 'cda';
+
     public const DEFAULT_NORMAL_STEPS = [
         ['id' => 'loan-processor', 'name' => 'Loan Processor', 'role' => 'loan_processor', 'kind' => 'submit'],
         ['id' => 'manager', 'name' => 'Manager', 'role' => 'manager', 'kind' => 'approve'],
@@ -57,8 +64,10 @@ class ApprovalWorkflowSetting extends Model
 
     public static function defaultStepsFor(string $type): array
     {
-        return $type === self::TYPE_POLICY_EXCEPTION
-            ? self::DEFAULT_POLICY_EXCEPTION_STEPS
-            : self::DEFAULT_NORMAL_STEPS;
+        return match ($type) {
+            self::TYPE_POLICY_EXCEPTION => self::DEFAULT_POLICY_EXCEPTION_STEPS,
+            self::TYPE_CDA => [],
+            default => self::DEFAULT_NORMAL_STEPS,
+        };
     }
 }

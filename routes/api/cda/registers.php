@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\Api\Cda\CdaComplianceRequirementController;
 use App\Http\Controllers\Api\Cda\CdaDocumentController;
 use App\Http\Controllers\Api\Cda\CdaMediationCaseController;
 use App\Http\Controllers\Api\Cda\CdaOfficerController;
@@ -52,4 +53,9 @@ Route::prefix('cda')->group(function () {
     Route::post('/documents/{cdaDocument}/withdraw', [CdaDocumentController::class, 'withdraw'])->whereNumber('cdaDocument');
 
     Route::post('/submissions/{submission}/proof', [CdaSubmissionProofController::class, 'store'])->whereNumber('submission');
+
+    Route::get('/periods/{year}/requirements', [CdaComplianceRequirementController::class, 'index'])->whereNumber('year');
+    Route::post('/periods/{year}/requirements', [CdaComplianceRequirementController::class, 'store'])->whereNumber('year');
+    Route::put('/requirements/{requirement}', [CdaComplianceRequirementController::class, 'update'])->whereNumber('requirement');
+    Route::delete('/requirements/{requirement}', [CdaComplianceRequirementController::class, 'destroy'])->whereNumber('requirement');
 });
