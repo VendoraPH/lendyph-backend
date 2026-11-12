@@ -9,6 +9,7 @@ use Brick\Math\BigDecimal;
 use Brick\Math\BigRational;
 use Brick\Math\Exception\RoundingNecessaryException;
 use Brick\Math\RoundingMode;
+use Carbon\Carbon;
 use Carbon\CarbonImmutable;
 
 /**
@@ -23,6 +24,11 @@ use Carbon\CarbonImmutable;
  * - Interest runs on the unrounded balance; only the figures shown are
  *   rounded, half up to the centavo (towards +∞ at a tie, as the page's
  *   Math.round did).
+ * - The principal adds up exactly: the last row's principal is the principal
+ *   less the rounded principal settled on the rows before it, and its payment
+ *   follows from it (see self::lastPrincipal()). This differs on purpose from
+ *   the page, which summed rounded rows and could read ₱99,999.99 for a
+ *   ₱100,000.00 loan.
  * - Due dates step one calendar month from the start, on its day of the month
  *   or a shorter month's last day, and the first due date is the start date.
  * - The Share Capital Build-Up is a fixed amount every period.
@@ -97,8 +103,9 @@ final class BinhsCalculator
 
     /**
      * The page's starting inputs for a loan: its principal, its rate as a rate
-     * a year, its term in months and its start date, with a note in words for
-     * each value left out.
+     * a year, its term in months and its first due date (the calculator's
+     * `start_date`, see firstDueDateOf()), with a note in words for each
+     * value left out.
      *
      * - The rate a year is the loan's rate times its periods in a year on the
      *   30-day-month convention (monthly × 12, annual × 1, any other period
@@ -152,10 +159,40 @@ final class BinhsCalculator
                 'principal' => BigDecimal::of((string) $loan->principal_amount)->toScale(2)->__toString(),
                 'annual_rate' => $annualRate,
                 'term_months' => $termMonths,
-                'start_date' => $loan->start_date?->toDateString(),
+                'start_date' => $this->firstDueDateOf($loan),
             ],
             'notes' => $notes,
         ];
+    }
+
+    /**
+     * The loan's first due date: its schedule's first period, or, while it has
+     * no schedule (a draft), the date the schedule will give it: one payment
+     * period after the start, on the start's day of the month (a shorter
+     * month's last day) when it steps by calendar month, or the maturity date
+     * for a single payment at maturity.
+     */
+    private function firstDueDateOf(Loan $loan): ?string
+    {
+        $scheduled = $loan->amortizationSchedules()->reorder('period_number')->value('due_date');
+
+        if ($scheduled !== null) {
+            return CarbonImmutable::parse($scheduled)->toDateString();
+        }
+
+        if ($loan->start_date === null) {
+            return null;
+        }
+
+        $start = Carbon::parse($loan->start_date->toDateString());
+        $term = max(1, (int) $loan->term);
+
+        if ($loan->frequency === 'upon_maturity') {
+            return ($loan->maturity_date ?? LoanTermSchedule::maturityDate($start, $term, $loan->term_unit->value, 'upon_maturity'))
+                ->toDateString();
+        }
+
+        return LoanTermSchedule::instalments($start, $term, $loan->term_unit->value, $loan->frequency)[0]['due_date']->toDateString();
     }
 
     /**
@@ -205,6 +242,8 @@ final class BinhsCalculator
     /**
      * Every period paid as scheduled. The balance shown steps down by the
      * rounded principal, and reads 0.00 where the rounding takes it below 0.
+     * The last row takes the principal the rows before it left, so the
+     * column adds up to the principal and the balance closes at 0.00.
      *
      * @param  array{principal: BigDecimal|BigRational, rate: BigRational, level: BigDecimal|BigRational, zero: BigDecimal|BigRational, scheduled_principal: list<BigDecimal|BigRational>, scheduled_interest: list<BigDecimal|BigRational>}  $plan
      * @param  list<string>  $dueDates
@@ -214,10 +253,15 @@ final class BinhsCalculator
     {
         $rows = [];
         $balance = self::round2($plan['principal']);
+        $settled = BigDecimal::zero();
+        $last = count($dueDates) - 1;
 
         foreach ($dueDates as $i => $dueDate) {
             $interest = self::round2($plan['scheduled_interest'][$i]);
-            $principalPaid = self::round2($plan['scheduled_principal'][$i]);
+            $principalPaid = $i === $last
+                ? self::lastPrincipal($plan, $settled)
+                : self::round2($plan['scheduled_principal'][$i]);
+            $settled = $settled->plus($principalPaid);
             $balance = $balance->minus($principalPaid);
 
             $rows[] = self::row($i, $dueDate, $principalPaid, $interest, BigDecimal::zero(), $scbu,
@@ -233,7 +277,8 @@ final class BinhsCalculator
      * 20% penalty on it. The first period's interest is on the principal, the
      * second's on the ideal balance after period 1, and every later one on
      * the running balance, which adds each period's interest and penalty.
-     * The payment shown is the level payment plus the build-up.
+     * The payment shown is the level payment plus the build-up. Nothing is
+     * settled, so the last row carries the whole principal.
      *
      * @param  array{principal: BigDecimal|BigRational, rate: BigRational, level: BigDecimal|BigRational, zero: BigDecimal|BigRational, scheduled_principal: list<BigDecimal|BigRational>, scheduled_interest: list<BigDecimal|BigRational>}  $plan
      * @param  list<string>  $dueDates
@@ -246,6 +291,7 @@ final class BinhsCalculator
         $running = $plan['principal'];
         $idealBalance = $plan['principal'];
         $payment = self::round2($plan['level']->plus($scbu));
+        $last = count($dueDates) - 1;
 
         foreach ($dueDates as $i => $dueDate) {
             $carried = $carried->plus($plan['scheduled_principal'][$i]);
@@ -263,7 +309,9 @@ final class BinhsCalculator
                 $running = $running->plus($interest)->plus($penalty);
             }
 
-            $rows[] = self::row($i, $dueDate, self::round2($carried), self::round2($interest), self::round2($penalty),
+            $shownPrincipal = $i === $last ? self::lastPrincipal($plan, BigDecimal::zero()) : self::round2($carried);
+
+            $rows[] = self::row($i, $dueDate, $shownPrincipal, self::round2($interest), self::round2($penalty),
                 $scbu, $payment, self::round2($running));
         }
 
@@ -274,7 +322,10 @@ final class BinhsCalculator
      * The periods marked paid settle the scheduled principal plus any carried
      * from unpaid periods before them. An unpaid period carries its scheduled
      * principal, and adds its interest and a 20% penalty on everything carried
-     * to the outstanding balance. Interest is always on that balance.
+     * to the outstanding balance. Interest is always on that balance. The
+     * last row, paid or carried, takes the principal the paid rows before it
+     * left, and a paid last row's payment is that principal plus its
+     * interest and build-up.
      *
      * @param  array{principal: BigDecimal|BigRational, rate: BigRational, level: BigDecimal|BigRational, zero: BigDecimal|BigRational, scheduled_principal: list<BigDecimal|BigRational>, scheduled_interest: list<BigDecimal|BigRational>}  $plan
      * @param  list<string>  $dueDates
@@ -287,6 +338,8 @@ final class BinhsCalculator
         $outstanding = $plan['principal'];
         $carried = $plan['zero'];
         $unpaidPayment = self::round2($plan['level']->plus($scbu));
+        $settledShown = BigDecimal::zero();
+        $last = count($dueDates) - 1;
 
         foreach ($dueDates as $i => $dueDate) {
             $scheduled = $plan['scheduled_principal'][$i];
@@ -297,8 +350,18 @@ final class BinhsCalculator
                 $outstanding = $outstanding->minus($settled);
                 $carried = $plan['zero'];
 
-                $rows[] = self::row($i, $dueDate, self::round2($settled), self::round2($interest), BigDecimal::zero(),
-                    $scbu, self::round2($settled->plus($interest)->plus($scbu)),
+                if ($i === $last) {
+                    $shown = self::lastPrincipal($plan, $settledShown);
+                    $payment = $shown->plus(self::round2($interest))->plus($scbu);
+                } else {
+                    $shown = self::round2($settled);
+                    $payment = self::round2($settled->plus($interest)->plus($scbu));
+                }
+
+                $settledShown = $settledShown->plus($shown);
+
+                $rows[] = self::row($i, $dueDate, $shown, self::round2($interest), BigDecimal::zero(),
+                    $scbu, $payment,
                     $outstanding->isNegative() ? BigDecimal::zero() : self::round2($outstanding));
 
                 continue;
@@ -307,12 +370,25 @@ final class BinhsCalculator
             $carried = $carried->plus($scheduled);
             $penalty = $carried->multipliedBy(self::PENALTY_RATE);
             $outstanding = $outstanding->plus($interest)->plus($penalty);
+            $shown = $i === $last ? self::lastPrincipal($plan, $settledShown) : self::round2($carried);
 
-            $rows[] = self::row($i, $dueDate, self::round2($carried), self::round2($interest), self::round2($penalty),
+            $rows[] = self::row($i, $dueDate, $shown, self::round2($interest), self::round2($penalty),
                 $scbu, $unpaidPayment, self::round2($outstanding));
         }
 
         return $rows;
+    }
+
+    /**
+     * The last row's principal: the principal less the rounded principal the
+     * rows before it settled, so the principal a schedule settles adds up to
+     * the principal exactly. Interest is never moved: each row keeps its own.
+     *
+     * @param  array{principal: BigDecimal|BigRational, rate: BigRational, level: BigDecimal|BigRational, zero: BigDecimal|BigRational, scheduled_principal: list<BigDecimal|BigRational>, scheduled_interest: list<BigDecimal|BigRational>}  $plan
+     */
+    private static function lastPrincipal(array $plan, BigDecimal $settledShown): BigDecimal
+    {
+        return self::round2($plan['principal'])->minus($settledShown);
     }
 
     /**
