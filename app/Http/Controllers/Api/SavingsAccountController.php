@@ -143,7 +143,7 @@ class SavingsAccountController extends Controller
     #[OA\Get(
         path: '/api/savings/accounts/{account}',
         summary: 'A savings account',
-        description: 'With the server\'s `balance`, `hold_amount`, `held_for_requests` (the part of `hold_amount` held for portal withdrawal requests from members), `pending_amount` (outflows waiting for approval), `available_balance`, `accrued_interest` (since the last crediting, not yet credited) and `interest_credited_through`.',
+        description: 'With the server\'s `balance`, `hold_amount`, `held_for_requests` (the part of `hold_amount` held for portal withdrawal requests from members), `pending_amount` (outflows waiting for approval), `available_balance`, `accrued_interest` (since the last crediting, not yet credited) and `interest_credited_through`. The detail alone also carries `next_withdrawal_fee` (the excess-withdrawal fee a withdrawal requested today would carry: "0.00" when free, null when the free withdrawals are used up and the product charges no fee, so it would be refused) and `free_withdrawals_left` (null when unlimited), counting posted withdrawals, pending approvals and members\' open requests this month.',
         tags: ['Savings'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'account', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
@@ -157,7 +157,7 @@ class SavingsAccountController extends Controller
     {
         $this->authorize('savings:view');
 
-        return response()->json(['success' => true, 'data' => $this->presenter->account($this->scope->account($request->user(), $account))]);
+        return response()->json(['success' => true, 'data' => $this->presenter->accountDetail($this->scope->account($request->user(), $account))]);
     }
 
     #[OA\Get(

@@ -104,7 +104,7 @@ class AccountListsTest extends TestCase
             ->assertJsonPath('data.0.account_number', $account->account_number)
             ->assertJsonPath('data.0.branch_name', $this->branch->name);
 
-        $this->assertSame(['id', 'kind', 'status', 'account_id', 'account_number', 'time_deposit_id', 'certificate_number', 'borrower_name', 'branch_name', 'target_transaction_id', 'target_reference', 'amount', 'fee_amount', 'required_checkers', 'requested_by', 'first_checker', 'decided_by', 'decision_reason', 'check_reason', 'decided_at', 'expires_at', 'result_transaction_id', 'created_at'], array_keys($response->json('data.0')));
+        $this->assertSame(['id', 'kind', 'status', 'account_id', 'account_number', 'time_deposit_id', 'certificate_number', 'borrower_name', 'branch_name', 'target_transaction_id', 'target_reference', 'amount', 'fee_amount', 'total_with_fee', 'required_checkers', 'requested_by', 'first_checker', 'decided_by', 'decision_reason', 'check_reason', 'decided_at', 'expires_at', 'result_transaction_id', 'created_at'], array_keys($response->json('data.0')));
         $this->assertSame(1, SavingsAccount::query()->count());
     }
 }
