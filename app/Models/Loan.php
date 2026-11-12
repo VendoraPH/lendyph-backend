@@ -4,6 +4,7 @@ namespace App\Models;
 
 use App\Enums\InterestRateFrequency;
 use App\Enums\TermUnit;
+use App\Services\ApprovalAssignees;
 use App\Services\BranchAccess;
 use App\Services\SequenceCode;
 use App\Support\StaffRouteBinding;
@@ -601,27 +602,92 @@ class Loan extends Model
      * `manager ` match the role `manager`. There is no admin/super_admin
      * bypass: this asks whether it is the role's turn, not who may act.
      *
+     * With `$user` (the "awaiting me" filter), a step forwarded to a named
+     * user (`assigned_to`) is theirs, not the role's, while they still hold it
+     * (ApprovalAssignees); once they don't, it is the role's again. An
+     * approved loan's pending release step counts too, for a user holding
+     * `loans:release`, by the same rule.
+     *
      * @param  list<string>  $roleNames
      */
-    public function scopeAwaitingApprovalFromRoles($query, array $roleNames)
+    public function scopeAwaitingApprovalFromRoles($query, array $roleNames, ?User $user = null)
     {
-        return $query->where('loans.status', 'for_review')
-            ->whereExists(function ($steps) use ($roleNames) {
-                $steps->selectRaw('1')
-                    ->from('loan_approval_steps as current_step')
-                    ->whereColumn('current_step.loan_id', 'loans.id')
-                    ->where('current_step.status', LoanApprovalStep::STATUS_PENDING)
-                    ->whereRaw('current_step.round = (select max(latest.round) from loan_approval_steps as latest where latest.loan_id = current_step.loan_id)')
-                    ->whereNotExists(function ($earlier) {
-                        $earlier->selectRaw('1')
-                            ->from('loan_approval_steps as earlier_step')
-                            ->whereColumn('earlier_step.loan_id', 'current_step.loan_id')
-                            ->whereColumn('earlier_step.round', 'current_step.round')
-                            ->where('earlier_step.status', LoanApprovalStep::STATUS_PENDING)
-                            ->whereColumn('earlier_step.step_order', '<', 'current_step.step_order');
-                    })
-                    ->whereIn(DB::raw('CAST(current_step.role AS BINARY)'), $roleNames);
+        if ($user === null) {
+            return $query->where('loans.status', 'for_review')
+                ->whereExists(fn ($steps) => $this->currentStepQuery($steps)
+                    ->whereIn(DB::raw('CAST(current_step.role AS BINARY)'), $roleNames));
+        }
+
+        $userId = (int) $user->getKey();
+        $fallingBack = $this->stepsFallingBackToTheirRole($roleNames, $userId);
+        $mine = fn ($steps) => $steps->where(fn ($who) => $who
+            ->where(fn ($assigned) => $assigned
+                ->where('current_step.assigned_to', $userId)
+                ->whereNotIn('current_step.id', $fallingBack))
+            ->orWhere(fn ($forRole) => $forRole
+                ->where(fn ($unassigned) => $unassigned
+                    ->whereNull('current_step.assigned_to')
+                    ->orWhereIn('current_step.id', $fallingBack))
+                ->whereIn(DB::raw('CAST(current_step.role AS BINARY)'), $roleNames)));
+
+        $canRelease = $user->can('loans:release');
+
+        return $query->where(fn ($loans) => $loans
+            ->where(fn ($inReview) => $inReview
+                ->where('loans.status', 'for_review')
+                ->whereExists(fn ($steps) => $mine($this->currentStepQuery($steps))))
+            ->when($canRelease, fn ($loans) => $loans->orWhere(fn ($approved) => $approved
+                ->where('loans.status', 'approved')
+                ->whereExists(fn ($steps) => $mine($this->currentStepQuery($steps)
+                    ->where('current_step.kind', LoanApprovalStep::KIND_RELEASE))))));
+    }
+
+    /**
+     * The first `pending` step of the loan's latest round, as `current_step`.
+     */
+    private function currentStepQuery($steps)
+    {
+        return $steps->selectRaw('1')
+            ->from('loan_approval_steps as current_step')
+            ->whereColumn('current_step.loan_id', 'loans.id')
+            ->where('current_step.status', LoanApprovalStep::STATUS_PENDING)
+            ->whereRaw('current_step.round = (select max(latest.round) from loan_approval_steps as latest where latest.loan_id = current_step.loan_id)')
+            ->whereNotExists(function ($earlier) {
+                $earlier->selectRaw('1')
+                    ->from('loan_approval_steps as earlier_step')
+                    ->whereColumn('earlier_step.loan_id', 'current_step.loan_id')
+                    ->whereColumn('earlier_step.round', 'current_step.round')
+                    ->where('earlier_step.status', LoanApprovalStep::STATUS_PENDING)
+                    ->whereColumn('earlier_step.step_order', '<', 'current_step.step_order');
             });
+    }
+
+    /**
+     * Pending, forwarded steps of loans in review or approved, that matter to
+     * this user (their role's, or forwarded to them), whose assignee no
+     * longer holds them: these read as their role's again. Few rows, so the
+     * full rule is checked in PHP (ApprovalAssignees), as canAct() checks it.
+     *
+     * @param  list<string>  $roleNames
+     * @return list<int>
+     */
+    private function stepsFallingBackToTheirRole(array $roleNames, int $userId): array
+    {
+        $assignees = app(ApprovalAssignees::class);
+
+        return LoanApprovalStep::query()
+            ->with(['loan', 'assignee.roles', 'assignee.permissions'])
+            ->where('status', LoanApprovalStep::STATUS_PENDING)
+            ->whereNotNull('assigned_to')
+            ->whereHas('loan', fn ($loans) => $loans->whereIn('status', ['for_review', 'approved']))
+            ->where(fn ($steps) => $steps
+                ->where('assigned_to', $userId)
+                ->orWhereIn('role', $roleNames === [] ? [''] : $roleNames))
+            ->get()
+            ->filter(fn (LoanApprovalStep $step) => $assignees->effectiveAssignee($step, $step->loan) === null)
+            ->map(fn (LoanApprovalStep $step) => (int) $step->id)
+            ->values()
+            ->all();
     }
 
     /**
