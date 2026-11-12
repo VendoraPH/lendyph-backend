@@ -23,7 +23,7 @@ class AmortizationCalculatorController extends Controller
                 properties: [
                     new OA\Property(property: 'principal_amount', type: 'number', example: 50000),
                     new OA\Property(property: 'interest_rate', type: 'number', example: 3),
-                    new OA\Property(property: 'interest_rate_frequency', type: 'string', enum: ['daily', 'weekly', 'bi_weekly', 'semi_monthly', 'monthly']),
+                    new OA\Property(property: 'interest_rate_frequency', type: 'string', enum: ['daily', 'weekly', 'bi_weekly', 'semi_monthly', 'monthly', 'annual']),
                     new OA\Property(property: 'interest_method', type: 'string', enum: ['straight', 'diminishing', 'upon_maturity']),
                     new OA\Property(property: 'term', type: 'integer', example: 6),
                     new OA\Property(property: 'term_unit', type: 'string', enum: ['months', 'days']),

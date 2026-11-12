@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Enums\InterestRateFrequency;
 use App\Enums\TermUnit;
+use Brick\Math\BigRational;
 use Carbon\Carbon;
 
 /**
@@ -15,8 +16,10 @@ use Carbon\Carbon;
  *   instalment is charged for the days it covers.
  *
  * Periods convert on a 30-day month: a day is 1, a week 7, a bi-weekly period
- * 14, a semi-monthly period 15 and a month 30 days. A length that does not
- * split evenly ends in a shorter final instalment, charged only for its days.
+ * 14, a semi-monthly period 15, a month 30 and a year 360 days (a rate
+ * period only, so a yearly rate is 12 times the monthly one). A length that
+ * does not split evenly ends in a shorter final instalment, charged only for
+ * its days.
  *
  * A months term paid monthly or at maturity steps by CALENDAR months instead,
  * each instalment charged as one full month, exactly as every loan was before
@@ -38,13 +41,19 @@ final class LoanTermSchedule
 {
     public const DAYS_PER_MONTH = 30;
 
-    /** Days in one period of each frequency, on the 30-day-month convention. */
+    public const DAYS_PER_YEAR = 360;
+
+    /**
+     * Days in one period of each frequency, on the 30-day-month convention.
+     * `annual` is a rate period only: no payment frequency is yearly.
+     */
     public const PERIOD_DAYS = [
         'daily' => 1,
         'weekly' => 7,
         'bi_weekly' => 14,
         'semi_monthly' => 15,
         'monthly' => self::DAYS_PER_MONTH,
+        'annual' => self::DAYS_PER_YEAR,
     ];
 
     public static function stepsByCalendarMonth(string $termUnit, string $frequency): bool
@@ -191,9 +200,21 @@ final class LoanTermSchedule
      *
      * Exactly `$ratePercent / 100` when the days equal one rate period, so a
      * monthly rate on a monthly instalment is charged as it always was.
+     *
+     * A rate per year is worked out exactly, rate × days ÷ 36,000, and only
+     * the result becomes a float, so 18% a year on 30 days is 0.015, the
+     * figure 1.5% a month gives. The other periods keep the arithmetic every
+     * existing loan was charged with.
      */
     public static function rateForDays(float $ratePercent, string $rateFrequency, int $days): float
     {
+        if ($rateFrequency === InterestRateFrequency::Annual->value) {
+            return BigRational::of((string) $ratePercent)
+                ->multipliedBy($days)
+                ->dividedBy(100 * self::DAYS_PER_YEAR)
+                ->toFloat();
+        }
+
         $rateDays = self::PERIOD_DAYS[$rateFrequency];
         $factor = $days === $rateDays ? 1 : $days / $rateDays;
 

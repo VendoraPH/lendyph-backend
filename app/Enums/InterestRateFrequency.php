@@ -6,8 +6,10 @@ namespace App\Enums;
  * The period a loan's `interest_rate` is quoted per ("3% per month").
  *
  * The payment frequencies minus `upon_maturity`, which is a repayment shape
- * rather than a period. `monthly` is the default and the basis every rate
- * entered before this column existed was charged on.
+ * rather than a period, plus `annual` ("18% per year"), which is a rate
+ * period only: no loan is ever paid yearly (LoanFrequency has no `annual`).
+ * `monthly` is the default and the basis every rate entered before this
+ * column existed was charged on.
  */
 enum InterestRateFrequency: string
 {
@@ -16,6 +18,7 @@ enum InterestRateFrequency: string
     case BiWeekly = 'bi_weekly';
     case SemiMonthly = 'semi_monthly';
     case Monthly = 'monthly';
+    case Annual = 'annual';
 
     /**
      * @return list<string>

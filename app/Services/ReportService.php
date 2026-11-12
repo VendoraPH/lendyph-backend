@@ -719,6 +719,7 @@ class ReportService
             'weekly' => 'per week',
             'bi_weekly' => 'per 2 weeks',
             'semi_monthly' => 'per half month',
+            'annual' => 'per year',
             default => 'per month',
         };
 

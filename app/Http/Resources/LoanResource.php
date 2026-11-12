@@ -32,7 +32,7 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'external_loan_no', type: 'string', nullable: true, description: "The cooperative's own reference for a loan migrated in by the CSV importer. Kept separate from `loan_account_number`, which is a generated LN- sequence."),
         new OA\Property(property: 'is_imported', type: 'boolean', description: 'True when this loan was migrated in from an existing book rather than originated here, so its amortization schedule is reconstructed and its pre-import arrears are not penalised.'),
         new OA\Property(property: 'interest_rate', type: 'number'),
-        new OA\Property(property: 'interest_rate_frequency', type: 'string', enum: ['daily', 'weekly', 'bi_weekly', 'semi_monthly', 'monthly']),
+        new OA\Property(property: 'interest_rate_frequency', type: 'string', enum: ['daily', 'weekly', 'bi_weekly', 'semi_monthly', 'monthly', 'annual']),
         new OA\Property(property: 'interest_method', type: 'string'),
         new OA\Property(property: 'term', type: 'integer'),
         new OA\Property(property: 'term_unit', type: 'string', enum: ['months', 'days']),

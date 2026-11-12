@@ -41,7 +41,7 @@ class StoreLoanProductRequest extends FormRequest
             'service_fee' => ['nullable', 'numeric', 'min:0', 'max:100', 'decimal:0,4'],
             'min_service_fee' => ['nullable', 'numeric', 'min:0', 'max:100', 'decimal:0,4'],
             'max_service_fee' => ['nullable', 'numeric', 'min:0', 'max:100', 'decimal:0,4'],
-            'notarial_fee' => ['nullable', 'numeric', 'min:0', 'decimal:0,4'],
+            'notarial_fee' => ['nullable', 'numeric', 'min:0', 'max:100', 'decimal:0,4'],
             'custom_fees' => ['nullable', 'array'],
             'penalty_rate' => ['nullable', 'numeric', 'min:0', 'max:100', 'decimal:0,4'],
             'grace_period_days' => ['nullable', 'integer', 'min:0'],

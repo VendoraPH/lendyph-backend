@@ -18,7 +18,7 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'name', type: 'string'),
         new OA\Property(property: 'description', type: 'string', nullable: true),
         new OA\Property(property: 'interest_rate', type: 'number'),
-        new OA\Property(property: 'interest_rate_frequency', type: 'string', enum: ['daily', 'weekly', 'bi_weekly', 'semi_monthly', 'monthly']),
+        new OA\Property(property: 'interest_rate_frequency', type: 'string', enum: ['daily', 'weekly', 'bi_weekly', 'semi_monthly', 'monthly', 'annual']),
         new OA\Property(property: 'min_interest_rate', type: 'number', nullable: true),
         new OA\Property(property: 'max_interest_rate', type: 'number', description: 'Alias for interest_rate'),
         new OA\Property(property: 'interest_method', type: 'string'),

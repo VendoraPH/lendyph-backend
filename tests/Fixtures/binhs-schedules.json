@@ -1,0 +1,2919 @@
+{
+  "ts-default": {
+    "input": {
+      "principal": "10000.00",
+      "annual_rate": "24",
+      "term_months": 3,
+      "scbu_per_period": "100.00",
+      "start_date": "2026-08-07",
+      "paid_flags": [
+        true,
+        false,
+        true
+      ]
+    },
+    "ideal": {
+      "rows": [
+        {
+          "period": 1,
+          "due_date": "2026-08-07",
+          "principal": "3267.55",
+          "interest": "200.00",
+          "penalty": "0.00",
+          "scbu": "100.00",
+          "total_payment": "3567.55",
+          "running_balance": "6732.45"
+        },
+        {
+          "period": 2,
+          "due_date": "2026-09-07",
+          "principal": "3332.90",
+          "interest": "134.65",
+          "penalty": "0.00",
+          "scbu": "100.00",
+          "total_payment": "3567.55",
+          "running_balance": "3399.55"
+        },
+        {
+          "period": 3,
+          "due_date": "2026-10-07",
+          "principal": "3399.56",
+          "interest": "67.99",
+          "penalty": "0.00",
+          "scbu": "100.00",
+          "total_payment": "3567.55",
+          "running_balance": "0.00"
+        }
+      ],
+      "totals": {
+        "principal": "10000.01",
+        "interest": "402.64",
+        "penalty": "0.00",
+        "scbu": "300.00",
+        "total_payment": "10702.65"
+      }
+    },
+    "worst_case": {
+      "rows": [
+        {
+          "period": 1,
+          "due_date": "2026-08-07",
+          "principal": "3267.55",
+          "interest": "200.00",
+          "penalty": "653.51",
+          "scbu": "100.00",
+          "total_payment": "3567.55",
+          "running_balance": "7585.96"
+        },
+        {
+          "period": 2,
+          "due_date": "2026-09-07",
+          "principal": "6600.44",
+          "interest": "134.65",
+          "penalty": "1320.09",
+          "scbu": "100.00",
+          "total_payment": "3567.55",
+          "running_balance": "9040.70"
+        },
+        {
+          "period": 3,
+          "due_date": "2026-10-07",
+          "principal": "10000.00",
+          "interest": "180.81",
+          "penalty": "2000.00",
+          "scbu": "100.00",
+          "total_payment": "3567.55",
+          "running_balance": "11221.51"
+        }
+      ],
+      "totals": {
+        "principal": "19867.99",
+        "interest": "515.46",
+        "penalty": "3973.60",
+        "scbu": "300.00",
+        "total_payment": "10702.65"
+      }
+    },
+    "custom": {
+      "rows": [
+        {
+          "period": 1,
+          "due_date": "2026-08-07",
+          "principal": "3267.55",
+          "interest": "200.00",
+          "penalty": "0.00",
+          "scbu": "100.00",
+          "total_payment": "3567.55",
+          "running_balance": "6732.45"
+        },
+        {
+          "period": 2,
+          "due_date": "2026-09-07",
+          "principal": "3332.90",
+          "interest": "134.65",
+          "penalty": "666.58",
+          "scbu": "100.00",
+          "total_payment": "3567.55",
+          "running_balance": "7533.68"
+        },
+        {
+          "period": 3,
+          "due_date": "2026-10-07",
+          "principal": "6732.45",
+          "interest": "150.67",
+          "penalty": "0.00",
+          "scbu": "100.00",
+          "total_payment": "6983.13",
+          "running_balance": "801.23"
+        }
+      ],
+      "totals": {
+        "principal": "13332.90",
+        "interest": "485.32",
+        "penalty": "666.58",
+        "scbu": "300.00",
+        "total_payment": "14118.23"
+      }
+    }
+  },
+  "eighteen-12": {
+    "input": {
+      "principal": "50000.00",
+      "annual_rate": "18",
+      "term_months": 12,
+      "scbu_per_period": "0.00",
+      "start_date": "2026-01-31",
+      "paid_flags": [
+        true,
+        false,
+        true,
+        false,
+        false,
+        true,
+        true,
+        false,
+        true,
+        false,
+        true,
+        true
+      ]
+    },
+    "ideal": {
+      "rows": [
+        {
+          "period": 1,
+          "due_date": "2026-01-31",
+          "principal": "3834.00",
+          "interest": "750.00",
+          "penalty": "0.00",
+          "scbu": "0.00",
+          "total_payment": "4584.00",
+          "running_balance": "46166.00"
+        },
+        {
+          "period": 2,
+          "due_date": "2026-02-28",
+          "principal": "3891.51",
+          "interest": "692.49",
+          "penalty": "0.00",
+          "scbu": "0.00",
+          "total_payment": "4584.00",
+          "running_balance": "42274.49"
+        },
+        {
+          "period": 3,
+          "due_date": "2026-03-31",
+          "principal": "3949.88",
+          "interest": "634.12",
+          "penalty": "0.00",
+          "scbu": "0.00",
+          "total_payment": "4584.00",
+          "running_balance": "38324.61"
+        },
+        {
+          "period": 4,
+          "due_date": "2026-04-30",
+          "principal": "4009.13",
+          "interest": "574.87",
+          "penalty": "0.00",
+          "scbu": "0.00",
+          "total_payment": "4584.00",
+          "running_balance": "34315.48"
+        },
+        {
+          "period": 5,
+          "due_date": "2026-05-31",
+          "principal": "4069.27",
+          "interest": "514.73",
+          "penalty": "0.00",
+          "scbu": "0.00",
+          "total_payment": "4584.00",
+          "running_balance": "30246.21"
+        },
+        {
+          "period": 6,
+          "due_date": "2026-06-30",
+          "principal": "4130.31",
+          "interest": "453.69",
+          "penalty": "0.00",
+          "scbu": "0.00",
+          "total_payment": "4584.00",
+          "running_balance": "26115.90"
+        },
+        {
+          "period": 7,
+          "due_date": "2026-07-31",
+          "principal": "4192.26",
+          "interest": "391.74",
+          "penalty": "0.00",
+          "scbu": "0.00",
+          "total_payment": "4584.00",
+          "running_balance": "21923.64"
+        },
+        {
+          "period": 8,
+          "due_date": "2026-08-31",
+          "principal": "4255.15",
+          "interest": "328.85",
+          "penalty": "0.00",
+          "scbu": "0.00",
+          "total_payment": "4584.00",
+          "running_balance": "17668.49"
+        },
+        {
+          "period": 9,
+          "due_date": "2026-09-30",
+          "principal": "4318.97",
+          "interest": "265.03",
+          "penalty": "0.00",
+          "scbu": "0.00",
+          "total_payment": "4584.00",
+          "running_balance": "13349.52"
+        },
+        {
+          "period": 10,
+          "due_date": "2026-10-31",
+          "principal": "4383.76",
+          "interest": "200.24",
+          "penalty": "0.00",
+          "scbu": "0.00",
+          "total_payment": "4584.00",
+          "running_balance": "8965.76"
+        },
+        {
+          "period": 11,
+          "due_date": "2026-11-30",
+          "principal": "4449.51",
+          "interest": "134.49",
+          "penalty": "0.00",
+          "scbu": "0.00",
+          "total_payment": "4584.00",
+          "running_balance": "4516.25"
+        },
+        {
+          "period": 12,
+          "due_date": "2026-12-31",
+          "principal": "4516.26",
+          "interest": "67.74",
+          "penalty": "0.00",
+          "scbu": "0.00",
+          "total_payment": "4584.00",
+          "running_balance": "0.00"
+        }
+      ],
+      "totals": {
+        "principal": "50000.01",
+        "interest": "5007.99",
+        "penalty": "0.00",
+        "scbu": "0.00",
+        "total_payment": "55008.00"
+      }
+    },
+    "worst_case": {
+      "rows": [
+        {
+          "period": 1,
+          "due_date": "2026-01-31",
+          "principal": "3834.00",
+          "interest": "750.00",
+          "penalty": "766.80",
+          "scbu": "0.00",
+          "total_payment": "4584.00",
+          "running_balance": "47682.80"
+        },
+        {
+          "period": 2,
+          "due_date": "2026-02-28",
+          "principal": "7725.51",
+          "interest": "692.49",
+          "penalty": "1545.10",
+          "scbu": "0.00",
+          "total_payment": "4584.00",
+          "running_balance": "49920.39"
+        },
+        {
+          "period": 3,
+          "due_date": "2026-03-31",
+          "principal": "11675.39",
+          "interest": "748.81",
+          "penalty": "2335.08",
+          "scbu": "0.00",
+          "total_payment": "4584.00",
+          "running_balance": "53004.28"
+        },
+        {
+          "period": 4,
+          "due_date": "2026-04-30",
+          "principal": "15684.52",
+          "interest": "795.06",
+          "penalty": "3136.90",
+          "scbu": "0.00",
+          "total_payment": "4584.00",
+          "running_balance": "56936.24"
+        },
+        {
+          "period": 5,
+          "due_date": "2026-05-31",
+          "principal": "19753.79",
+          "interest": "854.04",
+          "penalty": "3950.76",
+          "scbu": "0.00",
+          "total_payment": "4584.00",
+          "running_balance": "61741.05"
+        },
+        {
+          "period": 6,
+          "due_date": "2026-06-30",
+          "principal": "23884.10",
+          "interest": "926.12",
+          "penalty": "4776.82",
+          "scbu": "0.00",
+          "total_payment": "4584.00",
+          "running_balance": "67443.98"
+        },
+        {
+          "period": 7,
+          "due_date": "2026-07-31",
+          "principal": "28076.36",
+          "interest": "1011.66",
+          "penalty": "5615.27",
+          "scbu": "0.00",
+          "total_payment": "4584.00",
+          "running_balance": "74070.91"
+        },
+        {
+          "period": 8,
+          "due_date": "2026-08-31",
+          "principal": "32331.50",
+          "interest": "1111.06",
+          "penalty": "6466.30",
+          "scbu": "0.00",
+          "total_payment": "4584.00",
+          "running_balance": "81648.28"
+        },
+        {
+          "period": 9,
+          "due_date": "2026-09-30",
+          "principal": "36650.47",
+          "interest": "1224.72",
+          "penalty": "7330.09",
+          "scbu": "0.00",
+          "total_payment": "4584.00",
+          "running_balance": "90203.10"
+        },
+        {
+          "period": 10,
+          "due_date": "2026-10-31",
+          "principal": "41034.23",
+          "interest": "1353.05",
+          "penalty": "8206.85",
+          "scbu": "0.00",
+          "total_payment": "4584.00",
+          "running_balance": "99762.99"
+        },
+        {
+          "period": 11,
+          "due_date": "2026-11-30",
+          "principal": "45483.74",
+          "interest": "1496.44",
+          "penalty": "9096.75",
+          "scbu": "0.00",
+          "total_payment": "4584.00",
+          "running_balance": "110356.18"
+        },
+        {
+          "period": 12,
+          "due_date": "2026-12-31",
+          "principal": "50000.00",
+          "interest": "1655.34",
+          "penalty": "10000.00",
+          "scbu": "0.00",
+          "total_payment": "4584.00",
+          "running_balance": "122011.52"
+        }
+      ],
+      "totals": {
+        "principal": "316133.61",
+        "interest": "12618.79",
+        "penalty": "63226.72",
+        "scbu": "0.00",
+        "total_payment": "55008.00"
+      }
+    },
+    "custom": {
+      "rows": [
+        {
+          "period": 1,
+          "due_date": "2026-01-31",
+          "principal": "3834.00",
+          "interest": "750.00",
+          "penalty": "0.00",
+          "scbu": "0.00",
+          "total_payment": "4584.00",
+          "running_balance": "46166.00"
+        },
+        {
+          "period": 2,
+          "due_date": "2026-02-28",
+          "principal": "3891.51",
+          "interest": "692.49",
+          "penalty": "778.30",
+          "scbu": "0.00",
+          "total_payment": "4584.00",
+          "running_balance": "47636.79"
+        },
+        {
+          "period": 3,
+          "due_date": "2026-03-31",
+          "principal": "7841.39",
+          "interest": "714.55",
+          "penalty": "0.00",
+          "scbu": "0.00",
+          "total_payment": "8555.94",
+          "running_balance": "39795.40"
+        },
+        {
+          "period": 4,
+          "due_date": "2026-04-30",
+          "principal": "4009.13",
+          "interest": "596.93",
+          "penalty": "801.83",
+          "scbu": "0.00",
+          "total_payment": "4584.00",
+          "running_balance": "41194.16"
+        },
+        {
+          "period": 5,
+          "due_date": "2026-05-31",
+          "principal": "8078.40",
+          "interest": "617.91",
+          "penalty": "1615.68",
+          "scbu": "0.00",
+          "total_payment": "4584.00",
+          "running_balance": "43427.75"
+        },
+        {
+          "period": 6,
+          "due_date": "2026-06-30",
+          "principal": "12208.70",
+          "interest": "651.42",
+          "penalty": "0.00",
+          "scbu": "0.00",
+          "total_payment": "12860.12",
+          "running_balance": "31219.04"
+        },
+        {
+          "period": 7,
+          "due_date": "2026-07-31",
+          "principal": "4192.26",
+          "interest": "468.29",
+          "penalty": "0.00",
+          "scbu": "0.00",
+          "total_payment": "4660.55",
+          "running_balance": "27026.78"
+        },
+        {
+          "period": 8,
+          "due_date": "2026-08-31",
+          "principal": "4255.15",
+          "interest": "405.40",
+          "penalty": "851.03",
+          "scbu": "0.00",
+          "total_payment": "4584.00",
+          "running_balance": "28283.21"
+        },
+        {
+          "period": 9,
+          "due_date": "2026-09-30",
+          "principal": "8574.12",
+          "interest": "424.25",
+          "penalty": "0.00",
+          "scbu": "0.00",
+          "total_payment": "8998.37",
+          "running_balance": "19709.10"
+        },
+        {
+          "period": 10,
+          "due_date": "2026-10-31",
+          "principal": "4383.76",
+          "interest": "295.64",
+          "penalty": "876.75",
+          "scbu": "0.00",
+          "total_payment": "4584.00",
+          "running_balance": "20881.49"
+        },
+        {
+          "period": 11,
+          "due_date": "2026-11-30",
+          "principal": "8833.27",
+          "interest": "313.22",
+          "penalty": "0.00",
+          "scbu": "0.00",
+          "total_payment": "9146.49",
+          "running_balance": "12048.22"
+        },
+        {
+          "period": 12,
+          "due_date": "2026-12-31",
+          "principal": "4516.26",
+          "interest": "180.72",
+          "penalty": "0.00",
+          "scbu": "0.00",
+          "total_payment": "4696.98",
+          "running_balance": "7531.96"
+        }
+      ],
+      "totals": {
+        "principal": "74617.95",
+        "interest": "6110.82",
+        "penalty": "4923.59",
+        "scbu": "0.00",
+        "total_payment": "76422.45"
+      }
+    }
+  },
+  "zero-rate": {
+    "input": {
+      "principal": "12345.67",
+      "annual_rate": "0",
+      "term_months": 5,
+      "scbu_per_period": "50.50",
+      "start_date": "2028-01-29",
+      "paid_flags": [
+        false,
+        false,
+        true,
+        false,
+        true
+      ]
+    },
+    "ideal": {
+      "rows": [
+        {
+          "period": 1,
+          "due_date": "2028-01-29",
+          "principal": "2469.13",
+          "interest": "0.00",
+          "penalty": "0.00",
+          "scbu": "50.50",
+          "total_payment": "2519.63",
+          "running_balance": "9876.54"
+        },
+        {
+          "period": 2,
+          "due_date": "2028-02-29",
+          "principal": "2469.13",
+          "interest": "0.00",
+          "penalty": "0.00",
+          "scbu": "50.50",
+          "total_payment": "2519.63",
+          "running_balance": "7407.41"
+        },
+        {
+          "period": 3,
+          "due_date": "2028-03-29",
+          "principal": "2469.13",
+          "interest": "0.00",
+          "penalty": "0.00",
+          "scbu": "50.50",
+          "total_payment": "2519.63",
+          "running_balance": "4938.28"
+        },
+        {
+          "period": 4,
+          "due_date": "2028-04-29",
+          "principal": "2469.13",
+          "interest": "0.00",
+          "penalty": "0.00",
+          "scbu": "50.50",
+          "total_payment": "2519.63",
+          "running_balance": "2469.15"
+        },
+        {
+          "period": 5,
+          "due_date": "2028-05-29",
+          "principal": "2469.13",
+          "interest": "0.00",
+          "penalty": "0.00",
+          "scbu": "50.50",
+          "total_payment": "2519.63",
+          "running_balance": "0.02"
+        }
+      ],
+      "totals": {
+        "principal": "12345.65",
+        "interest": "0.00",
+        "penalty": "0.00",
+        "scbu": "252.50",
+        "total_payment": "12598.15"
+      }
+    },
+    "worst_case": {
+      "rows": [
+        {
+          "period": 1,
+          "due_date": "2028-01-29",
+          "principal": "2469.13",
+          "interest": "0.00",
+          "penalty": "493.83",
+          "scbu": "50.50",
+          "total_payment": "2519.63",
+          "running_balance": "10370.36"
+        },
+        {
+          "period": 2,
+          "due_date": "2028-02-29",
+          "principal": "4938.27",
+          "interest": "0.00",
+          "penalty": "987.65",
+          "scbu": "50.50",
+          "total_payment": "2519.63",
+          "running_balance": "11358.02"
+        },
+        {
+          "period": 3,
+          "due_date": "2028-03-29",
+          "principal": "7407.40",
+          "interest": "0.00",
+          "penalty": "1481.48",
+          "scbu": "50.50",
+          "total_payment": "2519.63",
+          "running_balance": "12839.50"
+        },
+        {
+          "period": 4,
+          "due_date": "2028-04-29",
+          "principal": "9876.54",
+          "interest": "0.00",
+          "penalty": "1975.31",
+          "scbu": "50.50",
+          "total_payment": "2519.63",
+          "running_balance": "14814.80"
+        },
+        {
+          "period": 5,
+          "due_date": "2028-05-29",
+          "principal": "12345.67",
+          "interest": "0.00",
+          "penalty": "2469.13",
+          "scbu": "50.50",
+          "total_payment": "2519.63",
+          "running_balance": "17283.94"
+        }
+      ],
+      "totals": {
+        "principal": "37037.01",
+        "interest": "0.00",
+        "penalty": "7407.40",
+        "scbu": "252.50",
+        "total_payment": "12598.15"
+      }
+    },
+    "custom": {
+      "rows": [
+        {
+          "period": 1,
+          "due_date": "2028-01-29",
+          "principal": "2469.13",
+          "interest": "0.00",
+          "penalty": "493.83",
+          "scbu": "50.50",
+          "total_payment": "2519.63",
+          "running_balance": "12839.50"
+        },
+        {
+          "period": 2,
+          "due_date": "2028-02-29",
+          "principal": "4938.27",
+          "interest": "0.00",
+          "penalty": "987.65",
+          "scbu": "50.50",
+          "total_payment": "2519.63",
+          "running_balance": "13827.15"
+        },
+        {
+          "period": 3,
+          "due_date": "2028-03-29",
+          "principal": "7407.40",
+          "interest": "0.00",
+          "penalty": "0.00",
+          "scbu": "50.50",
+          "total_payment": "7457.90",
+          "running_balance": "6419.75"
+        },
+        {
+          "period": 4,
+          "due_date": "2028-04-29",
+          "principal": "2469.13",
+          "interest": "0.00",
+          "penalty": "493.83",
+          "scbu": "50.50",
+          "total_payment": "2519.63",
+          "running_balance": "6913.58"
+        },
+        {
+          "period": 5,
+          "due_date": "2028-05-29",
+          "principal": "4938.27",
+          "interest": "0.00",
+          "penalty": "0.00",
+          "scbu": "50.50",
+          "total_payment": "4988.77",
+          "running_balance": "1975.31"
+        }
+      ],
+      "totals": {
+        "principal": "22222.20",
+        "interest": "0.00",
+        "penalty": "1975.31",
+        "scbu": "252.50",
+        "total_payment": "20005.56"
+      }
+    }
+  },
+  "odd-rate-7": {
+    "input": {
+      "principal": "98765.43",
+      "annual_rate": "13.3333",
+      "term_months": 7,
+      "scbu_per_period": "25.00",
+      "start_date": "2026-09-30",
+      "paid_flags": [
+        false,
+        true,
+        false,
+        false,
+        true,
+        false,
+        true
+      ]
+    },
+    "ideal": {
+      "rows": [
+        {
+          "period": 1,
+          "due_date": "2026-09-30",
+          "principal": "13645.97",
+          "interest": "1097.39",
+          "penalty": "0.00",
+          "scbu": "25.00",
+          "total_payment": "14768.36",
+          "running_balance": "85119.46"
+        },
+        {
+          "period": 2,
+          "due_date": "2026-10-30",
+          "principal": "13797.59",
+          "interest": "945.77",
+          "penalty": "0.00",
+          "scbu": "25.00",
+          "total_payment": "14768.36",
+          "running_balance": "71321.87"
+        },
+        {
+          "period": 3,
+          "due_date": "2026-11-30",
+          "principal": "13950.89",
+          "interest": "792.46",
+          "penalty": "0.00",
+          "scbu": "25.00",
+          "total_payment": "14768.35",
+          "running_balance": "57370.98"
+        },
+        {
+          "period": 4,
+          "due_date": "2026-12-30",
+          "principal": "14105.90",
+          "interest": "637.45",
+          "penalty": "0.00",
+          "scbu": "25.00",
+          "total_payment": "14768.35",
+          "running_balance": "43265.08"
+        },
+        {
+          "period": 5,
+          "due_date": "2027-01-30",
+          "principal": "14262.63",
+          "interest": "480.72",
+          "penalty": "0.00",
+          "scbu": "25.00",
+          "total_payment": "14768.35",
+          "running_balance": "29002.45"
+        },
+        {
+          "period": 6,
+          "due_date": "2027-02-28",
+          "principal": "14421.11",
+          "interest": "322.25",
+          "penalty": "0.00",
+          "scbu": "25.00",
+          "total_payment": "14768.36",
+          "running_balance": "14581.34"
+        },
+        {
+          "period": 7,
+          "due_date": "2027-03-30",
+          "principal": "14581.34",
+          "interest": "162.01",
+          "penalty": "0.00",
+          "scbu": "25.00",
+          "total_payment": "14768.35",
+          "running_balance": "0.00"
+        }
+      ],
+      "totals": {
+        "principal": "98765.43",
+        "interest": "4438.05",
+        "penalty": "0.00",
+        "scbu": "175.00",
+        "total_payment": "103378.48"
+      }
+    },
+    "worst_case": {
+      "rows": [
+        {
+          "period": 1,
+          "due_date": "2026-09-30",
+          "principal": "13645.97",
+          "interest": "1097.39",
+          "penalty": "2729.19",
+          "scbu": "25.00",
+          "total_payment": "14768.36",
+          "running_balance": "88946.05"
+        },
+        {
+          "period": 2,
+          "due_date": "2026-10-30",
+          "principal": "27443.55",
+          "interest": "945.77",
+          "penalty": "5488.71",
+          "scbu": "25.00",
+          "total_payment": "14768.36",
+          "running_balance": "95380.53"
+        },
+        {
+          "period": 3,
+          "due_date": "2026-11-30",
+          "principal": "41394.44",
+          "interest": "1059.78",
+          "penalty": "8278.89",
+          "scbu": "25.00",
+          "total_payment": "14768.36",
+          "running_balance": "104719.20"
+        },
+        {
+          "period": 4,
+          "due_date": "2026-12-30",
+          "principal": "55500.35",
+          "interest": "1163.54",
+          "penalty": "11100.07",
+          "scbu": "25.00",
+          "total_payment": "14768.36",
+          "running_balance": "116982.81"
+        },
+        {
+          "period": 5,
+          "due_date": "2027-01-30",
+          "principal": "69762.98",
+          "interest": "1299.81",
+          "penalty": "13952.60",
+          "scbu": "25.00",
+          "total_payment": "14768.36",
+          "running_balance": "132235.21"
+        },
+        {
+          "period": 6,
+          "due_date": "2027-02-28",
+          "principal": "84184.09",
+          "interest": "1469.28",
+          "penalty": "16836.82",
+          "scbu": "25.00",
+          "total_payment": "14768.36",
+          "running_balance": "150541.31"
+        },
+        {
+          "period": 7,
+          "due_date": "2027-03-30",
+          "principal": "98765.43",
+          "interest": "1672.68",
+          "penalty": "19753.09",
+          "scbu": "25.00",
+          "total_payment": "14768.36",
+          "running_balance": "171967.07"
+        }
+      ],
+      "totals": {
+        "principal": "390696.81",
+        "interest": "8708.25",
+        "penalty": "78139.37",
+        "scbu": "175.00",
+        "total_payment": "103378.52"
+      }
+    },
+    "custom": {
+      "rows": [
+        {
+          "period": 1,
+          "due_date": "2026-09-30",
+          "principal": "13645.97",
+          "interest": "1097.39",
+          "penalty": "2729.19",
+          "scbu": "25.00",
+          "total_payment": "14768.36",
+          "running_balance": "102592.01"
+        },
+        {
+          "period": 2,
+          "due_date": "2026-10-30",
+          "principal": "27443.55",
+          "interest": "1139.91",
+          "penalty": "0.00",
+          "scbu": "25.00",
+          "total_payment": "28608.46",
+          "running_balance": "75148.46"
+        },
+        {
+          "period": 3,
+          "due_date": "2026-11-30",
+          "principal": "13950.89",
+          "interest": "834.98",
+          "penalty": "2790.18",
+          "scbu": "25.00",
+          "total_payment": "14768.36",
+          "running_balance": "78773.62"
+        },
+        {
+          "period": 4,
+          "due_date": "2026-12-30",
+          "principal": "28056.80",
+          "interest": "875.26",
+          "penalty": "5611.36",
+          "scbu": "25.00",
+          "total_payment": "14768.36",
+          "running_balance": "85260.24"
+        },
+        {
+          "period": 5,
+          "due_date": "2027-01-30",
+          "principal": "42319.43",
+          "interest": "947.33",
+          "penalty": "0.00",
+          "scbu": "25.00",
+          "total_payment": "43291.76",
+          "running_balance": "42940.81"
+        },
+        {
+          "period": 6,
+          "due_date": "2027-02-28",
+          "principal": "14421.11",
+          "interest": "477.12",
+          "penalty": "2884.22",
+          "scbu": "25.00",
+          "total_payment": "14768.36",
+          "running_balance": "46302.15"
+        },
+        {
+          "period": 7,
+          "due_date": "2027-03-30",
+          "principal": "29002.45",
+          "interest": "514.47",
+          "penalty": "0.00",
+          "scbu": "25.00",
+          "total_payment": "29541.92",
+          "running_balance": "17299.70"
+        }
+      ],
+      "totals": {
+        "principal": "168840.20",
+        "interest": "5886.46",
+        "penalty": "14014.95",
+        "scbu": "175.00",
+        "total_payment": "160515.58"
+      }
+    }
+  },
+  "big-60": {
+    "input": {
+      "principal": "1000000.00",
+      "annual_rate": "36.5",
+      "term_months": 60,
+      "scbu_per_period": "250.00",
+      "start_date": "2026-11-15",
+      "paid_flags": [
+        true,
+        false,
+        true,
+        true,
+        false,
+        true,
+        true,
+        false,
+        true,
+        true,
+        false,
+        true,
+        true,
+        false,
+        true,
+        true,
+        false,
+        true,
+        true,
+        false,
+        true,
+        true,
+        false,
+        true,
+        true,
+        false,
+        true,
+        true,
+        false,
+        true,
+        true,
+        false,
+        true,
+        true,
+        false,
+        true,
+        true,
+        false,
+        true,
+        true,
+        false,
+        true,
+        true,
+        false,
+        true,
+        true,
+        false,
+        true,
+        true,
+        false,
+        true,
+        true,
+        false,
+        true,
+        true,
+        false,
+        true,
+        true,
+        false,
+        true
+      ]
+    },
+    "ideal": {
+      "rows": [
+        {
+          "period": 1,
+          "due_date": "2026-11-15",
+          "principal": "6039.46",
+          "interest": "30416.67",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "993960.54"
+        },
+        {
+          "period": 2,
+          "due_date": "2026-12-15",
+          "principal": "6223.16",
+          "interest": "30232.97",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "987737.38"
+        },
+        {
+          "period": 3,
+          "due_date": "2027-01-15",
+          "principal": "6412.45",
+          "interest": "30043.68",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "981324.93"
+        },
+        {
+          "period": 4,
+          "due_date": "2027-02-15",
+          "principal": "6607.49",
+          "interest": "29848.63",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.12",
+          "running_balance": "974717.44"
+        },
+        {
+          "period": 5,
+          "due_date": "2027-03-15",
+          "principal": "6808.47",
+          "interest": "29647.66",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "967908.97"
+        },
+        {
+          "period": 6,
+          "due_date": "2027-04-15",
+          "principal": "7015.56",
+          "interest": "29440.56",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.12",
+          "running_balance": "960893.41"
+        },
+        {
+          "period": 7,
+          "due_date": "2027-05-15",
+          "principal": "7228.95",
+          "interest": "29227.17",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.12",
+          "running_balance": "953664.46"
+        },
+        {
+          "period": 8,
+          "due_date": "2027-06-15",
+          "principal": "7448.83",
+          "interest": "29007.29",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.12",
+          "running_balance": "946215.63"
+        },
+        {
+          "period": 9,
+          "due_date": "2027-07-15",
+          "principal": "7675.40",
+          "interest": "28780.73",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "938540.23"
+        },
+        {
+          "period": 10,
+          "due_date": "2027-08-15",
+          "principal": "7908.86",
+          "interest": "28547.27",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "930631.37"
+        },
+        {
+          "period": 11,
+          "due_date": "2027-09-15",
+          "principal": "8149.42",
+          "interest": "28306.70",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.12",
+          "running_balance": "922481.95"
+        },
+        {
+          "period": 12,
+          "due_date": "2027-10-15",
+          "principal": "8397.30",
+          "interest": "28058.83",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "914084.65"
+        },
+        {
+          "period": 13,
+          "due_date": "2027-11-15",
+          "principal": "8652.72",
+          "interest": "27803.41",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "905431.93"
+        },
+        {
+          "period": 14,
+          "due_date": "2027-12-15",
+          "principal": "8915.90",
+          "interest": "27540.22",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.12",
+          "running_balance": "896516.03"
+        },
+        {
+          "period": 15,
+          "due_date": "2028-01-15",
+          "principal": "9187.10",
+          "interest": "27269.03",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "887328.93"
+        },
+        {
+          "period": 16,
+          "due_date": "2028-02-15",
+          "principal": "9466.54",
+          "interest": "26989.59",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "877862.39"
+        },
+        {
+          "period": 17,
+          "due_date": "2028-03-15",
+          "principal": "9754.48",
+          "interest": "26701.65",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "868107.91"
+        },
+        {
+          "period": 18,
+          "due_date": "2028-04-15",
+          "principal": "10051.18",
+          "interest": "26404.95",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "858056.73"
+        },
+        {
+          "period": 19,
+          "due_date": "2028-05-15",
+          "principal": "10356.90",
+          "interest": "26099.23",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "847699.83"
+        },
+        {
+          "period": 20,
+          "due_date": "2028-06-15",
+          "principal": "10671.92",
+          "interest": "25784.20",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.12",
+          "running_balance": "837027.91"
+        },
+        {
+          "period": 21,
+          "due_date": "2028-07-15",
+          "principal": "10996.53",
+          "interest": "25459.60",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "826031.38"
+        },
+        {
+          "period": 22,
+          "due_date": "2028-08-15",
+          "principal": "11331.00",
+          "interest": "25125.12",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.12",
+          "running_balance": "814700.38"
+        },
+        {
+          "period": 23,
+          "due_date": "2028-09-15",
+          "principal": "11675.66",
+          "interest": "24780.47",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "803024.72"
+        },
+        {
+          "period": 24,
+          "due_date": "2028-10-15",
+          "principal": "12030.79",
+          "interest": "24425.34",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "790993.93"
+        },
+        {
+          "period": 25,
+          "due_date": "2028-11-15",
+          "principal": "12396.73",
+          "interest": "24059.40",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "778597.20"
+        },
+        {
+          "period": 26,
+          "due_date": "2028-12-15",
+          "principal": "12773.79",
+          "interest": "23682.33",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.12",
+          "running_balance": "765823.41"
+        },
+        {
+          "period": 27,
+          "due_date": "2029-01-15",
+          "principal": "13162.33",
+          "interest": "23293.80",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "752661.08"
+        },
+        {
+          "period": 28,
+          "due_date": "2029-02-15",
+          "principal": "13562.68",
+          "interest": "22893.44",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.12",
+          "running_balance": "739098.40"
+        },
+        {
+          "period": 29,
+          "due_date": "2029-03-15",
+          "principal": "13975.22",
+          "interest": "22480.91",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "725123.18"
+        },
+        {
+          "period": 30,
+          "due_date": "2029-04-15",
+          "principal": "14400.30",
+          "interest": "22055.83",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "710722.88"
+        },
+        {
+          "period": 31,
+          "due_date": "2029-05-15",
+          "principal": "14838.30",
+          "interest": "21617.82",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.12",
+          "running_balance": "695884.58"
+        },
+        {
+          "period": 32,
+          "due_date": "2029-06-15",
+          "principal": "15289.64",
+          "interest": "21166.49",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "680594.94"
+        },
+        {
+          "period": 33,
+          "due_date": "2029-07-15",
+          "principal": "15754.70",
+          "interest": "20701.43",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "664840.24"
+        },
+        {
+          "period": 34,
+          "due_date": "2029-08-15",
+          "principal": "16233.90",
+          "interest": "20222.22",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.12",
+          "running_balance": "648606.34"
+        },
+        {
+          "period": 35,
+          "due_date": "2029-09-15",
+          "principal": "16727.68",
+          "interest": "19728.44",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.12",
+          "running_balance": "631878.66"
+        },
+        {
+          "period": 36,
+          "due_date": "2029-10-15",
+          "principal": "17236.48",
+          "interest": "19219.64",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.12",
+          "running_balance": "614642.18"
+        },
+        {
+          "period": 37,
+          "due_date": "2029-11-15",
+          "principal": "17760.76",
+          "interest": "18695.37",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "596881.42"
+        },
+        {
+          "period": 38,
+          "due_date": "2029-12-15",
+          "principal": "18300.98",
+          "interest": "18155.14",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.12",
+          "running_balance": "578580.44"
+        },
+        {
+          "period": 39,
+          "due_date": "2030-01-15",
+          "principal": "18857.64",
+          "interest": "17598.49",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "559722.80"
+        },
+        {
+          "period": 40,
+          "due_date": "2030-02-15",
+          "principal": "19431.22",
+          "interest": "17024.90",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.12",
+          "running_balance": "540291.58"
+        },
+        {
+          "period": 41,
+          "due_date": "2030-03-15",
+          "principal": "20022.26",
+          "interest": "16433.87",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "520269.32"
+        },
+        {
+          "period": 42,
+          "due_date": "2030-04-15",
+          "principal": "20631.27",
+          "interest": "15824.86",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "499638.05"
+        },
+        {
+          "period": 43,
+          "due_date": "2030-05-15",
+          "principal": "21258.80",
+          "interest": "15197.32",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.12",
+          "running_balance": "478379.25"
+        },
+        {
+          "period": 44,
+          "due_date": "2030-06-15",
+          "principal": "21905.42",
+          "interest": "14550.70",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.12",
+          "running_balance": "456473.83"
+        },
+        {
+          "period": 45,
+          "due_date": "2030-07-15",
+          "principal": "22571.71",
+          "interest": "13884.41",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.12",
+          "running_balance": "433902.12"
+        },
+        {
+          "period": 46,
+          "due_date": "2030-08-15",
+          "principal": "23258.27",
+          "interest": "13197.86",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "410643.85"
+        },
+        {
+          "period": 47,
+          "due_date": "2030-09-15",
+          "principal": "23965.71",
+          "interest": "12490.42",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "386678.14"
+        },
+        {
+          "period": 48,
+          "due_date": "2030-10-15",
+          "principal": "24694.67",
+          "interest": "11761.46",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "361983.47"
+        },
+        {
+          "period": 49,
+          "due_date": "2030-11-15",
+          "principal": "25445.79",
+          "interest": "11010.33",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.12",
+          "running_balance": "336537.68"
+        },
+        {
+          "period": 50,
+          "due_date": "2030-12-15",
+          "principal": "26219.77",
+          "interest": "10236.35",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.12",
+          "running_balance": "310317.91"
+        },
+        {
+          "period": 51,
+          "due_date": "2031-01-15",
+          "principal": "27017.29",
+          "interest": "9438.84",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "283300.62"
+        },
+        {
+          "period": 52,
+          "due_date": "2031-02-15",
+          "principal": "27839.06",
+          "interest": "8617.06",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.12",
+          "running_balance": "255461.56"
+        },
+        {
+          "period": 53,
+          "due_date": "2031-03-15",
+          "principal": "28685.84",
+          "interest": "7770.29",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "226775.72"
+        },
+        {
+          "period": 54,
+          "due_date": "2031-04-15",
+          "principal": "29558.36",
+          "interest": "6897.76",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.12",
+          "running_balance": "197217.36"
+        },
+        {
+          "period": 55,
+          "due_date": "2031-05-15",
+          "principal": "30457.43",
+          "interest": "5998.69",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.12",
+          "running_balance": "166759.93"
+        },
+        {
+          "period": 56,
+          "due_date": "2031-06-15",
+          "principal": "31383.84",
+          "interest": "5072.28",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.12",
+          "running_balance": "135376.09"
+        },
+        {
+          "period": 57,
+          "due_date": "2031-07-15",
+          "principal": "32338.44",
+          "interest": "4117.69",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "103037.65"
+        },
+        {
+          "period": 58,
+          "due_date": "2031-08-15",
+          "principal": "33322.06",
+          "interest": "3134.06",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.12",
+          "running_balance": "69715.59"
+        },
+        {
+          "period": 59,
+          "due_date": "2031-09-15",
+          "principal": "34335.61",
+          "interest": "2120.52",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "35379.98"
+        },
+        {
+          "period": 60,
+          "due_date": "2031-10-15",
+          "principal": "35379.98",
+          "interest": "1076.14",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.12",
+          "running_balance": "0.00"
+        }
+      ],
+      "totals": {
+        "principal": "1000000.00",
+        "interest": "1187367.53",
+        "penalty": "0.00",
+        "scbu": "15000.00",
+        "total_payment": "2202367.53"
+      }
+    },
+    "worst_case": {
+      "rows": [
+        {
+          "period": 1,
+          "due_date": "2026-11-15",
+          "principal": "6039.46",
+          "interest": "30416.67",
+          "penalty": "1207.89",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "1025585.10"
+        },
+        {
+          "period": 2,
+          "due_date": "2026-12-15",
+          "principal": "12262.62",
+          "interest": "30232.97",
+          "penalty": "2452.52",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "1058270.59"
+        },
+        {
+          "period": 3,
+          "due_date": "2027-01-15",
+          "principal": "18675.06",
+          "interest": "32189.06",
+          "penalty": "3735.01",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "1094194.67"
+        },
+        {
+          "period": 4,
+          "due_date": "2027-02-15",
+          "principal": "25282.56",
+          "interest": "33281.75",
+          "penalty": "5056.51",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "1132532.93"
+        },
+        {
+          "period": 5,
+          "due_date": "2027-03-15",
+          "principal": "32091.03",
+          "interest": "34447.88",
+          "penalty": "6418.21",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "1173399.01"
+        },
+        {
+          "period": 6,
+          "due_date": "2027-04-15",
+          "principal": "39106.59",
+          "interest": "35690.89",
+          "penalty": "7821.32",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "1216911.22"
+        },
+        {
+          "period": 7,
+          "due_date": "2027-05-15",
+          "principal": "46335.54",
+          "interest": "37014.38",
+          "penalty": "9267.11",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "1263192.71"
+        },
+        {
+          "period": 8,
+          "due_date": "2027-06-15",
+          "principal": "53784.37",
+          "interest": "38422.11",
+          "penalty": "10756.87",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "1312371.70"
+        },
+        {
+          "period": 9,
+          "due_date": "2027-07-15",
+          "principal": "61459.77",
+          "interest": "39917.97",
+          "penalty": "12291.95",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "1364581.62"
+        },
+        {
+          "period": 10,
+          "due_date": "2027-08-15",
+          "principal": "69368.63",
+          "interest": "41506.02",
+          "penalty": "13873.73",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "1419961.37"
+        },
+        {
+          "period": 11,
+          "due_date": "2027-09-15",
+          "principal": "77518.05",
+          "interest": "43190.49",
+          "penalty": "15503.61",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "1478655.47"
+        },
+        {
+          "period": 12,
+          "due_date": "2027-10-15",
+          "principal": "85915.35",
+          "interest": "44975.77",
+          "penalty": "17183.07",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "1540814.32"
+        },
+        {
+          "period": 13,
+          "due_date": "2027-11-15",
+          "principal": "94568.07",
+          "interest": "46866.44",
+          "penalty": "18913.61",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "1606594.37"
+        },
+        {
+          "period": 14,
+          "due_date": "2027-12-15",
+          "principal": "103483.97",
+          "interest": "48867.25",
+          "penalty": "20696.79",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "1676158.41"
+        },
+        {
+          "period": 15,
+          "due_date": "2028-01-15",
+          "principal": "112671.07",
+          "interest": "50983.15",
+          "penalty": "22534.21",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "1749675.77"
+        },
+        {
+          "period": 16,
+          "due_date": "2028-02-15",
+          "principal": "122137.61",
+          "interest": "53219.30",
+          "penalty": "24427.52",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "1827322.60"
+        },
+        {
+          "period": 17,
+          "due_date": "2028-03-15",
+          "principal": "131892.09",
+          "interest": "55581.06",
+          "penalty": "26378.42",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "1909282.08"
+        },
+        {
+          "period": 18,
+          "due_date": "2028-04-15",
+          "principal": "141943.26",
+          "interest": "58074.00",
+          "penalty": "28388.65",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "1995744.73"
+        },
+        {
+          "period": 19,
+          "due_date": "2028-05-15",
+          "principal": "152300.16",
+          "interest": "60703.90",
+          "penalty": "30460.03",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "2086908.66"
+        },
+        {
+          "period": 20,
+          "due_date": "2028-06-15",
+          "principal": "162972.08",
+          "interest": "63476.81",
+          "penalty": "32594.42",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "2182979.88"
+        },
+        {
+          "period": 21,
+          "due_date": "2028-07-15",
+          "principal": "173968.61",
+          "interest": "66398.97",
+          "penalty": "34793.72",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "2284172.58"
+        },
+        {
+          "period": 22,
+          "due_date": "2028-08-15",
+          "principal": "185299.62",
+          "interest": "69476.92",
+          "penalty": "37059.92",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "2390709.42"
+        },
+        {
+          "period": 23,
+          "due_date": "2028-09-15",
+          "principal": "196975.27",
+          "interest": "72717.41",
+          "penalty": "39395.05",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "2502821.88"
+        },
+        {
+          "period": 24,
+          "due_date": "2028-10-15",
+          "principal": "209006.06",
+          "interest": "76127.50",
+          "penalty": "41801.21",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "2620750.59"
+        },
+        {
+          "period": 25,
+          "due_date": "2028-11-15",
+          "principal": "221402.79",
+          "interest": "79714.50",
+          "penalty": "44280.56",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "2744745.65"
+        },
+        {
+          "period": 26,
+          "due_date": "2028-12-15",
+          "principal": "234176.58",
+          "interest": "83486.01",
+          "penalty": "46835.32",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "2875066.98"
+        },
+        {
+          "period": 27,
+          "due_date": "2029-01-15",
+          "principal": "247338.91",
+          "interest": "87449.95",
+          "penalty": "49467.78",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "3011984.71"
+        },
+        {
+          "period": 28,
+          "due_date": "2029-02-15",
+          "principal": "260901.60",
+          "interest": "91614.54",
+          "penalty": "52180.32",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "3155779.57"
+        },
+        {
+          "period": 29,
+          "due_date": "2029-03-15",
+          "principal": "274876.81",
+          "interest": "95988.30",
+          "penalty": "54975.36",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "3306743.22"
+        },
+        {
+          "period": 30,
+          "due_date": "2029-04-15",
+          "principal": "289277.11",
+          "interest": "100580.11",
+          "penalty": "57855.42",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "3465178.75"
+        },
+        {
+          "period": 31,
+          "due_date": "2029-05-15",
+          "principal": "304115.41",
+          "interest": "105399.19",
+          "penalty": "60823.08",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "3631401.02"
+        },
+        {
+          "period": 32,
+          "due_date": "2029-06-15",
+          "principal": "319405.05",
+          "interest": "110455.11",
+          "penalty": "63881.01",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "3805737.15"
+        },
+        {
+          "period": 33,
+          "due_date": "2029-07-15",
+          "principal": "335159.74",
+          "interest": "115757.84",
+          "penalty": "67031.95",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "3988526.93"
+        },
+        {
+          "period": 34,
+          "due_date": "2029-08-15",
+          "principal": "351393.64",
+          "interest": "121317.69",
+          "penalty": "70278.73",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "4180123.36"
+        },
+        {
+          "period": 35,
+          "due_date": "2029-09-15",
+          "principal": "368121.33",
+          "interest": "127145.42",
+          "penalty": "73624.27",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "4380893.04"
+        },
+        {
+          "period": 36,
+          "due_date": "2029-10-15",
+          "principal": "385357.81",
+          "interest": "133252.16",
+          "penalty": "77071.56",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "4591216.76"
+        },
+        {
+          "period": 37,
+          "due_date": "2029-11-15",
+          "principal": "403118.57",
+          "interest": "139649.51",
+          "penalty": "80623.71",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "4811489.99"
+        },
+        {
+          "period": 38,
+          "due_date": "2029-12-15",
+          "principal": "421419.55",
+          "interest": "146349.49",
+          "penalty": "84283.91",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "5042123.39"
+        },
+        {
+          "period": 39,
+          "due_date": "2030-01-15",
+          "principal": "440277.19",
+          "interest": "153364.59",
+          "penalty": "88055.44",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "5283543.41"
+        },
+        {
+          "period": 40,
+          "due_date": "2030-02-15",
+          "principal": "459708.41",
+          "interest": "160707.78",
+          "penalty": "91941.68",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "5536192.87"
+        },
+        {
+          "period": 41,
+          "due_date": "2030-03-15",
+          "principal": "479730.67",
+          "interest": "168392.53",
+          "penalty": "95946.13",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "5800531.54"
+        },
+        {
+          "period": 42,
+          "due_date": "2030-04-15",
+          "principal": "500361.93",
+          "interest": "176432.83",
+          "penalty": "100072.39",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "6077036.76"
+        },
+        {
+          "period": 43,
+          "due_date": "2030-05-15",
+          "principal": "521620.73",
+          "interest": "184843.20",
+          "penalty": "104324.15",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "6366204.11"
+        },
+        {
+          "period": 44,
+          "due_date": "2030-06-15",
+          "principal": "543526.16",
+          "interest": "193638.71",
+          "penalty": "108705.23",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "6668548.04"
+        },
+        {
+          "period": 45,
+          "due_date": "2030-07-15",
+          "principal": "566097.87",
+          "interest": "202835.00",
+          "penalty": "113219.57",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "6984602.62"
+        },
+        {
+          "period": 46,
+          "due_date": "2030-08-15",
+          "principal": "589356.14",
+          "interest": "212448.33",
+          "penalty": "117871.23",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "7314922.18"
+        },
+        {
+          "period": 47,
+          "due_date": "2030-09-15",
+          "principal": "613321.85",
+          "interest": "222495.55",
+          "penalty": "122664.37",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "7660082.10"
+        },
+        {
+          "period": 48,
+          "due_date": "2030-10-15",
+          "principal": "638016.51",
+          "interest": "232994.16",
+          "penalty": "127603.30",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "8020679.56"
+        },
+        {
+          "period": 49,
+          "due_date": "2030-11-15",
+          "principal": "663462.31",
+          "interest": "243962.34",
+          "penalty": "132692.46",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "8397334.36"
+        },
+        {
+          "period": 50,
+          "due_date": "2030-12-15",
+          "principal": "689682.08",
+          "interest": "255418.92",
+          "penalty": "137936.42",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "8790689.70"
+        },
+        {
+          "period": 51,
+          "due_date": "2031-01-15",
+          "principal": "716699.37",
+          "interest": "267383.48",
+          "penalty": "143339.87",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "9201413.05"
+        },
+        {
+          "period": 52,
+          "due_date": "2031-02-15",
+          "principal": "744538.43",
+          "interest": "279876.31",
+          "penalty": "148907.69",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "9630197.05"
+        },
+        {
+          "period": 53,
+          "due_date": "2031-03-15",
+          "principal": "773224.27",
+          "interest": "292918.49",
+          "penalty": "154644.85",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "10077760.40"
+        },
+        {
+          "period": 54,
+          "due_date": "2031-04-15",
+          "principal": "802782.63",
+          "interest": "306531.88",
+          "penalty": "160556.53",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "10544848.80"
+        },
+        {
+          "period": 55,
+          "due_date": "2031-05-15",
+          "principal": "833240.06",
+          "interest": "320739.15",
+          "penalty": "166648.01",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "11032235.97"
+        },
+        {
+          "period": 56,
+          "due_date": "2031-06-15",
+          "principal": "864623.91",
+          "interest": "335563.84",
+          "penalty": "172924.78",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "11540724.59"
+        },
+        {
+          "period": 57,
+          "due_date": "2031-07-15",
+          "principal": "896962.34",
+          "interest": "351030.37",
+          "penalty": "179392.47",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "12071147.43"
+        },
+        {
+          "period": 58,
+          "due_date": "2031-08-15",
+          "principal": "930284.41",
+          "interest": "367164.07",
+          "penalty": "186056.88",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "12624368.38"
+        },
+        {
+          "period": 59,
+          "due_date": "2031-09-15",
+          "principal": "964620.02",
+          "interest": "383991.20",
+          "penalty": "192924.00",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "13201283.59"
+        },
+        {
+          "period": 60,
+          "due_date": "2031-10-15",
+          "principal": "1000000.00",
+          "interest": "401539.04",
+          "penalty": "200000.00",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "13802822.63"
+        }
+      ],
+      "totals": {
+        "principal": "21963259.09",
+        "interest": "8416210.26",
+        "penalty": "4392651.78",
+        "scbu": "15000.00",
+        "total_payment": "2202367.80"
+      }
+    },
+    "custom": {
+      "rows": [
+        {
+          "period": 1,
+          "due_date": "2026-11-15",
+          "principal": "6039.46",
+          "interest": "30416.67",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "993960.54"
+        },
+        {
+          "period": 2,
+          "due_date": "2026-12-15",
+          "principal": "6223.16",
+          "interest": "30232.97",
+          "penalty": "1244.63",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "1025438.14"
+        },
+        {
+          "period": 3,
+          "due_date": "2027-01-15",
+          "principal": "12635.61",
+          "interest": "31190.41",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "44076.02",
+          "running_balance": "1012802.53"
+        },
+        {
+          "period": 4,
+          "due_date": "2027-02-15",
+          "principal": "6607.49",
+          "interest": "30806.08",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "37663.57",
+          "running_balance": "1006195.04"
+        },
+        {
+          "period": 5,
+          "due_date": "2027-03-15",
+          "principal": "6808.47",
+          "interest": "30605.10",
+          "penalty": "1361.69",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "1038161.83"
+        },
+        {
+          "period": 6,
+          "due_date": "2027-04-15",
+          "principal": "13824.03",
+          "interest": "31577.42",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "45651.45",
+          "running_balance": "1024337.80"
+        },
+        {
+          "period": 7,
+          "due_date": "2027-05-15",
+          "principal": "7228.95",
+          "interest": "31156.94",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "38635.89",
+          "running_balance": "1017108.85"
+        },
+        {
+          "period": 8,
+          "due_date": "2027-06-15",
+          "principal": "7448.83",
+          "interest": "30937.06",
+          "penalty": "1489.77",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "1049535.68"
+        },
+        {
+          "period": 9,
+          "due_date": "2027-07-15",
+          "principal": "15124.23",
+          "interest": "31923.38",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "47297.61",
+          "running_balance": "1034411.45"
+        },
+        {
+          "period": 10,
+          "due_date": "2027-08-15",
+          "principal": "7908.86",
+          "interest": "31463.35",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "39622.21",
+          "running_balance": "1026502.59"
+        },
+        {
+          "period": 11,
+          "due_date": "2027-09-15",
+          "principal": "8149.42",
+          "interest": "31222.79",
+          "penalty": "1629.88",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "1059355.26"
+        },
+        {
+          "period": 12,
+          "due_date": "2027-10-15",
+          "principal": "16546.72",
+          "interest": "32222.06",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "49018.78",
+          "running_balance": "1042808.54"
+        },
+        {
+          "period": 13,
+          "due_date": "2027-11-15",
+          "principal": "8652.72",
+          "interest": "31718.76",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "40621.48",
+          "running_balance": "1034155.82"
+        },
+        {
+          "period": 14,
+          "due_date": "2027-12-15",
+          "principal": "8915.90",
+          "interest": "31455.57",
+          "penalty": "1783.18",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "1067394.57"
+        },
+        {
+          "period": 15,
+          "due_date": "2028-01-15",
+          "principal": "18103.00",
+          "interest": "32466.58",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "50819.59",
+          "running_balance": "1049291.57"
+        },
+        {
+          "period": 16,
+          "due_date": "2028-02-15",
+          "principal": "9466.54",
+          "interest": "31915.95",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "41632.49",
+          "running_balance": "1039825.04"
+        },
+        {
+          "period": 17,
+          "due_date": "2028-03-15",
+          "principal": "9754.48",
+          "interest": "31628.01",
+          "penalty": "1950.90",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "1073403.94"
+        },
+        {
+          "period": 18,
+          "due_date": "2028-04-15",
+          "principal": "19805.65",
+          "interest": "32649.37",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "52705.02",
+          "running_balance": "1053598.29"
+        },
+        {
+          "period": 19,
+          "due_date": "2028-05-15",
+          "principal": "10356.90",
+          "interest": "32046.95",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "42653.85",
+          "running_balance": "1043241.39"
+        },
+        {
+          "period": 20,
+          "due_date": "2028-06-15",
+          "principal": "10671.92",
+          "interest": "31731.93",
+          "penalty": "2134.38",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "1077107.70"
+        },
+        {
+          "period": 21,
+          "due_date": "2028-07-15",
+          "principal": "21668.45",
+          "interest": "32762.03",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "54680.47",
+          "running_balance": "1055439.25"
+        },
+        {
+          "period": 22,
+          "due_date": "2028-08-15",
+          "principal": "11331.00",
+          "interest": "32102.94",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "43683.95",
+          "running_balance": "1044108.25"
+        },
+        {
+          "period": 23,
+          "due_date": "2028-09-15",
+          "principal": "11675.66",
+          "interest": "31758.29",
+          "penalty": "2335.13",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "1078201.67"
+        },
+        {
+          "period": 24,
+          "due_date": "2028-10-15",
+          "principal": "23706.45",
+          "interest": "32795.30",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "56751.75",
+          "running_balance": "1054495.22"
+        },
+        {
+          "period": 25,
+          "due_date": "2028-11-15",
+          "principal": "12396.73",
+          "interest": "32074.23",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "44720.96",
+          "running_balance": "1042098.50"
+        },
+        {
+          "period": 26,
+          "due_date": "2028-12-15",
+          "principal": "12773.79",
+          "interest": "31697.16",
+          "penalty": "2554.76",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "1076350.42"
+        },
+        {
+          "period": 27,
+          "due_date": "2029-01-15",
+          "principal": "25936.12",
+          "interest": "32738.99",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "58925.12",
+          "running_balance": "1050414.29"
+        },
+        {
+          "period": 28,
+          "due_date": "2029-02-15",
+          "principal": "13562.68",
+          "interest": "31950.10",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "45762.79",
+          "running_balance": "1036851.61"
+        },
+        {
+          "period": 29,
+          "due_date": "2029-03-15",
+          "principal": "13975.22",
+          "interest": "31537.57",
+          "penalty": "2795.04",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "1071184.22"
+        },
+        {
+          "period": 30,
+          "due_date": "2029-04-15",
+          "principal": "28375.51",
+          "interest": "32581.85",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "61207.36",
+          "running_balance": "1042808.71"
+        },
+        {
+          "period": 31,
+          "due_date": "2029-05-15",
+          "principal": "14838.30",
+          "interest": "31718.76",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "46807.07",
+          "running_balance": "1027970.41"
+        },
+        {
+          "period": 32,
+          "due_date": "2029-06-15",
+          "principal": "15289.64",
+          "interest": "31267.43",
+          "penalty": "3057.93",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "1062295.77"
+        },
+        {
+          "period": 33,
+          "due_date": "2029-07-15",
+          "principal": "31044.33",
+          "interest": "32311.50",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "63605.83",
+          "running_balance": "1031251.44"
+        },
+        {
+          "period": 34,
+          "due_date": "2029-08-15",
+          "principal": "16233.90",
+          "interest": "31367.23",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "47851.13",
+          "running_balance": "1015017.54"
+        },
+        {
+          "period": 35,
+          "due_date": "2029-09-15",
+          "principal": "16727.68",
+          "interest": "30873.45",
+          "penalty": "3345.54",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "1049236.52"
+        },
+        {
+          "period": 36,
+          "due_date": "2029-10-15",
+          "principal": "33964.16",
+          "interest": "31914.28",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "66128.44",
+          "running_balance": "1015272.36"
+        },
+        {
+          "period": 37,
+          "due_date": "2029-11-15",
+          "principal": "17760.76",
+          "interest": "30881.20",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "48891.96",
+          "running_balance": "997511.60"
+        },
+        {
+          "period": 38,
+          "due_date": "2029-12-15",
+          "principal": "18300.98",
+          "interest": "30340.98",
+          "penalty": "3660.20",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "1031512.77"
+        },
+        {
+          "period": 39,
+          "due_date": "2030-01-15",
+          "principal": "37158.62",
+          "interest": "31375.18",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "68783.80",
+          "running_balance": "994354.15"
+        },
+        {
+          "period": 40,
+          "due_date": "2030-02-15",
+          "principal": "19431.22",
+          "interest": "30244.94",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "49926.16",
+          "running_balance": "974922.93"
+        },
+        {
+          "period": 41,
+          "due_date": "2030-03-15",
+          "principal": "20022.26",
+          "interest": "29653.91",
+          "penalty": "4004.45",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "1008581.29"
+        },
+        {
+          "period": 42,
+          "due_date": "2030-04-15",
+          "principal": "40653.52",
+          "interest": "30677.68",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "71581.20",
+          "running_balance": "967927.76"
+        },
+        {
+          "period": 43,
+          "due_date": "2030-05-15",
+          "principal": "21258.80",
+          "interest": "29441.14",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "50949.94",
+          "running_balance": "946668.96"
+        },
+        {
+          "period": 44,
+          "due_date": "2030-06-15",
+          "principal": "21905.42",
+          "interest": "28794.51",
+          "penalty": "4381.08",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "979844.56"
+        },
+        {
+          "period": 45,
+          "due_date": "2030-07-15",
+          "principal": "44477.14",
+          "interest": "29803.61",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "74530.74",
+          "running_balance": "935367.43"
+        },
+        {
+          "period": 46,
+          "due_date": "2030-08-15",
+          "principal": "23258.27",
+          "interest": "28450.76",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "51959.03",
+          "running_balance": "912109.16"
+        },
+        {
+          "period": 47,
+          "due_date": "2030-09-15",
+          "principal": "23965.71",
+          "interest": "27743.32",
+          "penalty": "4793.14",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "944645.62"
+        },
+        {
+          "period": 48,
+          "due_date": "2030-10-15",
+          "principal": "48660.37",
+          "interest": "28732.97",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "77643.34",
+          "running_balance": "895985.24"
+        },
+        {
+          "period": 49,
+          "due_date": "2030-11-15",
+          "principal": "25445.79",
+          "interest": "27252.88",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "52948.68",
+          "running_balance": "870539.45"
+        },
+        {
+          "period": 50,
+          "due_date": "2030-12-15",
+          "principal": "26219.77",
+          "interest": "26478.91",
+          "penalty": "5243.95",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "902262.31"
+        },
+        {
+          "period": 51,
+          "due_date": "2031-01-15",
+          "principal": "53237.06",
+          "interest": "27443.81",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "80930.87",
+          "running_balance": "849025.25"
+        },
+        {
+          "period": 52,
+          "due_date": "2031-02-15",
+          "principal": "27839.06",
+          "interest": "25824.52",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "53913.58",
+          "running_balance": "821186.19"
+        },
+        {
+          "period": 53,
+          "due_date": "2031-03-15",
+          "principal": "28685.84",
+          "interest": "24977.75",
+          "penalty": "5737.17",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "851901.10"
+        },
+        {
+          "period": 54,
+          "due_date": "2031-04-15",
+          "principal": "58244.20",
+          "interest": "25911.99",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "84406.19",
+          "running_balance": "793656.90"
+        },
+        {
+          "period": 55,
+          "due_date": "2031-05-15",
+          "principal": "30457.43",
+          "interest": "24140.40",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "54847.83",
+          "running_balance": "763199.47"
+        },
+        {
+          "period": 56,
+          "due_date": "2031-06-15",
+          "principal": "31383.84",
+          "interest": "23213.98",
+          "penalty": "6276.77",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "792690.22"
+        },
+        {
+          "period": 57,
+          "due_date": "2031-07-15",
+          "principal": "63722.28",
+          "interest": "24110.99",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "88083.27",
+          "running_balance": "728967.94"
+        },
+        {
+          "period": 58,
+          "due_date": "2031-08-15",
+          "principal": "33322.06",
+          "interest": "22172.77",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "55744.84",
+          "running_balance": "695645.88"
+        },
+        {
+          "period": 59,
+          "due_date": "2031-09-15",
+          "principal": "34335.61",
+          "interest": "21159.23",
+          "penalty": "6867.12",
+          "scbu": "250.00",
+          "total_payment": "36706.13",
+          "running_balance": "723672.23"
+        },
+        {
+          "period": 60,
+          "due_date": "2031-10-15",
+          "principal": "69715.59",
+          "interest": "22011.70",
+          "penalty": "0.00",
+          "scbu": "250.00",
+          "total_payment": "91977.29",
+          "running_balance": "653956.64"
+        }
+      ],
+      "totals": {
+        "principal": "1333233.56",
+        "interest": "1791657.59",
+        "penalty": "66646.71",
+        "scbu": "15000.00",
+        "total_payment": "2948470.28"
+      }
+    }
+  }
+}

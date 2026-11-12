@@ -34,7 +34,7 @@ class FeeController extends Controller
                     new OA\Property(property: 'formula_expression', type: 'string', example: '(Principal Amount * 2.5%) / 365'),
                     new OA\Property(property: 'principal_amount', type: 'string', nullable: true, example: '100000.00'),
                     new OA\Property(property: 'interest_rate', type: 'string', nullable: true, example: '3'),
-                    new OA\Property(property: 'interest_rate_frequency', type: 'string', nullable: true, enum: ['daily', 'weekly', 'bi_weekly', 'semi_monthly', 'monthly']),
+                    new OA\Property(property: 'interest_rate_frequency', type: 'string', nullable: true, enum: ['daily', 'weekly', 'bi_weekly', 'semi_monthly', 'monthly', 'annual']),
                     new OA\Property(property: 'term', type: 'integer', nullable: true, example: 12),
                     new OA\Property(property: 'term_unit', type: 'string', nullable: true, enum: ['months', 'days']),
                     new OA\Property(property: 'min_amount', type: 'string', nullable: true),

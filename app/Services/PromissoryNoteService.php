@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Loan;
+use App\Services\Penalties\PenaltyTerms;
 
 class PromissoryNoteService
 {
@@ -61,7 +62,12 @@ class PromissoryNoteService
                 'maturity_date' => $loan->maturity_date->toDateString(),
                 'total_interest' => round($totalInterest, 2),
                 'total_obligation' => round($totalPrincipal + $totalInterest, 2),
+                // The late penalty clause: the fixed rate, or the day ranges of
+                // the configuration copied at creation with its name (both
+                // null on a loan charged by `penalty_rate`), and the grace.
                 'penalty_rate' => (float) $loan->penalty_rate,
+                'penalty_config_name' => $loan->penalty_config_name,
+                'penalty_brackets' => PenaltyTerms::bracketsOf($loan),
                 'grace_period_days' => $loan->grace_period_days,
             ],
 

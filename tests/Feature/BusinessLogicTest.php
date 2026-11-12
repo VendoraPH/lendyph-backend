@@ -443,7 +443,8 @@ class BusinessLogicTest extends TestCase
             'processing_fee' => 2.0,
             'min_processing_fee' => 1.0,
             'max_processing_fee' => 3.0,
-            'notarial_fee' => 500,
+            // A percentage of the principal, capped at 100.
+            'notarial_fee' => 1.5,
             // Additional fees are retired: only an empty list is accepted.
             'custom_fees' => [],
             'min_amount' => 5000,
@@ -460,7 +461,7 @@ class BusinessLogicTest extends TestCase
         $this->assertEquals(['monthly', 'semi_monthly'], $data['frequencies']);
         $this->assertEquals(1.0, (float) $data['min_processing_fee']);
         $this->assertEquals(3.0, (float) $data['max_processing_fee']);
-        $this->assertEquals(500, (float) $data['notarial_fee']);
+        $this->assertEquals(1.5, (float) $data['notarial_fee']);
         $this->assertSame([], $data['custom_fees']);
     }
 

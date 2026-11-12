@@ -16,6 +16,7 @@ use App\Http\Controllers\Api\AuditLogController;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\AutoCreditController;
 use App\Http\Controllers\Api\AutoPayController;
+use App\Http\Controllers\Api\BinhsCalculatorController;
 use App\Http\Controllers\Api\BorrowerController;
 use App\Http\Controllers\Api\BranchController;
 use App\Http\Controllers\Api\BrandingController;
@@ -256,6 +257,8 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::post('/loans/preview', [LoanController::class, 'formPreview']);
     // The Amortization Calculator: a what-if schedule with no product or loan.
     Route::post('/loans/amortization-calculator', AmortizationCalculatorController::class)->middleware('throttle:calculator');
+    // The Amortization (BINHS) page's schedules and its loan prefill.
+    Route::post('/loans/amortization-calculator/binhs', BinhsCalculatorController::class)->middleware('throttle:calculator');
     Route::apiResource('loans', LoanController::class);
     Route::patch('/loans/{loan}/submit', [LoanController::class, 'submit']);
     Route::patch('/loans/{loan}/approve', [LoanController::class, 'approve']);
