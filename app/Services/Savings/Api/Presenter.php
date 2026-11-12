@@ -229,6 +229,7 @@ class Presenter
                 'first_checker' => SavingsUserRef::from($a->firstChecker),
                 'decided_by' => SavingsUserRef::from($a->decider),
                 'decision_reason' => $a->decision_reason,
+                'check_reason' => $a->payload['check_reason'] ?? null,
                 'decided_at' => $a->decided_at?->toJSON(),
                 'expires_at' => $a->expires_at?->toJSON(),
                 'result_transaction_id' => $a->result_transaction_id,

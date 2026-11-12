@@ -13,6 +13,7 @@ use App\Models\TimeDeposit;
 use App\Services\BranchAccess;
 use App\Services\Savings\Dashboard\DepositFigures;
 use App\Services\Savings\Dashboard\DepositSummary;
+use App\Services\Savings\Notices\DormancyWindow;
 use App\Services\Savings\Reports\GlControl;
 use App\Services\Savings\Reports\MemberStatement;
 use App\Services\Savings\Reports\SavingsReports;
@@ -21,7 +22,9 @@ use App\Services\Savings\SavingsMath;
 use Closure;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
 use Illuminate\Pagination\LengthAwarePaginator;
+use Illuminate\Support\Facades\Validator;
 use OpenApi\Attributes as OA;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
@@ -160,10 +163,14 @@ class SavingsReportController extends Controller
     #[OA\Get(
         path: '/api/reports/savings/dormant',
         summary: 'Dormant Savings Accounts',
-        description: 'Accounts dormant today. `totals`: account_count, total_balance.',
+        description: 'Accounts dormant today, or with `list=approaching` the active accounts that turn dormant within `dormancy_warning_days` (each with `dormant_on`, the day it turns dormant without member activity, and `days_left`), soonest first. `totals` (the same for both lists): account_count and total_balance (dormant), approaching_count and approaching_balance, and reactivated_this_month (accounts reactivated in this Manila month, in the caller\'s branches).',
         tags: ['Savings Reports'],
         security: [['sanctum' => []]],
-        parameters: [new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')), new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', maximum: 1000))],
+        parameters: [
+            new OA\Parameter(name: 'list', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['dormant', 'approaching'])),
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
+            new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', maximum: 1000)),
+        ],
         responses: [
             new OA\Response(response: 200, description: 'A page of accounts with totals'),
             new OA\Response(response: 403, description: 'Missing reports:view or savings:view, or another branch'),
@@ -173,9 +180,22 @@ class SavingsReportController extends Controller
     public function dormant(SavingsReportRequest $request): JsonResponse
     {
         $filters = $request->filters();
+        $list = $this->dormantList($request);
+        $extra = ['as_of' => now()->toDateString(), 'list' => $list];
+
+        if ($list === 'approaching') {
+            $window = DormancyWindow::current();
+            $page = $this->reports->approachingQuery($filters, $window)->paginate($this->perPage($filters));
+
+            return $this->list($page, $page->getCollection()->map(fn (SavingsAccount $account) => $this->reports->approachingRow($account, $window))->all(), $this->reports->dormantTotals($filters), [
+                ...$extra,
+                'dormancy_warning_days' => $window->warningDays,
+            ]);
+        }
+
         $page = $this->reports->dormantQuery($filters)->paginate($this->perPage($filters));
 
-        return $this->list($page, $page->getCollection()->map(fn (SavingsAccount $account) => $this->reports->dormantRow($account))->all(), $this->reports->dormantTotals($filters), ['as_of' => now()->toDateString()]);
+        return $this->list($page, $page->getCollection()->map(fn (SavingsAccount $account) => $this->reports->dormantRow($account))->all(), $this->reports->dormantTotals($filters), $extra);
     }
 
     #[OA\Get(
@@ -265,14 +285,33 @@ class SavingsReportController extends Controller
         });
     }
 
-    #[OA\Get(path: '/api/reports/savings/dormant/export', summary: 'Export Dormant Savings Accounts as CSV', tags: ['Savings Reports'], security: [['sanctum' => []]], parameters: [new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer'))], responses: [new OA\Response(response: 200, description: 'CSV file'), new OA\Response(response: 403, description: 'Missing reports:export or savings:view')])]
+    #[OA\Get(path: '/api/reports/savings/dormant/export', summary: 'Export Dormant Savings Accounts as CSV', description: '`list=approaching` exports the accounts approaching dormancy instead, with the day each turns dormant and the days left.', tags: ['Savings Reports'], security: [['sanctum' => []]], parameters: [new OA\Parameter(name: 'list', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['dormant', 'approaching'])), new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer'))], responses: [new OA\Response(response: 200, description: 'CSV file'), new OA\Response(response: 403, description: 'Missing reports:export or savings:view'), new OA\Response(response: 422, description: 'An invalid list')])]
     public function exportDormant(SavingsExportRequest $request): StreamedResponse
     {
+        if ($this->dormantList($request) === 'approaching') {
+            $window = DormancyWindow::current();
+
+            return $this->csv('approaching-dormancy-savings-accounts.csv', ['Account #', 'Member', 'Product', 'Branch', 'Balance', 'Last Activity', 'Turns Dormant On', 'Days Left'], $this->reports->approachingQuery($request->filters(), $window), function (SavingsAccount $account) use ($window): array {
+                $r = $this->reports->approachingRow($account, $window);
+
+                return [$r['account_number'], $r['borrower_name'], $r['product_name'], $r['branch_name'], $r['balance'], $r['last_member_activity_on'], $r['dormant_on'], (string) $r['days_left']];
+            });
+        }
+
         return $this->csv('dormant-savings-accounts.csv', ['Account #', 'Member', 'Product', 'Branch', 'Balance', 'Last Activity', 'Dormant Since'], $this->reports->dormantQuery($request->filters()), function (SavingsAccount $account): array {
             $r = $this->reports->dormantRow($account);
 
             return [$r['account_number'], $r['borrower_name'], $r['product_name'], $r['branch_name'], $r['balance'], $r['last_member_activity_on'], $r['dormant_since']];
         });
+    }
+
+    /** The dormant report's `list` (`dormant` by default), or 422 in words. */
+    private function dormantList(Request $request): string
+    {
+        return Validator::make($request->query(), ['list' => ['nullable', 'string', 'in:dormant,approaching']], [
+            'list.string' => 'Choose the dormant accounts or the ones approaching dormancy.',
+            'list.in' => 'Choose the dormant accounts or the ones approaching dormancy.',
+        ])->validate()['list'] ?? 'dormant';
     }
 
     #[OA\Get(path: '/api/reports/savings/gl-control/export', summary: 'Export the Savings GL Control as CSV', tags: ['Savings Reports'], security: [['sanctum' => []]], parameters: [new OA\Parameter(name: 'as_of', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')), new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer'))], responses: [new OA\Response(response: 200, description: 'CSV file'), new OA\Response(response: 403, description: 'Missing reports:export or savings:view')])]

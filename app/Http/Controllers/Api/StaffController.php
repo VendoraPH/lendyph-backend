@@ -29,13 +29,15 @@ class StaffController extends Controller
         summary: 'List active staff for account-officer pickers',
         description: 'Active users only, as `{id, full_name}` — the same `full_name` a loan returns for '
             .'`account_officer`. Allowed for any caller holding `loans:create`, `loans:update` or '
-            .'`loans:restructure` (the new-loan, loan-detail and restructure pickers); this is not user '
+            .'`loans:restructure` (the new-loan, loan-detail and restructure pickers), or with `for=savings` '
+            .'`savings:create` (the savings opening form\'s account officer); this is not user '
             .'management and does not require `users:view`. `search` matches first name, last '
             .'name or "first last", never username or email. Ordered by first name, last name, then id. '
             .'`per_page` is clamped to 1..100.',
         tags: ['Staff'],
         security: [['sanctum' => []]],
         parameters: [
+            new OA\Parameter(name: 'for', in: 'query', required: false, description: '`savings`: the savings opening form; also allowed with `savings:create`.', schema: new OA\Schema(type: 'string', enum: ['savings'])),
             new OA\Parameter(name: 'search', in: 'query', required: false, description: 'Matches first name, last name, or "first last". Max 100 characters.', schema: new OA\Schema(type: 'string', maxLength: 100)),
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15, minimum: 1, maximum: 100)),
             new OA\Parameter(name: 'page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 1, minimum: 1)),
@@ -64,7 +66,7 @@ class StaffController extends Controller
                 ]),
             ),
             new OA\Response(response: 401, description: 'Unauthenticated'),
-            new OA\Response(response: 403, description: 'Holds none of loans:create, loans:update or loans:restructure'),
+            new OA\Response(response: 403, description: 'Holds none of loans:create, loans:update or loans:restructure (nor savings:create with for=savings)'),
             new OA\Response(response: 422, description: 'Validation error'),
         ],
     )]

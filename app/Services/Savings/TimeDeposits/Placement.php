@@ -8,6 +8,7 @@ use App\Models\SavingsProduct;
 use App\Models\TimeDeposit;
 use App\Models\User;
 use App\Services\Accounting\AutomaticPoster;
+use App\Services\Savings\ApprovalGate;
 use App\Services\Savings\AvailableBalance;
 use App\Services\Savings\ProductRules;
 use App\Services\Savings\SavingsLedger;
@@ -53,6 +54,7 @@ class Placement
         private readonly SavingsNumbers $numbers,
         private readonly AutomaticPoster $poster,
         private readonly ProductRules $rules,
+        private readonly ApprovalGate $gate,
     ) {}
 
     /**
@@ -241,6 +243,8 @@ class Placement
         if ($account->status !== SavingsAccount::STATUS_ACTIVE) {
             $this->refuse('funding_account_id', "{$account->account_number} is {$account->status}; only an active account can pay for a placement.");
         }
+
+        $this->gate->assertNoUncheckedOutflow($account, 'funding_account_id', 'A time deposit placement has no approval step: make a withdrawal for a checker to approve first, or pay for the placement in cash.');
 
         $available = $this->available->for($account);
 

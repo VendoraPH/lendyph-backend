@@ -12,6 +12,7 @@ use App\Http\Requests\Savings\Account\OpenSavingsAccountRequest;
 use App\Http\Requests\Savings\Account\SavingsMoneyRequest;
 use App\Http\Requests\Savings\Account\TransferSavingsRequest;
 use App\Models\SavingsAccount;
+use App\Models\SavingsApproval;
 use App\Models\SavingsTransaction;
 use App\Services\BranchAccess;
 use App\Services\GeneratedNumberWrite;
@@ -22,6 +23,7 @@ use App\Services\Savings\Api\AccountScope;
 use App\Services\Savings\Api\Presenter;
 use App\Services\Savings\Api\StatusChanger;
 use App\Services\Savings\Api\Teller;
+use App\Services\Savings\ApprovalGate;
 use App\Services\Savings\IdempotentWrite;
 use App\Services\Savings\SavingsMath;
 use Illuminate\Database\Eloquent\Builder;
@@ -237,7 +239,7 @@ class SavingsAccountController extends Controller
     #[OA\Post(
         path: '/api/savings/accounts/{account}/withdrawals',
         summary: 'Withdraw',
-        description: 'Up to the available balance, from an active account. Up to tier 1 it posts (201, the transaction, Dr 2050 / Cr settlement); above it, it waits for approval and reserves the amount (202, `{approval}`). Needs an `Idempotency-Key` header.',
+        description: 'Up to the available balance, from an active account. Up to tier 1 it posts (201, the transaction, Dr 2050 / Cr settlement); above it, it waits for approval and reserves the amount (202, `{approval}`). After money paid in reactivates a dormant account, its outflows wait for one checker whatever the amount until one is approved (202, with `message` and the approval\'s `check_reason`). Needs an `Idempotency-Key` header.',
         tags: ['Savings'],
         security: [['sanctum' => []]],
         parameters: [
@@ -269,7 +271,7 @@ class SavingsAccountController extends Controller
             $result = $teller->withdraw($account, $data, $user);
 
             return $result['approval'] !== null
-                ? response()->json(['success' => true, 'data' => ['approval' => $this->presenter->approval($result['approval'])]], 202)
+                ? $this->sentForApproval($result['approval'])
                 : response()->json(['success' => true, 'data' => $this->presenter->transaction($result['transaction'])], 201);
         });
     }
@@ -371,7 +373,7 @@ class SavingsAccountController extends Controller
             $result = $closer->close($account, $data, $user);
 
             return $result['approval'] !== null
-                ? response()->json(['success' => true, 'data' => ['approval' => $this->presenter->approval($result['approval'])]], 202)
+                ? $this->sentForApproval($result['approval'])
                 : response()->json(['success' => true, 'data' => $this->presenter->account($result['account'])], 201);
         });
     }
@@ -379,7 +381,7 @@ class SavingsAccountController extends Controller
     #[OA\Post(
         path: '/api/savings/accounts/{account}/status',
         summary: 'Freeze, unfreeze or reactivate',
-        description: '`frozen` freezes an active or dormant account; `active` unfreezes a frozen one (back to dormant when it was dormant before) or reactivates a dormant one (which counts as member activity today). Audited with the reason. A closed account keeps its status (422). A lock wait answers 409.',
+        description: '`frozen` freezes an active or dormant account; `active` unfreezes a frozen one (back to dormant when it was dormant before). `active` on a dormant account asks for its reactivation: 202 with `{approval}` (kind `reactivation`, one checker who isn\'t the maker); once approved it becomes active, counting as member activity that day. Audited with the reason. A closed account keeps its status (422). A reactivation already waiting, or a lock wait, answers 409.',
         tags: ['Savings'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'account', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
@@ -389,6 +391,7 @@ class SavingsAccountController extends Controller
         ])),
         responses: [
             new OA\Response(response: 200, description: 'The account'),
+            new OA\Response(response: 202, description: '`{approval}`: a reactivation sent for approval'),
             new OA\Response(response: 403, description: 'Missing savings:close'),
             new OA\Response(response: 404, description: 'No such account in the caller\'s branches'),
             new OA\Response(response: 422, description: 'Already in that status, or closed'),
@@ -397,12 +400,29 @@ class SavingsAccountController extends Controller
     public function status(ChangeSavingsStatusRequest $request, StatusChanger $changer, int $account): JsonResponse
     {
         $data = $request->validated();
-        $changed = GeneratedNumberWrite::run(
-            fn (): SavingsAccount => DB::transaction(fn (): SavingsAccount => $changer->change($account, $data['status'], $data['reason'], $request->user())),
+        $result = GeneratedNumberWrite::run(
+            fn (): array => DB::transaction(fn (): array => $changer->change($account, $data['status'], $data['reason'], $request->user())),
             GeneratedNumberWrite::SAVINGS_CONFLICT,
         );
 
-        return response()->json(['success' => true, 'data' => $this->presenter->account($changed)]);
+        return $result['approval'] !== null
+            ? response()->json(['success' => true, 'message' => 'Reactivation sent for approval. The account stays dormant until a checker approves it.', 'data' => ['approval' => $this->presenter->approval($result['approval'])]], 202)
+            : response()->json(['success' => true, 'data' => $this->presenter->account($result['account'])]);
+    }
+
+    /**
+     * 202 with `{approval}`; with `message` when the account is held after a
+     * deposit reactivated it (review M1), whatever the amount.
+     */
+    private function sentForApproval(SavingsApproval $approval): JsonResponse
+    {
+        $held = isset($approval->payload['check_reason']);
+
+        return response()->json([
+            'success' => true,
+            ...($held ? ['message' => ApprovalGate::OUTFLOW_HOLD] : []),
+            'data' => ['approval' => $this->presenter->approval($approval)],
+        ], 202);
     }
 
     /**

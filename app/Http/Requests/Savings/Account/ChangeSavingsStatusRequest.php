@@ -7,7 +7,9 @@ use Illuminate\Validation\Rule;
 
 /**
  * `POST /savings/accounts/{account}/status` (savings:close): freeze
- * (`frozen`), or unfreeze or reactivate (`active`), with a reason.
+ * (`frozen`), or unfreeze or reactivate (`active`), with a reason. On a
+ * dormant account `active` asks for a reactivation, which waits for a
+ * checker who isn't the maker (gap round S4).
  */
 class ChangeSavingsStatusRequest extends FormRequest
 {

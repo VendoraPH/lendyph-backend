@@ -105,7 +105,7 @@ class Teller
             $this->rules->assertStillDecided($account, $centavos, $decided);
         }
 
-        $needsApproval = $this->gate->needsApproval($centavos);
+        $needsApproval = $this->gate->needsApprovalFor($account, $centavos);
 
         // Paid now: charge the stored fee, or less if something counted
         // before it has fallen away. Waiting for a checker: keep it as stored.
@@ -195,6 +195,7 @@ class Teller
 
         $this->assertCanPayOut($from);
         $this->rules->assertCanTransferOut($from, $centavos);
+        $this->gate->assertNoUncheckedOutflow($from, 'amount', 'A transfer has no approval step: make a withdrawal for a checker to approve first.');
 
         if ($to->borrower_id !== $from->borrower_id) {
             Refuse::field('to_account_id', "{$to->account_number} belongs to another member. A transfer goes only between the same member's own accounts.");
