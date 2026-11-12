@@ -2,10 +2,14 @@
 
 namespace Tests\Feature\ServerFigures;
 
+use App\Models\AmortizationSchedule;
 use App\Models\Borrower;
 use App\Models\Branch;
 use App\Models\Loan;
 use App\Models\User;
+use App\Services\LoanService;
+use App\Services\LoanTermSchedule;
+use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
@@ -18,8 +22,12 @@ use Tests\Traits\SetupLendyPH;
  *
  * The expected figures in tests/Fixtures/binhs-schedules.json are the
  * frontend's own (src/lib/binhs.ts at frontend 0b05fa7), produced by running
- * its build*Schedule() and sumBinhsRows() functions on each case's input. The
- * due-date cases are ported from src/lib/binhs.test.ts.
+ * its build*Schedule() and sumBinhsRows() functions on each case's input,
+ * with one deliberate difference: the last row's principal is the principal
+ * less the rounded principal settled before it, so the principal adds up
+ * exactly (the browser summed rounded rows and could read ₱99,999.99 for
+ * ₱100,000.00). That row's payment and balance follow from it. The due-date
+ * cases are ported from src/lib/binhs.test.ts.
  */
 class BinhsCalculatorTest extends TestCase
 {
@@ -110,6 +118,113 @@ class BinhsCalculatorTest extends TestCase
         );
         $this->assertSame('0.00', $data['custom']['totals']['penalty']);
         $this->assertSame('0.00', end($data['custom']['rows'])['running_balance']);
+    }
+
+    public function test_the_ideal_principal_total_equals_the_principal(): void
+    {
+        // ₱100,000.00 at 24% a year over 12 months: the rounded rows add up
+        // to ₱99,999.99, so the last row takes the centavo left.
+        $ideal = $this->postJson(self::URL, $this->input([
+            'principal' => 100000, 'annual_rate' => 24, 'term_months' => 12, 'scbu_per_period' => 100,
+        ]))->assertOk()->json('data.scenarios.ideal');
+
+        $rows = $ideal['rows'];
+        $last = array_pop($rows);
+        $before = array_sum(array_map(fn (array $row) => (int) round((float) $row['principal'] * 100), $rows));
+
+        $this->assertSame('100000.00', $ideal['totals']['principal']);
+        $this->assertSame(number_format((10000000 - $before) / 100, 2, '.', ''), $last['principal']);
+        $this->assertSame(
+            number_format(((int) round((float) $last['principal'] * 100) + (int) round((float) $last['interest'] * 100) + 10000) / 100, 2, '.', ''),
+            $last['total_payment'],
+        );
+        $this->assertSame('0.00', $last['running_balance']);
+    }
+
+    /**
+     * The principal a schedule settles adds up to the principal: every paid
+     * row's principal, and the last row's (paid or still carried), which
+     * takes what the rounded rows before it left.
+     */
+    #[DataProvider('fixtureCases')]
+    public function test_the_principal_settled_adds_up_to_the_principal_in_every_scenario(string $case): void
+    {
+        $input = self::fixture()[$case]['input'];
+        $scenarios = $this->postJson(self::URL, $input)->assertOk()->json('data.scenarios');
+        $principal = (int) round((float) $input['principal'] * 100);
+        $cents = fn (string $value) => (int) round((float) $value * 100);
+
+        foreach (['ideal' => null, 'worst_case' => [], 'custom' => $input['paid_flags']] as $scenario => $flags) {
+            $rows = $scenarios[$scenario]['rows'];
+            $settled = 0;
+
+            foreach (array_slice($rows, 0, -1) as $i => $row) {
+                if ($flags === null || ($flags[$i] ?? false) === true) {
+                    $settled += $cents($row['principal']);
+                }
+            }
+
+            $this->assertSame($principal, $settled + $cents(end($rows)['principal']), "{$case} {$scenario}");
+        }
+
+        $this->assertSame($input['principal'], $scenarios['ideal']['totals']['principal'], $case);
+    }
+
+    public function test_a_custom_schedule_paid_in_full_totals_the_principal(): void
+    {
+        foreach ([[100000, 24, 12], [100000, 18, 6], [12345.67, 0, 5]] as [$principal, $rate, $term]) {
+            $custom = $this->postJson(self::URL, $this->input([
+                'principal' => $principal, 'annual_rate' => $rate, 'term_months' => $term,
+                'paid_flags' => array_fill(0, $term, true),
+            ]))->assertOk()->json('data.scenarios.custom');
+
+            $this->assertSame(number_format($principal, 2, '.', ''), $custom['totals']['principal'], "{$principal} {$rate}% {$term}");
+            $this->assertSame('0.00', end($custom['rows'])['running_balance']);
+        }
+    }
+
+    /** @return array<string, array{float, int|float, int}> */
+    public static function tinyPrincipals(): array
+    {
+        return [
+            '₱1.50 over 60 months at 0%: ₱0.025 a month' => [1.50, 0, 60],
+            '₱1.00 over 60 months at 1% a year' => [1.00, 1, 60],
+            '₱1.00 over 60 months at 0%' => [1.00, 0, 60],
+        ];
+    }
+
+    /**
+     * A principal so small that each row's share rounds up (₱0.025 to
+     * ₱0.03) never makes the last row negative, and the principal settled
+     * still adds up to the principal: no row settles more than is left.
+     */
+    #[DataProvider('tinyPrincipals')]
+    public function test_a_tiny_principal_never_gives_a_negative_row_and_still_adds_up(float $principal, int|float $rate, int $term): void
+    {
+        $expected = number_format($principal, 2, '.', '');
+
+        foreach ([[], array_fill(0, $term, true)] as $flags) {
+            $scenarios = $this->postJson(self::URL, $this->input([
+                'principal' => $principal, 'annual_rate' => $rate, 'term_months' => $term,
+                'scbu_per_period' => 0, 'paid_flags' => $flags,
+            ]))->assertOk()->json('data.scenarios');
+
+            foreach (['ideal', 'worst_case', 'custom'] as $scenario) {
+                foreach ($scenarios[$scenario]['rows'] as $row) {
+                    foreach (['principal', 'total_payment', 'running_balance'] as $column) {
+                        $this->assertGreaterThanOrEqual(0, (float) $row[$column], "{$scenario} period {$row['period']} {$column}");
+                    }
+                }
+            }
+
+            $this->assertSame($expected, $scenarios['ideal']['totals']['principal']);
+            $this->assertSame('0.00', end($scenarios['ideal']['rows'])['running_balance']);
+            $this->assertSame($expected, end($scenarios['worst_case']['rows'])['principal']);
+
+            if ($flags !== []) {
+                $this->assertSame($expected, $scenarios['custom']['totals']['principal']);
+            }
+        }
     }
 
     public function test_an_exact_half_centavo_rounds_up_where_the_browser_fell_short(): void
@@ -234,10 +349,89 @@ class BinhsCalculatorTest extends TestCase
             'principal' => '60000.00',
             'annual_rate' => '36',
             'term_months' => 6,
-            'start_date' => '2026-03-15',
+            'start_date' => '2026-04-15',
         ], $data['prefill']);
         $this->assertSame([], $data['prefill_notes']);
         $this->assertNull($data['scenarios']);
+    }
+
+    public function test_the_prefill_start_date_is_the_loans_first_due_date_from_its_schedule(): void
+    {
+        $loan = $this->loan(['start_date' => '2026-03-15']);
+
+        foreach ([[3, '2026-06-20'], [1, '2026-04-20'], [2, '2026-05-20']] as [$period, $dueDate]) {
+            AmortizationSchedule::factory()->create(['loan_id' => $loan->id, 'period_number' => $period, 'due_date' => $dueDate]);
+        }
+
+        $this->postJson(self::URL, ['loan_id' => $loan->id])
+            ->assertOk()
+            ->assertJsonPath('data.prefill.start_date', '2026-04-20');
+    }
+
+    /** @return array<string, array{array<string, mixed>, string}> */
+    public static function anchoredFirstDueDates(): array
+    {
+        return [
+            'monthly, one calendar month on' => [['start_date' => '2026-03-15'], '2026-04-15'],
+            'monthly from the 31st, capped at February\'s end' => [['start_date' => '2026-01-31'], '2026-02-28'],
+            'weekly on a days term' => [['frequency' => 'weekly', 'term' => 45, 'term_unit' => 'days', 'start_date' => '2026-03-15'], '2026-03-22'],
+            'semi-monthly on a months term' => [['frequency' => 'semi_monthly', 'start_date' => '2026-03-15'], '2026-03-30'],
+            'one payment at maturity' => [['frequency' => 'upon_maturity', 'term' => 3, 'start_date' => '2026-01-31', 'maturity_date' => '2026-04-30'], '2026-04-30'],
+        ];
+    }
+
+    /** @param  array<string, mixed>  $attributes */
+    #[DataProvider('anchoredFirstDueDates')]
+    public function test_without_a_schedule_the_prefill_start_date_is_the_anchored_first_due_date(array $attributes, string $firstDueDate): void
+    {
+        $loan = $this->loan($attributes);
+        $this->assertSame(0, $loan->amortizationSchedules()->count());
+
+        $this->postJson(self::URL, ['loan_id' => $loan->id])
+            ->assertOk()
+            ->assertJsonPath('data.prefill.start_date', $firstDueDate);
+    }
+
+    /** @return array<string, array{array<string, mixed>}> */
+    public static function draftShapes(): array
+    {
+        return [
+            'one payment at maturity on a 6-month term' => [['frequency' => 'upon_maturity', 'term' => 6, 'start_date' => '2026-01-31']],
+            'one payment at maturity on a 45-day term' => [['frequency' => 'upon_maturity', 'term' => 45, 'term_unit' => 'days', 'start_date' => '2026-01-31']],
+            'interest-only months, principal at maturity' => [['interest_method' => 'upon_maturity', 'frequency' => 'monthly', 'term' => 6, 'start_date' => '2026-01-31']],
+            'diminishing monthly from the 31st' => [['interest_method' => 'diminishing', 'frequency' => 'monthly', 'term' => 6, 'start_date' => '2026-01-31']],
+            'straight weekly on a days term' => [['frequency' => 'weekly', 'term' => 45, 'term_unit' => 'days', 'start_date' => '2026-03-15']],
+            'straight semi-monthly' => [['frequency' => 'semi_monthly', 'term' => 6, 'start_date' => '2026-03-15']],
+        ];
+    }
+
+    /**
+     * Without a schedule, the prefill date is the first due date the release
+     * will save: the first row of the engine's own schedule
+     * (LoanService::buildAmortizationPreview()), which is what release
+     * stores. A single payment at maturity is one row on the maturity date,
+     * whatever the term's length.
+     *
+     * @param  array<string, mixed>  $attributes
+     */
+    #[DataProvider('draftShapes')]
+    public function test_without_a_schedule_the_prefill_date_is_the_first_row_the_engine_will_save(array $attributes): void
+    {
+        $attributes += ['term_unit' => 'months', 'interest_method' => 'straight'];
+        $attributes['maturity_date'] = LoanTermSchedule::maturityDate(
+            Carbon::parse($attributes['start_date']), $attributes['term'], $attributes['term_unit'], $attributes['frequency'],
+        )->toDateString();
+        $loan = $this->loan($attributes);
+
+        $engineFirst = app(LoanService::class)->buildAmortizationPreview($loan->fresh())[0]['due_date'];
+
+        $this->postJson(self::URL, ['loan_id' => $loan->id])
+            ->assertOk()
+            ->assertJsonPath('data.prefill.start_date', $engineFirst);
+
+        if ($attributes['frequency'] === 'upon_maturity') {
+            $this->assertSame($attributes['maturity_date'], $engineFirst);
+        }
     }
 
     public function test_a_loan_id_with_inputs_answers_both(): void
