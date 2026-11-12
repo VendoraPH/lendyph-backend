@@ -106,6 +106,24 @@ class OpeningAndEligibilityTest extends TestCase
             ->assertJsonPath('data.beneficiary', ['name' => 'Jose Santos', 'relationship' => 'Son', 'contact_number' => null]);
     }
 
+    public function test_the_beneficiarys_contact_needs_borrowers_view_and_the_member_in_the_callers_branches(): void
+    {
+        $account = SavingsAccount::query()->findOrFail($this->open([
+            'beneficiary' => ['name' => 'Jose Santos', 'relationship' => 'Son', 'contact_number' => '09181234567'],
+        ])->assertCreated()->json('data.id'));
+
+        $reader = $this->userWith(['savings:view', 'borrowers:view']);
+        $this->actingAs($reader)->getJson("/api/savings/accounts/{$account->id}")->assertOk()
+            ->assertJsonPath('data.beneficiary.contact_number', '09181234567');
+
+        // The member moves to a branch the reader can't see; the account stays in its branch.
+        $this->member->forceFill(['branch_id' => Branch::factory()->create()->id])->save();
+        $this->actingAs($reader)->getJson("/api/savings/accounts/{$account->id}")->assertOk()
+            ->assertJsonPath('data.beneficiary.contact_number', null);
+        $this->actingAs($this->admin)->getJson("/api/savings/accounts/{$account->id}")->assertOk()
+            ->assertJsonPath('data.beneficiary.contact_number', '09181234567');
+    }
+
     public function test_bad_opening_details_are_refused_in_words(): void
     {
         $inactive = User::factory()->create(['branch_id' => $this->branch->id, 'status' => 'inactive']);

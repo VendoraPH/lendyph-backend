@@ -80,6 +80,7 @@ class SavingsTransaction extends Model
         'interest_run_id',
         'approval_id',
         'fee_for_transaction_id',
+        'counted_on',
         'created_by',
     ];
 
@@ -98,6 +99,7 @@ class SavingsTransaction extends Model
             'interest_run_id' => 'integer',
             'approval_id' => 'integer',
             'fee_for_transaction_id' => 'integer',
+            'counted_on' => 'date',
             'created_by' => 'integer',
         ];
     }

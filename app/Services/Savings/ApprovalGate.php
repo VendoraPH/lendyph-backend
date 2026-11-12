@@ -84,10 +84,17 @@ class ApprovalGate
     /**
      * Open a pending approval. Always at least one checker: a kind that is
      * always approved (a reversal) opens one below tier 1 too. A second live
-     * approval with the same `live_key` answers 409. `fee_amount` (centavos)
-     * is an excess-withdrawal fee it reserves beside `$centavos`.
+     * approval with the same `live_key` answers 409.
      *
-     * @param  array{account_id?: int|null, time_deposit_id?: int|null, target_transaction_id?: int|null, payload?: array<string, mixed>|null, live_key?: string|null, fee_amount?: int}  $attributes
+     * - `fee`: a withdrawal's excess-withdrawal fee decision, stored with it
+     *   (the fee it reserves beside `$centavos`, the month it counts in and
+     *   the product's rule then);
+     * - `fee_amount` (centavos): a fee it carries without a decision (a
+     *   reversal of a withdrawal and its fee shows the fee);
+     * - `tier_centavos`: the amount its checkers are counted on, when that is
+     *   more than `$centavos` (a reversal of a withdrawal and its fee).
+     *
+     * @param  array{account_id?: int|null, time_deposit_id?: int|null, target_transaction_id?: int|null, payload?: array<string, mixed>|null, live_key?: string|null, fee?: WithdrawalFee, fee_amount?: int, tier_centavos?: int}  $attributes
      */
     public function open(string $kind, int $centavos, array $attributes, int $requestedBy): SavingsApproval
     {
@@ -111,15 +118,19 @@ class ApprovalGate
      */
     private function create(string $kind, int $centavos, array $attributes, int $requestedBy): SavingsApproval
     {
+        $fee = ($attributes['fee'] ?? null) instanceof WithdrawalFee
+            ? $attributes['fee']->columns()
+            : ['fee_amount' => SavingsMath::pesos((int) ($attributes['fee_amount'] ?? 0))];
+
         return SavingsApproval::query()->create([
+            ...$fee,
             'kind' => $kind,
             'account_id' => $attributes['account_id'] ?? null,
             'time_deposit_id' => $attributes['time_deposit_id'] ?? null,
             'target_transaction_id' => $attributes['target_transaction_id'] ?? null,
             'amount' => SavingsMath::pesos($centavos),
-            'fee_amount' => SavingsMath::pesos((int) ($attributes['fee_amount'] ?? 0)),
             'payload' => $attributes['payload'] ?? null,
-            'required_checkers' => max(1, $this->requiredCheckers($centavos)),
+            'required_checkers' => max(1, $this->requiredCheckers(max($centavos, (int) ($attributes['tier_centavos'] ?? 0)))),
             'status' => 'pending',
             'requested_by' => $requestedBy,
             'expires_at' => now()->endOfDay(),

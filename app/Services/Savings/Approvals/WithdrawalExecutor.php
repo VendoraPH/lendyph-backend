@@ -12,15 +12,16 @@ use App\Services\Savings\Api\Refuse;
 use App\Services\Savings\Api\Teller;
 use App\Services\Savings\ProductRules;
 use App\Services\Savings\SavingsMath;
+use App\Services\Savings\WithdrawalFee;
 
 /**
  * An approved withdrawal (slice S2): re-checks, under the account lock, that
  * the account is still active and the money is still there (leaving out the
  * amount and fee this request itself reserves), then posts it as the maker's
- * withdrawal with its journal, linked to the approval. The product rules are
- * checked again, and the excess-withdrawal fee worked out again without this
- * request in the month's count: a fee other than the one it reserved answers
- * 409 in words. One a member asked
+ * withdrawal with its journal, linked to the approval. It charges the
+ * excess-withdrawal fee decided when it was requested, never counting again;
+ * the product's switch and limits are checked again, and a free count or fee
+ * changed since the request answers 409 in words. One a member asked
  * for in the portal is paid only while that member's portal account and
  * membership are still active.
  */
@@ -54,16 +55,11 @@ class WithdrawalExecutor implements ApprovalExecutor
         $this->assertMemberRequestStillPayable($approval);
         $this->teller->assertCanPayOut($account);
 
-        $reservedFee = SavingsMath::centavos($approval->fee_amount ?? 0);
-        $fee = $this->rules->assertCanWithdraw($account, $centavos, (string) $payload['date'], $approval->id);
+        $decided = WithdrawalFee::storedOn($approval, (string) $payload['date']);
+        $this->rules->assertStillDecided($account, $centavos, $decided);
+        $this->teller->assertAvailable($account, $centavos + $decided->fee, $centavos + $decided->fee);
 
-        if ($fee !== $reservedFee) {
-            Refuse::conflict(Teller::feeChanged($fee, $reservedFee));
-        }
-
-        $this->teller->assertAvailable($account, $centavos + $fee, $centavos + $reservedFee);
-
-        return $this->teller->postWithdrawal($account, $centavos, $payload, $approval->requested_by, $approval->id, $checker->id, [$approval->first_checker_id], $reservedFee);
+        return $this->teller->postWithdrawal($account, $centavos, $payload, $decided, $approval->requested_by, $approval->id, $checker->id, [$approval->first_checker_id]);
     }
 
     /**

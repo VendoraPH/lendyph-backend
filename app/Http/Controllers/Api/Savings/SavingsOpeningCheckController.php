@@ -12,9 +12,9 @@ use App\Services\LoanService;
 use App\Services\Savings\Api\AccountScope;
 use App\Services\Savings\ProductRules;
 use App\Services\Savings\SavingsMath;
-use App\Services\ShareCapitalMemberService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use OpenApi\Attributes as OA;
 
 /**
@@ -51,7 +51,7 @@ class SavingsOpeningCheckController extends Controller
             new OA\Response(response: 422, description: 'No member chosen'),
         ],
     )]
-    public function __invoke(Request $request, LoanListTotals $totals, ShareCapitalMemberService $shareCapital): JsonResponse
+    public function __invoke(Request $request, LoanListTotals $totals): JsonResponse
     {
         $this->authorize('savings:view');
         $user = $request->user();
@@ -77,7 +77,10 @@ class SavingsOpeningCheckController extends Controller
         }
 
         $shareCapitalBalance = $user->can('share_capital:view')
-            ? SavingsMath::pesos(LoanService::toCentavos((float) $shareCapital->memberPeriod($member->id, null, null)['ending_balance']))
+            ? SavingsMath::pesos(SavingsMath::signedCentavos((string) DB::table('share_capital_ledger')
+                ->where('borrower_id', $member->id)
+                ->selectRaw('COALESCE(SUM(credit), 0) - COALESCE(SUM(debit), 0) AS balance')
+                ->value('balance')))
             : null;
 
         $accounts = $this->scope->accounts($user)
