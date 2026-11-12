@@ -2358,7 +2358,10 @@ class LoanService
      * Rebuild deduction inputs from stored deduction items so a recompute
      * applies percentage and formula fees off their original rate
      * (`original_value`), not the previously computed peso amount. A formula
-     * item keeps its per-month flag and bounds.
+     * item keeps its per-month flag and bounds, and one charged from a written
+     * formula keeps its snapshot (`formula_expression`, `formula_inputs`,
+     * `raw_amount`), so it is read from what it was charged with
+     * (FeeAmount::formulaFields()), never from today's fee.
      *
      * @param  array<int, array{name: string, amount: float|int|string, type: string, original_value?: float|int|string}>  $items
      * @return array<int, array{name: string, amount: float|int|string, type: string}>
@@ -2774,6 +2777,10 @@ class LoanService
             // the product's unit, as the saved loan will carry it.
             'term' => $input['term'] ?? null,
             'term_unit' => $termUnit,
+            // The rate a written formula's Interest Rate reads: the form's,
+            // per the product's rate period, as createLoan() copies it.
+            'interest_rate' => $input['interest_rate'] ?? null,
+            'interest_rate_frequency' => $product->interest_rate_frequency,
             'start_date' => $input['start_date'] ?? null,
             'maturity_date' => $maturity?->toDateString(),
             'deductions' => $items,

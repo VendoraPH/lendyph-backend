@@ -8,6 +8,10 @@ use App\Models\Fee;
 use App\Models\Loan;
 use App\Models\LoanProduct;
 use App\Services\Accounting\AutomaticPoster;
+use App\Services\Fees\FeeExpression;
+use App\Services\Fees\FeeExpressionException;
+use App\Services\Fees\FeeFormulaInputs;
+use App\Services\Fees\FeeFormulaResult;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Validation\ValidationException;
@@ -338,8 +342,9 @@ final class LoanReleaseFeeService
      *
      * ## What goes into it, and what deliberately does not
      *
-     * `id`, `name`, `type` and `value` of each APPLICABLE fee, in id order.
-     * Those are precisely the fields that decide what this loan is charged and
+     * `id`, `name`, `type` and `value` of each APPLICABLE fee, in id order,
+     * plus a formula fee's bounds, per-month flag and written formula
+     * (`formula_expression`, when it has one). Those are precisely the fields that decide what this loan is charged and
      * what the cashier read on the screen.
      *
      * `conditions` and `applicable_product_ids` are absent by design. Neither
@@ -377,6 +382,12 @@ final class LoanReleaseFeeService
             // the one it always had.
             if ($fee->type === 'formula') {
                 array_push($row, (bool) $fee->per_month, (string) $fee->min_amount, (string) $fee->max_amount);
+
+                // So does a written formula. Added only when there is one, so
+                // a recipe formula fee's fingerprint is the one it always had.
+                if (filled($fee->formula_expression)) {
+                    $row[] = (string) $fee->formula_expression;
+                }
             }
 
             $rows[] = $row;
@@ -444,7 +455,7 @@ final class LoanReleaseFeeService
             return true;
         }
 
-        $termDays = $this->termDays($loan);
+        $termDays = self::termDays($loan);
         $principal = (float) $loan->principal_amount;
 
         $checks = [
@@ -498,7 +509,7 @@ final class LoanReleaseFeeService
      * (Neither column is nullable for a loan originated here; CSV-imported
      * loans never pass through release at all.)
      */
-    private function termDays(Loan $loan): ?int
+    public static function termDays(Loan $loan): ?int
     {
         if ($loan->start_date === null || $loan->maturity_date === null) {
             return null;
@@ -545,6 +556,7 @@ final class LoanReleaseFeeService
 
         $principal = (float) $loan->principal_amount;
         $months = FeeAmount::termMonths($loan->term, $loan->term_unit);
+        $inputs = null;
 
         foreach ($fees as $fee) {
             $id = (int) $fee->id;
@@ -564,7 +576,24 @@ final class LoanReleaseFeeService
             // per-month formula fee on a loan whose term isn't known yet (an
             // unsaved form preview): it applies once the term is, as a term-day
             // condition waits for the maturity date.
-            $amount = FeeAmount::forFee($fee, $principal, $months);
+            //
+            // A formula written as an expression is worked out from this
+            // loan's figures, and the item keeps them (the snapshot), so a
+            // later edit of the fee never changes what this loan was charged.
+            $snapshot = [];
+
+            if ($fee->type === 'formula' && filled($fee->formula_expression)) {
+                $inputs ??= FeeFormulaInputs::fromLoan($loan);
+                $result = $this->expressionResult($fee, $inputs);
+                $amount = $result?->amountAsFloat();
+                $snapshot = [
+                    'formula_expression' => (string) $fee->formula_expression,
+                    'formula_inputs' => $inputs->snapshot(),
+                    'raw_amount' => $result?->rawAmount,
+                ];
+            } else {
+                $amount = FeeAmount::forFee($fee, $principal, $months);
+            }
 
             if ($amount === null || $amount <= 0.0) {
                 continue;
@@ -578,12 +607,37 @@ final class LoanReleaseFeeService
                 // a fixed one — the same convention computeDeductions() uses, so
                 // a later recompute reads a fee item the way it reads its own.
                 'original_value' => $rate,
-                ...FeeAmount::formulaFields((string) $fee->type, $fee->only(['per_month', 'min_amount', 'max_amount'])),
+                ...FeeAmount::formulaFields((string) $fee->type, [...$fee->only(['per_month', 'min_amount', 'max_amount']), ...$snapshot]),
                 self::ITEM_FEE_KEY => $id,
             ];
         }
 
         return $items;
+    }
+
+    /**
+     * An expression fee on this loan ({@see FeeAmount::forExpression()}), or
+     * null while an input it uses isn't known.
+     *
+     * A divisor that works out to zero, or a result below ₱0.00, is a 422 on
+     * `fees` naming the fee, at release and at every preview that quotes it
+     * (release, deductions and form previews, and the disclosure), so the
+     * cashier is told which fee to fix in Settings.
+     *
+     * @throws ValidationException
+     */
+    private function expressionResult(Fee $fee, FeeFormulaInputs $inputs): ?FeeFormulaResult
+    {
+        try {
+            return FeeAmount::forExpression(
+                FeeExpression::parse((string) $fee->formula_expression),
+                $inputs,
+                $fee->min_amount,
+                $fee->max_amount,
+            );
+        } catch (FeeExpressionException $e) {
+            throw ValidationException::withMessages(['fees' => [$e->messageForFee((string) $fee->name)]]);
+        }
     }
 
     /**
