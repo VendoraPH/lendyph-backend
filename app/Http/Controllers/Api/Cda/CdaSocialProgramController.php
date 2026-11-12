@@ -71,7 +71,9 @@ class CdaSocialProgramController extends Controller
 
         $rows = $page->getCollection()->map(fn (CdaSocialProgram $program) => RegisterPresenter::socialProgram($program))->values()->all();
 
-        return RegisterPresenter::page($page, $this->documents->withDocumentsCount($rows, 'program', $request->user()), [
+        $periodIds = $page->getCollection()->mapWithKeys(fn (CdaSocialProgram $program) => [$program->id => (int) $program->period_id])->all();
+
+        return RegisterPresenter::page($page, $this->documents->withDocumentsCount($rows, 'program', $request->user(), $periodIds), [
             'totals' => [
                 'count' => $held->count(),
                 'beneficiaries' => (int) $held->sum('actual_beneficiaries'),
@@ -120,7 +122,7 @@ class CdaSocialProgramController extends Controller
             return $program;
         }, conflictMessage: self::CONFLICT);
 
-        return RegisterPresenter::one($this->withCount(RegisterPresenter::socialProgram($program->load(['period', 'responsibleOfficer.member'])), $request->user()), 201, 'Program recorded.');
+        return RegisterPresenter::one($this->withCount(RegisterPresenter::socialProgram($program->load(['period', 'responsibleOfficer.member'])), $program, $request->user()), 201, 'Program recorded.');
     }
 
     #[OA\Put(
@@ -149,7 +151,7 @@ class CdaSocialProgramController extends Controller
             return $locked;
         }, conflictMessage: self::CONFLICT);
 
-        return RegisterPresenter::one($this->withCount(RegisterPresenter::socialProgram($saved->load(['period', 'responsibleOfficer.member'])), $request->user()), message: 'Program saved.');
+        return RegisterPresenter::one($this->withCount(RegisterPresenter::socialProgram($saved->load(['period', 'responsibleOfficer.member'])), $saved, $request->user()), message: 'Program saved.');
     }
 
     #[OA\Delete(
@@ -188,8 +190,8 @@ class CdaSocialProgramController extends Controller
      * @param  array<string, mixed>  $row
      * @return array<string, mixed>
      */
-    private function withCount(array $row, User $user): array
+    private function withCount(array $row, CdaSocialProgram $program, User $user): array
     {
-        return $this->documents->withDocumentsCount([$row], 'program', $user)[0];
+        return $this->documents->withDocumentsCount([$row], 'program', $user, [$program->id => (int) $program->period_id])[0];
     }
 }

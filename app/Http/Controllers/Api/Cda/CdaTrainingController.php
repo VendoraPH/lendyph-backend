@@ -93,7 +93,7 @@ class CdaTrainingController extends Controller
         $rows = $page->getCollection()
             ->map(fn (CdaOfficerTraining $training) => RegisterPresenter::training($training, $certificates->get($training->id), $users))->values()->all();
 
-        return RegisterPresenter::page($page, $this->documents->withDocumentsCount($rows, 'training', $request->user()));
+        return RegisterPresenter::page($page, $this->documents->withDocumentsCount($rows, 'training', $request->user(), $this->periodIds($page->getCollection())));
     }
 
     #[OA\Post(
@@ -228,7 +228,21 @@ class CdaTrainingController extends Controller
     {
         $training->load('officer.member');
 
-        return $this->documents->withDocumentsCount([RegisterPresenter::training($training, $this->certificates([$training->id])->get($training->id))], 'training', $user)[0];
+        return $this->documents->withDocumentsCount([RegisterPresenter::training($training, $this->certificates([$training->id])->get($training->id))], 'training', $user, $this->periodIds(collect([$training])))[0];
+    }
+
+    /**
+     * Each training's own period: the one nearest its year (completed, else
+     * started, else this year), where its certificate is filed.
+     *
+     * @param  Collection<int, CdaOfficerTraining>  $trainings
+     * @return array<int, int|null>
+     */
+    private function periodIds(Collection $trainings): array
+    {
+        return $this->documents->nearestPeriodIds($trainings->mapWithKeys(fn (CdaOfficerTraining $training) => [
+            $training->id => ($training->completed_on ?? $training->started_on ?? now('Asia/Manila'))->year,
+        ])->all());
     }
 
     /**

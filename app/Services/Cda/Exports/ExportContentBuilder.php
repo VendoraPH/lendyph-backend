@@ -87,7 +87,9 @@ final class ExportContentBuilder
             $sourceValues = $rows->map(fn (CdaReportValue $row) => $row->source_value)->all();
             $profile = $this->liveProfile();
             $branding = BrandingSetting::query()->orderBy('id')->first();
-            $coopName = $branding?->organization_name;
+            // No name in Settings › Branding: the app's name, as the other server-made
+            // documents print (gap round B7). Live only: a snapshot keeps the name it froze.
+            $coopName = filled($branding?->organization_name) ? $branding->organization_name : config('app.name');
             $coopAddress = $branding?->organization_address;
             $templateVersion = (string) ($template?->version ?? '—');
         }
@@ -111,8 +113,7 @@ final class ExportContentBuilder
             reportType: $report->report_type,
             title: $title,
             periodLabel: $periodLabel,
-            // No name in Settings › Branding: the app's name, as the other server-made documents print (gap round B7).
-            coopName: filled($coopName) ? (string) $coopName : (string) config('app.name'),
+            coopName: filled($coopName) ? (string) $coopName : ValueFormatter::EMPTY,
             coopAddress: filled($coopAddress) ? (string) $coopAddress : null,
             registrationNo: filled($profile['cda_registration_no'] ?? null) ? (string) $profile['cda_registration_no'] : null,
             statusLabel: self::STATUS_LABELS[$report->status] ?? $report->status,

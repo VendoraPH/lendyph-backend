@@ -10,8 +10,10 @@ use App\Models\SavingsAutoCreditInstruction;
 use App\Models\SavingsAutoCreditRun;
 use App\Models\SavingsAutoCreditSkip;
 use App\Models\SavingsProduct;
+use App\Models\User;
 use App\Services\Accounting\AccountMap;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\DB;
 use Tests\Feature\Savings\Accounts\SavingsAccountsTestHelpers;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
@@ -140,6 +142,63 @@ class AutoCreditRunHistoryTest extends TestCase
 
         $this->assertSame(2, SavingsAutoCreditSkip::query()->count());
         $this->assertTrue(SavingsAutoCreditRun::query()->sole()->skips_recorded);
+    }
+
+    public function test_an_instruction_a_run_skipped_is_kept_for_the_record(): void
+    {
+        $frozen = $this->account(['status' => 'frozen']);
+        $instruction = $this->instruct($frozen, '100.00');
+        $this->money('/api/savings/auto-credit/process', ['cycle_date' => '2026-11-15'])->assertCreated()->assertJsonPath('data.totals.skipped_count', 1);
+
+        $this->deleteJson("/api/savings/auto-credit/instructions/{$instruction->id}")
+            ->assertStatus(422)
+            ->assertJsonPath('errors.instruction.0', 'This instruction was skipped by an auto-credit run, so it is kept for the record. Deactivate it instead.');
+
+        $this->assertNotNull($instruction->fresh());
+    }
+
+    public function test_the_list_reads_its_figures_in_sql_in_a_fixed_number_of_queries(): void
+    {
+        $viewer = $this->userWith(['savings:view']);
+        $this->instruct($this->account(), '100.00', '15/30');
+        $this->money('/api/savings/auto-credit/process', ['cycle_date' => '2026-11-15'])->assertCreated();
+        $one = $this->listQueries($viewer);
+
+        foreach (range(1, 4) as $i) {
+            $this->instruct($this->account(['product_id' => SavingsProduct::factory()->create(['name' => "Payroll Savings {$i}"])->id]), '100.00', '15/30');
+        }
+        Carbon::setTestNow(Carbon::parse('2026-11-30 10:00:00', 'Asia/Manila'));
+        $this->actingAs($this->admin);
+        $this->money('/api/savings/auto-credit/process', ['cycle_date' => '2026-11-30'])->assertCreated();
+        $two = $this->listQueries($viewer);
+
+        $this->assertSame(count($one), count($two), 'Two runs with six credits read in as many queries as one run with one credit.');
+
+        // The counts, the ₱ total and the first credit come from grouped SQL: no posting, account or member rows are loaded.
+        foreach ($two as $sql) {
+            $this->assertDoesNotMatchRegularExpression('/^select \* from `(savings_auto_credit_postings|savings_accounts|borrowers)`/', $sql);
+        }
+
+        $this->actingAs($viewer);
+        $rows = $this->getJson('/api/savings/auto-credit/runs')->assertOk()->json('data');
+        $this->assertSame([5, '500.00'], [$rows[0]['posted_count'], $rows[0]['posted_total']]);
+        $this->assertSame([1, '100.00'], [$rows[1]['posted_count'], $rows[1]['posted_total']]);
+        $this->assertNotNull($rows[0]['settlement_account']);
+    }
+
+    /** @return list<string> the SQL the list ran, as `$viewer`, after one warm-up request */
+    private function listQueries(User $viewer): array
+    {
+        $this->actingAs($viewer);
+        $this->getJson('/api/savings/auto-credit/runs')->assertOk();
+
+        DB::flushQueryLog();
+        DB::enableQueryLog();
+        $this->getJson('/api/savings/auto-credit/runs')->assertOk();
+        $queries = array_column(DB::getQueryLog(), 'query');
+        DB::disableQueryLog();
+
+        return $queries;
     }
 
     /**

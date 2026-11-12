@@ -60,13 +60,13 @@ class RunHistory
     public function rows(iterable $runs, User $user): array
     {
         $runs = collect($runs);
-        $postings = $this->postings($runs->pluck('id')->all(), $user)->groupBy('run_id');
+        $posted = $this->postedTotals($runs->pluck('id')->all(), $user);
         $skips = $this->skipCounts($runs->pluck('id')->all(), $user);
-        $settlement = $this->settlementAccounts($postings->map(fn (Collection $rows) => $rows->first()->transaction_id)->all());
+        $settlement = $this->settlementAccounts($posted->map(fn (object $row) => (int) $row->first_transaction_id)->all());
         $all = $this->branches->for($user) === null;
 
-        return $runs->map(function (SavingsAutoCreditRun $run) use ($postings, $skips, $settlement, $all) {
-            $mine = $postings->get($run->id, collect());
+        return $runs->map(function (SavingsAutoCreditRun $run) use ($posted, $skips, $settlement, $all) {
+            $mine = $posted->get($run->id);
 
             return [
                 'id' => $run->id,
@@ -77,10 +77,8 @@ class RunHistory
                 'method_label' => self::METHOD_WORDS[$run->method] ?? $run->method,
                 'reference_number' => $run->reference_number,
                 'settlement_account' => $settlement[$run->id] ?? null,
-                'posted_count' => $all ? $run->posted_count : $mine->count(),
-                'posted_total' => $all
-                    ? SavingsMath::pesos(SavingsMath::centavos($run->posted_total))
-                    : SavingsMath::pesos($mine->sum(fn (SavingsAutoCreditPosting $posting) => SavingsMath::centavos($posting->amount))),
+                'posted_count' => $all ? $run->posted_count : (int) ($mine->posted_count ?? 0),
+                'posted_total' => SavingsMath::pesos(SavingsMath::centavos($all ? $run->posted_total : ($mine->posted_total ?? '0.00'))),
                 'skipped_count' => match (true) {
                     $all => $run->skipped_count,
                     $run->skips_recorded => (int) ($skips[$run->id] ?? 0),
@@ -101,7 +99,7 @@ class RunHistory
      */
     public function detail(SavingsAutoCreditRun $run, User $user): array
     {
-        $postings = $this->postings([$run->id], $user);
+        $postings = $this->postings($run->id, $user);
         $reversed = SavingsTransaction::query()->whereIn('reverses_transaction_id', $postings->pluck('transaction_id'))->pluck('reverses_transaction_id')->flip();
 
         $posted = $postings->map(function (SavingsAutoCreditPosting $posting) use ($reversed) {
@@ -147,14 +145,16 @@ class RunHistory
     }
 
     /**
-     * @param  list<int>  $runIds
+     * One run's credits on the caller's accounts, with their accounts and
+     * members (detail() only).
+     *
      * @return Collection<int, SavingsAutoCreditPosting>
      */
-    private function postings(array $runIds, User $user): Collection
+    private function postings(int $runId, User $user): Collection
     {
         return SavingsAutoCreditPosting::query()
             ->with(['account.borrower', 'transaction:id,reference'])
-            ->whereIn('run_id', $runIds)
+            ->where('run_id', $runId)
             ->whereIn('account_id', $this->scope->accountIds($user))
             ->orderBy('id')
             ->get();
@@ -169,6 +169,26 @@ class RunHistory
             ->whereIn('account_id', $this->scope->accountIds($user))
             ->orderBy('id')
             ->get();
+    }
+
+    /**
+     * Each run's credits on the caller's accounts, grouped in SQL: the count,
+     * the ₱ sum (an exact decimal) and the first credit's transaction (for the
+     * settlement account). No posting, account or member rows are loaded.
+     *
+     * @param  list<int>  $runIds
+     * @return Collection<int, object{run_id: int, posted_count: int, posted_total: string, first_transaction_id: int}> keyed by run id
+     */
+    private function postedTotals(array $runIds, User $user): Collection
+    {
+        return SavingsAutoCreditPosting::query()
+            ->toBase()
+            ->whereIn('run_id', $runIds)
+            ->whereIn('account_id', $this->scope->accountIds($user))
+            ->groupBy('run_id')
+            ->selectRaw('run_id, COUNT(*) AS posted_count, SUM(amount) AS posted_total, MIN(transaction_id) AS first_transaction_id')
+            ->get()
+            ->keyBy('run_id');
     }
 
     /**

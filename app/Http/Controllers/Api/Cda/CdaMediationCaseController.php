@@ -75,7 +75,9 @@ class CdaMediationCaseController extends Controller
 
         $rows = $page->getCollection()->map(fn (CdaMediationCase $case) => RegisterPresenter::mediationCase($case, $year))->values()->all();
 
-        return RegisterPresenter::page($page, $this->documents->withDocumentsCount($rows, 'case', $request->user()));
+        $periodIds = $page->getCollection()->mapWithKeys(fn (CdaMediationCase $case) => [$case->id => $period->id])->all();
+
+        return RegisterPresenter::page($page, $this->documents->withDocumentsCount($rows, 'case', $request->user(), $periodIds));
     }
 
     #[OA\Post(
@@ -112,7 +114,7 @@ class CdaMediationCaseController extends Controller
             return $case;
         }, GeneratedNumberWrite::MEDIATION_CONFLICT));
 
-        return RegisterPresenter::one($this->withCount(RegisterPresenter::mediationCase($case->refresh(), $year), $request->user()), 201, "Case {$case->case_number} recorded.");
+        return RegisterPresenter::one($this->withCount(RegisterPresenter::mediationCase($case->refresh(), $year), $year, $request->user()), 201, "Case {$case->case_number} recorded.");
     }
 
     #[OA\Put(
@@ -142,7 +144,7 @@ class CdaMediationCaseController extends Controller
             return $locked;
         }, conflictMessage: self::CONFLICT));
 
-        return RegisterPresenter::one($this->withCount(RegisterPresenter::mediationCase($saved, $saved->filed_on->year), $request->user()), message: "Case {$saved->case_number} saved.");
+        return RegisterPresenter::one($this->withCount(RegisterPresenter::mediationCase($saved, $saved->filed_on->year), $saved->filed_on->year, $request->user()), message: "Case {$saved->case_number} saved.");
     }
 
     #[OA\Delete(
@@ -210,8 +212,8 @@ class CdaMediationCaseController extends Controller
      * @param  array<string, mixed>  $row
      * @return array<string, mixed>
      */
-    private function withCount(array $row, User $user): array
+    private function withCount(array $row, int $year, User $user): array
     {
-        return $this->documents->withDocumentsCount([$row], 'case', $user)[0];
+        return $this->documents->withDocumentsCount([$row], 'case', $user, $this->documents->periodIdsForYears([$row['id'] => $year]))[0];
     }
 }

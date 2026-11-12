@@ -15,7 +15,8 @@ use Tests\Traits\SetupLendyPH;
 /**
  * Gap round B7: a register row's attachments. The document list takes
  * `subject_id` with `subject_type`, and training, program and case rows carry
- * `documents_count`: the active documents attached to the row that the caller
+ * `documents_count`: the active documents attached to the row, in the row's
+ * own year's period (as the list for that year shows them), that the caller
  * may see under the existing restriction rules (withdrawn ones stay listed
  * but aren't counted).
  */
@@ -103,6 +104,28 @@ class CdaRegisterDocumentsCountTest extends TestCase
             ->putJson("/api/cda/social-programs/{$program->id}", ['name' => 'Coastal clean-up'])
             ->assertOk()
             ->assertJsonPath('data.documents_count', 1);
+    }
+
+    public function test_each_row_counts_the_documents_of_its_own_year_as_the_list_shows_them(): void
+    {
+        $earlier = $this->period(2025);
+        $program = CdaSocialProgram::factory()->create(['period_id' => $this->period()->id]);
+        $training = CdaOfficerTraining::factory()->create(['completed_on' => '2026-03-01']);
+        $case = CdaMediationCase::factory()->create(['filed_on' => '2026-03-01']);
+
+        foreach (['program' => $program->id, 'training' => $training->id, 'case' => $case->id] as $type => $id) {
+            $this->attach($type, $id);
+            $this->attach($type, $id, ['period_id' => $earlier->id]);
+        }
+
+        $this->actingAs($this->cdaUser([CdaAccess::VIEW, CdaAccess::VIEW_MEDIATION]));
+
+        $listed = fn (string $type, int $id): int => count($this->getJson("/api/cda/periods/2026/documents?subject_type={$type}&subject_id={$id}&status=active")->assertOk()->json('data'));
+        $this->assertSame(1, $listed('program', $program->id));
+
+        $this->assertSame(1, collect($this->getJson('/api/cda/periods/2026/social-programs')->json('data'))->firstWhere('id', $program->id)['documents_count']);
+        $this->assertSame(1, collect($this->getJson('/api/cda/trainings')->json('data'))->firstWhere('id', $training->id)['documents_count']);
+        $this->assertSame(1, collect($this->getJson('/api/cda/periods/2026/mediation-cases')->json('data'))->firstWhere('id', $case->id)['documents_count']);
     }
 
     /** @param  array<string, mixed>  $attributes */

@@ -7,6 +7,7 @@ use App\Models\CdaDocumentVersion;
 use App\Models\CdaMediationCase;
 use App\Models\CdaOfficerTraining;
 use App\Models\CdaReport;
+use App\Models\CdaReportingPeriod;
 use App\Models\CdaSocialProgram;
 use App\Models\CdaSubmission;
 use App\Models\Document;
@@ -197,23 +198,62 @@ final class DocumentRepository
 
     /**
      * Adds `documents_count` to presented register rows (gap round B7): the
-     * active documents attached to each row (training, program or case) that
-     * the user may see under scopeVisible(). Withdrawn ones stay listed but
-     * aren't counted. One query for the whole page.
+     * active documents attached to each row (training, program or case) in
+     * the row's own period, the one whose documents list the screen opens for
+     * it, that the user may see under scopeVisible(). Withdrawn ones stay
+     * listed but aren't counted. One query for the whole page.
      *
      * @param  list<array<string, mixed>>  $rows  each with its `id`
+     * @param  array<int, int|null>  $periodIds  each row's period id, by row id (none: 0)
      * @return list<array<string, mixed>>
      */
-    public function withDocumentsCount(array $rows, string $subjectType, User $user): array
+    public function withDocumentsCount(array $rows, string $subjectType, User $user, array $periodIds): array
     {
         $query = CdaDocument::query()
             ->where('subject_type', $subjectType)
             ->whereIn('subject_id', array_column($rows, 'id'))
+            ->whereIn('period_id', array_values(array_filter($periodIds)))
             ->where('status', 'active');
         $this->scopeVisible($query, $user);
-        $counts = $query->groupBy('subject_id')->selectRaw('subject_id, COUNT(*) AS aggregate')->pluck('aggregate', 'subject_id');
+        $counts = $query->groupBy('subject_id', 'period_id')->selectRaw('subject_id, period_id, COUNT(*) AS aggregate')->get()
+            ->mapWithKeys(fn ($row) => [$row->subject_id.':'.$row->period_id => (int) $row->aggregate]);
 
-        return array_map(fn (array $row) => [...$row, 'documents_count' => (int) ($counts[$row['id']] ?? 0)], $rows);
+        return array_map(fn (array $row) => [
+            ...$row,
+            'documents_count' => $counts[$row['id'].':'.($periodIds[$row['id']] ?? '')] ?? 0,
+        ], $rows);
+    }
+
+    /**
+     * The reporting period nearest each year (the earlier on a tie), by row
+     * id: where a training's certificate is filed (CdaTrainingController), so
+     * its count reads the same period. One query.
+     *
+     * @param  array<int, int>  $years  by row id
+     * @return array<int, int|null>
+     */
+    public function nearestPeriodIds(array $years): array
+    {
+        $periods = CdaReportingPeriod::query()->orderBy('year')->pluck('id', 'year');
+
+        return array_map(function (int $year) use ($periods): ?int {
+            $nearest = $periods->keys()->sortBy(fn ($candidate) => [abs((int) $candidate - $year), (int) $candidate])->first();
+
+            return $nearest === null ? null : (int) $periods[$nearest];
+        }, $years);
+    }
+
+    /**
+     * Each year's own reporting period, by row id (null when that year has none).
+     *
+     * @param  array<int, int>  $years  by row id
+     * @return array<int, int|null>
+     */
+    public function periodIdsForYears(array $years): array
+    {
+        $periods = CdaReportingPeriod::query()->whereIn('year', array_values(array_unique($years)))->pluck('id', 'year');
+
+        return array_map(fn (int $year) => isset($periods[$year]) ? (int) $periods[$year] : null, $years);
     }
 
     /**
