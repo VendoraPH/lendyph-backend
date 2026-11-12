@@ -4,13 +4,13 @@ namespace App\Services\Savings;
 
 use App\Models\Borrower;
 use App\Models\Branch;
+use App\Models\PortalRequest;
 use App\Models\SavingsAccount;
-use App\Models\SavingsApproval;
-use App\Models\SavingsHold;
 use App\Models\SavingsProduct;
 use App\Services\Savings\Api\Refuse;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Query\Builder as QueryBuilder;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
@@ -42,6 +42,9 @@ use Illuminate\Validation\ValidationException;
  */
 final class ProductRules
 {
+    /** Portal withdrawal requests still waiting for staff; an approved one counts through its savings approval. */
+    private const OPEN_PORTAL_STATUSES = [PortalRequest::STATUS_SUBMITTED, PortalRequest::STATUS_UNDER_REVIEW, PortalRequest::STATUS_NEED_INFO];
+
     /** @throws ValidationException */
     public function assertCanDeposit(SavingsAccount $account, int $centavos, bool $openingDeposit = false, string $field = 'amount'): void
     {
@@ -111,6 +114,7 @@ final class ProductRules
         return new WithdrawalFee(
             $this->withdrawalFee($account, $product, $countedOn, $field),
             $countedOn,
+            now()->format('Y-m-d H:i:s'),
             $product->free_withdrawals_per_month,
             $this->limit($product->excess_withdrawal_fee),
         );
@@ -118,10 +122,11 @@ final class ProductRules
 
     /**
      * Check, when a withdrawal decided earlier posts, that the product still
-     * allows it (switch and limits) and that its free withdrawals and fee
-     * are what they were when it was requested: a change answers 409 in
-     * words. Nothing is counted again, so a withdrawal made in between never
-     * moves this one's fee.
+     * allows it (switch and limits) and that the rule its fee was decided
+     * on still stands: a changed free count answers 409 in words, and so
+     * does a changed fee when this withdrawal carries one (one decided within
+     * the free withdrawals pays none, whatever the fee). The fee itself is
+     * {@see self::payoutFee()}'s.
      *
      * @throws ValidationException
      */
@@ -130,10 +135,30 @@ final class ProductRules
         $product = $this->productOf($account);
         $this->assertWithdrawalLimits($product, $centavos, $field);
 
-        if ($product->free_withdrawals_per_month !== $decided->freeWithdrawals || $this->limit($product->excess_withdrawal_fee) !== $decided->excessFee) {
+        $freeChanged = $product->free_withdrawals_per_month !== $decided->freeWithdrawals;
+        $feeChanged = $decided->fee > 0 && $this->limit($product->excess_withdrawal_fee) !== $decided->excessFee;
+
+        if ($freeChanged || $feeChanged) {
             Refuse::conflict("{$product->name}'s free withdrawals or excess-withdrawal fee changed since this request was made (it reserved a "
                 .Refuse::peso($decided->fee).' fee). Reject it and make a new request.');
         }
+    }
+
+    /**
+     * The fee a withdrawal decided earlier is charged when it posts: the
+     * stored fee, or nothing when the withdrawals counted before it (by
+     * request time, then id, read under the account lock) no longer use up
+     * the free count, because one of them was rejected, cancelled, expired
+     * or reversed since. Never more than the stored fee, so a withdrawal
+     * made after this one never raises it.
+     */
+    public function payoutFee(SavingsAccount $account, WithdrawalFee $decided): int
+    {
+        if ($decided->fee === 0 || $decided->freeWithdrawals === null) {
+            return 0;
+        }
+
+        return $this->withdrawalsInMonth($account, $decided->countedOn, $decided) < $decided->freeWithdrawals ? 0 : $decided->fee;
     }
 
     /**
@@ -213,17 +238,22 @@ final class ProductRules
      *   posted before it existed counts by its `date`), not reversed (a time
      *   deposit's funding is not a withdrawal);
      * - pending withdrawal approvals by `counted_on` (else their date);
-     * - members' open portal withdrawal requests by the day they were placed
-     *   (their active request holds).
+     * - members' open portal withdrawal requests by `counted_on` (else the
+     *   day they were made).
      *
-     * An approved or paid request leaves the count as its posted row joins
-     * it, under the same lock, so nothing counts twice.
+     * An approved or paid request leaves the count as its approval or posted
+     * row joins it, under the same lock, so nothing counts twice.
+     *
+     * With `$before`, only what was requested before that withdrawal counts:
+     * an earlier request time, or the same time and a lower id in the same
+     * table. Its own approval or portal request is left out.
      */
-    public function withdrawalsInMonth(SavingsAccount $account, string $date): int
+    public function withdrawalsInMonth(SavingsAccount $account, string $date, ?WithdrawalFee $before = null): int
     {
         $day = CarbonImmutable::parse($date);
         $from = $day->startOfMonth()->toDateString();
         $to = $day->endOfMonth()->toDateString();
+        $at = $before?->requestedAt;
 
         $posted = DB::table('savings_transactions AS t')
             ->where('t.account_id', $account->id)
@@ -231,30 +261,45 @@ final class ProductRules
             ->whereNull('t.time_deposit_id')
             ->whereRaw('COALESCE(t.counted_on, t.date) BETWEEN ? AND ?', [$from, $to])
             ->whereNotExists(fn ($q) => $q->from('savings_transactions AS r')->whereColumn('r.reverses_transaction_id', 't.id'))
+            ->when($at !== null, fn ($q) => $q->whereRaw('COALESCE(t.requested_at, t.created_at) < ?', [$at]))
             ->count();
 
-        $pending = SavingsApproval::query()
-            ->where('account_id', $account->id)
-            ->where('kind', 'withdrawal')
-            ->where('status', 'pending')
-            ->where(fn ($q) => $q->whereNull('expires_at')->orWhere('expires_at', '>', now()))
-            ->get(['id', 'payload', 'counted_on'])
-            ->filter(function (SavingsApproval $approval) use ($from, $to): bool {
-                $on = $approval->counted_on?->toDateString() ?? (string) ($approval->payload['date'] ?? '');
-
-                return $on >= $from && $on <= $to;
-            })
+        $pending = DB::table('savings_approvals AS a')
+            ->where('a.account_id', $account->id)
+            ->where('a.kind', 'withdrawal')
+            ->where('a.status', 'pending')
+            ->where(fn ($q) => $q->whereNull('a.expires_at')->orWhere('a.expires_at', '>', now()))
+            ->whereRaw("COALESCE(a.counted_on, JSON_UNQUOTE(JSON_EXTRACT(a.payload, '$.date'))) BETWEEN ? AND ?", [$from, $to])
+            ->when($before !== null, fn ($q) => $this->requestedBefore($q, 'a', $before, WithdrawalFee::SOURCE_APPROVAL))
             ->count();
 
-        $requested = DB::table('savings_holds')
-            ->where('account_id', $account->id)
-            ->where('type', SavingsHold::TYPE_MEMBER_REQUEST)
-            ->where('status', 'active')
-            ->where(fn ($q) => $q->whereNull('expires_on')->orWhere('expires_on', '>=', now()->toDateString()))
-            ->whereBetween('placed_on', [$from, $to])
+        $requested = DB::table('portal_requests AS p')
+            ->where('p.savings_account_id', $account->id)
+            ->where('p.type', PortalRequest::TYPE_SAVINGS_WITHDRAWAL)
+            ->whereIn('p.status', self::OPEN_PORTAL_STATUSES)
+            ->where(fn ($q) => $q->whereNull('p.expires_on')->orWhere('p.expires_on', '>=', now()->toDateString()))
+            ->whereRaw('COALESCE(p.counted_on, DATE(p.created_at)) BETWEEN ? AND ?', [$from, $to])
+            ->when($before !== null, fn ($q) => $this->requestedBefore($q, 'p', $before, WithdrawalFee::SOURCE_PORTAL_REQUEST))
             ->count();
 
         return $posted + $pending + $requested;
+    }
+
+    /**
+     * Narrow approvals or portal requests (`$alias`) to those requested
+     * before `$before`, leaving out its own row.
+     */
+    private function requestedBefore(QueryBuilder $query, string $alias, WithdrawalFee $before, string $source): QueryBuilder
+    {
+        $own = $before->source === $source ? $before->sourceId : null;
+
+        return $query
+            ->when($own !== null, fn ($q) => $q->where("{$alias}.id", '!=', $own))
+            ->where(fn ($q) => $q
+                ->whereRaw("COALESCE({$alias}.requested_at, {$alias}.created_at) < ?", [$before->requestedAt])
+                ->when($own !== null, fn ($q) => $q->orWhere(fn ($q) => $q
+                    ->whereRaw("COALESCE({$alias}.requested_at, {$alias}.created_at) = ?", [$before->requestedAt])
+                    ->where("{$alias}.id", '<', $own))));
     }
 
     /**

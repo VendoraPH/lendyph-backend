@@ -6,8 +6,8 @@ use App\Models\AccountingAccountMapping;
 use App\Models\Borrower;
 use App\Models\SavingsAccount;
 use App\Models\SavingsApproval;
-use App\Models\SavingsHold;
 use App\Models\SavingsTransaction;
+use App\Models\User;
 use App\Services\Savings\ProductRules;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -31,6 +31,8 @@ class ExcessWithdrawalFeeTest extends TestCase
     use SavingsAccountsTestHelpers, SetupLendyPH;
 
     private SavingsAccount $savings;
+
+    private User $maker;
 
     protected function setUp(): void
     {
@@ -131,7 +133,7 @@ class ExcessWithdrawalFeeTest extends TestCase
         $this->assertSame(0, $this->usedThisMonth());
     }
 
-    public function test_pending_approvals_and_portal_requests_count_once_and_approving_counts_nothing_more(): void
+    public function test_a_pending_approval_counts_once_and_approving_counts_nothing_more(): void
     {
         $this->rules(['free_withdrawals_per_month' => 3]);
         $this->actingAs($this->teller());
@@ -139,17 +141,12 @@ class ExcessWithdrawalFeeTest extends TestCase
         $this->assertSame(1, $this->usedThisMonth());
         $this->assertSame('2026-11-10', SavingsApproval::query()->findOrFail($approval)->counted_on->toDateString());
 
-        SavingsHold::query()->create([
-            'account_id' => $this->savings->id, 'type' => SavingsHold::TYPE_MEMBER_REQUEST, 'amount' => '100.00',
-            'reason' => 'Member portal request', 'placed_on' => '2026-11-10', 'expires_on' => '2026-11-17', 'status' => 'active',
-        ]);
-        $this->assertSame(2, $this->usedThisMonth());
-        // A request placed in another month counts in that month only.
+        // A request counts in the month it was made only (portal requests: PortalRulesTest).
         $this->assertSame(0, $this->usedThisMonth('2026-12-01'));
 
         $this->actingAs($this->checker());
         $this->postJson("/api/savings/approvals/{$approval}/approve")->assertOk();
-        $this->assertSame(2, $this->usedThisMonth(), 'The approved withdrawal replaces its request in the count.');
+        $this->assertSame(1, $this->usedThisMonth(), 'The approved withdrawal replaces its request in the count.');
         $posted = SavingsTransaction::query()->where('approval_id', $approval)->where('type', 'withdrawal')->sole();
         $this->assertSame('2026-11-10', $posted->counted_on->toDateString());
     }
@@ -198,6 +195,95 @@ class ExcessWithdrawalFeeTest extends TestCase
         $this->assertFalse(SavingsTransaction::query()->where('fee_for_transaction_id', $withdrawal->id)->exists());
         $this->assertSame(1, SavingsTransaction::query()->where('account_id', $this->savings->id)->where('type', 'fee')->count());
         $this->assertSame('84875.00', $this->balanceOf($this->savings));
+    }
+
+    /**
+     * Two free withdrawals, one posted; approval A (₱0.00) then approval B
+     * (counting A, so ₱25.00). Returns [A, B].
+     *
+     * @return array{0: int, 1: int}
+     */
+    private function twoPendingAfterOnePosted(): array
+    {
+        $this->rules(['free_withdrawals_per_month' => 2, 'excess_withdrawal_fee' => '25.00']);
+        $this->withdraw('100.00')->assertCreated();
+        $this->actingAs($this->maker = $this->teller());
+
+        $this->travelTo(Carbon::parse('2026-11-10 10:05:00', 'Asia/Manila'));
+        $a = $this->withdraw('15000.00')->assertStatus(202)->assertJsonPath('data.approval.fee_amount', '0.00')->json('data.approval.id');
+        $this->travelTo(Carbon::parse('2026-11-10 10:10:00', 'Asia/Manila'));
+        $b = $this->withdraw('16000.00')->assertStatus(202)->assertJsonPath('data.approval.fee_amount', '25.00')->json('data.approval.id');
+
+        return [$a, $b];
+    }
+
+    private function approvedFee(int $approval): ?string
+    {
+        $this->actingAs($this->checker());
+        $this->postJson("/api/savings/approvals/{$approval}/approve")->assertOk();
+        $withdrawal = SavingsTransaction::query()->where('approval_id', $approval)->where('type', 'withdrawal')->sole();
+
+        return SavingsTransaction::query()->where('fee_for_transaction_id', $withdrawal->id)->value('debit');
+    }
+
+    public function test_a_rejected_earlier_request_lowers_a_later_requests_fee_at_payout(): void
+    {
+        [$a, $b] = $this->twoPendingAfterOnePosted();
+
+        $this->actingAs($this->checker());
+        $this->postJson("/api/savings/approvals/{$a}/reject", ['reason' => 'Not needed'])->assertOk();
+
+        $this->assertNull($this->approvedFee($b), 'Only two withdrawals were made, both free.');
+        $this->assertSame('83900.00', $this->balanceOf($this->savings));
+    }
+
+    public function test_an_expired_earlier_request_lowers_a_later_requests_fee_at_payout(): void
+    {
+        [$a, $b] = $this->twoPendingAfterOnePosted();
+        SavingsApproval::query()->whereKey($a)->update(['expires_at' => now()->subMinute()]);
+
+        $this->assertNull($this->approvedFee($b));
+    }
+
+    public function test_an_earlier_withdrawal_reversed_while_a_request_waits_lowers_its_fee(): void
+    {
+        $this->rules(['free_withdrawals_per_month' => 1, 'excess_withdrawal_fee' => '25.00']);
+        $first = $this->withdraw('100.00')->assertCreated()->json('data.id');
+        $this->actingAs($this->teller());
+        $this->travelTo(Carbon::parse('2026-11-10 10:05:00', 'Asia/Manila'));
+        $b = $this->withdraw('15000.00')->assertStatus(202)->assertJsonPath('data.approval.fee_amount', '25.00')->json('data.approval.id');
+
+        $reversal = $this->money("/api/savings/transactions/{$first}/reverse", ['reason' => 'Keyed twice'])->assertStatus(202)->json('data.approval.id');
+        $this->actingAs($this->checker());
+        $this->postJson("/api/savings/approvals/{$reversal}/approve")->assertOk();
+
+        $this->assertNull($this->approvedFee($b));
+        $this->assertSame('85000.00', $this->balanceOf($this->savings));
+    }
+
+    public function test_a_later_request_falling_away_never_raises_or_lowers_an_earlier_ones_fee(): void
+    {
+        [$a, $b] = $this->twoPendingAfterOnePosted();
+
+        $this->actingAs($this->maker);
+        $this->postJson("/api/savings/approvals/{$b}/cancel", ['reason' => 'Changed mind'])->assertOk();
+
+        $this->assertNull($this->approvedFee($a));
+    }
+
+    public function test_a_request_decided_within_the_free_count_ignores_a_changed_fee_but_not_a_changed_free_count(): void
+    {
+        $this->rules(['free_withdrawals_per_month' => 2, 'excess_withdrawal_fee' => '25.00']);
+        $this->actingAs($this->teller());
+        $first = $this->withdraw('15000.00')->assertStatus(202)->assertJsonPath('data.approval.fee_amount', '0.00')->json('data.approval.id');
+        $this->travelTo(Carbon::parse('2026-11-10 10:05:00', 'Asia/Manila'));
+        $second = $this->withdraw('15000.00')->assertStatus(202)->json('data.approval.id');
+
+        $this->rules(['excess_withdrawal_fee' => '40.00']);
+        $this->assertNull($this->approvedFee($first));
+
+        $this->rules(['free_withdrawals_per_month' => 3]);
+        $this->postJson("/api/savings/approvals/{$second}/approve")->assertConflict();
     }
 
     public function test_a_free_count_or_fee_changed_since_the_request_answers_409_in_words(): void

@@ -68,6 +68,7 @@ class PortalRequest extends Model
         // A withdrawal request's excess-withdrawal fee, decided when it was made (gap round S1).
         'fee_amount',
         'counted_on',
+        'requested_at',
         'rule_free_withdrawals',
         'rule_excess_fee',
         'savings_account_id',
@@ -93,6 +94,7 @@ class PortalRequest extends Model
             'amount' => 'decimal:2',
             'fee_amount' => 'decimal:2',
             'counted_on' => 'date',
+            'requested_at' => 'datetime',
             'rule_free_withdrawals' => 'integer',
             'rule_excess_fee' => 'decimal:2',
             'savings_account_id' => 'integer',

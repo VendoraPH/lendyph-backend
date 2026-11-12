@@ -19,9 +19,10 @@ use App\Services\Savings\WithdrawalFee;
  * the account is still active and the money is still there (leaving out the
  * amount and fee this request itself reserves), then posts it as the maker's
  * withdrawal with its journal, linked to the approval. It charges the
- * excess-withdrawal fee decided when it was requested, never counting again;
- * the product's switch and limits are checked again, and a free count or fee
- * changed since the request answers 409 in words. One a member asked
+ * excess-withdrawal fee decided when it was requested, or less when
+ * something counted before it has fallen away since (never more); the
+ * product's switch and limits are checked again, and a changed rule its fee
+ * depends on answers 409 in words. One a member asked
  * for in the portal is paid only while that member's portal account and
  * membership are still active.
  */
@@ -57,9 +58,10 @@ class WithdrawalExecutor implements ApprovalExecutor
 
         $decided = WithdrawalFee::storedOn($approval, (string) $payload['date']);
         $this->rules->assertStillDecided($account, $centavos, $decided);
-        $this->teller->assertAvailable($account, $centavos + $decided->fee, $centavos + $decided->fee);
+        $charged = $decided->charging($this->rules->payoutFee($account, $decided));
+        $this->teller->assertAvailable($account, $centavos + $charged->fee, $centavos + $decided->fee);
 
-        return $this->teller->postWithdrawal($account, $centavos, $payload, $decided, $approval->requested_by, $approval->id, $checker->id, [$approval->first_checker_id]);
+        return $this->teller->postWithdrawal($account, $centavos, $payload, $charged, $approval->requested_by, $approval->id, $checker->id, [$approval->first_checker_id]);
     }
 
     /**

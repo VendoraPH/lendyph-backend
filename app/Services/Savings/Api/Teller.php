@@ -84,7 +84,8 @@ class Teller
      * excess-withdrawal fee is decided here, once, counting only what came
      * before it in the month of its date; or, for a member's portal request
      * being paid, `$decided` is the decision stored when the member asked
-     * (checked against the product's rule then, 409 when it changed).
+     * (checked against the product's rule then, 409 when it changed), paid
+     * at that fee or less (ProductRules::payoutFee()).
      *
      * @param  array{amount: string, date: string, payment_method: string, reference?: string|null, remarks?: string|null}  $data
      * @return array{transaction: SavingsTransaction|null, approval: SavingsApproval|null}
@@ -104,9 +105,17 @@ class Teller
             $this->rules->assertStillDecided($account, $centavos, $decided);
         }
 
+        $needsApproval = $this->gate->needsApproval($centavos);
+
+        // Paid now: charge the stored fee, or less if something counted
+        // before it has fallen away. Waiting for a checker: keep it as stored.
+        if (! $needsApproval && $decided->source !== null) {
+            $decided = $decided->charging($this->rules->payoutFee($account, $decided));
+        }
+
         $this->assertAvailable($account, $centavos + $decided->fee);
 
-        if ($this->gate->needsApproval($centavos)) {
+        if ($needsApproval) {
             $this->assertNotBeforeLatest($account, $data['date']);
             $this->periods->assertOpen($data['date'], 'This withdrawal');
 
@@ -130,8 +139,9 @@ class Teller
      * once approved, by the WithdrawalExecutor), and post its journal. It
      * charges the fee `$fee` decided at request: beyond the free withdrawals
      * the fee posts as its own `fee` row linked to the withdrawal, with its
-     * own journal, in the same write. The withdrawal row keeps `counted_on`,
-     * the date its request counts in.
+     * own journal, in the same write. The withdrawal row keeps `counted_on`
+     * and `requested_at`, the date its request counts in and when it was
+     * asked for.
      *
      * @param  array{date: string, payment_method: string, reference?: string|null, remarks?: string|null}  $data
      * @param  list<int|null>  $otherDeciders  checkers who approved it before the poster (not alerted)
@@ -144,6 +154,7 @@ class Teller
             ...$this->attributes($data, $makerId),
             'approval_id' => $approvalId,
             'counted_on' => $fee->countedOn,
+            'requested_at' => $fee->requestedAt,
         ]);
         $this->poster->savingsTransaction($row, $posterId);
 
