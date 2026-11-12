@@ -23,14 +23,26 @@ use Illuminate\Foundation\Http\FormRequest;
  *    `users.*` routes, whose `{user}` binding is an oracle; a list that binds
  *    nothing has nothing to conceal.
  *
+ * `?for=savings` (gap round S4) also lets a caller holding `savings:create`
+ * read it, for the account officer on the savings opening form
+ * (OpenSavingsAccountRequest needs `savings:create`). The rows are the same
+ * names-only list of active staff in the caller's branches; without the
+ * parameter the loan rule above is unchanged.
+ *
  * `$this->authorize()` in the controller takes one ability, hence a
  * FormRequest for the `canAny()`.
  */
 class ListStaffRequest extends FormRequest
 {
+    /** The one form outside lending with an officer picker: opening a savings account. */
+    public const FOR_SAVINGS = 'savings';
+
     public function authorize(): bool
     {
-        return $this->user()->canAny(['loans:create', 'loans:update', 'loans:restructure']);
+        $user = $this->user();
+
+        return $user->canAny(['loans:create', 'loans:update', 'loans:restructure'])
+            || ($this->query('for') === self::FOR_SAVINGS && $user->can('savings:create'));
     }
 
     /**
@@ -39,9 +51,19 @@ class ListStaffRequest extends FormRequest
     public function rules(): array
     {
         return [
+            'for' => ['nullable', 'string', 'in:'.self::FOR_SAVINGS],
             'search' => ['nullable', 'string', 'max:100'],
             'per_page' => ['nullable', 'integer', 'min:1'],
             'page' => ['nullable', 'integer', 'min:1'],
+        ];
+    }
+
+    /** @return array<string, string> */
+    public function messages(): array
+    {
+        return [
+            'for.string' => 'The staff list can be asked for the savings opening form only (for=savings), or without it.',
+            'for.in' => 'The staff list can be asked for the savings opening form only (for=savings), or without it.',
         ];
     }
 

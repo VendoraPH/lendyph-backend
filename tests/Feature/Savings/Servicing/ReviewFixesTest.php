@@ -148,6 +148,25 @@ class ReviewFixesTest extends TestCase
             ->assertJsonPath('message', self::HOLD_MESSAGE)->assertJsonPath('data.approval.check_reason', self::CHECK_REASON));
     }
 
+    public function test_a_small_share_capital_transfer_needs_a_checker_while_held(): void
+    {
+        $this->reactivateByDeposit();
+        $officer = $this->userWith(['savings:view', 'savings:post', 'share_capital:create', 'share_capital:view']);
+
+        $approvalId = $this->actingAs($officer)->money("/api/savings/accounts/{$this->dormant->id}/share-capital-transfers", ['amount' => '500.00', 'remarks' => 'Build-up'])
+            ->assertStatus(202)
+            ->assertJsonPath('data.approval.kind', 'share_capital_transfer')
+            ->assertJsonPath('data.approval.check_reason', self::CHECK_REASON)
+            ->json('data.approval.id');
+        $this->assertSame('5000.00', $this->balanceOf($this->dormant));
+
+        $this->actingAs($this->checker())->postJson("/api/savings/approvals/{$approvalId}/approve")->assertOk();
+        $this->assertSame('4500.00', $this->balanceOf($this->dormant));
+        $this->assertNull($this->dormant->refresh()->outflow_check_required_since);
+
+        $this->actingAs($officer)->money("/api/savings/accounts/{$this->dormant->id}/share-capital-transfers", ['amount' => '100.00'])->assertCreated();
+    }
+
     public function test_an_account_never_reactivated_by_a_deposit_is_unchanged(): void
     {
         $active = $this->account(['borrower_id' => Borrower::factory()->create(['branch_id' => $this->branch->id, 'status' => 'active'])->id]);
