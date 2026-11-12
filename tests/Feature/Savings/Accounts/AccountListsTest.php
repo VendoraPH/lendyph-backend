@@ -51,7 +51,7 @@ class AccountListsTest extends TestCase
             ->assertJsonPath('meta.totals.account_count', 2)
             ->assertJsonPath('meta.totals.total_balance', '1500.50');
 
-        $this->assertSame(['id', 'account_number', 'borrower_id', 'borrower_name', 'borrower_code', 'branch_id', 'branch_name', 'product', 'status', 'balance', 'hold_amount', 'held_for_requests', 'pending_amount', 'available_balance', 'accrued_interest', 'interest_credited_through', 'opened_on', 'last_member_activity_on', 'dormant_since', 'closed_on', 'close_reason', 'remarks'], array_keys($response->json('data.0')));
+        $this->assertSame(['id', 'account_number', 'borrower_id', 'borrower_name', 'borrower_code', 'branch_id', 'branch_name', 'product', 'status', 'balance', 'hold_amount', 'held_for_requests', 'pending_amount', 'available_balance', 'accrued_interest', 'interest_credited_through', 'opened_on', 'last_member_activity_on', 'dormant_since', 'closed_on', 'close_reason', 'remarks', 'account_officer', 'source_of_funds', 'source_of_funds_other', 'source_of_funds_label', 'beneficiary'], array_keys($response->json('data.0')));
 
         $this->getJson('/api/savings/accounts?search=rizal')->assertJsonPath('meta.total', 1)->assertJsonPath('data.0.borrower_name', 'Jose Rizal');
         $this->getJson('/api/savings/accounts?search='.$a->account_number)->assertJsonPath('meta.total', 1);
@@ -104,7 +104,7 @@ class AccountListsTest extends TestCase
             ->assertJsonPath('data.0.account_number', $account->account_number)
             ->assertJsonPath('data.0.branch_name', $this->branch->name);
 
-        $this->assertSame(['id', 'kind', 'status', 'account_id', 'account_number', 'time_deposit_id', 'certificate_number', 'borrower_name', 'branch_name', 'target_transaction_id', 'target_reference', 'amount', 'required_checkers', 'requested_by', 'first_checker', 'decided_by', 'decision_reason', 'decided_at', 'expires_at', 'result_transaction_id', 'created_at'], array_keys($response->json('data.0')));
+        $this->assertSame(['id', 'kind', 'status', 'account_id', 'account_number', 'time_deposit_id', 'certificate_number', 'borrower_name', 'branch_name', 'target_transaction_id', 'target_reference', 'amount', 'fee_amount', 'required_checkers', 'requested_by', 'first_checker', 'decided_by', 'decision_reason', 'decided_at', 'expires_at', 'result_transaction_id', 'created_at'], array_keys($response->json('data.0')));
         $this->assertSame(1, SavingsAccount::query()->count());
     }
 }

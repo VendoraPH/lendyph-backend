@@ -64,7 +64,7 @@ class CdaTemplatesTest extends TestCase
 
     public function test_required_documents_are_needed_to_submit_never_to_finalize(): void
     {
-        foreach (CdaReportTemplate::query()->where('version', '2026.1')->get() as $template) {
+        foreach (CdaReportTemplate::query()->whereIn('version', ['2026.1', '2026.2'])->get() as $template) {
             foreach ($template->definition['documents'] ?? [] as $document) {
                 $this->assertSame('submit', $document['stage'], "{$template->report_type}: {$document['key']} is produced after finalizing.");
             }

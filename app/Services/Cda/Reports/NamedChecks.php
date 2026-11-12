@@ -6,6 +6,7 @@ use App\Models\CdaOfficer;
 use App\Models\CdaRegulatoryProfile;
 use App\Models\CdaReport;
 use App\Services\Accounting\BalanceSheetBuilder;
+use App\Services\Accounting\Money;
 use App\Services\Accounting\TrialBalanceBuilder;
 use App\Services\Cda\Registers\TrainingCompliance;
 use App\Services\Cda\Sources\AccountingSource;
@@ -14,6 +15,8 @@ use App\Services\Cda\Sources\SourceContext;
 use App\Services\Cda\Sources\SourceRegistry;
 use App\Services\Cda\Sources\SourceResult;
 use App\Services\Cda\Sources\SourceUnavailable;
+use App\Services\Savings\Reports\GlControl;
+use App\Services\Savings\SavingsMath;
 use Illuminate\Support\Carbon;
 use InvalidArgumentException;
 
@@ -42,6 +45,7 @@ final class NamedChecks
         private readonly SourceRegistry $sources,
         private readonly BalanceSheetBuilder $balanceSheet,
         private readonly TrialBalanceBuilder $trialBalance,
+        private readonly GlControl $savingsGl,
     ) {}
 
     /** @param  array<string, mixed>  $params */
@@ -67,6 +71,7 @@ final class NamedChecks
             'template.verified' => $definition->isVerified() ? null
                 : 'This form follows the CDA template as understood in v1 and is still to be checked against the official form.',
             'pesos.rules_verified' => $this->pesosVerified($context),
+            'savings.gl_matches' => $this->savingsGlMatches($periodEnd),
             default => throw new InvalidArgumentException("Unknown check \"{$check}\"."),
         };
     }
@@ -132,6 +137,29 @@ final class NamedChecks
         }
 
         return $missing === [] ? null : 'No '.self::list($missing).' is recorded as serving on '.self::day($asOf).'.';
+    }
+
+    /**
+     * The savings subledger against the general ledger at the period's end,
+     * every branch (GlControl, the Savings GL Control report's rule). Passes
+     * when the cooperative keeps no savings.
+     */
+    private function savingsGlMatches(string $asOf): ?string
+    {
+        if (! $this->savingsGl->hasSavings()) {
+            return null;
+        }
+
+        $control = $this->savingsGl->build($asOf, null);
+
+        if ($control['is_balanced']) {
+            return null;
+        }
+
+        $difference = Money::format(abs(SavingsMath::signedCentavos($control['totals']['difference'])));
+        $lines = $control['differences'] === 1 ? '1 line differs' : "{$control['differences']} lines differ";
+
+        return 'The savings subledger differs from the general ledger as of '.self::day($asOf)." by {$difference} ({$lines}). Check the Savings GL Control report before filing.";
     }
 
     private function profileComplete(): ?string

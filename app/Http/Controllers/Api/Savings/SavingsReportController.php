@@ -11,9 +11,13 @@ use App\Models\SavingsInterestRun;
 use App\Models\SavingsTransaction;
 use App\Models\TimeDeposit;
 use App\Services\BranchAccess;
+use App\Services\Savings\Dashboard\DepositFigures;
+use App\Services\Savings\Dashboard\DepositSummary;
 use App\Services\Savings\Reports\GlControl;
+use App\Services\Savings\Reports\MemberStatement;
 use App\Services\Savings\Reports\SavingsReports;
 use App\Services\Savings\Reports\StatementBuilder;
+use App\Services\Savings\SavingsMath;
 use Closure;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
@@ -45,6 +49,7 @@ class SavingsReportController extends Controller
     private const TRANSACTION_TYPE_WORDS = [
         'deposit' => 'Deposit', 'withdrawal' => 'Withdrawal', 'transfer_in' => 'Transfer in', 'transfer_out' => 'Transfer out',
         'interest' => 'Interest', 'withholding_tax' => 'Withholding tax', 'closing' => 'Closing payout', 'reversal' => 'Reversal',
+        'fee' => 'Excess-withdrawal fee', 'share_capital_transfer' => 'Transfer to share capital',
     ];
 
     private const METHOD_WORDS = ['cash' => 'Cash', 'bank_transfer' => 'Bank transfer', 'gcash' => 'GCash', 'maya' => 'Maya', 'savings' => 'Savings account'];
@@ -64,6 +69,8 @@ class SavingsReportController extends Controller
         private readonly StatementBuilder $statements,
         private readonly GlControl $control,
         private readonly BranchAccess $branches,
+        private readonly DepositSummary $summary,
+        private readonly MemberStatement $memberStatements,
     ) {}
 
     #[OA\Get(
@@ -275,6 +282,305 @@ class SavingsReportController extends Controller
         $rows = array_map(fn (array $row) => [$control['as_of'], $row['branch_name'], $row['account_code'], $row['account_name'], $row['subledger_balance'], $row['gl_balance'], $row['difference']], $control['rows']);
 
         return $this->savingsCsv('savings-gl-control.csv', ['As Of', 'Branch', 'Account', 'Account Name', 'Savings Subledger', 'General Ledger', 'Difference'], $rows);
+    }
+
+    // ── Gap round S5: the rest of the Savings task's TASK 36 ──
+
+    #[OA\Get(
+        path: '/api/reports/savings/accounts',
+        summary: 'Savings Account Listing',
+        description: 'Every savings account in the caller\'s branches, closed ones too, by account number, with its balance today, opening and closing dates, dormancy and account officer. `totals`: account_count, active_count, dormant_count, frozen_count, closed_count, total_balance.',
+        tags: ['Savings Reports'],
+        security: [['sanctum' => []]],
+        parameters: [new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')), new OA\Parameter(name: 'product_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')), new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', maximum: 1000))],
+        responses: [new OA\Response(response: 200, description: 'A page of accounts with totals'), new OA\Response(response: 403, description: 'Missing reports:view or savings:view, or another branch'), new OA\Response(response: 422, description: 'An invalid filter')],
+    )]
+    public function accounts(SavingsReportRequest $request): JsonResponse
+    {
+        $filters = $request->filters();
+        $page = $this->reports->accountListQuery($filters)->paginate($this->perPage($filters));
+
+        return $this->list($page, $page->getCollection()->map(fn (SavingsAccount $account) => $this->reports->accountListRow($account))->all(), $this->reports->accountListTotals($filters), ['as_of' => now()->toDateString()]);
+    }
+
+    #[OA\Get(
+        path: '/api/reports/savings/deposits',
+        summary: 'Savings Deposits',
+        description: 'Deposits dated in the period (default this month to today), oldest first; money moved from a time deposit is left out. A deposit reversed by the period\'s end is listed with `reversed` and counts in no money total; one reversed later counts, as the period stood at its end. `totals`: count, reversed_count, total_credit, total_debit, total_amount.',
+        tags: ['Savings Reports'],
+        security: [['sanctum' => []]],
+        parameters: [new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')), new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')), new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')), new OA\Parameter(name: 'product_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')), new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', maximum: 1000))],
+        responses: [new OA\Response(response: 200, description: 'A page of deposits with totals'), new OA\Response(response: 403, description: 'Missing reports:view or savings:view, or another branch'), new OA\Response(response: 422, description: 'An invalid filter')],
+    )]
+    public function deposits(SavingsReportRequest $request): JsonResponse
+    {
+        $filters = $request->filters();
+
+        return $this->flowList($this->reports->depositsQuery($filters), $filters);
+    }
+
+    #[OA\Get(
+        path: '/api/reports/savings/withdrawals',
+        summary: 'Savings Withdrawals',
+        description: 'Withdrawals and closing payouts dated in the period (default this month to today), oldest first; money moved into a time deposit is left out. A reversed one is listed with `reversed` and counts in no money total. `totals`: count, reversed_count, total_credit, total_debit, total_amount.',
+        tags: ['Savings Reports'],
+        security: [['sanctum' => []]],
+        parameters: [new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')), new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')), new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')), new OA\Parameter(name: 'product_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')), new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', maximum: 1000))],
+        responses: [new OA\Response(response: 200, description: 'A page of withdrawals with totals'), new OA\Response(response: 403, description: 'Missing reports:view or savings:view, or another branch'), new OA\Response(response: 422, description: 'An invalid filter')],
+    )]
+    public function withdrawals(SavingsReportRequest $request): JsonResponse
+    {
+        $filters = $request->filters();
+
+        return $this->flowList($this->reports->withdrawalsQuery($filters), $filters);
+    }
+
+    #[OA\Get(
+        path: '/api/reports/savings/large-transactions',
+        summary: 'Large Savings Transactions',
+        description: 'Deposits, withdrawals and closing payouts dated in the period of the large-transaction alert\'s amount (savings settings) or more, the rows the alert is sent for; money moved to or from a time deposit is left out. `threshold` is that amount. A reversed one is listed with `reversed` and counts in no money total. `totals`: count, reversed_count, total_credit, total_debit, total_amount.',
+        tags: ['Savings Reports'],
+        security: [['sanctum' => []]],
+        parameters: [new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')), new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')), new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')), new OA\Parameter(name: 'product_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')), new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', maximum: 1000))],
+        responses: [new OA\Response(response: 200, description: 'A page of transactions with totals'), new OA\Response(response: 403, description: 'Missing reports:view or savings:view, or another branch'), new OA\Response(response: 422, description: 'An invalid filter')],
+    )]
+    public function largeTransactions(SavingsReportRequest $request): JsonResponse
+    {
+        $filters = $request->filters();
+
+        return $this->flowList($this->reports->largeTransactionsQuery($filters), $filters, ['threshold' => SavingsMath::pesos($this->reports->largeTransactionThreshold())]);
+    }
+
+    #[OA\Get(
+        path: '/api/reports/savings/time-deposits',
+        summary: 'Time Deposits Outstanding',
+        description: 'Time deposits outstanding at the end of `as_of` (default today): placed by then and not settled by then, soonest maturity first, with the days to maturity from `as_of`. `totals`: count, total_principal (the GL control\'s 2060 subledger), total_net_interest, total_maturity_amount.',
+        tags: ['Savings Reports'],
+        security: [['sanctum' => []]],
+        parameters: [new OA\Parameter(name: 'as_of', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')), new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')), new OA\Parameter(name: 'product_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')), new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', maximum: 1000))],
+        responses: [new OA\Response(response: 200, description: 'A page of time deposits with totals'), new OA\Response(response: 403, description: 'Missing reports:view or savings:view, or another branch'), new OA\Response(response: 422, description: 'An invalid filter, or `as_of` after today')],
+    )]
+    public function timeDeposits(SavingsReportRequest $request): JsonResponse
+    {
+        $filters = $request->filters();
+        $page = $this->reports->timeDepositsQuery($filters)->paginate($this->perPage($filters));
+
+        return $this->list($page, $page->getCollection()->map(fn (TimeDeposit $deposit) => $this->reports->timeDepositRow($deposit, $filters))->all(), $this->reports->timeDepositTotals($filters), ['as_of' => $this->reports->asOf($filters)]);
+    }
+
+    #[OA\Get(
+        path: '/api/reports/savings/interest-accrual',
+        summary: 'Savings Interest Accrual',
+        description: 'Interest earned and not yet credited, today, on every account not closed: from the day after it was last credited (or its opening) to yesterday, its average daily balance, gross interest, tax and net, as an interest run works it out. Shown only; nothing posts until a run credits it. `totals`: account_count, total_gross_interest, total_tax, total_net_interest.',
+        tags: ['Savings Reports'],
+        security: [['sanctum' => []]],
+        parameters: [new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')), new OA\Parameter(name: 'product_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')), new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', maximum: 1000))],
+        responses: [new OA\Response(response: 200, description: 'A page of accounts with totals'), new OA\Response(response: 403, description: 'Missing reports:view or savings:view, or another branch'), new OA\Response(response: 422, description: 'An invalid filter')],
+    )]
+    public function interestAccrual(SavingsReportRequest $request): JsonResponse
+    {
+        $filters = $request->filters();
+        $page = $this->reports->interestAccrualQuery($filters)->paginate($this->perPage($filters));
+
+        return $this->list($page, $this->reports->interestAccrualRows($page->getCollection()), $this->reports->interestAccrualTotals($filters), ['as_of' => now()->toDateString()]);
+    }
+
+    #[OA\Get(
+        path: '/api/reports/savings/account-activity',
+        summary: 'Savings Account Activity',
+        description: 'Each account open at some point in the period (default this month to today): its balance before the period, money in and out in it (every row, reversals too), its number of rows, its closing balance and its last row\'s date. `totals`: account_count, transaction_count, total_opening_balance, total_credits, total_debits, total_closing_balance.',
+        tags: ['Savings Reports'],
+        security: [['sanctum' => []]],
+        parameters: [new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')), new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')), new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')), new OA\Parameter(name: 'product_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')), new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', maximum: 1000))],
+        responses: [new OA\Response(response: 200, description: 'A page of accounts with totals'), new OA\Response(response: 403, description: 'Missing reports:view or savings:view, or another branch'), new OA\Response(response: 422, description: 'An invalid filter')],
+    )]
+    public function accountActivity(SavingsReportRequest $request): JsonResponse
+    {
+        $filters = $request->filters();
+        $page = $this->reports->accountActivityQuery($filters)->paginate($this->perPage($filters));
+
+        return $this->list($page, $this->reports->accountActivityRows($page->getCollection(), $filters), $this->reports->accountActivityTotals($filters), $this->range($filters));
+    }
+
+    #[OA\Get(
+        path: '/api/reports/savings/member-statement/{borrower}',
+        summary: 'Member Deposit Statement',
+        description: 'One member\'s savings accounts in the caller\'s branches, each as its own statement for the period (default the member\'s first account opening to today), and the member\'s time deposits outstanding at some point in it. `member` carries the id, name, code and branch only. `totals`: account_count, opening_balance, credit, debit, closing_balance, time_deposit_count and time_deposits (outstanding at `date_to`), total_deposits.',
+        tags: ['Savings Reports'],
+        security: [['sanctum' => []]],
+        parameters: [new OA\Parameter(name: 'borrower', in: 'path', required: true, schema: new OA\Schema(type: 'integer')), new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')), new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')), new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')), new OA\Parameter(name: 'product_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer'))],
+        responses: [new OA\Response(response: 200, description: 'The statement'), new OA\Response(response: 403, description: 'Missing reports:view or savings:view'), new OA\Response(response: 404, description: 'No such member in the caller\'s branches'), new OA\Response(response: 422, description: 'An invalid filter')],
+    )]
+    public function memberStatement(SavingsReportRequest $request, int $borrower): JsonResponse
+    {
+        $filters = $request->filters();
+        $member = $this->memberStatements->member($request->user(), $borrower);
+
+        return response()->json(['success' => true, 'data' => $this->memberStatements->build($request->user(), $member, $filters)]);
+    }
+
+    #[OA\Get(
+        path: '/api/reports/savings/summary',
+        summary: 'Savings Deposit Summary',
+        description: 'The period (default this month to today) by branch (default) or by product (`group_by`). Each row and `totals`: opening_balance, deposit_count, deposits, withdrawal_count, withdrawals, interest_credited, tax_withheld, fee_count, fees_charged (excess-withdrawal fees, income, never a withdrawal), share_capital_transfer_count, share_capital_transfers (savings moved to share capital, never a withdrawal), other_movements, net_movement, closing_balance, new_accounts, open_accounts, time_deposit_count and time_deposits (outstanding at `date_to`), time_deposits_placed_count, time_deposits_placed, time_deposit_interest, interest_expense and total_deposits. Every active branch or product is listed; `totals` are worked out over the whole filter, and the rows add up to them.',
+        tags: ['Savings Reports'],
+        security: [['sanctum' => []]],
+        parameters: [new OA\Parameter(name: 'group_by', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['branch', 'product'])), new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')), new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')), new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')), new OA\Parameter(name: 'product_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer'))],
+        responses: [new OA\Response(response: 200, description: 'The summary'), new OA\Response(response: 403, description: 'Missing reports:view or savings:view, or another branch'), new OA\Response(response: 422, description: 'An invalid filter')],
+    )]
+    public function summary(SavingsReportRequest $request): JsonResponse
+    {
+        return response()->json(['success' => true, 'data' => $this->summaryFor($request->filters())]);
+    }
+
+    #[OA\Get(path: '/api/reports/savings/accounts/export', summary: 'Export the Savings Account Listing as CSV', tags: ['Savings Reports'], security: [['sanctum' => []]], parameters: [new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')), new OA\Parameter(name: 'product_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer'))], responses: [new OA\Response(response: 200, description: 'CSV file'), new OA\Response(response: 403, description: 'Missing reports:export or savings:view')])]
+    public function exportAccounts(SavingsExportRequest $request): StreamedResponse
+    {
+        return $this->csv('savings-accounts.csv', ['Account #', 'Member', 'Member Code', 'Product', 'Branch', 'Status', 'Balance (₱)', 'Opened', 'Closed', 'Dormant Since', 'Last Activity', 'Account Officer'], $this->reports->accountListQuery($request->filters()), function (SavingsAccount $account): array {
+            $r = $this->reports->accountListRow($account);
+
+            return [$r['account_number'], $r['borrower_name'], $r['borrower_code'], $r['product_name'], $r['branch_name'], self::inWords(self::ACCOUNT_STATUS_WORDS, $r['status']), $r['balance'], $r['opened_on'], $r['closed_on'], $r['dormant_since'], $r['last_member_activity_on'], $r['account_officer']['name'] ?? ''];
+        });
+    }
+
+    #[OA\Get(path: '/api/reports/savings/deposits/export', summary: 'Export Savings Deposits as CSV', tags: ['Savings Reports'], security: [['sanctum' => []]], parameters: [new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')), new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')), new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')), new OA\Parameter(name: 'product_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer'))], responses: [new OA\Response(response: 200, description: 'CSV file'), new OA\Response(response: 403, description: 'Missing reports:export or savings:view')])]
+    public function exportDeposits(SavingsExportRequest $request): StreamedResponse
+    {
+        $filters = $request->filters();
+
+        return $this->flowCsv('savings-deposits.csv', $this->reports->depositsQuery($filters), $filters);
+    }
+
+    #[OA\Get(path: '/api/reports/savings/withdrawals/export', summary: 'Export Savings Withdrawals as CSV', tags: ['Savings Reports'], security: [['sanctum' => []]], parameters: [new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')), new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')), new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')), new OA\Parameter(name: 'product_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer'))], responses: [new OA\Response(response: 200, description: 'CSV file'), new OA\Response(response: 403, description: 'Missing reports:export or savings:view')])]
+    public function exportWithdrawals(SavingsExportRequest $request): StreamedResponse
+    {
+        $filters = $request->filters();
+
+        return $this->flowCsv('savings-withdrawals.csv', $this->reports->withdrawalsQuery($filters), $filters);
+    }
+
+    #[OA\Get(path: '/api/reports/savings/large-transactions/export', summary: 'Export Large Savings Transactions as CSV', tags: ['Savings Reports'], security: [['sanctum' => []]], parameters: [new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')), new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')), new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')), new OA\Parameter(name: 'product_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer'))], responses: [new OA\Response(response: 200, description: 'CSV file'), new OA\Response(response: 403, description: 'Missing reports:export or savings:view')])]
+    public function exportLargeTransactions(SavingsExportRequest $request): StreamedResponse
+    {
+        $filters = $request->filters();
+
+        return $this->flowCsv('large-savings-transactions.csv', $this->reports->largeTransactionsQuery($filters), $filters);
+    }
+
+    #[OA\Get(path: '/api/reports/savings/time-deposits/export', summary: 'Export Time Deposits Outstanding as CSV', tags: ['Savings Reports'], security: [['sanctum' => []]], parameters: [new OA\Parameter(name: 'as_of', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')), new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')), new OA\Parameter(name: 'product_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer'))], responses: [new OA\Response(response: 200, description: 'CSV file'), new OA\Response(response: 403, description: 'Missing reports:export or savings:view')])]
+    public function exportTimeDeposits(SavingsExportRequest $request): StreamedResponse
+    {
+        $filters = $request->filters();
+
+        return $this->csv('time-deposits.csv', ['Certificate #', 'Member', 'Product', 'Branch', 'Placed', 'Maturity', 'Days to Maturity', 'Principal (₱)', 'Rate', 'Days', 'Net Interest (₱)', 'Due at Maturity (₱)', 'Instruction', 'Status'], $this->reports->timeDepositsQuery($filters), function (TimeDeposit $deposit) use ($filters): array {
+            $r = $this->reports->timeDepositRow($deposit, $filters);
+
+            return [$r['certificate_number'], $r['borrower_name'], $r['product_name'], $r['branch_name'], $r['placement_date'], $r['maturity_date'], $r['days_to_maturity'], $r['principal'], self::percent($r['annual_rate']), $r['term_days'], $r['net_interest'], $r['maturity_amount'], self::inWords(self::MATURITY_INSTRUCTION_WORDS, $r['maturity_instruction']), self::inWords(self::TIME_DEPOSIT_STATUS_WORDS, $r['status'])];
+        });
+    }
+
+    #[OA\Get(path: '/api/reports/savings/interest-accrual/export', summary: 'Export Savings Interest Accrual as CSV', tags: ['Savings Reports'], security: [['sanctum' => []]], parameters: [new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')), new OA\Parameter(name: 'product_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer'))], responses: [new OA\Response(response: 200, description: 'CSV file'), new OA\Response(response: 403, description: 'Missing reports:export or savings:view')])]
+    public function exportInterestAccrual(SavingsExportRequest $request): StreamedResponse
+    {
+        $filters = $request->filters();
+        $rows = (function () use ($filters) {
+            foreach ($this->reports->interestAccrualQuery($filters)->reorder()->lazyById(500)->chunk(500) as $chunk) {
+                foreach ($this->reports->interestAccrualRows($chunk->collect()->values()) as $r) {
+                    yield [$r['account_number'], $r['borrower_name'], $r['product_name'], $r['branch_name'], self::inWords(self::ACCOUNT_STATUS_WORDS, $r['status']), $r['balance'], $r['accrual_from'], $r['accrual_to'], $r['days'], $r['average_daily_balance'], $r['gross_interest'], $r['tax'], $r['net_interest']];
+                }
+            }
+        })();
+
+        return $this->savingsCsv('savings-interest-accrual.csv', ['Account #', 'Member', 'Product', 'Branch', 'Status', 'Balance (₱)', 'From', 'To', 'Days', 'Average Daily Balance (₱)', 'Gross Interest (₱)', 'Tax (₱)', 'Net Interest (₱)'], $rows);
+    }
+
+    #[OA\Get(path: '/api/reports/savings/account-activity/export', summary: 'Export Savings Account Activity as CSV', tags: ['Savings Reports'], security: [['sanctum' => []]], parameters: [new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')), new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')), new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')), new OA\Parameter(name: 'product_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer'))], responses: [new OA\Response(response: 200, description: 'CSV file'), new OA\Response(response: 403, description: 'Missing reports:export or savings:view')])]
+    public function exportAccountActivity(SavingsExportRequest $request): StreamedResponse
+    {
+        $filters = $request->filters();
+        $rows = (function () use ($filters) {
+            foreach ($this->reports->accountActivityQuery($filters)->reorder()->lazyById(500)->chunk(500) as $chunk) {
+                foreach ($this->reports->accountActivityRows($chunk->collect()->values(), $filters) as $r) {
+                    yield [$r['account_number'], $r['borrower_name'], $r['product_name'], $r['branch_name'], self::inWords(self::ACCOUNT_STATUS_WORDS, $r['status']), $r['opening_balance'], $r['credits'], $r['debits'], $r['transaction_count'], $r['closing_balance'], $r['last_transaction_on']];
+                }
+            }
+        })();
+
+        return $this->savingsCsv('savings-account-activity.csv', ['Account #', 'Member', 'Product', 'Branch', 'Status', 'Opening Balance (₱)', 'In (₱)', 'Out (₱)', 'Transactions', 'Closing Balance (₱)', 'Last Transaction'], $rows);
+    }
+
+    #[OA\Get(path: '/api/reports/savings/member-statement/{borrower}/export', summary: 'Export a Member Deposit Statement as CSV', tags: ['Savings Reports'], security: [['sanctum' => []]], parameters: [new OA\Parameter(name: 'borrower', in: 'path', required: true, schema: new OA\Schema(type: 'integer')), new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')), new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date'))], responses: [new OA\Response(response: 200, description: 'CSV file'), new OA\Response(response: 403, description: 'Missing reports:export or savings:view'), new OA\Response(response: 404, description: 'No such member in the caller\'s branches')])]
+    public function exportMemberStatement(SavingsExportRequest $request, int $borrower): StreamedResponse
+    {
+        $filters = $request->filters();
+        $member = $this->memberStatements->member($request->user(), $borrower);
+        $statement = $this->memberStatements->build($request->user(), $member, $filters);
+        $rows = [];
+
+        foreach ($statement['accounts'] as $account) {
+            $number = $account['account']['account_number'];
+            $rows[] = [$number, $account['date_from'], '', 'Opening balance', '', '', $account['opening_balance']];
+
+            foreach ($account['rows'] as $line) {
+                $rows[] = [$number, $line['date'], $line['reference'], self::inWords(self::TRANSACTION_TYPE_WORDS, $line['type']), $line['credit'], $line['debit'], $line['balance_after']];
+            }
+
+            $rows[] = [$number, $account['date_to'], '', 'Closing balance', $account['totals']['credit'], $account['totals']['debit'], $account['closing_balance']];
+        }
+
+        foreach ($statement['time_deposits'] as $deposit) {
+            $rows[] = [$deposit['certificate_number'], $deposit['placement_date'], '', 'Time deposit, '.self::inWords(self::TIME_DEPOSIT_STATUS_WORDS, $deposit['status']), $deposit['principal'], '', ''];
+        }
+
+        return $this->savingsCsv('member-deposit-statement.csv', ['Account #', 'Date', 'Reference', 'Type', 'In (₱)', 'Out (₱)', 'Balance (₱)'], $rows);
+    }
+
+    #[OA\Get(path: '/api/reports/savings/summary/export', summary: 'Export the Savings Deposit Summary as CSV', tags: ['Savings Reports'], security: [['sanctum' => []]], parameters: [new OA\Parameter(name: 'group_by', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['branch', 'product'])), new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')), new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')), new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')), new OA\Parameter(name: 'product_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer'))], responses: [new OA\Response(response: 200, description: 'CSV file'), new OA\Response(response: 403, description: 'Missing reports:export or savings:view')])]
+    public function exportSummary(SavingsExportRequest $request): StreamedResponse
+    {
+        $summary = $this->summaryFor($request->filters());
+        $line = fn (string $name, array $r) => [$name, $r['opening_balance'], $r['deposit_count'], $r['deposits'], $r['withdrawal_count'], $r['withdrawals'], $r['interest_credited'], $r['tax_withheld'], $r['fees_charged'], $r['share_capital_transfers'], $r['other_movements'], $r['net_movement'], $r['closing_balance'], $r['new_accounts'], $r['open_accounts'], $r['time_deposit_count'], $r['time_deposits'], $r['time_deposits_placed'], $r['interest_expense'], $r['total_deposits']];
+        $rows = array_map(fn (array $r) => $line($r['group_name'], $r), $summary['rows']);
+        $rows[] = $line('Total', $summary['totals']);
+
+        return $this->savingsCsv('savings-summary.csv', [
+            $summary['group_by'] === DepositFigures::GROUP_PRODUCT ? 'Product' : 'Branch', 'Opening Balance (₱)', 'Deposits (count)', 'Deposits (₱)', 'Withdrawals (count)', 'Withdrawals (₱)',
+            'Interest Credited (₱)', 'Tax Withheld (₱)', 'Fees Charged (₱)', 'Share Capital Transfers (₱)', 'Other Movements (₱)', 'Net Movement (₱)', 'Closing Balance (₱)', 'New Accounts', 'Open Accounts',
+            'Time Deposits (count)', 'Time Deposits (₱)', 'Time Deposits Placed (₱)', 'Interest Expense (₱)', 'Total Deposits (₱)',
+        ], $rows);
+    }
+
+    /**
+     * @param  Builder<SavingsTransaction>  $query
+     * @param  array<string, mixed>  $extra
+     */
+    private function flowList(Builder $query, array $filters, array $extra = []): JsonResponse
+    {
+        $page = (clone $query)->paginate($this->perPage($filters));
+        $asAt = $this->reports->period($filters)[1];
+
+        return $this->list($page, $page->getCollection()->map(fn (SavingsTransaction $row) => $this->reports->flowRow($row, $asAt))->all(), $this->reports->flowTotals($query, $asAt), [...$this->range($filters), ...$extra]);
+    }
+
+    /** @param  Builder<SavingsTransaction>  $query */
+    private function flowCsv(string $filename, Builder $query, array $filters): StreamedResponse
+    {
+        $asAt = $this->reports->period($filters)[1];
+
+        return $this->csv($filename, ['Date', 'Reference', 'Account #', 'Member', 'Product', 'Branch', 'Type', 'Method', 'Amount (₱)', 'Balance (₱)', 'Reversed By', 'Reversed On'], $query, function (SavingsTransaction $row) use ($asAt): array {
+            $r = $this->reports->flowRow($row, $asAt);
+
+            return [$r['date'], $r['reference'], $r['account_number'], $r['borrower_name'], $r['product_name'], $r['branch_name'], self::inWords(self::TRANSACTION_TYPE_WORDS, $r['type']), self::inWords(self::METHOD_WORDS, $r['method']), $r['amount'], $r['balance_after'], $r['reversed_by_reference'] ?? '', $r['reversed_on'] ?? ''];
+        });
+    }
+
+    /** @return array<string, mixed> */
+    private function summaryFor(array $filters): array
+    {
+        [$from, $to] = $this->reports->period($filters);
+        $scope = ['branch_ids' => $filters['branch_ids'], 'branch_id' => isset($filters['branch_id']) ? (int) $filters['branch_id'] : null, 'product_id' => isset($filters['product_id']) ? (int) $filters['product_id'] : null];
+
+        return $this->summary->build($scope, $from, $to, $filters['group_by'] ?? DepositFigures::GROUP_BRANCH);
     }
 
     /**

@@ -49,13 +49,17 @@ class GlControl
 
     /**
      * @param  list<int>|null  $branchIds  the caller's branches; null for every branch
+     * @param  bool  $fromAccountBalances  read today's savings subledger from the accounts' own
+     *                                     balances instead of every row (gap round S5, the dashboards);
+     *                                     used only for today, when the two are the same
      * @return array{as_of: string, rows: list<array<string, mixed>>, totals: array{subledger_balance: string, gl_balance: string, difference: string}, is_balanced: bool, differences: int}
      */
-    public function build(string $asOf, ?array $branchIds, ?int $branchId = null): array
+    public function build(string $asOf, ?array $branchIds, ?int $branchId = null, bool $fromAccountBalances = false): array
     {
         $scope = $branchId !== null ? [$branchId] : $branchIds;
+        $subledger = $fromAccountBalances && $asOf === now()->toDateString() ? $this->accountBalances() : $this->savingsSubledger($asOf);
         $figures = [
-            PostingRules::SAVINGS_DEPOSITS_ROLE => [$this->savingsSubledger($asOf), $this->generalLedger(PostingRules::SAVINGS_DEPOSITS_ROLE, $asOf)],
+            PostingRules::SAVINGS_DEPOSITS_ROLE => [$subledger, $this->generalLedger(PostingRules::SAVINGS_DEPOSITS_ROLE, $asOf)],
             PostingRules::TIME_DEPOSITS_ROLE => [$this->timeDepositSubledger($asOf), $this->generalLedger(PostingRules::TIME_DEPOSITS_ROLE, $asOf)],
         ];
         $accounts = $this->accounts();
@@ -215,6 +219,23 @@ class GlControl
             ->selectRaw('a.branch_id AS branch_id, COALESCE(SUM(t.credit), 0) AS credits, COALESCE(SUM(t.debit), 0) AS debits')
             ->get()
             ->mapWithKeys(fn ($row) => [(int) ($row->branch_id ?? 0) => SavingsMath::centavos($row->credits) - SavingsMath::centavos($row->debits)])
+            ->all();
+    }
+
+    /**
+     * Today's savings subledger from the accounts' own balances, by branch
+     * (SavingsLedger keeps `ledger_balance` equal to the account's rows, and
+     * no row is dated after today).
+     *
+     * @return array<int, int>
+     */
+    private function accountBalances(): array
+    {
+        return DB::table('savings_accounts')
+            ->groupBy('branch_id')
+            ->selectRaw('branch_id, COALESCE(SUM(ledger_balance), 0) AS balance')
+            ->get()
+            ->mapWithKeys(fn ($row) => [(int) ($row->branch_id ?? 0) => SavingsMath::signedCentavos($row->balance)])
             ->all();
     }
 

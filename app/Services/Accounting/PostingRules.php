@@ -1530,6 +1530,49 @@ final class PostingRules
         ];
     }
 
+    /** Excess-withdrawal fees on savings (gap round S1): the catalog fees' 4080 Other Fee Income. */
+    public const SAVINGS_FEE_INCOME_ROLE = self::CATALOG_FEE_ROLE;
+
+    /** Savings moved to the member's share capital (gap round S3): 3060 Share Capital. */
+    public const SAVINGS_SHARE_CAPITAL_ROLE = 'share_capital';
+
+    /**
+     * An excess-withdrawal fee charged on a savings account (gap round S1):
+     * Dr savings deposits / Cr other fee income. No money moves; the fee
+     * comes out of the member's balance.
+     */
+    public static function savingsFee(int $amount, AccountMap $map): array
+    {
+        self::requireAmount($amount, 'An excess-withdrawal fee');
+
+        return [
+            'source' => 'savings',
+            'description' => 'Savings excess-withdrawal fee',
+            'lines' => [
+                self::debit($map->accountFor(self::SAVINGS_DEPOSITS_ROLE), $amount),
+                self::credit($map->accountFor(self::SAVINGS_FEE_INCOME_ROLE), $amount),
+            ],
+        ];
+    }
+
+    /**
+     * Savings moved to the member's share capital (gap round S3; registered
+     * by S1): Dr savings deposits / Cr share capital. No money moves.
+     */
+    public static function savingsShareCapitalTransfer(int $amount, AccountMap $map): array
+    {
+        self::requireAmount($amount, 'A savings transfer to share capital');
+
+        return [
+            'source' => 'savings',
+            'description' => 'Savings moved to share capital',
+            'lines' => [
+                self::debit($map->accountFor(self::SAVINGS_DEPOSITS_ROLE), $amount),
+                self::credit($map->accountFor(self::SAVINGS_SHARE_CAPITAL_ROLE), $amount),
+            ],
+        ];
+    }
+
     /**
      * Interest credited to savings, on a cash basis (Phase 2 decision 1):
      * Dr interest expense on deposits, gross / Cr savings deposits, gross less

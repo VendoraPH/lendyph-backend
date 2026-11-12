@@ -20,6 +20,7 @@ use App\Models\AuditLog;
 use App\Models\Borrower;
 use App\Models\BorrowerNotificationPreference;
 use App\Models\Branch;
+use App\Models\CdaComplianceRequirement;
 use App\Models\CdaDocument;
 use App\Models\CdaDocumentVersion;
 use App\Models\CdaMediationCase;
@@ -70,6 +71,9 @@ use App\Models\RepaymentAllocation;
 use App\Models\Role;
 use App\Models\SavingsAccount;
 use App\Models\SavingsApproval;
+use App\Models\SavingsAutoCreditInstruction;
+use App\Models\SavingsAutoCreditPosting;
+use App\Models\SavingsAutoCreditRun;
 use App\Models\SavingsHold;
 use App\Models\SavingsIdempotencyKey;
 use App\Models\SavingsInterestRun;
@@ -188,6 +192,10 @@ class AuditLogModules
         SavingsInterestRun::class => 'savings',
         SavingsInterestRunLine::class => 'savings',
         SavingsIdempotencyKey::class => 'savings',
+        // Auto-credit into savings (gap round S3).
+        SavingsAutoCreditInstruction::class => 'savings',
+        SavingsAutoCreditRun::class => 'savings',
+        SavingsAutoCreditPosting::class => 'savings',
         // CDA Reports (Phase 3): every CDA model, including the ones that
         // write no audit rows today (report values, notices), so a later
         // writer never drifts into `system`. Mediation cases redact their
@@ -207,6 +215,7 @@ class AuditLogModules
         CdaSocialProgram::class => 'cda',
         CdaMediationCase::class => 'cda',
         CdaNoticeSent::class => 'cda',
+        CdaComplianceRequirement::class => 'cda',
         // Member Portal (Phase 3): access, codes, settings, terms, requests and
         // announcements. A member's own actions are filed here too, through
         // the portal user or record they act on.

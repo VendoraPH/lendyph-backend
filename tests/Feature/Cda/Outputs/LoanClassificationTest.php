@@ -173,7 +173,7 @@ class LoanClassificationTest extends TestCase
         $this->actingAs($this->userWith(['branches:view_all', 'loans:view']))->getJson(self::URI)->assertForbidden();
         $this->actingAs($this->userWith(['cda:view', 'loans:view']))->getJson(self::URI)
             ->assertForbidden()
-            ->assertJsonPath('message', 'CDA reports cover the whole cooperative, so they need access to every branch (branches:view_all).');
+            ->assertJsonPath('message', 'CDA reports cover the whole cooperative, so this needs head-office access to all branches.');
         $this->actingAs($this->viewer())->getJson('/api/cda/periods/2031/loan-classification')
             ->assertNotFound()
             ->assertJsonPath('message', 'There is no CDA reporting period for 2031.');

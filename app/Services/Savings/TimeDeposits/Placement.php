@@ -9,6 +9,7 @@ use App\Models\TimeDeposit;
 use App\Models\User;
 use App\Services\Accounting\AutomaticPoster;
 use App\Services\Savings\AvailableBalance;
+use App\Services\Savings\ProductRules;
 use App\Services\Savings\SavingsLedger;
 use App\Services\Savings\SavingsLocks;
 use App\Services\Savings\SavingsMath;
@@ -25,7 +26,9 @@ use LogicException;
  * the generated certificate number, then the journal last.
  *
  * - Members only, and only an active one, in the caller's branches (the
- *   request's `exists` rule); the placement sits in the member's branch.
+ *   request's `exists` rule), whom the product is offered to (its eligible
+ *   member types and branches, gap round S1); the placement sits in the
+ *   member's branch. A rollover places again without asking.
  * - The figures are {@see Quote::figures()}, so the quote equals the
  *   placement; the rates and the tax rate are snapshotted on the row.
  * - The placement date is today or yesterday (back-dating only until the
@@ -49,6 +52,7 @@ class Placement
         private readonly AvailableBalance $available,
         private readonly SavingsNumbers $numbers,
         private readonly AutomaticPoster $poster,
+        private readonly ProductRules $rules,
     ) {}
 
     /**
@@ -69,6 +73,7 @@ class Placement
 
         $date = $this->placementDate((string) $data['placement_date']);
         $product = SavingsProduct::query()->findOrFail((int) $data['product_id']);
+        $this->rules->assertEligible($member, $product);
         $principal = SavingsMath::centavos($data['principal']);
         $figures = $this->quote->figures($product, $principal, (int) $data['term_days'], $date);
 

@@ -2339,7 +2339,9 @@ class ReportService
         // with a `repayment_id` is a payment's build-up (or its void's
         // reversal), cash already inside the repayment line. Both are summed
         // apart and kept out of every cash figure; only the rows with neither
-        // are share capital paid in or out on its own.
+        // are share capital paid in or out on its own. A row with a
+        // `savings_transaction_id` moved from the member's savings (gap round
+        // S3): no cash moved, so it is summed apart too.
         $share = DB::table('share_capital_ledger')
             ->when($branchIds !== null, fn ($q) => $q->whereIn(
                 'share_capital_ledger.borrower_id',
@@ -2347,10 +2349,11 @@ class ReportService
             ))
             ->whereBetween('date', [$fromDate, $toDate])
             ->selectRaw('
-                COALESCE(SUM(CASE WHEN loan_id IS NULL AND repayment_id IS NULL THEN 1 ELSE 0 END), 0) as entry_count,
-                COALESCE(SUM(CASE WHEN loan_id IS NULL AND repayment_id IS NULL THEN credit ELSE 0 END), 0) as credit,
-                COALESCE(SUM(CASE WHEN loan_id IS NULL AND repayment_id IS NULL THEN debit ELSE 0 END), 0) as debit,
+                COALESCE(SUM(CASE WHEN loan_id IS NULL AND repayment_id IS NULL AND savings_transaction_id IS NULL THEN 1 ELSE 0 END), 0) as entry_count,
+                COALESCE(SUM(CASE WHEN loan_id IS NULL AND repayment_id IS NULL AND savings_transaction_id IS NULL THEN credit ELSE 0 END), 0) as credit,
+                COALESCE(SUM(CASE WHEN loan_id IS NULL AND repayment_id IS NULL AND savings_transaction_id IS NULL THEN debit ELSE 0 END), 0) as debit,
                 COALESCE(SUM(CASE WHEN loan_id IS NOT NULL THEN credit - debit ELSE 0 END), 0) as at_release,
+                COALESCE(SUM(CASE WHEN savings_transaction_id IS NOT NULL THEN credit - debit ELSE 0 END), 0) as from_savings,
                 COALESCE(SUM(CASE WHEN loan_id IS NULL AND repayment_id IS NOT NULL THEN credit ELSE 0 END), 0) as build_up_credit,
                 COALESCE(SUM(CASE WHEN loan_id IS NULL AND repayment_id IS NOT NULL THEN debit ELSE 0 END), 0) as build_up_debit
             ')
@@ -2371,6 +2374,7 @@ class ReportService
         $shareCredit = round((float) ($share->credit ?? 0), 2);
         $shareDebit = round((float) ($share->debit ?? 0), 2);
         $shareAtRelease = round((float) ($share->at_release ?? 0), 2);
+        $shareFromSavings = round((float) ($share->from_savings ?? 0), 2);
         $buildUpCredit = round((float) ($share->build_up_credit ?? 0), 2);
         $buildUpDebit = round((float) ($share->build_up_debit ?? 0), 2);
         $netProceedsOut = round((float) ($release->net_proceeds ?? 0), 2);
@@ -2413,7 +2417,10 @@ class ReportService
                 // Part of the deductions withheld at release, credited to the
                 // members' share capital ledgers: their equity, never cash in.
                 'share_capital_at_release' => $shareAtRelease,
-                'note' => 'Deductions are withheld at release and never leave the till; principal_released = net_proceeds + total_deductions. share_capital_at_release is the share capital withheld from loans at release and credited to the members\' share capital: it is in their Share Capital balance but was never received as cash, so it is excluded from inflows and from share_capital.',
+                // Moved from the members' savings to their share capital: one
+                // liability to equity, never cash in.
+                'share_capital_from_savings' => $shareFromSavings,
+                'note' => 'Deductions are withheld at release and never leave the till; principal_released = net_proceeds + total_deductions. share_capital_at_release is the share capital withheld from loans at release and credited to the members\' share capital: it is in their Share Capital balance but was never received as cash, so it is excluded from inflows and from share_capital. share_capital_from_savings is share capital moved from the members\' savings accounts: no cash moved, so it is excluded the same way.',
             ],
             // Same scope vocabulary as the Share Capital report. `credit`,
             // `debit`, `net_movement` and `count` are share capital paid in and
@@ -2436,7 +2443,7 @@ class ReportService
                     ? 'share_capital_ledger has no branch column, so branch_id is honoured through the member\'s branch, matching the Share Capital report.'
                     : 'No branch filter applied, so these figures are organisation-wide.')
                     .' In by_branch, share capital paid in and out on its own is in the row of the branch each member belongs to (inflow_share_capital, outflow_share_capital, inside inflow_total and outflow_total), so the rows add up to the statement totals; a member with no branch is in an Unassigned row.'
-                    .' credit and debit are share capital paid in and out on its own. build_up_from_payments is the share capital build-up credited from loan payments, net of void reversals: that cash is already in inflows.repayments (as overpayment), so it is in no total here. Share capital withheld at release is under non_cash.share_capital_at_release. The Share Capital report\'s credits for the same period and branch = credit + build_up_credit + non_cash.share_capital_at_release; its debits = debit + build_up_debit.',
+                    .' credit and debit are share capital paid in and out on its own. build_up_from_payments is the share capital build-up credited from loan payments, net of void reversals: that cash is already in inflows.repayments (as overpayment), so it is in no total here. Share capital withheld at release is under non_cash.share_capital_at_release. The Share Capital report\'s credits for the same period and branch = credit + build_up_credit + non_cash.share_capital_at_release + non_cash.share_capital_from_savings; its debits = debit + build_up_debit.',
             ],
             'by_branch' => $byBranch,
             // The rows' loan cash plus the share capital paid in and out on
@@ -2511,6 +2518,7 @@ class ReportService
             ->leftJoin('borrowers', 'borrowers.id', '=', 'share_capital_ledger.borrower_id')
             ->whereNull('share_capital_ledger.loan_id')
             ->whereNull('share_capital_ledger.repayment_id')
+            ->whereNull('share_capital_ledger.savings_transaction_id')
             ->tap(self::inBranches($branchIds, 'borrowers.branch_id'))
             ->whereBetween('share_capital_ledger.date', [$fromDate, $toDate])
             ->groupBy('borrowers.branch_id')

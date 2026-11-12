@@ -17,6 +17,8 @@
         table.grid th.section-title { font-size: 10pt; padding: 0 0 2pt 0; background: none; border: 0; border-bottom: 0.6pt solid #9aa5b1; }
         table.grid tr.section-gap th { padding: 0; height: 4pt; background: none; border: 0; }
         .coop { font-size: 10pt; font-weight: bold; }
+        img.logo { height: 14mm; margin-bottom: 3pt; }
+        .lendy-mark { margin-top: 1pt; color: #7b8794; }
         .muted { color: #52606d; }
         table { width: 100%; border-collapse: collapse; }
         td, th { padding: 3pt 4pt; vertical-align: top; text-align: left; }
@@ -38,8 +40,12 @@
     <div class="watermark">{{ \App\Services\Cda\Exports\ExportContent::DRAFT_MARK }}</div>
 @endif
 {{-- The footer's facts wrap in the left cell; the right cell stays empty for "Page X of Y", which PdfRenderer draws into it on every page. --}}
-<table class="footer"><tr><td class="footer-text">{{ $content->footer() }}</td><td class="footer-page"></td></tr></table>
+<table class="footer"><tr><td class="footer-text">{{ $content->footer() }}<div class="lendy-mark">{{ \App\Services\Cda\Exports\ExportContent::LENDY_MARK }}</div></td><td class="footer-page"></td></tr></table>
 
+{{-- The cooperative's logo: an opaque PNG data URI from ExportLogo (at most 600 px tall), never a URL. The official form's layout comes first, so it stays small. --}}
+@if ($logo)
+    <img class="logo" src="{{ $logo }}" alt="">
+@endif
 <div class="coop">{{ $content->coopName }}</div>
 @if ($content->coopAddress)
     <div class="muted">{{ $content->coopAddress }}</div>

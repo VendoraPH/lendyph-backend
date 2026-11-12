@@ -39,6 +39,17 @@ class SubmitLoanRequest extends FormRequest
      */
     public function rules(): array
     {
-        return [];
+        return [
+            // Checked against the chain's first pending step in
+            // LoanApprovalChainService::seed(), under the loan's lock.
+            'forward_to_user_id' => ['nullable', 'integer', 'min:1'],
+        ];
+    }
+
+    public function forwardToUserId(): ?int
+    {
+        $id = $this->validated('forward_to_user_id');
+
+        return $id === null ? null : (int) $id;
     }
 }

@@ -9,6 +9,7 @@ use App\Services\LoanWriteTransaction;
 use App\Services\Savings\Approvals\ApprovalExecutor;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
 use LogicException;
 use Symfony\Component\HttpKernel\Exception\HttpException;
 
@@ -85,7 +86,15 @@ class ApprovalGate
      * always approved (a reversal) opens one below tier 1 too. A second live
      * approval with the same `live_key` answers 409.
      *
-     * @param  array{account_id?: int|null, time_deposit_id?: int|null, target_transaction_id?: int|null, payload?: array<string, mixed>|null, live_key?: string|null}  $attributes
+     * - `fee`: a withdrawal's excess-withdrawal fee decision, stored with it
+     *   (the fee it reserves beside `$centavos`, the month it counts in and
+     *   the product's rule then);
+     * - `fee_amount` (centavos): a fee it carries without a decision (a
+     *   reversal of a withdrawal and its fee shows the fee);
+     * - `tier_centavos`: the amount its checkers are counted on, when that is
+     *   more than `$centavos` (a reversal of a withdrawal and its fee).
+     *
+     * @param  array{account_id?: int|null, time_deposit_id?: int|null, target_transaction_id?: int|null, payload?: array<string, mixed>|null, live_key?: string|null, fee?: WithdrawalFee, fee_amount?: int, tier_centavos?: int}  $attributes
      */
     public function open(string $kind, int $centavos, array $attributes, int $requestedBy): SavingsApproval
     {
@@ -109,14 +118,19 @@ class ApprovalGate
      */
     private function create(string $kind, int $centavos, array $attributes, int $requestedBy): SavingsApproval
     {
+        $fee = ($attributes['fee'] ?? null) instanceof WithdrawalFee
+            ? $attributes['fee']->columns()
+            : ['fee_amount' => SavingsMath::pesos((int) ($attributes['fee_amount'] ?? 0))];
+
         return SavingsApproval::query()->create([
+            ...$fee,
             'kind' => $kind,
             'account_id' => $attributes['account_id'] ?? null,
             'time_deposit_id' => $attributes['time_deposit_id'] ?? null,
             'target_transaction_id' => $attributes['target_transaction_id'] ?? null,
             'amount' => SavingsMath::pesos($centavos),
             'payload' => $attributes['payload'] ?? null,
-            'required_checkers' => max(1, $this->requiredCheckers($centavos)),
+            'required_checkers' => max(1, $this->requiredCheckers(max($centavos, (int) ($attributes['tier_centavos'] ?? 0)))),
             'status' => 'pending',
             'requested_by' => $requestedBy,
             'expires_at' => now()->endOfDay(),
@@ -147,15 +161,37 @@ class ApprovalGate
         return 'App\\Services\\Savings\\Approvals\\'.Str::studly($kind).'Executor';
     }
 
-    /** The executor for a kind, from the container. */
-    public function executor(string $kind): ApprovalExecutor
+    /** Whether a kind has its executor yet (a kind can be registered before its slice adds one). */
+    public static function hasExecutor(string $kind): bool
     {
         $class = self::executorClass($kind);
 
-        if (! in_array($kind, SavingsApproval::KINDS, true) || ! class_exists($class) || ! is_subclass_of($class, ApprovalExecutor::class)) {
-            throw new LogicException("There is no approval executor for \"{$kind}\" ({$class}).");
+        return in_array($kind, SavingsApproval::KINDS, true) && class_exists($class) && is_subclass_of($class, ApprovalExecutor::class);
+    }
+
+    /**
+     * The executor for a kind, from the container. A registered kind with no
+     * executor yet (registered ahead of the slice that carries it out) is
+     * refused in words (422 on `approval`), never a 500, and nothing changes.
+     * A kind that isn't registered at all is a programming error.
+     *
+     * @throws ValidationException
+     * @throws LogicException
+     */
+    public function executor(string $kind): ApprovalExecutor
+    {
+        if (! in_array($kind, SavingsApproval::KINDS, true)) {
+            throw new LogicException("\"{$kind}\" is not a savings approval kind.");
         }
 
-        return app($class);
+        if (! self::hasExecutor($kind)) {
+            $words = str_replace('_', ' ', $kind);
+
+            throw ValidationException::withMessages(['approval' => [
+                "A {$words} request can't be carried out yet: this version has no way to complete it. Reject or cancel it instead.",
+            ]]);
+        }
+
+        return app(self::executorClass($kind));
     }
 }

@@ -1097,8 +1097,10 @@ final class AutomaticPoster
      * when this organisation keeps no books. An auto-credit run calls it per
      * row with the method chosen for the run.
      *
-     * A row written by a payment's build-up (`repayment_id`) or by a release
-     * (`loan_id`) is refused: its money is already in that journal.
+     * A row written by a payment's build-up (`repayment_id`), by a release
+     * (`loan_id`) or by a transfer from savings (`savings_transaction_id`,
+     * posted Dr 2050 / Cr 3060 on the savings row) is refused: its money is
+     * already in that journal.
      *
      * @param  string  $method  how the money moved, in the lending vocabulary
      */
@@ -1108,10 +1110,15 @@ final class AutomaticPoster
             return null;
         }
 
-        if ($row->repayment_id !== null || $row->loan_id !== null) {
+        if ($row->repayment_id !== null || $row->loan_id !== null || $row->savings_transaction_id !== null) {
+            $source = match (true) {
+                $row->repayment_id !== null => 'payment',
+                $row->loan_id !== null => 'loan release',
+                default => 'transfer from savings',
+            };
+
             throw CannotPostToTheBooksException::because(
-                "{$row->reference} was written by a ".($row->repayment_id !== null ? 'payment' : 'loan release')
-                .', and its money is already in that journal. Posting it again would count it twice.');
+                "{$row->reference} was written by a {$source}, and its money is already in that journal. Posting it again would count it twice.");
         }
 
         $posting = PostingRules::shareCapitalEntry(
@@ -1416,8 +1423,18 @@ final class AutomaticPoster
     private const SAVINGS_SETTLEMENT_ROLES = ['cash' => 'cash', 'bank_transfer' => 'bank', 'gcash' => 'gcash', 'maya' => 'maya'];
 
     /**
+     * Savings rows that post a `savings` journal of their own: a deposit, a
+     * withdrawal, a closing payout, an excess-withdrawal fee (Dr 2050 / Cr
+     * 4080, gap round S1) and a transfer to share capital (Dr 2050 / Cr 3060,
+     * gap round S3).
+     */
+    private const SAVINGS_OWN_JOURNAL_TYPES = ['deposit', 'withdrawal', 'closing', 'fee', 'share_capital_transfer'];
+
+    /**
      * A deposit, a withdrawal or a closing payout (source `savings`, keyed on
-     * the row): Dr settlement / Cr savings deposits, or the reverse. A
+     * the row): Dr settlement / Cr savings deposits, or the reverse. An
+     * excess-withdrawal fee and a transfer to share capital move no money:
+     * Dr savings deposits / Cr other fee income or share capital. A
      * transfer between a member's own accounts in one branch posts nothing
      * (null): both legs sit on savings deposits. Call it for a transfer leg
      * only once both legs are written (the second leg names the first as its
@@ -1438,17 +1455,19 @@ final class AutomaticPoster
             return null;
         }
 
-        if (! in_array($row->type, ['deposit', 'withdrawal', 'closing'], true) || $row->time_deposit_id !== null || $row->interest_run_id !== null) {
+        if (! in_array($row->type, self::SAVINGS_OWN_JOURNAL_TYPES, true) || $row->time_deposit_id !== null || $row->interest_run_id !== null) {
             throw CannotPostToTheBooksException::because(
-                "{$row->reference} is not a deposit, withdrawal or closing payout of its own, so it posts through its own "
+                "{$row->reference} is not a deposit, withdrawal, fee, share capital transfer or closing payout of its own, so it posts through its own "
                 .'journal (interest, tax, time deposit or reversal). Nothing has been saved.');
         }
 
-        $role = $this->savingsSettlementRole($row->method, $row->reference);
         $map = AccountMap::resolve();
-        $posting = $row->type === 'deposit'
-            ? PostingRules::savingsDeposit($this->centavos($row->credit, 'credit', $row), $role, $map)
-            : PostingRules::savingsWithdrawal($this->centavos($row->debit, 'debit', $row), $role, $map);
+        $posting = match ($row->type) {
+            'deposit' => PostingRules::savingsDeposit($this->centavos($row->credit, 'credit', $row), $this->savingsSettlementRole($row->method, $row->reference), $map),
+            'fee' => PostingRules::savingsFee($this->centavos($row->debit, 'debit', $row), $map),
+            'share_capital_transfer' => PostingRules::savingsShareCapitalTransfer($this->centavos($row->debit, 'debit', $row), $map),
+            default => PostingRules::savingsWithdrawal($this->centavos($row->debit, 'debit', $row), $this->savingsSettlementRole($row->method, $row->reference), $map),
+        };
 
         if ($row->type === 'closing') {
             $posting['description'] = 'Savings account closed, balance paid out';

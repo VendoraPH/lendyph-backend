@@ -53,7 +53,7 @@ class PortalContractTest extends TestCase
 
     private const SAVINGS = [
         'id', 'account_number', 'product_name', 'status', 'ledger_balance', 'held', 'pending_withdrawal', 'maintaining_balance',
-        'available_balance', 'withdrawable', 'annual_rate', 'accrued_interest', 'interest_credited_through', 'opened_on',
+        'available_balance', 'withdrawable', 'annual_rate', 'rate_tiers', 'accrued_interest', 'interest_credited_through', 'opened_on',
         'branch_name', 'last_transaction_on',
     ];
 

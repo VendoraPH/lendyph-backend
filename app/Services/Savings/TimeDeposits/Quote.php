@@ -24,9 +24,10 @@ use OverflowException;
  * - withholding tax = the member rate in force on that date, half up to the
  *   centavo; net = gross − tax; maturity amount = P + net;
  * - the pre-termination rate is the regular rate of the product's
- *   `pretermination_product_id`, in force on the placement date (snapshotted;
- *   none when the product names no regular product, and refused (422) when
- *   it names one with no rate in force then: never a silent 0%);
+ *   `pretermination_product_id`, in force on the placement date, at the tier
+ *   the principal reaches (snapshotted in `pretermination_rate`; none when
+ *   the product names no regular product, and refused (422) when it names
+ *   one with no rate in force then: never a silent 0%);
  * - a principal too large to work out (the arithmetic would overflow) or a
  *   maturity amount beyond what a savings column holds is refused (422).
  *
@@ -37,8 +38,10 @@ use OverflowException;
  * settled after its maturity date earns, for the days from the maturity date
  * to the day before settlement, the regular savings rate (its product's
  * pre-termination product's rate in force on each day, split where it
- * changes) on its maturity amount, rounded half up once, taxed at the
- * member tax rule in force on the settlement date.
+ * changes, at the tier the maturity amount reaches on that day's ladder)
+ * on its maturity amount, rounded half up once, taxed at the member tax rule
+ * in force on the settlement date. Days on or after a new ladder's date take
+ * its tiers: the day-by-day rule, not a recalculation.
  *
  * Writes nothing. Amounts are centavos inside and two-decimal strings out.
  */
@@ -99,7 +102,7 @@ class Quote
 
         $annualRate = SavingsMath::rateString(SavingsMath::rateUnits((string) $rate));
         $taxRate = $this->taxes->rateOn(SavingsTaxRule::HOLDER_MEMBER, $priced->toDateString());
-        $preterminationRate = $this->preterminationRate($product, $priced);
+        $preterminationRate = $this->preterminationRate($product, $priced, $principal);
 
         try {
             $gross = $this->interest->simple($principal, $annualRate, $termDays);
@@ -131,18 +134,19 @@ class Quote
     }
 
     /**
-     * The regular rate an early termination would earn, in force on $date:
-     * null when the product names no regular product.
+     * The regular rate an early termination would earn, in force on $date, at
+     * the tier the placed principal (centavos) reaches: null when the product
+     * names no regular product.
      *
      * @throws ValidationException when it names one with no rate in force on $date
      */
-    private function preterminationRate(SavingsProduct $product, CarbonImmutable $date): ?string
+    private function preterminationRate(SavingsProduct $product, CarbonImmutable $date, int $principal): ?string
     {
         if ($product->pretermination_product_id === null) {
             return null;
         }
 
-        $rate = $this->rates->rateOn($product->pretermination_product_id, null, $date->toDateString());
+        $rate = $this->rates->rateOn($product->pretermination_product_id, null, $date->toDateString(), $principal);
 
         if ($rate === null) {
             $regular = SavingsProduct::query()->whereKey($product->pretermination_product_id)->value('name') ?? 'its regular product';
@@ -225,7 +229,7 @@ class Quote
      * Post-maturity interest for settling on $settledOn: none on or before
      * the maturity date. The regular rates are those of the pre-termination
      * product snapshotted on the placement (its product's current link when
-     * it has none). `$taxRate` is a rate snapshotted earlier (an approval's,
+     * it has none), each day at the tier the maturity amount reaches. `$taxRate` is a rate snapshotted earlier (an approval's,
      * taken at request); otherwise the member rule in force on $settledOn.
      *
      * @return array{days: int, gross: int, tax: int, tax_rate: string|null}

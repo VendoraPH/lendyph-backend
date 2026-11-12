@@ -148,7 +148,7 @@ final class DocumentRepository
     public function authorizeSee(User $user, CdaDocument $document): void
     {
         foreach ($this->restrictionsFor($document) as $permission) {
-            abort_unless($user->can($permission), 403, "This document is restricted: it needs the {$permission} permission.");
+            abort_unless($user->can($permission), 403, 'This document is restricted: it needs '.CdaAccess::words($permission).'.');
         }
     }
 
@@ -174,7 +174,7 @@ final class DocumentRepository
     {
         $permission = self::writePermissionFor($category, $subjectType);
 
-        abort_unless($permission === null || $user->can($permission), 403, "This document belongs to its register: changing it needs the {$permission} permission.");
+        abort_unless($permission === null || $user->can($permission), 403, 'This document belongs to its register: changing it needs '.CdaAccess::words((string) $permission).'.');
     }
 
     /**
@@ -189,7 +189,7 @@ final class DocumentRepository
         $needs = [$category === null ? null : DocumentCategories::restriction($category), $subjectType === 'case' ? CdaAccess::VIEW_MEDIATION : null];
 
         foreach (array_filter($needs) as $permission) {
-            abort_unless($user->can($permission), 403, "This document is restricted: it needs the {$permission} permission.");
+            abort_unless($user->can($permission), 403, 'This document is restricted: it needs '.CdaAccess::words($permission).'.');
         }
 
         $this->authorizeWrite($user, $category, $subjectType);

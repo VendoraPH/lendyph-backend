@@ -1,0 +1,387 @@
+{
+  "report_type": "financial_statements",
+  "version": "2026.2",
+  "name": "Audited Financial Statements CY2026",
+  "effective_from": "2026-01-01",
+  "effective_until": null,
+  "cooperative_types": [],
+  "asset_classes": [],
+  "definition": {
+    "schema_version": 1,
+    "meta": {
+      "verified": false,
+      "source_doc": "Audited financial statements (as understood in v1; to verify)",
+      "auditor_fields": [
+        "auditor.auditor_name",
+        "auditor.auditor_firm",
+        "auditor.auditor_cpa_no",
+        "auditor.auditor_accreditation_no",
+        "auditor.accreditation_valid_until",
+        "auditor.audit_date",
+        "auditor.audit_opinion",
+        "auditor.audit_report_date"
+      ],
+      "notes": "2026.2 (2026-11-12): Adds the statement of operations, changes in equity and cash flows beside the balance sheet, five supporting documents, the auditor's firm, CPA number, accreditation validity, audit date and remarks, the auditor fields the Audited stage needs (meta.auditor_fields) and the savings GL check. Still to verify against the official CDA form."
+    },
+    "parts": [
+      "annual"
+    ],
+    "deadline": {
+      "basis": "year_end",
+      "days_setting": "annual_deadline_days"
+    },
+    "sections": [
+      {
+        "key": "statements",
+        "title": "Statement of financial condition and operations",
+        "kind": "fields",
+        "fields": [
+          {
+            "key": "total_assets",
+            "label": "Total assets",
+            "type": "money",
+            "required": true,
+            "source": {
+              "key": "fs.total_assets"
+            }
+          },
+          {
+            "key": "total_liabilities",
+            "label": "Total liabilities",
+            "type": "money",
+            "required": true,
+            "source": {
+              "key": "fs.total_liabilities"
+            }
+          },
+          {
+            "key": "total_equity",
+            "label": "Total equity",
+            "type": "money",
+            "required": true,
+            "source": {
+              "key": "fs.total_equity"
+            }
+          },
+          {
+            "key": "is_balanced",
+            "label": "Assets equal liabilities and equity",
+            "type": "boolean",
+            "source": {
+              "key": "fs.is_balanced"
+            }
+          },
+          {
+            "key": "total_income",
+            "label": "Total income",
+            "type": "money",
+            "source": {
+              "key": "fs.total_income"
+            }
+          },
+          {
+            "key": "total_expenses",
+            "label": "Total expenses",
+            "type": "money",
+            "source": {
+              "key": "fs.total_expenses"
+            }
+          },
+          {
+            "key": "net_surplus",
+            "label": "Net surplus",
+            "type": "money",
+            "source": {
+              "key": "fs.net_surplus"
+            }
+          }
+        ]
+      },
+      {
+        "key": "balance_sheet",
+        "title": "Balance sheet",
+        "kind": "table",
+        "source": {
+          "key": "fs.balance_sheet"
+        },
+        "columns": [
+          {
+            "key": "account_code",
+            "label": "Code",
+            "format": "text"
+          },
+          {
+            "key": "account_name",
+            "label": "Account",
+            "format": "text"
+          },
+          {
+            "key": "amount",
+            "label": "Amount",
+            "format": "money"
+          }
+        ]
+      },
+      {
+        "key": "income_statement",
+        "title": "Statement of operations (income statement)",
+        "kind": "table",
+        "source": {
+          "key": "fs.income_statement"
+        },
+        "columns": [
+          {
+            "key": "section",
+            "label": "Section",
+            "format": "text"
+          },
+          {
+            "key": "account_code",
+            "label": "Code",
+            "format": "text"
+          },
+          {
+            "key": "account_name",
+            "label": "Account",
+            "format": "text"
+          },
+          {
+            "key": "amount",
+            "label": "Amount",
+            "format": "money"
+          }
+        ]
+      },
+      {
+        "key": "equity_changes",
+        "title": "Statement of changes in equity",
+        "kind": "table",
+        "source": {
+          "key": "fs.equity_changes"
+        },
+        "columns": [
+          {
+            "key": "account_code",
+            "label": "Code",
+            "format": "text"
+          },
+          {
+            "key": "label",
+            "label": "Account",
+            "format": "text"
+          },
+          {
+            "key": "beginning",
+            "label": "Beginning",
+            "format": "money"
+          },
+          {
+            "key": "additions",
+            "label": "Additions",
+            "format": "money"
+          },
+          {
+            "key": "deductions",
+            "label": "Deductions",
+            "format": "money"
+          },
+          {
+            "key": "ending",
+            "label": "Ending",
+            "format": "money"
+          }
+        ]
+      },
+      {
+        "key": "cash_flow",
+        "title": "Statement of cash flows",
+        "kind": "table",
+        "source": {
+          "key": "fs.cash_flow"
+        },
+        "columns": [
+          {
+            "key": "section",
+            "label": "Activity",
+            "format": "text"
+          },
+          {
+            "key": "label",
+            "label": "Line",
+            "format": "text"
+          },
+          {
+            "key": "amount",
+            "label": "Amount",
+            "format": "money"
+          }
+        ]
+      },
+      {
+        "key": "auditor",
+        "title": "External auditor",
+        "kind": "fields",
+        "fields": [
+          {
+            "key": "auditor_name",
+            "label": "Auditor's name",
+            "type": "text",
+            "required": true
+          },
+          {
+            "key": "auditor_firm",
+            "label": "Audit firm",
+            "type": "text",
+            "required": true
+          },
+          {
+            "key": "auditor_cpa_no",
+            "label": "CPA number",
+            "type": "text",
+            "required": true
+          },
+          {
+            "key": "auditor_accreditation_no",
+            "label": "BOA / CDA accreditation number",
+            "type": "text",
+            "required": true
+          },
+          {
+            "key": "accreditation_valid_until",
+            "label": "Accreditation valid until",
+            "type": "date",
+            "required": true
+          },
+          {
+            "key": "audit_date",
+            "label": "Audit date",
+            "type": "date",
+            "required": true
+          },
+          {
+            "key": "audit_opinion",
+            "label": "Opinion",
+            "type": "select",
+            "required": true,
+            "options": [
+              {
+                "value": "unmodified",
+                "label": "Unmodified"
+              },
+              {
+                "value": "qualified",
+                "label": "Qualified"
+              },
+              {
+                "value": "adverse",
+                "label": "Adverse"
+              },
+              {
+                "value": "disclaimer",
+                "label": "Disclaimer"
+              }
+            ]
+          },
+          {
+            "key": "audit_report_date",
+            "label": "Date of the audit report",
+            "type": "date",
+            "required": true
+          },
+          {
+            "key": "audit_remarks",
+            "label": "Auditor's remarks",
+            "type": "textarea"
+          }
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "year_closed",
+        "type": "check",
+        "check": "accounting.year_closed",
+        "severity": "critical",
+        "category": "financial_data",
+        "component": "accounting",
+        "fix_href": "/accounting"
+      },
+      {
+        "id": "fs_balanced",
+        "type": "check",
+        "check": "fs.balanced",
+        "severity": "critical",
+        "category": "accounting_mismatch",
+        "component": "accounting"
+      },
+      {
+        "id": "tb_matches_fs",
+        "type": "check",
+        "check": "fs.tb_matches_fs",
+        "severity": "critical",
+        "category": "accounting_mismatch",
+        "component": "accounting"
+      },
+      {
+        "id": "savings_gl_matches",
+        "type": "check",
+        "check": "savings.gl_matches",
+        "severity": "warning",
+        "category": "accounting_mismatch",
+        "component": "accounting",
+        "fix_href": "/savings"
+      },
+      {
+        "id": "template_verified",
+        "type": "check",
+        "check": "template.verified",
+        "severity": "info",
+        "category": "invalid_data",
+        "component": "fields",
+        "message": "This form follows the CDA template as understood in v1 and is still to be checked against the official form."
+      }
+    ],
+    "documents": [
+      {
+        "key": "audited_fs",
+        "category": "financial_statements",
+        "label": "Audited financial statements (signed)",
+        "stage": "submit",
+        "severity": "critical"
+      },
+      {
+        "key": "auditor_report",
+        "category": "audit_report",
+        "label": "Independent auditor's report",
+        "stage": "submit",
+        "severity": "critical"
+      },
+      {
+        "key": "management_representation",
+        "category": "management_representation",
+        "label": "Management representation letter",
+        "stage": "submit",
+        "severity": "critical"
+      },
+      {
+        "key": "management_responsibility",
+        "category": "management_responsibility",
+        "label": "Statement of management responsibility",
+        "stage": "submit",
+        "severity": "critical"
+      },
+      {
+        "key": "fs_notes",
+        "category": "fs_notes",
+        "label": "Notes to the financial statements",
+        "stage": "submit",
+        "severity": "critical"
+      }
+    ],
+    "export": {
+      "pdf": {
+        "orientation": "portrait"
+      }
+    }
+  }
+}

@@ -33,7 +33,7 @@ class SavingsJournalReversalTest extends TestCase
 
     private const IN_SAVINGS = 'This entry comes from Savings. Reverse it there, so the savings records and the books stay the same.';
 
-    private const NO_REVERSAL = 'This entry comes from a time deposit or an account closing and can\'t be reversed. To fix the cash or bank side, record a correcting journal entry.';
+    private const NO_REVERSAL = 'This entry comes from a time deposit, an account closing or a transfer to share capital and can\'t be reversed. To fix it, record a correcting journal entry.';
 
     protected function setUp(): void
     {
@@ -48,8 +48,10 @@ class SavingsJournalReversalTest extends TestCase
         return [
             'deposit' => ['deposit', 'savings', self::IN_SAVINGS],
             'withdrawal' => ['withdrawal', 'savings', self::IN_SAVINGS],
+            'excess-withdrawal fee' => ['fee', 'savings', self::IN_SAVINGS],
             'interest run' => ['run', 'savings_interest', self::IN_SAVINGS],
             'account-closing payout' => ['closing', 'savings', self::NO_REVERSAL],
+            'transfer to share capital' => ['share_capital_transfer', 'savings', self::NO_REVERSAL],
             'interest credited at closing' => ['interest', 'savings_interest', self::NO_REVERSAL],
             'time deposit placement' => ['time_deposit', 'time_deposit', self::NO_REVERSAL],
             'time deposit settlement' => ['time_deposit', 'time_deposit_settlement', self::NO_REVERSAL],
