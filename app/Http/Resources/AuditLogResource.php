@@ -130,6 +130,8 @@ class AuditLogResource extends JsonResource
         'CsvImportRun' => 'Data import',
         'SavingsApproval' => 'Savings approval request',
         'SavingsSetting' => 'Savings settings',
+        'SavingsAutoCreditInstruction' => 'Savings auto-credit instruction',
+        'SavingsAutoCreditRun' => 'Savings auto-credit run',
         'ReminderSetting' => 'Reminder settings',
         'ReminderBranchSetting' => 'Branch reminder settings',
         'BorrowerNotificationPreference' => 'Member reminder preferences',

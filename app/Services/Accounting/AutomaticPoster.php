@@ -1097,8 +1097,10 @@ final class AutomaticPoster
      * when this organisation keeps no books. An auto-credit run calls it per
      * row with the method chosen for the run.
      *
-     * A row written by a payment's build-up (`repayment_id`) or by a release
-     * (`loan_id`) is refused: its money is already in that journal.
+     * A row written by a payment's build-up (`repayment_id`), by a release
+     * (`loan_id`) or by a transfer from savings (`savings_transaction_id`,
+     * posted Dr 2050 / Cr 3060 on the savings row) is refused: its money is
+     * already in that journal.
      *
      * @param  string  $method  how the money moved, in the lending vocabulary
      */
@@ -1108,10 +1110,15 @@ final class AutomaticPoster
             return null;
         }
 
-        if ($row->repayment_id !== null || $row->loan_id !== null) {
+        if ($row->repayment_id !== null || $row->loan_id !== null || $row->savings_transaction_id !== null) {
+            $source = match (true) {
+                $row->repayment_id !== null => 'payment',
+                $row->loan_id !== null => 'loan release',
+                default => 'transfer from savings',
+            };
+
             throw CannotPostToTheBooksException::because(
-                "{$row->reference} was written by a ".($row->repayment_id !== null ? 'payment' : 'loan release')
-                .', and its money is already in that journal. Posting it again would count it twice.');
+                "{$row->reference} was written by a {$source}, and its money is already in that journal. Posting it again would count it twice.");
         }
 
         $posting = PostingRules::shareCapitalEntry(

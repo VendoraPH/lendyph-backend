@@ -399,6 +399,7 @@ final class LedgerGapsReport
             ->leftJoin('borrowers as b', 'b.id', '=', 's.borrower_id')
             ->whereNull('s.repayment_id')
             ->whereNull('s.loan_id')
+            ->whereNull('s.savings_transaction_id')
             ->whereRaw('(COALESCE(s.credit, 0) + COALESCE(s.debit, 0)) > 0')
             ->whereNotExists($this->journal(ShareCapitalLedger::class, 's.id', 'share_capital'))
             ->selectRaw("'share_capital' AS kind, s.id AS record_id, s.reference")
