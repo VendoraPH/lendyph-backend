@@ -11,6 +11,7 @@ use App\Models\SavingsTransaction;
 use App\Models\User;
 use App\Services\Savings\AccruedInterest;
 use App\Services\Savings\AvailableBalance;
+use App\Services\Savings\ProductRules;
 use App\Services\Savings\SavingsMath;
 use Carbon\CarbonInterface;
 use Illuminate\Database\Eloquent\Builder;
@@ -32,12 +33,39 @@ class Presenter
     public function __construct(
         private readonly AvailableBalance $available,
         private readonly AccruedInterest $accrued,
+        private readonly ProductRules $rules,
     ) {}
 
     /** @return array<string, mixed> */
     public function account(SavingsAccount $account): array
     {
         return $this->accounts(collect([$account]))[0];
+    }
+
+    /**
+     * One account for its detail page: the account, plus what a withdrawal
+     * requested today would carry (gap round B9), counted as the portal's
+     * options count it (posted withdrawals, pending approvals and members'
+     * open requests this month). `next_withdrawal_fee` is "0.00" when free and
+     * null whenever a withdrawal would be refused: the free withdrawals are
+     * used up and the product charges no fee, the product doesn't allow
+     * withdrawals, or the account can't pay out (only an active one can, as
+     * Teller::assertCanPayOut() says). `free_withdrawals_left` is the count
+     * alone, null when unlimited. Read only, without the account lock. Lists
+     * leave it out: it costs three count queries per account.
+     *
+     * @return array<string, mixed>
+     */
+    public function accountDetail(SavingsAccount $account): array
+    {
+        $next = $this->rules->nextWithdrawal($account, now()->toDateString());
+        $canPayOut = $account->status === SavingsAccount::STATUS_ACTIVE && (bool) $account->product?->allow_withdrawals;
+
+        return [
+            ...$this->account($account),
+            'next_withdrawal_fee' => $next['fee'] === null || ! $canPayOut ? null : SavingsMath::pesos($next['fee']),
+            'free_withdrawals_left' => $next['free_left'],
+        ];
     }
 
     /**
@@ -121,6 +149,12 @@ class Presenter
         $reversedBy = SavingsTransaction::query()->whereIn('reverses_transaction_id', $ids)->pluck('id', 'reverses_transaction_id');
         $fees = SavingsTransaction::query()->whereIn('fee_for_transaction_id', $ids)->get(['id', 'fee_for_transaction_id', 'debit'])->keyBy('fee_for_transaction_id');
         $pointedAt = SavingsTransaction::query()->whereIn('counterpart_transaction_id', $ids)->pluck('id', 'counterpart_transaction_id');
+        $approvedThrough = SavingsApproval::query()
+            ->whereIn('id', $rows->pluck('approval_id')->filter()->unique()->values()->all())
+            ->where('status', 'approved')
+            ->with(['firstChecker', 'decider'])
+            ->get(['id', 'first_checker_id', 'decided_by'])
+            ->keyBy('id');
         $counterpart = fn (SavingsTransaction $r): ?int => $r->counterpart_transaction_id ?? $pointedAt[$r->id] ?? null;
         $anchors = $rows->mapWithKeys(fn (SavingsTransaction $r) => [$r->id => Reverser::anchorIdOf($r, $counterpart($r))]);
         $pending = SavingsApproval::query()
@@ -150,9 +184,16 @@ class Presenter
             'time_deposit_id' => $r->time_deposit_id,
             'interest_run_id' => $r->interest_run_id,
             'approval_id' => $r->approval_id,
+            // Posted through an approval (gap round B9): its final checker, and the first of two checkers.
+            'approved_by' => SavingsUserRef::from($approvedThrough->get($r->approval_id)?->decider),
+            'first_checker' => SavingsUserRef::from($approvedThrough->get($r->approval_id)?->firstChecker),
             // An excess-withdrawal fee (gap round S1): on a withdrawal, its fee row and amount; on a fee row, its withdrawal.
             'fee_transaction_id' => $fees->get($r->id)?->id,
             'fee_amount' => $fees->has($r->id) ? SavingsMath::pesos(SavingsMath::centavos($fees->get($r->id)->debit)) : null,
+            // The withdrawal plus its fee, null without one (gap round B9).
+            'total_with_fee' => $fees->has($r->id)
+                ? SavingsMath::pesos(SavingsMath::centavos($r->debit) + SavingsMath::centavos($fees->get($r->id)->debit))
+                : null,
             'fee_for_transaction_id' => $r->fee_for_transaction_id,
             'created_by' => SavingsUserRef::from($r->creator),
             'created_at' => $r->created_at?->toJSON(),
@@ -226,6 +267,7 @@ class Presenter
                 'target_reference' => $a->targetTransaction?->reference,
                 'amount' => SavingsMath::pesos(SavingsMath::centavos($a->amount)),
                 'fee_amount' => SavingsMath::pesos(SavingsMath::centavos($a->fee_amount ?? 0)),
+                'total_with_fee' => self::totalWithFee($a),
                 'required_checkers' => $a->required_checkers,
                 'requested_by' => SavingsUserRef::from($a->requester),
                 'first_checker' => SavingsUserRef::from($a->firstChecker),
@@ -238,6 +280,22 @@ class Presenter
                 'created_at' => $a->created_at?->toJSON(),
             ];
         })->values()->all();
+    }
+
+    /**
+     * A withdrawal approval, or a reversal of a withdrawal with its fee, as
+     * amount plus the fee it shows (gap round B9). Null when it carries no
+     * fee, and on every other kind.
+     */
+    private static function totalWithFee(SavingsApproval $approval): ?string
+    {
+        $fee = SavingsMath::centavos($approval->fee_amount ?? 0);
+
+        if ($fee === 0 || ! in_array($approval->kind, ['withdrawal', 'reversal'], true)) {
+            return null;
+        }
+
+        return SavingsMath::pesos(SavingsMath::centavos($approval->amount) + $fee);
     }
 
     /** The source of funds in words: "Salary", or "Other: <the member's words>". Null when not recorded. */
