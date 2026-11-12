@@ -64,6 +64,7 @@ class SavingsDashboard
                     'tax' => SavingsMath::pesos($flows['tax']),
                     'net' => SavingsMath::pesos($flows['interest'] - $flows['tax']),
                 ],
+                'fees_charged' => ['count' => $flows['fee_count'], 'amount' => SavingsMath::pesos($flows['fees'])],
                 'time_deposit_interest_paid' => ['gross' => SavingsMath::pesos($tdInterest['gross']), 'tax' => SavingsMath::pesos($tdInterest['tax'])],
                 'maturing_30_days' => $this->money($buckets[0], ['count', 'principal', 'maturity_amount']),
                 'gl_control' => $this->glControl($scope, $to),

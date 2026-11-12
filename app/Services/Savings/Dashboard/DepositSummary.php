@@ -14,7 +14,7 @@ use Carbon\CarbonImmutable;
  *
  * Each row and the totals carry the same figures:
  * - the savings balance at the start and end of the period, the deposits,
- *   withdrawals, interest credited and tax withheld in it
+ *   withdrawals, interest credited, tax withheld and fees charged in it
  *   ({@see DepositFigures} says what each counts), the other movements (the
  *   rest of the change in balance) and the net movement (closing less
  *   opening);
@@ -90,11 +90,11 @@ class DepositSummary
      */
     private function line(array $figures, int|string $key): array
     {
-        $flows = $figures['flows'][$key] ?? ['deposit_count' => 0, 'deposits' => 0, 'withdrawal_count' => 0, 'withdrawals' => 0, 'interest' => 0, 'tax' => 0, 'credits' => 0, 'debits' => 0];
+        $flows = $figures['flows'][$key] ?? ['deposit_count' => 0, 'deposits' => 0, 'withdrawal_count' => 0, 'withdrawals' => 0, 'interest' => 0, 'tax' => 0, 'fee_count' => 0, 'fees' => 0, 'credits' => 0, 'debits' => 0];
         $opening = $figures['opening'][$key] ?? 0;
         $closing = $figures['closing'][$key] ?? 0;
         $net = $closing - $opening;
-        $counted = $flows['deposits'] - $flows['withdrawals'] + $flows['interest'] - $flows['tax'];
+        $counted = $flows['deposits'] - $flows['withdrawals'] + $flows['interest'] - $flows['tax'] - $flows['fees'];
         $outstanding = $figures['outstanding'][$key] ?? ['count' => 0, 'principal' => 0, 'maturity_amount' => 0];
         $placed = $figures['placed'][$key] ?? ['count' => 0, 'principal' => 0];
         $tdInterest = $figures['td_interest'][$key] ?? ['gross' => 0, 'tax' => 0];
@@ -107,6 +107,8 @@ class DepositSummary
             'withdrawals' => SavingsMath::pesos($flows['withdrawals']),
             'interest_credited' => SavingsMath::pesos($flows['interest']),
             'tax_withheld' => SavingsMath::pesos($flows['tax']),
+            'fee_count' => $flows['fee_count'],
+            'fees_charged' => SavingsMath::pesos($flows['fees']),
             'other_movements' => SavingsMath::pesos($net - $counted),
             'net_movement' => SavingsMath::pesos($net),
             'closing_balance' => SavingsMath::pesos($closing),

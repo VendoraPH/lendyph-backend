@@ -5,9 +5,11 @@ namespace Tests\Feature\Savings\Insight;
 use App\Models\SavingsSetting;
 use App\Models\User;
 use App\Services\Savings\AccruedInterest;
+use App\Services\Savings\SavingsLedger;
 use App\Services\Savings\SavingsMath;
 use Illuminate\Routing\Middleware\ThrottleRequests;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\DB;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
@@ -261,10 +263,33 @@ class SavingsInsightReportsTest extends TestCase
 
         $csv = $this->actingAs($this->admin)->get('/api/reports/savings/summary/export?group_by=product&date_from=2026-11-01&date_to=2026-11-10')->assertOk()->streamedContent();
         $this->assertStringStartsWith('Product,"Opening Balance",', $csv);
-        $this->assertStringContainsString("\nTotal,1550.00,2,11999.00,1,300.00,12.34,2.47,-200.00,11508.87,13058.87,", $csv);
+        $this->assertStringContainsString("\nTotal,1550.00,2,11999.00,1,300.00,12.34,2.47,0.00,-200.00,11508.87,13058.87,", $csv);
         $this->assertStringContainsString("\n\"Junior Savings\",", $csv);
 
         $this->actingAs($this->admin)->getJson('/api/reports/savings/summary?group_by=member')->assertStatus(422)->assertJsonValidationErrors('group_by');
+    }
+
+    public function test_an_excess_withdrawal_fee_is_income_and_never_a_withdrawal(): void
+    {
+        $b = $this->accounts['B'];
+        $withdrawal = $this->withdraw($b, 10_000);
+        DB::transaction(fn () => app(SavingsLedger::class)->debit($b->refresh(), 'fee', 1_500, ['fee_for_transaction_id' => $withdrawal->id]));
+
+        $this->actingAs($this->admin)->getJson('/api/savings/dashboard')->assertOk()
+            ->assertJsonPath('data.kpis.withdrawals', ['count' => 2, 'amount' => '400.00'])
+            ->assertJsonPath('data.kpis.fees_charged', ['count' => 1, 'amount' => '15.00'])
+            ->assertJsonPath('data.kpis.savings_balance', '12943.87');
+
+        $this->actingAs($this->admin)->getJson('/api/reports/savings/summary?date_from=2026-11-01&date_to=2026-11-10')->assertOk()
+            ->assertJsonPath('data.totals.withdrawals', '400.00')
+            ->assertJsonPath('data.totals.fee_count', 1)
+            ->assertJsonPath('data.totals.fees_charged', '15.00')
+            ->assertJsonPath('data.totals.other_movements', '-200.00')
+            ->assertJsonPath('data.totals.closing_balance', '12943.87');
+
+        $this->actingAs($this->reader)->getJson('/api/reports/savings/withdrawals?date_from=2026-11-01&date_to=2026-11-10')->assertOk()
+            ->assertJsonPath('meta.total', 2)
+            ->assertJsonPath('totals.total_debit', '400.00');
     }
 
     public function test_a_branch_user_summarises_only_their_branches(): void

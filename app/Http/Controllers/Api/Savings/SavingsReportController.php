@@ -422,7 +422,7 @@ class SavingsReportController extends Controller
     #[OA\Get(
         path: '/api/reports/savings/summary',
         summary: 'Savings Deposit Summary',
-        description: 'The period (default this month to today) by branch (default) or by product (`group_by`). Each row and `totals`: opening_balance, deposit_count, deposits, withdrawal_count, withdrawals, interest_credited, tax_withheld, other_movements, net_movement, closing_balance, new_accounts, open_accounts, time_deposit_count and time_deposits (outstanding at `date_to`), time_deposits_placed_count, time_deposits_placed, time_deposit_interest, interest_expense and total_deposits. Every active branch or product is listed; `totals` are worked out over the whole filter, and the rows add up to them.',
+        description: 'The period (default this month to today) by branch (default) or by product (`group_by`). Each row and `totals`: opening_balance, deposit_count, deposits, withdrawal_count, withdrawals, interest_credited, tax_withheld, fee_count, fees_charged (excess-withdrawal fees, income, never a withdrawal), other_movements, net_movement, closing_balance, new_accounts, open_accounts, time_deposit_count and time_deposits (outstanding at `date_to`), time_deposits_placed_count, time_deposits_placed, time_deposit_interest, interest_expense and total_deposits. Every active branch or product is listed; `totals` are worked out over the whole filter, and the rows add up to them.',
         tags: ['Savings Reports'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'group_by', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['branch', 'product'])), new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')), new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')), new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')), new OA\Parameter(name: 'product_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer'))],
@@ -533,13 +533,13 @@ class SavingsReportController extends Controller
     public function exportSummary(SavingsExportRequest $request): StreamedResponse
     {
         $summary = $this->summaryFor($request->filters());
-        $line = fn (string $name, array $r) => [$name, $r['opening_balance'], $r['deposit_count'], $r['deposits'], $r['withdrawal_count'], $r['withdrawals'], $r['interest_credited'], $r['tax_withheld'], $r['other_movements'], $r['net_movement'], $r['closing_balance'], $r['new_accounts'], $r['open_accounts'], $r['time_deposit_count'], $r['time_deposits'], $r['time_deposits_placed'], $r['interest_expense'], $r['total_deposits']];
+        $line = fn (string $name, array $r) => [$name, $r['opening_balance'], $r['deposit_count'], $r['deposits'], $r['withdrawal_count'], $r['withdrawals'], $r['interest_credited'], $r['tax_withheld'], $r['fees_charged'], $r['other_movements'], $r['net_movement'], $r['closing_balance'], $r['new_accounts'], $r['open_accounts'], $r['time_deposit_count'], $r['time_deposits'], $r['time_deposits_placed'], $r['interest_expense'], $r['total_deposits']];
         $rows = array_map(fn (array $r) => $line($r['group_name'], $r), $summary['rows']);
         $rows[] = $line('Total', $summary['totals']);
 
         return $this->savingsCsv('savings-summary.csv', [
             $summary['group_by'] === DepositFigures::GROUP_PRODUCT ? 'Product' : 'Branch', 'Opening Balance', 'Deposits (count)', 'Deposits', 'Withdrawals (count)', 'Withdrawals',
-            'Interest Credited', 'Tax Withheld', 'Other Movements', 'Net Movement', 'Closing Balance', 'New Accounts', 'Open Accounts',
+            'Interest Credited', 'Tax Withheld', 'Fees Charged', 'Other Movements', 'Net Movement', 'Closing Balance', 'New Accounts', 'Open Accounts',
             'Time Deposits (count)', 'Time Deposits', 'Time Deposits Placed', 'Interest Expense', 'Total Deposits',
         ], $rows);
     }

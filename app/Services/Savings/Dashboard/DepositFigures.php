@@ -31,6 +31,8 @@ use InvalidArgumentException;
  * - Money moved between a member's savings and their time deposits (rows
  *   with a `time_deposit_id`) is neither: it never leaves the cooperative.
  * - Interest credited: `interest` rows; tax withheld: `withholding_tax` rows.
+ * - Fees: `fee` rows (an excess-withdrawal fee, Dr 2050 / Cr 4080), the
+ *   cooperative's income, never a withdrawal.
  * - A row that was reversed, and the reversal itself, count in none of
  *   these, as the interest postings report counts a reversed run in no
  *   total. Balances still read every row, so a period's other movements
@@ -80,7 +82,7 @@ class DepositFigures
      * row's credits and debits. With `$byMonth`, keyed by month (YYYY-MM)
      * instead, ungrouped.
      *
-     * @return array<int|string, array{deposit_count: int, deposits: int, withdrawal_count: int, withdrawals: int, interest: int, tax: int, credits: int, debits: int}>
+     * @return array<int|string, array{deposit_count: int, deposits: int, withdrawal_count: int, withdrawals: int, interest: int, tax: int, fee_count: int, fees: int, credits: int, debits: int}>
      */
     public function flows(array $scope, string $from, string $to, ?string $group = null, bool $byMonth = false): array
     {
@@ -88,6 +90,7 @@ class DepositFigures
         $withdrawal = $this->counted(self::WITHDRAWAL_TYPES, true);
         $interest = $this->counted(['interest'], false);
         $tax = $this->counted(['withholding_tax'], false);
+        $fee = $this->counted(['fee'], false);
 
         $query = $this->transactions($scope)
             ->leftJoin('savings_transactions AS r', 'r.reverses_transaction_id', '=', 't.id')
@@ -100,6 +103,8 @@ class DepositFigures
             "COALESCE(SUM(CASE WHEN {$withdrawal} THEN t.debit ELSE 0 END), 0) AS withdrawals",
             "COALESCE(SUM(CASE WHEN {$interest} THEN t.credit ELSE 0 END), 0) AS interest",
             "COALESCE(SUM(CASE WHEN {$tax} THEN t.debit ELSE 0 END), 0) AS tax",
+            "COALESCE(SUM(CASE WHEN {$fee} THEN 1 ELSE 0 END), 0) AS fee_count",
+            "COALESCE(SUM(CASE WHEN {$fee} THEN t.debit ELSE 0 END), 0) AS fees",
             'COALESCE(SUM(t.credit), 0) AS credits',
             'COALESCE(SUM(t.debit), 0) AS debits',
         ]);
@@ -115,6 +120,8 @@ class DepositFigures
             'withdrawals' => SavingsMath::centavos($row->withdrawals),
             'interest' => SavingsMath::centavos($row->interest),
             'tax' => SavingsMath::centavos($row->tax),
+            'fee_count' => (int) $row->fee_count,
+            'fees' => SavingsMath::centavos($row->fees),
             'credits' => SavingsMath::centavos($row->credits),
             'debits' => SavingsMath::centavos($row->debits),
         ])->all();
