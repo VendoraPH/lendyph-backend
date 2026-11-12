@@ -66,7 +66,8 @@ class ShareCapitalTransfer
     ) {}
 
     /**
-     * Post a transfer, or (above tier 1) open its approval.
+     * Post a transfer, or (above tier 1, or while the account is held after a
+     * deposit reactivated it) open its approval.
      *
      * @param  array{amount: string, remarks?: string|null}  $data
      * @return array{transaction: SavingsTransaction|null, entry: ShareCapitalLedger|null, approval: SavingsApproval|null}
@@ -82,7 +83,7 @@ class ShareCapitalTransfer
         $this->assertCanTransfer($account, $centavos);
         $this->teller->assertAvailable($account, $centavos);
 
-        if ($this->gate->needsApproval($centavos)) {
+        if ($this->gate->needsApprovalFor($account, $centavos)) {
             $this->teller->assertNotBeforeLatest($account, $date);
             $this->periods->assertOpen($date, 'This transfer to share capital');
 

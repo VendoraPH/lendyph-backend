@@ -185,7 +185,7 @@ final class WithdrawalRequests
         // opens reserves the money as a pending outflow, under this same
         // account lock, so the hold hands over to it (keeping both would
         // reserve the money twice). The reason says which happened.
-        $reason = $this->gate->needsApproval(SavingsMath::centavos($locked->amount))
+        $reason = $this->gate->needsApprovalFor($account, SavingsMath::centavos($locked->amount))
             ? "Moved to its second approval on request {$locked->reference}; the savings approval now reserves the money"
             : "Paid out on request {$locked->reference}";
         $this->holds->releaseForRequest($hold, $reason, $staff);

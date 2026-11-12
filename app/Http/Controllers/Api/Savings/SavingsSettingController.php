@@ -77,6 +77,8 @@ class SavingsSettingController extends Controller
             new OA\Property(property: 'tier3_checkers', type: 'integer', example: 2),
             new OA\Property(property: 'dormancy_months', type: 'integer', example: 24),
             new OA\Property(property: 'large_transaction_alert', type: 'string', example: '500000.00'),
+            new OA\Property(property: 'notice_days', type: 'array', items: new OA\Items(type: 'integer'), example: [30, 15, 7, 3, 0]),
+            new OA\Property(property: 'dormancy_warning_days', type: 'integer', example: 60),
         ])),
         responses: [
             new OA\Response(response: 200, description: 'The saved settings'),
@@ -179,6 +181,8 @@ class SavingsSettingController extends Controller
             'tier3_checkers' => $settings->tier3_checkers,
             'dormancy_months' => $settings->dormancy_months,
             'large_transaction_alert' => $settings->large_transaction_alert,
+            'notice_days' => $settings->noticeDays(),
+            'dormancy_warning_days' => $settings->dormancy_warning_days,
             'updated_by' => SavingsUserRef::from($settings->updater),
             'updated_at' => $settings->updated_at,
             ...$this->booksStatus(),

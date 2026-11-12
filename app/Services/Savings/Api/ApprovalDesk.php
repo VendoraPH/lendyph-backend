@@ -82,6 +82,7 @@ class ApprovalDesk
             }
 
             $result = $executor->execute($locked, $checker);
+            $this->gate->liftOutflowHold($locked, $checker);
 
             $locked->update([
                 'status' => 'approved',

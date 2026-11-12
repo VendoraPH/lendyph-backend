@@ -90,7 +90,7 @@ class AccountCloser
         $this->teller->assertNotBeforeLatest($account, $data['date']);
         $payout = $this->figures($account, $data['date'])['payout'];
 
-        if ($this->gate->needsApproval($payout)) {
+        if ($this->gate->needsApprovalFor($account, $payout)) {
             $this->periods->assertOpen($data['date'], 'This closing');
 
             return ['account' => null, 'approval' => $this->gate->open('close', $payout, [
