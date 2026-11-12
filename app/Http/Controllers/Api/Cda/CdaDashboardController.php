@@ -40,7 +40,7 @@ class CdaDashboardController extends Controller
     #[OA\Get(
         path: '/api/cda/periods/{year}/calendar',
         summary: 'The CDA compliance calendar for a year',
-        description: 'Needs `cda:view` and `branches:view_all`. One row per report instance the caller can open (mediation H1 and H2 separately; restricted reports without their view are left out), by effective deadline: the report row, `display_status`, `readiness` and `filed`. Deadlines are YYYY-MM-DD; `days_remaining` counts Manila days, negative once past.',
+        description: 'Needs `cda:view` and `branches:view_all`. One row per report instance the caller can open (mediation H1 and H2 separately; restricted reports without their view are left out), by effective deadline: the report row (`kind: report`), `display_status`, `readiness` and `filed`; the year\'s custom compliance requirements are listed among them (`kind: requirement`, effective deadline = the extension, else the default). Deadlines are YYYY-MM-DD; `days_remaining` counts Manila days, negative once past.',
         tags: ['CDA'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'year', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],

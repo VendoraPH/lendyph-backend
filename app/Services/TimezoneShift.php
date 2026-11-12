@@ -276,6 +276,10 @@ class TimezoneShift
         'cda_reporting_periods' => ['created_at', 'updated_at', 'year_end_captured_at'],
         'cda_reports' => ['approved_at', 'created_at', 'finalized_at', 'refreshed_at', 'stale_at', 'submitted_for_review_at', 'updated_at', 'validated_at'],
         'cda_settings' => ['created_at', 'updated_at'],
+        // Gap round B6 (2026-11-13): the review chain's steps and custom
+        // calendar items. Their due and filing dates are DATEs.
+        'cda_compliance_requirements' => ['created_at', 'updated_at'],
+        'cda_report_approval_steps' => ['acted_at', 'closed_at', 'created_at', 'updated_at'],
         'cda_social_programs' => ['created_at', 'updated_at'],
         'cda_submissions' => ['created_at', 'updated_at'],
         'time_deposits' => ['created_at', 'updated_at'],

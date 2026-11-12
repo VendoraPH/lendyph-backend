@@ -16,8 +16,9 @@ use App\Services\Cda\Sources\SourceCatalog;
  * template lays them out, each field with its value, where it came from
  * (`source` label, `source_key`, the source's own figure), whether it's
  * provisional, overridden or editable; the issues, readiness and its
- * breakdown, the history, the snapshot, the stage and the actions the caller
- * can take now.
+ * breakdown, the history, the snapshot, the stage, the review chain's latest
+ * round (`approval_steps`, empty on the single review) and the actions the
+ * caller can take now.
  *
  * A finalized or later report reads entirely from its snapshot, so a later
  * member, Branding or profile change never shows on it. Only the documents
@@ -32,6 +33,7 @@ final class ReportView
     public function __construct(
         private readonly ReportEngine $engine,
         private readonly CdaAccess $access,
+        private readonly CdaApprovalChain $chain,
     ) {}
 
     /** @return array<string, mixed> */
@@ -123,6 +125,7 @@ final class ReportView
             'approved_by' => CdaPresenter::user($report->approved_by === null ? null : User::query()->find($report->approved_by)),
             'approved_at' => $report->approved_at,
             'finalized_by' => CdaPresenter::user($report->finalized_by === null ? null : User::query()->find($report->finalized_by)),
+            'approval_steps' => $this->chain->present($report),
             'available_actions' => ReportWorkflow::available($report, $viewer, $this->access),
             'history' => $this->history($report),
         ];
