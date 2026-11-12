@@ -211,6 +211,12 @@ class RoleAndPermissionSeeder extends Seeder
             // permissions: the portal takes the member from the token.
             'member_portal:view', 'member_portal:invite', 'member_portal:manage',
             'member_portal:requests', 'member_portal:announcements', 'member_portal:settings',
+
+            // Penalty configurations (Phase 4, Settings → Penalties). admin and
+            // super_admin only, through Permission::all() below; no other role
+            // lists them. Mirrors 2026_11_12_400200_add_penalty_permissions,
+            // which grants them on the already-migrated deployments.
+            'penalties:view', 'penalties:create', 'penalties:update', 'penalties:delete',
         ];
 
         $guard = 'web';

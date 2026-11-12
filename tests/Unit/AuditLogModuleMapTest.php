@@ -80,7 +80,7 @@ it('files auth events under auth whatever their class', function () {
 it('lists the module values', function () {
     expect(AuditLogModules::all())->toEqualCanonicalizing([
         'auth', 'borrowers', 'loans', 'payments', 'collections', 'users', 'roles', 'accounting', 'gcash',
-        'reminders', 'credit_scoring', 'savings', 'cda', 'member_portal', 'system',
+        'reminders', 'credit_scoring', 'savings', 'cda', 'member_portal', 'penalties', 'system',
     ]);
 });
 

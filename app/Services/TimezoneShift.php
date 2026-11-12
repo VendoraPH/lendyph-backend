@@ -277,6 +277,10 @@ class TimezoneShift
         'cda_social_programs' => ['created_at', 'updated_at'],
         'cda_submissions' => ['created_at', 'updated_at'],
         'time_deposits' => ['created_at', 'updated_at'],
+        // Penalty configurations (Phase 4), added 2026-11-12, well after the
+        // cutover. The products pivot has no timestamps.
+        'penalty_config_conditions' => ['created_at', 'updated_at'],
+        'penalty_configs' => ['created_at', 'updated_at'],
         // Added 2026-11-11 with the Member Portal (Phase 3), well after the
         // cutover, for the same reason. `portal_requests.expires_on` is a DATE.
         'portal_announcement_reads' => ['read_at'],

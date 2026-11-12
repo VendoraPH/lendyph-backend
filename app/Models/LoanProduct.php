@@ -7,6 +7,7 @@ use App\Enums\TermUnit;
 use App\Traits\Auditable;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class LoanProduct extends Model
@@ -81,6 +82,31 @@ class LoanProduct extends Model
     public function loans(): HasMany
     {
         return $this->hasMany(Loan::class);
+    }
+
+    /**
+     * The penalty configurations covering this product, active or not. At most
+     * one is active (PenaltyConfigService); see activePenaltyConfigs().
+     *
+     * @return BelongsToMany<PenaltyConfig, $this>
+     */
+    public function penaltyConfigs(): BelongsToMany
+    {
+        return $this->belongsToMany(PenaltyConfig::class, 'penalty_config_products')
+            ->using(PenaltyConfigProduct::class);
+    }
+
+    /**
+     * The active configuration covering this product, as a list of at most
+     * one, for eager loading (PenaltyTerms::activeConfigFor()).
+     *
+     * @return BelongsToMany<PenaltyConfig, $this>
+     */
+    public function activePenaltyConfigs(): BelongsToMany
+    {
+        return $this->penaltyConfigs()
+            ->where('penalty_configs.status', PenaltyConfig::STATUS_ACTIVE)
+            ->orderBy('penalty_configs.id');
     }
 
     public function scopeActive($query)

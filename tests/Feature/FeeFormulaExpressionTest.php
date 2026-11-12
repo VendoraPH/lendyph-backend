@@ -382,11 +382,17 @@ class FeeFormulaExpressionTest extends TestCase
         $product = $this->freeProduct();
         $this->expressionFee($product, 'Loan Amount / (Loan Term − 6)', ['name' => 'Odd Fee']);
 
-        $preview = $this->postJson('/api/loans/preview', $this->formPreviewBody($product, 10000))->assertOk()->json('data');
+        $body = [...$this->formPreviewBody($product, 10000), 'deductions' => [['name' => 'Service Fee', 'amount' => 4000, 'type' => 'fixed']]];
+        $preview = $this->postJson('/api/loans/preview', $body)->assertOk()->json('data');
 
         $this->assertSame('The fee "Odd Fee" can\'t be worked out for this loan: it divides by zero.', $preview['deductions']['error']);
         $this->assertSame([], $preview['deductions']['configured_fees']);
         $this->assertNull($preview['deductions']['net_proceeds']);
+        // The total isn't known while a configured fee can't be worked out:
+        // null, never the stated items alone. The stated items still show.
+        $this->assertNull($preview['deductions']['total_deductions']);
+        $this->assertEquals(4000, $preview['deductions']['stated_total']);
+        $this->assertCount(1, $preview['deductions']['items']);
         $this->assertNotNull($preview['amortization']);
     }
 

@@ -920,22 +920,22 @@ it('has no path writing an active loan status outside the ones that are accounte
         //
         // The moment this importer learns to attach collateral, that stops
         // being true and this line has to move to the guarded list.
-        'app/Services/CsvImport/CsvImportProcessor.php:945 — \'status\' => \'ongoing\',',
+        'app/Services/CsvImport/CsvImportProcessor.php:946 — \'status\' => \'ongoing\',',
         // release(): approved → released. Its lock is the first statement of the
         // transaction; the assertion runs at the end, after
         // closeRestructuredSource() has taken any restructure source out of the
         // active set. The automatic accounting posting sits immediately BEFORE
         // that assertion, so the assertion is still the transaction's last
         // statement — which is what this entry is really asserting.
-        'app/Services/LoanService.php:1540 — \'status\' => \'released\',',
+        'app/Services/LoanService.php:1543 — \'status\' => \'released\',',
         // recordRepaymentOnLockedLoan(), which records every payment: released
         // → ongoing. Deliberately UNGUARDED — both are already active, so it
         // cannot add a holder.
-        'app/Services/RepaymentService.php:381 — $loan->update([\'status\' => \'ongoing\']);',
+        'app/Services/RepaymentService.php:383 — $loan->update([\'status\' => \'ongoing\']);',
         // voidRepayment(): completed → ongoing/released. Guarded before the
         // status write, off a lock taken at the top of the transaction. The
         // journal reversal is written before this block and does not move
         // either the lock or the assertion relative to the write.
-        'app/Services/RepaymentService.php:978 — $loan->update([\'status\' => $remainingPayments > 0 ? \'ongoing\' : \'released\']);',
+        'app/Services/RepaymentService.php:980 — $loan->update([\'status\' => $remainingPayments > 0 ? \'ongoing\' : \'released\']);',
     ], 'a new writer of an active loan status appeared; open its transaction with CollateralPledgeGuard::lockCollateralsOf() and call CollateralPledgeGuard::assertNoDoublePledge() before the write, or account for it here and say why it cannot add a second active holder');
 });

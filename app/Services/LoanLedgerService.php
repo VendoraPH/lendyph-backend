@@ -9,6 +9,8 @@ use App\Models\LoanAdjustment;
 use App\Models\LoanLedgerEntry;
 use App\Models\Repayment;
 use App\Models\ShareCapitalLedger;
+use App\Services\Penalties\BracketRate;
+use App\Services\Penalties\PenaltyTerms;
 use Carbon\CarbonInterface;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Support\Carbon;
@@ -295,7 +297,7 @@ final class LoanLedgerService
                 $date = $line['on']->gt($today) ? $today : $line['on'];
                 $postedAt = $date->lt($releasedAt) ? $releasedAt : $date;
 
-                $events[] = $this->penaltyCharge($postedAt, $schedule->id, (int) $schedule->period_number, $line['centavos'], $line['number']);
+                $events[] = $this->penaltyCharge($postedAt, $schedule->id, (int) $schedule->period_number, $line['centavos'], $line['number'], $line['rate'] ?? null);
             }
         }
 
@@ -330,19 +332,35 @@ final class LoanLedgerService
      *   shows it), so the split is what was charged and the last of them
      *   takes any rounding.
      *
-     * @return list<array{on: Carbon, centavos: int, number: int}>
+     * On a loan created under a penalty configuration each line carries the
+     * rate of its charge (`rate`), for its wording; the single line is the
+     * period's first charge.
+     *
+     * @return list<array{on: Carbon, centavos: int, number: int, rate?: float}>
      */
     private function penaltyLines(Loan $loan, AmortizationSchedule $schedule, int $charged, Carbon $today): array
     {
         $lateFrom = $schedule->due_date->copy()->addDays(max(0, (int) $loan->grace_period_days) + 1)->startOfDay();
         $single = [['on' => $lateFrom, 'centavos' => $charged, 'number' => 1]];
         $months = (int) $schedule->penalty_months;
+        $repayments = app(RepaymentService::class);
+
+        // A bracket loan's single line is its first real charge, with its
+        // day, number and rate: a day no bracket covers, or covers at 0%,
+        // charges nothing, so the first charge can fall after the first day
+        // past grace.
+        if (PenaltyTerms::bracketsOf($loan) !== null) {
+            $first = $repayments->penaltyCharges($loan, $schedule, $today)[0] ?? null;
+
+            if ($first !== null) {
+                $single = [[...$first, 'centavos' => $charged]];
+            }
+        }
 
         if ($schedule->isWaivedForGood() || $months <= 1) {
             return $single;
         }
 
-        $repayments = app(RepaymentService::class);
         $charges = array_slice($repayments->penaltyCharges($loan, $schedule, $today), 0, $months);
         // The months up to the checkpoint are weighed as they were charged,
         // beside the payments the Ledger shows with them.
@@ -407,14 +425,24 @@ final class LoanLedgerService
         return $lines === [] ? [[...$charges[0], 'centavos' => $total]] : $lines;
     }
 
-    /** @return array<string, mixed> */
-    private function penaltyCharge(CarbonInterface $postedAt, int $scheduleId, ?int $periodNumber, int $charged, int $number = 1): array
+    /**
+     * "Late penalty, period 2, month 3". A line of a loan created under a
+     * penalty configuration adds its bracket's rate, never rounded: "Late
+     * penalty, period 2, month 3, at 2.5%".
+     *
+     * @return array<string, mixed>
+     */
+    private function penaltyCharge(CarbonInterface $postedAt, int $scheduleId, ?int $periodNumber, int $charged, int $number = 1, ?float $rate = null): array
     {
         $description = match (true) {
             $periodNumber === null => 'Late penalty',
             $number > 1 => "Late penalty, period {$periodNumber}, month {$number}",
             default => "Late penalty, period {$periodNumber}",
         };
+
+        if ($periodNumber !== null && $rate !== null) {
+            $description .= ', at '.BracketRate::percent($rate);
+        }
 
         return $this->event($postedAt, $postedAt, 'penalty_charge', $scheduleId, [
             'kind' => 'penalty_charge',

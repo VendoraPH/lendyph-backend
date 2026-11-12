@@ -4,6 +4,7 @@ namespace App\Console\Commands;
 
 use App\Models\AmortizationSchedule;
 use App\Models\Loan;
+use App\Services\Penalties\PenaltyTerms;
 use App\Services\RepaymentService;
 use Carbon\Carbon;
 use Illuminate\Console\Attributes\Description;
@@ -25,7 +26,10 @@ class ApplyOverduePenalties extends Command
         // reach a no-op, and a candidate count that did not describe what the
         // command actually did.
         $loans = Loan::whereIn('status', Loan::ACTIVE_STATUSES)
-            ->where('penalty_rate', '>', 0)
+            // A penalty rate, or the brackets of a penalty configuration the
+            // loan was created under; one whose brackets charge nothing is
+            // dropped below, as the service would leave it alone.
+            ->where(fn ($q) => $q->where('penalty_rate', '>', 0)->orWhereNotNull('penalty_brackets'))
             ->whereHas('amortizationSchedules', function ($q) use ($today) {
                 $q->whereRaw(AmortizationSchedule::pastGraceSql(), [$today->toDateString()])
                     // Same reason as the grace filter beside it: a loan
@@ -41,7 +45,8 @@ class ApplyOverduePenalties extends Command
                     ->whereRaw(AmortizationSchedule::stillChargeableSql())
                     ->whereIn('status', AmortizationSchedule::UNPAID_STATUSES);
             })
-            ->get();
+            ->get()
+            ->filter(fn (Loan $loan): bool => PenaltyTerms::chargesPenalty($loan));
 
         $count = 0;
         foreach ($loans as $loan) {

@@ -53,6 +53,7 @@ use App\Models\LoanAdjustment;
 use App\Models\LoanApprovalStep;
 use App\Models\LoanLedgerEntry;
 use App\Models\LoanProduct;
+use App\Models\PenaltyConfig;
 use App\Models\PortalAnnouncement;
 use App\Models\PortalCode;
 use App\Models\PortalRequest;
@@ -215,6 +216,9 @@ class AuditLogModules
         PortalTermsVersion::class => 'member_portal',
         PortalRequest::class => 'member_portal',
         PortalAnnouncement::class => 'member_portal',
+        // Penalty configurations (Phase 4, Settings → Penalties). Its brackets
+        // and products are written on the configuration's own rows.
+        PenaltyConfig::class => 'penalties',
         // Deliberately system: an import run is housekeeping, not a record
         // any module's screen shows.
         CsvImportRun::class => self::UNMAPPED,

@@ -5,17 +5,21 @@ namespace App\Http\Resources;
 use App\Models\AmortizationSchedule;
 use App\Models\CoMaker;
 use App\Models\Loan;
+use App\Models\LoanProduct;
 use App\Services\BranchAccess;
 use App\Services\CollateralSecurity;
 use App\Services\LoanLedgerService;
 use App\Services\LoanService;
+use App\Services\Penalties\PenaltyTerms;
 use App\Services\PersistedScheduleFigures;
 use App\Services\RepaymentService;
 use Carbon\Carbon;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
+use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Http\Resources\Json\JsonResource;
+use Illuminate\Pagination\AbstractPaginator;
 use Illuminate\Support\Collection;
 use OpenApi\Attributes as OA;
 
@@ -40,6 +44,14 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'start_date', type: 'string', format: 'date'),
         new OA\Property(property: 'maturity_date', type: 'string', format: 'date'),
         new OA\Property(property: 'scb_amount', type: 'number', description: 'Share capital build-up amount per payment'),
+        new OA\Property(property: 'penalty_rate', type: 'number', description: 'The late penalty rate, a percent of the period\'s unpaid principal per charge, copied from the product at creation. 0 on a loan created under a penalty configuration, which charges by `penalty_brackets` instead.'),
+        new OA\Property(property: 'penalty_config_id', type: 'integer', nullable: true, description: 'The penalty configuration the loan was created under; null on a loan charged by `penalty_rate`.'),
+        new OA\Property(property: 'penalty_config_name', type: 'string', nullable: true, description: 'That configuration\'s name on the day the loan was created.'),
+        new OA\Property(property: 'penalty_brackets', type: 'array', nullable: true, description: 'The brackets the loan was created with, in day order: days past the due date (the day after it is day 1), `days_to` null for open-ended, and the rate in percent, never rounded. Each charge takes the bracket covering its day; a day none covers is no charge. Later edits to the configuration never change them. Null on a loan charged by `penalty_rate`.', items: new OA\Items(properties: [
+            new OA\Property(property: 'days_from', type: 'integer', example: 1),
+            new OA\Property(property: 'days_to', type: 'integer', nullable: true, example: 5),
+            new OA\Property(property: 'rate', type: 'number', example: 20),
+        ], type: 'object')),
         new OA\Property(property: 'policy_exception', type: 'boolean'),
         new OA\Property(property: 'policy_exception_details', type: 'string', nullable: true),
         new OA\Property(property: 'status', type: 'string'),
@@ -163,6 +175,36 @@ class LoanResource extends JsonResource
      *
      * @param  LengthAwarePaginator<int, Loan>  $loans
      */
+    /**
+     * A list's embedded `loan_product` reads its `penalty_source` from each
+     * product's active penalty configuration: loaded here for every product
+     * on the page in one query, never per row.
+     *
+     * @param  mixed  $resource
+     */
+    public static function collection($resource): AnonymousResourceCollection
+    {
+        $loans = match (true) {
+            $resource instanceof EloquentCollection => $resource,
+            $resource instanceof AbstractPaginator => $resource->getCollection(),
+            default => null,
+        };
+
+        if ($loans instanceof EloquentCollection) {
+            $products = $loans
+                ->filter(fn (mixed $loan): bool => $loan instanceof Loan && $loan->relationLoaded('loanProduct') && $loan->loanProduct !== null)
+                ->map(fn (Loan $loan): LoanProduct => $loan->loanProduct)
+                ->unique(fn (LoanProduct $product): int => spl_object_id($product))
+                ->values();
+
+            if ($products->isNotEmpty()) {
+                (new EloquentCollection($products->all()))->loadMissing('activePenaltyConfigs');
+            }
+        }
+
+        return parent::collection($resource);
+    }
+
     public static function summaryCollection(LengthAwarePaginator $loans): AnonymousResourceCollection
     {
         $owedOnPeriods = Loan::owedOnPeriodsByLoan($loans->getCollection()->modelKeys());
@@ -255,6 +297,11 @@ class LoanResource extends JsonResource
             'net_proceeds' => $this->net_proceeds,
             'scb_amount' => (float) $this->scb_amount,
             'penalty_rate' => $this->penalty_rate,
+            // The penalty configuration copied at creation (PenaltyTerms); all
+            // null on a loan charged by `penalty_rate`.
+            'penalty_config_id' => $this->penalty_config_id,
+            'penalty_config_name' => $this->penalty_config_name,
+            'penalty_brackets' => PenaltyTerms::bracketsOf($this->resource),
             'grace_period_days' => $this->grace_period_days,
             'policy_exception' => (bool) $this->policy_exception,
             'policy_exception_details' => $this->policy_exception_details,
