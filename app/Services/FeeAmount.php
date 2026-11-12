@@ -4,6 +4,12 @@ namespace App\Services;
 
 use App\Enums\TermUnit;
 use App\Models\Fee;
+use App\Services\Fees\FeeExpression;
+use App\Services\Fees\FeeExpressionException;
+use App\Services\Fees\FeeFormulaInputs;
+use App\Services\Fees\FeeFormulaResult;
+use Brick\Math\BigDecimal;
+use Brick\Math\RoundingMode;
 
 /**
  * The one place a fee's peso amount is worked out, for a catalog fee
@@ -20,6 +26,10 @@ use App\Models\Fee;
  *   optional), rounded half up to the centavo. Worked in whole numbers
  *   (centavos, ten-thousandths of a percent, days), so a half centavo is
  *   exactly a half and always rounds up.
+ * - `formula` written as an expression (`formula_expression`, Phase 4):
+ *   {@see self::forExpression()}, exact rational maths, half up to the
+ *   centavo, then the same bounds. `value` is 0 and `per_month` false on such
+ *   a fee; with no expression the recipe above is unchanged.
  *
  * The term in months is the schedule engine's: a days term is its days over
  * {@see LoanTermSchedule::DAYS_PER_MONTH} (a 12-week term of 84 days is 2.8
@@ -27,6 +37,12 @@ use App\Models\Fee;
  */
 final class FeeAmount
 {
+    /**
+     * The most a fee may come to: what the 12,2 money columns (a loan's
+     * deductions totals, the bounds) can hold.
+     */
+    public const LARGEST_AMOUNT = '9999999999.99';
+
     /** The fee types a catalog fee or a product custom fee may have. */
     public const TYPES = ['fixed', 'percentage', 'formula'];
 
@@ -79,6 +95,69 @@ final class FeeAmount
     }
 
     /**
+     * An expression fee's amount on a loan, or null when an input the formula
+     * uses isn't known yet (the form preview before its rate or dates).
+     *
+     * The exact result is cut to 6 decimals half up for `raw_amount`, rounded
+     * half up to the centavo from the exact figure (never from the 6-decimal
+     * one, so nothing is rounded twice), then kept between `$minAmount` and
+     * `$maxAmount` when they're set. An amount above
+     * {@see self::LARGEST_AMOUNT} after the bounds is refused.
+     *
+     * @throws FeeExpressionException DIVIDES_BY_ZERO, NEGATIVE or TOO_LARGE on these inputs
+     */
+    public static function forExpression(FeeExpression $expression, FeeFormulaInputs $inputs, mixed $minAmount = null, mixed $maxAmount = null): ?FeeFormulaResult
+    {
+        $raw = $expression->evaluate($inputs->values());
+
+        if ($raw === null) {
+            return null;
+        }
+
+        $rounded = $raw->toScale(2, RoundingMode::HalfUp);
+        $amount = $rounded;
+        $clamped = null;
+        $min = self::decimalOrNull($minAmount);
+        $max = self::decimalOrNull($maxAmount);
+
+        // Compared as decimals, never as integers: a formula can work out far
+        // beyond what an int holds before a maximum brings it back down.
+        if ($min !== null && $amount->isLessThan($min)) {
+            [$amount, $clamped] = [$min, 'min'];
+        }
+
+        if ($max !== null && $amount->isGreaterThan($max)) {
+            [$amount, $clamped] = [$max, 'max'];
+        }
+
+        if ($amount->isGreaterThan(self::LARGEST_AMOUNT)) {
+            throw FeeExpressionException::tooLarge();
+        }
+
+        return new FeeFormulaResult(
+            raw: $raw,
+            rawAmount: (string) $raw->toScale(6, RoundingMode::HalfUp),
+            roundedAmount: (string) $rounded,
+            amount: (string) $amount,
+            clamped: $clamped,
+        );
+    }
+
+    /**
+     * A bound as a 2-place decimal, or null when it isn't set.
+     */
+    private static function decimalOrNull(mixed $amount): ?BigDecimal
+    {
+        if ($amount === null || $amount === '' || ! is_numeric($amount)) {
+            return null;
+        }
+
+        $written = is_float($amount) ? number_format($amount, 2, '.', '') : (string) $amount;
+
+        return BigDecimal::of($written)->toScale(2, RoundingMode::HalfUp);
+    }
+
+    /**
      * A product custom fee or a stated deduction, as an array:
      * `{type, value|amount, per_month?, min_amount?, max_amount?}`.
      *
@@ -87,6 +166,15 @@ final class FeeAmount
      */
     public static function forCustomFee(array $fee, float|int|string $principal, ?array $months): ?float
     {
+        if (self::carriesExpression($fee)) {
+            return self::forExpression(
+                FeeExpression::parse((string) $fee['formula_expression']),
+                FeeFormulaInputs::fromSnapshot($fee['formula_inputs']),
+                $fee['min_amount'] ?? null,
+                $fee['max_amount'] ?? null,
+            )?->amountAsFloat();
+        }
+
         return self::forRule(
             (string) ($fee['type'] ?? 'fixed'),
             $fee['value'] ?? $fee['amount'] ?? 0,
@@ -101,10 +189,12 @@ final class FeeAmount
     /**
      * The formula fields a deduction item carries, so a recompute reads a
      * formula item exactly as it was charged. Empty for any other type, whose
-     * items keep their `{name, amount, type, original_value}` shape.
+     * items keep their `{name, amount, type, original_value}` shape. An
+     * expression item also keeps its snapshot: `formula_expression`,
+     * `formula_inputs` and `raw_amount`.
      *
      * @param  array<string, mixed>  $fee
-     * @return array{per_month?: bool, min_amount?: float|null, max_amount?: float|null}
+     * @return array{per_month?: bool, min_amount?: float|null, max_amount?: float|null, formula_expression?: string, formula_inputs?: array<string, string|null>, raw_amount?: string|null}
      */
     public static function formulaFields(string $type, array $fee): array
     {
@@ -112,11 +202,37 @@ final class FeeAmount
             return [];
         }
 
-        return [
+        $fields = [
             'per_month' => (bool) ($fee['per_month'] ?? false),
             'min_amount' => self::nullableAmount($fee['min_amount'] ?? null),
             'max_amount' => self::nullableAmount($fee['max_amount'] ?? null),
         ];
+
+        if (! self::carriesExpression([...$fee, 'type' => $type])) {
+            return $fields;
+        }
+
+        return [
+            ...$fields,
+            'formula_expression' => (string) $fee['formula_expression'],
+            'formula_inputs' => $fee['formula_inputs'],
+            'raw_amount' => isset($fee['raw_amount']) ? (string) $fee['raw_amount'] : null,
+        ];
+    }
+
+    /**
+     * Whether a deduction item was charged from an expression and carries its
+     * snapshot (`formula_expression` and `formula_inputs`), so a recompute
+     * reads it from what it was charged with, never from today's fee.
+     *
+     * @param  array<string, mixed>  $fee
+     */
+    private static function carriesExpression(array $fee): bool
+    {
+        return ($fee['type'] ?? null) === 'formula'
+            && is_string($fee['formula_expression'] ?? null)
+            && trim($fee['formula_expression']) !== ''
+            && is_array($fee['formula_inputs'] ?? null);
     }
 
     /**

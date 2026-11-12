@@ -17,6 +17,7 @@ class Fee extends Model
         'per_month',
         'min_amount',
         'max_amount',
+        'formula_expression',
         'applicable_product_ids',
         'conditions',
     ];
