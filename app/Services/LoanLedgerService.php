@@ -333,28 +333,34 @@ final class LoanLedgerService
      *   takes any rounding.
      *
      * On a loan created under a penalty configuration each line carries the
-     * rate of its charge (`rate`), for its wording; the single line takes the
-     * rate of the bracket covering its day.
+     * rate of its charge (`rate`), for its wording; the single line is the
+     * period's first charge.
      *
      * @return list<array{on: Carbon, centavos: int, number: int, rate?: float}>
      */
     private function penaltyLines(Loan $loan, AmortizationSchedule $schedule, int $charged, Carbon $today): array
     {
         $lateFrom = $schedule->due_date->copy()->addDays(max(0, (int) $loan->grace_period_days) + 1)->startOfDay();
-        $brackets = PenaltyTerms::bracketsOf($loan);
-        $single = [[
-            'on' => $lateFrom,
-            'centavos' => $charged,
-            'number' => 1,
-            ...($brackets === null ? [] : ['rate' => BracketRate::rateFor($brackets, (int) $schedule->due_date->copy()->startOfDay()->diffInDays($lateFrom))]),
-        ]];
+        $single = [['on' => $lateFrom, 'centavos' => $charged, 'number' => 1]];
         $months = (int) $schedule->penalty_months;
+        $repayments = app(RepaymentService::class);
+
+        // A bracket loan's single line is its first real charge, with its
+        // day, number and rate: a day no bracket covers, or covers at 0%,
+        // charges nothing, so the first charge can fall after the first day
+        // past grace.
+        if (PenaltyTerms::bracketsOf($loan) !== null) {
+            $first = $repayments->penaltyCharges($loan, $schedule, $today)[0] ?? null;
+
+            if ($first !== null) {
+                $single = [[...$first, 'centavos' => $charged]];
+            }
+        }
 
         if ($schedule->isWaivedForGood() || $months <= 1) {
             return $single;
         }
 
-        $repayments = app(RepaymentService::class);
         $charges = array_slice($repayments->penaltyCharges($loan, $schedule, $today), 0, $months);
         // The months up to the checkpoint are weighed as they were charged,
         // beside the payments the Ledger shows with them.

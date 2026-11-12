@@ -1550,10 +1550,12 @@ class RepaymentService
      * - The rate is the loan's `penalty_rate`, or, on a loan created under a
      *   penalty configuration (`penalty_brackets`), the rate of the bracket
      *   covering the charge's days past the due date (the day after it is
-     *   day 1). A day no bracket covers is no charge, and is left out; each
-     *   charge keeps its month number, and carries its `rate`. Bracket loans
-     *   are all created after the switch date, so they always take the
-     *   monthly rule, never the pre-switch branch.
+     *   day 1). A day no bracket covers, or one covered at 0%, is no charge
+     *   and is left out (so it counts in no `penalty_months`); each charge
+     *   keeps its number, and carries its `rate`. The switch-date rule above
+     *   applies to bracket loans too, since it turns on when the period fell
+     *   late (a CSV import or a backdated start can fall late before it): the
+     *   pre-switch charge takes the bracket of the day it fell late.
      *
      * None on a loan that charges no penalty (PenaltyTerms::chargesPenalty()),
      * a period not late on `$asOf`, or one due before the loan's imported
@@ -1580,77 +1582,77 @@ class RepaymentService
 
         $day = $asOf->copy()->startOfDay();
         $unpaidOn = $this->principalUnpaidOn($schedule, $asCharged);
-        $charge = fn (Carbon $on): int => LoanService::toCentavos(round($unpaidOn($on) / 100 * ($rate / 100), 2));
+        $charge = fn (Carbon $base, float $rate): int => LoanService::toCentavos(round($unpaidOn($base) / 100 * ($rate / 100), 2));
 
         $dueDate = $schedule->due_date->copy()->startOfDay();
         $lateFrom = $dueDate->copy()->addDays(max(0, (int) $loan->grace_period_days) + 1);
+        $days = self::chargeDays($dueDate, $lateFrom, $day);
 
-        if ($brackets !== null) {
-            return $this->bracketCharges($brackets, $unpaidOn, $dueDate, $lateFrom, $day);
+        if ($brackets === null) {
+            return array_map(
+                fn (array $chargeDay): array => ['on' => $chargeDay['on'], 'centavos' => $charge($chargeDay['base'], $rate), 'number' => $chargeDay['number']],
+                $days,
+            );
         }
 
-        $switchDate = LatePenaltySetting::monthlyFrom();
+        $charges = [];
 
-        if ($switchDate !== null && $lateFrom->lt($switchDate)) {
-            $charges = [['on' => $lateFrom, 'centavos' => $charge($switchDate), 'number' => 1]];
+        foreach ($days as $chargeDay) {
+            $bracketRate = BracketRate::rateFor($brackets, (int) $dueDate->diffInDays($chargeDay['on']));
 
-            for ($month = 1; $month <= self::fullMonthsBetween($switchDate, $day); $month++) {
-                $on = $switchDate->copy()->addMonthsNoOverflow($month);
-                $charges[] = ['on' => $on, 'centavos' => $charge($on), 'number' => $month + 1];
+            // A day no bracket covers, or one covered at 0%, is no charge.
+            if ($bracketRate === null || $bracketRate <= 0) {
+                continue;
             }
 
-            return $charges;
-        }
-
-        $charges = [['on' => $lateFrom, 'centavos' => $charge($lateFrom), 'number' => 1]];
-
-        for ($month = 2; $month <= self::fullMonthsBetween($dueDate, $day); $month++) {
-            $on = $dueDate->copy()->addMonthsNoOverflow($month);
-            $on = $on->lt($lateFrom) ? $lateFrom : $on;
-            $charges[] = ['on' => $on, 'centavos' => $charge($on), 'number' => $month];
+            $charges[] = [
+                'on' => $chargeDay['on'],
+                'centavos' => $charge($chargeDay['base'], $bracketRate),
+                'number' => $chargeDay['number'],
+                'rate' => $bracketRate,
+            ];
         }
 
         return $charges;
     }
 
     /**
-     * penaltyCharges() on a loan created under a penalty configuration: the
-     * same charge days (the first day past grace, then each full month after
-     * the due date) and the same base (the principal unpaid that day), each
-     * at the rate of the bracket covering its days past the due date. A day
-     * no bracket covers is no charge.
+     * The days a late period is charged by `$day`, the principal unpaid on
+     * which day each is worked on (`base`), and which charge it is.
      *
-     * @param  list<array{days_from: int, days_to: int|null, rate: float}>  $brackets
-     * @param  Closure(Carbon): int  $unpaidOn
-     * @return list<array{on: Carbon, centavos: int, number: int, rate: float}>
+     * - The first falls on the first day past grace, then one on each monthly
+     *   anniversary of the due date from the second month, each worked on its
+     *   own day.
+     * - A period already late before the switch date has its one charge,
+     *   dated when it fell late and worked on the switch day, then one at
+     *   each full month after the switch date.
+     *
+     * @return list<array{on: Carbon, base: Carbon, number: int}>
      */
-    private function bracketCharges(array $brackets, Closure $unpaidOn, Carbon $dueDate, Carbon $lateFrom, Carbon $day): array
+    private static function chargeDays(Carbon $dueDate, Carbon $lateFrom, Carbon $day): array
     {
-        $days = [1 => $lateFrom];
+        $switchDate = LatePenaltySetting::monthlyFrom();
+
+        if ($switchDate !== null && $lateFrom->lt($switchDate)) {
+            $days = [['on' => $lateFrom, 'base' => $switchDate, 'number' => 1]];
+
+            for ($month = 1; $month <= self::fullMonthsBetween($switchDate, $day); $month++) {
+                $on = $switchDate->copy()->addMonthsNoOverflow($month);
+                $days[] = ['on' => $on, 'base' => $on, 'number' => $month + 1];
+            }
+
+            return $days;
+        }
+
+        $days = [['on' => $lateFrom, 'base' => $lateFrom, 'number' => 1]];
 
         for ($month = 2; $month <= self::fullMonthsBetween($dueDate, $day); $month++) {
             $on = $dueDate->copy()->addMonthsNoOverflow($month);
-            $days[$month] = $on->lt($lateFrom) ? $lateFrom : $on;
+            $on = $on->lt($lateFrom) ? $lateFrom : $on;
+            $days[] = ['on' => $on, 'base' => $on, 'number' => $month];
         }
 
-        $charges = [];
-
-        foreach ($days as $number => $on) {
-            $rate = BracketRate::rateFor($brackets, (int) $dueDate->diffInDays($on));
-
-            if ($rate === null) {
-                continue;
-            }
-
-            $charges[] = [
-                'on' => $on,
-                'centavos' => LoanService::toCentavos(round($unpaidOn($on) / 100 * ($rate / 100), 2)),
-                'number' => $number,
-                'rate' => $rate,
-            ];
-        }
-
-        return $charges;
+        return $days;
     }
 
     /**

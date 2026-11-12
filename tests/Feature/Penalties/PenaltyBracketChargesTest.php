@@ -3,6 +3,7 @@
 namespace Tests\Feature\Penalties;
 
 use App\Models\AmortizationSchedule;
+use App\Models\LatePenaltySetting;
 use App\Models\Loan;
 use App\Models\LoanAdjustment;
 use App\Models\Repayment;
@@ -251,6 +252,100 @@ class PenaltyBracketChargesTest extends TestCase
             ['2026-03-16', 'Late penalty, period 2, at 2.5%', 250.0],
             ['2026-04-15', 'Late penalty, period 1, month 2, at 3.1234%', 312.34],
         ], array_map(fn (array $line): array => [$line[0], $line[1], $line[2]], $this->penaltyLines($loan)));
+    }
+
+    public function test_one_open_bracket_matches_the_rate_across_the_switch_date_to_the_centavo(): void
+    {
+        // Periods 1 and 2 fell late before the switch on 10 April: their one
+        // charge is worked on the principal unpaid on the switch day, then one
+        // more at each full month after it. Period 3 falls late after it.
+        LatePenaltySetting::query()->create(['monthly_from' => '2026-04-10']);
+
+        $rate = $this->createReleasedLoan(['start_date' => '2026-01-15']);
+        $bracket = $this->bracketLoan([['days_from' => 1, 'days_to' => null, 'rate' => 2]], grace: 3);
+
+        $this->nightlyOn('2026-05-05');
+        $this->assertSamePenalties($rate, $bracket);
+        $this->assertPenalty($bracket, 1, charged: 200, months: 1);
+
+        // A part payment before the next month lowers the base after it.
+        $payments = array_map(fn (Loan $loan): Repayment => $this->payOn($loan, '2026-05-06', 7350.55), [$rate, $bracket]);
+        $this->assertSame($payments[0]->penalty_applied, $payments[1]->penalty_applied);
+
+        $this->nightlyOn('2026-06-15');
+        $this->assertSamePenalties($rate, $bracket);
+        $this->assertSameSummaries($rate, $bracket);
+
+        $rateLines = $this->penaltyLines($rate);
+        $bracketLines = $this->penaltyLines($bracket);
+        $this->assertSame(array_column($rateLines, 0), array_column($bracketLines, 0));
+        $this->assertSame(array_column($rateLines, 2), array_column($bracketLines, 2));
+    }
+
+    public function test_a_period_late_before_the_switch_takes_its_brackets_rate_on_each_charge(): void
+    {
+        LatePenaltySetting::query()->create(['monthly_from' => '2026-04-10']);
+
+        // Grace 3: period 1 fell late on 19 February, day 4 (20%), worked on
+        // the principal unpaid on the switch day. The next charge is a full
+        // month after the switch, 10 May, day 84 (50%).
+        $loan = $this->bracketLoan(self::KEVIN, grace: 3);
+
+        $this->nightlyOn('2026-05-09');
+        $this->assertPenalty($loan, 1, charged: 2000, months: 1);
+
+        $this->nightlyOn('2026-05-10');
+        $this->assertPenalty($loan, 1, charged: 7000, months: 2);
+
+        $this->assertSame(
+            [['2026-02-19', 'Late penalty, period 1, at 20%', 2000.0], ['2026-05-10', 'Late penalty, period 1, month 2, at 50%', 5000.0]],
+            array_values(array_filter($this->penaltyLines($loan), fn (array $line): bool => str_starts_with($line[1], 'Late penalty, period 1,'))),
+        );
+    }
+
+    public function test_a_day_covered_at_0_percent_is_no_charge(): void
+    {
+        $loan = $this->bracketLoan([
+            ['days_from' => 1, 'days_to' => 30, 'rate' => 0],
+            ['days_from' => 31, 'days_to' => null, 'rate' => 5],
+        ], grace: 0);
+
+        // Day 1 is covered at 0%: no charge, and not counted.
+        $this->nightlyOn('2026-02-16');
+        $this->assertPenalty($loan, 1, charged: 0, months: 0);
+
+        // Day 59 is 5% of ₱10,000. Period 2 is on its day 31 with only its
+        // first charge (day 1, 0%) fallen.
+        $this->nightlyOn('2026-04-15');
+        $this->assertPenalty($loan, 1, charged: 500, months: 1);
+        $this->assertPenalty($loan, 2, charged: 0, months: 0);
+
+        $this->assertSame(
+            [['2026-04-15', 'Late penalty, period 1, month 2, at 5%', 500.0]],
+            $this->penaltyLines($loan),
+        );
+    }
+
+    public function test_the_disclosure_and_the_promissory_note_send_the_loans_penalty_terms(): void
+    {
+        $bracket = $this->bracketLoan(self::KEVIN, grace: 3);
+        $rate = $this->createReleasedLoan(['start_date' => '2026-01-15', 'product' => ['penalty_rate' => 2.5]]);
+        $none = $this->createReleasedLoan(['start_date' => '2026-01-15', 'product' => ['penalty_rate' => 0]]);
+
+        foreach (['disclosure', 'promissory-note'] as $document) {
+            $terms = fn (Loan $loan): array => $this->getJson("/api/loans/{$loan->id}/{$document}")->assertOk()->json('data.loan_terms');
+
+            $withBrackets = $terms($bracket);
+            $this->assertEquals(0, $withBrackets['penalty_rate'], $document);
+            $this->assertEquals(self::KEVIN, $withBrackets['penalty_brackets'], $document);
+            $this->assertSame('1–5 days late: 20%; 6–10 days late: 30%; 11 days or more late: 50%', $withBrackets['penalty_terms'], $document);
+
+            $withRate = $terms($rate);
+            $this->assertNull($withRate['penalty_brackets'], $document);
+            $this->assertSame('2.5% a month', $withRate['penalty_terms'], $document);
+
+            $this->assertSame('No late penalty', $terms($none)['penalty_terms'], $document);
+        }
     }
 
     public function test_the_loan_row_sends_its_brackets_and_configuration(): void

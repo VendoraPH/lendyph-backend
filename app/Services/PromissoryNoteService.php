@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Loan;
+use App\Services\Penalties\PenaltyTerms;
 
 class PromissoryNoteService
 {
@@ -62,6 +63,10 @@ class PromissoryNoteService
                 'total_interest' => round($totalInterest, 2),
                 'total_obligation' => round($totalPrincipal + $totalInterest, 2),
                 'penalty_rate' => (float) $loan->penalty_rate,
+                // A loan created under a penalty configuration charges by
+                // these brackets (its penalty_rate is 0); null otherwise.
+                'penalty_brackets' => PenaltyTerms::bracketsOf($loan),
+                'penalty_terms' => PenaltyTerms::inWords($loan),
                 'grace_period_days' => $loan->grace_period_days,
             ],
 

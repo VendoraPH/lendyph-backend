@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Enums\TermUnit;
 use App\Models\Loan;
 use App\Services\Accounting\PostingRules;
+use App\Services\Penalties\PenaltyTerms;
 use Illuminate\Validation\ValidationException;
 
 /**
@@ -210,6 +211,10 @@ class DisclosureService
                 'term_unit' => $loan->term_unit->value,
                 'frequency' => $loan->frequency,
                 'penalty_rate' => (float) $loan->penalty_rate,
+                // A loan created under a penalty configuration charges by
+                // these brackets (its penalty_rate is 0); null otherwise.
+                'penalty_brackets' => PenaltyTerms::bracketsOf($loan),
+                'penalty_terms' => PenaltyTerms::inWords($loan),
                 'grace_period_days' => $loan->grace_period_days,
                 'start_date' => $loan->start_date->toDateString(),
                 'maturity_date' => $loan->maturity_date->toDateString(),

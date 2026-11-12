@@ -31,19 +31,27 @@ final class PenaltyTerms
     /**
      * The penalty attributes a new loan on `$product` stores.
      *
-     * The configuration is re-read under a shared lock: inside the creating
-     * transaction, a delete or edit of it waits until the loan is saved, and
-     * the delete then sees the loan and is refused (PenaltyConfigService).
+     * Inside the creating transaction the lookup is a locking read: the
+     * active configuration and its link to the product are read together
+     * under a shared lock, then its brackets under the same lock. A product
+     * moved to another configuration meanwhile gets that one; one no longer
+     * covered gets its own rate. An edit or delete of the configuration waits
+     * until the loan is saved, and the delete then sees the loan and is
+     * refused (PenaltyConfigService).
      *
      * @return array{penalty_rate: mixed, penalty_config_id: int|null, penalty_config_name: string|null, penalty_brackets: list<array{days_from: int, days_to: int|null, rate: float}>|null}
      */
     public static function forProduct(LoanProduct $product): array
     {
-        $config = $product->getKey() === null ? null : $product->activePenaltyConfigs()->first();
-
-        if ($config !== null && DB::transactionLevel() > 0) {
-            $config = PenaltyConfig::query()->whereKey($config->id)->active()->sharedLock()->first();
-        }
+        $locking = DB::transactionLevel() > 0;
+        $config = $product->getKey() === null ? null : PenaltyConfig::query()
+            ->select('penalty_configs.*')
+            ->join('penalty_config_products', 'penalty_config_products.penalty_config_id', '=', 'penalty_configs.id')
+            ->where('penalty_config_products.loan_product_id', $product->getKey())
+            ->where('penalty_configs.status', PenaltyConfig::STATUS_ACTIVE)
+            ->orderBy('penalty_configs.id')
+            ->when($locking, fn ($q) => $q->sharedLock())
+            ->first();
 
         if ($config === null) {
             return [
@@ -53,6 +61,9 @@ final class PenaltyTerms
                 'penalty_brackets' => null,
             ];
         }
+
+        $conditions = $config->conditions()->when($locking, fn ($q) => $q->sharedLock())->get();
+        $config->setRelation('conditions', $conditions);
 
         return [
             'penalty_rate' => 0,
@@ -109,6 +120,24 @@ final class PenaltyTerms
         $brackets = $loan->penalty_brackets;
 
         return is_array($brackets) && $brackets !== [] ? BracketRate::normalise($brackets) : null;
+    }
+
+    /**
+     * The loan's late penalty in words, for its printables: its brackets
+     * ("1–5 days late: 20%; 11 days or more late: 50%"), its rate ("3% a
+     * month"), or "No late penalty". Rates never rounded.
+     */
+    public static function inWords(Loan $loan): string
+    {
+        $brackets = self::bracketsOf($loan);
+
+        if ($brackets !== null) {
+            return BracketRate::inWords($brackets, ' late');
+        }
+
+        return (float) $loan->penalty_rate > 0
+            ? BracketRate::percent((string) $loan->penalty_rate).' a month'
+            : 'No late penalty';
     }
 
     /**

@@ -8,7 +8,9 @@ use App\Models\Loan;
 use App\Models\LoanProduct;
 use App\Services\CsvImport\CsvImportProcessor;
 use App\Services\LoanService;
+use App\Services\Penalties\PenaltyTerms;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\DB;
 use Tests\TestCase;
 use Tests\Traits\BuildsCsvImports;
 use Tests\Traits\SetupLendyPH;
@@ -114,6 +116,41 @@ class PenaltyConfigSnapshotTest extends TestCase
         $this->deleteJson("/api/penalty-configs/{$id}")
             ->assertConflict()
             ->assertJsonPath('message', "This configuration is on 2 loans, so it can't be deleted. Deactivate it instead.");
+    }
+
+    public function test_the_copy_reads_the_configuration_now_covering_the_product_under_a_lock(): void
+    {
+        $other = LoanProduct::factory()->create(['name' => 'Other Loan']);
+        $first = $this->configure(self::FIRST);
+
+        // The product moves from the first configuration to a second one.
+        $this->putJson("/api/penalty-configs/{$first}", [
+            'name' => 'Standard Loan Penalty',
+            'applicable_product_ids' => [$other->id],
+            'conditions' => self::FIRST,
+        ])->assertOk();
+        $second = $this->postJson('/api/penalty-configs', [
+            'name' => 'Moved Penalty',
+            'applicable_product_ids' => [$this->product->id],
+            'conditions' => self::SECOND,
+        ])->assertCreated()->json('data.id');
+
+        foreach ([false, true] as $inTransaction) {
+            $terms = $inTransaction
+                ? DB::transaction(fn (): array => PenaltyTerms::forProduct($this->product->fresh()))
+                : PenaltyTerms::forProduct($this->product->fresh());
+
+            $this->assertSame($second, $terms['penalty_config_id']);
+            $this->assertSame('Moved Penalty', $terms['penalty_config_name']);
+            $this->assertEquals(self::SECOND, $terms['penalty_brackets']);
+            $this->assertSame(0, $terms['penalty_rate']);
+        }
+
+        // Deactivated: the product's own rate, inside a transaction too.
+        $this->patchJson("/api/penalty-configs/{$second}/status", ['status' => 'inactive'])->assertOk();
+        $terms = DB::transaction(fn (): array => PenaltyTerms::forProduct($this->product->fresh()));
+        $this->assertNull($terms['penalty_brackets']);
+        $this->assertSame('3.0000', $terms['penalty_rate']);
     }
 
     public function test_an_imported_loan_copies_its_products_active_configuration(): void
