@@ -47,20 +47,23 @@ class Presenter
      * requested today would carry (gap round B9), counted as the portal's
      * options count it (posted withdrawals, pending approvals and members'
      * open requests this month). `next_withdrawal_fee` is "0.00" when free and
-     * null when the free withdrawals are used up and the product charges no
-     * fee, so it would be refused; `free_withdrawals_left` is null when
-     * unlimited. Read only, without the account lock. Lists leave it out: it
-     * costs three count queries per account.
+     * null whenever a withdrawal would be refused: the free withdrawals are
+     * used up and the product charges no fee, the product doesn't allow
+     * withdrawals, or the account can't pay out (only an active one can, as
+     * Teller::assertCanPayOut() says). `free_withdrawals_left` is the count
+     * alone, null when unlimited. Read only, without the account lock. Lists
+     * leave it out: it costs three count queries per account.
      *
      * @return array<string, mixed>
      */
     public function accountDetail(SavingsAccount $account): array
     {
         $next = $this->rules->nextWithdrawal($account, now()->toDateString());
+        $canPayOut = $account->status === SavingsAccount::STATUS_ACTIVE && (bool) $account->product?->allow_withdrawals;
 
         return [
             ...$this->account($account),
-            'next_withdrawal_fee' => $next['fee'] === null ? null : SavingsMath::pesos($next['fee']),
+            'next_withdrawal_fee' => $next['fee'] === null || ! $canPayOut ? null : SavingsMath::pesos($next['fee']),
             'free_withdrawals_left' => $next['free_left'],
         ];
     }

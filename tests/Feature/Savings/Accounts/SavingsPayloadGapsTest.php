@@ -167,6 +167,29 @@ class SavingsPayloadGapsTest extends TestCase
             ->assertJsonPath('data.free_withdrawals_left', 0);
     }
 
+    public function test_the_account_detail_reads_null_fee_on_a_frozen_dormant_or_closed_account(): void
+    {
+        $this->rules(['free_withdrawals_per_month' => 2, 'excess_withdrawal_fee' => '25.00']);
+
+        foreach ([SavingsAccount::STATUS_FROZEN, SavingsAccount::STATUS_DORMANT, SavingsAccount::STATUS_CLOSED] as $status) {
+            $this->savings->forceFill(['status' => $status])->save();
+
+            $this->getJson("/api/savings/accounts/{$this->savings->id}")->assertOk()
+                ->assertJsonPath('data.status', $status)
+                ->assertJsonPath('data.next_withdrawal_fee', null)
+                ->assertJsonPath('data.free_withdrawals_left', 2);
+        }
+    }
+
+    public function test_the_account_detail_reads_null_fee_when_the_product_allows_no_withdrawals(): void
+    {
+        $this->rules(['allow_withdrawals' => false]);
+
+        $this->getJson("/api/savings/accounts/{$this->savings->id}")->assertOk()
+            ->assertJsonPath('data.next_withdrawal_fee', null)
+            ->assertJsonPath('data.free_withdrawals_left', null);
+    }
+
     public function test_the_next_fee_is_on_the_account_detail_only_not_the_list(): void
     {
         $row = $this->getJson('/api/savings/accounts')->assertOk()->json('data.0');
