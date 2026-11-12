@@ -19,7 +19,9 @@ use Illuminate\Validation\Rule;
  * round S2): `{min_balance, annual_rate}` rows, the base tier (no minimum
  * balance) first and exactly once, then minimum balances above ₱0.00 in
  * ascending order with no repeats. Rates are 0–100% with at most four
- * decimals, never rounded. A time deposit product takes no tiers.
+ * decimals, never rounded. A time deposit product takes no tiers. A tier
+ * without a `min_balance` is the base tier. A post replaces the date's whole
+ * ladder (RateBook).
  */
 class StoreSavingsProductRateRequest extends FormRequest
 {

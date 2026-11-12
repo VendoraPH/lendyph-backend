@@ -38,9 +38,10 @@ use OverflowException;
  * settled after its maturity date earns, for the days from the maturity date
  * to the day before settlement, the regular savings rate (its product's
  * pre-termination product's rate in force on each day, split where it
- * changes, at the tier the placed principal reaches on that day's ladder)
+ * changes, at the tier the maturity amount reaches on that day's ladder)
  * on its maturity amount, rounded half up once, taxed at the member tax rule
- * in force on the settlement date.
+ * in force on the settlement date. Days on or after a new ladder's date take
+ * its tiers: the day-by-day rule, not a recalculation.
  *
  * Writes nothing. Amounts are centavos inside and two-decimal strings out.
  */
@@ -228,7 +229,7 @@ class Quote
      * Post-maturity interest for settling on $settledOn: none on or before
      * the maturity date. The regular rates are those of the pre-termination
      * product snapshotted on the placement (its product's current link when
-     * it has none), each day at the tier the placed principal reaches. `$taxRate` is a rate snapshotted earlier (an approval's,
+     * it has none), each day at the tier the maturity amount reaches. `$taxRate` is a rate snapshotted earlier (an approval's,
      * taken at request); otherwise the member rule in force on $settledOn.
      *
      * @return array{days: int, gross: int, tax: int, tax_rate: string|null}
@@ -247,7 +248,7 @@ class Quote
         $start = $matures->toDateString();
         $end = $on->subDay()->toDateString();
         $regularId = $deposit->pretermination_product_id ?? $deposit->product()->value('pretermination_product_id');
-        $segments = $regularId === null ? [] : $this->rates->segmentsAt((int) $regularId, null, $start, $end, SavingsMath::centavos($deposit->principal));
+        $segments = $regularId === null ? [] : $this->rates->segments((int) $regularId, null, $start, $end);
         $taxRate ??= $this->taxes->rateOn(SavingsTaxRule::HOLDER_MEMBER, $on->toDateString());
 
         try {

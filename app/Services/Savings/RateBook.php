@@ -14,10 +14,13 @@ use Illuminate\Support\Collection;
  * reads the same later.
  *
  * - **Ladder.** The rate set in force on a date is the rows sharing the
- *   latest `effective_from` on or before it. Within that date a same-day
- *   correction is the highest id per minimum balance. `min_balance` null is
- *   the base tier, which covers every balance below the first tier; a
- *   ladder of one base row is a plain single rate, as before tiers.
+ *   latest `effective_from` on or before it. Within that date, the newest
+ *   rate post wins whole (the rows sharing the newest row's
+ *   `rate_post_id`), so a same-date correction replaces the ladder. Rows
+ *   with no post id (before tiers) keep the highest id per minimum balance.
+ *   `min_balance` null is the base tier, which covers every balance below
+ *   the first tier; a ladder of one base row is a plain single rate, as
+ *   before tiers.
  * - **Tier for a balance.** The highest tier whose minimum the balance
  *   reaches (whole-balance tiering); without a balance, the base tier.
  * - Time deposit rates (a term) never carry a minimum balance.
@@ -107,27 +110,6 @@ class RateBook
     }
 
     /**
-     * The segments over [$start, $end] at the one tier `$balance` (centavos)
-     * reaches on each segment's ladder, with no tiers left in them: how a
-     * time deposit's post-maturity days earn the regular product's tier for
-     * the placed amount.
-     *
-     * @return list<array{from: string, to: string, rate: string}>
-     */
-    public function segmentsAt(int $productId, ?int $termDays, string $start, string $end, int $balance): array
-    {
-        return array_map(function (array $segment) use ($balance): array {
-            if (! isset($segment['tiers'])) {
-                return $segment;
-            }
-
-            $ladder = array_map(fn (array $tier) => ['min_balance' => $tier['min_balance'], 'annual_rate' => $tier['rate']], $segment['tiers']);
-
-            return ['from' => $segment['from'], 'to' => $segment['to'], 'rate' => self::tierFor($ladder, $balance)['annual_rate'] ?? '0.0000'];
-        }, $this->segments($productId, $termDays, $start, $end));
-    }
-
-    /**
      * The rate in force per term on a date: one row for a regular product,
      * one per offered term for a time deposit product (a term with no rate
      * yet is left out). `annual_rate` and `id` are the base tier's; `tiers`
@@ -199,14 +181,21 @@ class RateBook
     }
 
     /**
-     * One date's rows as a ladder: the highest id per minimum balance, base
-     * tier first, then by minimum balance.
+     * One date's rows as a ladder, base tier first, then by minimum balance:
+     * the rows of the newest post when the newest row has a post id, else
+     * the highest id per minimum balance.
      *
      * @param  Collection<int, SavingsProductRate>  $rows  one date's rows, in id order
      * @return list<array{id: int, min_balance: string|null, annual_rate: string, effective_from: string}>
      */
     private static function ladder(Collection $rows): array
     {
+        $post = $rows->last()?->rate_post_id;
+
+        if ($post !== null) {
+            $rows = $rows->filter(fn (SavingsProductRate $row) => $row->rate_post_id === $post);
+        }
+
         $byMinimum = [];
 
         foreach ($rows as $row) {

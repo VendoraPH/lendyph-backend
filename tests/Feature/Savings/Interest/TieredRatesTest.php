@@ -62,7 +62,7 @@ class TieredRatesTest extends TestCase
         return $product;
     }
 
-    public function test_a_same_day_correction_replaces_only_its_own_tier(): void
+    public function test_legacy_rows_keep_the_newest_row_per_minimum_balance(): void
     {
         $product = $this->regularProduct([], null);
         $this->tier($product, null, '1.0000');
@@ -77,6 +77,63 @@ class TieredRatesTest extends TestCase
         $this->assertSame('1.0000', $book->rateOn($product->id, null, '2026-06-01'), 'Without a balance, the base tier.');
         $this->assertSame('1.0000', $book->rateOn($product->id, null, '2026-06-01', 999_999));
         $this->assertSame('2.5000', $book->rateOn($product->id, null, '2026-06-01', 1_000_000));
+    }
+
+    public function test_a_same_date_correction_replaces_the_whole_ladder(): void
+    {
+        $this->onDay('2026-11-10');
+        $product = $this->regularProduct([], '1.0000');
+        $url = "/api/savings/products/{$product->id}/rates";
+
+        $this->postJson($url, ['effective_from' => '2026-12-01', 'tiers' => [
+            ['min_balance' => null, 'annual_rate' => '1'],
+            ['min_balance' => '50000', 'annual_rate' => '2'],
+            ['min_balance' => '100000', 'annual_rate' => '3'],
+        ]])->assertCreated()->assertJsonCount(3, 'data');
+
+        $corrected = $this->postJson($url, ['effective_from' => '2026-12-01', 'tiers' => [
+            ['min_balance' => null, 'annual_rate' => '1'],
+            ['min_balance' => '50000', 'annual_rate' => '2.25'],
+        ]])->assertCreated();
+
+        $this->assertSame([[null, '1.0000'], ['50000.00', '2.2500']], array_map(fn (array $row) => [$row['min_balance'], $row['annual_rate']], $corrected->json('data')),
+            'The response is the full ladder in force for the date.');
+
+        $book = app(RateBook::class);
+        $this->assertSame([[null, '1.0000'], ['50000.00', '2.2500']],
+            array_map(fn (array $tier) => [$tier['min_balance'], $tier['annual_rate']], $book->ladderOn($product->id, null, '2026-12-01')));
+        $this->assertSame('2.2500', $book->rateOn($product->id, null, '2026-12-01', 10_000_000), 'The ₱100,000.00 tier is gone.');
+        $this->assertSame(5, SavingsProductRate::query()->where('product_id', $product->id)->whereDate('effective_from', '2026-12-01')->count(), 'Nothing is deleted.');
+    }
+
+    public function test_a_single_rate_on_the_same_date_replaces_a_ladder(): void
+    {
+        $this->onDay('2026-11-10');
+        $product = $this->regularProduct([], '1.0000');
+        $url = "/api/savings/products/{$product->id}/rates";
+
+        $this->postJson($url, ['effective_from' => '2026-12-01', 'tiers' => [
+            ['min_balance' => null, 'annual_rate' => '1'],
+            ['min_balance' => '50000', 'annual_rate' => '2'],
+        ]])->assertCreated();
+        $this->postJson($url, ['annual_rate' => '1.75', 'effective_from' => '2026-12-01'])
+            ->assertCreated()->assertJsonPath('data.annual_rate', '1.7500')->assertJsonPath('data.min_balance', null);
+
+        $book = app(RateBook::class);
+        $this->assertCount(1, $book->ladderOn($product->id, null, '2026-12-01'));
+        $this->assertSame('1.7500', $book->rateOn($product->id, null, '2026-12-01', 10_000_000));
+        $this->assertSame([['from' => '2026-12-01', 'to' => '2026-12-31', 'rate' => '1.7500']], $book->segments($product->id, null, '2026-12-01', '2026-12-31'));
+    }
+
+    public function test_a_tier_sent_without_a_minimum_balance_key_is_the_base_tier(): void
+    {
+        $this->onDay('2026-11-10');
+        $product = $this->regularProduct([], '1.0000');
+
+        $this->postJson("/api/savings/products/{$product->id}/rates", ['effective_from' => '2026-12-01', 'tiers' => [
+            ['annual_rate' => '1.1'],
+            ['min_balance' => '10000', 'annual_rate' => '2'],
+        ]])->assertCreated()->assertJsonPath('data.0.min_balance', null)->assertJsonPath('data.0.annual_rate', '1.1000');
     }
 
     public function test_a_later_ladder_replaces_the_whole_earlier_one(): void
@@ -266,6 +323,26 @@ class TieredRatesTest extends TestCase
 
         $this->assertNull($line['skip_reason']);
         $this->assertSame('184.00', $line['gross_interest']);
+    }
+
+    public function test_a_line_that_stays_in_a_0_percent_base_tier_says_why_it_earns_nothing(): void
+    {
+        $maker = $this->userWith(['savings:view', 'savings:post']);
+
+        $this->onDay('2026-07-01');
+        $product = $this->regularProduct(['minimum_adb_for_interest' => '0.00'], null);
+        $this->tier($product, null, '0.0000');
+        $this->tier($product, '10000.00', '3.6500');
+        $low = $this->openAccount($product, 999_999);
+        $this->openAccount($product, 2_000_000);
+        $this->onDay('2026-10-01');
+
+        $lines = collect($this->actingAs($maker)->postJson('/api/savings/interest-runs/preview', ['product_id' => $product->id, 'period_start' => '2026-07-01'])
+            ->assertOk()->json('data.runs.0.lines'));
+        $line = $lines->firstWhere('account_id', $low->id);
+
+        $this->assertSame('0.00', $line['gross_interest']);
+        $this->assertSame('below_earning_tier', $line['skip_reason']);
     }
 
     public function test_a_single_rate_product_gives_the_same_figures_and_segments_as_before(): void

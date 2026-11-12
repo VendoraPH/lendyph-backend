@@ -10,10 +10,11 @@ use Tests\TestCase;
 /**
  * Tiered regular rates and time deposits (gap round S2): an early
  * termination and post-maturity interest earn the regular product's tier for
- * the placed amount. The early-termination rate is that tier's rate on the
- * placement date, snapshotted on the placement (`pretermination_rate`), as
- * before; post-maturity days take, from each day's regular ladder, the tier
- * the placed amount reaches.
+ * the placed amount. The early-termination rate is the tier for the placed
+ * principal on the placement date, snapshotted on the placement
+ * (`pretermination_rate`), as before. Post-maturity days earn, from each
+ * day's regular ladder, the tier the maturity amount reaches (the balance
+ * they are paid on), day by day as before tiers.
  *
  * The fixtures' regular product pays 1%; here it also pays 2% from
  * ₱50,000.00. The time deposit pays 3% on 90 days.
@@ -64,7 +65,7 @@ class TimeDepositTierRateTest extends TestCase
             ->assertJsonPath('data.gross_interest', '82.19');
     }
 
-    public function test_post_maturity_days_earn_the_tier_the_placed_amount_reaches(): void
+    public function test_post_maturity_days_earn_the_tier_the_maturity_amount_reaches(): void
     {
         $account = $this->savingsAccount();
         $deposit = $this->placed(['payout_account_id' => $account->id]);
@@ -75,6 +76,28 @@ class TimeDepositTierRateTest extends TestCase
         $this->getJson("/api/savings/time-deposits/{$deposit->id}")->assertOk()
             ->assertJsonPath('data.post_maturity_days', 14)
             ->assertJsonPath('data.post_maturity_interest', '77.28');
+    }
+
+    public function test_a_maturity_amount_crossing_a_tier_the_principal_is_below_earns_the_higher_tier(): void
+    {
+        SavingsProductRate::query()->create([
+            'product_id' => $this->regular->id, 'term_days' => null, 'min_balance' => '100000.00',
+            'annual_rate' => '2.5000', 'effective_from' => now()->toDateString(), 'created_by' => $this->admin->id,
+        ]);
+        $account = $this->savingsAccount();
+        $deposit = $this->placed(['principal' => '99000.00', 'term_days' => 360, 'payout_account_id' => $account->id]);
+
+        // Early termination: the tier for the ₱99,000.00 principal, the ₱50,000.00 tier at 2%.
+        $this->assertSame('2.0000', $deposit->pretermination_rate);
+        // ₱99,000.00 × 3% × 360 ÷ 365 = ₱2,929.32, so it matures at ₱101,929.32, above ₱100,000.00.
+        $this->assertSame('101929.32', $deposit->maturity_amount);
+
+        $this->travelTo(Carbon::parse('2027-11-19 08:00:00', 'Asia/Manila'));
+
+        // ₱101,929.32 × 2.5% × 14 ÷ 365 = 9,774.04 centavos → ₱97.74 (₱78.19 at the principal's 2% tier).
+        $this->getJson("/api/savings/time-deposits/{$deposit->id}")->assertOk()
+            ->assertJsonPath('data.post_maturity_days', 14)
+            ->assertJsonPath('data.post_maturity_interest', '97.74');
     }
 
     public function test_a_placement_below_every_tier_keeps_the_base_rate_after_maturity(): void

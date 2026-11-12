@@ -18,14 +18,18 @@ use Illuminate\Support\Carbon;
  *
  * Tiers (gap round S2): the rows sharing one `effective_from` are that date's
  * ladder. `min_balance` is the lowest closing balance that earns the row's
- * rate; null is the base tier. A same-day correction is the highest id per
- * (`effective_from`, `min_balance`). Time deposit rates never carry one.
+ * rate; null is the base tier. Every row one rate post writes shares a
+ * `rate_post_id`, and a date's ladder is the rows of its newest post, so a
+ * same-date correction replaces the whole ladder. Rows with no post id
+ * (before tiers) keep the highest id per minimum balance. Time deposit rates
+ * never carry a minimum balance.
  *
  * @property int $id
  * @property int $product_id
  * @property int|null $term_days
  * @property string $annual_rate
  * @property string|null $min_balance
+ * @property string|null $rate_post_id
  * @property Carbon $effective_from
  */
 class SavingsProductRate extends Model
@@ -40,6 +44,7 @@ class SavingsProductRate extends Model
         'term_days',
         'annual_rate',
         'min_balance',
+        'rate_post_id',
         'effective_from',
         'created_by',
     ];

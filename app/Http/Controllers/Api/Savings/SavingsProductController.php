@@ -21,6 +21,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 use OpenApi\Attributes as OA;
@@ -240,7 +241,7 @@ class SavingsProductController extends Controller
     #[OA\Post(
         path: '/api/savings/products/{product}/rates',
         summary: 'Add a rate, or a ladder of balance tiers, from a date',
-        description: 'From today or later (a past date is 422, so interest already figured never changes). A time deposit product\'s rate names one of its terms; a regular product\'s has none. Send either one `annual_rate` (the base tier; answers the new row) or, for a regular product only, `tiers`: the base tier first (`min_balance` null) and exactly once, then minimum balances above ₱0.00 rising with no repeats, at most 20 (answers the new rows). The ladder in force on a day is the rows sharing the latest `effective_from`; a same-day correction is the newest row per minimum balance. Each row is audited in words.',
+        description: 'From today or later (a past date is 422, so interest already figured never changes). A time deposit product\'s rate names one of its terms; a regular product\'s has none. Send either one `annual_rate` (the base tier; answers the new row) or, for a regular product only, `tiers`: the base tier first (`min_balance` null) and exactly once, then minimum balances above ₱0.00 rising with no repeats, at most 20 (answers the new rows). The ladder in force on a day is the rows sharing the latest `effective_from`; a same-date post replaces the whole ladder for that date (a single rate included), and the response is the full ladder in force for the date. Nothing is deleted. Each row is audited in words.',
         tags: ['Savings'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'product', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
@@ -268,14 +269,17 @@ class SavingsProductController extends Controller
         $effectiveFrom = (string) $request->validated('effective_from');
         $userId = (int) $request->user()->id;
 
-        $rates = DB::transaction(function () use ($product, $ladder, $termDays, $effectiveFrom, $userId): Collection {
+        $postId = (string) Str::uuid();
+
+        $rates = DB::transaction(function () use ($product, $ladder, $termDays, $effectiveFrom, $userId, $postId): Collection {
             $locked = SavingsProduct::query()->whereKey($product->id)->lockForUpdate()->firstOrFail();
 
             $rates = AuditLogService::withoutModelAuditing(fn (): Collection => collect($ladder)->map(fn (array $tier): SavingsProductRate => SavingsProductRate::query()->create([
                 'product_id' => $locked->id,
                 'term_days' => $termDays,
                 'annual_rate' => (string) $tier['annual_rate'],
-                'min_balance' => $tier['min_balance'] === null ? null : SavingsMath::pesos(SavingsMath::centavos($tier['min_balance'])),
+                'min_balance' => ($tier['min_balance'] ?? null) === null ? null : SavingsMath::pesos(SavingsMath::centavos($tier['min_balance'])),
+                'rate_post_id' => $postId,
                 'effective_from' => $effectiveFrom,
                 'created_by' => $userId,
             ])->refresh()));
