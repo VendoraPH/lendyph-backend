@@ -10,9 +10,12 @@ use App\Models\CreditScore;
 use App\Models\CreditScorecardRevision;
 use App\Models\CreditScoreMember;
 use App\Models\CreditScoringSetting;
+use App\Models\Loan;
 use App\Models\User;
 use App\Services\CreditScoring\FactorTable;
+use App\Services\LoanListTotals;
 use Carbon\CarbonInterface;
+use Illuminate\Database\Eloquent\Builder;
 
 /**
  * The Credit Scoring API's shapes, exactly the frontend's
@@ -76,7 +79,10 @@ final class Presenter
     /** Request attribute prefix for the per-request memos (as BranchAccess::for() keeps its own). */
     private const MEMO_PREFIX = 'credit_scoring.presenter.';
 
-    public function __construct(private readonly CreditScope $scope) {}
+    public function __construct(
+        private readonly CreditScope $scope,
+        private readonly LoanListTotals $totals,
+    ) {}
 
     /**
      * The `CreditScore` shape, for a member's current score or a loan's
@@ -225,13 +231,27 @@ final class Presenter
      * member's own (current) name and branch loaded. `has_active_loan` and
      * `past_due` are loan facts: null without `loans:view`.
      *
+     * `outstanding` is everything the member still owes on the collectible
+     * loans the caller can see (LoanListTotals `total_outstanding`), a
+     * 2-decimal peso string, ₱0.00 when nothing is owed. It is a figure from
+     * the member's record, so it follows CreditScope::seesFinancialsFrom()
+     * with no application details: `loans:view`, `borrowers:view` and the
+     * member's branch; null otherwise. Pass the page's self::outstanding() so
+     * a list reads it once; without it the row reads its own.
+     *
+     * @param  array<int, string>|null  $outstanding  member id => pesos
      * @return array<string, mixed>
      */
-    public function row(CreditScoreMember $current, User $viewer): array
+    public function row(CreditScoreMember $current, User $viewer, ?array $outstanding = null): array
     {
         $loans = $viewer->can('loans:view');
 
         $member = $current->borrower;
+        $seesFigures = $member !== null && $this->scope->seesFinancialsFrom($viewer, $member, null);
+
+        if ($seesFigures && $outstanding === null) {
+            $outstanding = $this->outstanding([(int) $current->borrower_id], $viewer);
+        }
 
         return [
             'borrower_id' => (int) $current->borrower_id,
@@ -246,7 +266,50 @@ final class Presenter
             'past_due' => $loans ? (bool) $current->past_due : null,
             'calculated_at' => self::time($current->calculated_at),
             'status' => $current->status,
+            'outstanding' => $seesFigures ? ($outstanding[(int) $current->borrower_id] ?? '0.00') : null,
         ];
+    }
+
+    /**
+     * What each member still owes on the collectible loans (released,
+     * ongoing, defaulted) the caller can see, in one grouped read, keyed by
+     * member id as 2-decimal peso strings. A member who owes nothing has no
+     * key. Empty without `loans:view`.
+     *
+     * @param  iterable<int>  $memberIds
+     * @return array<int, string>
+     */
+    public function outstanding(iterable $memberIds, User $viewer): array
+    {
+        $ids = array_values(array_unique(array_map('intval', [...$memberIds])));
+
+        if ($ids === [] || ! $viewer->can('loans:view')) {
+            return [];
+        }
+
+        return array_map(
+            fn (array $figures) => self::pesos($figures['total_outstanding']),
+            $this->totals->byBorrower(self::collectibleLoans($viewer)->whereIn('loans.borrower_id', $ids)),
+        );
+    }
+
+    /**
+     * The collectible loans the caller can see.
+     *
+     * @return Builder<Loan>
+     */
+    public static function collectibleLoans(User $viewer): Builder
+    {
+        return Loan::query()->visibleTo($viewer)->whereIn('loans.status', Loan::COLLECTIBLE_STATUSES);
+    }
+
+    /**
+     * A peso total (LoanListTotals, already rounded to the centavo) as a
+     * 2-decimal string.
+     */
+    public static function pesos(float $amount): string
+    {
+        return number_format($amount, 2, '.', '');
     }
 
     /**

@@ -97,6 +97,39 @@ class LoanListTotals
     }
 
     /**
+     * The same figures as self::for(), summed per member (`loans.borrower_id`)
+     * over the filtered loans, keyed by member id, in one grouped query. A
+     * member with none of the loans has no key. A list that shows each
+     * member's outstanding beside its rows asks once per page.
+     *
+     * @param  Builder<Loan>  $loans  the filtered loans; its select, eager loads and order are ignored
+     * @return array<int, array{total_outstanding: float, outstanding_principal: float, overdue_amount: float}>
+     */
+    public function byBorrower(Builder $loans, ?Carbon $asOf = null): array
+    {
+        $asOf ??= Carbon::today();
+
+        $perLoan = $this->perLoan($this->baseOf($loans)->select('loans.id'), $asOf);
+
+        return $this->baseOf($loans)
+            ->leftJoinSub($perLoan, 'per_loan', 'per_loan.loan_id', '=', 'loans.id')
+            ->groupBy('loans.borrower_id')
+            ->selectRaw(
+                'loans.borrower_id,
+                COALESCE(SUM(per_loan.owed), 0) + COALESCE(SUM(GREATEST(loans.insurance_remaining_balance, 0)), 0) as total_outstanding,
+                COALESCE(SUM(per_loan.principal), 0) as outstanding_principal,
+                COALESCE(SUM(per_loan.overdue), 0) as overdue_amount',
+            )
+            ->get()
+            ->mapWithKeys(fn (object $row) => [(int) $row->borrower_id => [
+                'total_outstanding' => round((float) $row->total_outstanding, 2),
+                'outstanding_principal' => round((float) $row->outstanding_principal, 2),
+                'overdue_amount' => round((float) $row->overdue_amount, 2),
+            ]])
+            ->all();
+    }
+
+    /**
      * One row per loan: what its periods still owe (`owed`), their principal
      * (`principal`) and the part on LATE periods (`overdue`). The join puts
      * `loans` in scope for the grace period pastGraceSql() reads.

@@ -50,7 +50,7 @@ class CreditScoringController extends Controller
 
     #[OA\Get(
         path: '/api/credit-scoring/dashboard',
-        summary: 'Credit Scoring portfolio summary: scored members, average, risk distribution and recent changes',
+        summary: 'Credit Scoring portfolio summary: scored members, average, risk distribution, risk by branch, high risk outstanding, scores due for review and recent changes',
         tags: ['Credit Scoring'],
         security: [['sanctum' => []]],
         responses: [
@@ -78,10 +78,13 @@ class CreditScoringController extends Controller
             new OA\Parameter(name: 'max_score', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
             new OA\Parameter(name: 'has_active_loan', in: 'query', required: false, schema: new OA\Schema(type: 'boolean')),
             new OA\Parameter(name: 'past_due', in: 'query', required: false, schema: new OA\Schema(type: 'boolean')),
+            new OA\Parameter(name: 'trend', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['up', 'down', 'flat'])),
+            new OA\Parameter(name: 'member_type', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['regular', 'associate'])),
+            new OA\Parameter(name: 'loan_product_id', in: 'query', required: false, description: 'Members with a collectible loan of this product the caller can see; needs loans:view', schema: new OA\Schema(type: 'integer')),
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
         ],
         responses: [
-            new OA\Response(response: 200, description: 'A paginator of BorrowerScoreRow'),
+            new OA\Response(response: 200, description: 'A paginator of BorrowerScoreRow, each with `outstanding` (null unless the caller may read the member\'s figures)'),
             new OA\Response(response: 403, description: 'Missing credit_scoring:view, or a branch outside the caller\'s'),
             new OA\Response(response: 422, description: 'A bad filter'),
         ],
@@ -103,13 +106,20 @@ class CreditScoringController extends Controller
             ->when($request->filled('max_score'), fn ($q) => $q->where('credit_score_members.score', '<=', (int) $request->input('max_score')))
             ->when($hasActiveLoan !== null, fn ($q) => $q->where('credit_score_members.has_active_loan', $hasActiveLoan))
             ->when($pastDue !== null, fn ($q) => $q->where('credit_score_members.past_due', $pastDue))
+            ->when($request->filled('trend'), fn ($q) => $q->where('credit_score_members.trend', $request->input('trend')))
+            ->when($request->filled('member_type'), fn ($q) => $q->where('borrowers.member_type', $request->input('member_type')))
+            ->when($request->filled('loan_product_id'), fn ($q) => $q->whereIn(
+                'credit_score_members.borrower_id',
+                Presenter::collectibleLoans($request->user())->where('loans.loan_product_id', (int) $request->input('loan_product_id'))->select('loans.borrower_id'),
+            ))
             ->with(['borrower:'.implode(',', CreditScope::MEMBER_COLUMNS), 'borrower.branch:id,name'])
             ->orderBy('borrowers.last_name')
             ->orderBy('borrowers.first_name')
             ->orderBy('credit_score_members.borrower_id')
             ->paginate($this->perPage($request));
+        $outstanding = $this->presenter->outstanding($rows->getCollection()->pluck('borrower_id'), $request->user());
 
-        return $this->page($rows, fn (CreditScoreMember $current) => $this->presenter->row($current, $request->user()));
+        return $this->page($rows, fn (CreditScoreMember $current) => $this->presenter->row($current, $request->user(), $outstanding));
     }
 
     #[OA\Get(
@@ -309,18 +319,18 @@ class CreditScoringController extends Controller
 
     #[OA\Put(
         path: '/api/credit-scoring/scorecard-config',
-        summary: 'Save the scorecard: a change writes a new, unvalidated revision',
+        summary: 'Save the scorecard (weights, risk bands and factor ranges): a change writes a new, unvalidated revision',
         tags: ['Credit Scoring'],
         security: [['sanctum' => []]],
         responses: [
             new OA\Response(response: 200, description: 'The ScorecardConfig in use after the save'),
             new OA\Response(response: 403, description: 'Missing credit_scoring:settings'),
-            new OA\Response(response: 422, description: 'Weights not totalling 100.00, other categories, or changed rules'),
+            new OA\Response(response: 422, description: 'Weights not totalling 100.00, other categories, changed policy rules, a changed factor id, rule or points, or factor ranges out of order or out of range'),
         ],
     )]
     public function updateScorecardConfig(UpdateScorecardConfigRequest $request, ScorecardEditor $editor): JsonResponse
     {
-        $revision = $editor->save($request->user(), $request->weights(), $request->bandMinimums());
+        $revision = $editor->save($request->user(), $request->weights(), $request->bandMinimums(), $request->factorRanges());
 
         return $this->ok($editor->config($revision));
     }
