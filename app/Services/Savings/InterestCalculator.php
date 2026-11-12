@@ -24,6 +24,15 @@ use Symfony\Component\HttpKernel\Exception\HttpException;
  * - The numerator is refused (OverflowException) when it would leave a
  *   64-bit integer, and overlapping rate segments are refused (422, in
  *   words): a day earns one rate.
+ * - Tiers (gap round S2): a segment may carry its whole ladder (`tiers`,
+ *   RateBook). Each day's closing balance then earns the rate of the highest
+ *   tier whose minimum it reaches, the base tier below the first one
+ *   (whole-balance tiering), and S is summed per tier: N adds S_tier ×
+ *   r_tier. The ladder is one segment, never overlapping ones. The line's
+ *   segment records the ladder (`tiers`) and, per tier used, its days and
+ *   centavo-days (`by_tier`), so the gross can be worked out again from the
+ *   line; its `rate` is the tier the segment's last day earned. A ladder of
+ *   only a base tier reads exactly like a single rate.
  */
 final class InterestCalculator
 {
@@ -36,7 +45,7 @@ final class InterestCalculator
     /**
      * @param  int  $opening  the balance before `$start`, in centavos
      * @param  array<string, int>  $deltas  signed change per value date (Y-m-d), in centavos
-     * @param  list<array{from: string, to: string, rate: string}>  $segments  the rates over [$start, $end]; a day no segment covers earns 0%
+     * @param  list<array{from: string, to: string, rate: string, tiers?: list<array{min_balance: string|null, rate: string}>}>  $segments  the rates over [$start, $end]; a day no segment covers earns 0%
      * @param  int  $minimumAdb  the product's minimum average daily balance, in centavos
      * @param  string  $taxRate  the withholding tax percent
      * @return array{
@@ -44,7 +53,7 @@ final class InterestCalculator
      *     balance_days: int,
      *     average_daily_balance: int,
      *     rate: string,
-     *     rate_segments: list<array{from: string, to: string, rate: string, balance_days: int}>,
+     *     rate_segments: list<array{from: string, to: string, rate: string, balance_days: int, tiers?: list<array<string, mixed>>, by_tier?: list<array<string, mixed>>}>,
      *     gross: int,
      *     tax_rate: string,
      *     tax: int,
@@ -76,6 +85,15 @@ final class InterestCalculator
         $lastRate = '0.0000';
 
         foreach ($this->covering($segments, $from, $to) as $segment) {
+            if ($segment['tiers'] !== null) {
+                [$segmentNumerator, $record] = $this->tiered($segment, $daily);
+                $numerator = SavingsMath::add($numerator, $segmentNumerator);
+                $lastRate = $record['rate'];
+                $used[] = $record;
+
+                continue;
+            }
+
             $sum = 0;
 
             for ($day = $segment['from']; $day->lessThanOrEqualTo($segment['to']); $day = $day->addDay()) {
@@ -150,10 +168,70 @@ final class InterestCalculator
     }
 
     /**
-     * The segments clipped to [$from, $to], in date order.
+     * One tiered segment: each day's closing balance earns the highest tier
+     * whose minimum it reaches. Returns the segment's numerator and its
+     * recorded line part.
      *
-     * @param  list<array{from: string, to: string, rate: string}>  $segments
-     * @return list<array{from: CarbonImmutable, to: CarbonImmutable, rate: string}>
+     * @param  array{from: CarbonImmutable, to: CarbonImmutable, rate: string, tiers: list<array{min_balance: string|null, min: int, units: int}>}  $segment
+     * @param  array<string, int>  $daily
+     * @return array{0: int, 1: array{from: string, to: string, rate: string, balance_days: int, tiers: list<array{min_balance: string|null, rate: string}>, by_tier: list<array{min_balance: string|null, rate: string, days: int, balance_days: int}>}}
+     */
+    private function tiered(array $segment, array $daily): array
+    {
+        $tiers = $segment['tiers'];
+        $byTier = [];
+        $sum = 0;
+        $last = 0;
+
+        for ($day = $segment['from']; $day->lessThanOrEqualTo($segment['to']); $day = $day->addDay()) {
+            $balance = $daily[$day->toDateString()];
+            $index = 0;
+
+            foreach ($tiers as $i => $tier) {
+                if ($balance >= $tier['min']) {
+                    $index = $i;
+                }
+            }
+
+            $byTier[$index] ??= ['days' => 0, 'balance_days' => 0];
+            $byTier[$index]['days']++;
+            $byTier[$index]['balance_days'] = SavingsMath::add($byTier[$index]['balance_days'], $balance);
+            $sum = SavingsMath::add($sum, $balance);
+            $last = $index;
+        }
+
+        ksort($byTier);
+        $numerator = 0;
+        $recorded = [];
+
+        foreach ($byTier as $index => $usage) {
+            $numerator = SavingsMath::add($numerator, SavingsMath::multiply($usage['balance_days'], $tiers[$index]['units']));
+            $recorded[] = [
+                'min_balance' => $tiers[$index]['min_balance'],
+                'rate' => SavingsMath::rateString($tiers[$index]['units']),
+                'days' => $usage['days'],
+                'balance_days' => $usage['balance_days'],
+            ];
+        }
+
+        return [$numerator, [
+            'from' => $segment['from']->toDateString(),
+            'to' => $segment['to']->toDateString(),
+            'rate' => SavingsMath::rateString($tiers[$last]['units']),
+            'balance_days' => $sum,
+            'tiers' => array_map(fn (array $tier) => ['min_balance' => $tier['min_balance'], 'rate' => SavingsMath::rateString($tier['units'])], $tiers),
+            'by_tier' => $recorded,
+        ]];
+    }
+
+    /**
+     * The segments clipped to [$from, $to], in date order. A segment's ladder
+     * is read into exact figures (minimums in centavos, rates in units), base
+     * tier first; a ladder of only a base tier becomes that single rate, and
+     * a ladder with no base tier or a repeated minimum is refused (422).
+     *
+     * @param  list<array{from: string, to: string, rate: string, tiers?: list<array{min_balance: string|null, rate: string}>}>  $segments
+     * @return list<array{from: CarbonImmutable, to: CarbonImmutable, rate: string, tiers: list<array{min_balance: string|null, min: int, units: int}>|null}>
      */
     private function covering(array $segments, CarbonImmutable $from, CarbonImmutable $to): array
     {
@@ -164,7 +242,15 @@ final class InterestCalculator
             $finish = CarbonImmutable::parse($segment['to'])->startOfDay()->min($to);
 
             if ($start->lessThanOrEqualTo($finish)) {
-                $clipped[] = ['from' => $start, 'to' => $finish, 'rate' => $segment['rate']];
+                $tiers = $this->ladder($segment['tiers'] ?? null, $start);
+                $rate = $segment['rate'];
+
+                if ($tiers !== null && count($tiers) === 1) {
+                    $rate = SavingsMath::rateString($tiers[0]['units']);
+                    $tiers = null;
+                }
+
+                $clipped[] = ['from' => $start, 'to' => $finish, 'rate' => $rate, 'tiers' => $tiers];
             }
         }
 
@@ -178,6 +264,40 @@ final class InterestCalculator
         }
 
         return $clipped;
+    }
+
+    /**
+     * A segment's ladder in exact figures, base tier first, or null when it
+     * has none.
+     *
+     * @param  list<array{min_balance: string|null, rate: string}>|null  $tiers
+     * @return list<array{min_balance: string|null, min: int, units: int}>|null
+     */
+    private function ladder(?array $tiers, CarbonImmutable $from): ?array
+    {
+        if ($tiers === null || $tiers === []) {
+            return null;
+        }
+
+        $read = array_map(static function (array $tier): array {
+            $minimum = $tier['min_balance'] === null ? null : SavingsMath::centavos($tier['min_balance']);
+
+            return [
+                'min_balance' => $minimum === null ? null : SavingsMath::pesos($minimum),
+                'min' => $minimum ?? PHP_INT_MIN,
+                'units' => SavingsMath::rateUnits($tier['rate']),
+            ];
+        }, $tiers);
+
+        usort($read, static fn (array $a, array $b): int => $a['min'] <=> $b['min']);
+        $minimums = array_column($read, 'min');
+
+        if ($read[0]['min_balance'] !== null || count(array_unique($minimums)) !== count($minimums)) {
+            throw new HttpException(422,
+                'The interest rates from '.$from->format('M j, Y').' need exactly one base rate (no minimum balance) and one rate per minimum balance.');
+        }
+
+        return $read;
     }
 
     /**

@@ -29,7 +29,8 @@ use Illuminate\Validation\ValidationException;
  * period's start, its opening day and the day after its interest was last
  * credited, to the period's end, through InterestCalculator. A line that
  * earns nothing says why (`skip_reason`): `closed`, `no_days`, `no_rate`,
- * `no_balance` or `below_minimum_adb`.
+ * `no_balance`, `below_minimum_adb` or `below_earning_tier` (every day's
+ * balance stayed in a 0% tier of a ladder whose higher tiers pay).
  *
  * The same figures() serves the preview, the draft and the re-check at
  * posting (RunPoster), so the three can only agree or answer 409.
@@ -39,6 +40,9 @@ class RunBuilder
     public const SKIP_CLOSED = 'closed';
 
     public const SKIP_NO_RATE = 'no_rate';
+
+    /** Every day stayed in a 0% tier, below the first tier that earns interest. */
+    public const SKIP_BELOW_EARNING_TIER = 'below_earning_tier';
 
     public const SKIP_NO_BALANCE = 'no_balance';
 
@@ -97,7 +101,8 @@ class RunBuilder
         foreach ($open->groupBy(fn (SavingsAccount $account) => $this->firstDay($account, $start)) as $from => $group) {
             $loaded = $from <= $end ? $this->balances->load($group->pluck('id'), $from, $end) : [];
             $segments = $from <= $end ? $this->rates->segments($product->id, null, $from, $end) : [];
-            $noRate = collect($segments)->every(fn (array $segment) => SavingsMath::rateUnits($segment['rate']) === 0);
+            $noRate = collect($segments)->every(fn (array $segment) => SavingsMath::rateUnits($segment['rate']) === 0
+                && collect($segment['tiers'] ?? [])->every(fn (array $tier) => SavingsMath::rateUnits($tier['rate']) === 0));
 
             foreach ($group as $account) {
                 $figures = $this->calculator->calculate(
@@ -114,6 +119,7 @@ class RunBuilder
                     $reason = match (true) {
                         $noRate => self::SKIP_NO_RATE,
                         $figures['balance_days'] <= 0 => self::SKIP_NO_BALANCE,
+                        $figures['skip_reason'] === null && self::earnedOnlyZeroTiers($figures['rate_segments']) => self::SKIP_BELOW_EARNING_TIER,
                         default => null,
                     };
 
@@ -377,6 +383,33 @@ class RunBuilder
 
             return $created;
         }, 'savings_interest_runs_live_key_unique', $conflict);
+    }
+
+    /**
+     * Whether a line with tiers earned 0% on every day: each tiered
+     * segment's days all fell in 0% tiers, and every other segment is 0%.
+     *
+     * @param  list<array<string, mixed>>  $segments  the line's `rate_segments`
+     */
+    private static function earnedOnlyZeroTiers(array $segments): bool
+    {
+        $tiered = false;
+
+        foreach ($segments as $segment) {
+            if (isset($segment['by_tier'])) {
+                $tiered = true;
+
+                foreach ($segment['by_tier'] as $tier) {
+                    if (SavingsMath::rateUnits($tier['rate']) > 0) {
+                        return false;
+                    }
+                }
+            } elseif (SavingsMath::rateUnits($segment['rate']) > 0) {
+                return false;
+            }
+        }
+
+        return $tiered;
     }
 
     /**

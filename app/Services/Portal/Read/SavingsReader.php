@@ -25,7 +25,8 @@ use Illuminate\Support\Facades\DB;
  * A member's savings accounts and time deposits (portal design §0 finding
  * 10, §3). Every figure is the savings module's own: the balances and the
  * available balance from AvailableBalance, accrued interest from
- * AccruedInterest, the rate from RateBook, the passbook's running balance
+ * AccruedInterest, the rate from RateBook (the tier the ledger balance
+ * reaches today, with the ladder in `rate_tiers`), the passbook's running balance
  * from the rows, and a time deposit's figures through TimeDepositPresenter.
  *
  * - `held` and `pending_withdrawal`: AvailableBalance's split of what it takes
@@ -113,12 +114,13 @@ final class SavingsReader
         $accrued = $open->isEmpty() ? [] : $this->accrued->forMany($open);
         $lastDays = DB::table('savings_transactions')->whereIn('account_id', $ids)->groupBy('account_id')
             ->selectRaw('account_id, MAX(date) AS last_day')->pluck('last_day', 'account_id');
-        $rates = [];
+        $ladders = [];
 
-        return $accounts->map(function (SavingsAccount $a) use ($breakdowns, $accrued, $lastDays, $today, &$rates): array {
+        return $accounts->map(function (SavingsAccount $a) use ($breakdowns, $accrued, $lastDays, $today, &$ladders): array {
             $b = $breakdowns[$a->id];
             $available = $a->isClosed() ? 0 : $b['available'];
-            $rates[$a->product_id] ??= $this->rates->rateOn($a->product_id, null, $today);
+            $ladders[$a->product_id] ??= $this->rates->ladderOn($a->product_id, null, $today);
+            $ladder = $ladders[$a->product_id];
 
             return [
                 'id' => $a->id,
@@ -131,7 +133,8 @@ final class SavingsReader
                 'maintaining_balance' => Pesos::fromCentavos($b['maintaining']),
                 'available_balance' => Pesos::fromCentavos($available),
                 'withdrawable' => Pesos::fromCentavos($a->status === SavingsAccount::STATUS_ACTIVE ? $available : 0),
-                'annual_rate' => $rates[$a->product_id],
+                'annual_rate' => RateBook::tierFor($ladder, $b['ledger'])['annual_rate'] ?? null,
+                'rate_tiers' => array_map(fn (array $tier) => ['min_balance' => $tier['min_balance'], 'annual_rate' => $tier['annual_rate']], $ladder),
                 'accrued_interest' => Pesos::fromCentavos($accrued[$a->id]['gross'] ?? 0),
                 'interest_credited_through' => $a->interest_credited_through?->toDateString(),
                 'opened_on' => $a->opened_on?->toDateString(),

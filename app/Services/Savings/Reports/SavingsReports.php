@@ -5,15 +5,18 @@ namespace App\Services\Savings\Reports;
 use App\Http\Resources\Savings\SavingsUserRef;
 use App\Models\SavingsAccount;
 use App\Models\SavingsInterestRun;
+use App\Models\SavingsSetting;
 use App\Models\SavingsTransaction;
 use App\Models\TimeDeposit;
 use App\Services\Savings\AccruedInterest;
 use App\Services\Savings\AvailableBalance;
+use App\Services\Savings\Dashboard\DepositFigures;
 use App\Services\Savings\Notices\DormancyWindow;
 use App\Services\Savings\SavingsMath;
 use App\Services\Savings\TimeDeposits\Settlement;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Query\Builder as QueryBuilder;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 
@@ -30,6 +33,9 @@ use Illuminate\Support\Facades\DB;
 class SavingsReports
 {
     private const CHUNK = 500;
+
+    /** The rows the large-transaction alert is sent for (LargeTransactionAlert). */
+    public const LARGE_TRANSACTION_TYPES = ['deposit', 'withdrawal', 'closing'];
 
     public function __construct(
         private readonly AvailableBalance $available,
@@ -446,6 +452,350 @@ class SavingsReports
         return (int) $query->distinct()->count('audit_logs.auditable_id');
     }
 
+    // ── Account listing (gap round S5) ──
+
+    /** @return Builder<SavingsAccount> every account in the scope, closed ones too */
+    public function accountListQuery(array $filters): Builder
+    {
+        return $this->accounts($filters)->with('accountOfficer')->orderBy('account_number')->orderBy('id');
+    }
+
+    /** @return array<string, mixed> */
+    public function accountListRow(SavingsAccount $account): array
+    {
+        return [
+            ...$this->accountFields($account),
+            'balance' => $this->money($account->ledger_balance),
+            'opened_on' => $account->opened_on->toDateString(),
+            'closed_on' => $account->closed_on?->toDateString(),
+            'dormant_since' => $account->dormant_since?->toDateString(),
+            'last_member_activity_on' => $account->last_member_activity_on?->toDateString(),
+            'account_officer' => SavingsUserRef::from($account->accountOfficer),
+        ];
+    }
+
+    /** @return array<string, int|string> */
+    public function accountListTotals(array $filters): array
+    {
+        $query = $this->accountListQuery($filters)->reorder()->toBase()
+            ->selectRaw('COUNT(*) AS rows_count, COALESCE(SUM(ledger_balance), 0) AS balance');
+
+        foreach (SavingsAccount::STATUSES as $status) {
+            $query->selectRaw("COALESCE(SUM(CASE WHEN status = ? THEN 1 ELSE 0 END), 0) AS {$status}_count", [$status]);
+        }
+
+        $sums = $query->first();
+
+        return [
+            'account_count' => (int) $sums->rows_count,
+            ...collect(SavingsAccount::STATUSES)->mapWithKeys(fn (string $status) => ["{$status}_count" => (int) $sums->{"{$status}_count"}])->all(),
+            'total_balance' => $this->money($sums->balance),
+        ];
+    }
+
+    // ── Deposits, withdrawals and large transactions (gap round S5) ──
+
+    /**
+     * Deposits dated in the period (DepositFigures::DEPOSIT_TYPES), money
+     * moved from a time deposit left out.
+     *
+     * @return Builder<SavingsTransaction>
+     */
+    public function depositsQuery(array $filters): Builder
+    {
+        return $this->transactionsQuery($filters)->with('reversedBy')
+            ->whereIn('type', DepositFigures::DEPOSIT_TYPES)
+            ->whereNull('time_deposit_id');
+    }
+
+    /**
+     * Withdrawals and closing payouts dated in the period
+     * (DepositFigures::WITHDRAWAL_TYPES), money moved into a time deposit
+     * left out.
+     *
+     * @return Builder<SavingsTransaction>
+     */
+    public function withdrawalsQuery(array $filters): Builder
+    {
+        return $this->transactionsQuery($filters)->with('reversedBy')
+            ->whereIn('type', DepositFigures::WITHDRAWAL_TYPES)
+            ->whereNull('time_deposit_id');
+    }
+
+    /** The large-transaction alert's amount, in centavos (savings settings). */
+    public function largeTransactionThreshold(): int
+    {
+        return SavingsMath::centavos(SavingsSetting::current()->large_transaction_alert);
+    }
+
+    /**
+     * Deposits, withdrawals and closing payouts dated in the period of the
+     * large-transaction alert's amount or more (the rows the alert is sent
+     * for, LargeTransactionAlert), money moved to or from a time deposit left
+     * out, as the deposit and withdrawal reports do.
+     *
+     * @return Builder<SavingsTransaction>
+     */
+    public function largeTransactionsQuery(array $filters): Builder
+    {
+        $threshold = SavingsMath::pesos($this->largeTransactionThreshold());
+
+        return $this->transactionsQuery($filters)->with('reversedBy')
+            ->whereIn('type', self::LARGE_TRANSACTION_TYPES)
+            ->whereNull('time_deposit_id')
+            ->where(fn ($q) => $q->where('credit', '>=', $threshold)->orWhere('debit', '>=', $threshold));
+    }
+
+    /**
+     * A deposit, withdrawal or large transaction: the register's fields, its
+     * amount, and whether it was reversed by the period's end `$asAt`
+     * (listed, counted in no total). A reversal dated later leaves `reversed`
+     * false, so the period reads as it stood at its end, and still shows its
+     * reference and date.
+     *
+     * @return array<string, mixed>
+     */
+    public function flowRow(SavingsTransaction $row, string $asAt): array
+    {
+        return [
+            ...$this->transactionRow($row),
+            'amount' => SavingsMath::pesos(max(SavingsMath::centavos($row->credit), SavingsMath::centavos($row->debit))),
+            'reversed' => $row->reversedBy !== null && $row->reversedBy->date->toDateString() <= $asAt,
+            'reversed_by_reference' => $row->reversedBy?->reference,
+            'reversed_on' => $row->reversedBy?->date->toDateString(),
+        ];
+    }
+
+    /**
+     * Totals over the whole filter: every row listed (`count`), the ones
+     * reversed by the period's end (`reversed_count`), and the money of the
+     * rest, in (`total_credit`) and out (`total_debit`) and both
+     * (`total_amount`).
+     *
+     * @param  Builder<SavingsTransaction>  $query
+     * @return array<string, int|string>
+     */
+    public function flowTotals(Builder $query, string $asAt): array
+    {
+        $sums = DB::query()
+            ->fromSub($query->reorder()->toBase()->select(['savings_transactions.id', 'savings_transactions.credit', 'savings_transactions.debit']), 'f')
+            ->leftJoin('savings_transactions AS r', fn ($join) => $join->on('r.reverses_transaction_id', '=', 'f.id')->where('r.date', '<=', $asAt))
+            ->selectRaw('COUNT(*) AS rows_count, COALESCE(SUM(CASE WHEN r.id IS NULL THEN 0 ELSE 1 END), 0) AS reversed_count')
+            ->selectRaw('COALESCE(SUM(CASE WHEN r.id IS NULL THEN f.credit ELSE 0 END), 0) AS credits')
+            ->selectRaw('COALESCE(SUM(CASE WHEN r.id IS NULL THEN f.debit ELSE 0 END), 0) AS debits')
+            ->first();
+
+        $credits = SavingsMath::centavos($sums->credits);
+        $debits = SavingsMath::centavos($sums->debits);
+
+        return [
+            'count' => (int) $sums->rows_count,
+            'reversed_count' => (int) $sums->reversed_count,
+            'total_credit' => SavingsMath::pesos($credits),
+            'total_debit' => SavingsMath::pesos($debits),
+            'total_amount' => SavingsMath::pesos($credits + $debits),
+        ];
+    }
+
+    // ── Time deposits outstanding (gap round S5) ──
+
+    /**
+     * Time deposits outstanding at the end of `as_of` (default today): placed
+     * by then and not settled by then, the GL control's rule for 2060.
+     *
+     * @return Builder<TimeDeposit>
+     */
+    public function timeDepositsQuery(array $filters): Builder
+    {
+        $asOf = $this->asOf($filters);
+
+        return $this->scopeBranches(TimeDeposit::query(), $filters)
+            ->with(['borrower', 'branch', 'product'])
+            ->where('placement_date', '<=', $asOf)
+            ->where(fn ($q) => $q->whereNull('settled_on')->orWhere('settled_on', '>', $asOf))
+            ->orderBy('maturity_date')
+            ->orderBy('id');
+    }
+
+    /** @return array<string, mixed> */
+    public function timeDepositRow(TimeDeposit $deposit, array $filters): array
+    {
+        return [
+            ...$this->maturityRow($deposit),
+            'days_to_maturity' => (int) CarbonImmutable::parse($this->asOf($filters))->diffInDays($deposit->maturity_date, false),
+        ];
+    }
+
+    /** @return array<string, int|string> */
+    public function timeDepositTotals(array $filters): array
+    {
+        $sums = $this->timeDepositsQuery($filters)->reorder()->toBase()
+            ->selectRaw('COUNT(*) AS rows_count, COALESCE(SUM(principal), 0) AS principal, COALESCE(SUM(net_interest), 0) AS net_interest, COALESCE(SUM(maturity_amount), 0) AS maturity_amount')
+            ->first();
+
+        return [
+            'count' => (int) $sums->rows_count,
+            'total_principal' => $this->money($sums->principal),
+            'total_net_interest' => $this->money($sums->net_interest),
+            'total_maturity_amount' => $this->money($sums->maturity_amount),
+        ];
+    }
+
+    // ── Interest accrual (gap round S5) ──
+
+    /**
+     * Accounts not closed today, for the interest earned and not yet credited
+     * (AccruedInterest, today only: what was earned on a past day is not kept).
+     *
+     * @return Builder<SavingsAccount>
+     */
+    public function interestAccrualQuery(array $filters): Builder
+    {
+        return $this->accounts($filters)
+            ->where('status', '!=', SavingsAccount::STATUS_CLOSED)
+            ->orderBy('account_number')
+            ->orderBy('id');
+    }
+
+    /**
+     * @param  Collection<int, SavingsAccount>  $accounts
+     * @return list<array<string, mixed>>
+     */
+    public function interestAccrualRows(Collection $accounts): array
+    {
+        $accrued = $accounts->isEmpty() ? [] : $this->accrued->forMany($accounts);
+
+        return $accounts->map(fn (SavingsAccount $account) => [
+            ...$this->accountFields($account),
+            'balance' => $this->money($account->ledger_balance),
+            'interest_credited_through' => $account->interest_credited_through?->toDateString(),
+            'accrual_from' => $accrued[$account->id]['from'],
+            'accrual_to' => $accrued[$account->id]['to'],
+            'days' => $accrued[$account->id]['days'],
+            'average_daily_balance' => SavingsMath::pesos($accrued[$account->id]['average_daily_balance']),
+            'gross_interest' => SavingsMath::pesos($accrued[$account->id]['gross']),
+            'tax' => SavingsMath::pesos($accrued[$account->id]['tax']),
+            'net_interest' => SavingsMath::pesos($accrued[$account->id]['net']),
+            'skip_reason' => $accrued[$account->id]['skip_reason'],
+        ])->values()->all();
+    }
+
+    /** @return array<string, int|string> */
+    public function interestAccrualTotals(array $filters): array
+    {
+        $totals = ['count' => 0, 'gross' => 0, 'tax' => 0, 'net' => 0];
+
+        $this->interestAccrualQuery($filters)->setEagerLoads([])->reorder()->chunkById(self::CHUNK, function (Collection $accounts) use (&$totals): void {
+            $totals['count'] += $accounts->count();
+
+            foreach ($this->accrued->forMany($accounts) as $figures) {
+                $totals['gross'] += $figures['gross'];
+                $totals['tax'] += $figures['tax'];
+                $totals['net'] += $figures['net'];
+            }
+        });
+
+        return [
+            'account_count' => $totals['count'],
+            'total_gross_interest' => SavingsMath::pesos($totals['gross']),
+            'total_tax' => SavingsMath::pesos($totals['tax']),
+            'total_net_interest' => SavingsMath::pesos($totals['net']),
+        ];
+    }
+
+    // ── Account activity (gap round S5) ──
+
+    /**
+     * Accounts open at some point in the period (opened by its end, and not
+     * closed before its start).
+     *
+     * @return Builder<SavingsAccount>
+     */
+    public function accountActivityQuery(array $filters): Builder
+    {
+        [$from, $to] = $this->period($filters);
+
+        return $this->accounts($filters)
+            ->where('opened_on', '<=', $to)
+            ->where(fn ($q) => $q->where('status', '!=', SavingsAccount::STATUS_CLOSED)->orWhere('closed_on', '>=', $from))
+            ->orderBy('account_number')
+            ->orderBy('id');
+    }
+
+    /**
+     * Each account's balance before the period, money in and out in it (every
+     * row, reversals too, so opening + in − out = closing), its rows and its
+     * last row's date.
+     *
+     * @param  Collection<int, SavingsAccount>  $accounts
+     * @return list<array<string, mixed>>
+     */
+    public function accountActivityRows(Collection $accounts, array $filters): array
+    {
+        $figures = $this->activityFigures(DB::table('savings_transactions')->whereIn('account_id', $accounts->pluck('id')->all()), $filters)
+            ->groupBy('account_id')
+            ->addSelect('account_id')
+            ->selectRaw('MAX(CASE WHEN date BETWEEN ? AND ? THEN date END) AS last_date', $this->period($filters))
+            ->get()
+            ->keyBy('account_id');
+
+        return $accounts->map(function (SavingsAccount $account) use ($figures) {
+            $row = $figures[$account->id] ?? null;
+            [$opening, $credits, $debits, $count] = $this->activityLine($row);
+
+            return [
+                ...$this->accountFields($account),
+                'opened_on' => $account->opened_on->toDateString(),
+                'closed_on' => $account->closed_on?->toDateString(),
+                'opening_balance' => SavingsMath::pesos($opening),
+                'credits' => SavingsMath::pesos($credits),
+                'debits' => SavingsMath::pesos($debits),
+                'transaction_count' => $count,
+                'closing_balance' => SavingsMath::pesos($opening + $credits - $debits),
+                'last_transaction_on' => $row?->last_date === null ? null : substr((string) $row->last_date, 0, 10),
+            ];
+        })->values()->all();
+    }
+
+    /** @return array<string, int|string> */
+    public function accountActivityTotals(array $filters): array
+    {
+        $ids = $this->accountActivityQuery($filters)->setEagerLoads([])->reorder()->toBase()->select('savings_accounts.id');
+        $row = $this->activityFigures(DB::table('savings_transactions')->whereIn('account_id', $ids), $filters)->first();
+        [$opening, $credits, $debits, $count] = $this->activityLine($row);
+
+        return [
+            'account_count' => $this->accountActivityQuery($filters)->setEagerLoads([])->reorder()->count(),
+            'transaction_count' => $count,
+            'total_opening_balance' => SavingsMath::pesos($opening),
+            'total_credits' => SavingsMath::pesos($credits),
+            'total_debits' => SavingsMath::pesos($debits),
+            'total_closing_balance' => SavingsMath::pesos($opening + $credits - $debits),
+        ];
+    }
+
+    private function activityFigures(QueryBuilder $query, array $filters): QueryBuilder
+    {
+        [$from, $to] = $this->period($filters);
+
+        return $query
+            ->where('date', '<=', $to)
+            ->selectRaw('COALESCE(SUM(CASE WHEN date < ? THEN credit - debit ELSE 0 END), 0) AS opening', [$from])
+            ->selectRaw('COALESCE(SUM(CASE WHEN date >= ? THEN credit ELSE 0 END), 0) AS credits', [$from])
+            ->selectRaw('COALESCE(SUM(CASE WHEN date >= ? THEN debit ELSE 0 END), 0) AS debits', [$from])
+            ->selectRaw('COALESCE(SUM(CASE WHEN date >= ? THEN 1 ELSE 0 END), 0) AS rows_count', [$from]);
+    }
+
+    /** @return array{0: int, 1: int, 2: int, 3: int} opening, credits, debits, rows */
+    private function activityLine(?object $row): array
+    {
+        if ($row === null) {
+            return [0, 0, 0, 0];
+        }
+
+        return [SavingsMath::signedCentavos($row->opening), SavingsMath::centavos($row->credits), SavingsMath::centavos($row->debits), (int) $row->rows_count];
+    }
+
     // ── Shared ──
 
     /**
@@ -476,8 +826,8 @@ class SavingsReports
     }
 
     /**
-     * Narrow a query on a table with `branch_id` to the caller's branches and
-     * the `branch_id` filter.
+     * Narrow a query on a table with `branch_id` and `product_id` to the
+     * caller's branches, the `branch_id` filter and the `product_id` filter.
      *
      * @template TBuilder of Builder
      *
@@ -491,7 +841,8 @@ class SavingsReports
         return $query
             ->when($filters['branch_ids'] ?? null, fn ($q, array $ids) => $q->whereIn($column, $ids))
             ->when(array_key_exists('branch_ids', $filters) && $filters['branch_ids'] === [], fn ($q) => $q->whereRaw('1 = 0'))
-            ->when($filters['branch_id'] ?? null, fn ($q, $id) => $q->where($column, $id));
+            ->when($filters['branch_id'] ?? null, fn ($q, $id) => $q->where($column, $id))
+            ->when($filters['product_id'] ?? null, fn ($q, $id) => $q->where($query->getModel()->qualifyColumn('product_id'), $id));
     }
 
     /**

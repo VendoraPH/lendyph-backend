@@ -10,7 +10,8 @@ use Illuminate\Http\Resources\Json\JsonResource;
 /**
  * A savings product as the API shows it (the frontend's `SavingsProduct`):
  * money as two-decimal strings, the rates in force today per term
- * (`current_rates`), how many accounts and time deposits it holds
+ * (`current_rates`: the base tier's `annual_rate`, plus the whole ladder as
+ * `tiers`, each `{min_balance, annual_rate, effective_from}`), how many accounts and time deposits it holds
  * (`account_count`) and whether it can still be deleted (none of either, and
  * no time deposit product paying early terminations at its rate). Load
  * `accounts_count`, `time_deposits_count`, `pretermination_for_count` and

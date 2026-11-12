@@ -149,6 +149,7 @@ class RunPresenter
                 'from' => $segment['from'],
                 'to' => $segment['to'],
                 'rate' => $segment['rate'],
+                ...$this->tiers($segment),
             ], $line['rate_segments'] ?? []),
             'gross_interest' => SavingsMath::pesos($line['gross']),
             'tax_rate' => $line['tax_rate'],
@@ -157,6 +158,31 @@ class RunPresenter
             'skip_reason' => $line['skip_reason'],
             'interest_transaction_id' => $line['interest_transaction_id'] ?? null,
             'tax_transaction_id' => $line['tax_transaction_id'] ?? null,
+        ];
+    }
+
+    /**
+     * A tiered segment's ladder (`tiers`: min_balance, rate) and, per tier
+     * the days used, its days and centavo-days (`by_tier`); nothing for a
+     * single-rate segment, which reads as before tiers.
+     *
+     * @param  array<string, mixed>  $segment
+     * @return array{tiers?: list<array{min_balance: string|null, rate: string}>, by_tier?: list<array{min_balance: string|null, rate: string, days: int, balance_days: int}>}
+     */
+    private function tiers(array $segment): array
+    {
+        if (! isset($segment['tiers'])) {
+            return [];
+        }
+
+        return [
+            'tiers' => array_map(fn (array $tier) => ['min_balance' => $tier['min_balance'], 'rate' => $tier['rate']], $segment['tiers']),
+            'by_tier' => array_map(fn (array $tier) => [
+                'min_balance' => $tier['min_balance'],
+                'rate' => $tier['rate'],
+                'days' => $tier['days'],
+                'balance_days' => $tier['balance_days'],
+            ], $segment['by_tier'] ?? []),
         ];
     }
 
