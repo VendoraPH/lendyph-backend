@@ -261,6 +261,10 @@ class TimezoneShift
         'savings_settings' => ['created_at', 'updated_at'],
         'savings_tax_rules' => ['created_at'],
         'savings_transactions' => ['created_at', 'requested_at'],
+        // Auto-credit into savings (gap round S3), added 2026-11-13.
+        'savings_auto_credit_instructions' => ['created_at', 'updated_at'],
+        'savings_auto_credit_postings' => ['created_at'],
+        'savings_auto_credit_runs' => ['created_at'],
         // Added 2026-11-11 with CDA Reports (Phase 3), well after the
         // cutover, for the same reason. Their business dates are DATEs.
         'cda_document_versions' => ['created_at'],

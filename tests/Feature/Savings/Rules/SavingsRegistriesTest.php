@@ -70,6 +70,7 @@ class SavingsRegistriesTest extends TestCase
     public function test_an_approval_of_a_kind_with_no_executor_yet_answers_422_and_stays_pending(): void
     {
         $this->assertTrue(ApprovalGate::hasExecutor('reactivation'));
+        $this->assertTrue(ApprovalGate::hasExecutor('share_capital_transfer'));
         $missing = array_values(array_filter(SavingsApproval::KINDS, fn (string $kind) => ! ApprovalGate::hasExecutor($kind)));
 
         foreach (array_diff(SavingsApproval::KINDS, $missing) as $kind) {

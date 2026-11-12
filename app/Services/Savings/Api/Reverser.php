@@ -50,6 +50,9 @@ class Reverser
      */
     public const REVERSIBLE = ['deposit', 'withdrawal', 'transfer_in', 'transfer_out'];
 
+    /** A transfer to share capital is never reversed (gap round S3); how to correct one instead. */
+    public const SHARE_CAPITAL_TRANSFER = 'A transfer to share capital can\'t be reversed. To correct one, record a share capital entry taking the amount back out of the member\'s share capital, then a deposit of it into their savings account.';
+
     public const FEE_ALONE = 'An excess-withdrawal fee is reversed only with its withdrawal. Reverse the withdrawal instead.';
 
     /** Rows whose own `savings` journal a reversal reverses. */
@@ -76,6 +79,10 @@ class Reverser
     {
         if ($target->type === 'fee') {
             Refuse::field('transaction', self::FEE_ALONE);
+        }
+
+        if ($target->type === 'share_capital_transfer') {
+            Refuse::field('transaction', self::SHARE_CAPITAL_TRANSFER);
         }
 
         if (! in_array($target->type, self::REVERSIBLE, true) || $target->time_deposit_id !== null || $target->interest_run_id !== null) {
