@@ -81,6 +81,7 @@ class SavingsTransaction extends Model
         'approval_id',
         'fee_for_transaction_id',
         'counted_on',
+        'requested_at',
         'created_by',
     ];
 
@@ -100,6 +101,7 @@ class SavingsTransaction extends Model
             'approval_id' => 'integer',
             'fee_for_transaction_id' => 'integer',
             'counted_on' => 'date',
+            'requested_at' => 'datetime',
             'created_by' => 'integer',
         ];
     }
