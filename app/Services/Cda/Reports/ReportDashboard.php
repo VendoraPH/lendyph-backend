@@ -3,6 +3,8 @@
 namespace App\Services\Cda\Reports;
 
 use App\Http\Resources\Cda\CdaPresenter;
+use App\Http\Resources\Cda\RequirementPresenter;
+use App\Models\CdaComplianceRequirement;
 use App\Models\CdaReport;
 use App\Models\CdaReportingPeriod;
 use App\Models\User;
@@ -31,7 +33,8 @@ use Illuminate\Support\Collection;
  * - A finalized report whose accounting year was reopened afterwards raises
  *   a Warning.
  *
- * The calendar is one row per instance, by effective deadline.
+ * The calendar is one row per instance, by effective deadline, with the
+ * year's custom compliance requirements among them.
  */
 final class ReportDashboard
 {
@@ -108,17 +111,28 @@ final class ReportDashboard
         ];
     }
 
-    /** @return list<array<string, mixed>> */
+    /**
+     * The year's report instances (`kind: report`) and custom compliance
+     * requirements (`kind: requirement`, RequirementPresenter), by effective
+     * deadline.
+     *
+     * @return list<array<string, mixed>>
+     */
     public function calendar(CdaReportingPeriod $period, User $viewer): array
     {
-        return $this->reports($period, $viewer)
+        $reports = $this->reports($period, $viewer)
             ->map(fn (CdaReport $report) => [
+                'kind' => 'report',
                 ...CdaPresenter::reportRow($report, $period, $viewer),
                 'display_status' => ReportView::displayStatus($report),
                 'readiness' => $this->engine->readinessNow($report)['readiness'],
                 'filed' => in_array($report->status, self::FILED, true),
-            ])
-            ->sortBy(fn (array $row) => $row['effective_deadline'].sprintf('%010d', $row['id']))
+            ]);
+        $requirements = CdaComplianceRequirement::query()->with(['creator', 'updater'])->where('year', $period->year)->get()
+            ->map(fn (CdaComplianceRequirement $requirement) => RequirementPresenter::row($requirement));
+
+        return $reports->toBase()->concat($requirements)
+            ->sortBy(fn (array $row) => $row['effective_deadline'].($row['kind'] === 'report' ? '0' : '1').sprintf('%010d', $row['id']))
             ->values()
             ->all();
     }

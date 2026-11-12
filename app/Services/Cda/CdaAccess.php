@@ -65,6 +65,34 @@ final class CdaAccess
 
     public const TEMPLATE_MANAGER_ROLE = 'super_admin';
 
+    /** Each permission in words, for refusals: users never see a permission key. */
+    private const WORDS = [
+        self::VIEW => 'CDA view', self::PREPARE => 'CDA prepare', self::UPLOAD => 'CDA upload', self::REVIEW => 'CDA review',
+        self::APPROVE => 'CDA approve', self::FINALIZE => 'CDA finalize', self::REOPEN => 'CDA reopen', self::SUBMIT => 'CDA filing',
+        self::EXPORT => 'CDA export', self::SETTINGS => 'CDA settings', self::MANAGE_OFFICERS => 'CDA officers',
+        self::MANAGE_SOCIAL => 'CDA social programs', self::MANAGE_MEDIATION => 'CDA mediation cases',
+        self::VIEW_MEDIATION => 'CDA mediation view', self::VIEW_AUDIT => 'CDA audit reports view', self::VIEW_TAX => 'CDA tax reports view',
+    ];
+
+    /** The refusal for a caller without `branches:view_all`. */
+    public const VIEW_ALL_REFUSAL = 'CDA reports cover the whole cooperative, so this needs head-office access to all branches.';
+
+    /**
+     * Permissions in words, joined with "or": "the CDA review or CDA approve
+     * permission". A key with no words reads as words made from the key.
+     *
+     * @param  string|list<string>  $permissions
+     */
+    public static function words(string|array $permissions): string
+    {
+        $words = array_map(
+            fn (string $permission) => self::WORDS[$permission] ?? ucfirst(str_replace(['_', ':'], ' ', $permission)),
+            (array) $permissions,
+        );
+
+        return 'the '.implode(' or ', $words).' permission';
+    }
+
     /** Whether the user holds `branches:view_all` and the permission. */
     public function allows(User $user, string $permission): bool
     {
@@ -81,8 +109,8 @@ final class CdaAccess
     {
         $permissions = (array) $permissions;
 
-        abort_unless($user->can(BranchAccess::VIEW_ALL), 403, 'CDA reports cover the whole cooperative, so they need access to every branch (branches:view_all).');
-        abort_unless($user->canAny($permissions), 403, 'This needs the '.implode(' or ', $permissions).' permission.');
+        abort_unless($user->can(BranchAccess::VIEW_ALL), 403, self::VIEW_ALL_REFUSAL);
+        abort_unless($user->canAny($permissions), 403, 'This needs '.self::words($permissions).'.');
     }
 
     /** Whether the user may see a report type: always, unless it's restricted. */
@@ -120,7 +148,7 @@ final class CdaAccess
     {
         $restriction = ReportTypes::restriction($reportType);
 
-        abort_unless($this->canSeeType($user, $reportType), 403, ReportTypes::title($reportType)." is restricted: it needs the {$restriction} permission.");
+        abort_unless($this->canSeeType($user, $reportType), 403, ReportTypes::title($reportType).' is restricted: it needs '.self::words((string) $restriction).'.');
     }
 
     public function isTemplateManager(User $user): bool
