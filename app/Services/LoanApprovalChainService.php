@@ -31,12 +31,13 @@ use Illuminate\Validation\ValidationException;
 class LoanApprovalChainService
 {
     /**
-     * Container key for the user a submit forwards its first pending step to.
-     * LoanService::submitForReview() resolves this service on its own and
-     * calls seed() with no room for it, so submitForwarding() leaves it here
-     * for seed() to read, and removes it afterwards.
+     * Container key for the forward a submit carries, as
+     * `['loan_id' => …, 'user_id' => …]`. LoanService::submitForReview()
+     * resolves this service on its own and calls seed() with no room for it,
+     * so submitForwarding() leaves it here and always removes it afterwards;
+     * seed() uses it only for the loan it names.
      */
-    private const SUBMIT_FORWARD_KEY = 'loan-approval-chain.submit-forward-to';
+    public const SUBMIT_FORWARD_KEY = 'loan-approval-chain.submit-forward-to';
 
     public function __construct(
         private LoanService $loanService,
@@ -53,7 +54,7 @@ class LoanApprovalChainService
      */
     public function submitForwarding(Loan $loan, User $submitter, int $forwardToUserId): Loan
     {
-        app()->instance(self::SUBMIT_FORWARD_KEY, $forwardToUserId);
+        app()->instance(self::SUBMIT_FORWARD_KEY, ['loan_id' => (int) $loan->getKey(), 'user_id' => $forwardToUserId]);
 
         try {
             return $this->loanService->submitForReview($loan, $submitter);
@@ -125,11 +126,11 @@ class LoanApprovalChainService
         // Loan::isReleasable refuses to release and nothing can move.
         $pending = $steps->firstWhere('status', LoanApprovalStep::STATUS_PENDING);
 
-        $forwardToUserId = app()->bound(self::SUBMIT_FORWARD_KEY) ? app(self::SUBMIT_FORWARD_KEY) : null;
+        $forward = app()->bound(self::SUBMIT_FORWARD_KEY) ? app(self::SUBMIT_FORWARD_KEY) : null;
 
-        if ($forwardToUserId !== null) {
+        if (is_array($forward) && (int) ($forward['loan_id'] ?? 0) === (int) $loan->getKey()) {
             app()->forgetInstance(self::SUBMIT_FORWARD_KEY);
-            $assignee = $this->assignForward($loan, $pending, (int) $forwardToUserId, $submitter);
+            $assignee = $this->assignForward($loan, $pending, (int) $forward['user_id'], $submitter);
 
             AuditLogService::log(
                 action: 'loan_step_forwarded',
@@ -140,6 +141,7 @@ class LoanApprovalChainService
                     'step_id' => $pending->step_id,
                     'role' => $pending->role,
                     'forwarded_to' => $assignee->full_name,
+                    'forwarded_to_user_id' => (int) $assignee->id,
                 ],
                 description: "Loan {$loan->application_number} submitted and forwarded to {$assignee->full_name} at the \"{$pending->name}\" step.",
                 userId: $submitter?->id,
@@ -231,7 +233,7 @@ class LoanApprovalChainService
                     'role' => $step->role,
                     'kind' => $step->kind,
                     'remarks' => $remarks,
-                    ...($assignee === null ? [] : ['forwarded_to' => $assignee->full_name]),
+                    ...($assignee === null ? [] : ['forwarded_to' => $assignee->full_name, 'forwarded_to_user_id' => (int) $assignee->id]),
                 ],
                 description: "Approval step \"{$step->name}\" signed off on loan {$loan->application_number} (round {$step->round})"
                     .($assignee === null ? '.' : ", forwarded to {$assignee->full_name} at the \"{$next->name}\" step."),
@@ -633,7 +635,9 @@ class LoanApprovalChainService
      * forwarded to, while that user could still be given it. admin and
      * super_admin may release it anyway; an unassigned release step changes
      * nothing (`loans:release` decides, as before). Called by
-     * LoanController::release before its transaction.
+     * LoanController::release and ::sendBackApproved before their
+     * transactions: sending an approved restructure back is the release
+     * step's decision too.
      *
      * @throws AuthorizationException
      */
@@ -750,6 +754,11 @@ class LoanApprovalChainService
      * Check `$userId` against the step that just became pending and store
      * them as its assignee. Runs under the loan's lock (seed() and approve()).
      *
+     * A user who isn't one of the step's candidates for this caller gets one
+     * fixed answer naming only the step: whether the id is unknown, inactive,
+     * lacks the role or the branch is never said, so the field can't be used
+     * to look up staff accounts.
+     *
      * @throws ValidationException 422 on `forward_to_user_id`, in words
      */
     private function assignForward(Loan $loan, ?LoanApprovalStep $next, int $userId, ?User $actor): User
@@ -761,10 +770,10 @@ class LoanApprovalChainService
         }
 
         $candidate = User::query()->with(['roles', 'permissions'])->find($userId);
-        $refusal = $this->assignees->refusal($candidate, $loan, $next, $this->assignees->isLastApproveStep($next), $actor);
-
-        if ($refusal !== null) {
-            throw ValidationException::withMessages(['forward_to_user_id' => [$refusal]]);
+        if (! $this->assignees->canBeGiven($candidate, $loan, $next, $this->assignees->isLastApproveStep($next), $actor)) {
+            throw ValidationException::withMessages([
+                'forward_to_user_id' => ["This user can't be given the \"{$next->name}\" step. Pick someone from the list."],
+            ]);
         }
 
         $next->update(['assigned_to' => $candidate->id]);

@@ -257,7 +257,7 @@ DESC,
             new OA\Parameter(name: 'loan_product_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
             new OA\Parameter(name: 'date_from', in: 'query', required: false, description: 'Inclusive lower bound on created_at (YYYY-MM-DD).', schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'date_to', in: 'query', required: false, description: 'Inclusive upper bound on created_at, whole day (YYYY-MM-DD).', schema: new OA\Schema(type: 'string', format: 'date')),
-            new OA\Parameter(name: 'awaiting_me', in: 'query', required: false, description: 'When 1, only `for_review` loans whose current approval step (the one `current_approver` names) belongs to one of the signed-in user\'s active roles, by exact role name. No admin/super_admin bypass. `meta.total` is the badge count.', schema: new OA\Schema(type: 'boolean', default: false)),
+            new OA\Parameter(name: 'awaiting_me', in: 'query', required: false, description: 'When 1, only loans waiting on the signed-in user: `for_review` loans whose current approval step (the one `current_approver` names) was forwarded to them, or is unassigned and belongs to one of their active roles, by exact role name; and, for a user holding `loans:release`, `approved` loans whose pending release step is theirs by the same rule. A step whose assignee no longer holds it counts as unassigned. No admin/super_admin bypass. `meta.total` is the badge count.', schema: new OA\Schema(type: 'boolean', default: false)),
             new OA\Parameter(name: 'sort', in: 'query', required: false, schema: new OA\Schema(type: 'string', default: 'created_at', enum: self::SORT_KEYS)),
             new OA\Parameter(name: 'dir', in: 'query', required: false, schema: new OA\Schema(type: 'string', default: 'desc', enum: ['asc', 'desc'])),
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15, maximum: 100)),
@@ -929,14 +929,17 @@ DESC,
         ),
         responses: [
             new OA\Response(response: 200, description: 'Restructure sent back; `data` is the loan, now `for_review`'),
-            new OA\Response(response: 403, description: 'Missing loans:release'),
+            new OA\Response(response: 403, description: 'Missing loans:release, or the release step was forwarded to someone else who still holds it (admin and super_admin may send it back anyway)'),
             new OA\Response(response: 404, description: 'No such loan, or outside the caller\'s branches'),
             new OA\Response(response: 409, description: 'The restructure was sent back, released or voided since it was read, or another change to it or its source was saved at the same time; nothing was written and nobody was notified. Message: "Another change to this loan was saved at the same time. Reload and try again."'),
             new OA\Response(response: 422, description: 'Missing or too long `reason`, or (on `status`) the loan is not a restructure or the restructure is not approved'),
         ],
     )]
-    public function sendBackApproved(SendBackApprovedLoanRequest $request, Loan $loan): JsonResponse
+    public function sendBackApproved(SendBackApprovedLoanRequest $request, Loan $loan, LoanApprovalChainService $chain): JsonResponse
     {
+        // The release step's assignee (or admin) decides, as for the release.
+        $chain->assertMayRelease($loan, $request->user());
+
         $this->loanService->sendBackApproved($loan, $request->user(), $request->reason());
 
         return response()->json(['message' => 'Restructure sent back for approval.', 'data' => new LoanResource($loan)]);

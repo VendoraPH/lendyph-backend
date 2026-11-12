@@ -40,7 +40,7 @@ class AuditLogResource extends JsonResource
     private const USER_FOREIGN_KEYS = [
         'account_officer_id', 'acted_by', 'added_by', 'adjusted_by', 'approved_by', 'assigned_to',
         'auto_pay_enabled_by', 'checked_by', 'closed_by', 'created_by', 'decided_by',
-        'first_checker_id', 'initiated_by', 'paid_by_user_id', 'posted_by', 'processed_by',
+        'first_checker_id', 'forwarded_to_user_id', 'initiated_by', 'paid_by_user_id', 'posted_by', 'processed_by',
         'received_by', 'rejected_by', 'released_by', 'reopened_by', 'requested_by',
         'reversed_by', 'settled_by', 'transactor_user_id', 'updated_by', 'user_id', 'voided_by',
     ];

@@ -33,36 +33,29 @@ final class ApprovalAssignees
     public function __construct(private BranchAccess $branchAccess) {}
 
     /**
-     * Why `$candidate` can't be given `$step`, in words, or null when they can.
+     * Whether `$candidate` can be given `$step`.
+     *
+     * A yes or no only, never the reason: the answer to a refused forward is
+     * the same whatever failed, so it never tells the caller whether an
+     * account exists, is active, or what it holds.
      *
      * @param  bool  $lastApprove  whether `$step` is the round's last approve step
      */
-    public function refusal(?User $candidate, Loan $loan, LoanApprovalStep $step, bool $lastApprove, ?User $actor = null): ?string
+    public function canBeGiven(?User $candidate, Loan $loan, LoanApprovalStep $step, bool $lastApprove, ?User $actor = null): bool
     {
-        if ($candidate === null) {
-            return 'The selected user was not found.';
-        }
-
-        $name = trim((string) $candidate->full_name);
-
-        if ($candidate->status !== 'active') {
-            return "{$name}'s account is not active.";
+        if ($candidate === null || $candidate->status !== 'active') {
+            return false;
         }
 
         if ($actor !== null && (int) $candidate->getKey() === (int) $actor->getKey()) {
-            return 'You can\'t forward a loan to yourself.';
+            return false;
         }
 
-        if (! $candidate->activeRoles()->contains('name', $step->role)) {
-            return "{$name} does not hold the role of the \"{$step->name}\" step.";
-        }
-
-        if (! $candidate->can('loans:view')) {
-            return "{$name} can't view loans.";
-        }
-
-        if (! $this->branchAccess->canSee($candidate, $loan->branch_id === null ? null : (int) $loan->branch_id)) {
-            return "{$name} can't see this loan's branch.";
+        if (! $candidate->activeRoles()->contains('name', $step->role)
+            || ! $candidate->can('loans:view')
+            || ! $this->branchAccess->canSee($candidate, $loan->branch_id === null ? null : (int) $loan->branch_id)
+        ) {
+            return false;
         }
 
         if ($lastApprove
@@ -70,21 +63,19 @@ final class ApprovalAssignees
             && (int) $loan->created_by === (int) $candidate->getKey()
             && ! $candidate->hasRole('super_admin')
         ) {
-            return "{$name} created this restructure, so someone else must approve it.";
+            return false;
         }
 
-        if ($step->kind === LoanApprovalStep::KIND_RELEASE && ! $candidate->can('loans:release')) {
-            return "{$name} can't release loans.";
-        }
-
-        return null;
+        return $step->kind !== LoanApprovalStep::KIND_RELEASE || $candidate->can('loans:release');
     }
 
     /**
      * The step's assignee while they still could be given it, else null: the
-     * step is then for its role's holders again.
+     * step is then for its role's holders again. A caller that already knows
+     * whether the step is its round's last approve step passes it, which
+     * saves a query.
      */
-    public function effectiveAssignee(LoanApprovalStep $step, ?Loan $loan = null): ?User
+    public function effectiveAssignee(LoanApprovalStep $step, ?Loan $loan = null, ?bool $lastApprove = null): ?User
     {
         if ($step->assigned_to === null) {
             return null;
@@ -97,7 +88,7 @@ final class ApprovalAssignees
             return null;
         }
 
-        return $this->refusal($assignee, $loan, $step, $this->isLastApproveStep($step)) === null ? $assignee : null;
+        return $this->canBeGiven($assignee, $loan, $step, $lastApprove ?? $this->isLastApproveStep($step)) ? $assignee : null;
     }
 
     /**
@@ -108,7 +99,7 @@ final class ApprovalAssignees
     public function candidates(Loan $loan, LoanApprovalStep $step, bool $lastApprove, User $actor): Collection
     {
         return $this->roleHolders($step->role)
-            ->filter(fn (User $user) => $this->refusal($user, $loan, $step, $lastApprove, $actor) === null)
+            ->filter(fn (User $user) => $this->canBeGiven($user, $loan, $step, $lastApprove, $actor))
             ->sortBy(fn (User $user) => mb_strtolower(trim((string) $user->full_name)))
             ->values();
     }

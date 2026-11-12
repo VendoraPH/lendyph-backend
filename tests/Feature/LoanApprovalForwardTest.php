@@ -12,9 +12,11 @@ use App\Models\LoanProduct;
 use App\Models\Role;
 use App\Models\User;
 use App\Notifications\StaffNotification;
+use App\Services\LoanApprovalChainService;
 use App\Services\LoanService;
 use App\Services\Notifications;
 use Illuminate\Notifications\DatabaseNotification;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Testing\TestResponse;
 use Spatie\Permission\PermissionRegistrar;
 use Tests\TestCase;
@@ -64,6 +66,7 @@ class LoanApprovalForwardTest extends TestCase
 
         $audit = AuditLog::where('action', 'loan_step_forwarded')->where('auditable_id', $loan->id)->latest('id')->firstOrFail();
         $this->assertSame('Mara Reyes', $audit->new_values['forwarded_to']);
+        $this->assertSame($manager->id, $audit->new_values['forwarded_to_user_id']);
         $this->assertStringContainsString('forwarded to Mara Reyes', $audit->description);
     }
 
@@ -78,6 +81,7 @@ class LoanApprovalForwardTest extends TestCase
         $this->assertSame($chair->id, $this->pendingStep($loan)->assigned_to);
         $audit = AuditLog::where('action', 'loan_step_approved')->where('auditable_id', $loan->id)->latest('id')->firstOrFail();
         $this->assertSame('Celia Santos', $audit->new_values['forwarded_to']);
+        $this->assertSame($chair->id, $audit->new_values['forwarded_to_user_id']);
         $this->assertStringContainsString('forwarded to Celia Santos', $audit->description);
     }
 
@@ -96,17 +100,17 @@ class LoanApprovalForwardTest extends TestCase
     {
         $inactive = $this->staff('manager', ['status' => 'inactive']);
 
-        $this->assertSubmitRefused($inactive->id, 'not active');
+        $this->assertSubmitRefused($inactive->id);
     }
 
     public function test_a_user_who_does_not_exist_is_refused(): void
     {
-        $this->assertSubmitRefused(999999, 'not found');
+        $this->assertSubmitRefused(999999);
     }
 
     public function test_a_user_without_the_steps_role_is_refused(): void
     {
-        $this->assertSubmitRefused($this->staff('bod1')->id, 'role');
+        $this->assertSubmitRefused($this->staff('bod1')->id);
     }
 
     public function test_a_user_whose_role_is_deactivated_is_refused(): void
@@ -115,7 +119,7 @@ class LoanApprovalForwardTest extends TestCase
         Role::where('name', 'manager')->update(['is_active' => false]);
         app(PermissionRegistrar::class)->forgetCachedPermissions();
 
-        $this->assertSubmitRefused($manager->id, 'role');
+        $this->assertSubmitRefused($manager->id);
     }
 
     public function test_a_user_without_loans_view_is_refused(): void
@@ -127,7 +131,7 @@ class LoanApprovalForwardTest extends TestCase
             ['id' => 'teller', 'name' => 'Teller', 'role' => 'cashier', 'kind' => 'release'],
         ]);
 
-        $this->assertSubmitRefused($this->staff('reviewer')->id, 'view loans');
+        $this->assertSubmitRefused($this->staff('reviewer')->id, 'Reviewer');
     }
 
     public function test_a_user_who_cannot_see_the_loans_branch_is_refused(): void
@@ -138,7 +142,37 @@ class LoanApprovalForwardTest extends TestCase
             ['id' => 'teller', 'name' => 'Teller', 'role' => 'cashier', 'kind' => 'release'],
         ]);
 
-        $this->assertSubmitRefused($this->staff('cashier', [], $this->far)->id, 'branch');
+        $this->assertSubmitRefused($this->staff('cashier', [], $this->far)->id, 'Teller');
+    }
+
+    public function test_an_unknown_an_inactive_and_an_out_of_branch_user_get_the_same_answer(): void
+    {
+        $this->chain([
+            ['id' => 'processor', 'name' => 'Loan Processor', 'role' => 'loan_processor', 'kind' => 'submit'],
+            ['id' => 'teller', 'name' => 'Teller', 'role' => 'cashier', 'kind' => 'release'],
+        ]);
+        $answers = [];
+
+        foreach ([999999, $this->staff('cashier', ['status' => 'inactive'])->id, $this->staff('cashier', [], $this->far)->id] as $userId) {
+            $loan = $this->draftLoan();
+            $answers[] = $this->submit($loan, $userId)->assertUnprocessable()->json('errors');
+        }
+
+        $expected = ['forward_to_user_id' => [self::refusal('Teller')]];
+        $this->assertSame([$expected, $expected, $expected], $answers);
+    }
+
+    public function test_the_forward_is_bound_only_for_its_own_loan(): void
+    {
+        $manager = $this->staff('manager');
+        $other = $this->draftLoan();
+        $loan = $this->draftLoan();
+        app()->instance(LoanApprovalChainService::SUBMIT_FORWARD_KEY, ['loan_id' => $loan->id, 'user_id' => $manager->id]);
+
+        app(LoanService::class)->submitForReview($other, $this->admin);
+
+        $this->assertNull($this->pendingStep($other)->assigned_to);
+        app()->forgetInstance(LoanApprovalChainService::SUBMIT_FORWARD_KEY);
     }
 
     public function test_forwarding_to_yourself_is_refused(): void
@@ -172,7 +206,7 @@ class LoanApprovalForwardTest extends TestCase
             ->assertUnprocessable()
             ->assertJsonValidationErrors(['forward_to_user_id']);
 
-        $this->assertStringContainsString('created this restructure', $response->json('errors.forward_to_user_id.0'));
+        $this->assertSame([self::refusal('BOD Chairman')], $response->json('errors.forward_to_user_id'));
         $this->assertSame('Manager', $this->pendingStep($restructure)->name);
         $this->assertNull($this->pendingStep($restructure)->assigned_to);
     }
@@ -192,7 +226,7 @@ class LoanApprovalForwardTest extends TestCase
             ->assertUnprocessable()
             ->assertJsonValidationErrors(['forward_to_user_id']);
 
-        $this->assertStringContainsString('release loans', $response->json('errors.forward_to_user_id.0'));
+        $this->assertSame([self::refusal('Release Clerk')], $response->json('errors.forward_to_user_id'));
         $this->assertSame('for_review', $loan->fresh()->status);
         $this->assertSame('Manager', $this->pendingStep($loan)->name);
     }
@@ -362,6 +396,46 @@ class LoanApprovalForwardTest extends TestCase
 
         $this->assertSame([], $this->awaitingIdsFor($this->staff('admin')));
         $this->assertSame([], $this->awaitingIdsFor($this->admin));
+    }
+
+    public function test_only_the_release_assignee_may_send_an_approved_restructure_back(): void
+    {
+        $assignee = $this->staff('cashier');
+        $source = $this->createReleasedLoan();
+        $restructure = app(LoanService::class)->restructure($source, [
+            'borrower_id' => $source->borrower_id,
+            'loan_product_id' => $source->loan_product_id,
+            'principal_amount' => 70800,
+            'start_date' => now()->toDateString(),
+        ], $this->admin);
+        app(LoanService::class)->submitForReview($restructure, $this->admin);
+        $this->approveAs($this->staff('manager'), $restructure)->assertOk();
+        $this->approveAs($this->staff('bod1'), $restructure, $assignee->id)->assertOk();
+
+        $this->actingAs($this->staff('cashier'))
+            ->patchJson("/api/loans/{$restructure->id}/send-back-approved", ['reason' => 'Source paid down'])
+            ->assertForbidden();
+        $this->assertSame('approved', $restructure->fresh()->status);
+
+        $this->actingAs($assignee)
+            ->patchJson("/api/loans/{$restructure->id}/send-back-approved", ['reason' => 'Source paid down'])
+            ->assertOk();
+        $this->assertSame('for_review', $restructure->fresh()->status);
+    }
+
+    public function test_awaiting_me_reads_forwarded_steps_without_a_query_per_step(): void
+    {
+        // Another manager's badge reads every step forwarded within the role.
+        $manager = $this->staff('manager');
+        $viewer = $this->staff('manager');
+        $this->forwardedToManager($manager);
+
+        $one = $this->awaitingQueryCount($viewer->fresh());
+        $this->forwardedToManager($manager);
+        $this->forwardedToManager($manager);
+        $this->forwardedToManager($manager);
+
+        $this->assertSame($one, $this->awaitingQueryCount($viewer->fresh()));
     }
 
     // -----------------------------------------------------------------
@@ -621,7 +695,16 @@ class LoanApprovalForwardTest extends TestCase
         );
     }
 
-    private function assertSubmitRefused(int $userId, string $reason): void
+    /**
+     * The one answer to a user who can't be given a step, whatever the reason,
+     * so a refusal never says whether an account exists or what it holds.
+     */
+    private static function refusal(string $stepName): string
+    {
+        return "This user can't be given the \"{$stepName}\" step. Pick someone from the list.";
+    }
+
+    private function assertSubmitRefused(int $userId, string $stepName = 'Manager'): void
     {
         $loan = $this->draftLoan();
 
@@ -629,7 +712,8 @@ class LoanApprovalForwardTest extends TestCase
             ->assertUnprocessable()
             ->assertJsonValidationErrors(['forward_to_user_id']);
 
-        $this->assertStringContainsString($reason, $response->json('errors.forward_to_user_id.0'));
+        $this->assertSame([self::refusal($stepName)], $response->json('errors.forward_to_user_id'));
+        $this->assertFalse(app()->bound(LoanApprovalChainService::SUBMIT_FORWARD_KEY));
         $this->assertSame('draft', $loan->fresh()->status);
         $this->assertSame(0, $loan->approvalSteps()->count());
         $this->assertSame(0, DatabaseNotification::count());
@@ -646,6 +730,27 @@ class LoanApprovalForwardTest extends TestCase
         $this->actingAs($this->admin);
 
         return $response;
+    }
+
+    private function forwardedToManager(User $manager): Loan
+    {
+        $loan = $this->draftLoan();
+        $this->submit($loan, $manager->id)->assertOk();
+
+        return $loan;
+    }
+
+    private function awaitingQueryCount(User $user): int
+    {
+        $this->actingAs($user);
+        DB::flushQueryLog();
+        DB::enableQueryLog();
+        $this->getJson('/api/loans?awaiting_me=1&per_page=100')->assertOk();
+        $count = count(DB::getQueryLog());
+        DB::disableQueryLog();
+        $this->actingAs($this->admin);
+
+        return $count;
     }
 
     private function canActOnPending(Loan $loan, User $user): bool

@@ -619,7 +619,7 @@ class Loan extends Model
         }
 
         $userId = (int) $user->getKey();
-        $fallingBack = $this->stepsFallingBackToTheirRole($roleNames, $userId);
+        $fallingBack = $this->stepsFallingBackToTheirRole($roleNames, $user);
         $mine = fn ($steps) => $steps->where(fn ($who) => $who
             ->where(fn ($assigned) => $assigned
                 ->where('current_step.assigned_to', $userId)
@@ -663,31 +663,50 @@ class Loan extends Model
     }
 
     /**
-     * Pending, forwarded steps of loans in review or approved, that matter to
-     * this user (their role's, or forwarded to them), whose assignee no
-     * longer holds them: these read as their role's again. Few rows, so the
-     * full rule is checked in PHP (ApprovalAssignees), as canAct() checks it.
+     * Pending, forwarded steps of the live round of loans this user can see,
+     * in review or approved, that matter to them (their role's, or forwarded
+     * to them), whose assignee no longer holds them: these read as their
+     * role's again. Few rows, so the full rule is checked in PHP
+     * (ApprovalAssignees), as canAct() checks it.
+     *
+     * Read in a fixed number of queries whatever the number of steps: the
+     * steps with their loans, the loans' steps (for the last-approve rule) and
+     * the assignees' roles and permissions are loaded together, and the
+     * branch check is read once per assignee (BranchAccess memoises it).
      *
      * @param  list<string>  $roleNames
      * @return list<int>
      */
-    private function stepsFallingBackToTheirRole(array $roleNames, int $userId): array
+    private function stepsFallingBackToTheirRole(array $roleNames, User $user): array
     {
         $assignees = app(ApprovalAssignees::class);
+        $userId = (int) $user->getKey();
 
         return LoanApprovalStep::query()
-            ->with(['loan', 'assignee.roles', 'assignee.permissions'])
-            ->where('status', LoanApprovalStep::STATUS_PENDING)
-            ->whereNotNull('assigned_to')
-            ->whereHas('loan', fn ($loans) => $loans->whereIn('status', ['for_review', 'approved']))
+            ->with(['loan.approvalSteps', 'assignee.roles', 'assignee.permissions'])
+            ->where('loan_approval_steps.status', LoanApprovalStep::STATUS_PENDING)
+            ->whereNotNull('loan_approval_steps.assigned_to')
+            ->whereRaw('loan_approval_steps.round = (select max(latest.round) from loan_approval_steps as latest where latest.loan_id = loan_approval_steps.loan_id)')
+            ->whereHas('loan', fn ($loans) => $loans->visibleTo($user)->whereIn('loans.status', ['for_review', 'approved']))
             ->where(fn ($steps) => $steps
-                ->where('assigned_to', $userId)
-                ->orWhereIn('role', $roleNames === [] ? [''] : $roleNames))
+                ->where('loan_approval_steps.assigned_to', $userId)
+                ->orWhereIn('loan_approval_steps.role', $roleNames === [] ? [''] : $roleNames))
             ->get()
-            ->filter(fn (LoanApprovalStep $step) => $assignees->effectiveAssignee($step, $step->loan) === null)
+            ->filter(fn (LoanApprovalStep $step) => $assignees->effectiveAssignee($step, $step->loan, self::isLastApproveIn($step)) === null)
             ->map(fn (LoanApprovalStep $step) => (int) $step->id)
             ->values()
             ->all();
+    }
+
+    /**
+     * ApprovalAssignees::isLastApproveStep(), read from the loan's loaded steps.
+     */
+    private static function isLastApproveIn(LoanApprovalStep $step): bool
+    {
+        return $step->kind === LoanApprovalStep::KIND_APPROVE
+            && ! $step->loan->approvalSteps->contains(fn (LoanApprovalStep $other) => $other->round === $step->round
+                && $other->step_order > $step->step_order
+                && in_array($other->kind, [LoanApprovalStep::KIND_SUBMIT, LoanApprovalStep::KIND_APPROVE], true));
     }
 
     /**
