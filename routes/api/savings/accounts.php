@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\Api\Savings\SavingsOpeningCheckController;
 use App\Http\Controllers\Api\SavingsAccountController;
 use App\Http\Controllers\Api\SavingsApprovalController;
 use App\Http\Controllers\Api\SavingsHoldController;
@@ -18,6 +19,9 @@ use Illuminate\Support\Facades\Route;
 | needs an Idempotency-Key header.
 */
 Route::prefix('savings')->group(function () {
+    // The member check before opening an account (gap round S1).
+    Route::get('/opening-check', SavingsOpeningCheckController::class);
+
     Route::get('/accounts', [SavingsAccountController::class, 'index']);
     Route::post('/accounts', [SavingsAccountController::class, 'store']);
     Route::get('/accounts/{account}', [SavingsAccountController::class, 'show'])->whereNumber('account');

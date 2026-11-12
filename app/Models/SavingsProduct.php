@@ -27,6 +27,18 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
  * @property list<int>|null $term_options_days
  * @property int|null $pretermination_product_id
  * @property bool $is_active
+ * @property string|null $max_balance
+ * @property string|null $min_deposit
+ * @property string|null $max_deposit
+ * @property string|null $min_withdrawal
+ * @property string|null $max_withdrawal
+ * @property int|null $free_withdrawals_per_month
+ * @property string|null $excess_withdrawal_fee
+ * @property bool $allow_deposits
+ * @property bool $allow_withdrawals
+ * @property bool $allow_transfers
+ * @property list<string>|null $eligible_member_types
+ * @property list<int>|null $eligible_branch_ids
  */
 class SavingsProduct extends Model
 {
@@ -52,6 +64,19 @@ class SavingsProduct extends Model
         'term_options_days',
         'pretermination_product_id',
         'is_active',
+        // Product rules (gap round S1; null = no limit, or every member and branch).
+        'max_balance',
+        'min_deposit',
+        'max_deposit',
+        'min_withdrawal',
+        'max_withdrawal',
+        'free_withdrawals_per_month',
+        'excess_withdrawal_fee',
+        'allow_deposits',
+        'allow_withdrawals',
+        'allow_transfers',
+        'eligible_member_types',
+        'eligible_branch_ids',
         'created_by',
         'updated_by',
     ];
@@ -65,6 +90,18 @@ class SavingsProduct extends Model
             'term_options_days' => 'array',
             'pretermination_product_id' => 'integer',
             'is_active' => 'boolean',
+            'max_balance' => 'decimal:2',
+            'min_deposit' => 'decimal:2',
+            'max_deposit' => 'decimal:2',
+            'min_withdrawal' => 'decimal:2',
+            'max_withdrawal' => 'decimal:2',
+            'free_withdrawals_per_month' => 'integer',
+            'excess_withdrawal_fee' => 'decimal:2',
+            'allow_deposits' => 'boolean',
+            'allow_withdrawals' => 'boolean',
+            'allow_transfers' => 'boolean',
+            'eligible_member_types' => 'array',
+            'eligible_branch_ids' => 'array',
             'created_by' => 'integer',
             'updated_by' => 'integer',
         ];

@@ -18,8 +18,10 @@ use App\Services\Savings\Api\Refuse;
 use App\Services\Savings\Api\Teller;
 use App\Services\Savings\ApprovalGate;
 use App\Services\Savings\AvailableBalance;
+use App\Services\Savings\ProductRules;
 use App\Services\Savings\SavingsLocks;
 use App\Services\Savings\SavingsMath;
+use App\Services\Savings\WithdrawalFee;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 
@@ -28,10 +30,15 @@ use Illuminate\Validation\ValidationException;
  * Savings: no second ledger and no second approval engine.
  *
  * 1. **Submit** (the member, inside IdempotentWrite's portal store): lock the
- *    account, check it pays out and the amount is within what can be
- *    withdrawn now (AvailableBalance, read under the lock), insert the request
+ *    account, check it pays out, the product's withdrawal rules and the
+ *    month's free count (ProductRules, gap round S1), and that the amount
+ *    plus any excess-withdrawal fee is within what can be withdrawn now
+ *    (AvailableBalance, read under the lock). The fee is decided here, once,
+ *    and stored on the request (`fee_amount`, `counted_on` and the product's
+ *    rule then); insert the request
  *    (`live_key` `w:{account}`), then place a `member_request` hold
- *    (HoldDesk::placeForRequest), which reserves the money at once.
+ *    (HoldDesk::placeForRequest) for the amount plus the fee, which reserves
+ *    the money at once.
  * 2. **Approve** (staff, inside the savings IdempotentWrite): lock the
  *    account, then the request (status re-checked), release the hold and
  *    withdraw through the Teller as the staff user, under that same lock, so
@@ -62,6 +69,7 @@ final class WithdrawalRequests
         private readonly RequestTimeline $timeline,
         private readonly RequestNumbers $numbers,
         private readonly ApprovalGate $gate,
+        private readonly ProductRules $rules,
     ) {}
 
     /**
@@ -125,10 +133,14 @@ final class WithdrawalRequests
             Refuse::conflict("You already have an open withdrawal request on {$account->account_number}. Cancel it, or wait for your branch's decision.");
         }
 
+        $decided = $this->rules->decideWithdrawal($account, $centavos, now()->toDateString(), 'details.amount');
+        $fee = $decided->fee;
         $free = $this->available->for($account);
 
-        if ($centavos > $free) {
-            Refuse::field('details.amount', Refuse::peso($centavos).' is more than the '.Refuse::peso($free)." you can withdraw from {$account->account_number} now.");
+        if ($centavos + $fee > $free) {
+            Refuse::field('details.amount', $fee === 0
+                ? Refuse::peso($centavos).' is more than the '.Refuse::peso($free)." you can withdraw from {$account->account_number} now."
+                : Refuse::peso($centavos).' plus the '.Refuse::peso($fee).' excess-withdrawal fee is more than the '.Refuse::peso($free)." you can withdraw from {$account->account_number} now.");
         }
 
         $expiresOn = now()->addDays(max(1, (int) ($this->settings->current()->withdrawal_hold_days ?? 7)))->toDateString();
@@ -142,12 +154,13 @@ final class WithdrawalRequests
             'status' => PortalRequest::STATUS_SUBMITTED,
             'details' => $this->storedDetails($details),
             'amount' => SavingsMath::pesos($centavos),
+            ...$decided->columns(),
             'savings_account_id' => $account->id,
             'expires_on' => $expiresOn,
             'live_key' => $liveKey,
         ], "You already have an open withdrawal request on {$account->account_number}.");
 
-        $hold = $this->holds->placeForRequest($account, $request, $centavos, $expiresOn);
+        $hold = $this->holds->placeForRequest($account, $request, $centavos + $fee, $expiresOn);
         $request->forceFill(['savings_hold_id' => $hold->id])->save();
 
         return $request;
@@ -183,7 +196,7 @@ final class WithdrawalRequests
             'payment_method' => $payout['method'],
             'reference' => $payout['reference'] ?? null,
             'remarks' => "Member portal request {$locked->reference}",
-        ], $staff);
+        ], $staff, WithdrawalFee::storedOn($locked, $locked->created_at?->toDateString() ?? $payout['date']));
 
         if ($result['transaction'] !== null) {
             $this->timeline->move($locked, PortalRequest::STATUS_COMPLETED, PortalRequestEvent::ACTOR_STAFF, $staff->id, $message, [

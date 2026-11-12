@@ -12,13 +12,15 @@ use App\Models\SavingsProduct;
 use App\Models\User;
 use App\Services\Savings\Api\AccountOpener;
 use App\Services\Savings\Api\Refuse;
+use App\Services\Savings\ProductRules;
 use App\Services\Savings\SavingsMath;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Validation\ValidationException;
 
 /**
  * A member's request for a new savings account (portal design §6): on an
- * active regular product open for portal requests, with an opening deposit
+ * active regular product open for portal requests and offered to the member
+ * (its eligible member types and branches, gap round S1), with an opening deposit
  * of at least the product's minimum, when the member holds no open account
  * on it. One open request per member and product (`o:{member}:{product}`).
  * Staff approval opens it through the AccountOpener with the deposit received
@@ -30,6 +32,7 @@ final class OpeningRequests
         private readonly AccountOpener $opener,
         private readonly RequestTimeline $timeline,
         private readonly RequestNumbers $numbers,
+        private readonly ProductRules $rules,
     ) {}
 
     /** @return array<string, array<int, mixed>> */
@@ -54,13 +57,18 @@ final class OpeningRequests
         ];
     }
 
-    /** Products a member may ask for in the portal. */
-    public function openProducts(): Builder
+    /**
+     * Products open for portal requests; with `$member`, only those offered
+     * to that member (ProductRules: member type and branch).
+     */
+    public function openProducts(?Borrower $member = null): Builder
     {
-        return SavingsProduct::query()
+        $query = SavingsProduct::query()
             ->where('kind', SavingsProduct::KIND_REGULAR)
             ->where('is_active', true)
             ->where('portal_account_requests', true);
+
+        return $member === null ? $query : ProductRules::constrainEligible($query, $member);
     }
 
     /**
@@ -76,6 +84,8 @@ final class OpeningRequests
         if ($product === null) {
             Refuse::field('details.product_id', 'That savings product isn\'t offered in the portal. Choose another, or visit your branch.');
         }
+
+        $this->rules->assertEligible($member, $product, 'details.product_id');
 
         if (SavingsAccount::query()->where('open_key', SavingsAccount::openKey($member->id, $product->id))->exists()) {
             Refuse::field('details.product_id', "You already have an open {$product->name} account.");

@@ -43,16 +43,21 @@ class SavingsTransaction extends Model
 
     public const UPDATED_AT = null;
 
-    public const TYPES = ['deposit', 'withdrawal', 'transfer_in', 'transfer_out', 'interest', 'withholding_tax', 'closing', 'reversal'];
+    /**
+     * `fee` is an excess-withdrawal fee, linked to its withdrawal by
+     * `fee_for_transaction_id`. `share_capital_transfer` (savings moved to the
+     * member's share capital) is registered for the gap round's S3.
+     */
+    public const TYPES = ['deposit', 'withdrawal', 'transfer_in', 'transfer_out', 'interest', 'withholding_tax', 'closing', 'reversal', 'fee', 'share_capital_transfer'];
 
     /** Types that only ever add to the balance. */
     public const CREDIT_TYPES = ['deposit', 'transfer_in', 'interest'];
 
     /** Types that only ever take from it. */
-    public const DEBIT_TYPES = ['withdrawal', 'transfer_out', 'withholding_tax', 'closing'];
+    public const DEBIT_TYPES = ['withdrawal', 'transfer_out', 'withholding_tax', 'closing', 'fee', 'share_capital_transfer'];
 
     /** Types that count as the member using the account (dormancy). */
-    public const MEMBER_ACTIVITY_TYPES = ['deposit', 'withdrawal', 'transfer_in', 'transfer_out'];
+    public const MEMBER_ACTIVITY_TYPES = ['deposit', 'withdrawal', 'transfer_in', 'transfer_out', 'share_capital_transfer'];
 
     /** How money moved; `savings` is a move between savings records (transfers, time deposits). */
     public const METHODS = ['cash', 'bank_transfer', 'gcash', 'maya', 'savings'];
@@ -74,6 +79,9 @@ class SavingsTransaction extends Model
         'time_deposit_id',
         'interest_run_id',
         'approval_id',
+        'fee_for_transaction_id',
+        'counted_on',
+        'requested_at',
         'created_by',
     ];
 
@@ -91,6 +99,9 @@ class SavingsTransaction extends Model
             'time_deposit_id' => 'integer',
             'interest_run_id' => 'integer',
             'approval_id' => 'integer',
+            'fee_for_transaction_id' => 'integer',
+            'counted_on' => 'date',
+            'requested_at' => 'datetime',
             'created_by' => 'integer',
         ];
     }
@@ -138,6 +149,18 @@ class SavingsTransaction extends Model
     public function approval(): BelongsTo
     {
         return $this->belongsTo(SavingsApproval::class, 'approval_id');
+    }
+
+    /** On a `fee` row: the withdrawal it was charged on. */
+    public function feeFor(): BelongsTo
+    {
+        return $this->belongsTo(self::class, 'fee_for_transaction_id');
+    }
+
+    /** On a withdrawal: its excess-withdrawal fee row, if one was charged. */
+    public function feeRow(): HasOne
+    {
+        return $this->hasOne(self::class, 'fee_for_transaction_id');
     }
 
     public function creator(): BelongsTo
