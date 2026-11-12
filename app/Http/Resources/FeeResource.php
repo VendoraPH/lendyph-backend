@@ -30,7 +30,7 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'principal_amount', type: 'string', example: '100000.00'),
         new OA\Property(property: 'loan_amount', type: 'string', example: '100000.00'),
         new OA\Property(property: 'interest_rate', type: 'string', nullable: true, example: '3.0000'),
-        new OA\Property(property: 'interest_rate_frequency', type: 'string', nullable: true, example: 'monthly'),
+        new OA\Property(property: 'interest_rate_frequency', type: 'string', nullable: true, enum: ['daily', 'weekly', 'bi_weekly', 'semi_monthly', 'monthly', 'annual'], example: 'monthly'),
         new OA\Property(property: 'loan_term', type: 'string', nullable: true, example: '12', description: 'Months; a days term is days ÷ 30 and keeps its decimals ("1.5")'),
         new OA\Property(property: 'term_in_days', type: 'string', nullable: true, example: '365'),
     ],

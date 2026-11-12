@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Enums\TermUnit;
 use App\Models\Loan;
 use App\Services\Accounting\PostingRules;
+use App\Services\Penalties\PenaltyTerms;
 use Illuminate\Validation\ValidationException;
 
 /**
@@ -93,6 +94,8 @@ class DisclosureService
         'bi_weekly' => 26,
         'semi_monthly' => 24,
         'monthly' => 12,
+        // A rate period only (a rate per year); no loan is paid yearly.
+        'annual' => 1,
     ];
 
     /**
@@ -210,6 +213,11 @@ class DisclosureService
                 'term_unit' => $loan->term_unit->value,
                 'frequency' => $loan->frequency,
                 'penalty_rate' => (float) $loan->penalty_rate,
+                // The late penalty terms the statement prints: the day ranges
+                // of the configuration copied at creation, with its name, or
+                // both null on a loan charged by `penalty_rate`.
+                'penalty_config_name' => $loan->penalty_config_name,
+                'penalty_brackets' => PenaltyTerms::bracketsOf($loan),
                 'grace_period_days' => $loan->grace_period_days,
                 'start_date' => $loan->start_date->toDateString(),
                 'maturity_date' => $loan->maturity_date->toDateString(),
