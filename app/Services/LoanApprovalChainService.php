@@ -10,6 +10,7 @@ use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Http\Exceptions\HttpResponseException;
+use Illuminate\Support\Collection as SupportCollection;
 use Illuminate\Validation\ValidationException;
 
 /**
@@ -29,10 +30,38 @@ use Illuminate\Validation\ValidationException;
  */
 class LoanApprovalChainService
 {
+    /**
+     * Container key for the forward a submit carries, as
+     * `['loan_id' => …, 'user_id' => …]`. LoanService::submitForReview()
+     * resolves this service on its own and calls seed() with no room for it,
+     * so submitForwarding() leaves it here and always removes it afterwards;
+     * seed() uses it only for the loan it names.
+     */
+    public const SUBMIT_FORWARD_KEY = 'loan-approval-chain.submit-forward-to';
+
     public function __construct(
         private LoanService $loanService,
         private Notifications $notifications,
+        private ApprovalAssignees $assignees,
     ) {}
+
+    /**
+     * Submit a draft for review and forward its first pending step to a named
+     * user (`forward_to_user_id`, PATCH /loans/{loan}/submit). The user is
+     * checked in seed(), under the loan's lock, against the step that just
+     * became pending: a refusal is a 422 on `forward_to_user_id` and the loan
+     * stays a draft.
+     */
+    public function submitForwarding(Loan $loan, User $submitter, int $forwardToUserId): Loan
+    {
+        app()->instance(self::SUBMIT_FORWARD_KEY, ['loan_id' => (int) $loan->getKey(), 'user_id' => $forwardToUserId]);
+
+        try {
+            return $this->loanService->submitForReview($loan, $submitter);
+        } finally {
+            app()->forgetInstance(self::SUBMIT_FORWARD_KEY);
+        }
+    }
 
     /**
      * Snapshot the configured chain onto the loan as round 1.
@@ -97,6 +126,28 @@ class LoanApprovalChainService
         // Loan::isReleasable refuses to release and nothing can move.
         $pending = $steps->firstWhere('status', LoanApprovalStep::STATUS_PENDING);
 
+        $forward = app()->bound(self::SUBMIT_FORWARD_KEY) ? app(self::SUBMIT_FORWARD_KEY) : null;
+
+        if (is_array($forward) && (int) ($forward['loan_id'] ?? 0) === (int) $loan->getKey()) {
+            app()->forgetInstance(self::SUBMIT_FORWARD_KEY);
+            $assignee = $this->assignForward($loan, $pending, (int) $forward['user_id'], $submitter);
+
+            AuditLogService::log(
+                action: 'loan_step_forwarded',
+                auditable: $loan,
+                newValues: [
+                    'round' => $pending->round,
+                    'step_order' => $pending->step_order,
+                    'step_id' => $pending->step_id,
+                    'role' => $pending->role,
+                    'forwarded_to' => $assignee->full_name,
+                    'forwarded_to_user_id' => (int) $assignee->id,
+                ],
+                description: "Loan {$loan->application_number} submitted and forwarded to {$assignee->full_name} at the \"{$pending->name}\" step.",
+                userId: $submitter?->id,
+            );
+        }
+
         // approveLocked(), not approve(): this runs inside submitForReview's
         // transaction, which locked the loan's row as its first statement, and
         // LoanWriteTransaction::run() must be the outermost.
@@ -125,11 +176,11 @@ class LoanApprovalChainService
      * or a lock wait timeout, and the chain is left exactly as that request
      * left it.
      */
-    public function approve(Loan $loan, LoanApprovalStep $step, User $user, ?string $remarks = null): LoanApprovalStep
+    public function approve(Loan $loan, LoanApprovalStep $step, User $user, ?string $remarks = null, ?int $forwardToUserId = null): LoanApprovalStep
     {
         $this->assertActionable($loan, $step, $user);
 
-        return LoanWriteTransaction::run(function () use ($loan, $step, $user, $remarks) {
+        return LoanWriteTransaction::run(function () use ($loan, $step, $user, $remarks, $forwardToUserId) {
             [$loan, $step] = $this->lockAndGuard($loan, $step, $user);
 
             // Re-submitting after a send-back: a restructure's figures are
@@ -152,6 +203,11 @@ class LoanApprovalChainService
                 ->first();
 
             $next?->update(['status' => LoanApprovalStep::STATUS_PENDING]);
+
+            // Checked against the step that just became pending, under the
+            // locks, so the rule reads the chain as this sign-off left it. A
+            // refusal rolls the sign-off back with it.
+            $assignee = $forwardToUserId === null ? null : $this->assignForward($loan, $next, $forwardToUserId, $user);
 
             // The chain has cleared every approver — either the next step is
             // the release step, or a misconfigured chain has simply run out.
@@ -177,8 +233,10 @@ class LoanApprovalChainService
                     'role' => $step->role,
                     'kind' => $step->kind,
                     'remarks' => $remarks,
+                    ...($assignee === null ? [] : ['forwarded_to' => $assignee->full_name, 'forwarded_to_user_id' => (int) $assignee->id]),
                 ],
-                description: "Approval step \"{$step->name}\" signed off on loan {$loan->application_number} (round {$step->round}).",
+                description: "Approval step \"{$step->name}\" signed off on loan {$loan->application_number} (round {$step->round})"
+                    .($assignee === null ? '.' : ", forwarded to {$assignee->full_name} at the \"{$next->name}\" step."),
                 userId: $user->id,
             );
 
@@ -532,11 +590,13 @@ class LoanApprovalChainService
     }
 
     /**
-     * Whether this user may act on this step, by role alone.
+     * Whether this user may act on this step: the WHO half of the question
+     * only — assertActionable adds the state half.
      *
      * Mirrors the client's canUserActOnStep: the role named on the step, with
-     * admin/super_admin able to act on anything. This is the ROLE half of the
-     * question only — assertActionable adds the state half.
+     * admin/super_admin able to act on anything. A step forwarded to a named
+     * user is that user's alone while ApprovalAssignees says they still hold
+     * it; otherwise it falls back to the role.
      *
      * The step's own role is matched against the user's role NAMES directly
      * rather than through `hasRole($string)`, because Spatie splits a string
@@ -554,13 +614,176 @@ class LoanApprovalChainService
             return false;
         }
 
-        $roles = $user->activeRoles();
-
-        if ($roles->contains(fn ($role) => in_array($role->name, LoanApprovalStep::BYPASS_ROLES, true))) {
+        if ($this->bypasses($user)) {
             return true;
         }
 
-        return $roles->contains('name', $step->role);
+        // A step forwarded to a named user is theirs alone while they could
+        // still have been given it (ApprovalAssignees); once they can't, it is
+        // the role's again.
+        $assignee = $this->assignees->effectiveAssignee($step);
+
+        if ($assignee !== null) {
+            return (int) $assignee->getKey() === (int) $user->getKey();
+        }
+
+        return $user->activeRoles()->contains('name', $step->role);
+    }
+
+    /**
+     * Refuse a release by anyone but the user the loan's release step is
+     * forwarded to, while that user could still be given it. admin and
+     * super_admin may release it anyway; an unassigned release step changes
+     * nothing (`loans:release` decides, as before). Called by
+     * LoanController::release and ::sendBackApproved before their
+     * transactions: sending an approved restructure back is the release
+     * step's decision too.
+     *
+     * @throws AuthorizationException
+     */
+    public function assertMayRelease(Loan $loan, User $user): void
+    {
+        if ($this->bypasses($user)) {
+            return;
+        }
+
+        $step = $loan->approvalSteps()
+            ->where('round', $this->currentRound($loan))
+            ->where('kind', LoanApprovalStep::KIND_RELEASE)
+            ->where('status', LoanApprovalStep::STATUS_PENDING)
+            ->orderBy('step_order')
+            ->first();
+
+        $assignee = $step === null ? null : $this->assignees->effectiveAssignee($step, $loan);
+
+        if ($assignee !== null && (int) $assignee->getKey() !== (int) $user->getKey()) {
+            throw new AuthorizationException("This loan was forwarded to {$assignee->full_name} for release.");
+        }
+    }
+
+    /**
+     * The step a caller would forward to from where the loan is now, for
+     * GET /loans/{loan}/approval/forward-candidates.
+     *
+     *   - A draft: the step its submit would make pending, from the chain its
+     *     submit would snapshot (chainFor()). The caller must be able to
+     *     submit it (SubmitLoanRequest's rule).
+     *   - In review: the step after the pending one. The caller must be able
+     *     to act on the pending one (canAct()).
+     *
+     * Null when the pending step is the round's last. An unsaved step for a
+     * draft, never written.
+     *
+     * @return array{step: LoanApprovalStep, last_approve: bool}|null
+     *
+     * @throws AuthorizationException when the caller can't act
+     * @throws ValidationException when the loan is not a draft or in review
+     */
+    public function forwardTarget(Loan $loan, User $user): ?array
+    {
+        if ($loan->status === 'draft') {
+            $canSubmit = $user->can('loans:update') || ($loan->isRestructure() && $user->can('loans:restructure'));
+
+            if (! $canSubmit) {
+                throw new AuthorizationException('You can\'t submit this loan for approval.');
+            }
+
+            $chain = $this->chainFor($loan);
+            $next = $chain[1] ?? null;
+
+            if ($next === null) {
+                return null;
+            }
+
+            $step = new LoanApprovalStep([
+                'loan_id' => $loan->id,
+                'round' => 1,
+                'step_order' => 1,
+                'step_id' => $next['id'],
+                'name' => $next['name'],
+                'role' => $next['role'],
+                'kind' => $next['kind'],
+            ]);
+
+            $later = array_slice($chain, 2);
+
+            return [
+                'step' => $step,
+                'last_approve' => $step->kind === LoanApprovalStep::KIND_APPROVE
+                    && ! collect($later)->contains(fn (array $s) => in_array($s['kind'], [LoanApprovalStep::KIND_SUBMIT, LoanApprovalStep::KIND_APPROVE], true)),
+            ];
+        }
+
+        if ($loan->status !== 'for_review') {
+            throw ValidationException::withMessages([
+                'status' => ['Only a draft or a loan for approval can be forwarded.'],
+            ]);
+        }
+
+        $round = $this->currentRound($loan);
+        $current = $loan->approvalSteps()
+            ->where('round', $round)
+            ->where('status', LoanApprovalStep::STATUS_PENDING)
+            ->orderBy('step_order')
+            ->first();
+
+        if ($current === null || ! $this->canAct($current, $user)) {
+            throw new AuthorizationException('You can\'t act on this loan\'s current approval step.');
+        }
+
+        $next = $loan->approvalSteps()
+            ->where('round', $round)
+            ->where('step_order', '>', $current->step_order)
+            ->orderBy('step_order')
+            ->first();
+
+        return $next === null ? null : ['step' => $next, 'last_approve' => $this->assignees->isLastApproveStep($next)];
+    }
+
+    /**
+     * The users `$user` may forward `$step` to, sorted by name.
+     *
+     * @return SupportCollection<int, User>
+     */
+    public function forwardCandidates(Loan $loan, LoanApprovalStep $step, bool $lastApprove, User $user): SupportCollection
+    {
+        return $this->assignees->candidates($loan, $step, $lastApprove, $user);
+    }
+
+    /**
+     * Check `$userId` against the step that just became pending and store
+     * them as its assignee. Runs under the loan's lock (seed() and approve()).
+     *
+     * A user who isn't one of the step's candidates for this caller gets one
+     * fixed answer naming only the step: whether the id is unknown, inactive,
+     * lacks the role or the branch is never said, so the field can't be used
+     * to look up staff accounts.
+     *
+     * @throws ValidationException 422 on `forward_to_user_id`, in words
+     */
+    private function assignForward(Loan $loan, ?LoanApprovalStep $next, int $userId, ?User $actor): User
+    {
+        if ($next === null) {
+            throw ValidationException::withMessages([
+                'forward_to_user_id' => ['This is the last step of the approval chain, so there is nobody to forward it to.'],
+            ]);
+        }
+
+        $candidate = User::query()->with(['roles', 'permissions'])->find($userId);
+        if (! $this->assignees->canBeGiven($candidate, $loan, $next, $this->assignees->isLastApproveStep($next), $actor)) {
+            throw ValidationException::withMessages([
+                'forward_to_user_id' => ["This user can't be given the \"{$next->name}\" step. Pick someone from the list."],
+            ]);
+        }
+
+        $next->update(['assigned_to' => $candidate->id]);
+
+        return $candidate;
+    }
+
+    private function bypasses(User $user): bool
+    {
+        return $user->activeRoles()->contains(fn ($role) => in_array($role->name, LoanApprovalStep::BYPASS_ROLES, true));
     }
 
     /**
@@ -666,9 +889,11 @@ class LoanApprovalChainService
         }
 
         if (! $this->canAct($step, $user)) {
-            throw new AuthorizationException(
-                "This step must be actioned by the \"{$step->role}\" role.",
-            );
+            $assignee = $this->assignees->effectiveAssignee($step, $loan);
+
+            throw new AuthorizationException($assignee === null
+                ? "This step must be actioned by the \"{$step->role}\" role."
+                : "This step was forwarded to {$assignee->full_name}.");
         }
     }
 

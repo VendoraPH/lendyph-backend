@@ -294,6 +294,8 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::get('/loans/{loan}/approval-steps', [LoanApprovalStepController::class, 'index']);
     Route::patch('/loans/{loan}/approval-steps/{approvalStep}/approve', [LoanApprovalStepController::class, 'approve'])->scopeBindings();
     Route::patch('/loans/{loan}/approval-steps/{approvalStep}/send-back', [LoanApprovalStepController::class, 'sendBack'])->scopeBindings();
+    // Who the next step can be forwarded to (`forward_to_user_id` on submit and approve).
+    Route::get('/loans/{loan}/approval/forward-candidates', [LoanApprovalStepController::class, 'forwardCandidates'])->whereNumber('loan');
 
     // Repayments
     Route::get('/repayments', [RepaymentController::class, 'listAll']);
