@@ -49,7 +49,7 @@ class CdaRegisterStalenessTest extends TestCase
 
         $this->postJson('/api/cda/officers', ['name' => 'Ana Reyes', 'sex' => 'female', 'position' => 'treasurer', 'term_start' => '2026-01-01'])->assertCreated();
 
-        $this->assertSame(['officers_trainings/annual'], $this->stale());
+        $this->assertSame(['officers_trainings/annual', 'sworn_statement/annual'], $this->stale(), 'Since 2026.2 the sworn statement lists the officers.');
     }
 
     public function test_social_and_mediation_writes_mark_their_reports_stale(): void
