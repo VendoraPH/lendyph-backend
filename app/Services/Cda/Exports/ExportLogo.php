@@ -21,11 +21,12 @@ use Throwable;
  *   decoding it fits in the memory PHP has left (fitsInMemory()). PHP's
  *   bundled GD allocates through PHP's memory manager, so running out is a
  *   fatal error no catch can stop: the estimate comes first. The JPEG
- *   library's own buffers sit outside memory_limit, which the side limit
- *   keeps small.
+ *   library's own working buffers sit outside memory_limit and aren't
+ *   counted; the side limit bounds them, but they aren't small.
  *
- * With GD it is redrawn at most MAX_HEIGHT pixels tall (the aspect kept,
- * never enlarged), flattened onto white and encoded as an opaque PNG. A small
+ * With GD it is redrawn at most MAX_HEIGHT pixels tall and MAX_WIDTH wide
+ * (the aspect kept, never enlarged), flattened onto white and encoded as an
+ * opaque PNG. A small
  * opaque image keeps dompdf off its slow, memory-hungry alpha path, which a
  * large transparent logo sends it down until the export fails. Without GD
  * only an image of at most NO_GD_MAX_SIDE pixels a side is used, as it is.
@@ -41,6 +42,9 @@ class ExportLogo
     public const MAX_SOURCE_SIDE = 4000;
 
     public const MAX_HEIGHT = 600;
+
+    /** The redrawn copy's widest, so a wide logo stays a small image for dompdf. */
+    public const MAX_WIDTH = 2400;
 
     public const NO_GD_MAX_SIDE = 1500;
 
@@ -61,9 +65,11 @@ class ExportLogo
     }
 
     /**
-     * The bytes a pixel decoding takes, peak: a truecolour PNG holds GD's
-     * 4-byte pixels and a raw copy of its rows while it reads (about 8), a
-     * palette or greyscale PNG about 2, a GIF 1, a JPEG GD's 4.
+     * The bytes a pixel decoding takes, peak. GD loads every PNG except
+     * greyscale (colour type 0) and palette (3) as truecolour, grey with alpha
+     * (4) included, holding its 4-byte pixels and a raw copy of the rows while
+     * it reads: about 8. Greyscale and palette PNGs take about 2, a GIF 1 and a
+     * JPEG GD's 4.
      */
     public static function bytesPerPixel(string $bytes, string $type): int
     {
@@ -77,7 +83,7 @@ class ExportLogo
 
         $colourType = strlen($bytes) > 25 ? ord($bytes[25]) : 6;
 
-        return in_array($colourType, [0, 3, 4], true) ? 2 : 8;
+        return in_array($colourType, [0, 3], true) ? 2 : 8;
     }
 
     private function build(): ?string
@@ -160,7 +166,7 @@ class ExportLogo
         return is_string($bytes) && $bytes !== '' && strlen($bytes) <= self::MAX_BYTES ? $bytes : null;
     }
 
-    /** The image at most MAX_HEIGHT tall on white, as PNG bytes; null when GD can't read it or it wouldn't fit in memory. */
+    /** The image at most MAX_HEIGHT tall and MAX_WIDTH wide on white, as PNG bytes; null when GD can't read it or it wouldn't fit in memory. */
     private function flattened(string $bytes, string $type, int $width, int $height): ?string
     {
         if (! self::fitsInMemory($width, $height, self::bytesPerPixel($bytes, $type), (string) ini_get('memory_limit'), memory_get_usage(true))) {
@@ -199,14 +205,16 @@ class ExportLogo
         return $written && $png !== '' ? $png : null;
     }
 
-    /** @return array{0: int, 1: int} the copy's size: at most MAX_HEIGHT tall, never enlarged */
+    /** @return array{0: int, 1: int} the copy's size: at most MAX_HEIGHT tall and MAX_WIDTH wide, the aspect kept, never enlarged */
     private static function copySize(int $width, int $height): array
     {
-        if ($height <= self::MAX_HEIGHT) {
+        $scale = min(1, self::MAX_HEIGHT / $height, self::MAX_WIDTH / $width);
+
+        if ($scale >= 1) {
             return [$width, $height];
         }
 
-        return [max(1, (int) round($width * self::MAX_HEIGHT / $height)), self::MAX_HEIGHT];
+        return [max(1, (int) round($width * $scale)), max(1, (int) round($height * $scale))];
     }
 
     /** "128M", "1G", "512K" or a byte count; -1 for no limit. */

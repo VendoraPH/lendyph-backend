@@ -153,6 +153,15 @@ class ExportLogoTest extends TestCase
         $this->assertStringContainsString('/Subtype /Image', app(PdfRenderer::class)->render($this->content()), 'The PDF still renders.');
     }
 
+    public function test_a_wide_logo_is_redrawn_at_most_2400_px_wide(): void
+    {
+        $this->logo('branding/logo.png', self::drawn(4000, 100));
+
+        $png = $this->logoPng();
+        $this->assertNotNull($png);
+        $this->assertSame([2400, 60], array_slice(getimagesizefromstring($png), 0, 2), 'The aspect is kept.');
+    }
+
     public function test_a_logo_over_4000_px_a_side_is_skipped(): void
     {
         $this->assertSame(4000, ExportLogo::MAX_SOURCE_SIDE);
@@ -220,6 +229,10 @@ class ExportLogoTest extends TestCase
         $grey = base64_decode(self::PNG);
         $grey[25] = chr(0);
         $this->assertSame(2, ExportLogo::bytesPerPixel($grey, 'image/png'), 'Greyscale PNG.');
+        $greyAlpha = base64_decode(self::PNG);
+        $greyAlpha[25] = chr(4);
+        $this->assertSame(8, ExportLogo::bytesPerPixel($greyAlpha, 'image/png'), 'Grey with alpha: GD loads it as truecolour.');
+        $this->assertFalse(ExportLogo::fitsInMemory(4000, 4000, ExportLogo::bytesPerPixel($greyAlpha, 'image/png'), '128M', 20 * 1024 * 1024), 'A 4000×4000 grey-with-alpha PNG at 128M.');
         $this->assertSame(1, ExportLogo::bytesPerPixel(base64_decode(self::GIF), 'image/gif'));
         $this->assertSame(4, ExportLogo::bytesPerPixel('jpeg bytes', 'image/jpeg'));
     }
