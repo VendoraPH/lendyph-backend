@@ -18,7 +18,8 @@ use Carbon\CarbonImmutable;
  * Builds what an export shows (CDA design §9).
  *
  * - A draft, for-approval or approved report renders its stored values live,
- *   with the cooperative's name from Settings › Branding and the current CDA
+ *   with the cooperative's name from Settings › Branding (the app's name when it
+ *   has none, as the other server-made documents print) and the current CDA
  *   profile, and carries the DRAFT mark.
  * - A finalized, submitted, accepted or for-correction report renders from
  *   its current snapshot only (SnapshotReader): its values, frozen profile
@@ -110,7 +111,8 @@ final class ExportContentBuilder
             reportType: $report->report_type,
             title: $title,
             periodLabel: $periodLabel,
-            coopName: filled($coopName) ? (string) $coopName : ValueFormatter::EMPTY,
+            // No name in Settings › Branding: the app's name, as the other server-made documents print (gap round B7).
+            coopName: filled($coopName) ? (string) $coopName : (string) config('app.name'),
             coopAddress: filled($coopAddress) ? (string) $coopAddress : null,
             registrationNo: filled($profile['cda_registration_no'] ?? null) ? (string) $profile['cda_registration_no'] : null,
             statusLabel: self::STATUS_LABELS[$report->status] ?? $report->status,
