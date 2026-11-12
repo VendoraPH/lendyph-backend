@@ -160,6 +160,70 @@ class CdaTemplates20262MigrationTest extends TestCase
         $this->assertSame($audit, AuditLog::query()->count());
     }
 
+    /** A "2026.2" someone made in CDA Settings before the migration ran. */
+    private function foreign20262(string $type, ?int $createdBy, ?array $definition = null): CdaReportTemplate
+    {
+        $definition ??= $this->template($type, '2026.1')->definition;
+
+        return CdaReportTemplate::query()->create([
+            'report_type' => $type, 'version' => '2026.2', 'name' => 'Own '.$type, 'effective_from' => '2026-01-01',
+            'cooperative_types' => [], 'asset_classes' => [], 'definition' => $definition,
+            'status' => CdaReportTemplate::STATUS_DRAFT, 'created_by' => $createdBy,
+        ]);
+    }
+
+    public function test_a_2026_2_made_in_cda_settings_is_never_taken_for_the_migrations_own(): void
+    {
+        $this->before();
+        $period = app(PeriodOpener::class)->open(2026, $this->admin);
+        $byUser = $this->foreign20262('capr', $this->admin->id);
+        $shipped = json_decode((string) file_get_contents(database_path('cda-templates/2026.2/sworn_statement.json')), true)['definition'];
+        $shipped['meta']['source_doc'] = 'Edited in CDA Settings';
+        $edited = $this->foreign20262('sworn_statement', null, $shipped);
+        $byUser->forceFill(['status' => CdaReportTemplate::STATUS_ACTIVE, 'activated_at' => now()])->save();
+
+        $this->artisan('cda:activate-templates-2026-2', ['--dry-run' => true])
+            ->expectsOutputToContain('capr: left as it is: a 2026.2 made in CDA Settings is already there')
+            ->expectsOutputToContain('sworn_statement: left as it is: a 2026.2 made in CDA Settings is already there')
+            ->assertSuccessful();
+
+        $this->migration()->up();
+
+        foreach (['capr' => $byUser, 'sworn_statement' => $edited] as $type => $theirs) {
+            $this->assertSame(CdaReportTemplate::STATUS_ACTIVE, $this->template($type, '2026.1')->status, $type);
+            $this->assertSame($this->template($type, '2026.1')->id, CdaReport::query()->where('period_id', $period->id)->where('report_type', $type)->value('template_id'), $type);
+            $fields = ['status', 'definition', 'name', 'created_by', 'reason'];
+            $this->assertEquals($theirs->only($fields), $theirs->fresh()->only($fields), "{$type}: their 2026.2 is untouched.");
+        }
+
+        $this->assertSame(CdaReportTemplate::STATUS_RETIRED, $this->template('abr', '2026.1')->status, 'Other types still move.');
+
+        $this->migration()->down();
+
+        $this->assertNotNull($byUser->fresh(), 'down() never deletes a 2026.2 it did not make.');
+        $this->assertNotNull($edited->fresh());
+        $this->assertSame(CdaReportTemplate::STATUS_ACTIVE, $this->template('abr', '2026.1')->status);
+    }
+
+    public function test_down_leaves_2026_1_retired_while_another_template_of_its_type_is_active(): void
+    {
+        $this->before();
+        $migration = $this->migration();
+        $migration->up();
+        $newer = CdaReportTemplate::query()->create([
+            'report_type' => 'abr', 'version' => '2026.3', 'name' => 'Own ABR', 'effective_from' => '2026-06-01',
+            'cooperative_types' => [], 'asset_classes' => [], 'definition' => $this->template('abr', '2026.2')->definition,
+            'status' => CdaReportTemplate::STATUS_ACTIVE, 'activated_at' => now(), 'created_by' => $this->admin->id,
+        ]);
+
+        $migration->down();
+
+        $this->assertNull(CdaReportTemplate::query()->where('report_type', 'abr')->where('version', '2026.2')->first(), 'Its own unused 2026.2 goes.');
+        $this->assertSame(CdaReportTemplate::STATUS_RETIRED, $this->template('abr', '2026.1')->status, 'Not two active templates.');
+        $this->assertSame(CdaReportTemplate::STATUS_ACTIVE, $newer->fresh()->status);
+        $this->assertSame(CdaReportTemplate::STATUS_ACTIVE, $this->template('capr', '2026.1')->status);
+    }
+
     public function test_a_type_with_its_own_active_template_is_left_as_it_is(): void
     {
         $this->before();

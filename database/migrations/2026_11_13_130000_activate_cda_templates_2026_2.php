@@ -22,8 +22,12 @@ use Symfony\Component\Console\Output\ConsoleOutput;
  *   later) keeps 2026.1: its figures and snapshot follow the form it was
  *   prepared on.
  *
- * A type is left as it is when another active template, made in CDA
- * Settings, exists for it, or when its 2026.2 is no longer active. Each
+ * A 2026.2 row is this migration's own only when it has no creator
+ * (`created_by` null) and its definition equals the shipped JSON (isOwn()):
+ * a super_admin may already have made a "2026.2" in CDA Settings. A type is
+ * left as it is, with a note the dry run lists, when its 2026.2 isn't this
+ * migration's, when another active template made in CDA Settings exists for
+ * it, or when its 2026.2 is no longer active. Each
  * template change writes an audit row too. A report is re-read under a lock
  * and moved only while it's still a draft on 2026.1, so a second run changes
  * nothing.
@@ -34,10 +38,11 @@ use Symfony\Component\Console\Output\ConsoleOutput;
  * `php artisan cda:activate-templates-2026-2 --dry-run` runs run(true) on a
  * database and lists what this will change there, writing nothing.
  *
- * down() moves back the drafts this moved that are still drafts on 2026.2,
- * then deletes each 2026.2 no report or snapshot uses and reactivates the
- * 2026.1 it retired. A 2026.2 still in use stays, with its 2026.1 retired.
- * Audit rows are never removed.
+ * down() moves back the drafts this moved that are still drafts on its own
+ * 2026.2, then deletes each of its own 2026.2 rows no report or snapshot
+ * uses, and reactivates the 2026.1 it retired when no other template of that
+ * type is active. A 2026.2 still in use, or not its own, stays. Audit rows
+ * are never removed.
  */
 return new class extends Migration
 {
@@ -126,10 +131,16 @@ return new class extends Migration
             $templates->lockForUpdate();
         }
 
-        $rows = $templates->get(['id', 'version', 'status', 'reason'])->keyBy('version');
+        $rows = $templates->get(['id', 'version', 'status', 'reason', 'created_by', 'definition'])->keyBy('version');
         $old = $rows->get(self::PREVIOUS);
         $new = $rows->get(self::VERSION);
         $own = $rows->first(fn ($row) => $row->status === 'active' && ! in_array($row->version, [self::PREVIOUS, self::VERSION], true));
+
+        if ($new !== null && ! self::isOwn($new, $template['definition'])) {
+            $entry['note'] = 'a 2026.2 made in CDA Settings is already there';
+
+            return [$entry, []];
+        }
 
         if ($new === null && $own !== null) {
             $entry['note'] = "the template {$own->version}, made in CDA Settings, is active";
@@ -239,6 +250,11 @@ return new class extends Migration
     public function down(): void
     {
         DB::transaction(function (): void {
+            $shipped = $this->shippedDefinitions();
+            $ownIds = DB::table('cda_report_templates')->where('version', self::VERSION)->lockForUpdate()
+                ->get(['id', 'report_type', 'created_by', 'definition'])
+                ->filter(fn ($row) => isset($shipped[$row->report_type]) && self::isOwn($row, $shipped[$row->report_type]))
+                ->map(fn ($row) => (int) $row->id)->values()->all();
             $rows = DB::table('audit_logs')
                 ->where('action', 'cda_workflow')
                 ->where('auditable_type', self::REPORT_CLASS)
@@ -256,6 +272,7 @@ return new class extends Migration
                     ->first(['cda_reports.id', 'cda_reports.report_type', 'cda_reports.part', 'cda_reports.status', 'cda_reports.template_id', 'cda_reporting_periods.year']);
 
                 if ($report === null || $report->status !== 'draft' || (int) $report->template_id !== (int) ($new['template_id'] ?? 0)
+                    || ! in_array((int) $report->template_id, $ownIds, true)
                     || ! DB::table('cda_report_templates')->where('id', $old['template_id'] ?? 0)->exists()) {
                     continue;
                 }
@@ -270,7 +287,11 @@ return new class extends Migration
                 );
             }
 
-            foreach (DB::table('cda_report_templates')->where('version', self::VERSION)->lockForUpdate()->get(['id', 'report_type', 'status']) as $template) {
+            foreach (DB::table('cda_report_templates')->where('version', self::VERSION)->lockForUpdate()->get(['id', 'report_type', 'status', 'created_by', 'definition']) as $template) {
+                if (! isset($shipped[$template->report_type]) || ! self::isOwn($template, $shipped[$template->report_type])) {
+                    continue;
+                }
+
                 $used = DB::table('cda_reports')->where('template_id', $template->id)->exists()
                     || DB::table('cda_report_snapshots')->where('template_id', $template->id)->exists();
 
@@ -289,13 +310,63 @@ return new class extends Migration
                     ->where('status', 'retired')->where('reason', self::RETIRE_REASON)
                     ->first(['id']);
 
-                if ($previous !== null) {
+                $otherActive = DB::table('cda_report_templates')
+                    ->where('report_type', $template->report_type)->where('status', 'active')->exists();
+
+                if ($previous !== null && ! $otherActive) {
                     DB::table('cda_report_templates')->where('id', $previous->id)->update(['status' => 'active', 'reason' => null, 'updated_at' => now()]);
                     $this->audit('updated', self::TEMPLATE_CLASS, (int) $previous->id, ['status' => 'retired', 'reason' => self::RETIRE_REASON], ['status' => 'active', 'reason' => null],
                         sprintf('System change: CDA template %s %s active again (the 2026.2 update was rolled back).', self::TITLES[$template->report_type] ?? $template->report_type, self::PREVIOUS));
                 }
             }
         });
+    }
+
+    /**
+     * Whether a 2026.2 row is the one this migration inserted: no creator, and
+     * the shipped definition (compared as data, since MySQL stores JSON with
+     * its keys reordered).
+     *
+     * @param  array<string, mixed>  $shipped
+     */
+    private static function isOwn(object $row, array $shipped): bool
+    {
+        if ($row->created_by !== null) {
+            return false;
+        }
+
+        $stored = json_decode((string) $row->definition, true);
+
+        return is_array($stored) && self::canonical($stored) === self::canonical($shipped);
+    }
+
+    /** Associative arrays with their keys sorted, at every depth; lists keep their order. */
+    private static function canonical(mixed $value): mixed
+    {
+        if (! is_array($value)) {
+            return $value;
+        }
+
+        $value = array_map(fn (mixed $item) => self::canonical($item), $value);
+
+        if (! array_is_list($value)) {
+            ksort($value);
+        }
+
+        return $value;
+    }
+
+    /** @return array<string, array<string, mixed>> report type => the shipped 2026.2 definition */
+    private function shippedDefinitions(): array
+    {
+        $definitions = [];
+
+        foreach (glob(database_path('cda-templates/'.self::VERSION.'/*.json')) ?: [] as $file) {
+            $template = json_decode((string) file_get_contents($file), true, flags: JSON_THROW_ON_ERROR);
+            $definitions[(string) $template['report_type']] = (array) $template['definition'];
+        }
+
+        return $definitions;
     }
 
     /**

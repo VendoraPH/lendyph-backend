@@ -38,9 +38,14 @@ class PdfRenderer
 
     private const PT_PER_MM = 72 / 25.4;
 
+    /**
+     * The export as HTML, with the cooperative's logo read now (ExportLogo,
+     * from the container, so a stand-in renderer keeps its own constructor):
+     * only a PDF ever reads the logo.
+     */
     public function html(ExportContent $content): string
     {
-        return view('cda.report', ['content' => $content])->render();
+        return view('cda.report', ['content' => $content, 'logo' => app(ExportLogo::class)->dataUri()])->render();
     }
 
     public function render(ExportContent $content): string

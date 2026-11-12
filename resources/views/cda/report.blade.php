@@ -42,9 +42,9 @@
 {{-- The footer's facts wrap in the left cell; the right cell stays empty for "Page X of Y", which PdfRenderer draws into it on every page. --}}
 <table class="footer"><tr><td class="footer-text">{{ $content->footer() }}<div class="lendy-mark">{{ \App\Services\Cda\Exports\ExportContent::LENDY_MARK }}</div></td><td class="footer-page"></td></tr></table>
 
-{{-- The cooperative's logo: a PNG, JPEG or GIF data URI built by ExportContentBuilder, never a URL. The official form's layout comes first, so it stays small. --}}
-@if ($content->logoDataUri)
-    <img class="logo" src="{{ $content->logoDataUri }}" alt="">
+{{-- The cooperative's logo: an opaque PNG data URI from ExportLogo (at most 600 px tall), never a URL. The official form's layout comes first, so it stays small. --}}
+@if ($logo)
+    <img class="logo" src="{{ $logo }}" alt="">
 @endif
 <div class="coop">{{ $content->coopName }}</div>
 @if ($content->coopAddress)

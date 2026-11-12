@@ -19,9 +19,9 @@ use App\Services\Cda\ProfileWords;
  * (money, percent, number, text, …, table), and `profile` the stored CDA
  * profile fields. `unverified` is true when the template (from the snapshot
  * once finalized) is still marked `meta.verified: false`; every format then
- * prints UNVERIFIED_NOTE under the title. `logoDataUri` is the cooperative's
- * logo (Settings › Branding) as a data URI, or null: the PDF shows it in the
- * header and LENDY_MARK in the footer; Excel stays text only.
+ * prints UNVERIFIED_NOTE under the title. The PDF also shows the
+ * cooperative's logo (ExportLogo, read by PdfRenderer) and LENDY_MARK in its
+ * footer; Excel stays text only.
  */
 final class ExportContent
 {
@@ -66,7 +66,6 @@ final class ExportContent
         public readonly array $profile,
         public readonly array $excel,
         public readonly bool $unverified = false,
-        public readonly ?string $logoDataUri = null,
     ) {}
 
     /** A profile field as the official workbook's cell shows it: a chosen value in words (ProfileWords). */
