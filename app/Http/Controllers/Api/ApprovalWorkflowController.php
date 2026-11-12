@@ -356,7 +356,7 @@ class ApprovalWorkflowController extends Controller
         return array_map(fn ($item) => is_array($item) ? self::sortedKeys($item) : $item, $value);
     }
 
-    /** @param  array<int, mixed>  $steps "Manager (Manager), BOD Chairwoman (Bod1)" */
+    /** @param  array<int, mixed>  $steps "Manager (Manager), BOD Chairwoman (BOD1)" */
     private function stepsInWords(array $steps): string
     {
         if ($steps === []) {

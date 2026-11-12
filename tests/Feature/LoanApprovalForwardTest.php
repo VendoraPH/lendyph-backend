@@ -502,6 +502,22 @@ class LoanApprovalForwardTest extends TestCase
             ]]);
     }
 
+    public function test_the_next_steps_role_reads_bod1_in_capitals_unless_it_has_a_display_name(): void
+    {
+        $this->staff('bod1');
+        $manager = $this->staff('manager');
+        $loan = $this->submittedLoan();
+        $bod1 = Role::where('name', 'bod1')->firstOrFail();
+
+        $bod1->forceFill(['display_name' => null])->save();
+        $this->actingAs($manager)->getJson("/api/loans/{$loan->id}/approval/forward-candidates")
+            ->assertOk()->assertJsonPath('data.next_step.role_label', 'BOD1');
+
+        $bod1->forceFill(['display_name' => 'BOD Chairwoman'])->save();
+        $this->actingAs($manager)->getJson("/api/loans/{$loan->id}/approval/forward-candidates")
+            ->assertOk()->assertJsonPath('data.next_step.role_label', 'BOD Chairwoman');
+    }
+
     public function test_the_candidates_leave_out_the_caller_and_users_outside_the_branch(): void
     {
         $this->chain([

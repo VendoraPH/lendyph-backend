@@ -11,7 +11,6 @@ use App\Services\LoanApprovalChainService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
-use Illuminate\Support\Str;
 use OpenApi\Attributes as OA;
 
 /**
@@ -248,7 +247,7 @@ class LoanApprovalStepController extends Controller
             'next_step' => [
                 'name' => $step->name,
                 'role' => $step->role,
-                'role_label' => $role?->auditLabel() ?? Str::headline($step->role),
+                'role_label' => $role?->auditLabel() ?? Role::fallbackLabel($step->role),
                 'kind' => $step->kind,
             ],
             'users' => $this->chain->forwardCandidates($loan, $step, $target['last_approve'], $user)
