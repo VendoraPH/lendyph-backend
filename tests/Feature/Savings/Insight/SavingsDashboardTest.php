@@ -2,7 +2,10 @@
 
 namespace Tests\Feature\Savings\Insight;
 
+use App\Models\TimeDeposit;
+use App\Services\Savings\Dashboard\DepositFigures;
 use App\Services\Savings\Dashboard\SavingsDashboard;
+use App\Services\Savings\SavingsLedger;
 use App\Services\Savings\SavingsMath;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -179,6 +182,67 @@ class SavingsDashboardTest extends TestCase
         $this->actingAs($this->admin)->getJson("/api/savings/dashboard?product_id={$this->timeProduct->id}")->assertOk()
             ->assertJsonPath('data.kpis.savings_balance', '0.00')
             ->assertJsonPath('data.kpis.time_deposits', ['count' => 4, 'amount' => '37200.00']);
+    }
+
+    /**
+     * Re-review L-a: a reversal, a time deposit settlement, a fee and a
+     * transfer to share capital across the Nov/Dec boundary. The carried-
+     * forward series equals each month worked out on its own (balances from
+     * every row up to the month's end, flows for that month alone) to the
+     * centavo.
+     */
+    public function test_the_carried_forward_series_equals_each_month_worked_out_on_its_own(): void
+    {
+        $b = $this->accounts['B'];
+        $ledger = app(SavingsLedger::class);
+
+        $this->onDay('2026-11-30');
+        $lateDeposit = $this->deposit($b->refresh(), 30_000);
+        $withdrawal = $this->withdraw($b->refresh(), 10_000);
+        DB::transaction(fn () => $ledger->debit($b->refresh(), 'fee', 500, ['fee_for_transaction_id' => $withdrawal->id]));
+        DB::transaction(fn () => $ledger->debit($b->refresh(), 'share_capital_transfer', 5_000, ['method' => 'savings']));
+
+        $this->onDay('2026-12-01');
+        DB::transaction(fn () => $ledger->debit($b->refresh(), 'reversal', 30_000, ['reverses_transaction_id' => $lateDeposit->id, 'method' => 'cash']));
+        DB::table('time_deposits')->where('id', $this->deposits['TD1']->id)->update([
+            'status' => 'withdrawn', 'settled_on' => '2026-12-01', 'settled_interest' => '50.00', 'settled_tax' => '0.00',
+        ]);
+
+        $this->onDay('2026-12-02');
+        $withdrawal = $this->withdraw($b->refresh(), 2_000);
+        DB::transaction(fn () => $ledger->debit($b->refresh(), 'fee', 300, ['fee_for_transaction_id' => $withdrawal->id]));
+        DB::transaction(fn () => $ledger->debit($b->refresh(), 'share_capital_transfer', 1_000, ['method' => 'savings']));
+
+        $series = $this->actingAs($this->admin)->getJson('/api/savings/dashboard')->assertOk()->json('data.series');
+        $this->assertSame(['2026-09', '2026-10', '2026-11', '2026-12'], array_column($series, 'month'));
+
+        $figures = app(DepositFigures::class);
+        $previous = 0;
+
+        foreach ($series as $point) {
+            $start = substr($point['as_of'], 0, 8).'01';
+            $end = $point['as_of'];
+            $rows = DB::table('savings_transactions')->where('date', '<=', $end)->selectRaw('COALESCE(SUM(credit), 0) AS credits, COALESCE(SUM(debit), 0) AS debits')->first();
+            $savings = SavingsMath::centavos($rows->credits) - SavingsMath::centavos($rows->debits);
+            $deposits = TimeDeposit::query()->where('placement_date', '<=', $end)
+                ->where(fn ($q) => $q->whereNull('settled_on')->orWhere('settled_on', '>', $end))
+                ->get()->sum(fn (TimeDeposit $deposit) => SavingsMath::centavos($deposit->principal));
+            $flow = $figures->flows(['branch_ids' => null], $start, $end)[DepositFigures::ALL];
+
+            $this->assertSame(SavingsMath::pesos($savings), $point['savings_balance'], "{$point['month']} savings balance");
+            $this->assertSame(SavingsMath::pesos($deposits), $point['time_deposits'], "{$point['month']} time deposits");
+            $this->assertSame(SavingsMath::pesos($savings + $deposits), $point['total_deposits'], "{$point['month']} total");
+            $this->assertSame(SavingsMath::pesos($savings + $deposits - $previous), $point['net_movement'], "{$point['month']} net movement");
+            $this->assertSame([$flow['deposit_count'], SavingsMath::pesos($flow['deposits'])], [$point['deposit_count'], $point['deposits']], "{$point['month']} deposits");
+            $this->assertSame([$flow['withdrawal_count'], SavingsMath::pesos($flow['withdrawals'])], [$point['withdrawal_count'], $point['withdrawals']], "{$point['month']} withdrawals");
+            $this->assertSame(SavingsMath::pesos($flow['interest']), $point['interest_credited'], "{$point['month']} interest");
+            $previous = $savings + $deposits;
+        }
+
+        // November keeps the deposit reversed on Dec 1 (as at its end); December has none.
+        $this->assertSame(['12299.00', '0.00'], [$series[2]['deposits'], $series[3]['deposits']]);
+        // TD1 is outstanding at the end of November and settled on Dec 1.
+        $this->assertSame(['37200.00', '27200.00'], [$series[2]['time_deposits'], $series[3]['time_deposits']]);
     }
 
     /**

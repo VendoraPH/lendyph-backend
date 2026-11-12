@@ -567,10 +567,10 @@ class SavingsReportController extends Controller
     {
         $asAt = $this->reports->period($filters)[1];
 
-        return $this->csv($filename, ['Date', 'Reference', 'Account #', 'Member', 'Product', 'Branch', 'Type', 'Method', 'Amount (₱)', 'Balance (₱)', 'Reversed By'], $query, function (SavingsTransaction $row) use ($asAt): array {
+        return $this->csv($filename, ['Date', 'Reference', 'Account #', 'Member', 'Product', 'Branch', 'Type', 'Method', 'Amount (₱)', 'Balance (₱)', 'Reversed By', 'Reversed On'], $query, function (SavingsTransaction $row) use ($asAt): array {
             $r = $this->reports->flowRow($row, $asAt);
 
-            return [$r['date'], $r['reference'], $r['account_number'], $r['borrower_name'], $r['product_name'], $r['branch_name'], self::inWords(self::TRANSACTION_TYPE_WORDS, $r['type']), self::inWords(self::METHOD_WORDS, $r['method']), $r['amount'], $r['balance_after'], $r['reversed_by_reference'] ?? ''];
+            return [$r['date'], $r['reference'], $r['account_number'], $r['borrower_name'], $r['product_name'], $r['branch_name'], self::inWords(self::TRANSACTION_TYPE_WORDS, $r['type']), self::inWords(self::METHOD_WORDS, $r['method']), $r['amount'], $r['balance_after'], $r['reversed_by_reference'] ?? '', $r['reversed_on'] ?? ''];
         });
     }
 

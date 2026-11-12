@@ -86,7 +86,7 @@ class SavingsInsightReportsTest extends TestCase
             ->assertJsonPath('totals.total_amount', '11999.00');
 
         $csv = $this->actingAs($this->exporter)->get('/api/reports/savings/deposits/export?date_from=2026-11-01&date_to=2026-11-10')->assertOk()->streamedContent();
-        $this->assertStringContainsString('Date,Reference,"Account #",Member,Product,Branch,Type,Method,"Amount (₱)","Balance (₱)","Reversed By"', $csv);
+        $this->assertStringContainsString('Date,Reference,"Account #",Member,Product,Branch,Type,Method,"Amount (₱)","Balance (₱)","Reversed By","Reversed On"', $csv);
         $this->assertStringContainsString(',Deposit,Cash,2000.00,', $csv);
         $this->assertStringContainsString(',Deposit,Cash,250.50,', $csv);
         $this->assertStringContainsString($reversed['reversed_by_reference'], $csv);
@@ -350,6 +350,8 @@ class SavingsInsightReportsTest extends TestCase
             ->json('data'))->firstWhere('id', $october->id);
         $this->assertFalse($row['reversed']);
         $this->assertSame('2026-11-10', $row['reversed_on']);
+        $csv = $this->actingAs($this->exporter)->get('/api/reports/savings/deposits/export?date_from=2026-10-01&date_to=2026-10-31')->assertOk()->streamedContent();
+        $this->assertStringContainsString(",{$row['reversed_by_reference']},2026-11-10\n", $csv);
 
         // In November it is an other movement, and the deposit isn't counted twice.
         $this->actingAs($this->admin)->getJson('/api/reports/savings/summary?date_from=2026-11-01&date_to=2026-11-10')->assertOk()
