@@ -213,6 +213,14 @@ it('reads a role by its audit name, a removed role included', function () {
         ->and($changes['role']['old'])->toBe('"Teller" (teller_probe)');
 });
 
+it('reads a board role with no display name in capitals, a removed one included', function () {
+    Role::where('name', 'bod1')->firstOrFail()->forceFill(['display_name' => null])->save();
+
+    $changes = auditChangesFor(User::class, ['role' => 'bod1'], ['role' => 'bod_gone']);
+
+    expect($changes['role'])->toMatchArray(['old' => '"BOD1" (bod1)', 'new' => '"BOD Gone" (bod_gone)']);
+});
+
 it('reads branch ids by branch name, a removed branch by its id', function () {
     $first = Branch::factory()->create(['name' => 'Alpha Branch']);
     $second = Branch::factory()->create(['name' => 'Beta Branch']);
@@ -447,12 +455,12 @@ it('reads closed approval steps by their names on the loan, else as roles', func
     ]);
     // No target loan, so no chain to read the names from (a target id of 1
     // could be the loan above).
-    $noSteps = auditChangesFor(null, null, ['steps_closed' => ['manager', 'not_a_role']], 'loan_chain_short_circuited');
+    $noSteps = auditChangesFor(null, null, ['steps_closed' => ['manager', 'not_a_role', 'bod9']], 'loan_chain_short_circuited');
 
     $changes = collect($this->getJson("/api/audit-logs/{$row->id}")->assertOk()->json('data.changes'))->keyBy('field');
 
     expect($changes['steps_closed']['new'])->toBe('Branch Manager, BOD Chairwoman')
-        ->and($noSteps['steps_closed']['new'])->toBe(Role::where('name', 'manager')->firstOrFail()->auditName().', Not A Role');
+        ->and($noSteps['steps_closed']['new'])->toBe(Role::where('name', 'manager')->firstOrFail()->auditName().', Not A Role, BOD9');
 });
 
 it('leaves a fee fingerprint out of the change list', function () {

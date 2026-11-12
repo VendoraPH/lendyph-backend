@@ -198,7 +198,7 @@ it('audits saving a loan chain in words, old and new steps by name and role', fu
 
     $rows = AuditLog::where('action', 'loan_approval_chain_updated')->get();
     expect($rows)->toHaveCount(1);
-    expect($rows[0]->description)->toBe('Normal loan approval chain saved: Loan Processor (Loan Processor), Branch Head (Manager), Teller (Cashier). Before: the default chain, Loan Processor (Loan Processor), Manager (Manager), BOD Chairwoman (Bod1), General Bookkeeper (General Bookkeeper).');
+    expect($rows[0]->description)->toBe('Normal loan approval chain saved: Loan Processor (Loan Processor), Branch Head (Manager), Teller (Cashier). Before: the default chain, Loan Processor (Loan Processor), Manager (Manager), BOD Chairwoman (BOD1), General Bookkeeper (General Bookkeeper).');
     expect($rows[0]->old_values['type'])->toBe('normal');
     expect($rows[0]->old_values['is_default'])->toBeTrue();
     expect(array_column($rows[0]->old_values['steps'], 'name'))->toBe(array_column(ApprovalWorkflowSetting::defaultStepsFor('normal'), 'name'));

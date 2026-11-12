@@ -20,7 +20,6 @@ use App\Services\UserReach;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Str;
 use OpenApi\Attributes as OA;
 
 /**
@@ -388,7 +387,7 @@ class UserController extends Controller
     private static function roleName(string $key): string
     {
         return Role::query()->where('name', $key)->where('guard_name', 'web')->first()?->auditName()
-            ?? json_encode(Str::headline($key), JSON_UNESCAPED_UNICODE).' ('.$key.')';
+            ?? json_encode(Role::fallbackLabel($key), JSON_UNESCAPED_UNICODE).' ('.$key.')';
     }
 
     /**

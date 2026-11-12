@@ -9,6 +9,7 @@ use App\Models\CdaReportApprovalStep;
 use App\Models\Role;
 use App\Models\User;
 use App\Services\Cda\CdaAccess;
+use App\Services\Cda\Reports\CdaApprovalChain;
 use Exception;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Carbon;
@@ -431,5 +432,15 @@ class CdaReviewChainTest extends TestCase
 
         $this->act($report, 'return', $this->preparer, ['reason' => 'Recount'])->assertOk();
         $this->act($report, 'return', $approverOnly, ['reason' => 'Recount'])->assertForbidden()->assertJsonPath('message', $refusal);
+    }
+
+    public function test_a_steps_role_with_no_display_name_reads_a_board_key_in_capitals(): void
+    {
+        Role::query()->where('name', 'bod1')->update(['display_name' => null]);
+
+        $this->assertSame('BOD1', CdaApprovalChain::roleLabel('bod1'));
+        $this->assertSame('BOD9', CdaApprovalChain::roleLabel('bod9'));
+        $this->assertSame('No Such Role', CdaApprovalChain::roleLabel('no_such_role'));
+        $this->assertSame('Board Chair', CdaApprovalChain::roleLabel('cda_board'));
     }
 }

@@ -8,7 +8,6 @@ use App\Rules\ExactPermissionName;
 use App\Rules\UniqueRoleDisplayName;
 use App\Rules\ValidUtf8;
 use Illuminate\Foundation\Http\FormRequest;
-use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\Validator;
 
@@ -126,13 +125,13 @@ class UpdateRoleRequest extends FormRequest
 
     /**
      * The label a role is shown by: a blank or missing label means the default,
-     * the key in headline case ("Super Admin"), which is also what the role
+     * Role::fallbackLabel() of the key ("Super Admin"), which is also what the role
      * editor shows, and sends back as `display_name: null`.
      */
     private static function effectiveLabel(Role $role, mixed $value): mixed
     {
         if ($value === null || (is_string($value) && trim($value) === '')) {
-            return Str::headline($role->name);
+            return Role::fallbackLabel($role->name);
         }
 
         return is_string($value) ? trim($value) : $value;

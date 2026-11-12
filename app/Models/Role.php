@@ -28,6 +28,13 @@ class Role extends SpatieRole
      */
     public const PROTECTED_KEYS = ['super_admin', 'admin'];
 
+    /**
+     * A word of a key, in headline case, that fallbackLabel() reads in
+     * capitals: the board (`bod`, `bod1`..`bod7`) and an account officer
+     * (`ao`).
+     */
+    private const ACRONYM_KEY_PART = '/^(Bod|Ao)\d*$/';
+
     protected $fillable = [
         'name',
         'display_name',
@@ -82,12 +89,28 @@ class Role extends SpatieRole
     }
 
     /**
-     * The label the audit trail names this role by: its display name, or the
-     * key in headline case when it has none (what the role editor shows).
+     * The label the audit trail names this role by: its display name, or
+     * fallbackLabel() of its key when it has none.
      */
     public function auditLabel(): string
     {
-        return filled($this->display_name) ? trim((string) $this->display_name) : Str::headline((string) $this->name);
+        return filled($this->display_name) ? trim((string) $this->display_name) : self::fallbackLabel((string) $this->name);
+    }
+
+    /**
+     * How a role key reads when there is no display name to show, also for a
+     * key no role has any more: the key in headline case ("Loan Officer"),
+     * with an acronym part in capitals ("BOD1", "BOD Chair", "AO"). Display
+     * only; the key and stored rows never change.
+     */
+    public static function fallbackLabel(string $key): string
+    {
+        $words = array_map(
+            fn (string $word) => preg_match(self::ACRONYM_KEY_PART, $word) === 1 ? strtoupper($word) : $word,
+            explode(' ', Str::headline($key)),
+        );
+
+        return implode(' ', $words);
     }
 
     public function users(): MorphToMany

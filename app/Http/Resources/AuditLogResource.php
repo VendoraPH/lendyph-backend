@@ -854,7 +854,7 @@ class AuditLogResource extends JsonResource
             return (string) $name;
         }
 
-        return $this->getRelation('changeRoles')->get($stepId)?->auditName() ?? Str::headline($stepId);
+        return $this->getRelation('changeRoles')->get($stepId)?->auditName() ?? Role::fallbackLabel($stepId);
     }
 
     /**

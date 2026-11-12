@@ -13,7 +13,6 @@ use App\Services\Cda\CdaAccess;
 use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Str;
 
 /**
  * A CDA report's review chain (gap round B6).
@@ -283,12 +282,12 @@ final class CdaApprovalChain
         ])->all();
     }
 
-    /** A role's display name, else its key in words. */
+    /** A role's display name, else its key in words (Role::fallbackLabel()). */
     public static function roleLabel(string $role): string
     {
         $display = Role::query()->where('name', $role)->value('display_name');
 
-        return is_string($display) && trim($display) !== '' ? $display : Str::headline($role);
+        return is_string($display) && trim($display) !== '' ? $display : Role::fallbackLabel($role);
     }
 
     private static function unreadable(ApprovalWorkflowSetting $setting): HttpResponseException
