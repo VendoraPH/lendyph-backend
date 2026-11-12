@@ -196,7 +196,7 @@ class ApprovalGate
         $payload = $attributes['payload'] ?? null;
         $tierCentavos = max($centavos, (int) ($attributes['tier_centavos'] ?? 0));
 
-        if (in_array($kind, SavingsApproval::OUTFLOW_KINDS, true) && isset($attributes['account_id']) && ! $this->needsApproval($tierCentavos)) {
+        if (in_array($kind, SavingsApproval::OUTFLOW_KINDS, true) && isset($attributes['account_id'])) {
             $account = SavingsAccount::query()->find($attributes['account_id']);
             $reason = $account === null ? null : $this->uncheckedOutflowReason($account);
 

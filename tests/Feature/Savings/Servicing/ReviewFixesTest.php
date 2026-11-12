@@ -97,6 +97,25 @@ class ReviewFixesTest extends TestCase
         $this->withdrawal($this->dormant, '100.00')->assertCreated();
     }
 
+    public function test_a_withdrawal_above_tier_1_on_a_held_account_also_tells_the_checker(): void
+    {
+        $this->reactivateByDeposit('50000.00');
+
+        $approval = $this->withdrawal($this->dormant, '20000.00')->assertStatus(202)
+            ->assertJsonPath('message', self::HOLD_MESSAGE)
+            ->assertJsonPath('data.approval.required_checkers', 1)
+            ->assertJsonPath('data.approval.check_reason', self::CHECK_REASON)
+            ->json('data.approval');
+
+        $this->actingAs($this->checker())->postJson("/api/savings/approvals/{$approval['id']}/approve")->assertOk();
+        $this->assertNull($this->dormant->refresh()->outflow_check_required_since);
+
+        $this->actingAs($this->teller());
+        $this->withdrawal($this->dormant, '20000.00')->assertStatus(202)
+            ->assertJsonPath('data.approval.check_reason', null)
+            ->assertJsonMissingPath('message');
+    }
+
     public function test_the_hold_survives_midnight_until_an_outflow_is_approved(): void
     {
         $this->reactivateByDeposit();

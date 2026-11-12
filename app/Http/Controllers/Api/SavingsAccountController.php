@@ -411,8 +411,8 @@ class SavingsAccountController extends Controller
     }
 
     /**
-     * 202 with `{approval}`; with `message` when it waits for a checker only
-     * because of the hold after a deposit reactivated the account (review M1).
+     * 202 with `{approval}`; with `message` when the account is held after a
+     * deposit reactivated it (review M1), whatever the amount.
      */
     private function sentForApproval(SavingsApproval $approval): JsonResponse
     {
