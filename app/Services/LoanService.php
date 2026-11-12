@@ -2757,12 +2757,13 @@ class LoanService
      *   when the configured fees take them over, or a written-formula fee
      *   that can't be worked out for this loan (it divides by zero, or goes
      *   below ₱0.00 or above the largest amount), naming the fee, with no
-     *   configured fees listed. In the body rather than as a 422, so the rest
-     *   of the preview still shows while the form is filled in; the release
-     *   and its previews answer that fee's 422.
+     *   configured fees listed and `total_deductions` null too (the stated
+     *   items alone would understate it). In the body rather than as a 422,
+     *   so the rest of the preview still shows while the form is filled in;
+     *   the release and its previews answer that fee's 422.
      *
      * @param  array<string, mixed>  $input
-     * @return array{items: list<array<string, mixed>>, stated_total: float|int, configured_fees: list<array<string, mixed>>, configured_total: float|int, total_deductions: float|int, net_proceeds: float|int|null, error: string|null}
+     * @return array{items: list<array<string, mixed>>, stated_total: float|int, configured_fees: list<array<string, mixed>>, configured_total: float|int, total_deductions: float|int|null, net_proceeds: float|int|null, error: string|null}
      */
     private function formDeductions(LoanProduct $product, array $input, int $principal, ?Carbon $maturity, ?TermUnit $storedTermUnit = null): array
     {
@@ -2821,7 +2822,9 @@ class LoanService
             'stated_total' => $stated / 100,
             'configured_fees' => $configuredFees,
             'configured_total' => $configured / 100,
-            'total_deductions' => $total / 100,
+            // Unknown while a configured fee can't be worked out: null, never
+            // the stated items alone.
+            'total_deductions' => $feeError === null ? $total / 100 : null,
             'net_proceeds' => $error === null ? ($principal - $total) / 100 : null,
             'error' => $error,
         ];

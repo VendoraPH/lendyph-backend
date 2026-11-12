@@ -12,7 +12,8 @@ use Illuminate\Validation\Rule;
  * - `name`: required, at most 100 characters, unique.
  * - `applicable_product_ids`: existing loan products; an active
  *   configuration needs at least one.
- * - `conditions`: 1 to 20 brackets. Taken in `days_from` order, the first
+ * - `conditions`: 1 to 20 brackets ("conditions" on screen, so the
+ *   messages say "Condition N"). Taken in `days_from` order, the first
  *   starts at day 1 and each later one the day after the previous one ends
  *   (no gaps, no overlaps). `days_to` is at least `days_from`, and only the
  *   last may be null (open-ended). `rate` is 0 to 100 with at most 4
@@ -57,20 +58,20 @@ trait ValidatesPenaltyConfig
             'applicable_product_ids.*.integer' => 'Choose loan products from the list.',
             'applicable_product_ids.*.distinct' => 'A loan product is listed twice.',
             'applicable_product_ids.*.exists' => 'One of the chosen loan products no longer exists.',
-            'conditions.required' => 'Add at least one bracket.',
-            'conditions.array' => 'Add at least one bracket.',
-            'conditions.min' => 'Add at least one bracket.',
-            'conditions.max' => 'A configuration can have at most '.self::MAX_BRACKETS.' brackets.',
-            'conditions.*.array' => 'Each bracket needs days from, days to and a rate.',
-            'conditions.*.days_from.required' => 'Enter the day each bracket starts on.',
+            'conditions.required' => 'Add at least one condition.',
+            'conditions.array' => 'Add at least one condition.',
+            'conditions.min' => 'Add at least one condition.',
+            'conditions.max' => 'A configuration can have at most '.self::MAX_BRACKETS.' conditions.',
+            'conditions.*.array' => 'Each condition needs days from, days to and a rate.',
+            'conditions.*.days_from.required' => 'Enter the day each condition starts on.',
             'conditions.*.days_from.integer' => 'Days must be whole numbers.',
             'conditions.*.days_from.min' => 'Days start at day 1, the day after the due date.',
             'conditions.*.days_from.max' => 'Days can be at most '.number_format(self::MAX_DAYS).'.',
-            'conditions.*.days_to.present' => 'Enter the day each bracket ends on, or leave the last one open-ended.',
+            'conditions.*.days_to.present' => 'Enter the day each condition ends on, or leave the last one open-ended.',
             'conditions.*.days_to.integer' => 'Days must be whole numbers.',
             'conditions.*.days_to.min' => 'Days start at day 1, the day after the due date.',
             'conditions.*.days_to.max' => 'Days can be at most '.number_format(self::MAX_DAYS).'.',
-            'conditions.*.rate.required' => 'Enter a rate for each bracket.',
+            'conditions.*.rate.required' => 'Enter a rate for each condition.',
             'conditions.*.rate.numeric' => 'The rate must be a number.',
             'conditions.*.rate.min' => 'The rate can\'t be below 0%.',
             'conditions.*.rate.max' => 'The rate can be at most 100%.',
@@ -121,24 +122,24 @@ trait ValidatesPenaltyConfig
             $number = $position + 1;
 
             if ($row['to'] !== null && $row['to'] < $row['from']) {
-                $v->errors()->add("{$key}.days_to", "Bracket {$number} ends before it starts: days to must be at least days from.");
+                $v->errors()->add("{$key}.days_to", "Condition {$number} ends before it starts: days to must be at least days from.");
             }
 
             if ($row['to'] === null && $position !== $last) {
-                $v->errors()->add("{$key}.days_to", "Only the last bracket can be open-ended. Bracket {$number} needs the day it ends on.");
+                $v->errors()->add("{$key}.days_to", "Only the last condition can be open-ended. Condition {$number} needs the day it ends on.");
             }
 
             if ($previous === null) {
                 if ($row['from'] !== 1) {
-                    $v->errors()->add("{$key}.days_from", 'The first bracket must start at day 1, the day after the due date.');
+                    $v->errors()->add("{$key}.days_from", 'The first condition must start at day 1, the day after the due date.');
                 }
             } elseif ($previous['to'] !== null && $row['from'] !== $previous['to'] + 1) {
                 $expected = $previous['to'] + 1;
                 $problem = $row['from'] > $expected
                     ? "leaves a gap after day {$previous['to']}"
-                    : "overlaps bracket {$position}";
+                    : "overlaps condition {$position}";
 
-                $v->errors()->add("{$key}.days_from", "Bracket {$number} {$problem}: it must start on day {$expected}, the day after bracket {$position} ends.");
+                $v->errors()->add("{$key}.days_from", "Condition {$number} {$problem}: it must start on day {$expected}, the day after condition {$position} ends.");
             }
 
             $previous = $row;

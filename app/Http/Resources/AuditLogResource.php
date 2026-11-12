@@ -147,6 +147,8 @@ class AuditLogResource extends JsonResource
         'PortalTermsVersion' => 'Portal terms',
         'PortalRequest' => 'Portal request',
         'PortalAnnouncement' => 'Portal announcement',
+        // Read by its name while it exists; this only when it is gone.
+        'PenaltyConfig' => 'Penalty configuration',
     ];
 
     /**

@@ -81,22 +81,22 @@ class PenaltyConfigApiTest extends TestCase
             'a gap' => [[
                 ['days_from' => 1, 'days_to' => 5, 'rate' => 20],
                 ['days_from' => 7, 'days_to' => null, 'rate' => 30],
-            ], 'conditions.1.days_from', 'Bracket 2 leaves a gap after day 5: it must start on day 6, the day after bracket 1 ends.'],
+            ], 'conditions.1.days_from', 'Condition 2 leaves a gap after day 5: it must start on day 6, the day after condition 1 ends.'],
             'an overlap' => [[
                 ['days_from' => 1, 'days_to' => 5, 'rate' => 20],
                 ['days_from' => 5, 'days_to' => null, 'rate' => 30],
-            ], 'conditions.1.days_from', 'Bracket 2 overlaps bracket 1: it must start on day 6, the day after bracket 1 ends.'],
+            ], 'conditions.1.days_from', 'Condition 2 overlaps condition 1: it must start on day 6, the day after condition 1 ends.'],
             'a first row not at day 1' => [[
                 ['days_from' => 2, 'days_to' => null, 'rate' => 20],
-            ], 'conditions.0.days_from', 'The first bracket must start at day 1, the day after the due date.'],
+            ], 'conditions.0.days_from', 'The first condition must start at day 1, the day after the due date.'],
             'an open row that is not last' => [[
                 ['days_from' => 1, 'days_to' => null, 'rate' => 20],
                 ['days_from' => 6, 'days_to' => 10, 'rate' => 30],
-            ], 'conditions.0.days_to', 'Only the last bracket can be open-ended. Bracket 1 needs the day it ends on.'],
+            ], 'conditions.0.days_to', 'Only the last condition can be open-ended. Condition 1 needs the day it ends on.'],
             'a row ending before it starts' => [[
                 ['days_from' => 1, 'days_to' => 5, 'rate' => 20],
                 ['days_from' => 6, 'days_to' => 4, 'rate' => 30],
-            ], 'conditions.1.days_to', 'Bracket 2 ends before it starts: days to must be at least days from.'],
+            ], 'conditions.1.days_to', 'Condition 2 ends before it starts: days to must be at least days from.'],
             'a rate over 100' => [[
                 ['days_from' => 1, 'days_to' => null, 'rate' => 100.5],
             ], 'conditions.0.rate', 'The rate can be at most 100%.'],
@@ -106,7 +106,7 @@ class PenaltyConfigApiTest extends TestCase
             'a negative rate' => [[
                 ['days_from' => 1, 'days_to' => null, 'rate' => -1],
             ], 'conditions.0.rate', 'The rate can\'t be below 0%.'],
-            'no brackets' => [[], 'conditions', 'Add at least one bracket.'],
+            'no brackets' => [[], 'conditions', 'Add at least one condition.'],
         ];
     }
 
@@ -130,7 +130,7 @@ class PenaltyConfigApiTest extends TestCase
 
         $this->postJson('/api/penalty-configs', $this->body(['conditions' => $conditions]))
             ->assertUnprocessable()
-            ->assertJsonPath('errors.conditions.0', 'A configuration can have at most 20 brackets.');
+            ->assertJsonPath('errors.conditions.0', 'A configuration can have at most 20 conditions.');
 
         array_pop($conditions);
         $conditions[19]['days_to'] = null;
@@ -347,7 +347,7 @@ class PenaltyConfigApiTest extends TestCase
             $rows[0]['description'],
         );
         // Deleted since, so every row names it by its kind and id.
-        $this->assertSame("Penalty config #{$id}", $rows[0]['target']['label']);
+        $this->assertSame("Penalty configuration #{$id}", $rows[0]['target']['label']);
 
         $this->assertEqualsCanonicalizing([
             ['field' => 'applicable_product_ids', 'old' => 'Salary Loan, Regular Loan', 'new' => 'Salary Loan'],
@@ -360,6 +360,17 @@ class PenaltyConfigApiTest extends TestCase
 
         $this->assertSame('Penalty configuration "Standard Loan Penalty" deleted: 1 day or more: 2.5%. Products: Salary Loan', $rows[3]['description']);
         $this->assertSame(1, AuditLog::where('auditable_type', PenaltyConfig::class)->where('action', 'deleted')->count());
+    }
+
+    public function test_an_audit_row_names_the_configuration_by_its_name_while_it_exists(): void
+    {
+        $id = $this->postJson('/api/penalty-configs', $this->body())->assertCreated()->json('data.id');
+        $this->patchJson("/api/penalty-configs/{$id}/status", ['status' => 'inactive'])->assertOk();
+
+        $rows = $this->getJson('/api/audit-logs?module=penalties')->assertOk()->json('data');
+
+        $this->assertCount(2, $rows);
+        $this->assertSame(['Standard Loan Penalty'], array_values(array_unique(array_column(array_column($rows, 'target'), 'label'))));
     }
 
     /**
