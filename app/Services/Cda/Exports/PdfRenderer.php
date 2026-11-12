@@ -4,6 +4,7 @@ namespace App\Services\Cda\Exports;
 
 use Dompdf\Dompdf;
 use Dompdf\Options;
+use Throwable;
 
 /**
  * A CDA report as a PDF (CDA design §9): the Blade view
@@ -41,11 +42,19 @@ class PdfRenderer
     /**
      * The export as HTML, with the cooperative's logo read now (ExportLogo,
      * from the container, so a stand-in renderer keeps its own constructor):
-     * only a PDF ever reads the logo.
+     * only a PDF ever reads the logo, and a logo problem never fails the
+     * export (no logo instead).
      */
     public function html(ExportContent $content): string
     {
-        return view('cda.report', ['content' => $content, 'logo' => app(ExportLogo::class)->dataUri()])->render();
+        try {
+            $logo = app(ExportLogo::class)->dataUri();
+        } catch (Throwable $e) {
+            report($e);
+            $logo = null;
+        }
+
+        return view('cda.report', ['content' => $content, 'logo' => $logo])->render();
     }
 
     public function render(ExportContent $content): string

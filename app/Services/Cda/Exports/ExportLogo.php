@@ -18,7 +18,11 @@ use Throwable;
  * - it's at most MAX_BYTES, and its real type (read from its contents, never
  *   its name) is PNG, JPEG or GIF;
  * - it decodes as an image of at most MAX_SOURCE_SIDE pixels a side, and
- *   decoding it fits in the memory PHP has left.
+ *   decoding it fits in the memory PHP has left (fitsInMemory()). PHP's
+ *   bundled GD allocates through PHP's memory manager, so running out is a
+ *   fatal error no catch can stop: the estimate comes first. The JPEG
+ *   library's own buffers sit outside memory_limit, which the side limit
+ *   keeps small.
  *
  * With GD it is redrawn at most MAX_HEIGHT pixels tall (the aspect kept,
  * never enlarged), flattened onto white and encoded as an opaque PNG. A small
@@ -26,14 +30,15 @@ use Throwable;
  * large transparent logo sends it down until the export fails. Without GD
  * only an image of at most NO_GD_MAX_SIDE pixels a side is used, as it is.
  *
- * Anything else gives null, silently: the header then shows the name alone.
+ * Anything else, and any error on the way (the branding read included),
+ * gives null, silently: the header then shows the name alone.
  * The result is a data URI, never a URL, so dompdf fetches nothing.
  */
 class ExportLogo
 {
     public const MAX_BYTES = 5 * 1024 * 1024;
 
-    public const MAX_SOURCE_SIDE = 6000;
+    public const MAX_SOURCE_SIDE = 4000;
 
     public const MAX_HEIGHT = 600;
 
@@ -45,6 +50,37 @@ class ExportLogo
     private const HEADROOM = 8 * 1024 * 1024;
 
     public function dataUri(): ?string
+    {
+        try {
+            return $this->build();
+        } catch (Throwable $e) {
+            report($e);
+
+            return null;
+        }
+    }
+
+    /**
+     * The bytes a pixel decoding takes, peak: a truecolour PNG holds GD's
+     * 4-byte pixels and a raw copy of its rows while it reads (about 8), a
+     * palette or greyscale PNG about 2, a GIF 1, a JPEG GD's 4.
+     */
+    public static function bytesPerPixel(string $bytes, string $type): int
+    {
+        if ($type === 'image/gif') {
+            return 1;
+        }
+
+        if ($type !== 'image/png') {
+            return 4;
+        }
+
+        $colourType = strlen($bytes) > 25 ? ord($bytes[25]) : 6;
+
+        return in_array($colourType, [0, 3, 4], true) ? 2 : 8;
+    }
+
+    private function build(): ?string
     {
         $bytes = $this->read();
 
@@ -82,8 +118,10 @@ class ExportLogo
     }
 
     /**
-     * Whether decoding an image of this size, and drawing its copy, fits in
-     * the memory PHP has left under `memory_limit` ("-1" is no limit).
+     * Whether decoding an image of this size, drawing its copy (4 bytes a
+     * pixel) and the PNG writer's buffer (about 3 bytes a pixel of the copy),
+     * with a quarter more and HEADROOM to spare, fit in the memory PHP has
+     * left under `memory_limit` ("-1" is no limit).
      */
     public static function fitsInMemory(int $width, int $height, int $bytesPerPixel, string $memoryLimit, int $used): bool
     {
@@ -94,7 +132,7 @@ class ExportLogo
         }
 
         [$copyWidth, $copyHeight] = self::copySize($width, $height);
-        $needed = (int) ceil(($width * $height * $bytesPerPixel + $copyWidth * $copyHeight * 4) * 1.25);
+        $needed = (int) ceil(($width * $height * $bytesPerPixel + $copyWidth * $copyHeight * (4 + 3)) * 1.25);
 
         return $used + $needed + self::HEADROOM <= $limit;
     }
@@ -125,7 +163,7 @@ class ExportLogo
     /** The image at most MAX_HEIGHT tall on white, as PNG bytes; null when GD can't read it or it wouldn't fit in memory. */
     private function flattened(string $bytes, string $type, int $width, int $height): ?string
     {
-        if (! self::fitsInMemory($width, $height, self::isPalette($bytes, $type) ? 1 : 4, (string) ini_get('memory_limit'), memory_get_usage(true))) {
+        if (! self::fitsInMemory($width, $height, self::bytesPerPixel($bytes, $type), (string) ini_get('memory_limit'), memory_get_usage(true))) {
             return null;
         }
 
@@ -143,6 +181,8 @@ class ExportLogo
             imagefilledrectangle($copy, 0, 0, $copyWidth - 1, $copyHeight - 1, (int) imagecolorallocate($copy, 255, 255, 255));
             imagealphablending($copy, true);
             imagecopyresampled($copy, $source, 0, 0, 0, 0, $copyWidth, $copyHeight, imagesx($source), imagesy($source));
+            imagedestroy($source);
+            unset($source);
             imagesavealpha($copy, false);
 
             ob_start();
@@ -167,12 +207,6 @@ class ExportLogo
         }
 
         return [max(1, (int) round($width * self::MAX_HEIGHT / $height)), self::MAX_HEIGHT];
-    }
-
-    /** A GIF, or a PNG of colour type 3, decodes to one byte a pixel. */
-    private static function isPalette(string $bytes, string $type): bool
-    {
-        return $type === 'image/gif' || ($type === 'image/png' && strlen($bytes) > 25 && ord($bytes[25]) === 3);
     }
 
     /** "128M", "1G", "512K" or a byte count; -1 for no limit. */
