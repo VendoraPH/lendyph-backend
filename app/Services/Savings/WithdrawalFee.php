@@ -5,7 +5,6 @@ namespace App\Services\Savings;
 use App\Models\PortalRequest;
 use App\Models\SavingsApproval;
 use Carbon\CarbonInterface;
-use Illuminate\Database\Eloquent\Model;
 
 /**
  * A withdrawal's excess-withdrawal fee, decided once, when the withdrawal is
@@ -61,13 +60,6 @@ final readonly class WithdrawalFee
             $row instanceof SavingsApproval ? self::SOURCE_APPROVAL : self::SOURCE_PORTAL_REQUEST,
             (int) $row->getKey(),
         );
-    }
-
-    /** The same decision, stored on `$row` (an approval it moves to). */
-    public function on(Model $row): self
-    {
-        return new self($this->fee, $this->countedOn, $this->requestedAt, $this->freeWithdrawals, $this->excessFee,
-            $row instanceof SavingsApproval ? self::SOURCE_APPROVAL : self::SOURCE_PORTAL_REQUEST, (int) $row->getKey());
     }
 
     /** The same decision charging `$fee` (never more than decided). */
