@@ -25,7 +25,10 @@ use UnexpectedValueException;
  *     strictly falling for `at_least` and strictly rising for `at_most`
  *     (FactorTable::points() takes the first band that matches);
  *   - band points, `otherwise` and `default_points` (only on a factor that
- *     has them): whole numbers from 0 to the factor's own points.
+ *     has them): whole numbers from 0 to the factor's own points;
+ *   - band points never rise from one band to the next, and `otherwise` is
+ *     no more than the last band's, so a better value never earns fewer
+ *     points.
  * - `policy_rules`: optional; when sent they must equal the current
  *   revision's (they round-trip; the screen can't change them).
  * - `risk_bands`: optional; the six keys once each, minimum scores falling
@@ -233,8 +236,8 @@ class UpdateScorecardConfigRequest extends FormRequest
                 $this->checkFactorBands($validator, $index, $own, $factor['bands']);
             }
 
-            if (array_key_exists('otherwise', $factor) && (int) $factor['otherwise'] > $points) {
-                $validator->errors()->add("factor_rules.{$index}.otherwise", "{$label}: the points for any other value must be from 0 to {$points}.");
+            if (array_key_exists('otherwise', $factor) || array_key_exists('bands', $factor)) {
+                $this->checkOtherwise($validator, $index, $own, $factor);
             }
 
             if (array_key_exists('default_points', $factor)) {
@@ -248,6 +251,28 @@ class UpdateScorecardConfigRequest extends FormRequest
     }
 
     /**
+     * `otherwise` (sent, or kept when only the bands are sent) between 0 and
+     * the factor's points, and no more than the last band's points.
+     *
+     * @param  array<string, mixed>  $own
+     * @param  array<string, mixed>  $factor
+     */
+    private function checkOtherwise(Validator $validator, int $index, array $own, array $factor): void
+    {
+        $points = (int) $own['points'];
+        $label = (string) $own['label'];
+        $otherwise = (int) ($factor['otherwise'] ?? $own['otherwise'] ?? 0);
+        $bands = array_values($factor['bands'] ?? $own['bands'] ?? []);
+        $last = $bands === [] ? $points : (int) end($bands)['points'];
+
+        if ($otherwise > $points) {
+            $validator->errors()->add("factor_rules.{$index}.otherwise", "{$label}: the points for any other value must be from 0 to {$points}.");
+        } elseif ($otherwise > $last) {
+            $validator->errors()->add("factor_rules.{$index}.otherwise", "{$label}: the points for any other value can't be more than the last band's {$last}.");
+        }
+    }
+
+    /**
      * @param  array<string, mixed>  $own
      * @param  list<array{threshold: int|float|string, points: int|string}>  $bands
      */
@@ -257,11 +282,18 @@ class UpdateScorecardConfigRequest extends FormRequest
         $label = (string) $own['label'];
         $falling = $own['rule'] === 'at_least';
         $previous = null;
+        $previousPoints = null;
 
         foreach ($bands as $position => $band) {
             if ((int) $band['points'] > $points) {
                 $validator->errors()->add("factor_rules.{$index}.bands.{$position}.points", "{$label}: each range's points must be from 0 to {$points}.");
             }
+
+            if ($previousPoints !== null && (int) $band['points'] > $previousPoints) {
+                $validator->errors()->add("factor_rules.{$index}.bands", "{$label}: each band must give the same or fewer points than the one before it.");
+            }
+
+            $previousPoints = (int) $band['points'];
 
             $threshold = Decimal::scaled($band['threshold'], 2);
 

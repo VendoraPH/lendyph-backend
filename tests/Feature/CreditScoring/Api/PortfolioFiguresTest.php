@@ -146,6 +146,27 @@ it('reads the previous score through the current revision\'s bands', function ()
     expect($this->actingAs($admin)->getJson('/api/credit-scoring/dashboard')->json('data.scores_due_for_review'))->toBe(1);
 });
 
+it('counts nobody after a band edit while scores stay the same', function () {
+    // Stored at the last run under 1.0: 79 moderate (low started at 80), and
+    // 72 moderate with a previous 79.
+    $steady = $this->scoredMember();
+    $fell = $this->scoredMember();
+    ($this->level)($steady, 'moderate', 79, 79);
+    ($this->level)($fell, 'moderate', 72, 79);
+    $admin = $this->branchAnalyst();
+
+    $config = $this->actingAs($admin)->getJson('/api/credit-scoring/scorecard-config')->json('data');
+    $config['risk_bands'] = array_map(fn (array $b) => $b['key'] === 'low' ? ['min_score' => 75] + $b : $b, $config['risk_bands']);
+    $this->actingAs($admin)->putJson('/api/credit-scoring/scorecard-config', $config)->assertOk()->assertJsonPath('data.version', '1.1');
+
+    // Under 1.1 both scores 79 read low; 72 still reads moderate, a real fall from 79.
+    // The stored levels are not read: an unchanged score is never a drop.
+    expect($this->actingAs($admin)->getJson('/api/credit-scoring/dashboard')->json('data.scores_due_for_review'))->toBe(1);
+
+    ($this->level)($fell, 'moderate', 79, 79);
+    expect($this->actingAs($admin)->getJson('/api/credit-scoring/dashboard')->json('data.scores_due_for_review'))->toBe(0);
+});
+
 it('counts past due members once each, by the grace rule, within the caller\'s branches', function () {
     $late = $this->scoredMember();
     $inGrace = $this->scoredMember();

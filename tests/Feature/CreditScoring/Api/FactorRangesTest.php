@@ -145,6 +145,27 @@ it('refuses points outside 0 to the factor\'s own points', function (array $chan
     'decimal points' => [['otherwise' => 1.5], 'factor_rules.3.otherwise'],
 ]);
 
+it('refuses bands that give a better value more points than the band before it', function (int $id, array $changes, string $field, string $message) {
+    ($this->put)(($this->withFactor)($id, $changes))
+        ->assertUnprocessable()
+        ->assertJsonValidationErrors([$field => $message]);
+
+    expect(CreditScorecardRevision::query()->count())->toBe(1);
+})->with([
+    'at least' => [1, ['bands' => [['threshold' => 95, 'points' => 5], ['threshold' => 90, 'points' => 12]]], 'factor_rules.0.bands', 'On-time payment rate: each band must give the same or fewer points than the one before it.'],
+    'at most' => [2, ['bands' => [['threshold' => 0, 'points' => 3], ['threshold' => 30, 'points' => 6]]], 'factor_rules.1.bands', 'Worst days late in the last 24 months: each band must give the same or fewer points than the one before it.'],
+    'otherwise above the last band' => [1, ['bands' => [['threshold' => 95, 'points' => 15], ['threshold' => 90, 'points' => 4]], 'otherwise' => 5], 'factor_rules.0.otherwise', 'On-time payment rate: the points for any other value can\'t be more than the last band\'s 4.'],
+    'otherwise above the stored last band' => [11, ['otherwise' => 2], 'factor_rules.10.otherwise', 'Years at residence: the points for any other value can\'t be more than the last band\'s 1.'],
+    'kept otherwise above the new last band' => [10, ['bands' => [['threshold' => 5, 'points' => 6], ['threshold' => 2, 'points' => 0]]], 'factor_rules.9.otherwise', 'Job tenure or business age: the points for any other value can\'t be more than the last band\'s 0.'],
+]);
+
+it('accepts bands that keep their points or give fewer, and otherwise equal to the last band', function () {
+    ($this->put)(($this->withFactor)(1, [
+        'bands' => [['threshold' => 95, 'points' => 15], ['threshold' => 90, 'points' => 15], ['threshold' => 80, 'points' => 4]],
+        'otherwise' => 4,
+    ]))->assertOk()->assertJsonPath('data.version', '1.1');
+});
+
 it('refuses a bad threshold, an empty band list, and default points on a factor without them', function (int $id, array $changes, string $field) {
     ($this->put)(($this->withFactor)($id, $changes))
         ->assertUnprocessable()

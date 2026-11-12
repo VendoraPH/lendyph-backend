@@ -182,37 +182,54 @@ final class Portfolio
 
     /**
      * The current scores due for review: the member has an open hard flag,
-     * or their risk level is at least one band worse than the band their
-     * previous score falls in under the current revision's bands. Flags are
-     * member details (round fz), so without `borrowers:view` only the band
-     * drops count, as on Risk Monitoring.
+     * or their score falls at least one band below their previous score.
+     * Both scores are read through the current revision's bands, never the
+     * stored `risk_level` (the bands at the last run), so a band edit alone
+     * moves nobody until a score itself changes. Flags are member details
+     * (round fz), so without `borrowers:view` only the band drops count, as
+     * on Risk Monitoring.
      *
      * @return Builder<CreditScoreMember>
      */
     public function dueForReview(User $user): Builder
     {
-        $previousBand = 'CASE';
-        $bindings = [];
-
-        foreach ($this->bandsHighestFirst() as $band) {
-            $previousBand .= ' WHEN credit_score_members.previous_score >= ? THEN ?';
-            array_push($bindings, (int) $band['min_score'], self::rank((string) $band['key']));
-        }
-
-        $previousBand .= ' ELSE ? END';
-        $bindings[] = count(self::RISK_LEVELS) - 1;
-        $levels = implode(', ', array_fill(0, count(self::RISK_LEVELS), '?'));
+        $bands = $this->bandsHighestFirst();
+        [$currentBand, $currentBindings] = self::bandRankSql('credit_score_members.score', $bands);
+        [$previousBand, $previousBindings] = self::bandRankSql('credit_score_members.previous_score', $bands);
 
         return $this->scope->currentScores($user)->where(fn (Builder $q) => $q
             ->where(fn (Builder $drop) => $drop
                 ->where('credit_score_members.status', CreditScore::STATUS_SCORED)
+                ->whereNotNull('credit_score_members.score')
                 ->whereNotNull('credit_score_members.previous_score')
-                ->whereIn('credit_score_members.risk_level', self::RISK_LEVELS)
-                ->whereRaw("FIELD(credit_score_members.risk_level, {$levels}) - 1 > ({$previousBand})", [...self::RISK_LEVELS, ...$bindings]))
+                ->whereRaw("({$currentBand}) > ({$previousBand})", [...$currentBindings, ...$previousBindings]))
             ->when($user->can('borrowers:view'), fn (Builder $q) => $q->orWhereIn(
                 'credit_score_members.borrower_id',
                 $this->scope->openFlags($user)->where('type', CreditPolicyFlag::HARD)->select('borrower_id'),
             )));
+    }
+
+    /**
+     * A score column's band rank (0 very low to 5 very high risk) under the
+     * given bands, highest minimum first: the first band whose minimum the
+     * score reaches (FactorTable::bandFor()'s rule), as SQL and bindings.
+     *
+     * @param  list<array<string, mixed>>  $bands
+     * @return array{0: string, 1: list<int>}
+     */
+    private static function bandRankSql(string $column, array $bands): array
+    {
+        $sql = 'CASE';
+        $bindings = [];
+
+        foreach ($bands as $band) {
+            $sql .= " WHEN {$column} >= ? THEN ?";
+            array_push($bindings, (int) $band['min_score'], self::rank((string) $band['key']));
+        }
+
+        $bindings[] = count(self::RISK_LEVELS) - 1;
+
+        return [$sql.' ELSE ? END', $bindings];
     }
 
     /**
