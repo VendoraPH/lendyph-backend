@@ -16,12 +16,14 @@ use WeakMap;
  * /accounting/journals/{id}/reverse` refuses it (422), and the journal
  * resource reads `reversible: false` with the reason, in one of two ways:
  *
- * - **Savings can reverse it** (a deposit or a withdrawal, source `savings`;
+ * - **Savings can reverse it** (a deposit, a withdrawal or its
+ *   excess-withdrawal fee, source `savings`;
  *   an interest run, `savings_interest` on a run; transfers post nothing):
  *   self::REVERSE_IN_SAVINGS. Savings reverses the record and its journal
  *   together (Reverser, RunReverser).
  * - **Nothing can reverse it** (a time deposit placement or settlement; an
- *   account-closing payout, `savings` on a `closing` row; the interest
+ *   account-closing payout or a transfer to share capital, `savings` on a
+ *   `closing` or `share_capital_transfer` row; the interest
  *   credited at closing, `savings_interest` on a transaction):
  *   self::NO_REVERSAL. A correcting journal entry fixes the cash or bank side.
  *
@@ -41,7 +43,14 @@ final class SavingsJournalGuard
 
     public const REVERSE_IN_SAVINGS = 'This entry comes from Savings. Reverse it there, so the savings records and the books stay the same.';
 
-    public const NO_REVERSAL = 'This entry comes from a time deposit or an account closing and can\'t be reversed. To fix the cash or bank side, record a correcting journal entry.';
+    public const NO_REVERSAL = 'This entry comes from a time deposit, an account closing or a transfer to share capital and can\'t be reversed. To fix it, record a correcting journal entry.';
+
+    /**
+     * Savings rows (source `savings`) whose journal nothing reverses: a
+     * closing payout and a transfer to share capital (gap round S3). An
+     * excess-withdrawal fee is reversed in Savings, with its withdrawal.
+     */
+    public const NOT_REVERSIBLE_SAVINGS_TYPES = ['closing', 'share_capital_transfer'];
 
     /** @var WeakMap<AccountingJournal, string|null>|null */
     private static ?WeakMap $reasons = null;
@@ -142,7 +151,7 @@ final class SavingsJournalGuard
     private static function reasonFor(array $origin, Collection $types): string
     {
         return match ($origin['source']) {
-            'savings' => $types->get((int) $origin['postable_id']) === 'closing' ? self::NO_REVERSAL : self::REVERSE_IN_SAVINGS,
+            'savings' => in_array($types->get((int) $origin['postable_id']), self::NOT_REVERSIBLE_SAVINGS_TYPES, true) ? self::NO_REVERSAL : self::REVERSE_IN_SAVINGS,
             'savings_interest' => $origin['postable_type'] === SavingsInterestRun::class ? self::REVERSE_IN_SAVINGS : self::NO_REVERSAL,
             default => self::NO_REVERSAL,
         };

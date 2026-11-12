@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api\Savings;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\Savings\SavingsProductRuleFields;
 use App\Http\Requests\Savings\StoreSavingsProductRateRequest;
 use App\Http\Requests\Savings\StoreSavingsProductRequest;
 use App\Http\Requests\Savings\UpdateSavingsProductRequest;
@@ -93,6 +94,12 @@ class SavingsProductController extends Controller
             new OA\Property(property: 'pretermination_product_id', type: 'integer', nullable: true),
             new OA\Property(property: 'annual_interest_rate', type: 'string', example: '1.2500'),
             new OA\Property(property: 'is_active', type: 'boolean'),
+            new OA\Property(property: 'max_balance', type: 'string', nullable: true, example: '500000.00', description: 'Regular products only; null = no limit (also min_deposit, max_deposit, min_withdrawal, max_withdrawal)'),
+            new OA\Property(property: 'free_withdrawals_per_month', type: 'integer', nullable: true, description: 'Null = unlimited'),
+            new OA\Property(property: 'excess_withdrawal_fee', type: 'string', nullable: true, example: '25.00', description: 'Charged beyond the free withdrawals; null = refuse them'),
+            new OA\Property(property: 'allow_deposits', type: 'boolean', description: 'Also allow_withdrawals and allow_transfers; default true'),
+            new OA\Property(property: 'eligible_member_types', type: 'array', nullable: true, items: new OA\Items(type: 'string', enum: ['regular', 'associate']), description: 'Null = every member type'),
+            new OA\Property(property: 'eligible_branch_ids', type: 'array', nullable: true, items: new OA\Items(type: 'integer'), description: 'Null = every branch'),
         ])),
         responses: [
             new OA\Response(response: 201, description: 'The product'),
@@ -102,11 +109,11 @@ class SavingsProductController extends Controller
     )]
     public function store(StoreSavingsProductRequest $request): JsonResponse
     {
-        $data = $request->validated();
+        $data = SavingsProductRuleFields::normalize($request->validated());
         $isActive = (bool) ($data['is_active'] ?? false);
 
         if ($isActive) {
-            $this->books->assertCanActivate($data['kind']);
+            $this->books->assertCanActivate($data['kind'], ($data['excess_withdrawal_fee'] ?? null) !== null);
         }
 
         $userId = $request->user()->id;
@@ -154,10 +161,13 @@ class SavingsProductController extends Controller
     )]
     public function update(UpdateSavingsProductRequest $request, SavingsProduct $product): JsonResponse
     {
-        $data = $request->validated();
+        $data = SavingsProductRuleFields::normalize($request->validated());
+        $chargesFee = (array_key_exists('excess_withdrawal_fee', $data) ? $data['excess_withdrawal_fee'] : $product->excess_withdrawal_fee) !== null;
 
         if (($data['is_active'] ?? false) && ! $product->is_active) {
-            $this->books->assertCanActivate($product->kind);
+            $this->books->assertCanActivate($product->kind, $chargesFee);
+        } elseif ($product->is_active && ($data['is_active'] ?? true) && $chargesFee && $product->excess_withdrawal_fee === null) {
+            $this->books->assertCanChargeFee();
         }
 
         if (is_array($data['term_options_days'] ?? null)) {

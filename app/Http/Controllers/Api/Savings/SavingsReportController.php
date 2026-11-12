@@ -45,6 +45,7 @@ class SavingsReportController extends Controller
     private const TRANSACTION_TYPE_WORDS = [
         'deposit' => 'Deposit', 'withdrawal' => 'Withdrawal', 'transfer_in' => 'Transfer in', 'transfer_out' => 'Transfer out',
         'interest' => 'Interest', 'withholding_tax' => 'Withholding tax', 'closing' => 'Closing payout', 'reversal' => 'Reversal',
+        'fee' => 'Excess-withdrawal fee', 'share_capital_transfer' => 'Transfer to share capital',
     ];
 
     private const METHOD_WORDS = ['cash' => 'Cash', 'bank_transfer' => 'Bank transfer', 'gcash' => 'GCash', 'maya' => 'Maya', 'savings' => 'Savings account'];

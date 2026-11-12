@@ -5,13 +5,15 @@ namespace App\Http\Requests\Savings;
 use App\Models\SavingsProduct;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\Validator;
 
 /**
  * `PUT /savings/products/{product}` (savings:settings and branches:view_all). Partial. The kind
  * never changes; the code only while the product holds no account or time
  * deposit. The rate is never edited here (422): rates are appended through
  * the rates endpoint. Turning it on is checked against the books by the
- * controller.
+ * controller. The product rules (limits, switches, eligibility) are
+ * SavingsProductRuleFields'.
  */
 class UpdateSavingsProductRequest extends FormRequest
 {
@@ -44,7 +46,15 @@ class UpdateSavingsProductRequest extends FormRequest
                 : ['prohibited'],
             'annual_interest_rate' => ['prohibited'],
             'is_active' => ['sometimes', 'boolean'],
+            ...SavingsProductRuleFields::rules($isTimeDeposit, $this->user()),
         ];
+    }
+
+    public function withValidator(Validator $validator): void
+    {
+        /** @var SavingsProduct $product */
+        $product = $this->route('product');
+        SavingsProductRuleFields::checkPairs($validator, $product);
     }
 
     /** @return array<string, string> */
@@ -52,6 +62,7 @@ class UpdateSavingsProductRequest extends FormRequest
     {
         return [
             ...SavingsProductMessages::all(),
+            ...SavingsProductRuleFields::messages(),
             'kind.in' => 'A product\'s kind can\'t be changed.',
             'code.in' => 'The code can\'t be changed once the product has accounts or time deposits.',
             'term_options_days.prohibited' => 'Only a time deposit product offers terms.',

@@ -4,6 +4,7 @@ namespace App\Services\Savings;
 
 use App\Models\AccountingAccount;
 use App\Models\AccountingAccountMapping;
+use App\Models\SavingsProduct;
 use App\Services\Accounting\PostingRules;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -40,6 +41,9 @@ use Illuminate\Validation\ValidationException;
 class SavingsBooks
 {
     public const ROLES = PostingRules::SAVINGS_ROLES;
+
+    /** The role an excess-withdrawal fee is credited to (4080 Other Fee Income on a seeded chart). */
+    public const FEE_ROLE = PostingRules::SAVINGS_FEE_INCOME_ROLE;
 
     public const AUDIT_ACCOUNT_ADDED = 'savings_books_account_added';
 
@@ -83,19 +87,40 @@ class SavingsBooks
 
     /**
      * The roles this kind of product needs that have no account, or null
-     * when there is no chart of accounts at all.
+     * when there is no chart of accounts at all. A product that charges an
+     * excess-withdrawal fee also needs {@see self::FEE_ROLE} (gap round S1).
      *
      * @return list<string>|null
      */
-    public function missingRoles(string $kind): ?array
+    public function missingRoles(string $kind, bool $chargesFee = false): ?array
     {
         if (! DB::table('accounting_accounts')->exists()) {
             return null;
         }
 
-        $mapped = DB::table('accounting_account_mappings')->whereIn('role', self::ROLES)->pluck('role')->all();
+        $needed = [...(self::ROLES_BY_KIND[$kind] ?? self::ROLES), ...($chargesFee ? [self::FEE_ROLE] : [])];
+        $mapped = DB::table('accounting_account_mappings')->whereIn('role', $needed)->pluck('role')->all();
 
-        return array_values(array_diff(self::ROLES_BY_KIND[$kind] ?? self::ROLES, $mapped));
+        return array_values(array_diff($needed, $mapped));
+    }
+
+    /**
+     * Refuses (422 on `excess_withdrawal_fee`) an excess-withdrawal fee on a
+     * product that is already on while the fee's income role has no account:
+     * the first fee charged would fail to post.
+     *
+     * @throws ValidationException
+     */
+    public function assertCanChargeFee(): void
+    {
+        $missing = $this->missingRoles(SavingsProduct::KIND_REGULAR, true);
+
+        if ($missing !== null && in_array(self::FEE_ROLE, $missing, true)) {
+            throw ValidationException::withMessages(['excess_withdrawal_fee' => [
+                'An excess-withdrawal fee posts to the '.AccountingAccountMapping::labelList([self::FEE_ROLE])
+                .' posting role, which has no account. Map it in Accounting first.',
+            ]]);
+        }
     }
 
     /**
@@ -104,9 +129,9 @@ class SavingsBooks
      *
      * @throws ValidationException
      */
-    public function assertCanActivate(string $kind): void
+    public function assertCanActivate(string $kind, bool $chargesFee = false): void
     {
-        $missing = $this->missingRoles($kind);
+        $missing = $this->missingRoles($kind, $chargesFee);
 
         if ($missing === null) {
             throw ValidationException::withMessages(['is_active' => [

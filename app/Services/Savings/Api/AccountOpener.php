@@ -7,6 +7,7 @@ use App\Models\SavingsAccount;
 use App\Models\SavingsProduct;
 use App\Models\User;
 use App\Services\Accounting\AutomaticPoster;
+use App\Services\Savings\ProductRules;
 use App\Services\Savings\SavingsLedger;
 use App\Services\Savings\SavingsMath;
 use App\Services\Savings\SavingsNumbers;
@@ -14,8 +15,11 @@ use Illuminate\Validation\ValidationException;
 
 /**
  * Opens a savings account (design §2): for an active member, on an active
- * regular product, with an opening deposit of at least the product's minimum
- * (none when the minimum is ₱0.00). One open account per member per product.
+ * regular product offered to them (ProductRules: member type and branch),
+ * with an opening deposit of at least the product's minimum (none when the
+ * minimum is ₱0.00) and within its maximum deposit and balance. One open
+ * account per member per product. It keeps the opening details given: the
+ * account officer, the source of funds and a beneficiary (gap round S1).
  *
  * Runs inside IdempotentWrite's transaction. Locks the member row first (lock
  * step 2), so two openings for one member queue and the second sees the
@@ -30,10 +34,12 @@ class AccountOpener
         private readonly SavingsLedger $ledger,
         private readonly AutomaticPoster $poster,
         private readonly LargeTransactionAlert $alert,
+        private readonly ProductRules $rules,
     ) {}
 
     /**
-     * @param  array{borrower_id: int|string, product_id: int|string, opened_at: string, initial_deposit: string, payment_method?: string|null, reference?: string|null, remarks?: string|null}  $data
+     * @param  array{borrower_id: int|string, product_id: int|string, opened_at: string, initial_deposit: string, payment_method?: string|null, reference?: string|null, remarks?: string|null,
+     *               account_officer_id?: int|null, source_of_funds?: string|null, source_of_funds_other?: string|null, beneficiary?: array<string, string|null>|null}  $data
      *
      * @throws ValidationException
      */
@@ -58,6 +64,8 @@ class AccountOpener
         if (! $product->is_active) {
             Refuse::field('product_id', "{$product->name} is turned off, so no account can be opened on it.");
         }
+
+        $this->rules->assertEligible($member, $product);
 
         $minimum = SavingsMath::centavos($product->minimum_opening_balance);
 
@@ -86,10 +94,16 @@ class AccountOpener
             'last_member_activity_on' => $data['opened_at'],
             'open_key' => $openKey,
             'remarks' => $data['remarks'] ?? null,
+            'account_officer_id' => $data['account_officer_id'] ?? null,
+            'source_of_funds' => $data['source_of_funds'] ?? null,
+            'source_of_funds_other' => ($data['source_of_funds'] ?? null) === 'other' ? ($data['source_of_funds_other'] ?? null) : null,
+            'beneficiary' => self::beneficiary($data['beneficiary'] ?? null),
             'created_by' => $user->id,
         ]);
 
         if ($deposit > 0) {
+            $this->rules->assertCanDeposit($account, $deposit, true, 'initial_deposit');
+
             $row = $this->ledger->credit($account, 'deposit', $deposit, [
                 'date' => $data['opened_at'],
                 'method' => $data['payment_method'],
@@ -102,5 +116,27 @@ class AccountOpener
         }
 
         return $account->refresh();
+    }
+
+    /**
+     * The beneficiary as stored: the parts given, trimmed, or null when none.
+     *
+     * @param  array<string, mixed>|null  $given
+     * @return array{name: string|null, relationship: string|null, contact_number: string|null}|null
+     */
+    private static function beneficiary(?array $given): ?array
+    {
+        if ($given === null) {
+            return null;
+        }
+
+        $kept = [];
+
+        foreach (['name', 'relationship', 'contact_number'] as $part) {
+            $value = trim((string) ($given[$part] ?? ''));
+            $kept[$part] = $value === '' ? null : $value;
+        }
+
+        return array_filter($kept, fn (?string $v) => $v !== null) === [] ? null : $kept;
     }
 }

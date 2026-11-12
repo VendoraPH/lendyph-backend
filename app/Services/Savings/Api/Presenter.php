@@ -3,10 +3,12 @@
 namespace App\Services\Savings\Api;
 
 use App\Http\Resources\Savings\SavingsUserRef;
+use App\Models\Borrower;
 use App\Models\SavingsAccount;
 use App\Models\SavingsApproval;
 use App\Models\SavingsHold;
 use App\Models\SavingsTransaction;
+use App\Models\User;
 use App\Services\Savings\AccruedInterest;
 use App\Services\Savings\AvailableBalance;
 use App\Services\Savings\SavingsMath;
@@ -49,7 +51,8 @@ class Presenter
         }
 
         $accounts = $this->models($accounts);
-        $accounts->loadMissing(['borrower', 'branch:id,name', 'product:id,code,name,kind']);
+        $accounts->loadMissing(['borrower', 'branch:id,name', 'product:id,code,name,kind', 'accountOfficer']);
+        $seesContactsOf = self::membersWhoseContactsShow($accounts->pluck('borrower_id')->unique()->values()->all());
         $breakdowns = $this->available->forManyWithRequests($accounts, [SavingsHold::TYPE_MEMBER_REQUEST]);
         $open = $accounts->reject(fn (SavingsAccount $a) => $a->isClosed())->values();
         $accrued = $open->isEmpty() ? [] : $this->accrued->forMany($open);
@@ -80,6 +83,12 @@ class Presenter
             'closed_on' => $this->day($a->closed_on),
             'close_reason' => $a->close_reason,
             'remarks' => $a->remarks,
+            // Opening details (gap round S1).
+            'account_officer' => SavingsUserRef::from($a->accountOfficer),
+            'source_of_funds' => $a->source_of_funds,
+            'source_of_funds_other' => $a->source_of_funds_other,
+            'source_of_funds_label' => self::sourceOfFundsLabel($a),
+            'beneficiary' => self::beneficiary($a->beneficiary, in_array((int) $a->borrower_id, $seesContactsOf, true)),
         ])->values()->all();
     }
 
@@ -108,6 +117,7 @@ class Presenter
         $ids = $rows->pluck('id')->all();
 
         $reversedBy = SavingsTransaction::query()->whereIn('reverses_transaction_id', $ids)->pluck('id', 'reverses_transaction_id');
+        $fees = SavingsTransaction::query()->whereIn('fee_for_transaction_id', $ids)->get(['id', 'fee_for_transaction_id', 'debit'])->keyBy('fee_for_transaction_id');
         $pointedAt = SavingsTransaction::query()->whereIn('counterpart_transaction_id', $ids)->pluck('id', 'counterpart_transaction_id');
         $counterpart = fn (SavingsTransaction $r): ?int => $r->counterpart_transaction_id ?? $pointedAt[$r->id] ?? null;
         $anchors = $rows->mapWithKeys(fn (SavingsTransaction $r) => [$r->id => Reverser::anchorIdOf($r, $counterpart($r))]);
@@ -138,6 +148,10 @@ class Presenter
             'time_deposit_id' => $r->time_deposit_id,
             'interest_run_id' => $r->interest_run_id,
             'approval_id' => $r->approval_id,
+            // An excess-withdrawal fee (gap round S1): on a withdrawal, its fee row and amount; on a fee row, its withdrawal.
+            'fee_transaction_id' => $fees->get($r->id)?->id,
+            'fee_amount' => $fees->has($r->id) ? SavingsMath::pesos(SavingsMath::centavos($fees->get($r->id)->debit)) : null,
+            'fee_for_transaction_id' => $r->fee_for_transaction_id,
             'created_by' => SavingsUserRef::from($r->creator),
             'created_at' => $r->created_at?->toJSON(),
         ])->values()->all();
@@ -209,6 +223,7 @@ class Presenter
                 'target_transaction_id' => $a->target_transaction_id,
                 'target_reference' => $a->targetTransaction?->reference,
                 'amount' => SavingsMath::pesos(SavingsMath::centavos($a->amount)),
+                'fee_amount' => SavingsMath::pesos(SavingsMath::centavos($a->fee_amount ?? 0)),
                 'required_checkers' => $a->required_checkers,
                 'requested_by' => SavingsUserRef::from($a->requester),
                 'first_checker' => SavingsUserRef::from($a->firstChecker),
@@ -220,6 +235,60 @@ class Presenter
                 'created_at' => $a->created_at?->toJSON(),
             ];
         })->values()->all();
+    }
+
+    /** The source of funds in words: "Salary", or "Other: <the member's words>". Null when not recorded. */
+    public static function sourceOfFundsLabel(SavingsAccount $account): ?string
+    {
+        $words = SavingsAccount::SOURCES_OF_FUNDS[$account->source_of_funds ?? ''] ?? null;
+
+        if ($words === null) {
+            return null;
+        }
+
+        return $account->source_of_funds === 'other' && filled($account->source_of_funds_other)
+            ? "{$words}: {$account->source_of_funds_other}"
+            : $words;
+    }
+
+    /**
+     * The beneficiary. Their contact number follows the round fz personal-data
+     * rule: it needs `borrowers:view` and the member in the caller's branches
+     * (a member can move branch after the account opened), and reads null
+     * otherwise.
+     *
+     * @param  array<string, string|null>|null  $stored
+     * @return array{name: string|null, relationship: string|null, contact_number: string|null}|null
+     */
+    private static function beneficiary(?array $stored, bool $seesContacts): ?array
+    {
+        if ($stored === null) {
+            return null;
+        }
+
+        return [
+            'name' => $stored['name'] ?? null,
+            'relationship' => $stored['relationship'] ?? null,
+            'contact_number' => $seesContacts ? ($stored['contact_number'] ?? null) : null,
+        ];
+    }
+
+    /**
+     * Of these members, those whose contact details the signed-in caller may
+     * see: `borrowers:view` and the member visible (Borrower::visibleTo).
+     *
+     * @param  list<int>  $borrowerIds
+     * @return list<int>
+     */
+    private static function membersWhoseContactsShow(array $borrowerIds): array
+    {
+        $caller = auth()->user();
+
+        if (! $caller instanceof User || ! $caller->can('borrowers:view') || $borrowerIds === []) {
+            return [];
+        }
+
+        return Borrower::query()->visibleTo($caller)->whereIn('borrowers.id', $borrowerIds)->pluck('borrowers.id')->map(fn ($id) => (int) $id)->all();
     }
 
     /**
