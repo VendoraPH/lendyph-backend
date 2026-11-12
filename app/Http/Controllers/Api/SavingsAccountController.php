@@ -22,6 +22,7 @@ use App\Services\Savings\Api\AccountOpener;
 use App\Services\Savings\Api\AccountScope;
 use App\Services\Savings\Api\Presenter;
 use App\Services\Savings\Api\StatusChanger;
+use App\Services\Savings\ApprovalGate;
 use App\Services\Savings\Api\Teller;
 use App\Services\Savings\IdempotentWrite;
 use App\Services\Savings\SavingsMath;
@@ -238,7 +239,7 @@ class SavingsAccountController extends Controller
     #[OA\Post(
         path: '/api/savings/accounts/{account}/withdrawals',
         summary: 'Withdraw',
-        description: 'Up to the available balance, from an active account. Up to tier 1 it posts (201, the transaction, Dr 2050 / Cr settlement); above it, it waits for approval and reserves the amount (202, `{approval}`). On the day money paid in reactivated a dormant account, its first outflow waits for one checker whatever the amount (202, with `message` and the approval\'s `check_reason`). Needs an `Idempotency-Key` header.',
+        description: 'Up to the available balance, from an active account. Up to tier 1 it posts (201, the transaction, Dr 2050 / Cr settlement); above it, it waits for approval and reserves the amount (202, `{approval}`). After money paid in reactivates a dormant account, its outflows wait for one checker whatever the amount until one is approved (202, with `message` and the approval\'s `check_reason`). Needs an `Idempotency-Key` header.',
         tags: ['Savings'],
         security: [['sanctum' => []]],
         parameters: [
@@ -411,15 +412,15 @@ class SavingsAccountController extends Controller
 
     /**
      * 202 with `{approval}`; with `message` when it waits for a checker only
-     * because money paid in reactivated the account today (review M1).
+     * because of the hold after a deposit reactivated the account (review M1).
      */
     private function sentForApproval(SavingsApproval $approval): JsonResponse
     {
-        $reason = $approval->payload['check_reason'] ?? null;
+        $held = isset($approval->payload['check_reason']);
 
         return response()->json([
             'success' => true,
-            ...($reason === null ? [] : ['message' => $reason]),
+            ...($held ? ['message' => ApprovalGate::OUTFLOW_HOLD] : []),
             'data' => ['approval' => $this->presenter->approval($approval)],
         ], 202);
     }

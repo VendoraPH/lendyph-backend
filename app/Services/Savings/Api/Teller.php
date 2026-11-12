@@ -195,7 +195,7 @@ class Teller
 
         $this->assertCanPayOut($from);
         $this->rules->assertCanTransferOut($from, $centavos);
-        $this->gate->assertNoUncheckedOutflow($from);
+        $this->gate->assertNoUncheckedOutflow($from, 'amount', 'A transfer has no approval step: make a withdrawal for a checker to approve first.');
 
         if ($to->borrower_id !== $from->borrower_id) {
             Refuse::field('to_account_id', "{$to->account_number} belongs to another member. A transfer goes only between the same member's own accounts.");

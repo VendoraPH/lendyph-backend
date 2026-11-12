@@ -6,9 +6,11 @@ use App\Models\SavingsAccount;
 use App\Models\SavingsApproval;
 use App\Models\SavingsSetting;
 use App\Models\User;
+use App\Services\AuditLogService;
 use App\Services\LoanWriteTransaction;
 use App\Services\Savings\Approvals\ApprovalExecutor;
 use Illuminate\Database\UniqueConstraintViolationException;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use LogicException;
@@ -44,8 +46,11 @@ class ApprovalGate
      */
     public const DUAL_CHECKERS = 2;
 
-    /** Why a reactivated account's first outflow today waits for a checker (review M1). */
-    public const REACTIVATED_TODAY = 'This account was reactivated by today\'s deposit, so a checker must approve money going out today.';
+    /** Why money going out of an account a deposit reactivated waits for a checker (review M1), for the maker. */
+    public const OUTFLOW_HOLD = 'This account was reactivated by a deposit, so a checker must approve money going out of it until one outflow has been approved.';
+
+    /** The same, for the checker deciding it. */
+    public const OUTFLOW_HOLD_CHECK = 'This account was reactivated by a deposit. Approving this lifts the hold on its other outflows, so confirm the member is present.';
 
     /** The unique index that keeps one live approval per thing. */
     public const LIVE_KEY_INDEX = 'savings_approvals_live_key_unique';
@@ -86,49 +91,65 @@ class ApprovalGate
     }
 
     /**
-     * Why money going out of `$account` today needs a checker whatever its
-     * amount (gap round S4, review M1), or null: money paid in (a deposit or
-     * a transfer in) reactivated the dormant account today
-     * (`reactivated_by_deposit_on`), and no outflow on it has been approved
-     * today yet. Only the first outflow that day is held for a checker.
+     * Why money going out of `$account` needs a checker whatever its amount
+     * (gap round S4, review M1), or null: money paid in (a deposit or a
+     * transfer in) reactivated the dormant account, and no outflow on it has
+     * been approved since (`outflow_check_required_since`). The hold doesn't
+     * end at midnight; the first approved outflow lifts it
+     * ({@see self::liftOutflowHold()}).
      */
     public function uncheckedOutflowReason(SavingsAccount $account): ?string
     {
-        $today = now()->toDateString();
-
-        if ($account->reactivated_by_deposit_on?->toDateString() !== $today) {
-            return null;
-        }
-
-        $checked = SavingsApproval::query()
-            ->where('account_id', $account->id)
-            ->whereIn('kind', SavingsApproval::OUTFLOW_KINDS)
-            ->where('status', 'approved')
-            ->where('decided_at', '>=', now()->startOfDay())
-            ->exists();
-
-        return $checked ? null : self::REACTIVATED_TODAY;
+        return $account->outflow_check_required_since === null ? null : self::OUTFLOW_HOLD;
     }
 
-    /** Whether an outflow of `$centavos` from `$account` must wait for a checker: its tier, or the M1 control. */
+    /** Whether an outflow of `$centavos` from `$account` must wait for a checker: its tier, or the M1 hold. */
     public function needsApprovalFor(SavingsAccount $account, int $centavos): bool
     {
         return $this->needsApproval($centavos) || $this->uncheckedOutflowReason($account) !== null;
     }
 
     /**
-     * Refuse (422 on `amount`) money moving out with no approval step (a
-     * transfer) while the M1 control holds the account's outflows.
+     * Refuse (422 on `$field`) money moving out with no approval step (a
+     * transfer, a time deposit placement) while the M1 hold is on.
+     *
+     * @param  string  $instead  what the staff can do instead, in words
      *
      * @throws ValidationException
      */
-    public function assertNoUncheckedOutflow(SavingsAccount $account): void
+    public function assertNoUncheckedOutflow(SavingsAccount $account, string $field, string $instead): void
     {
         if ($this->uncheckedOutflowReason($account) !== null) {
-            throw ValidationException::withMessages(['amount' => [
-                self::REACTIVATED_TODAY.' A transfer has no approval step: make a withdrawal for a checker to approve, or transfer tomorrow.',
-            ]]);
+            throw ValidationException::withMessages([$field => [self::OUTFLOW_HOLD.' '.$instead]]);
         }
+    }
+
+    /**
+     * Lift the M1 hold once a checker approves an outflow on the account
+     * (ApprovalDesk, under the account lock), with an audit row in words.
+     */
+    public function liftOutflowHold(SavingsApproval $approval, User $checker): void
+    {
+        if (! in_array($approval->kind, SavingsApproval::OUTFLOW_KINDS, true) || $approval->account_id === null) {
+            return;
+        }
+
+        $account = SavingsAccount::query()->find($approval->account_id);
+
+        if ($account === null || $account->outflow_check_required_since === null) {
+            return;
+        }
+
+        $since = $account->outflow_check_required_since->toDateString();
+        DB::table('savings_accounts')->where('id', $account->id)->update(['outflow_check_required_since' => null, 'updated_at' => now()]);
+
+        AuditLogService::log(
+            'savings_outflow_hold_lifted',
+            $account,
+            ['outflow_check_required_since' => $since],
+            ['outflow_check_required_since' => null],
+            "The hold on money going out of savings account {$account->account_number} after its reactivation by a deposit was lifted when {$checker->full_name} approved request #{$approval->id}.",
+        );
     }
 
     /**
@@ -180,7 +201,7 @@ class ApprovalGate
             $reason = $account === null ? null : $this->uncheckedOutflowReason($account);
 
             if ($reason !== null) {
-                $payload = [...($payload ?? []), 'check_reason' => $reason];
+                $payload = [...($payload ?? []), 'check_reason' => self::OUTFLOW_HOLD_CHECK];
             }
         }
 

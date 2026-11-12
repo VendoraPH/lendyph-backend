@@ -195,7 +195,7 @@ class SavingsLedger
         if ($byMember && in_array($type, self::REACTIVATING_TYPES, true) && $locked->status === SavingsAccount::STATUS_DORMANT) {
             $changes['status'] = SavingsAccount::STATUS_ACTIVE;
             $changes['dormant_since'] = null;
-            $changes['reactivated_by_deposit_on'] = now()->toDateString();
+            $changes['outflow_check_required_since'] = $locked->outflow_check_required_since?->toDateString() ?? now()->toDateString();
         }
 
         DB::table('savings_accounts')->where('id', $locked->id)->update($changes);
@@ -205,8 +205,8 @@ class SavingsLedger
                 'savings_account_reactivated',
                 $locked,
                 ['status' => SavingsAccount::STATUS_DORMANT, 'dormant_since' => $locked->dormant_since?->toDateString()],
-                ['status' => SavingsAccount::STATUS_ACTIVE, 'dormant_since' => null],
-                "Savings account {$locked->account_number} reactivated by ".($type === 'deposit' ? 'deposit' : 'transfer in')." {$row->reference}.",
+                ['status' => SavingsAccount::STATUS_ACTIVE, 'dormant_since' => null, 'outflow_check_required_since' => $changes['outflow_check_required_since']],
+                "Savings account {$locked->account_number} reactivated by ".($type === 'deposit' ? 'deposit' : 'transfer in')." {$row->reference}. Money going out of it needs a checker until one outflow is approved.",
             );
         }
 

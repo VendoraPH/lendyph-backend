@@ -38,7 +38,9 @@ class ReviewFixesTest extends TestCase
 {
     use PortalTestHelpers, SavingsAccountsTestHelpers, SetupLendyPH;
 
-    private const CHECK_MESSAGE = 'This account was reactivated by today\'s deposit, so a checker must approve money going out today.';
+    private const HOLD_MESSAGE = 'This account was reactivated by a deposit, so a checker must approve money going out of it until one outflow has been approved.';
+
+    private const CHECK_REASON = 'This account was reactivated by a deposit. Approving this lifts the hold on its other outflows, so confirm the member is present.';
 
     private SavingsAccount $dormant;
 
@@ -62,56 +64,91 @@ class ReviewFixesTest extends TestCase
 
     // ── M1 ──
 
-    public function test_a_small_withdrawal_after_a_deposit_reactivation_needs_a_checker_that_day_only(): void
+    private function reactivateByDeposit(string $amount = '5000.00'): void
     {
         $this->actingAs($this->teller());
-        $this->money("/api/savings/accounts/{$this->dormant->id}/deposits", ['amount' => '5000.00', 'date' => '2026-11-10', 'payment_method' => 'cash'])->assertCreated();
+        $this->money("/api/savings/accounts/{$this->dormant->id}/deposits", ['amount' => $amount, 'date' => now()->toDateString(), 'payment_method' => 'cash'])->assertCreated();
         $this->assertSame('active', $this->dormant->refresh()->status);
-        $this->assertSame('2026-11-10', $this->dormant->reactivated_by_deposit_on->toDateString());
+    }
+
+    public function test_a_small_withdrawal_after_a_deposit_reactivation_needs_a_checker_and_the_first_approval_lifts_the_hold(): void
+    {
+        $this->reactivateByDeposit();
+        $this->assertSame('2026-11-10', $this->dormant->outflow_check_required_since->toDateString());
 
         $approval = $this->withdrawal($this->dormant)->assertStatus(202)
-            ->assertJsonPath('message', self::CHECK_MESSAGE)
+            ->assertJsonPath('message', self::HOLD_MESSAGE)
             ->assertJsonPath('data.approval.kind', 'withdrawal')
             ->assertJsonPath('data.approval.required_checkers', 1)
-            ->assertJsonPath('data.approval.check_reason', self::CHECK_MESSAGE)
+            ->assertJsonPath('data.approval.check_reason', self::CHECK_REASON)
             ->json('data.approval');
         $this->assertSame('5000.00', $this->balanceOf($this->dormant));
 
-        $this->actingAs($this->checker())->postJson("/api/savings/approvals/{$approval['id']}/approve")->assertOk();
+        $checker = $this->checker();
+        $this->actingAs($checker)->postJson("/api/savings/approvals/{$approval['id']}/approve")->assertOk();
         $this->assertSame('4500.00', $this->balanceOf($this->dormant));
+        $this->assertNull($this->dormant->refresh()->outflow_check_required_since);
+        $this->assertStringContainsString(
+            "The hold on money going out of savings account {$this->dormant->account_number} after its reactivation by a deposit was lifted when {$checker->full_name} approved request #{$approval['id']}.",
+            (string) AuditLog::query()->where('action', 'savings_outflow_hold_lifted')->where('auditable_id', $this->dormant->id)->value('description'),
+        );
 
         $this->actingAs($this->teller());
         $this->withdrawal($this->dormant, '100.00')->assertCreated();
-
-        $this->on('2026-11-11', fn () => $this->withdrawal($this->dormant->refresh(), '100.00')->assertCreated());
     }
 
-    public function test_the_next_day_a_small_withdrawal_posts_at_once(): void
+    public function test_the_hold_survives_midnight_until_an_outflow_is_approved(): void
     {
-        $this->actingAs($this->teller());
-        $this->money("/api/savings/accounts/{$this->dormant->id}/deposits", ['amount' => '5000.00', 'date' => '2026-11-10', 'payment_method' => 'cash'])->assertCreated();
+        $this->reactivateByDeposit();
 
-        $this->on('2026-11-11', fn () => $this->withdrawal($this->dormant)->assertCreated());
-        $this->assertSame('4500.00', $this->balanceOf($this->dormant));
+        $this->on('2026-11-11', function (): void {
+            $this->withdrawal($this->dormant)->assertStatus(202)->assertJsonPath('message', self::HOLD_MESSAGE);
+        });
+
+        $this->on('2026-11-12', function (): void {
+            $approvalId = $this->withdrawal($this->dormant)->assertStatus(202)->json('data.approval.id');
+            $this->actingAs($this->checker())->postJson("/api/savings/approvals/{$approvalId}/reject", ['reason' => 'Member not present'])->assertOk();
+            $this->actingAs($this->teller());
+            $this->withdrawal($this->dormant)->assertStatus(202);
+        });
+
+        $this->assertSame('2026-11-10', $this->dormant->refresh()->outflow_check_required_since->toDateString());
     }
 
-    public function test_a_transfer_out_waits_for_the_next_day_and_a_close_needs_a_checker(): void
+    public function test_transfers_out_and_placements_are_refused_and_a_close_needs_a_checker_while_held(): void
     {
         $second = SavingsProduct::factory()->create(['name' => 'Second Savings', 'minimum_opening_balance' => '0.00']);
         SavingsProductRate::factory()->create(['product_id' => $second->id, 'annual_rate' => '1.0000', 'effective_from' => '2026-01-01']);
         $other = $this->account(['product_id' => $second->id]);
-        $this->actingAs($this->teller());
-        $this->money("/api/savings/accounts/{$this->dormant->id}/deposits", ['amount' => '5000.00', 'date' => '2026-11-10', 'payment_method' => 'cash'])->assertCreated();
+        $this->reactivateByDeposit('150000.00');
 
-        $this->money("/api/savings/accounts/{$this->dormant->id}/transfers", ['to_account_id' => $other->id, 'amount' => '100.00', 'date' => '2026-11-10'])
-            ->assertUnprocessable()
-            ->assertJsonPath('errors.amount.0', self::CHECK_MESSAGE.' A transfer has no approval step: make a withdrawal for a checker to approve, or transfer tomorrow.');
+        $this->on('2026-11-11', function () use ($other): void {
+            $this->money("/api/savings/accounts/{$this->dormant->id}/transfers", ['to_account_id' => $other->id, 'amount' => '100.00', 'date' => '2026-11-11'])
+                ->assertUnprocessable()
+                ->assertJsonPath('errors.amount.0', self::HOLD_MESSAGE.' A transfer has no approval step: make a withdrawal for a checker to approve first.');
+        });
 
-        $this->money("/api/savings/accounts/{$this->dormant->id}/close", ['date' => '2026-11-10', 'reason' => 'Member request', 'payout_method' => 'cash'])
-            ->assertStatus(202)->assertJsonPath('data.approval.kind', 'close')->assertJsonPath('message', self::CHECK_MESSAGE);
+        $timeDeposit = SavingsProduct::factory()->timeDeposit()->create(['pretermination_product_id' => $this->product->id]);
+        SavingsProductRate::query()->create(['product_id' => $timeDeposit->id, 'term_days' => 90, 'annual_rate' => '3.0000', 'effective_from' => '2026-01-01', 'created_by' => $this->admin->id]);
+        $this->actingAs($this->admin);
+        $this->money('/api/savings/time-deposits', [
+            'borrower_id' => $this->member->id, 'product_id' => $timeDeposit->id, 'principal' => '100000.00', 'term_days' => 90,
+            'placement_date' => '2026-11-10', 'maturity_instruction' => 'payout', 'payment_method' => 'savings', 'funding_account_id' => $this->dormant->id,
+        ])->assertUnprocessable()
+            ->assertJsonPath('errors.funding_account_id.0', self::HOLD_MESSAGE.' A time deposit placement has no approval step: make a withdrawal for a checker to approve first, or pay for the placement in cash.');
+        $this->assertSame('150000.00', $this->balanceOf($this->dormant));
     }
 
-    public function test_an_account_reactivated_by_staff_approval_or_never_dormant_is_unchanged(): void
+    public function test_a_small_close_needs_a_checker_while_held(): void
+    {
+        $this->reactivateByDeposit();
+
+        $this->on('2026-11-11', fn () => $this->money("/api/savings/accounts/{$this->dormant->id}/close", ['date' => '2026-11-11', 'reason' => 'Member request', 'payout_method' => 'cash'])
+            ->assertStatus(202)->assertJsonPath('data.approval.kind', 'close')
+            ->assertJsonPath('message', self::HOLD_MESSAGE)->assertJsonPath('data.approval.check_reason', self::CHECK_REASON));
+    }
+
+    public function test_an_account_never_reactivated_by_a_deposit_is_unchanged(): void
     {
         $active = $this->account(['borrower_id' => Borrower::factory()->create(['branch_id' => $this->branch->id, 'status' => 'active'])->id]);
         $this->fund($active, 500_000);
@@ -119,7 +156,7 @@ class ReviewFixesTest extends TestCase
         $this->withdrawal($active)->assertCreated();
 
         $this->assertFalse(app(ApprovalGate::class)->needsApprovalFor($active->refresh(), 50_000));
-        $this->assertNull($active->reactivated_by_deposit_on);
+        $this->assertNull($active->outflow_check_required_since);
     }
 
     // ── L1 ──
