@@ -76,7 +76,7 @@ class CdaWorkflowRequest extends FormRequest
             'reason.required' => 'Give a reason for this step.',
             'reason.max' => 'A reason takes up to 500 characters.',
             'reason.regex' => Sentence::NO_WORDS,
-            'confirm_warnings.boolean' => 'confirm_warnings is true or false.',
+            'confirm_warnings.boolean' => 'Say whether to go ahead despite the warnings.',
             'step_id.integer' => 'Choose the review step to approve.',
             'stage.required' => 'Choose the stage to move to.',
             'stage.in' => 'That isn\'t a stage of this report.',

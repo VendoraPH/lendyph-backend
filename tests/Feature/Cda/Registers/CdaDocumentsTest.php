@@ -210,10 +210,12 @@ class CdaDocumentsTest extends TestCase
         ];
         $base = [CdaAccess::VIEW, CdaAccess::UPLOAD, CdaAccess::VIEW_MEDIATION];
 
+        $words = [CdaAccess::MANAGE_OFFICERS => 'CDA officers', CdaAccess::SUBMIT => 'CDA filing', CdaAccess::MANAGE_MEDIATION => 'CDA mediation cases'];
+
         foreach ($owned as $permission => $document) {
             $this->actingAs($this->cdaUser($base));
             $this->upload(['file' => $this->pdf()], "/api/cda/documents/{$document->id}/versions")->assertForbidden()
-                ->assertJsonPath('message', "This document belongs to its register: changing it needs the {$permission} permission.");
+                ->assertJsonPath('message', "This document belongs to its register: changing it needs the {$words[$permission]} permission.");
             $this->postJson("/api/cda/documents/{$document->id}/withdraw", ['reason' => 'x'])->assertForbidden();
 
             $this->actingAs($this->cdaUser([...$base, $permission]));
