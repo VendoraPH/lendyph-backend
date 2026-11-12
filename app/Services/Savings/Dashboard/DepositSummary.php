@@ -14,7 +14,8 @@ use Carbon\CarbonImmutable;
  *
  * Each row and the totals carry the same figures:
  * - the savings balance at the start and end of the period, the deposits,
- *   withdrawals, interest credited, tax withheld and fees charged in it
+ *   withdrawals, interest credited, tax withheld, fees charged and transfers
+ *   to share capital in it
  *   ({@see DepositFigures} says what each counts), the other movements (the
  *   rest of the change in balance) and the net movement (closing less
  *   opening);
@@ -35,12 +36,12 @@ class DepositSummary
     public function __construct(private readonly DepositFigures $figures) {}
 
     /**
+     * @param  array<string, mixed>|null  $totals  the scope's totals when the caller already has them ({@see totals()})
      * @return array{group_by: string, date_from: string, date_to: string, rows: list<array<string, mixed>>, totals: array<string, mixed>}
      */
-    public function build(array $scope, string $from, string $to, string $group): array
+    public function build(array $scope, string $from, string $to, string $group, ?array $totals = null): array
     {
         $grouped = $this->collect($scope, $from, $to, $group);
-        $whole = $this->collect($scope, $from, $to, null);
 
         $rows = [];
 
@@ -57,8 +58,19 @@ class DepositSummary
             'date_from' => $from,
             'date_to' => $to,
             'rows' => $rows,
-            'totals' => $this->line($whole, DepositFigures::ALL),
+            'totals' => $totals ?? $this->totals($scope, $from, $to),
         ];
+    }
+
+    /**
+     * The whole scope's figures, worked out on their own (never by adding the
+     * rows).
+     *
+     * @return array<string, int|string>
+     */
+    public function totals(array $scope, string $from, string $to): array
+    {
+        return $this->line($this->collect($scope, $from, $to, null), DepositFigures::ALL);
     }
 
     /**
@@ -90,11 +102,11 @@ class DepositSummary
      */
     private function line(array $figures, int|string $key): array
     {
-        $flows = $figures['flows'][$key] ?? ['deposit_count' => 0, 'deposits' => 0, 'withdrawal_count' => 0, 'withdrawals' => 0, 'interest' => 0, 'tax' => 0, 'fee_count' => 0, 'fees' => 0, 'credits' => 0, 'debits' => 0];
+        $flows = $figures['flows'][$key] ?? ['deposit_count' => 0, 'deposits' => 0, 'withdrawal_count' => 0, 'withdrawals' => 0, 'interest' => 0, 'tax' => 0, 'fee_count' => 0, 'fees' => 0, 'share_capital_count' => 0, 'share_capital' => 0, 'credits' => 0, 'debits' => 0];
         $opening = $figures['opening'][$key] ?? 0;
         $closing = $figures['closing'][$key] ?? 0;
         $net = $closing - $opening;
-        $counted = $flows['deposits'] - $flows['withdrawals'] + $flows['interest'] - $flows['tax'] - $flows['fees'];
+        $counted = $flows['deposits'] - $flows['withdrawals'] + $flows['interest'] - $flows['tax'] - $flows['fees'] - $flows['share_capital'];
         $outstanding = $figures['outstanding'][$key] ?? ['count' => 0, 'principal' => 0, 'maturity_amount' => 0];
         $placed = $figures['placed'][$key] ?? ['count' => 0, 'principal' => 0];
         $tdInterest = $figures['td_interest'][$key] ?? ['gross' => 0, 'tax' => 0];
@@ -109,6 +121,8 @@ class DepositSummary
             'tax_withheld' => SavingsMath::pesos($flows['tax']),
             'fee_count' => $flows['fee_count'],
             'fees_charged' => SavingsMath::pesos($flows['fees']),
+            'share_capital_transfer_count' => $flows['share_capital_count'],
+            'share_capital_transfers' => SavingsMath::pesos($flows['share_capital']),
             'other_movements' => SavingsMath::pesos($net - $counted),
             'net_movement' => SavingsMath::pesos($net),
             'closing_balance' => SavingsMath::pesos($closing),

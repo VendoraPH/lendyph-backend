@@ -469,8 +469,9 @@ class SavingsReports
 
     /**
      * Deposits, withdrawals and closing payouts dated in the period of the
-     * large-transaction alert's amount or more: the rows the alert is sent
-     * for (LargeTransactionAlert).
+     * large-transaction alert's amount or more (the rows the alert is sent
+     * for, LargeTransactionAlert), money moved to or from a time deposit left
+     * out, as the deposit and withdrawal reports do.
      *
      * @return Builder<SavingsTransaction>
      */
@@ -480,39 +481,44 @@ class SavingsReports
 
         return $this->transactionsQuery($filters)->with('reversedBy')
             ->whereIn('type', self::LARGE_TRANSACTION_TYPES)
+            ->whereNull('time_deposit_id')
             ->where(fn ($q) => $q->where('credit', '>=', $threshold)->orWhere('debit', '>=', $threshold));
     }
 
     /**
      * A deposit, withdrawal or large transaction: the register's fields, its
-     * amount, and whether it was reversed (listed, counted in no total).
+     * amount, and whether it was reversed by the period's end `$asAt`
+     * (listed, counted in no total). A reversal dated later leaves `reversed`
+     * false, so the period reads as it stood at its end, and still shows its
+     * reference and date.
      *
      * @return array<string, mixed>
      */
-    public function flowRow(SavingsTransaction $row): array
+    public function flowRow(SavingsTransaction $row, string $asAt): array
     {
         return [
             ...$this->transactionRow($row),
             'amount' => SavingsMath::pesos(max(SavingsMath::centavos($row->credit), SavingsMath::centavos($row->debit))),
-            'reversed' => $row->reversedBy !== null,
+            'reversed' => $row->reversedBy !== null && $row->reversedBy->date->toDateString() <= $asAt,
             'reversed_by_reference' => $row->reversedBy?->reference,
             'reversed_on' => $row->reversedBy?->date->toDateString(),
         ];
     }
 
     /**
-     * Totals over the whole filter: every row listed (`count`), the reversed
-     * ones (`reversed_count`), and the money of the rows not reversed, in
-     * (`total_credit`) and out (`total_debit`) and both (`total_amount`).
+     * Totals over the whole filter: every row listed (`count`), the ones
+     * reversed by the period's end (`reversed_count`), and the money of the
+     * rest, in (`total_credit`) and out (`total_debit`) and both
+     * (`total_amount`).
      *
      * @param  Builder<SavingsTransaction>  $query
      * @return array<string, int|string>
      */
-    public function flowTotals(Builder $query): array
+    public function flowTotals(Builder $query, string $asAt): array
     {
         $sums = DB::query()
             ->fromSub($query->reorder()->toBase()->select(['savings_transactions.id', 'savings_transactions.credit', 'savings_transactions.debit']), 'f')
-            ->leftJoin('savings_transactions AS r', 'r.reverses_transaction_id', '=', 'f.id')
+            ->leftJoin('savings_transactions AS r', fn ($join) => $join->on('r.reverses_transaction_id', '=', 'f.id')->where('r.date', '<=', $asAt))
             ->selectRaw('COUNT(*) AS rows_count, COALESCE(SUM(CASE WHEN r.id IS NULL THEN 0 ELSE 1 END), 0) AS reversed_count')
             ->selectRaw('COALESCE(SUM(CASE WHEN r.id IS NULL THEN f.credit ELSE 0 END), 0) AS credits')
             ->selectRaw('COALESCE(SUM(CASE WHEN r.id IS NULL THEN f.debit ELSE 0 END), 0) AS debits')

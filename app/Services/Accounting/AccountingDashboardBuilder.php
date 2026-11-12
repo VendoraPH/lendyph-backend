@@ -10,6 +10,7 @@ use App\Services\Savings\Reports\GlControl;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\Query\Builder;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -42,6 +43,9 @@ final class AccountingDashboardBuilder
 {
     /** How many journals `recent_journals` lists. */
     public const RECENT_JOURNALS = 10;
+
+    /** How long a past day's savings GL control is cached, in minutes. */
+    public const SAVINGS_GL_CACHE_MINUTES = 5;
 
     /** How many months `months` covers, ending with as_of's month. */
     public const TREND_MONTHS = 12;
@@ -119,6 +123,10 @@ final class AccountingDashboardBuilder
      * and `savings_gl_control` carries the day and the total difference in ₱
      * (a two-decimal string). Both are null while savings is not in use.
      *
+     * Today reads the savings accounts' own balances instead of every savings
+     * row; another day sums the whole history, so it is cached for
+     * SAVINGS_GL_CACHE_MINUTES per day and scope.
+     *
      * @param  int|list<int>|null  $branchId
      * @return array{savings_gl_differs: bool|null, savings_gl_control: array{as_of: string, difference: string, differences: int}|null}
      */
@@ -128,10 +136,16 @@ final class AccountingDashboardBuilder
             return ['savings_gl_differs' => null, 'savings_gl_control' => null];
         }
 
-        $control = $this->savingsControl->build(
-            CarbonImmutable::parse($asOf)->toDateString(),
-            is_int($branchId) ? [$branchId] : $branchId,
-        );
+        $day = CarbonImmutable::parse($asOf)->toDateString();
+        $scope = is_int($branchId) ? [$branchId] : $branchId;
+
+        $control = $day === now()->toDateString()
+            ? $this->savingsControl->build($day, $scope, null, true)
+            : Cache::remember(
+                'accounting_dashboard.savings_gl.'.$day.'.'.($scope === null ? 'all' : implode('-', $scope)),
+                now()->addMinutes(self::SAVINGS_GL_CACHE_MINUTES),
+                fn () => $this->savingsControl->build($day, $scope),
+            );
 
         return [
             'savings_gl_differs' => ! $control['is_balanced'],

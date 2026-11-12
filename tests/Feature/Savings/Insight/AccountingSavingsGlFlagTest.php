@@ -67,6 +67,36 @@ class AccountingSavingsGlFlagTest extends TestCase
             ->assertJsonPath('data.savings_gl_control.as_of', '2026-11-10');
     }
 
+    public function test_today_reads_the_account_balances_instead_of_summing_every_savings_row(): void
+    {
+        $this->openAccount($this->regularProduct(), 150_000);
+        DB::flushQueryLog();
+        DB::enableQueryLog();
+
+        $this->actingAs($this->admin)->getJson('/api/accounting/dashboard')->assertOk()->assertJsonPath('data.savings_gl_differs', false);
+
+        $sql = collect(DB::getQueryLog())->pluck('query')->implode("\n");
+        DB::disableQueryLog();
+        $this->assertStringNotContainsString('savings_transactions', $sql);
+    }
+
+    public function test_a_past_day_is_cached_for_a_few_minutes(): void
+    {
+        $account = $this->openAccount($this->regularProduct(), 150_000);
+        $this->onDay('2026-11-11');
+        $this->actingAs($this->admin)->getJson('/api/accounting/dashboard?as_of=2026-11-10')->assertOk()->assertJsonPath('data.savings_gl_differs', false);
+
+        DB::transaction(fn () => app(SavingsLedger::class)->credit($account->refresh(), 'deposit', 1_000, ['method' => 'cash', 'date' => '2026-11-10', 'value_date' => '2026-11-10']));
+
+        $this->actingAs($this->admin)->getJson('/api/accounting/dashboard?as_of=2026-11-10')->assertOk()->assertJsonPath('data.savings_gl_differs', false);
+        $this->actingAs($this->admin)->getJson('/api/accounting/dashboard')->assertOk()->assertJsonPath('data.savings_gl_differs', true);
+
+        $this->travel(6)->minutes();
+        $this->actingAs($this->admin)->getJson('/api/accounting/dashboard?as_of=2026-11-10')->assertOk()
+            ->assertJsonPath('data.savings_gl_differs', true)
+            ->assertJsonPath('data.savings_gl_control.difference', '10.00');
+    }
+
     public function test_the_flag_reads_the_dashboards_branch_scope(): void
     {
         $far = Branch::factory()->create(['name' => 'Far Branch']);

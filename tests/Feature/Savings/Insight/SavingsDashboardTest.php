@@ -5,6 +5,7 @@ namespace Tests\Feature\Savings\Insight;
 use App\Services\Savings\Dashboard\SavingsDashboard;
 use App\Services\Savings\SavingsMath;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\DB;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
@@ -178,6 +179,33 @@ class SavingsDashboardTest extends TestCase
         $this->actingAs($this->admin)->getJson("/api/savings/dashboard?product_id={$this->timeProduct->id}")->assertOk()
             ->assertJsonPath('data.kpis.savings_balance', '0.00')
             ->assertJsonPath('data.kpis.time_deposits', ['count' => 4, 'amount' => '37200.00']);
+    }
+
+    /**
+     * The series is worked out from one monthly flows query and the opening
+     * balances, so twelve months cost the same queries as three.
+     */
+    public function test_the_query_count_does_not_grow_with_the_series(): void
+    {
+        $queries = function (): int {
+            DB::flushQueryLog();
+            DB::enableQueryLog();
+            $series = $this->actingAs($this->admin)->getJson('/api/savings/dashboard')->assertOk()->json('data.series');
+            $count = count(DB::getQueryLog());
+            DB::disableQueryLog();
+            $this->assertNotEmpty($series);
+
+            return $count;
+        };
+
+        // The first request also loads the caller's permissions.
+        $queries();
+        $threeMonths = $queries();
+        $this->onDay('2027-12-15');
+        $twelveMonths = $queries();
+
+        $this->assertSame($threeMonths, $twelveMonths);
+        $this->assertLessThanOrEqual(60, $twelveMonths);
     }
 
     /**

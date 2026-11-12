@@ -20,7 +20,9 @@ use Carbon\CarbonImmutable;
  * The member must be in the caller's branches (another branch's member
  * answers 404, the same as a missing one). Only the member's id, name, code
  * and branch are shown: no contact details or address. The period defaults
- * to the member's first account opening, or today, through today.
+ * to the member's first account opening, or today, through today; the start
+ * never falls after the end. The `branch_id` and `product_id` filters narrow
+ * the accounts and time deposits listed.
  */
 class MemberStatement
 {
@@ -39,10 +41,19 @@ class MemberStatement
             ->firstOr(fn () => abort(404, 'Member not found.'));
     }
 
-    /** @return array<string, mixed> */
-    public function build(User $user, Borrower $member, ?string $dateFrom, ?string $dateTo): array
+    /**
+     * @param  array<string, mixed>  $filters  the report filters: date_from, date_to, branch_id, product_id
+     * @return array<string, mixed>
+     */
+    public function build(User $user, Borrower $member, array $filters): array
     {
-        $accounts = $this->scope->accounts($user)
+        $dateFrom = $filters['date_from'] ?? null;
+        $dateTo = $filters['date_to'] ?? null;
+        $narrow = fn ($query) => $query
+            ->when($filters['branch_id'] ?? null, fn ($q, $id) => $q->where('branch_id', $id))
+            ->when($filters['product_id'] ?? null, fn ($q, $id) => $q->where('product_id', $id));
+
+        $accounts = $narrow($this->scope->accounts($user))
             ->with(['borrower', 'branch', 'product'])
             ->where('borrower_id', $member->id)
             ->orderBy('account_number')
@@ -51,11 +62,12 @@ class MemberStatement
 
         $today = now()->toDateString();
         $from = $dateFrom ?? ($accounts->min(fn (SavingsAccount $account) => $account->opened_on->toDateString()) ?? $today);
+        $from = $dateTo !== null && $from > $dateTo ? $dateTo : $from;
         $to = $dateTo ?? CarbonImmutable::parse($today)->max(CarbonImmutable::parse($from))->toDateString();
 
         $statements = $accounts->map(fn (SavingsAccount $account) => $this->statements->build($account, $from, $to))->values()->all();
 
-        $deposits = TimeDeposit::query()
+        $deposits = $narrow(TimeDeposit::query())
             ->with(['borrower', 'branch', 'product'])
             ->where('borrower_id', $member->id)
             ->when($this->branches->for($user), fn ($q, array $ids) => $q->whereIn('branch_id', $ids))

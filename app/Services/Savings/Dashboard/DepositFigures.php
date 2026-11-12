@@ -33,11 +33,16 @@ use InvalidArgumentException;
  * - Interest credited: `interest` rows; tax withheld: `withholding_tax` rows.
  * - Fees: `fee` rows (an excess-withdrawal fee, Dr 2050 / Cr 4080), the
  *   cooperative's income, never a withdrawal.
- * - A row that was reversed, and the reversal itself, count in none of
- *   these, as the interest postings report counts a reversed run in no
- *   total. Balances still read every row, so a period's other movements
- *   (transfers, fees, time deposit moves, reversals of earlier rows) are the
- *   rest of the change in balance.
+ * - Share capital transfers: `share_capital_transfer` rows (savings moved to
+ *   the member's share capital, Dr 2050 / Cr 3060), never a withdrawal.
+ * - A row reversed on or before the period's end, and the reversal itself,
+ *   count in none of these, as the interest postings report counts a
+ *   reversed run in no total. The figures are read as at the period's end:
+ *   a reversal dated later doesn't change the period (in the monthly series,
+ *   a reversal dated after the row's own month doesn't change that month).
+ * - Balances read every row, so a period's other movements (transfers
+ *   between accounts, time deposit moves, reversals of rows from earlier
+ *   periods) are the rest of the change in balance.
  */
 class DepositFigures
 {
@@ -64,12 +69,20 @@ class DepositFigures
 
     /**
      * Each group's savings balance at the end of `$asOf`: every row's credits
-     * less debits dated on or before it.
+     * less debits dated on or before it. Today, the accounts' own balances
+     * (SavingsLedger keeps `ledger_balance` equal to its rows, and no row is
+     * dated after today), so the dashboard's closing figures read no history.
      *
      * @return array<int|string, int>
      */
     public function savingsBalances(array $scope, string $asOf, ?string $group = null): array
     {
+        if ($asOf === now()->toDateString()) {
+            return $this->grouped($this->scoped(DB::table('savings_accounts AS a'), $scope, 'a'), $group, 'a', 'COALESCE(SUM(a.ledger_balance), 0) AS balance')
+                ->map(fn ($row) => SavingsMath::signedCentavos($row->balance))
+                ->all();
+        }
+
         $query = $this->transactions($scope)->where('t.date', '<=', $asOf);
 
         return $this->grouped($query, $group, 'a', 'COALESCE(SUM(t.credit), 0) AS credits, COALESCE(SUM(t.debit), 0) AS debits')
@@ -82,7 +95,7 @@ class DepositFigures
      * row's credits and debits. With `$byMonth`, keyed by month (YYYY-MM)
      * instead, ungrouped.
      *
-     * @return array<int|string, array{deposit_count: int, deposits: int, withdrawal_count: int, withdrawals: int, interest: int, tax: int, fee_count: int, fees: int, credits: int, debits: int}>
+     * @return array<int|string, array{deposit_count: int, deposits: int, withdrawal_count: int, withdrawals: int, interest: int, tax: int, fee_count: int, fees: int, share_capital_count: int, share_capital: int, credits: int, debits: int}>
      */
     public function flows(array $scope, string $from, string $to, ?string $group = null, bool $byMonth = false): array
     {
@@ -91,9 +104,16 @@ class DepositFigures
         $interest = $this->counted(['interest'], false);
         $tax = $this->counted(['withholding_tax'], false);
         $fee = $this->counted(['fee'], false);
+        $shareCapital = $this->counted(['share_capital_transfer'], false);
 
         $query = $this->transactions($scope)
-            ->leftJoin('savings_transactions AS r', 'r.reverses_transaction_id', '=', 't.id')
+            ->leftJoin('savings_transactions AS r', function ($join) use ($to, $byMonth): void {
+                $join->on('r.reverses_transaction_id', '=', 't.id')->where('r.date', '<=', $to);
+
+                if ($byMonth) {
+                    $join->whereRaw('r.date <= LAST_DAY(t.date)');
+                }
+            })
             ->whereBetween('t.date', [$from, $to]);
 
         $select = implode(', ', [
@@ -105,6 +125,8 @@ class DepositFigures
             "COALESCE(SUM(CASE WHEN {$tax} THEN t.debit ELSE 0 END), 0) AS tax",
             "COALESCE(SUM(CASE WHEN {$fee} THEN 1 ELSE 0 END), 0) AS fee_count",
             "COALESCE(SUM(CASE WHEN {$fee} THEN t.debit ELSE 0 END), 0) AS fees",
+            "COALESCE(SUM(CASE WHEN {$shareCapital} THEN 1 ELSE 0 END), 0) AS share_capital_count",
+            "COALESCE(SUM(CASE WHEN {$shareCapital} THEN t.debit ELSE 0 END), 0) AS share_capital",
             'COALESCE(SUM(t.credit), 0) AS credits',
             'COALESCE(SUM(t.debit), 0) AS debits',
         ]);
@@ -122,6 +144,8 @@ class DepositFigures
             'tax' => SavingsMath::centavos($row->tax),
             'fee_count' => (int) $row->fee_count,
             'fees' => SavingsMath::centavos($row->fees),
+            'share_capital_count' => (int) $row->share_capital_count,
+            'share_capital' => SavingsMath::centavos($row->share_capital),
             'credits' => SavingsMath::centavos($row->credits),
             'debits' => SavingsMath::centavos($row->debits),
         ])->all();
@@ -215,6 +239,35 @@ class DepositFigures
         return $this->grouped($query, $group, 'd', 'COALESCE(SUM(d.settled_interest), 0) AS gross, COALESCE(SUM(d.settled_tax), 0) AS tax')
             ->map(fn ($row) => ['gross' => SavingsMath::centavos($row->gross), 'tax' => SavingsMath::centavos($row->tax)])
             ->all();
+    }
+
+    /**
+     * Time deposit principal placed and settled in each month of the period
+     * (YYYY-MM), so the series can carry the outstanding figure forward from
+     * its opening without one query a month.
+     *
+     * @return array<string, array{placed: int, settled: int}>
+     */
+    public function timeDepositMovesByMonth(array $scope, string $from, string $to): array
+    {
+        $moves = [];
+        $sums = [
+            'placed' => $this->scoped(DB::table('time_deposits AS d'), $scope, 'd')->whereBetween('d.placement_date', [$from, $to])
+                ->groupByRaw("DATE_FORMAT(d.placement_date, '%Y-%m')")
+                ->selectRaw("DATE_FORMAT(d.placement_date, '%Y-%m') AS month, COALESCE(SUM(d.principal), 0) AS principal")->get(),
+            'settled' => $this->scoped(DB::table('time_deposits AS d'), $scope, 'd')->whereNotNull('d.settled_on')->whereBetween('d.settled_on', [$from, $to])
+                ->groupByRaw("DATE_FORMAT(d.settled_on, '%Y-%m')")
+                ->selectRaw("DATE_FORMAT(d.settled_on, '%Y-%m') AS month, COALESCE(SUM(d.principal), 0) AS principal")->get(),
+        ];
+
+        foreach ($sums as $kind => $rows) {
+            foreach ($rows as $row) {
+                $moves[$row->month] ??= ['placed' => 0, 'settled' => 0];
+                $moves[$row->month][$kind] = SavingsMath::centavos($row->principal);
+            }
+        }
+
+        return $moves;
     }
 
     /**
