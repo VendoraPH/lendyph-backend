@@ -119,6 +119,15 @@ class CdaWorkflowTest extends TestCase
             ->assertJsonPath('data.display_status', 'returned');
     }
 
+    public function test_an_unclear_warnings_answer_is_refused_in_words(): void
+    {
+        $report = $this->approvedReport();
+
+        $this->act($report, 'finalize', ['confirm_warnings' => 'perhaps'])->assertStatus(422)
+            ->assertJsonPath('errors.confirm_warnings.0', 'Say whether to go ahead despite the warnings.');
+        $this->assertSame('approved', $report->refresh()->status);
+    }
+
     public function test_the_approver_cant_be_the_submitter(): void
     {
         $report = $this->caprWithTestTemplate();
