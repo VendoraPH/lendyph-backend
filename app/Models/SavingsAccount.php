@@ -28,6 +28,7 @@ use Illuminate\Support\Carbon;
  * @property string $ledger_balance
  * @property Carbon $opened_on
  * @property Carbon|null $last_member_activity_on
+ * @property Carbon|null $outflow_check_required_since set when money paid in reactivated it: every outflow needs a checker until one is approved
  * @property Carbon|null $dormant_since
  * @property Carbon|null $interest_credited_through
  * @property Carbon|null $closed_on
@@ -94,6 +95,7 @@ class SavingsAccount extends Model
             'opened_on' => 'date',
             'last_member_activity_on' => 'date',
             'dormant_since' => 'date',
+            'outflow_check_required_since' => 'date',
             'interest_credited_through' => 'date',
             'closed_on' => 'date',
             'closed_by' => 'integer',

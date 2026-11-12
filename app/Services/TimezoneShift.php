@@ -249,11 +249,13 @@ class TimezoneShift
         // Added 2026-11-10 with Savings & Deposits (Phase 3), well after the
         // cutover completed, so none of these tables can hold a row written by
         // the old UTC application. Their business dates are DATEs.
+        'savings_account_notes' => ['created_at'],
         'savings_accounts' => ['created_at', 'updated_at'],
         'savings_approvals' => ['created_at', 'decided_at', 'expires_at', 'requested_at', 'updated_at'],
         'savings_holds' => ['created_at', 'updated_at'],
         'savings_idempotency_keys' => ['created_at'],
         'savings_interest_runs' => ['checked_at', 'created_at', 'posted_at', 'reversed_at', 'updated_at'],
+        'savings_notice_log' => ['created_at'],
         'savings_product_rates' => ['created_at'],
         'savings_products' => ['created_at', 'updated_at'],
         'savings_settings' => ['created_at', 'updated_at'],

@@ -12,7 +12,9 @@ use Illuminate\Validation\Validator;
  * `PUT /savings/settings` (savings:settings and branches:view_all: the
  * settings are company-wide). Every field is optional; the second tier must
  * stay above the first, comparing what is sent with what is stored. Above
- * the second tier exactly two checkers approve (v1 records two).
+ * the second tier exactly two checkers approve (v1 records two). The notice
+ * days (0 to 365, each once, up to 10; [] sends none) and the dormancy
+ * warning days (0 to 365) are the gap round S4 notices.
  */
 class UpdateSavingsSettingsRequest extends FormRequest
 {
@@ -27,6 +29,9 @@ class UpdateSavingsSettingsRequest extends FormRequest
             'tier3_checkers' => ['sometimes', 'required', 'integer', 'in:'.ApprovalGate::DUAL_CHECKERS],
             'dormancy_months' => ['sometimes', 'required', 'integer', 'between:1,120'],
             'large_transaction_alert' => ['sometimes', 'required', ...SavingsRules::money('large transaction alert'), 'gt:0'],
+            'notice_days' => ['sometimes', 'present', 'array', 'max:10'],
+            'notice_days.*' => ['required', 'integer', 'between:0,365', 'distinct'],
+            'dormancy_warning_days' => ['sometimes', 'required', 'integer', 'between:0,365'],
         ];
     }
 
@@ -62,6 +67,15 @@ class UpdateSavingsSettingsRequest extends FormRequest
             'tier3_checkers.in' => 'Above the second approval limit, exactly two different checkers approve; this version can\'t record a third.',
             'dormancy_months.integer' => 'The months before an account turns dormant must be a whole number.',
             'dormancy_months.between' => 'An account can turn dormant after 1 to 120 months without member activity.',
+            'notice_days.present' => 'List the days before maturity to send a notice on, or none.',
+            'notice_days.array' => 'List the days before maturity to send a notice on, or none.',
+            'notice_days.max' => 'A time deposit can be announced on at most 10 days.',
+            'notice_days.*.required' => 'Each notice day must be a whole number of days, from 0 (the maturity day) to 365.',
+            'notice_days.*.integer' => 'Each notice day must be a whole number of days, from 0 (the maturity day) to 365.',
+            'notice_days.*.between' => 'Each notice day must be a whole number of days, from 0 (the maturity day) to 365.',
+            'notice_days.*.distinct' => 'Each notice day can be listed once.',
+            'dormancy_warning_days.integer' => 'The days of warning before an account turns dormant must be a whole number.',
+            'dormancy_warning_days.between' => 'The warning before an account turns dormant can be 0 to 365 days.',
             '*.required' => 'This setting can\'t be left empty.',
         ];
     }

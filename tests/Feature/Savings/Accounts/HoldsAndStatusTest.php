@@ -96,7 +96,11 @@ class HoldsAndStatusTest extends TestCase
             ->assertOk()->assertJsonPath('data.status', 'active');
 
         $this->savings->forceFill(['status' => 'dormant', 'dormant_since' => '2026-11-01', 'last_member_activity_on' => '2024-01-01'])->save();
-        $this->postJson("/api/savings/accounts/{$this->savings->id}/status", ['status' => 'active', 'reason' => 'Member came in with ID'])
+        $approvalId = $this->postJson("/api/savings/accounts/{$this->savings->id}/status", ['status' => 'active', 'reason' => 'Member came in with ID'])
+            ->assertStatus(202)->assertJsonPath('data.approval.kind', 'reactivation')->json('data.approval.id');
+        $this->actingAs($this->checker())->postJson("/api/savings/approvals/{$approvalId}/approve")->assertOk();
+        $this->actingAs($this->userWith(['savings:view', 'savings:close']));
+        $this->getJson("/api/savings/accounts/{$this->savings->id}")
             ->assertOk()->assertJsonPath('data.status', 'active')->assertJsonPath('data.dormant_since', null)
             ->assertJsonPath('data.last_member_activity_on', '2026-11-10');
 
@@ -106,6 +110,7 @@ class HoldsAndStatusTest extends TestCase
                 ->where('action', 'like', 'savings_account_%')->orderBy('id')->pluck('action')->all(),
         );
         $this->assertStringContainsString('Disputed signature', (string) AuditLog::query()->where('action', 'savings_account_frozen')->value('description'));
+        $this->assertStringContainsString('Member came in with ID', (string) AuditLog::query()->where('action', 'savings_account_reactivated')->value('description'));
 
         $this->postJson("/api/savings/accounts/{$this->savings->id}/status", ['status' => 'dormant', 'reason' => 'x'])
             ->assertUnprocessable()->assertJsonValidationErrors('status');
