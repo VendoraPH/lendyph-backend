@@ -128,12 +128,15 @@ class SavingsProductController extends Controller
             ]);
 
             $terms = $product->isTimeDeposit() ? $product->term_options_days : [null];
+            // One rate post for the first rates (RateBook's ladder rule).
+            $postId = (string) Str::uuid();
 
             foreach ($terms as $term) {
                 SavingsProductRate::query()->create([
                     'product_id' => $product->id,
                     'term_days' => $term,
                     'annual_rate' => (string) $data['annual_interest_rate'],
+                    'rate_post_id' => $postId,
                     'effective_from' => now()->toDateString(),
                     'created_by' => $userId,
                 ]);

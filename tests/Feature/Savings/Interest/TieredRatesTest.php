@@ -125,6 +125,26 @@ class TieredRatesTest extends TestCase
         $this->assertSame([['from' => '2026-12-01', 'to' => '2026-12-31', 'rate' => '1.7500']], $book->segments($product->id, null, '2026-12-01', '2026-12-31'));
     }
 
+    public function test_creating_a_product_writes_its_first_rates_as_one_post(): void
+    {
+        $this->onDay('2026-11-10');
+
+        $id = $this->postJson('/api/savings/products', [
+            'code' => 'TD-TIER', 'name' => 'Tier Time Deposit', 'kind' => 'time_deposit', 'interest_crediting' => 'annual',
+            'minimum_opening_balance' => '1000.00', 'maintaining_balance' => '0', 'minimum_adb_for_interest' => '0',
+            'term_options_days' => [90, 180], 'annual_interest_rate' => '3',
+        ])->assertCreated()->json('data.id');
+
+        $posts = SavingsProductRate::query()->where('product_id', $id)->pluck('rate_post_id');
+        $this->assertCount(2, $posts);
+        $this->assertNotNull($posts[0], 'The first rates belong to a post, so only rows from before tiers use the old rule.');
+        $this->assertSame([$posts[0]], $posts->unique()->values()->all());
+
+        $this->postJson("/api/savings/products/{$id}/rates", ['annual_rate' => '3.5', 'term_days' => 90, 'effective_from' => '2026-11-10'])->assertCreated();
+        $this->assertSame('3.5000', app(RateBook::class)->rateOn($id, 90, '2026-11-10'));
+        $this->assertSame('3.0000', app(RateBook::class)->rateOn($id, 180, '2026-11-10'), 'A post on one term leaves the other terms alone.');
+    }
+
     public function test_a_tier_sent_without_a_minimum_balance_key_is_the_base_tier(): void
     {
         $this->onDay('2026-11-10');
