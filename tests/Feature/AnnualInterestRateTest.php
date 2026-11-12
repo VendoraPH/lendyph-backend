@@ -11,6 +11,9 @@ use App\Models\LoanProduct;
 use App\Services\AmortizationCalculatorService;
 use App\Services\LoanService;
 use App\Services\LoanTermSchedule;
+use Brick\Math\BigRational;
+use Brick\Math\RoundingMode;
+use Illuminate\Support\Carbon;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
@@ -113,6 +116,70 @@ class AnnualInterestRateTest extends TestCase
         }
 
         $this->assertSame(320, $compared);
+    }
+
+    /**
+     * Instalments that aren't 30 days: weekly and semi-monthly schedules
+     * (7- and 15-day periods, and a shorter last one), and a single payment
+     * at maturity on a days term. Each annual case equals its monthly twin
+     * to the centavo, except where the monthly twin's figure is exactly a
+     * half-centavo: the annual path works it out exactly and rounds it up,
+     * the monthly float path can land a hair below and round it down. Every
+     * such row is checked to be that tie, and nothing else differs.
+     */
+    public function test_an_annual_rate_matches_its_monthly_twin_on_other_instalment_lengths(): void
+    {
+        $calculator = app(AmortizationCalculatorService::class);
+        $shapes = [];
+
+        foreach (['weekly', 'semi_monthly'] as $frequency) {
+            foreach (['straight', 'diminishing', 'upon_maturity'] as $method) {
+                foreach ([1, 3, 12] as $months) {
+                    $shapes[] = ['interest_method' => $method, 'frequency' => $frequency, 'term' => $months, 'term_unit' => 'months'];
+                }
+
+                $shapes[] = ['interest_method' => $method, 'frequency' => $frequency, 'term' => 100, 'term_unit' => 'days'];
+            }
+        }
+
+        foreach (['straight', 'upon_maturity'] as $method) {
+            foreach ([7, 15, 45, 90, 100, 365] as $days) {
+                $shapes[] = ['interest_method' => $method, 'frequency' => 'upon_maturity', 'term' => $days, 'term_unit' => 'days'];
+            }
+        }
+
+        $compared = 0;
+
+        foreach ($shapes as $shape) {
+            foreach ([1000, 12345.67, 50000, 333333.33, 1000000] as $principal) {
+                foreach (['1', '1.5', '2.75', '3.3333'] as $monthly) {
+                    $input = $this->calculatorInput($shape + ['principal_amount' => $principal]);
+                    $annual = bcmul($monthly, '12', 4);
+
+                    $expected = $calculator->calculate(['interest_rate' => $monthly, 'interest_rate_frequency' => 'monthly'] + $input);
+                    $actual = $calculator->calculate(['interest_rate' => $annual, 'interest_rate_frequency' => 'annual'] + $input);
+
+                    $case = "{$shape['interest_method']}, {$shape['frequency']}, {$shape['term']} {$shape['term_unit']}, ₱{$principal}, {$monthly}% a month = {$annual}% a year";
+                    if ($expected['rows'] === $actual['rows']) {
+                        $this->assertSame($expected['totals'], $actual['totals'], $case);
+                    } else {
+                        $ties[] = $case;
+                        $this->assertOnlyHalfCentavoTies($input, $monthly, $expected['rows'], $actual['rows'], $case);
+                    }
+
+                    $compared++;
+                }
+            }
+        }
+
+        $this->assertSame(count($shapes) * 20, $compared);
+        // Both on the 10-day last period of a 100-day semi-monthly loan at 1%
+        // a month: ₱48,334.50 and ₱145,003.50 ÷ 300 are exactly ₱161.115 and
+        // ₱483.345.
+        $this->assertSame([
+            'diminishing, semi_monthly, 100 days, ₱333333.33, 1% a month = 12.0000% a year',
+            'diminishing, semi_monthly, 100 days, ₱1000000, 1% a month = 12.0000% a year',
+        ], $ties ?? []);
     }
 
     public function test_the_calculator_endpoint_takes_an_annual_rate(): void
@@ -219,6 +286,41 @@ class AnnualInterestRateTest extends TestCase
 
         $this->assertSame('Monthly', $changes['interest_rate_frequency']['old']);
         $this->assertSame('Annual', $changes['interest_rate_frequency']['new']);
+    }
+
+    /**
+     * Every row that differs differs only in its interest (and so its totals)
+     * by ₱0.01, and the exact interest, the base × the monthly rate × the
+     * row's days ÷ 30, is exactly a half-centavo, which the annual row rounds
+     * up. The base is the balance before the row on a diminishing schedule,
+     * else the principal.
+     *
+     * @param  array<string, mixed>  $input
+     * @param  list<array<string, mixed>>  $monthlyRows
+     * @param  list<array<string, mixed>>  $annualRows
+     */
+    private function assertOnlyHalfCentavoTies(array $input, string $monthlyRate, array $monthlyRows, array $annualRows, string $case): void
+    {
+        $instalments = LoanTermSchedule::instalments(Carbon::parse($input['start_date']), (int) $input['term'], $input['term_unit'], $input['frequency']);
+
+        foreach ($monthlyRows as $i => $monthlyRow) {
+            $annualRow = $annualRows[$i];
+
+            if ($monthlyRow === $annualRow) {
+                continue;
+            }
+
+            $this->assertSame('diminishing', $input['interest_method'], $case);
+            $this->assertSame(array_diff_key($monthlyRow, array_flip(['interest_due', 'total_due', 'total_payment'])), array_diff_key($annualRow, array_flip(['interest_due', 'total_due', 'total_payment'])), $case);
+
+            $base = $i === 0 ? (string) $input['principal_amount'] : (string) $monthlyRows[$i - 1]['remaining_balance'];
+            $exact = BigRational::of($base)->multipliedBy($monthlyRate)->multipliedBy($instalments[$i]['days'])->dividedBy(3000);
+            $centavos = $exact->multipliedBy(100);
+
+            $this->assertTrue($centavos->minus($centavos->getIntegralPart())->isEqualTo(BigRational::ofFraction(1, 2)), "{$case}: row {$i} is not a half-centavo tie");
+            $this->assertSame($exact->toScale(2, RoundingMode::HalfUp)->toFloat(), (float) $annualRow['interest_due'], $case);
+            $this->assertEqualsWithDelta(0.01, (float) $annualRow['interest_due'] - (float) $monthlyRow['interest_due'], 0.000001, $case);
+        }
     }
 
     /** @return array<string, mixed> */

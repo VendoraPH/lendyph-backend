@@ -34,12 +34,12 @@ class BinhsCalculatorRequest extends FormRequest
         return [
             'loan_id' => ['nullable', 'integer', 'min:1'],
             'principal' => [$required, 'nullable', 'numeric', 'min:1', 'max:100000000', 'decimal:0,2'],
-            'annual_rate' => [$required, 'nullable', 'numeric', 'min:0', 'max:100', 'decimal:0,4'],
+            'annual_rate' => [$required, 'nullable', 'numeric', 'min:0', 'max:'.BinhsCalculator::MAX_ANNUAL_RATE, 'decimal:0,4'],
             'term_months' => [$required, 'nullable', 'integer', 'min:1', 'max:'.BinhsCalculator::MAX_TERM_MONTHS],
             'start_date' => [$required, 'nullable', 'date_format:Y-m-d'],
             // At most what a loan's build-up (decimal 12,2 on products) is allowed.
             'scbu_per_period' => ['nullable', 'numeric', 'min:0', 'max:9999999.99', 'decimal:0,2'],
-            'paid_flags' => ['nullable', 'array', 'max:'.BinhsCalculator::MAX_TERM_MONTHS],
+            'paid_flags' => ['nullable', 'list', 'max:'.BinhsCalculator::MAX_TERM_MONTHS],
             'paid_flags.*' => ['boolean'],
         ];
     }

@@ -67,6 +67,7 @@ class BinhsCalculatorTest extends TestCase
         $data = $this->postJson(self::URL, $expected['input'])->assertOk()->json('data');
 
         $this->assertNull($data['prefill']);
+        $this->assertNull($data['prefill_notes']);
 
         foreach (['ideal', 'worst_case', 'custom'] as $scenario) {
             $this->assertSame($expected[$scenario]['rows'], $data['scenarios'][$scenario]['rows'], "{$case} {$scenario} rows");
@@ -179,6 +180,7 @@ class BinhsCalculatorTest extends TestCase
             'a paid flag not a yes or no' => [['paid_flags' => [true, 'maybe']], 'paid_flags.1'],
             'more paid flags than periods' => [['paid_flags' => [true, true, true, true]], 'paid_flags'],
             'more than 60 paid flags' => [['term_months' => 60, 'paid_flags' => array_fill(0, 61, true)], 'paid_flags'],
+            'paid flags keyed by period, not a list' => [['paid_flags' => ['1' => true, '2' => false]], 'paid_flags'],
             'loan id not a number' => [['loan_id' => 'abc'], 'loan_id'],
         ];
     }
@@ -234,6 +236,7 @@ class BinhsCalculatorTest extends TestCase
             'term_months' => 6,
             'start_date' => '2026-03-15',
         ], $data['prefill']);
+        $this->assertSame([], $data['prefill_notes']);
         $this->assertNull($data['scenarios']);
     }
 
@@ -287,7 +290,75 @@ class BinhsCalculatorTest extends TestCase
 
         $this->postJson(self::URL, ['loan_id' => $loan->id])
             ->assertOk()
-            ->assertJsonPath('data.prefill.term_months', null);
+            ->assertJsonPath('data.prefill.term_months', null)
+            ->assertJsonPath('data.prefill_notes', ["Term left out: the loan's term is 45 days, and the calculator takes months."]);
+    }
+
+    /** @return array<string, array{array<string, mixed>, string|null, int|null, list<string>}> */
+    public static function prefillsTheCalculatorRefuses(): array
+    {
+        return [
+            '9% a month is 108% a year' => [
+                ['interest_rate' => '9', 'interest_rate_frequency' => 'monthly'], null, 6,
+                ["Annual rate left out: 9% a month is 108% a year, above the calculator's limit of 100%."],
+            ],
+            '1% a day is 360% a year' => [
+                ['interest_rate' => '1', 'interest_rate_frequency' => 'daily'], null, 6,
+                ["Annual rate left out: 1% a day is 360% a year, above the calculator's limit of 100%."],
+            ],
+            '1% a week has no exact rate a year' => [
+                ['interest_rate' => '1', 'interest_rate_frequency' => 'weekly'], null, 6,
+                ['Annual rate left out: 1% a week has no exact rate a year. Enter the annual rate.'],
+            ],
+            '72 months is over 60' => [
+                ['term' => 72], '36', null,
+                ["Term left out: the loan's term of 72 months is outside the calculator's 1 to 60 months."],
+            ],
+            'a term of 0 months' => [
+                ['term' => 0], '36', null,
+                ["Term left out: the loan's term of 0 months is outside the calculator's 1 to 60 months."],
+            ],
+            'both left out' => [
+                ['interest_rate' => '8.5', 'interest_rate_frequency' => 'monthly', 'term' => 61], null, null,
+                [
+                    "Annual rate left out: 8.5% a month is 102% a year, above the calculator's limit of 100%.",
+                    "Term left out: the loan's term of 61 months is outside the calculator's 1 to 60 months.",
+                ],
+            ],
+        ];
+    }
+
+    /**
+     * A prefill never suggests a value the calculator would refuse: it
+     * leaves the rate or the term out and says why, in words.
+     *
+     * @param  array<string, mixed>  $attributes
+     * @param  list<string>  $notes
+     */
+    #[DataProvider('prefillsTheCalculatorRefuses')]
+    public function test_a_prefill_the_calculator_would_refuse_is_left_out_with_a_note(array $attributes, ?string $annualRate, ?int $termMonths, array $notes): void
+    {
+        $loan = $this->loan($attributes);
+
+        $data = $this->postJson(self::URL, ['loan_id' => $loan->id])->assertOk()->json('data');
+
+        $this->assertSame($annualRate, $data['prefill']['annual_rate']);
+        $this->assertSame($termMonths, $data['prefill']['term_months']);
+        $this->assertSame($notes, $data['prefill_notes']);
+    }
+
+    public function test_a_prefill_at_the_limits_is_kept(): void
+    {
+        foreach ([
+            [['interest_rate' => '100', 'interest_rate_frequency' => 'annual', 'term' => 60], '100', 60],
+            [['interest_rate' => '8.3333', 'interest_rate_frequency' => 'monthly', 'term' => 1], '99.9996', 1],
+        ] as [$attributes, $annualRate, $termMonths]) {
+            $data = $this->postJson(self::URL, ['loan_id' => $this->loan($attributes)->id])->assertOk()->json('data');
+
+            $this->assertSame($annualRate, $data['prefill']['annual_rate']);
+            $this->assertSame($termMonths, $data['prefill']['term_months']);
+            $this->assertSame([], $data['prefill_notes']);
+        }
     }
 
     public function test_another_branchs_loan_or_a_missing_one_answers_404(): void

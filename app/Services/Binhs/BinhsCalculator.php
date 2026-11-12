@@ -40,6 +40,19 @@ final class BinhsCalculator
 
     public const MAX_TERM_MONTHS = 60;
 
+    /** Each rate period in words, for the prefill notes ("9% a month"). */
+    private const RATE_PERIOD_WORDS = [
+        'daily' => 'a day',
+        'weekly' => 'a week',
+        'bi_weekly' => 'every 2 weeks',
+        'semi_monthly' => 'per half month',
+        'monthly' => 'a month',
+        'annual' => 'a year',
+    ];
+
+    /** The highest rate a year the calculator takes (BinhsCalculatorRequest). */
+    public const MAX_ANNUAL_RATE = 100;
+
     /**
      * Decimal places a working figure that isn't a finite decimal is held to.
      *
@@ -84,33 +97,64 @@ final class BinhsCalculator
 
     /**
      * The page's starting inputs for a loan: its principal, its rate as a rate
-     * a year, its term when it is in months (else null) and its start date.
+     * a year, its term in months and its start date, with a note in words for
+     * each value left out.
      *
-     * The rate a year is the loan's rate times its periods in a year on the
-     * 30-day-month convention (monthly × 12, annual × 1, any other period
-     * × 360 ÷ its days), exact and never rounded. A weekly or bi-weekly rate
-     * whose year is not a finite decimal (1% a week is 360/7% a year) reads
-     * null, for staff to enter.
+     * - The rate a year is the loan's rate times its periods in a year on the
+     *   30-day-month convention (monthly × 12, annual × 1, any other period
+     *   × 360 ÷ its days), exact and never rounded.
+     * - It is left out (null) when it isn't a finite decimal (1% a week is
+     *   360/7% a year) or is above the calculator's 100%.
+     * - The term is left out when it is in days, or outside 1 to 60 months.
      *
-     * @return array{loan_id: int, principal: string, annual_rate: string|null, term_months: int|null, start_date: string|null}
+     * So a prefill never suggests a value the calculator would refuse.
+     *
+     * @return array{prefill: array{loan_id: int, principal: string, annual_rate: string|null, term_months: int|null, start_date: string|null}, notes: list<string>}
      */
     public function prefillFor(Loan $loan): array
     {
-        $periodDays = LoanTermSchedule::PERIOD_DAYS[$loan->interest_rate_frequency->value];
-        $annual = BigRational::of((string) $loan->interest_rate)->multipliedBy(LoanTermSchedule::DAYS_PER_YEAR)->dividedBy($periodDays);
+        $period = $loan->interest_rate_frequency->value;
+        $rate = BigDecimal::of((string) $loan->interest_rate)->strippedOfTrailingZeros();
+        $quoted = $rate->__toString().'% '.self::RATE_PERIOD_WORDS[$period];
+        $notes = [];
 
         try {
-            $annualRate = $annual->toBigDecimal()->strippedOfTrailingZeros()->__toString();
+            $annual = $rate->toBigRational()
+                ->multipliedBy(LoanTermSchedule::DAYS_PER_YEAR)
+                ->dividedBy(LoanTermSchedule::PERIOD_DAYS[$period])
+                ->toBigDecimal()
+                ->strippedOfTrailingZeros();
+            $annualRate = $annual->__toString();
+
+            if ($annual->isGreaterThan(self::MAX_ANNUAL_RATE)) {
+                $notes[] = "Annual rate left out: {$quoted} is {$annualRate}% a year, above the calculator's limit of ".self::MAX_ANNUAL_RATE.'%.';
+                $annualRate = null;
+            }
         } catch (RoundingNecessaryException) {
+            $notes[] = "Annual rate left out: {$quoted} has no exact rate a year. Enter the annual rate.";
             $annualRate = null;
         }
 
+        $term = (int) $loan->term;
+        $termMonths = null;
+
+        if ($loan->term_unit !== TermUnit::Months) {
+            $notes[] = "Term left out: the loan's term is {$term} days, and the calculator takes months.";
+        } elseif ($term < 1 || $term > self::MAX_TERM_MONTHS) {
+            $notes[] = "Term left out: the loan's term of {$term} months is outside the calculator's 1 to ".self::MAX_TERM_MONTHS.' months.';
+        } else {
+            $termMonths = $term;
+        }
+
         return [
-            'loan_id' => $loan->id,
-            'principal' => BigDecimal::of((string) $loan->principal_amount)->toScale(2)->__toString(),
-            'annual_rate' => $annualRate,
-            'term_months' => $loan->term_unit === TermUnit::Months ? (int) $loan->term : null,
-            'start_date' => $loan->start_date?->toDateString(),
+            'prefill' => [
+                'loan_id' => $loan->id,
+                'principal' => BigDecimal::of((string) $loan->principal_amount)->toScale(2)->__toString(),
+                'annual_rate' => $annualRate,
+                'term_months' => $termMonths,
+                'start_date' => $loan->start_date?->toDateString(),
+            ],
+            'notes' => $notes,
         ];
     }
 

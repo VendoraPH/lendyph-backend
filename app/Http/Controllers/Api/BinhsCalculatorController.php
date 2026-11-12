@@ -14,7 +14,7 @@ class BinhsCalculatorController extends Controller
     #[OA\Post(
         path: '/api/loans/amortization-calculator/binhs',
         summary: 'Amortization (BINHS) schedules',
-        description: 'The Ideal, Worst Case (nothing paid) and Custom (the periods in `paid_flags` paid) schedules, worked out in exact maths: monthly rate = annual ÷ 12 ÷ 100, a level payment, interest on the unrounded balance, a 20% penalty on principal carried unpaid, the first due date on `start_date`, and each figure rounded half up to the centavo. Money is a 2-decimal string. With `loan_id`, `prefill` holds that loan\'s principal, its rate a year (exact; null when not a finite decimal), its term in months (null for a days term) and start date; `loan_id` alone answers the prefill only (`scenarios` null). Writes nothing.',
+        description: 'The Ideal, Worst Case (nothing paid) and Custom (the periods in `paid_flags` paid) schedules, worked out in exact maths: monthly rate = annual ÷ 12 ÷ 100, a level payment, interest on the unrounded balance, a 20% penalty on principal carried unpaid, the first due date on `start_date`, and each figure rounded half up to the centavo. Money is a 2-decimal string. With `loan_id`, `prefill` holds that loan\'s principal, its rate a year (exact; null when not a finite decimal or above 100), its term in months (null for a days term or one outside 1 to 60) and start date, and `prefill_notes` says in words which value was left out and why; `loan_id` alone answers the prefill only (`scenarios` null). Writes nothing.',
         tags: ['Amortization Schedule'],
         security: [['sanctum' => []]],
         requestBody: new OA\RequestBody(
@@ -32,7 +32,7 @@ class BinhsCalculatorController extends Controller
             ),
         ),
         responses: [
-            new OA\Response(response: 200, description: '`prefill` (or null) and `scenarios` (`ideal`, `worst_case`, `custom`, each with `rows` and `totals`), or null'),
+            new OA\Response(response: 200, description: '`prefill` and `prefill_notes` (or null) and `scenarios` (`ideal`, `worst_case`, `custom`, each with `rows` and `totals`), or null'),
             new OA\Response(response: 403, description: 'Missing loans:view'),
             new OA\Response(response: 404, description: 'No such loan, or another branch\'s'),
             new OA\Response(response: 422, description: 'Validation error'),
@@ -41,11 +41,12 @@ class BinhsCalculatorController extends Controller
     public function __invoke(BinhsCalculatorRequest $request, BinhsCalculator $calculator): JsonResponse
     {
         $prefill = null;
+        $prefillNotes = null;
 
         if ($request->filled('loan_id')) {
             $loan = Loan::query()->visibleTo($request->user())->whereKey((int) $request->validated('loan_id'))->first()
                 ?? abort(404, 'Loan not found.');
-            $prefill = $calculator->prefillFor($loan);
+            ['prefill' => $prefill, 'notes' => $prefillNotes] = $calculator->prefillFor($loan);
         }
 
         $scenarios = null;
@@ -62,6 +63,6 @@ class BinhsCalculatorController extends Controller
             );
         }
 
-        return response()->json(['data' => ['prefill' => $prefill, 'scenarios' => $scenarios]]);
+        return response()->json(['data' => ['prefill' => $prefill, 'prefill_notes' => $prefillNotes, 'scenarios' => $scenarios]]);
     }
 }
