@@ -25,7 +25,8 @@ use Throwable;
  * active user who holds `savings:approve` through an active role (or
  * directly) and can see the account's branch. Never to the people who made or
  * approved it, never by SMS or email. Transfers stay inside the member's own
- * accounts and send none.
+ * accounts and send none; a transfer to share capital (gap round S3) leaves
+ * savings, so it alerts like a withdrawal.
  *
  * Sent after the posting's transaction commits, through the same staff
  * notification the lending events use (StaffNotification, database channel
@@ -36,7 +37,7 @@ class LargeTransactionAlert
     public const TYPE = 'savings_large_transaction';
 
     /** The rows that move cash in or out, in words. */
-    private const ALERTED = ['deposit' => 'Deposit', 'withdrawal' => 'Withdrawal', 'closing' => 'Closing payout'];
+    private const ALERTED = ['deposit' => 'Deposit', 'withdrawal' => 'Withdrawal', 'closing' => 'Closing payout', 'share_capital_transfer' => 'Transfer to share capital'];
 
     public function __construct(private readonly BranchAccess $branches) {}
 

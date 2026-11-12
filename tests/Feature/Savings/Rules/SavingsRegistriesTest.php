@@ -67,15 +67,15 @@ class SavingsRegistriesTest extends TestCase
 
     public function test_an_approval_of_a_kind_with_no_executor_yet_answers_422_and_stays_pending(): void
     {
-        $account = $this->account();
-        $this->fund($account, 100_000);
-        $approval = DB::transaction(fn () => app(ApprovalGate::class)->open('share_capital_transfer', 30_000, ['account_id' => $account->id], $this->admin->id));
-
-        $this->getJson("/api/savings/accounts/{$account->id}")->assertJsonPath('data.pending_amount', '300.00');
+        // `share_capital_transfer` has its executor since gap round S3, so this
+        // uses `reactivation`, the kind still waiting for its own slice.
+        $this->assertTrue(ApprovalGate::hasExecutor('share_capital_transfer'));
+        $account = $this->account(['status' => 'dormant', 'dormant_since' => '2026-11-05']);
+        $approval = DB::transaction(fn () => app(ApprovalGate::class)->open('reactivation', 0, ['account_id' => $account->id], $this->admin->id));
 
         $this->actingAs($this->checker());
         $this->postJson("/api/savings/approvals/{$approval->id}/approve")->assertUnprocessable()
-            ->assertJsonPath('errors.approval.0', 'A share capital transfer request can\'t be carried out yet: this version has no way to complete it. Reject or cancel it instead.');
+            ->assertJsonPath('errors.approval.0', 'A reactivation request can\'t be carried out yet: this version has no way to complete it. Reject or cancel it instead.');
         $this->assertSame('pending', $approval->refresh()->status);
     }
 }

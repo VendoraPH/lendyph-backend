@@ -18,6 +18,7 @@ class ShareCapitalLedger extends Model
         'borrower_id',
         'repayment_id',
         'loan_id',
+        'savings_transaction_id',
         'date',
         'description',
         'reference',
@@ -128,6 +129,15 @@ class ShareCapitalLedger extends Model
     public function loan(): BelongsTo
     {
         return $this->belongsTo(Loan::class);
+    }
+
+    /**
+     * The savings row this credit came from, for a transfer from the member's
+     * savings to their share capital (gap round S3). Null on every other row.
+     */
+    public function savingsTransaction(): BelongsTo
+    {
+        return $this->belongsTo(SavingsTransaction::class);
     }
 
     public function createdByUser(): BelongsTo
