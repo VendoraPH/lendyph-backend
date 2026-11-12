@@ -16,9 +16,11 @@ use Illuminate\Http\Exceptions\HttpResponseException;
  * stage.
  *
  * - Financial statements: draft_fs → for_external_audit → audited. Audited
- *   needs the auditor's name, accreditation number, opinion and report date,
- *   and the template's required documents; exports read "Draft Financial
- *   Statements" until then.
+ *   needs the auditor fields the template names (`meta.auditor_fields`, from
+ *   2026.2: name, firm, CPA number, accreditation number and validity, audit
+ *   date, opinion and report date), else the auditor's name, accreditation
+ *   number, opinion and report date, and the template's required documents;
+ *   exports read "Draft Financial Statements" until then.
  * - Sworn statement: generated (set by the first export, markGenerated())
  *   → for_signature → signed → uploaded, which needs a final signed upload.
  *
@@ -43,6 +45,7 @@ final class ReportStages
         'uploaded' => 'Uploaded',
     ];
 
+    /** What Audited needs when the template names no `meta.auditor_fields` (the 2026.1 templates). */
     private const AUDITOR_FIELDS = ['auditor.auditor_name', 'auditor.auditor_accreditation_no', 'auditor.audit_opinion', 'auditor.audit_report_date'];
 
     public function __construct(private readonly ReportValidator $validator) {}
@@ -74,13 +77,10 @@ final class ReportStages
         }
 
         if ($stage === 'audited') {
-            $values = CdaReportValue::query()->where('report_id', $report->id)->whereIn('field_key', self::AUDITOR_FIELDS)->pluck('value', 'field_key');
+            $definition = new ReportDefinition($report->template?->definition ?? []);
+            $this->assertAuditorFields($report, $definition);
 
-            if (collect(self::AUDITOR_FIELDS)->contains(fn (string $key) => ! FieldValue::filled($values[$key] ?? null))) {
-                throw self::refused('Audited needs the auditor\'s name, accreditation number, opinion and report date first.');
-            }
-
-            foreach ((new ReportDefinition($report->template?->definition ?? []))->documents() as $document) {
+            foreach ($definition->documents() as $document) {
                 if (! $this->validator->documentPresent($report, (string) $document['category'], false)) {
                     throw self::refused('Audited needs '.($document['label'] ?? $document['category']).' uploaded first.');
                 }
@@ -92,6 +92,39 @@ final class ReportStages
         }
 
         $this->store($report, $current, $stage);
+    }
+
+    /**
+     * The auditor fields Audited needs are filled: the template's
+     * `meta.auditor_fields`, named by label when one is missing, else (none
+     * named, or none that resolves) the four fixed ones.
+     */
+    private function assertAuditorFields(CdaReport $report, ReportDefinition $definition): void
+    {
+        $named = (array) ($definition->definition['meta']['auditor_fields'] ?? []);
+        $keys = array_values(array_filter(array_map(fn (mixed $reference) => is_string($reference) ? $definition->resolve($reference) : null, $named)));
+        $keys = $keys === [] ? self::AUDITOR_FIELDS : $keys;
+        $values = CdaReportValue::query()->where('report_id', $report->id)->whereIn('field_key', $keys)->pluck('value', 'field_key');
+        $missing = array_values(array_filter($keys, fn (string $key) => ! FieldValue::filled($values[$key] ?? null)));
+
+        if ($missing === []) {
+            return;
+        }
+
+        if ($keys === self::AUDITOR_FIELDS) {
+            throw self::refused('Audited needs the auditor\'s name, accreditation number, opinion and report date first.');
+        }
+
+        $labels = array_map(fn (string $key) => self::lower((string) ($definition->field($key)['label'] ?? $key)), $missing);
+        $last = array_pop($labels);
+
+        throw self::refused('Audited needs these auditor details first: '.($labels === [] ? $last : implode(', ', $labels).' and '.$last).'.');
+    }
+
+    /** A label inside a sentence: lower-case first letter, unless it starts an abbreviation ("CPA number"). */
+    private static function lower(string $label): string
+    {
+        return preg_match('/^[A-Z]{2}/', $label) === 1 ? $label : lcfirst($label);
     }
 
     /** The sworn statement's first export sets "generated" (called by the exports, C4). */

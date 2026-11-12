@@ -60,7 +60,7 @@ final class TemplateDefinitionValidator
     public const CHECKS = [
         'accounting.year_closed', 'fs.balanced', 'fs.tb_matches_fs', 'members.missing_field', 'officers.training_incomplete',
         'officers.required_positions', 'profile.complete', 'period.cte_valid', 'classification.captured', 'template.verified',
-        'pesos.rules_verified',
+        'pesos.rules_verified', 'savings.gl_matches',
     ];
 
     public const SEVERITIES = ['critical', 'warning', 'info'];
@@ -104,7 +104,7 @@ final class TemplateDefinitionValidator
      * included, is refused.
      */
     private const KEYS = [
-        'meta' => ['verified', 'source_doc', 'notes'],
+        'meta' => ['verified', 'source_doc', 'notes', 'auditor_fields'],
         'deadline' => ['basis', 'days_setting'],
         'section_fields' => ['key', 'title', 'kind', 'description', 'fields'],
         'section_table' => ['key', 'title', 'kind', 'description', 'columns', 'source', 'editable'],
@@ -207,6 +207,7 @@ final class TemplateDefinitionValidator
 
         $this->collectFields($sections);
         $this->checkSections($sections);
+        $this->checkAuditorFields($definition['meta'] ?? null);
 
         if ($this->checkCycles()) {
             $this->checkOverridableCalculations();
@@ -272,6 +273,34 @@ final class TemplateDefinitionValidator
 
         if (isset($meta['source_doc']) && ! is_string($meta['source_doc'])) {
             $this->error('meta.source_doc', '"source_doc" must be text.');
+        }
+    }
+
+    /**
+     * `meta.auditor_fields`: the fields the financial statements' Audited
+     * stage needs filled (ReportStages), each a field of this template that
+     * isn't a table. Absent, the stage keeps its four fixed fields.
+     */
+    private function checkAuditorFields(mixed $meta): void
+    {
+        if (! is_array($meta) || ! array_key_exists('auditor_fields', $meta)) {
+            return;
+        }
+
+        $fields = $meta['auditor_fields'];
+
+        if (! is_array($fields) || ! array_is_list($fields) || $fields === []) {
+            $this->error('meta.auditor_fields', '"auditor_fields" is a list of the fields the Audited stage needs.');
+
+            return;
+        }
+
+        foreach ($fields as $i => $reference) {
+            $full = $this->reference($reference, "meta.auditor_fields.{$i}", null);
+
+            if ($full !== null && $this->fields[$full]['type'] === 'table') {
+                $this->error("meta.auditor_fields.{$i}", "\"{$reference}\" is a table, not an auditor field.");
+            }
         }
     }
 

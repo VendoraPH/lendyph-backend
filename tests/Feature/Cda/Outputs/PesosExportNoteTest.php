@@ -86,7 +86,7 @@ class PesosExportNoteTest extends TestCase
             'report_id' => $this->pesos->id,
             'version' => $version,
             'template_id' => $this->pesos->template_id,
-            'payload' => json_encode(['template' => ['definition' => $definition, 'version' => '2026.1'], 'values' => $values]),
+            'payload' => json_encode(['template' => ['definition' => $definition, 'version' => '2026.2'], 'values' => $values]),
             'checksum' => str_repeat((string) $version, 64),
             'finalized_by' => $this->admin->id,
             'finalized_at' => now(),

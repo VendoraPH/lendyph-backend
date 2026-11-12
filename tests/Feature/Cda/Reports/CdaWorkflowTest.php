@@ -291,6 +291,6 @@ class CdaWorkflowTest extends TestCase
         $this->act($fs, 'set_stage', ['stage' => 'signed'], $auditor)->assertStatus(422)->assertJsonValidationErrors(['stage']);
         $this->act($fs, 'set_stage', ['stage' => 'for_external_audit'], $auditor)->assertOk()->assertJsonPath('data.stage', 'for_external_audit');
         $this->act($fs, 'set_stage', ['stage' => 'audited'], $auditor)->assertStatus(422)
-            ->assertJsonPath('message', 'Audited needs the auditor\'s name, accreditation number, opinion and report date first.');
+            ->assertJsonPath('message', 'Audited needs these auditor details first: auditor\'s name, audit firm, CPA number, BOA / CDA accreditation number, accreditation valid until, audit date, opinion and date of the audit report.');
     }
 }

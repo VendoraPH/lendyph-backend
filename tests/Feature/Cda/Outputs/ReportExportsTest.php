@@ -157,7 +157,7 @@ class ReportExportsTest extends TestCase
         $this->assertStringContainsString('&lt;script&gt;', $html);
         $this->assertStringNotContainsString('<script>', $html);
         $this->assertStringContainsString('CY2026', $html);
-        $this->assertStringContainsString('Template 2026.1', $html);
+        $this->assertStringContainsString('Template 2026.2', $html);
         $this->assertStringContainsString('by Liza D&#039;Souza', $html, 'The name is escaped once, as Blade prints it.');
         $this->assertStringNotContainsString('&amp;#039;', $html);
         $this->assertStringContainsString('Generated Nov 20, 2026', $html);
