@@ -135,4 +135,67 @@ class PortalRulesTest extends TestCase
         // December's free withdrawal is still there.
         $this->money("/api/savings/accounts/{$account->id}/withdrawals", ['amount' => '100.00', 'date' => '2026-12-01', 'payment_method' => 'cash'])->assertCreated();
     }
+
+    public function test_a_cancelled_earlier_portal_request_lowers_a_later_approvals_fee_at_payout(): void
+    {
+        $account = $this->account();
+        $this->fund($account, 5_000_000);
+        $this->product->forceFill(['free_withdrawals_per_month' => 1, 'excess_withdrawal_fee' => '25.00'])->save();
+
+        $request = $this->submitted($this->submit($this->withdrawalBody($account, '100.00'))->assertCreated());
+        $this->assertSame('2026-11-10', $request->counted_on->toDateString());
+
+        $this->travelTo(Carbon::parse('2026-11-10 10:05:00', 'Asia/Manila'));
+        $this->freshRequest();
+        $this->actingAs($maker = $this->userWith(['savings:view', 'savings:transact']));
+        $approval = $this->money("/api/savings/accounts/{$account->id}/withdrawals", ['amount' => '15000.00', 'date' => '2026-11-10', 'payment_method' => 'cash'])
+            ->assertStatus(202)->assertJsonPath('data.approval.fee_amount', '25.00')->json('data.approval.id');
+
+        $this->member('POST', "/api/portal/requests/{$request->id}/cancel")->assertOk();
+
+        $this->freshRequest();
+        $this->actingAs($this->userWith(['savings:view', 'savings:approve']));
+        $this->postJson("/api/savings/approvals/{$approval}/approve")->assertOk();
+        $this->assertSame(0, SavingsTransaction::query()->where('account_id', $account->id)->where('type', 'fee')->count());
+        $this->assertSame('35000.00', $this->balanceOf($account));
+    }
+
+    public function test_open_requests_count_by_the_requests_own_date_not_the_holds(): void
+    {
+        $account = $this->account();
+        $this->fund($account, 500_000);
+        $this->product->forceFill(['free_withdrawals_per_month' => 1])->save();
+
+        $request = $this->submitted($this->submit($this->withdrawalBody($account, '100.00'))->assertCreated());
+        SavingsHold::query()->whereKey($request->savings_hold_id)->update(['placed_on' => '2026-12-01']);
+
+        $rules = app(ProductRules::class);
+        $this->assertSame(1, $rules->withdrawalsInMonth($account->refresh(), '2026-11-10'));
+        $this->assertSame(0, $rules->withdrawalsInMonth($account, '2026-12-01'));
+    }
+
+    public function test_an_approval_in_the_same_second_still_counts_before_a_portal_request(): void
+    {
+        $account = $this->account();
+        $this->fund($account, 5_000_000);
+        $this->product->forceFill(['free_withdrawals_per_month' => 1, 'excess_withdrawal_fee' => '25.00'])->save();
+
+        // 10:00:00: approval A takes the free withdrawal, then portal request P in the same second.
+        $this->freshRequest();
+        $this->actingAs($this->userWith(['savings:view', 'savings:transact']));
+        $approval = $this->money("/api/savings/accounts/{$account->id}/withdrawals", ['amount' => '15000.00', 'date' => '2026-11-10', 'payment_method' => 'cash'])
+            ->assertStatus(202)->assertJsonPath('data.approval.fee_amount', '0.00')->json('data.approval.id');
+        $request = $this->submitted($this->submit($this->withdrawalBody($account, '100.00'))->assertCreated());
+        $this->assertSame('25.00', (string) $request->fee_amount);
+
+        $this->decide($request, ['decision' => 'approve', 'payout' => $this->payout()])->assertCreated();
+        $paid = SavingsTransaction::query()->findOrFail($request->refresh()->savings_transaction_id);
+        $this->assertSame('25.00', (string) SavingsTransaction::query()->where('fee_for_transaction_id', $paid->id)->value('debit'));
+
+        $this->freshRequest();
+        $this->actingAs($this->userWith(['savings:view', 'savings:approve']));
+        $this->postJson("/api/savings/approvals/{$approval}/approve")->assertOk();
+        $this->assertSame(1, SavingsTransaction::query()->where('account_id', $account->id)->where('type', 'fee')->count());
+        $this->assertSame('34875.00', $this->balanceOf($account));
+    }
 }

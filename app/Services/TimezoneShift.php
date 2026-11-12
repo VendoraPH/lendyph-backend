@@ -250,7 +250,7 @@ class TimezoneShift
         // cutover completed, so none of these tables can hold a row written by
         // the old UTC application. Their business dates are DATEs.
         'savings_accounts' => ['created_at', 'updated_at'],
-        'savings_approvals' => ['created_at', 'decided_at', 'expires_at', 'updated_at'],
+        'savings_approvals' => ['created_at', 'decided_at', 'expires_at', 'requested_at', 'updated_at'],
         'savings_holds' => ['created_at', 'updated_at'],
         'savings_idempotency_keys' => ['created_at'],
         'savings_interest_runs' => ['checked_at', 'created_at', 'posted_at', 'reversed_at', 'updated_at'],
@@ -258,7 +258,7 @@ class TimezoneShift
         'savings_products' => ['created_at', 'updated_at'],
         'savings_settings' => ['created_at', 'updated_at'],
         'savings_tax_rules' => ['created_at'],
-        'savings_transactions' => ['created_at'],
+        'savings_transactions' => ['created_at', 'requested_at'],
         // Auto-credit into savings (gap round S3), added 2026-11-13.
         'savings_auto_credit_instructions' => ['created_at', 'updated_at'],
         'savings_auto_credit_postings' => ['created_at'],
@@ -294,7 +294,7 @@ class TimezoneShift
         'portal_login_events' => ['created_at', 'reported_at'],
         'portal_otp_challenges' => ['created_at', 'expires_at', 'verified_at'],
         'portal_request_events' => ['created_at'],
-        'portal_requests' => ['created_at', 'decided_at', 'updated_at'],
+        'portal_requests' => ['created_at', 'decided_at', 'requested_at', 'updated_at'],
         'portal_settings' => ['created_at', 'updated_at'],
         'portal_terms_versions' => ['created_at', 'published_at', 'updated_at'],
         'portal_users' => [
