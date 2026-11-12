@@ -30,6 +30,8 @@ trait ValidatesFormulaFields
 
     private const RATE_NEEDED_MESSAGE = 'Enter the rate when a formula fee goes back to a rate of the principal.';
 
+    private const PERCENTAGE_RATE_NEEDED_MESSAGE = 'Enter the rate when a fee written as a formula changes to a percentage.';
+
     protected function feeTypeRule(): string
     {
         return 'in:'.implode(',', FeeAmount::TYPES);
@@ -87,9 +89,10 @@ trait ValidatesFormulaFields
             }
 
             // A written formula stored its rate as 0: going back to the
-            // recipe needs a rate, or the fee would charge nothing.
-            if ($type === 'formula' && ! $writesFormula && filled($existing?->formula_expression) && ! $this->has('value')) {
-                $v->errors()->add('value', self::RATE_NEEDED_MESSAGE);
+            // recipe, or over to a percentage, needs a rate, or the fee would
+            // charge nothing.
+            if (in_array($type, ['formula', 'percentage'], true) && ! $writesFormula && filled($existing?->formula_expression) && ! $this->has('value')) {
+                $v->errors()->add('value', $type === 'formula' ? self::RATE_NEEDED_MESSAGE : self::PERCENTAGE_RATE_NEEDED_MESSAGE);
             }
 
             if ($v->errors()->hasAny(['min_amount', 'max_amount'])) {

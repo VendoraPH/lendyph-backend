@@ -3,6 +3,7 @@
 namespace App\Services\Fees;
 
 use Brick\Math\BigRational;
+use Brick\Math\Exception\MathException;
 
 /**
  * A Formula fee written as an expression (`fees.formula_expression`), parsed
@@ -17,9 +18,9 @@ use Brick\Math\BigRational;
  *     postfix    := primary "%"?          (÷ 100: 2.5% = 0.025)
  *     primary    := number | variable | "(" expression ")"
  *
- * Numbers are digits with an optional decimal part (`12`, `2.5`). Variables
- * ({@see self::VARIABLES}) match case-insensitively, with any run of spaces
- * counting as one. Nothing else is accepted: no functions, powers, commas or
+ * Numbers are ASCII digits with an optional decimal part (`12`, `2.5`).
+ * Variables ({@see self::VARIABLES}) match case-insensitively, with any run
+ * of spaces, Unicode spaces included, counting as one. Nothing else is accepted: no functions, powers, commas or
  * other names, and nothing is ever handed to `eval`.
  *
  * ## Refused at parse (save), each in words
@@ -96,7 +97,18 @@ final class FeeExpression
 
         $parser = new self($source, [], []);
         $parser->tokens = self::tokenize($source);
-        $tree = $parser->expression();
+
+        // Only spaces PHP's trim() doesn't know (a non-breaking or ideographic
+        // space): still nothing written.
+        if ($parser->tokens === []) {
+            throw FeeExpressionException::invalid(self::EMPTY);
+        }
+
+        try {
+            $tree = $parser->expression();
+        } catch (MathException) {
+            throw FeeExpressionException::invalid(self::STRAY);
+        }
 
         if ($parser->position < count($parser->tokens)) {
             throw FeeExpressionException::invalid($parser->unexpected($parser->tokens[$parser->position]));
@@ -172,7 +184,9 @@ final class FeeExpression
                 continue;
             }
 
-            if (preg_match('/\G\d+(?:\.\d+)?/u', $source, $match, 0, $offset) === 1) {
+            // ASCII digits only: a full-width or Arabic-Indic digit is a
+            // stray character, never a number.
+            if (preg_match('/\G[0-9]+(?:\.[0-9]+)?/u', $source, $match, 0, $offset) === 1) {
                 $tokens[] = ['type' => 'number', 'value' => $match[0], 'text' => $match[0]];
             } elseif (preg_match('/\G[A-Za-z]+(?:\s+[A-Za-z]+)*/u', $source, $match, 0, $offset) === 1) {
                 $tokens[] = self::variableToken($match[0]);
@@ -201,7 +215,10 @@ final class FeeExpression
      */
     private static function variableToken(string $written): array
     {
-        $normalised = strtolower((string) preg_replace('/\s+/', ' ', $written));
+        // Any run of spaces counts as one, Unicode spaces included, the same
+        // spaces the tokenizer skips.
+        $folded = (string) preg_replace('/\s+/u', ' ', $written);
+        $normalised = strtolower($folded);
 
         foreach (self::VARIABLES as $key => $name) {
             if (strtolower($name) === $normalised) {
@@ -211,9 +228,7 @@ final class FeeExpression
 
         $names = array_values(self::VARIABLES);
         $list = implode(', ', array_slice($names, 0, -1)).' or '.end($names);
-        $shown = (string) preg_replace('/\s+/', ' ', $written);
-
-        throw FeeExpressionException::invalid("Use a variable name from the list: {$list}. '{$shown}' isn't one.");
+        throw FeeExpressionException::invalid("Use a variable name from the list: {$list}. '{$folded}' isn't one.");
     }
 
     /**

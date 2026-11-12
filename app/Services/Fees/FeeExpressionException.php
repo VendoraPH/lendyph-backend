@@ -14,8 +14,10 @@ use RuntimeException;
  *   `detail` names the variable when the divisor is one ("Term in Days is
  *   0").
  * - `NEGATIVE`: on a real loan, the result is below ₱0.00.
+ * - `TOO_LARGE`: on a real loan, the amount charged is above
+ *   ₱9,999,999,999.99, the most a money column holds.
  *
- * The callers that charge a fee turn the last two into a 422 on `fees`,
+ * The callers that charge a fee turn the last three into a 422 on `fees`,
  * naming the fee ({@see self::messageForFee()}).
  */
 final class FeeExpressionException extends RuntimeException
@@ -25,6 +27,8 @@ final class FeeExpressionException extends RuntimeException
     public const DIVIDES_BY_ZERO = 'divides_by_zero';
 
     public const NEGATIVE = 'negative';
+
+    public const TOO_LARGE = 'too_large';
 
     private function __construct(public readonly string $reason, string $message, public readonly ?string $detail = null)
     {
@@ -46,6 +50,11 @@ final class FeeExpressionException extends RuntimeException
         return new self(self::NEGATIVE, 'works out below ₱0.00');
     }
 
+    public static function tooLarge(): self
+    {
+        return new self(self::TOO_LARGE, 'works out too large (above ₱9,999,999,999.99)');
+    }
+
     /**
      * The 422 message on `fees` for a fee that can't be charged on a loan.
      */
@@ -53,6 +62,7 @@ final class FeeExpressionException extends RuntimeException
     {
         return match ($this->reason) {
             self::NEGATIVE => "The fee \"{$feeName}\" works out below ₱0.00 for this loan.",
+            self::TOO_LARGE => "The fee \"{$feeName}\" works out too large for this loan (above ₱9,999,999,999.99).",
             self::DIVIDES_BY_ZERO => "The fee \"{$feeName}\" can't be worked out for this loan: it {$this->getMessage()}.",
             default => "The fee \"{$feeName}\" can't be worked out for this loan: {$this->getMessage()}",
         };
@@ -65,6 +75,7 @@ final class FeeExpressionException extends RuntimeException
     {
         return match ($this->reason) {
             self::NEGATIVE => 'On the sample loan the formula works out below ₱0.00.',
+            self::TOO_LARGE => 'On the sample loan the formula '.$this->getMessage().'.',
             self::DIVIDES_BY_ZERO => 'On the sample loan the formula '.$this->getMessage().'.',
             default => $this->getMessage(),
         };

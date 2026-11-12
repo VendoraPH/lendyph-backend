@@ -37,6 +37,12 @@ use Brick\Math\RoundingMode;
  */
 final class FeeAmount
 {
+    /**
+     * The most a fee may come to: what the 12,2 money columns (a loan's
+     * deductions totals, the bounds) can hold.
+     */
+    public const LARGEST_AMOUNT = '9999999999.99';
+
     /** The fee types a catalog fee or a product custom fee may have. */
     public const TYPES = ['fixed', 'percentage', 'formula'];
 
@@ -95,9 +101,10 @@ final class FeeAmount
      * The exact result is cut to 6 decimals half up for `raw_amount`, rounded
      * half up to the centavo from the exact figure (never from the 6-decimal
      * one, so nothing is rounded twice), then kept between `$minAmount` and
-     * `$maxAmount` when they're set.
+     * `$maxAmount` when they're set. An amount above
+     * {@see self::LARGEST_AMOUNT} after the bounds is refused.
      *
-     * @throws FeeExpressionException DIVIDES_BY_ZERO or NEGATIVE on these inputs
+     * @throws FeeExpressionException DIVIDES_BY_ZERO, NEGATIVE or TOO_LARGE on these inputs
      */
     public static function forExpression(FeeExpression $expression, FeeFormulaInputs $inputs, mixed $minAmount = null, mixed $maxAmount = null): ?FeeFormulaResult
     {
@@ -108,26 +115,46 @@ final class FeeAmount
         }
 
         $rounded = $raw->toScale(2, RoundingMode::HalfUp);
-        $centavos = $rounded->getUnscaledValue()->toInt();
+        $amount = $rounded;
         $clamped = null;
-        $min = self::centavosOrNull($minAmount);
-        $max = self::centavosOrNull($maxAmount);
+        $min = self::decimalOrNull($minAmount);
+        $max = self::decimalOrNull($maxAmount);
 
-        if ($min !== null && $centavos < $min) {
-            [$centavos, $clamped] = [$min, 'min'];
+        // Compared as decimals, never as integers: a formula can work out far
+        // beyond what an int holds before a maximum brings it back down.
+        if ($min !== null && $amount->isLessThan($min)) {
+            [$amount, $clamped] = [$min, 'min'];
         }
 
-        if ($max !== null && $centavos > $max) {
-            [$centavos, $clamped] = [$max, 'max'];
+        if ($max !== null && $amount->isGreaterThan($max)) {
+            [$amount, $clamped] = [$max, 'max'];
+        }
+
+        if ($amount->isGreaterThan(self::LARGEST_AMOUNT)) {
+            throw FeeExpressionException::tooLarge();
         }
 
         return new FeeFormulaResult(
             raw: $raw,
             rawAmount: (string) $raw->toScale(6, RoundingMode::HalfUp),
             roundedAmount: (string) $rounded,
-            amount: (string) BigDecimal::ofUnscaledValue($centavos, 2),
+            amount: (string) $amount,
             clamped: $clamped,
         );
+    }
+
+    /**
+     * A bound as a 2-place decimal, or null when it isn't set.
+     */
+    private static function decimalOrNull(mixed $amount): ?BigDecimal
+    {
+        if ($amount === null || $amount === '' || ! is_numeric($amount)) {
+            return null;
+        }
+
+        $written = is_float($amount) ? number_format($amount, 2, '.', '') : (string) $amount;
+
+        return BigDecimal::of($written)->toScale(2, RoundingMode::HalfUp);
     }
 
     /**

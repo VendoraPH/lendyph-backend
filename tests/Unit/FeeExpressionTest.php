@@ -213,6 +213,43 @@ class FeeExpressionTest extends TestCase
         )->amount);
     }
 
+    public function test_a_result_above_the_largest_amount_is_refused_and_a_maximum_still_clamps_it(): void
+    {
+        $cube = FeeExpression::parse('Principal Amount × Principal Amount × Principal Amount');
+
+        try {
+            FeeAmount::forExpression($cube, $this->inputs('1000000.00'));
+            $this->fail('A fee above ₱9,999,999,999.99 was worked out.');
+        } catch (FeeExpressionException $e) {
+            $this->assertSame(FeeExpressionException::TOO_LARGE, $e->reason);
+        }
+
+        $capped = FeeAmount::forExpression($cube, $this->inputs('1000000.00'), null, '500.00');
+        $this->assertSame('500.00', $capped->amount);
+        $this->assertSame('max', $capped->clamped);
+        $this->assertSame('1000000000000000000.00', $capped->roundedAmount);
+
+        $this->assertSame('9999999999.99', FeeAmount::forExpression(FeeExpression::parse('Principal Amount × 1'), $this->inputs('9999999999.99'))->amount);
+
+        $this->expectException(FeeExpressionException::class);
+        FeeAmount::forExpression(FeeExpression::parse('Principal Amount + 0.01'), $this->inputs('9999999999.99'));
+    }
+
+    public function test_only_ascii_digits_are_numbers(): void
+    {
+        $this->assertSame(self::STRAY, $this->refusal('Principal Amount × ２.５%'));
+        $this->assertSame(self::STRAY, $this->refusal('Loan Term × ٣'));
+    }
+
+    public function test_unicode_spaces_fold_like_ascii_ones(): void
+    {
+        $expression = FeeExpression::parse("Principal\u{00A0}Amount ×\u{3000}1%");
+
+        $this->assertSame(['Principal Amount'], $expression->variables());
+        $this->assertSame('1000.00', FeeAmount::forExpression($expression, $this->inputs())->amount);
+        $this->assertSame('Write a formula, for example (Principal Amount × 2.5%) ÷ 365.', $this->refusal("\u{00A0}\u{3000}\u{2003}"));
+    }
+
     public function test_the_trimmed_source_is_kept_as_written(): void
     {
         $this->assertSame('(Principal Amount × 2.5%) ÷ 365', FeeExpression::parse("  (Principal Amount × 2.5%) ÷ 365 \n")->source());

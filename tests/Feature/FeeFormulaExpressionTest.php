@@ -163,6 +163,19 @@ class FeeFormulaExpressionTest extends TestCase
             ->assertOk()->assertJsonPath('data.formula_expression', null)->assertJsonPath('data.value', 1.25);
     }
 
+    public function test_a_type_change_off_a_written_formula_needs_a_rate(): void
+    {
+        $fee = Fee::create(['name' => 'Written', 'type' => 'formula', 'value' => 0, 'formula_expression' => 'Loan Amount * 1%']);
+
+        $this->putJson("/api/fees/{$fee->id}", ['type' => 'percentage'])
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.value', ['Enter the rate when a fee written as a formula changes to a percentage.']);
+        $this->assertSame('Loan Amount * 1%', $fee->fresh()->formula_expression);
+
+        $this->putJson("/api/fees/{$fee->id}", ['type' => 'percentage', 'value' => 1.5])
+            ->assertOk()->assertJsonPath('data.value', 1.5)->assertJsonPath('data.formula_expression', null);
+    }
+
     /**
      * @return array<string, array{string, string}>
      */
@@ -351,14 +364,61 @@ class FeeFormulaExpressionTest extends TestCase
         $this->assertSame('approved', $loan->fresh()->status);
     }
 
-    public function test_a_divisor_that_works_out_to_zero_on_the_form_preview_answers_422(): void
+    public function test_a_divisor_that_works_out_to_zero_on_the_form_preview_is_reported_in_the_preview(): void
     {
         $product = $this->freeProduct();
         $this->expressionFee($product, 'Loan Amount / (Loan Term − 6)', ['name' => 'Odd Fee']);
 
-        $this->postJson('/api/loans/preview', $this->formPreviewBody($product, 10000))
+        $preview = $this->postJson('/api/loans/preview', $this->formPreviewBody($product, 10000))->assertOk()->json('data');
+
+        $this->assertSame('The fee "Odd Fee" can\'t be worked out for this loan: it divides by zero.', $preview['deductions']['error']);
+        $this->assertSame([], $preview['deductions']['configured_fees']);
+        $this->assertNull($preview['deductions']['net_proceeds']);
+        $this->assertNotNull($preview['amortization']);
+    }
+
+    public function test_the_form_preview_falls_back_to_the_products_rate_as_the_create_does(): void
+    {
+        $product = $this->freeProduct(['interest_rate' => 3.0, 'interest_rate_frequency' => 'weekly']);
+        $this->expressionFee($product, 'Loan Amount × Interest Rate% ÷ 10');
+
+        $body = $this->formPreviewBody($product, 10000);
+        unset($body['interest_rate']);
+        $item = $this->postJson('/api/loans/preview', $body)->assertOk()->json('data.deductions.configured_fees.0');
+
+        $this->assertEquals(30.0, $item['amount']);
+        $this->assertSame('3.0000', $item['formula_inputs']['interest_rate']);
+        $this->assertSame('weekly', $item['formula_inputs']['interest_rate_frequency']);
+    }
+
+    public function test_a_fee_above_the_largest_amount_answers_422_not_500(): void
+    {
+        $product = $this->freeProduct(['max_amount' => 10000000]);
+        $this->expressionFee($product, 'Principal Amount × Principal Amount × Principal Amount', ['name' => 'Cube']);
+        $loan = $this->approvedLoan($product, 1000000);
+
+        $message = 'The fee "Cube" works out too large for this loan (above ₱9,999,999,999.99).';
+
+        $this->getJson("/api/loans/{$loan->id}/release-preview")->assertUnprocessable()->assertJsonPath('errors.fees', [$message]);
+        $this->patchJson("/api/loans/{$loan->id}/release", [])->assertUnprocessable()->assertJsonPath('errors.fees', [$message]);
+        $this->assertSame($message, $this->postJson('/api/loans/preview', $this->formPreviewBody($product, 1000000))->assertOk()->json('data.deductions.error'));
+
+        $this->postJson('/api/fees/formula-check', ['formula_expression' => 'Principal Amount × Principal Amount', 'principal_amount' => '9999999999.99'])
             ->assertUnprocessable()
-            ->assertJsonPath('errors.fees', ['The fee "Odd Fee" can\'t be worked out for this loan: it divides by zero.']);
+            ->assertJsonPath('errors.sample', ['On the sample loan the formula works out too large (above ₱9,999,999,999.99).']);
+    }
+
+    public function test_a_huge_typed_term_on_the_form_preview_is_reported_not_a_500(): void
+    {
+        $product = $this->freeProduct();
+        $this->expressionFee($product, 'Loan Amount × Loan Term', ['name' => 'Per Month']);
+
+        $body = [...$this->formPreviewBody($product, 10000), 'term' => 1000000000000];
+
+        $this->assertSame(
+            'The fee "Per Month" works out too large for this loan (above ₱9,999,999,999.99).',
+            $this->postJson('/api/loans/preview', $body)->assertOk()->json('data.deductions.error'),
+        );
     }
 
     public function test_a_negative_result_answers_422_naming_the_fee(): void
@@ -370,7 +430,7 @@ class FeeFormulaExpressionTest extends TestCase
         $message = 'The fee "Rebate" works out below ₱0.00 for this loan.';
 
         $this->getJson("/api/loans/{$loan->id}/release-preview")->assertUnprocessable()->assertJsonPath('errors.fees', [$message]);
-        $this->postJson('/api/loans/preview', $this->formPreviewBody($product, 10000))->assertUnprocessable()->assertJsonPath('errors.fees', [$message]);
+        $this->assertSame($message, $this->postJson('/api/loans/preview', $this->formPreviewBody($product, 10000))->assertOk()->json('data.deductions.error'));
         $this->getJson("/api/loans/{$loan->id}/disclosure")->assertUnprocessable()->assertJsonPath('errors.fees', [$message]);
         $this->patchJson("/api/loans/{$loan->id}/release", [])->assertUnprocessable()->assertJsonPath('errors.fees', [$message]);
         $this->assertSame('approved', $loan->fresh()->status);
