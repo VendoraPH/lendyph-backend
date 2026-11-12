@@ -1,0 +1,180 @@
+{
+  "report_type": "abr",
+  "version": "2026.2",
+  "name": "Annual Benefits Report (ABR) CY2026",
+  "effective_from": "2026-01-01",
+  "effective_until": null,
+  "cooperative_types": [],
+  "asset_classes": [],
+  "definition": {
+    "schema_version": 1,
+    "meta": {
+      "verified": false,
+      "source_doc": "ABR template, April 2026 (owner to supply the Excel; to verify)",
+      "notes": "2026.2 (2026-11-12): Adds benefits to employees, the community and other beneficiaries. Still to verify against the official CDA form."
+    },
+    "parts": [
+      "annual"
+    ],
+    "deadline": {
+      "basis": "year_end",
+      "days_setting": "annual_deadline_days"
+    },
+    "applies": {
+      "requires_cte": true
+    },
+    "sections": [
+      {
+        "key": "benefits",
+        "title": "Benefits to members",
+        "kind": "fields",
+        "fields": [
+          {
+            "key": "patronage_refund",
+            "label": "Patronage refund paid",
+            "type": "money",
+            "required": true
+          },
+          {
+            "key": "interest_on_share_capital",
+            "label": "Interest on share capital paid",
+            "type": "money",
+            "required": true
+          },
+          {
+            "key": "cdf_used",
+            "label": "Community Development Fund used",
+            "type": "money",
+            "source": {
+              "key": "social_programs.summary",
+              "params": {
+                "measure": "cdf_amount"
+              }
+            }
+          },
+          {
+            "key": "members_benefited",
+            "label": "Members who benefited",
+            "type": "number",
+            "decimals": 0,
+            "required": true
+          }
+        ]
+      },
+      {
+        "key": "employees",
+        "title": "Benefits to employees",
+        "kind": "fields",
+        "fields": [
+          {
+            "key": "employees_benefited",
+            "label": "Employees who benefited",
+            "type": "number",
+            "decimals": 0
+          },
+          {
+            "key": "employee_benefits",
+            "label": "Employee benefits given",
+            "type": "money"
+          },
+          {
+            "key": "employee_benefits_description",
+            "label": "Description",
+            "type": "textarea"
+          }
+        ]
+      },
+      {
+        "key": "community",
+        "title": "Benefits to the community",
+        "kind": "fields",
+        "fields": [
+          {
+            "key": "community_beneficiaries",
+            "label": "Community beneficiaries",
+            "type": "number",
+            "decimals": 0
+          },
+          {
+            "key": "community_benefits",
+            "label": "Community benefits given",
+            "type": "money"
+          },
+          {
+            "key": "community_benefits_description",
+            "label": "Description",
+            "type": "textarea"
+          }
+        ]
+      },
+      {
+        "key": "other_beneficiaries",
+        "title": "Benefits to other beneficiaries",
+        "kind": "fields",
+        "fields": [
+          {
+            "key": "other_beneficiaries_count",
+            "label": "Other beneficiaries",
+            "type": "number",
+            "decimals": 0
+          },
+          {
+            "key": "other_benefits",
+            "label": "Other benefits given",
+            "type": "money"
+          },
+          {
+            "key": "other_benefits_description",
+            "label": "Description",
+            "type": "textarea"
+          }
+        ]
+      },
+      {
+        "key": "programs",
+        "title": "Programs",
+        "kind": "table",
+        "source": {
+          "key": "social_programs.list"
+        },
+        "columns": [
+          {
+            "key": "name",
+            "label": "Program",
+            "format": "text"
+          },
+          {
+            "key": "actual_beneficiaries",
+            "label": "Beneficiaries",
+            "format": "number"
+          },
+          {
+            "key": "actual_expense",
+            "label": "Amount spent",
+            "format": "money"
+          }
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "cte_valid",
+        "type": "check",
+        "check": "period.cte_valid",
+        "severity": "critical",
+        "category": "compliance_document",
+        "component": "fields",
+        "fix_href": "/cda/settings"
+      },
+      {
+        "id": "template_verified",
+        "type": "check",
+        "check": "template.verified",
+        "severity": "info",
+        "category": "invalid_data",
+        "component": "fields",
+        "message": "This form follows the CDA template as understood in v1 and is still to be checked against the official form."
+      }
+    ]
+  }
+}

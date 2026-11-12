@@ -60,7 +60,7 @@ class CdaFrontendContractTest extends TestCase
 
     public function test_a_template_carries_every_cda_template_field(): void
     {
-        $data = $this->getJson('/api/cda/templates?report_type=officers_trainings')->assertOk()->json('data');
+        $data = $this->getJson('/api/cda/templates?report_type=officers_trainings&status=active')->assertOk()->json('data');
         $this->assertCount(1, $data);
         $template = $data[0];
 

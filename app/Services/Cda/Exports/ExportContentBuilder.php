@@ -13,6 +13,9 @@ use App\Services\Cda\Reports\ReportStages;
 use App\Services\Cda\ReportTypes;
 use App\Services\Cda\Sources\PesosSource;
 use Carbon\CarbonImmutable;
+use finfo;
+use Illuminate\Support\Facades\Storage;
+use Throwable;
 
 /**
  * Builds what an export shows (CDA design §9).
@@ -37,6 +40,10 @@ use Carbon\CarbonImmutable;
  * Statements" until they are audited, even after finalize, and a sworn
  * statement's first export is what makes it "Generated".
  *
+ * The cooperative's logo is read at export time, drafts and finalized
+ * reports alike (logoDataUri()); the name and address of a finalized report
+ * stay its snapshot's.
+ *
  * Field keys are "section.field"; a table section's rows are stored under the
  * section's key.
  */
@@ -45,6 +52,12 @@ final class ExportContentBuilder
     public const TIMEZONE = 'Asia/Manila';
 
     public const DRAFT_FS_TITLE = 'Draft Financial Statements';
+
+    /** The logo's largest size, as Settings › Branding accepts it. */
+    public const LOGO_MAX_BYTES = 5 * 1024 * 1024;
+
+    /** The logo types the PDF shows, by the file's real type. */
+    private const LOGO_TYPES = ['image/png', 'image/jpeg', 'image/gif'];
 
     private const STATUS_LABELS = [
         CdaReport::STATUS_DRAFT => 'Draft',
@@ -129,7 +142,56 @@ final class ExportContentBuilder
             unverified: $report->report_type === 'pesos'
                 ? ! PesosSource::verified(($definition['meta']['verified'] ?? false) === true, $sourceValues)
                 : ($definition['meta']['verified'] ?? false) !== true,
+            logoDataUri: $this->logoDataUri(),
         );
+    }
+
+    /**
+     * Settings › Branding's logo as a data URI: a file on the public disk,
+     * at most LOGO_MAX_BYTES, whose real type (read from its contents, never
+     * its name) is PNG, JPEG or GIF. Anything else, a path that leaves the
+     * disk or a file that can't be read gives null, and the header shows the
+     * name alone. Never a URL: dompdf fetches nothing.
+     */
+    private function logoDataUri(): ?string
+    {
+        $path = BrandingSetting::query()->orderBy('id')->value('logo_path');
+
+        if (! is_string($path) || $path === '' || str_contains($path, '..') || str_contains($path, '://') || str_starts_with($path, '/') || str_contains($path, "\0")) {
+            return null;
+        }
+
+        try {
+            $disk = Storage::disk('public');
+
+            if (! $disk->exists($path) || $disk->size($path) > self::LOGO_MAX_BYTES) {
+                return null;
+            }
+
+            $bytes = $disk->get($path);
+        } catch (Throwable) {
+            return null;
+        }
+
+        if (! is_string($bytes) || $bytes === '' || strlen($bytes) > self::LOGO_MAX_BYTES) {
+            return null;
+        }
+
+        $type = (new finfo(FILEINFO_MIME_TYPE))->buffer($bytes);
+
+        if (! in_array($type, self::LOGO_TYPES, true)) {
+            return null;
+        }
+
+        try {
+            if (getimagesizefromstring($bytes) === false) {
+                return null;
+            }
+        } catch (Throwable) {
+            return null;
+        }
+
+        return 'data:'.$type.';base64,'.base64_encode($bytes);
     }
 
     /**

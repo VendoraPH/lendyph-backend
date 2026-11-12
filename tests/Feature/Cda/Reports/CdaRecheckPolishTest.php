@@ -77,7 +77,7 @@ class CdaRecheckPolishTest extends TestCase
     {
         $doubles = [];
 
-        foreach (glob(database_path('cda-templates/*.json')) as $path) {
+        foreach ([...glob(database_path('cda-templates/*.json')), ...glob(database_path('cda-templates/2026.2/*.json'))] as $path) {
             $json = json_decode((string) file_get_contents($path), true);
             $definition = $json['definition'] ?? $json;
             $this->assertSame([], app(TemplateDefinitionValidator::class)->validate($definition, (string) $json['report_type']), basename($path));
@@ -85,13 +85,13 @@ class CdaRecheckPolishTest extends TestCase
             foreach ($definition['documents'] ?? [] as $document) {
                 foreach ($definition['rules'] ?? [] as $rule) {
                     if (($rule['type'] ?? null) === 'document' && $rule['document_category'] === $document['category']) {
-                        $doubles[] = basename($path, '.json').':'.$document['key'];
+                        $doubles[] = $json['version'].' '.basename($path, '.json').':'.$document['key'];
                     }
                 }
             }
         }
 
-        $this->assertSame(['capr:signed_capr'], $doubles, 'A new double needs the same one-issue check.');
+        $this->assertSame(['2026.1 capr:signed_capr', '2026.2 capr:signed_capr'], $doubles, 'A new double needs the same one-issue check.');
     }
 
     public function test_a_failed_report_refresh_after_a_capture_is_reported_and_the_capture_still_stands(): void

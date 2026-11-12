@@ -1,0 +1,359 @@
+{
+  "report_type": "pesos",
+  "version": "2026.2",
+  "name": "Enhanced PESOS CY2026 (placeholder)",
+  "effective_from": "2026-01-01",
+  "effective_until": null,
+  "cooperative_types": [],
+  "asset_classes": [],
+  "definition": {
+    "schema_version": 1,
+    "meta": {
+      "verified": false,
+      "source_doc": "Pre-2025 PESOS shape, placeholder: to verify against the official MC 2025-12 tool",
+      "notes": "2026.2 (2026-11-12): Same content as 2026.1, so every report type has one active 2026.2 template. Still to verify against the official CDA form."
+    },
+    "parts": [
+      "annual"
+    ],
+    "deadline": {
+      "basis": "year_end",
+      "days_setting": "annual_deadline_days"
+    },
+    "sections": [
+      {
+        "key": "result",
+        "title": "Result",
+        "kind": "fields",
+        "fields": [
+          {
+            "key": "score",
+            "label": "Total score",
+            "type": "number",
+            "decimals": 2,
+            "source": {
+              "key": "pesos.result",
+              "params": {
+                "field": "score"
+              }
+            }
+          },
+          {
+            "key": "rating",
+            "label": "Rating",
+            "type": "text",
+            "source": {
+              "key": "pesos.result",
+              "params": {
+                "field": "rating"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "key": "indicators",
+        "title": "Indicators",
+        "kind": "table",
+        "source": {
+          "key": "pesos.result",
+          "params": {
+            "field": "indicators"
+          }
+        },
+        "columns": [
+          {
+            "key": "label",
+            "label": "Indicator",
+            "format": "text"
+          },
+          {
+            "key": "value",
+            "label": "Result",
+            "format": "percent"
+          },
+          {
+            "key": "score",
+            "label": "Score",
+            "format": "number"
+          },
+          {
+            "key": "weight",
+            "label": "Weight",
+            "format": "number"
+          }
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "pesos_rules_verified",
+        "type": "check",
+        "check": "pesos.rules_verified",
+        "severity": "info",
+        "category": "financial_data",
+        "component": "sources",
+        "message": "The PESOS indicators are placeholders until checked against the official MC 2025-12 tool."
+      },
+      {
+        "id": "template_verified",
+        "type": "check",
+        "check": "template.verified",
+        "severity": "info",
+        "category": "invalid_data",
+        "component": "fields",
+        "message": "This form follows the CDA template as understood in v1 and is still to be checked against the official form."
+      }
+    ],
+    "pesos": {
+      "components": [
+        {
+          "key": "portfolio_quality",
+          "label": "Portfolio quality",
+          "weight": 30
+        },
+        {
+          "key": "efficiency",
+          "label": "Efficiency",
+          "weight": 20
+        },
+        {
+          "key": "solvency",
+          "label": "Solvency",
+          "weight": 20
+        },
+        {
+          "key": "operations",
+          "label": "Operations and growth",
+          "weight": 15
+        },
+        {
+          "key": "sustainability",
+          "label": "Sustainability",
+          "weight": 15
+        }
+      ],
+      "indicators": [
+        {
+          "key": "portfolio_at_risk",
+          "component": "portfolio_quality",
+          "label": "Portfolio at risk",
+          "formula_key": "ratio",
+          "numerator": {
+            "key": "loans.past_due",
+            "params": {
+              "measure": "amount"
+            }
+          },
+          "denominator": {
+            "key": "loans.outstanding",
+            "params": {
+              "measure": "principal"
+            }
+          },
+          "unit": "percent",
+          "direction": "lower_better",
+          "weight": 15,
+          "bands": [
+            {
+              "min": null,
+              "max": "5.00",
+              "points": 15
+            },
+            {
+              "min": "5.00",
+              "max": "10.00",
+              "points": 8
+            },
+            {
+              "min": "10.00",
+              "max": null,
+              "points": 0
+            }
+          ]
+        },
+        {
+          "key": "allowance_coverage",
+          "component": "portfolio_quality",
+          "label": "Allowance for probable losses coverage",
+          "formula_key": "coverage",
+          "numerator": {
+            "key": "loans.allowance_booked"
+          },
+          "denominator": {
+            "key": "loans.provision_required"
+          },
+          "unit": "percent",
+          "direction": "higher_better",
+          "weight": 15,
+          "bands": [
+            {
+              "min": "100.00",
+              "max": null,
+              "points": 15
+            },
+            {
+              "min": "50.00",
+              "max": "100.00",
+              "points": 8
+            },
+            {
+              "min": null,
+              "max": "50.00",
+              "points": 0
+            }
+          ]
+        },
+        {
+          "key": "cost_ratio",
+          "component": "efficiency",
+          "label": "Operating cost ratio",
+          "formula_key": "ratio",
+          "numerator": {
+            "key": "fs.total_expenses"
+          },
+          "denominator": {
+            "key": "fs.total_income"
+          },
+          "unit": "percent",
+          "direction": "lower_better",
+          "weight": 20,
+          "bands": [
+            {
+              "min": null,
+              "max": "70.00",
+              "points": 20
+            },
+            {
+              "min": "70.00",
+              "max": "90.00",
+              "points": 10
+            },
+            {
+              "min": "90.00",
+              "max": null,
+              "points": 0
+            }
+          ]
+        },
+        {
+          "key": "capital_ratio",
+          "component": "solvency",
+          "label": "Equity to total assets",
+          "formula_key": "ratio",
+          "numerator": {
+            "key": "fs.total_equity"
+          },
+          "denominator": {
+            "key": "fs.total_assets"
+          },
+          "unit": "percent",
+          "direction": "higher_better",
+          "weight": 20,
+          "bands": [
+            {
+              "min": "20.00",
+              "max": null,
+              "points": 20
+            },
+            {
+              "min": "10.00",
+              "max": "20.00",
+              "points": 10
+            },
+            {
+              "min": null,
+              "max": "10.00",
+              "points": 0
+            }
+          ]
+        },
+        {
+          "key": "asset_growth",
+          "component": "operations",
+          "label": "Growth in total assets",
+          "formula_key": "growth",
+          "numerator": {
+            "key": "fs.total_assets"
+          },
+          "denominator": {
+            "key": "fs.total_assets",
+            "params": {
+              "as_of": "prior_period_end"
+            }
+          },
+          "unit": "percent",
+          "direction": "higher_better",
+          "weight": 15,
+          "bands": [
+            {
+              "min": "10.00",
+              "max": null,
+              "points": 15
+            },
+            {
+              "min": "0.00",
+              "max": "10.00",
+              "points": 8
+            },
+            {
+              "min": null,
+              "max": "0.00",
+              "points": 0
+            }
+          ]
+        },
+        {
+          "key": "self_sufficiency",
+          "component": "sustainability",
+          "label": "Operational self-sufficiency",
+          "formula_key": "ratio",
+          "numerator": {
+            "key": "fs.total_income"
+          },
+          "denominator": {
+            "key": "fs.total_expenses"
+          },
+          "unit": "percent",
+          "direction": "higher_better",
+          "weight": 15,
+          "bands": [
+            {
+              "min": "110.00",
+              "max": null,
+              "points": 15
+            },
+            {
+              "min": "100.00",
+              "max": "110.00",
+              "points": 8
+            },
+            {
+              "min": null,
+              "max": "100.00",
+              "points": 0
+            }
+          ]
+        }
+      ],
+      "rating_bands": [
+        {
+          "min": "90.00",
+          "label": "Very Satisfactory"
+        },
+        {
+          "min": "75.00",
+          "label": "Satisfactory"
+        },
+        {
+          "min": "60.00",
+          "label": "Fair"
+        },
+        {
+          "min": "0.00",
+          "label": "Needs Improvement"
+        }
+      ]
+    }
+  }
+}

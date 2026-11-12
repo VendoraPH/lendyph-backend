@@ -13,7 +13,11 @@ use App\Services\Cda\CdaAccess;
  * #510's categories, plus one per report type so a template's document rule
  * (`document_category`) and an export can name its report, plus training
  * certificates, submission proofs and report exports (an export is
- * restricted by its report's type, through `report_id`).
+ * restricted by its report's type, through `report_id`). The 2026.2
+ * templates add the audited statements' supporting papers (management
+ * representation letter, statement of management responsibility, notes to
+ * the financial statements), restricted like the statements, and CDA
+ * correspondence.
  */
 final class DocumentCategories
 {
@@ -29,6 +33,9 @@ final class DocumentCategories
         'capr' => 'Cooperative Annual Progress Report (CAPR)',
         'financial_statements' => 'Audited financial statements',
         'audit_report' => 'Auditor\'s report',
+        'management_representation' => 'Management representation letter',
+        'management_responsibility' => 'Statement of management responsibility',
+        'fs_notes' => 'Notes to the financial statements',
         'performance_audit' => 'Performance audit',
         'social_audit' => 'Social audit',
         'pesos' => 'Enhanced PESOS',
@@ -39,6 +46,7 @@ final class DocumentCategories
         'abr' => 'Annual Benefits Report (ABR)',
         'tax' => 'Tax documents',
         'minutes' => 'Minutes of meetings',
+        'cda_correspondence' => 'CDA Correspondence',
         self::CERTIFICATES => 'Training certificates',
         self::SUBMISSION_PROOF => 'Proof of submission',
         self::REPORT_EXPORT => 'Report export',
@@ -49,6 +57,9 @@ final class DocumentCategories
     private const RESTRICTED = [
         'financial_statements' => CdaAccess::VIEW_AUDIT,
         'audit_report' => CdaAccess::VIEW_AUDIT,
+        'management_representation' => CdaAccess::VIEW_AUDIT,
+        'management_responsibility' => CdaAccess::VIEW_AUDIT,
+        'fs_notes' => CdaAccess::VIEW_AUDIT,
         'performance_audit' => CdaAccess::VIEW_AUDIT,
         'atir' => CdaAccess::VIEW_TAX,
         'abr' => CdaAccess::VIEW_TAX,

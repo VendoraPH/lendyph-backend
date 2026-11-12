@@ -19,7 +19,7 @@ class CdaSocialProgram extends Model
     /** @use HasFactory<CdaSocialProgramFactory> */
     use Auditable, HasFactory;
 
-    public const CATEGORIES = ['education', 'health', 'environment', 'community', 'youth', 'livelihood', 'disaster_response', 'other'];
+    public const CATEGORIES = ['member_education', 'financial_literacy', 'education', 'health', 'environment', 'community', 'youth', 'livelihood', 'disaster_response', 'other'];
 
     public const FUNDING_SOURCES = ['cdf', 'general_fund', 'cetf', 'external', 'other'];
 
