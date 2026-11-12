@@ -14,6 +14,7 @@ use App\Services\Savings\ProductRules;
 use App\Services\Savings\SavingsLedger;
 use App\Services\Savings\SavingsLocks;
 use App\Services\Savings\SavingsMath;
+use App\Services\Savings\WithdrawalFee;
 use Carbon\CarbonImmutable;
 use Illuminate\Validation\ValidationException;
 
@@ -79,21 +80,31 @@ class Teller
     }
 
     /**
-     * Post a withdrawal, or (above tier 1) open its approval.
+     * Post a withdrawal, or (above tier 1) open its approval. Its
+     * excess-withdrawal fee is decided here, once, counting only what came
+     * before it in the month of its date; or, for a member's portal request
+     * being paid, `$decided` is the decision stored when the member asked
+     * (checked against the product's rule then, 409 when it changed).
      *
      * @param  array{amount: string, date: string, payment_method: string, reference?: string|null, remarks?: string|null}  $data
      * @return array{transaction: SavingsTransaction|null, approval: SavingsApproval|null}
      *
      * @throws ValidationException
      */
-    public function withdraw(int $accountId, array $data, User $user): array
+    public function withdraw(int $accountId, array $data, User $user, ?WithdrawalFee $decided = null): array
     {
         $account = $this->locks->account($accountId);
         $centavos = SavingsMath::centavos($data['amount']);
 
         $this->assertCanPayOut($account);
-        $fee = $this->rules->assertCanWithdraw($account, $centavos, $data['date']);
-        $this->assertAvailable($account, $centavos + $fee);
+
+        if ($decided === null) {
+            $decided = $this->rules->decideWithdrawal($account, $centavos, $data['date']);
+        } else {
+            $this->rules->assertStillDecided($account, $centavos, $decided);
+        }
+
+        $this->assertAvailable($account, $centavos + $decided->fee);
 
         if ($this->gate->needsApproval($centavos)) {
             $this->assertNotBeforeLatest($account, $data['date']);
@@ -101,7 +112,7 @@ class Teller
 
             return ['transaction' => null, 'approval' => $this->gate->open('withdrawal', $centavos, [
                 'account_id' => $account->id,
-                'fee_amount' => $fee,
+                'fee' => $decided,
                 'payload' => [
                     'date' => $data['date'],
                     'payment_method' => $data['payment_method'],
@@ -111,41 +122,33 @@ class Teller
             ], $user->id)];
         }
 
-        return ['transaction' => $this->postWithdrawal($account, $centavos, $data, $user->id, null, $user->id, [], $fee), 'approval' => null];
+        return ['transaction' => $this->postWithdrawal($account, $centavos, $data, $decided, $user->id, null, $user->id), 'approval' => null];
     }
 
     /**
-     * Write a withdrawal whose money was checked (by withdraw() or, once
-     * approved, by the WithdrawalExecutor) and post its journal. The product
-     * rules are checked again here, under the lock, since the approval path
-     * skips withdraw(): the limits, and the month's free count without the
-     * approval being carried out. Beyond the free count the excess-withdrawal
-     * fee posts as its own `fee` row linked to the withdrawal, with its own
-     * journal, in the same write. `$expectedFee` is the fee the caller
-     * checked the money for (what an approval reserved); a different fee now
-     * answers 409 in words.
+     * Write a withdrawal already checked, rules and money (by withdraw() or,
+     * once approved, by the WithdrawalExecutor), and post its journal. It
+     * charges the fee `$fee` decided at request: beyond the free withdrawals
+     * the fee posts as its own `fee` row linked to the withdrawal, with its
+     * own journal, in the same write. The withdrawal row keeps `counted_on`,
+     * the date its request counts in.
      *
      * @param  array{date: string, payment_method: string, reference?: string|null, remarks?: string|null}  $data
      * @param  list<int|null>  $otherDeciders  checkers who approved it before the poster (not alerted)
      *
      * @throws ValidationException
      */
-    public function postWithdrawal(SavingsAccount $account, int $centavos, array $data, int $makerId, ?int $approvalId, int $posterId, array $otherDeciders = [], ?int $expectedFee = null): SavingsTransaction
+    public function postWithdrawal(SavingsAccount $account, int $centavos, array $data, WithdrawalFee $fee, int $makerId, ?int $approvalId, int $posterId, array $otherDeciders = []): SavingsTransaction
     {
-        $fee = $this->rules->assertCanWithdraw($account, $centavos, $data['date'], $approvalId);
-
-        if ($expectedFee !== null && $fee !== $expectedFee) {
-            Refuse::conflict(self::feeChanged($fee, $expectedFee));
-        }
-
         $row = $this->ledger->debit($account, 'withdrawal', $centavos, [
             ...$this->attributes($data, $makerId),
             'approval_id' => $approvalId,
+            'counted_on' => $fee->countedOn,
         ]);
         $this->poster->savingsTransaction($row, $posterId);
 
-        if ($fee > 0) {
-            $feeRow = $this->ledger->debit($account, 'fee', $fee, [
+        if ($fee->fee > 0) {
+            $feeRow = $this->ledger->debit($account, 'fee', $fee->fee, [
                 'date' => $data['date'],
                 'remarks' => "Excess-withdrawal fee on {$row->reference}",
                 'approval_id' => $approvalId,
@@ -158,13 +161,6 @@ class Teller
         $this->alert->afterPosting($row, [$makerId, $posterId, ...$otherDeciders]);
 
         return $row;
-    }
-
-    /** The 409 for an approval whose excess-withdrawal fee is no longer the one it reserved. */
-    public static function feeChanged(int $now, int $reserved): string
-    {
-        return 'The excess-withdrawal fee on this request is now '.Refuse::peso($now).', not the '.Refuse::peso($reserved)
-            .' it reserved. Reject it and make a new request.';
     }
 
     /**

@@ -15,6 +15,7 @@ use App\Services\Portal\Requests\RequestPresenter;
 use App\Services\Portal\Requests\WithdrawalRequests;
 use App\Services\Savings\AvailableBalance;
 use App\Services\Savings\IdempotentWrite;
+use App\Services\Savings\ProductRules;
 use App\Services\Savings\SavingsMath;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -75,12 +76,12 @@ class PortalRequestController extends Controller
     #[OA\Get(
         path: '/api/portal/requests/options',
         summary: 'What the member can ask for',
-        description: 'Signed-in portal token. {types{profile_update, savings_withdrawal, savings_opening} (each switch), withdrawal_accounts[{id, account_number, product_name, withdrawable, has_open_request}] (`withdrawable` is the server\'s available balance: holds, pending requests and the maintaining balance already taken off), payout_methods[], hold_days, opening_products[{id, name, minimum_opening_balance}], profile_fields[{field, label, current}] (masked as the profile is)}.',
+        description: 'Signed-in portal token. {types{profile_update, savings_withdrawal, savings_opening} (each switch), withdrawal_accounts[{id, account_number, product_name, withdrawable, has_open_request, next_withdrawal_fee, free_withdrawals_left}] (`withdrawable` is the server\'s available balance: holds, pending requests and the maintaining balance already taken off; `next_withdrawal_fee` is the excess-withdrawal fee a request made now would carry, null when the free withdrawals are used up and the product charges no fee, so it would be refused; `free_withdrawals_left` is null when unlimited), payout_methods[], hold_days, opening_products[{id, name, minimum_opening_balance}], profile_fields[{field, label, current}] (masked as the profile is)}.',
         tags: ['Member Portal'],
         security: [['sanctum' => []]],
         responses: [new OA\Response(response: 200, description: 'The options')],
     )]
-    public function options(PortalSettings $settings, AvailableBalance $available, OpeningRequests $openings, ProfileFields $fields): JsonResponse
+    public function options(PortalSettings $settings, AvailableBalance $available, OpeningRequests $openings, ProfileFields $fields, ProductRules $rules): JsonResponse
     {
         $portalUser = $this->scope->portalUser();
         $member = $portalUser->borrower;
@@ -119,6 +120,7 @@ class PortalRequestController extends Controller
                 'product_name' => $a->product?->name,
                 'withdrawable' => SavingsMath::pesos($breakdowns[$a->id]['available'] ?? 0),
                 'has_open_request' => in_array('w:'.$a->id, $openKeys, true),
+                ...$this->nextWithdrawal($rules, $a),
             ])->all(),
             'payout_methods' => array_values(array_intersect(array_keys(WithdrawalRequests::METHODS), $setting->withdrawal_methods ?? [])),
             'hold_days' => (int) ($setting->withdrawal_hold_days ?? 7),
@@ -238,5 +240,21 @@ class PortalRequestController extends Controller
     {
         /** @var PortalRequest */
         return $this->scope->findOrFail(PortalRequest::query(), $id);
+    }
+
+    /**
+     * What a withdrawal request made now would carry (gap round S1), so the
+     * member sees the fee before asking.
+     *
+     * @return array{next_withdrawal_fee: string|null, free_withdrawals_left: int|null}
+     */
+    private function nextWithdrawal(ProductRules $rules, SavingsAccount $account): array
+    {
+        $next = $rules->nextWithdrawal($account, now()->toDateString());
+
+        return [
+            'next_withdrawal_fee' => $next['fee'] === null ? null : SavingsMath::pesos($next['fee']),
+            'free_withdrawals_left' => $next['free_left'],
+        ];
     }
 }

@@ -3,6 +3,7 @@
 namespace App\Services\Savings\Api;
 
 use App\Http\Resources\Savings\SavingsUserRef;
+use App\Models\Borrower;
 use App\Models\SavingsAccount;
 use App\Models\SavingsApproval;
 use App\Models\SavingsHold;
@@ -51,7 +52,7 @@ class Presenter
 
         $accounts = $this->models($accounts);
         $accounts->loadMissing(['borrower', 'branch:id,name', 'product:id,code,name,kind', 'accountOfficer']);
-        $seesContacts = self::seesContactDetails();
+        $seesContactsOf = self::membersWhoseContactsShow($accounts->pluck('borrower_id')->unique()->values()->all());
         $breakdowns = $this->available->forManyWithRequests($accounts, [SavingsHold::TYPE_MEMBER_REQUEST]);
         $open = $accounts->reject(fn (SavingsAccount $a) => $a->isClosed())->values();
         $accrued = $open->isEmpty() ? [] : $this->accrued->forMany($open);
@@ -87,7 +88,7 @@ class Presenter
             'source_of_funds' => $a->source_of_funds,
             'source_of_funds_other' => $a->source_of_funds_other,
             'source_of_funds_label' => self::sourceOfFundsLabel($a),
-            'beneficiary' => self::beneficiary($a->beneficiary, $seesContacts),
+            'beneficiary' => self::beneficiary($a->beneficiary, in_array((int) $a->borrower_id, $seesContactsOf, true)),
         ])->values()->all();
     }
 
@@ -252,8 +253,9 @@ class Presenter
 
     /**
      * The beneficiary. Their contact number follows the round fz personal-data
-     * rule: it needs `borrowers:view` (the account itself is already in the
-     * caller's branches), and reads null otherwise.
+     * rule: it needs `borrowers:view` and the member in the caller's branches
+     * (a member can move branch after the account opened), and reads null
+     * otherwise.
      *
      * @param  array<string, string|null>|null  $stored
      * @return array{name: string|null, relationship: string|null, contact_number: string|null}|null
@@ -271,11 +273,22 @@ class Presenter
         ];
     }
 
-    private static function seesContactDetails(): bool
+    /**
+     * Of these members, those whose contact details the signed-in caller may
+     * see: `borrowers:view` and the member visible (Borrower::visibleTo).
+     *
+     * @param  list<int>  $borrowerIds
+     * @return list<int>
+     */
+    private static function membersWhoseContactsShow(array $borrowerIds): array
     {
         $caller = auth()->user();
 
-        return $caller instanceof User && $caller->can('borrowers:view');
+        if (! $caller instanceof User || ! $caller->can('borrowers:view') || $borrowerIds === []) {
+            return [];
+        }
+
+        return Borrower::query()->visibleTo($caller)->whereIn('borrowers.id', $borrowerIds)->pluck('borrowers.id')->map(fn ($id) => (int) $id)->all();
     }
 
     /**

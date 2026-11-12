@@ -21,7 +21,10 @@ use Illuminate\Support\Carbon;
  * @property int|null $time_deposit_id
  * @property int|null $target_transaction_id
  * @property string $amount
- * @property string $fee_amount the excess-withdrawal fee it reserves beside `amount` (₱0.00 when none)
+ * @property string $fee_amount the excess-withdrawal fee it reserves beside `amount` (₱0.00 when none), decided at request
+ * @property Carbon|null $counted_on the date whose month a withdrawal request counts in
+ * @property int|null $rule_free_withdrawals the product's free withdrawals a month when it was requested
+ * @property string|null $rule_excess_fee the product's excess-withdrawal fee when it was requested
  * @property array<string, mixed>|null $payload
  * @property int $required_checkers
  * @property string $status
@@ -56,6 +59,9 @@ class SavingsApproval extends Model
         'target_transaction_id',
         'amount',
         'fee_amount',
+        'counted_on',
+        'rule_free_withdrawals',
+        'rule_excess_fee',
         'payload',
         'required_checkers',
         'status',
@@ -77,6 +83,9 @@ class SavingsApproval extends Model
             'target_transaction_id' => 'integer',
             'amount' => 'decimal:2',
             'fee_amount' => 'decimal:2',
+            'counted_on' => 'date',
+            'rule_free_withdrawals' => 'integer',
+            'rule_excess_fee' => 'decimal:2',
             'payload' => 'array',
             'required_checkers' => 'integer',
             'requested_by' => 'integer',

@@ -4,6 +4,10 @@ namespace Tests\Feature\Savings\Rules;
 
 use App\Models\Branch;
 use App\Models\PortalRequest;
+use App\Models\SavingsHold;
+use App\Models\SavingsTransaction;
+use App\Services\Savings\ProductRules;
+use Illuminate\Support\Carbon;
 use Tests\Feature\Portal\Requests\PortalRequestsTestHelpers;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
@@ -67,5 +71,68 @@ class PortalRulesTest extends TestCase
         $request = $this->submitted($this->submit($this->withdrawalBody($account, '100.00'))->assertCreated());
         $this->decide($request, ['decision' => 'approve', 'payout' => $this->payout()])->assertCreated()
             ->assertJsonPath('data.status', 'completed');
+    }
+
+    public function test_the_fee_is_shown_before_submitting_held_with_the_amount_and_stored_on_the_request(): void
+    {
+        $account = $this->account();
+        $this->fund($account, 500_000);
+        $this->product->forceFill(['free_withdrawals_per_month' => 0, 'excess_withdrawal_fee' => '25.00'])->save();
+
+        $this->member('GET', '/api/portal/requests/options')->assertOk()
+            ->assertJsonPath('data.withdrawal_accounts.0.next_withdrawal_fee', '25.00')
+            ->assertJsonPath('data.withdrawal_accounts.0.free_withdrawals_left', 0);
+
+        $request = $this->submitted($this->submit($this->withdrawalBody($account, '1000.00'))->assertCreated()
+            ->assertJsonPath('data.details.fee_amount', '25.00'));
+
+        $this->assertSame(['25.00', '2026-11-10', 0, '25.00'], [(string) $request->fee_amount, $request->counted_on->toDateString(), $request->rule_free_withdrawals, (string) $request->rule_excess_fee]);
+        $this->assertSame('1025.00', (string) SavingsHold::query()->findOrFail($request->savings_hold_id)->amount);
+
+        $this->decide($request, ['decision' => 'approve', 'payout' => $this->payout()])->assertCreated();
+        $this->assertSame('3975.00', $this->balanceOf($account));
+    }
+
+    public function test_a_request_keeps_the_fee_decided_when_it_was_made(): void
+    {
+        $account = $this->account();
+        $this->fund($account, 500_000);
+        $this->product->forceFill(['free_withdrawals_per_month' => 1, 'excess_withdrawal_fee' => '25.00'])->save();
+
+        $request = $this->submitted($this->submit($this->withdrawalBody($account, '100.00'))->assertCreated());
+        $this->assertSame('0.00', (string) $request->fee_amount);
+
+        // A counter withdrawal after the request pays the fee; the request still doesn't.
+        $this->freshRequest();
+        $this->actingAs($this->admin);
+        $this->money("/api/savings/accounts/{$account->id}/withdrawals", ['amount' => '100.00', 'date' => '2026-11-10', 'payment_method' => 'cash'])
+            ->assertCreated()->assertJsonPath('data.fee_amount', '25.00');
+
+        $this->decide($request, ['decision' => 'approve', 'payout' => $this->payout()])->assertCreated();
+        $this->assertSame(1, SavingsTransaction::query()->where('account_id', $account->id)->where('type', 'fee')->count());
+        $this->assertSame('4775.00', $this->balanceOf($account));
+    }
+
+    public function test_a_request_made_on_nov_30_and_paid_on_dec_1_counts_in_november_only(): void
+    {
+        $account = $this->account();
+        $this->fund($account, 500_000);
+        $this->product->forceFill(['free_withdrawals_per_month' => 1])->save();
+
+        $this->travelTo(Carbon::parse('2026-11-30 10:00:00', 'Asia/Manila'));
+        $this->token = $this->portalToken($this->portalUser);
+        $request = $this->submitted($this->submit($this->withdrawalBody($account, '100.00'))->assertCreated());
+
+        $this->travelTo(Carbon::parse('2026-12-01 10:00:00', 'Asia/Manila'));
+        $this->decide($request, ['decision' => 'approve', 'payout' => $this->payout(['date' => '2026-12-01'])])->assertCreated();
+
+        $rules = app(ProductRules::class);
+        $this->assertSame(1, $rules->withdrawalsInMonth($account->refresh(), '2026-11-30'));
+        $this->assertSame(0, $rules->withdrawalsInMonth($account, '2026-12-01'));
+        $paid = SavingsTransaction::query()->where('account_id', $account->id)->where('type', 'withdrawal')->sole();
+        $this->assertSame(['2026-12-01', '2026-11-30'], [$paid->date->toDateString(), $paid->counted_on->toDateString()]);
+
+        // December's free withdrawal is still there.
+        $this->money("/api/savings/accounts/{$account->id}/withdrawals", ['amount' => '100.00', 'date' => '2026-12-01', 'payment_method' => 'cash'])->assertCreated();
     }
 }

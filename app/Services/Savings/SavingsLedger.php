@@ -67,7 +67,8 @@ class SavingsLedger
      * @param  string  $type  deposit, transfer_in, interest or reversal
      * @param  array<string, mixed>  $attributes  date, value_date, method, external_reference, remarks, counterpart_transaction_id,
      *                                            reverses_transaction_id, time_deposit_id, interest_run_id, approval_id, fee_for_transaction_id
-     *                                            (a fee row's withdrawal), created_by, reference,
+     *                                            (a fee row's withdrawal), counted_on (a withdrawal's request date, for the free
+     *                                            withdrawals; defaults to `date`), created_by, reference,
      *                                            member_activity. `date` defaults to today and `value_date` to `date`; `created_by` defaults
      *                                            to the signed-in user (pass null for the system); `reference` to the next SVT number;
      *                                            `member_activity` to true (false: the member didn't make this row, so it neither counts
@@ -178,6 +179,7 @@ class SavingsLedger
             'interest_run_id' => $attributes['interest_run_id'] ?? null,
             'approval_id' => $attributes['approval_id'] ?? null,
             'fee_for_transaction_id' => $this->feeFor($locked, $type, $attributes),
+            'counted_on' => $type === 'withdrawal' ? ($attributes['counted_on'] ?? $date) : null,
             'created_by' => array_key_exists('created_by', $attributes) ? $attributes['created_by'] : $this->signedInStaffId(),
         ]);
 

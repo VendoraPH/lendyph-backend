@@ -25,10 +25,12 @@ use Illuminate\Validation\ValidationException;
  *   target checks only that it takes deposits and the maximum balance
  *   ({@see self::assertCanReceiveTransfer()}). Never applied to interest,
  *   time deposit payouts, reversals or closing: those callers don't ask.
- * - **Money out** ({@see self::assertCanWithdraw()}): the product allows
+ * - **Money out** ({@see self::decideWithdrawal()}): the product allows
  *   withdrawals, the amount is within its minimum and maximum withdrawal,
- *   and the month's free withdrawals are not used up. Beyond them it returns
- *   the excess-withdrawal fee, or refuses when the product charges none. A
+ *   and the month's free withdrawals are not used up. Beyond them it decides
+ *   the excess-withdrawal fee, once, at request (or refuses when the product
+ *   charges none); the payout charges that decision
+ *   ({@see self::assertStillDecided()}), never counting again. A
  *   transfer's source checks that the product allows transfers and the
  *   maximum withdrawal ({@see self::assertCanTransferOut()}).
  * - **Eligibility** ({@see self::assertEligible()}): the member's type and
@@ -93,55 +95,81 @@ final class ProductRules
     }
 
     /**
-     * Check a withdrawal of `$centavos` dated `$date` and return the
-     * excess-withdrawal fee it carries, in centavos (0 within the free
-     * count). `$exceptApprovalId` is the approval being carried out, left out
-     * of the count.
+     * Check a withdrawal of `$centavos` requested now and decide its
+     * excess-withdrawal fee, once: it counts in the Manila month of
+     * `$countedOn` (the request's date), after everything already counted
+     * there. The decision is stored on an approval or a portal request and
+     * charged as it is when the withdrawal posts.
      *
      * @throws ValidationException
      */
-    public function assertCanWithdraw(SavingsAccount $account, int $centavos, string $date, ?int $exceptApprovalId = null, string $field = 'amount'): int
+    public function decideWithdrawal(SavingsAccount $account, int $centavos, string $countedOn, string $field = 'amount'): WithdrawalFee
     {
         $product = $this->productOf($account);
+        $this->assertWithdrawalLimits($product, $centavos, $field);
 
-        if (! $product->allow_withdrawals) {
-            Refuse::field($field, "{$product->name} doesn't allow withdrawals.");
-        }
-
-        $min = $this->limit($product->min_withdrawal);
-        $max = $this->limit($product->max_withdrawal);
-
-        if ($min !== null && $centavos < $min) {
-            Refuse::field($field, "A withdrawal from {$product->name} is at least ".Refuse::peso($min).'.');
-        }
-
-        if ($max !== null && $centavos > $max) {
-            Refuse::field($field, "A withdrawal from {$product->name} is at most ".Refuse::peso($max).'.');
-        }
-
-        return $this->withdrawalFee($account, $date, $exceptApprovalId, $field);
+        return new WithdrawalFee(
+            $this->withdrawalFee($account, $product, $countedOn, $field),
+            $countedOn,
+            $product->free_withdrawals_per_month,
+            $this->limit($product->excess_withdrawal_fee),
+        );
     }
 
     /**
-     * The excess-withdrawal fee a withdrawal dated `$date` carries now: 0
-     * within the product's free withdrawals for that month (or when it has no
-     * free count), its fee beyond them, and a refusal beyond them when it
-     * charges no fee.
+     * Check, when a withdrawal decided earlier posts, that the product still
+     * allows it (switch and limits) and that its free withdrawals and fee
+     * are what they were when it was requested: a change answers 409 in
+     * words. Nothing is counted again, so a withdrawal made in between never
+     * moves this one's fee.
      *
      * @throws ValidationException
      */
-    public function withdrawalFee(SavingsAccount $account, string $date, ?int $exceptApprovalId = null, string $field = 'amount'): int
+    public function assertStillDecided(SavingsAccount $account, int $centavos, WithdrawalFee $decided, string $field = 'amount'): void
+    {
+        $product = $this->productOf($account);
+        $this->assertWithdrawalLimits($product, $centavos, $field);
+
+        if ($product->free_withdrawals_per_month !== $decided->freeWithdrawals || $this->limit($product->excess_withdrawal_fee) !== $decided->excessFee) {
+            Refuse::conflict("{$product->name}'s free withdrawals or excess-withdrawal fee changed since this request was made (it reserved a "
+                .Refuse::peso($decided->fee).' fee). Reject it and make a new request.');
+        }
+    }
+
+    /**
+     * What the next withdrawal requested on `$date` would carry, for a
+     * member to see before asking: `fee` in centavos (null when the product
+     * charges none and the free withdrawals are used up, so it would be
+     * refused) and `free_left` (null when unlimited).
+     *
+     * @return array{fee: int|null, free_left: int|null}
+     */
+    public function nextWithdrawal(SavingsAccount $account, string $date): array
     {
         $product = $this->productOf($account);
         $free = $product->free_withdrawals_per_month;
 
         if ($free === null) {
-            return 0;
+            return ['fee' => 0, 'free_left' => null];
         }
 
-        $used = $this->withdrawalsInMonth($account, $date, $exceptApprovalId);
+        $left = max(0, $free - $this->withdrawalsInMonth($account, $date));
 
-        if ($used < $free) {
+        return ['fee' => $left > 0 ? 0 : $this->limit($product->excess_withdrawal_fee), 'free_left' => $left];
+    }
+
+    /**
+     * The fee for a withdrawal counted on `$date`: 0 within the product's
+     * free withdrawals for that month (or with no free count), its fee
+     * beyond them, and a refusal beyond them when it charges none.
+     *
+     * @throws ValidationException
+     */
+    private function withdrawalFee(SavingsAccount $account, SavingsProduct $product, string $date, string $field): int
+    {
+        $free = $product->free_withdrawals_per_month;
+
+        if ($free === null || $this->withdrawalsInMonth($account, $date) < $free) {
             return 0;
         }
 
@@ -158,15 +186,40 @@ final class ProductRules
         return $fee;
     }
 
+    /** @throws ValidationException */
+    private function assertWithdrawalLimits(SavingsProduct $product, int $centavos, string $field): void
+    {
+        if (! $product->allow_withdrawals) {
+            Refuse::field($field, "{$product->name} doesn't allow withdrawals.");
+        }
+
+        $min = $this->limit($product->min_withdrawal);
+        $max = $this->limit($product->max_withdrawal);
+
+        if ($min !== null && $centavos < $min) {
+            Refuse::field($field, "A withdrawal from {$product->name} is at least ".Refuse::peso($min).'.');
+        }
+
+        if ($max !== null && $centavos > $max) {
+            Refuse::field($field, "A withdrawal from {$product->name} is at most ".Refuse::peso($max).'.');
+        }
+    }
+
     /**
      * Withdrawals counted against the free count for the Manila calendar month
-     * of `$date`: posted withdrawals dated in that month that are not
-     * reversed (a time deposit's funding is not a withdrawal), plus pending
-     * withdrawal approvals dated in it, plus members' open portal withdrawal
-     * requests placed in it (their active request holds), leaving out
-     * `$exceptApprovalId`, the approval being carried out.
+     * of `$date`, each once, in the month it was requested:
+     *
+     * - posted withdrawals by `counted_on` (their request's date; a row
+     *   posted before it existed counts by its `date`), not reversed (a time
+     *   deposit's funding is not a withdrawal);
+     * - pending withdrawal approvals by `counted_on` (else their date);
+     * - members' open portal withdrawal requests by the day they were placed
+     *   (their active request holds).
+     *
+     * An approved or paid request leaves the count as its posted row joins
+     * it, under the same lock, so nothing counts twice.
      */
-    public function withdrawalsInMonth(SavingsAccount $account, string $date, ?int $exceptApprovalId = null): int
+    public function withdrawalsInMonth(SavingsAccount $account, string $date): int
     {
         $day = CarbonImmutable::parse($date);
         $from = $day->startOfMonth()->toDateString();
@@ -176,7 +229,7 @@ final class ProductRules
             ->where('t.account_id', $account->id)
             ->where('t.type', 'withdrawal')
             ->whereNull('t.time_deposit_id')
-            ->whereBetween('t.date', [$from, $to])
+            ->whereRaw('COALESCE(t.counted_on, t.date) BETWEEN ? AND ?', [$from, $to])
             ->whereNotExists(fn ($q) => $q->from('savings_transactions AS r')->whereColumn('r.reverses_transaction_id', 't.id'))
             ->count();
 
@@ -185,10 +238,9 @@ final class ProductRules
             ->where('kind', 'withdrawal')
             ->where('status', 'pending')
             ->where(fn ($q) => $q->whereNull('expires_at')->orWhere('expires_at', '>', now()))
-            ->when($exceptApprovalId !== null, fn ($q) => $q->whereKeyNot($exceptApprovalId))
-            ->get(['id', 'payload'])
+            ->get(['id', 'payload', 'counted_on'])
             ->filter(function (SavingsApproval $approval) use ($from, $to): bool {
-                $on = (string) ($approval->payload['date'] ?? '');
+                $on = $approval->counted_on?->toDateString() ?? (string) ($approval->payload['date'] ?? '');
 
                 return $on >= $from && $on <= $to;
             })
@@ -298,7 +350,8 @@ final class ProductRules
     {
         $product = $account->relationLoaded('product') ? $account->product : null;
 
-        return $product instanceof SavingsProduct && $product->id === $account->product_id
+        // A product loaded with only some columns can't answer for its rules.
+        return $product instanceof SavingsProduct && $product->id === $account->product_id && array_key_exists('excess_withdrawal_fee', $product->getAttributes())
             ? $product
             : SavingsProduct::query()->findOrFail($account->product_id);
     }

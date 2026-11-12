@@ -56,9 +56,9 @@ class ExcessWithdrawalFeeTest extends TestCase
         return $this->money("/api/savings/accounts/{$this->savings->id}/withdrawals", ['amount' => $amount, 'date' => $date, 'payment_method' => 'cash']);
     }
 
-    private function usedThisMonth(string $date = '2026-11-10', ?int $except = null): int
+    private function usedThisMonth(string $date = '2026-11-10'): int
     {
-        return app(ProductRules::class)->withdrawalsInMonth($this->savings->refresh(), $date, $except);
+        return app(ProductRules::class)->withdrawalsInMonth($this->savings->refresh(), $date);
     }
 
     public function test_beyond_the_free_count_a_product_with_no_fee_refuses_in_words(): void
@@ -131,13 +131,13 @@ class ExcessWithdrawalFeeTest extends TestCase
         $this->assertSame(0, $this->usedThisMonth());
     }
 
-    public function test_pending_approvals_and_portal_requests_count_and_the_executing_approval_does_not(): void
+    public function test_pending_approvals_and_portal_requests_count_once_and_approving_counts_nothing_more(): void
     {
         $this->rules(['free_withdrawals_per_month' => 3]);
         $this->actingAs($this->teller());
         $approval = $this->withdraw('15000.00')->assertStatus(202)->json('data.approval.id');
         $this->assertSame(1, $this->usedThisMonth());
-        $this->assertSame(0, $this->usedThisMonth('2026-11-10', $approval));
+        $this->assertSame('2026-11-10', SavingsApproval::query()->findOrFail($approval)->counted_on->toDateString());
 
         SavingsHold::query()->create([
             'account_id' => $this->savings->id, 'type' => SavingsHold::TYPE_MEMBER_REQUEST, 'amount' => '100.00',
@@ -146,6 +146,12 @@ class ExcessWithdrawalFeeTest extends TestCase
         $this->assertSame(2, $this->usedThisMonth());
         // A request placed in another month counts in that month only.
         $this->assertSame(0, $this->usedThisMonth('2026-12-01'));
+
+        $this->actingAs($this->checker());
+        $this->postJson("/api/savings/approvals/{$approval}/approve")->assertOk();
+        $this->assertSame(2, $this->usedThisMonth(), 'The approved withdrawal replaces its request in the count.');
+        $posted = SavingsTransaction::query()->where('approval_id', $approval)->where('type', 'withdrawal')->sole();
+        $this->assertSame('2026-11-10', $posted->counted_on->toDateString());
     }
 
     public function test_a_pending_approval_reserves_its_fee_and_posts_it_when_approved(): void
@@ -170,20 +176,82 @@ class ExcessWithdrawalFeeTest extends TestCase
         $this->assertSame('84950.00', $this->balanceOf($this->savings));
     }
 
-    public function test_a_fee_that_changed_since_the_request_answers_409_in_words(): void
+    public function test_the_fee_is_decided_when_requested_so_a_later_withdrawal_never_charges_it_twice(): void
     {
-        $this->rules(['free_withdrawals_per_month' => 1, 'excess_withdrawal_fee' => '50.00']);
+        $this->rules(['free_withdrawals_per_month' => 1, 'excess_withdrawal_fee' => '25.00']);
+
+        // 10:00 approval A takes the free withdrawal (₱0.00 fee).
         $this->actingAs($this->teller());
         $approval = $this->withdraw('15000.00')->assertStatus(202)->assertJsonPath('data.approval.fee_amount', '0.00')->json('data.approval.id');
 
-        // Another withdrawal uses the free one first, so this one now carries the fee.
+        // 11:00 direct withdrawal W comes after A, so W pays the fee.
+        $this->travelTo(Carbon::parse('2026-11-10 11:00:00', 'Asia/Manila'));
         $this->actingAs($this->admin);
-        $this->withdraw('100.00')->assertCreated();
+        $this->withdraw('100.00')->assertCreated()->assertJsonPath('data.fee_amount', '25.00');
 
+        // 12:00 the checker approves A: it is charged what it was decided at, ₱0.00.
+        $this->travelTo(Carbon::parse('2026-11-10 12:00:00', 'Asia/Manila'));
+        $this->actingAs($this->checker());
+        $this->postJson("/api/savings/approvals/{$approval}/approve")->assertOk();
+
+        $withdrawal = SavingsTransaction::query()->where('approval_id', $approval)->where('type', 'withdrawal')->sole();
+        $this->assertFalse(SavingsTransaction::query()->where('fee_for_transaction_id', $withdrawal->id)->exists());
+        $this->assertSame(1, SavingsTransaction::query()->where('account_id', $this->savings->id)->where('type', 'fee')->count());
+        $this->assertSame('84875.00', $this->balanceOf($this->savings));
+    }
+
+    public function test_a_free_count_or_fee_changed_since_the_request_answers_409_in_words(): void
+    {
+        $this->rules(['free_withdrawals_per_month' => 0, 'excess_withdrawal_fee' => '50.00']);
+        $this->actingAs($this->teller());
+        $approval = $this->withdraw('15000.00')->assertStatus(202)->assertJsonPath('data.approval.fee_amount', '50.00')->json('data.approval.id');
+
+        $this->rules(['excess_withdrawal_fee' => '75.00']);
         $this->actingAs($this->checker());
         $this->postJson("/api/savings/approvals/{$approval}/approve")->assertConflict()
-            ->assertJsonPath('message', 'The excess-withdrawal fee on this request is now ₱50.00, not the ₱0.00 it reserved. Reject it and make a new request.');
+            ->assertJsonPath('message', 'Regular Savings\'s free withdrawals or excess-withdrawal fee changed since this request was made (it reserved a ₱50.00 fee). Reject it and make a new request.');
         $this->assertFalse(SavingsTransaction::query()->where('approval_id', $approval)->exists());
+
+        // The same rule as when requested posts the reserved fee.
+        $this->rules(['excess_withdrawal_fee' => '50.00']);
+        $this->postJson("/api/savings/approvals/{$approval}/approve")->assertOk();
+        $this->assertSame('84950.00', $this->balanceOf($this->savings));
+    }
+
+    public function test_a_reversal_of_a_withdrawal_and_its_fee_is_tiered_on_both_and_shows_the_fee(): void
+    {
+        $this->rules(['free_withdrawals_per_month' => 0, 'excess_withdrawal_fee' => '25.00']);
+        $this->actingAs($this->teller());
+        $request = $this->withdraw('49990.00')->assertStatus(202)->json('data.approval.id');
+        $this->actingAs($this->checker());
+        $this->postJson("/api/savings/approvals/{$request}/approve")->assertOk();
+        $withdrawal = SavingsTransaction::query()->where('approval_id', $request)->where('type', 'withdrawal')->sole();
+
+        // ₱49,990.00 plus the ₱25.00 fee is ₱50,015.00: above tier 2, so two checkers.
+        $this->actingAs($this->teller());
+        $this->money("/api/savings/transactions/{$withdrawal->id}/reverse", ['reason' => 'Keyed twice'])->assertStatus(202)
+            ->assertJsonPath('data.approval.amount', '49990.00')
+            ->assertJsonPath('data.approval.fee_amount', '25.00')
+            ->assertJsonPath('data.approval.required_checkers', 2);
+    }
+
+    public function test_the_gl_control_reads_nil_after_a_fee_and_after_reversing_it(): void
+    {
+        $this->rules(['free_withdrawals_per_month' => 0, 'excess_withdrawal_fee' => '25.00']);
+        $withdrawal = SavingsTransaction::query()->findOrFail($this->withdraw('100.00')->assertCreated()->json('data.id'));
+
+        $this->getJson('/api/reports/savings/gl-control')->assertOk()
+            ->assertJsonPath('data.totals.difference', '0.00')
+            ->assertJsonPath('data.totals.subledger_balance', '99875.00');
+
+        $approval = $this->money("/api/savings/transactions/{$withdrawal->id}/reverse", ['reason' => 'Keyed twice'])->assertStatus(202)->json('data.approval.id');
+        $this->actingAs($this->checker());
+        $this->postJson("/api/savings/approvals/{$approval}/approve")->assertOk();
+
+        $this->actingAs($this->admin);
+        $this->getJson('/api/reports/savings/gl-control')->assertOk()
+            ->assertJsonPath('data.totals.difference', '0.00')
+            ->assertJsonPath('data.totals.subledger_balance', '100000.00');
     }
 
     public function test_reversing_a_withdrawal_reverses_its_fee_and_the_fee_alone_is_refused(): void

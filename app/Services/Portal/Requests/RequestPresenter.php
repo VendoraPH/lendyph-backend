@@ -155,6 +155,8 @@ final class RequestPresenter
                 'account_number' => $this->account($request)?->account_number,
                 'product_name' => $this->account($request)?->product?->name,
                 'method' => $details['method'] ?? null,
+                // The excess-withdrawal fee decided when the request was made (gap round S1).
+                'fee_amount' => SavingsMath::pesos(SavingsMath::centavos($request->fee_amount ?? 0)),
                 'payout' => $this->payout($details, $fullPayout),
             ],
             PortalRequest::TYPE_SAVINGS_OPENING => [

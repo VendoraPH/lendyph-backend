@@ -98,9 +98,15 @@ class Reverser
             }
         }
 
+        // A withdrawal's fee is reversed with it: the checkers are counted on
+        // both, and the approval shows the fee beside the withdrawal.
+        $fee = $legs->where('type', 'fee')->sum(fn (SavingsTransaction $leg) => $this->amountOf($leg));
+
         return $this->gate->open('reversal', $this->amountOf($anchor), [
             'account_id' => $anchor->account_id,
             'target_transaction_id' => $anchor->id,
+            'fee_amount' => $fee,
+            'tier_centavos' => $this->amountOf($anchor) + $fee,
             'payload' => ['reason' => $reason],
             'live_key' => "rev:{$anchor->id}",
         ], $user->id);
