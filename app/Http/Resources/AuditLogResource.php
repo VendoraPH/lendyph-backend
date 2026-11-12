@@ -141,6 +141,7 @@ class AuditLogResource extends JsonResource
         'CdaSocialProgram' => 'Social program',
         'CdaMediationCase' => 'Mediation case',
         'CdaNoticeSent' => 'CDA notice',
+        'CdaComplianceRequirement' => 'Compliance requirement',
         'PortalUser' => 'Portal account',
         'PortalCode' => 'Portal code',
         'PortalSetting' => 'Member Portal settings',

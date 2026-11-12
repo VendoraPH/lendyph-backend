@@ -4,6 +4,11 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\ApprovalWorkflowSetting;
+use App\Models\CdaSetting;
+use App\Models\Role;
+use App\Services\AuditLogService;
+use App\Services\Cda\CdaAccess;
+use App\Services\Cda\Reports\CdaApprovalChain;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
@@ -15,16 +20,17 @@ class ApprovalWorkflowController extends Controller
     private const VALID_TYPES = [
         ApprovalWorkflowSetting::TYPE_NORMAL,
         ApprovalWorkflowSetting::TYPE_POLICY_EXCEPTION,
+        ApprovalWorkflowSetting::TYPE_CDA,
     ];
 
     #[OA\Get(
         path: '/api/settings/approval-workflow',
         summary: 'Get approval workflow chain',
-        description: 'Returns the configured approval chain for `normal` or `policy_exception`. Falls back to defaults if not yet configured.',
+        description: 'Returns the configured approval chain for `normal`, `policy_exception` or `cda` (the CDA report review chain). Falls back to defaults if not yet configured; the `cda` default is no steps (a single review).',
         tags: ['Settings'],
         security: [['sanctum' => []]],
         parameters: [
-            new OA\Parameter(name: 'type', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['normal', 'policy_exception'], default: 'policy_exception')),
+            new OA\Parameter(name: 'type', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['normal', 'policy_exception', 'cda'], default: 'policy_exception')),
         ],
         responses: [
             new OA\Response(
@@ -36,7 +42,7 @@ class ApprovalWorkflowController extends Controller
                             property: 'data',
                             type: 'object',
                             properties: [
-                                new OA\Property(property: 'type', type: 'string', enum: ['normal', 'policy_exception']),
+                                new OA\Property(property: 'type', type: 'string', enum: ['normal', 'policy_exception', 'cda']),
                                 new OA\Property(
                                     property: 'steps',
                                     type: 'array',
@@ -72,7 +78,7 @@ class ApprovalWorkflowController extends Controller
     #[OA\Put(
         path: '/api/settings/approval-workflow',
         summary: 'Save approval workflow chain',
-        description: 'Upserts the chain for the given type. The chain must start with a `submit` step and end with a `release` step. Step ids must be unique.',
+        description: 'Upserts the chain for the given type. A loan chain must start with a `submit` step and end with a `release` step, and step ids must be unique. The `cda` chain also needs `cda:settings` with `branches:view_all`: 1 to 10 approve-only steps {name, role, status?}, each role an existing active role and each name used once; audited. Reset (DELETE) returns `cda` to a single review.',
         tags: ['Settings'],
         security: [['sanctum' => []]],
         requestBody: new OA\RequestBody(
@@ -80,7 +86,7 @@ class ApprovalWorkflowController extends Controller
             content: new OA\JsonContent(
                 required: ['type', 'steps'],
                 properties: [
-                    new OA\Property(property: 'type', type: 'string', enum: ['normal', 'policy_exception']),
+                    new OA\Property(property: 'type', type: 'string', enum: ['normal', 'policy_exception', 'cda']),
                     new OA\Property(
                         property: 'steps',
                         type: 'array',
@@ -100,7 +106,7 @@ class ApprovalWorkflowController extends Controller
                             property: 'data',
                             type: 'object',
                             properties: [
-                                new OA\Property(property: 'type', type: 'string', enum: ['normal', 'policy_exception']),
+                                new OA\Property(property: 'type', type: 'string', enum: ['normal', 'policy_exception', 'cda']),
                                 new OA\Property(
                                     property: 'steps',
                                     type: 'array',
@@ -119,6 +125,10 @@ class ApprovalWorkflowController extends Controller
     public function update(Request $request): JsonResponse
     {
         $this->authorize('settings:update');
+
+        if ($request->input('type') === ApprovalWorkflowSetting::TYPE_CDA) {
+            return $this->updateCda($request);
+        }
 
         $validated = $request->validate([
             'type' => ['required', Rule::in(self::VALID_TYPES)],
@@ -153,7 +163,7 @@ class ApprovalWorkflowController extends Controller
         tags: ['Settings'],
         security: [['sanctum' => []]],
         parameters: [
-            new OA\Parameter(name: 'type', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['normal', 'policy_exception'], default: 'policy_exception')),
+            new OA\Parameter(name: 'type', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['normal', 'policy_exception', 'cda'], default: 'policy_exception')),
         ],
         responses: [
             new OA\Response(response: 200, description: 'Reset to default'),
@@ -165,7 +175,18 @@ class ApprovalWorkflowController extends Controller
         $this->authorize('settings:update');
 
         $type = $this->resolveType($request);
-        ApprovalWorkflowSetting::where('type', $type)->delete();
+
+        if ($type === ApprovalWorkflowSetting::TYPE_CDA) {
+            app(CdaAccess::class)->authorize($request->user(), CdaAccess::SETTINGS);
+            $setting = ApprovalWorkflowSetting::where('type', $type)->first();
+
+            if ($setting !== null) {
+                $setting->delete();
+                $this->auditCda($setting->steps ?? [], [], 'CDA review chain reset to a single review.');
+            }
+        } else {
+            ApprovalWorkflowSetting::where('type', $type)->delete();
+        }
 
         return response()->json([
             'data' => [
@@ -174,6 +195,97 @@ class ApprovalWorkflowController extends Controller
                 'is_default' => true,
             ],
         ]);
+    }
+
+    /**
+     * The CDA review chain: approve-only steps by role, at most ten, each
+     * name used once and each role an existing active role (admin and
+     * super_admin always count). Saving needs `cda:settings` too.
+     */
+    private function updateCda(Request $request): JsonResponse
+    {
+        app(CdaAccess::class)->authorize($request->user(), CdaAccess::SETTINGS);
+
+        $validated = $request->validate([
+            'type' => ['required', Rule::in([ApprovalWorkflowSetting::TYPE_CDA])],
+            'steps' => ['required', 'array', 'min:1', 'max:'.CdaApprovalChain::MAX_STEPS],
+            'steps.*' => ['array'],
+            'steps.*.id' => ['nullable', 'string', 'max:100'],
+            'steps.*.name' => ['required', 'string', 'max:100', 'regex:/\S/'],
+            'steps.*.role' => ['required', 'string', 'max:100'],
+            'steps.*.kind' => ['nullable', Rule::in(['approve'])],
+            'steps.*.status' => ['nullable', 'string', 'max:100'],
+        ], [
+            'steps.required' => 'Add at least one review step, or reset the chain to keep a single review.',
+            'steps.min' => 'Add at least one review step, or reset the chain to keep a single review.',
+            'steps.max' => 'A CDA review chain has at most '.CdaApprovalChain::MAX_STEPS.' steps.',
+            'steps.*.name.required' => 'Give each step a name.',
+            'steps.*.name.regex' => 'Give each step a name.',
+            'steps.*.name.max' => 'A step name takes up to 100 characters.',
+            'steps.*.role.required' => 'Choose the role for each step.',
+            'steps.*.kind.in' => 'CDA review steps only approve; there is no submit or release step.',
+            'steps.*.status.max' => 'A status label takes up to 100 characters.',
+        ]);
+
+        $names = [];
+        $steps = [];
+
+        foreach ($validated['steps'] as $index => $step) {
+            $name = trim($step['name']);
+            $key = mb_strtolower(preg_replace('/\s+/u', ' ', $name));
+
+            if (in_array($key, $names, true)) {
+                throw ValidationException::withMessages(["steps.{$index}.name" => "Two steps are named \"{$name}\". Give each step its own name."]);
+            }
+
+            $names[] = $key;
+            $active = Role::query()->where('name', $step['role'])
+                ->where(fn ($roles) => $roles->where('is_active', true)->orWhereIn('name', Role::PROTECTED_KEYS))
+                ->exists();
+
+            if (! $active) {
+                throw ValidationException::withMessages(["steps.{$index}.role" => "Step \"{$name}\" needs an existing, active role."]);
+            }
+
+            $status = trim((string) ($step['status'] ?? ''));
+            $steps[] = [
+                'id' => 'cda-step-'.($index + 1),
+                'name' => $name,
+                'role' => $step['role'],
+                'kind' => 'approve',
+                'status' => $status === '' ? null : $status,
+            ];
+        }
+
+        $old = ApprovalWorkflowSetting::where('type', ApprovalWorkflowSetting::TYPE_CDA)->value('steps') ?? [];
+        $setting = ApprovalWorkflowSetting::updateOrCreate(['type' => ApprovalWorkflowSetting::TYPE_CDA], ['steps' => $steps]);
+
+        if ($old !== $steps) {
+            $this->auditCda($old, $steps, 'CDA review chain saved: '.implode(', ', array_map(
+                fn (array $step) => $step['name'].' ('.CdaApprovalChain::roleLabel($step['role']).')',
+                $steps,
+            )).'.');
+        }
+
+        return response()->json([
+            'data' => [
+                'type' => $setting->type,
+                'steps' => $setting->steps,
+                'is_default' => false,
+            ],
+        ]);
+    }
+
+    /**
+     * The CDA chain's audit row, filed under CDA settings (the chain is CDA
+     * configuration, and its row may be gone after a reset).
+     *
+     * @param  array<int, mixed>  $old
+     * @param  array<int, mixed>  $new
+     */
+    private function auditCda(array $old, array $new, string $description): void
+    {
+        AuditLogService::log('cda_review_chain_updated', CdaSetting::current(), ['steps' => $old], ['steps' => $new], $description);
     }
 
     private function resolveType(Request $request): string
