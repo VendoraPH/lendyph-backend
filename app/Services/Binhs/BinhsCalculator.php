@@ -260,7 +260,7 @@ final class BinhsCalculator
             $interest = self::round2($plan['scheduled_interest'][$i]);
             $principalPaid = $i === $last
                 ? self::lastPrincipal($plan, $settled)
-                : self::round2($plan['scheduled_principal'][$i]);
+                : self::settledPrincipal($plan, $settled, $plan['scheduled_principal'][$i]);
             $settled = $settled->plus($principalPaid);
             $balance = $balance->minus($principalPaid);
 
@@ -354,8 +354,10 @@ final class BinhsCalculator
                     $shown = self::lastPrincipal($plan, $settledShown);
                     $payment = $shown->plus(self::round2($interest))->plus($scbu);
                 } else {
-                    $shown = self::round2($settled);
-                    $payment = self::round2($settled->plus($interest)->plus($scbu));
+                    $shown = self::settledPrincipal($plan, $settledShown, $settled);
+                    $payment = $shown->isEqualTo(self::round2($settled))
+                        ? self::round2($settled->plus($interest)->plus($scbu))
+                        : $shown->plus(self::round2($interest))->plus($scbu);
                 }
 
                 $settledShown = $settledShown->plus($shown);
@@ -380,9 +382,28 @@ final class BinhsCalculator
     }
 
     /**
+     * A row's principal settled, rounded as the page rounds it, but never more
+     * than the principal still left to settle.
+     *
+     * On an ordinary schedule the cap never binds. It does when each row's
+     * share is under a centavo or so and rounds up every time (₱1.50 over 60
+     * months at 0% is ₱0.025 a month, shown as ₱0.03): 59 rounded rows would
+     * settle ₱1.77 and leave the last row at -₱0.27. Capped, the rows settle
+     * ₱0.03 until the principal is used up, then ₱0.00, and the last row's
+     * remainder is never below ₱0.00.
+     *
+     * @param  array{principal: BigDecimal|BigRational, rate: BigRational, level: BigDecimal|BigRational, zero: BigDecimal|BigRational, scheduled_principal: list<BigDecimal|BigRational>, scheduled_interest: list<BigDecimal|BigRational>}  $plan
+     */
+    private static function settledPrincipal(array $plan, BigDecimal $settledShown, BigDecimal|BigRational $settled): BigDecimal
+    {
+        return BigDecimal::min(self::round2($settled), self::lastPrincipal($plan, $settledShown));
+    }
+
+    /**
      * The last row's principal: the principal less the rounded principal the
      * rows before it settled, so the principal a schedule settles adds up to
      * the principal exactly. Interest is never moved: each row keeps its own.
+     * settledPrincipal() keeps it from going below ₱0.00.
      *
      * @param  array{principal: BigDecimal|BigRational, rate: BigRational, level: BigDecimal|BigRational, zero: BigDecimal|BigRational, scheduled_principal: list<BigDecimal|BigRational>, scheduled_interest: list<BigDecimal|BigRational>}  $plan
      */
