@@ -97,7 +97,8 @@ class RunBuilder
         foreach ($open->groupBy(fn (SavingsAccount $account) => $this->firstDay($account, $start)) as $from => $group) {
             $loaded = $from <= $end ? $this->balances->load($group->pluck('id'), $from, $end) : [];
             $segments = $from <= $end ? $this->rates->segments($product->id, null, $from, $end) : [];
-            $noRate = collect($segments)->every(fn (array $segment) => SavingsMath::rateUnits($segment['rate']) === 0);
+            $noRate = collect($segments)->every(fn (array $segment) => SavingsMath::rateUnits($segment['rate']) === 0
+                && collect($segment['tiers'] ?? [])->every(fn (array $tier) => SavingsMath::rateUnits($tier['rate']) === 0));
 
             foreach ($group as $account) {
                 $figures = $this->calculator->calculate(

@@ -10,11 +10,16 @@ use App\Http\Resources\Savings\SavingsProductRateResource;
 use App\Http\Resources\Savings\SavingsProductResource;
 use App\Models\SavingsProduct;
 use App\Models\SavingsProductRate;
+use App\Services\Accounting\Money;
+use App\Services\AuditLogService;
 use App\Services\BranchAccess;
 use App\Services\Savings\SavingsBooks;
+use App\Services\Savings\SavingsMath;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
@@ -234,34 +239,82 @@ class SavingsProductController extends Controller
 
     #[OA\Post(
         path: '/api/savings/products/{product}/rates',
-        summary: 'Add a rate from a date',
-        description: 'From today or later (a past date is 422, so interest already figured never changes). A time deposit product\'s rate names one of its terms; a regular product\'s has none.',
+        summary: 'Add a rate, or a ladder of balance tiers, from a date',
+        description: 'From today or later (a past date is 422, so interest already figured never changes). A time deposit product\'s rate names one of its terms; a regular product\'s has none. Send either one `annual_rate` (the base tier; answers the new row) or, for a regular product only, `tiers`: the base tier first (`min_balance` null) and exactly once, then minimum balances above ₱0.00 rising with no repeats, at most 20 (answers the new rows). The ladder in force on a day is the rows sharing the latest `effective_from`; a same-day correction is the newest row per minimum balance. Each row is audited in words.',
         tags: ['Savings'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'product', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
-        requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent(required: ['annual_rate', 'effective_from'], properties: [
+        requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent(required: ['effective_from'], properties: [
             new OA\Property(property: 'annual_rate', type: 'string', example: '1.5000'),
             new OA\Property(property: 'term_days', type: 'integer', nullable: true, example: 180),
             new OA\Property(property: 'effective_from', type: 'string', format: 'date'),
+            new OA\Property(property: 'tiers', type: 'array', items: new OA\Items(properties: [
+                new OA\Property(property: 'min_balance', type: 'string', nullable: true, example: '50000.00'),
+                new OA\Property(property: 'annual_rate', type: 'string', example: '2.5000'),
+            ])),
         ])),
         responses: [
-            new OA\Response(response: 201, description: 'The new rate'),
+            new OA\Response(response: 201, description: 'The new rate, or the new tier rows'),
             new OA\Response(response: 403, description: 'Missing savings:settings or branches:view_all (company-wide)'),
             new OA\Response(response: 404, description: 'No such product'),
-            new OA\Response(response: 422, description: 'A past date, a term the product doesn\'t offer, or a rate outside 0–100%'),
+            new OA\Response(response: 422, description: 'A past date, a term the product doesn\'t offer, a rate outside 0–100%, tiers on a time deposit product, or a ladder without exactly one base tier or with minimums out of order'),
         ],
     )]
     public function storeRate(StoreSavingsProductRateRequest $request, SavingsProduct $product): JsonResponse
     {
-        $rate = SavingsProductRate::query()->create([
-            'product_id' => $product->id,
-            'term_days' => $request->validated('term_days'),
-            'annual_rate' => (string) $request->validated('annual_rate'),
-            'effective_from' => $request->validated('effective_from'),
-            'created_by' => $request->user()->id,
-        ]);
+        $tiers = $request->validated('tiers');
+        $ladder = $tiers ?? [['min_balance' => null, 'annual_rate' => $request->validated('annual_rate')]];
+        $termDays = $request->validated('term_days');
+        $effectiveFrom = (string) $request->validated('effective_from');
+        $userId = (int) $request->user()->id;
 
-        return response()->json(['success' => true, 'data' => (new SavingsProductRateResource($rate->refresh()->load('creator')))->resolve($request)], 201);
+        $rates = DB::transaction(function () use ($product, $ladder, $termDays, $effectiveFrom, $userId): Collection {
+            $locked = SavingsProduct::query()->whereKey($product->id)->lockForUpdate()->firstOrFail();
+
+            $rates = AuditLogService::withoutModelAuditing(fn (): Collection => collect($ladder)->map(fn (array $tier): SavingsProductRate => SavingsProductRate::query()->create([
+                'product_id' => $locked->id,
+                'term_days' => $termDays,
+                'annual_rate' => (string) $tier['annual_rate'],
+                'min_balance' => $tier['min_balance'] === null ? null : SavingsMath::pesos(SavingsMath::centavos($tier['min_balance'])),
+                'effective_from' => $effectiveFrom,
+                'created_by' => $userId,
+            ])->refresh()));
+
+            foreach ($rates->values() as $i => $rate) {
+                AuditLogService::log('created', $rate, null, $rate->getAttributes(), $this->rateWords($locked, $rate, $rates->get($i + 1)));
+            }
+
+            return $rates;
+        });
+
+        $rates = (new EloquentCollection($rates->all()))->load('creator');
+
+        $data = $tiers === null
+            ? (new SavingsProductRateResource($rates->first()))->resolve($request)
+            : SavingsProductRateResource::collection($rates)->resolve($request);
+
+        return response()->json(['success' => true, 'data' => $data], 201);
+    }
+
+    /**
+     * A new rate row in words, for its audit row: "Regular Savings rate from
+     * Dec 1, 2026. ₱50,000.00 and up: 2.5% a year." The base tier of a ladder
+     * reads "Below ₱10,000.00", a single rate reads just its rate, and a time
+     * deposit rate names its term. Rates are never rounded.
+     */
+    private function rateWords(SavingsProduct $product, SavingsProductRate $rate, ?SavingsProductRate $next): string
+    {
+        $percent = rtrim(rtrim($rate->annual_rate, '0'), '.').'% a year';
+        $peso = fn (string $pesos): string => '₱'.number_format(Money::toCentavos($pesos) / 100, 2);
+
+        $tier = match (true) {
+            $rate->term_days !== null => "{$rate->term_days} days: {$percent}",
+            $rate->min_balance !== null => $peso($rate->min_balance)." and up: {$percent}",
+            $next !== null && $next->min_balance !== null => 'Below '.$peso($next->min_balance).": {$percent}",
+            default => $percent,
+        };
+
+        return "{$product->name} rate from {$rate->effective_from->format('M j, Y')}. {$tier}.";
     }
 
     /**
