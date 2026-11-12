@@ -72,15 +72,14 @@ final class BracketRate
     }
 
     /**
-     * "1–5 days: 20%; 6–10 days: 30%; 11 days or more: 50%". `$after` follows
-     * each range: " late" reads "1–5 days late: 20%".
+     * "1–5 days: 20%; 6–10 days: 30%; 11 days or more: 50%".
      *
      * @param  iterable<array{days_from: int|string, days_to: int|string|null, rate: int|float|string}>  $brackets
      */
-    public static function inWords(iterable $brackets, string $after = ''): string
+    public static function inWords(iterable $brackets): string
     {
         return implode('; ', array_map(
-            fn (array $bracket): string => self::daysInWords($bracket['days_from'], $bracket['days_to']).$after.': '.self::percent($bracket['rate']),
+            fn (array $bracket): string => self::daysInWords($bracket['days_from'], $bracket['days_to']).': '.self::percent($bracket['rate']),
             self::normalise($brackets),
         ));
     }

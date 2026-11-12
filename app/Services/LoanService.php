@@ -14,6 +14,7 @@ use App\Models\LoanProduct;
 use App\Models\User;
 use App\Services\Accounting\AutomaticPoster;
 use App\Services\Accounting\Money;
+use App\Services\Penalties\PenaltyTerms;
 use Carbon\Carbon;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
@@ -139,14 +140,16 @@ class LoanService
      * product afterwards: how interest is computed (`interest_method`), what
      * the term counts (`term_unit`), what period the rate is quoted per
      * (`interest_rate_frequency`), and the late-payment terms (`penalty_rate`,
-     * `grace_period_days`).
+     * `grace_period_days`, and the product's active penalty configuration:
+     * `penalty_config_id`, `penalty_config_name` and `penalty_brackets`, with
+     * `penalty_rate` 0, see PenaltyTerms::forProduct()).
      *
      * The one list. createLoanRecord() copies it onto a new loan, and the
      * form preview builds its unsaved loan from it, so the preview's schedule
      * follows the same product terms the saved loan will. The loan keeps them
      * even if the product changes afterwards.
      *
-     * @return array{interest_method: string, term_unit: string, interest_rate_frequency: string, penalty_rate: mixed, grace_period_days: mixed}
+     * @return array{interest_method: string, term_unit: string, interest_rate_frequency: string, penalty_rate: mixed, penalty_config_id: int|null, penalty_config_name: string|null, penalty_brackets: list<array{days_from: int, days_to: int|null, rate: float}>|null, grace_period_days: mixed}
      */
     private function productSnapshot(LoanProduct $product): array
     {
@@ -154,7 +157,7 @@ class LoanService
             'interest_method' => $product->interest_method,
             'term_unit' => $product->term_unit->value,
             'interest_rate_frequency' => $product->interest_rate_frequency->value,
-            'penalty_rate' => $product->penalty_rate,
+            ...PenaltyTerms::forProduct($product),
             'grace_period_days' => $product->grace_period_days,
         ];
     }

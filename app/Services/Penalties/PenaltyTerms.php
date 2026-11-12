@@ -123,24 +123,6 @@ final class PenaltyTerms
     }
 
     /**
-     * The loan's late penalty in words, for its printables: its brackets
-     * ("1–5 days late: 20%; 11 days or more late: 50%"), its rate ("3% a
-     * month"), or "No late penalty". Rates never rounded.
-     */
-    public static function inWords(Loan $loan): string
-    {
-        $brackets = self::bracketsOf($loan);
-
-        if ($brackets !== null) {
-            return BracketRate::inWords($brackets, ' late');
-        }
-
-        return (float) $loan->penalty_rate > 0
-            ? BracketRate::percent((string) $loan->penalty_rate).' a month'
-            : 'No late penalty';
-    }
-
-    /**
      * Whether the loan charges any late penalty at all: a `penalty_rate`
      * above 0, or a bracket with a rate above 0.
      */

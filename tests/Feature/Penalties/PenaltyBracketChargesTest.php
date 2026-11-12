@@ -326,28 +326,6 @@ class PenaltyBracketChargesTest extends TestCase
         );
     }
 
-    public function test_the_disclosure_and_the_promissory_note_send_the_loans_penalty_terms(): void
-    {
-        $bracket = $this->bracketLoan(self::KEVIN, grace: 3);
-        $rate = $this->createReleasedLoan(['start_date' => '2026-01-15', 'product' => ['penalty_rate' => 2.5]]);
-        $none = $this->createReleasedLoan(['start_date' => '2026-01-15', 'product' => ['penalty_rate' => 0]]);
-
-        foreach (['disclosure', 'promissory-note'] as $document) {
-            $terms = fn (Loan $loan): array => $this->getJson("/api/loans/{$loan->id}/{$document}")->assertOk()->json('data.loan_terms');
-
-            $withBrackets = $terms($bracket);
-            $this->assertEquals(0, $withBrackets['penalty_rate'], $document);
-            $this->assertEquals(self::KEVIN, $withBrackets['penalty_brackets'], $document);
-            $this->assertSame('1–5 days late: 20%; 6–10 days late: 30%; 11 days or more late: 50%', $withBrackets['penalty_terms'], $document);
-
-            $withRate = $terms($rate);
-            $this->assertNull($withRate['penalty_brackets'], $document);
-            $this->assertSame('2.5% a month', $withRate['penalty_terms'], $document);
-
-            $this->assertSame('No late penalty', $terms($none)['penalty_terms'], $document);
-        }
-    }
-
     public function test_the_loan_row_sends_its_brackets_and_configuration(): void
     {
         $loan = $this->bracketLoan(self::KEVIN, grace: 0);

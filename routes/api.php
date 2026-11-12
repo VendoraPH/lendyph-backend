@@ -771,6 +771,7 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
      */
     require __DIR__.'/api/credit-scoring.php';
     require __DIR__.'/api/reminders.php';
+    require __DIR__.'/api/penalties.php';
 
     /*
      * Savings & Deposits partials (routes/api/savings/*.php), in file-name
