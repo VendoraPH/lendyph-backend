@@ -1,6 +1,7 @@
 <?php
 
 use App\Models\ApprovalWorkflowSetting;
+use App\Models\AuditLog;
 use App\Models\Branch;
 use App\Models\User;
 use Spatie\Permission\Models\Role;
@@ -184,4 +185,48 @@ it('saves a chain where some steps have no status label', function () {
     expect($steps[0]['status'] ?? null)->toBeNull();
     expect($steps[1]['status'] ?? null)->toBeNull();
     expect($steps[2]['status'] ?? null)->toBe('Ready for Release');
+});
+
+it('audits saving a loan chain in words, old and new steps by name and role', function () {
+    $steps = [
+        ['id' => 'lp', 'name' => 'Loan Processor', 'role' => 'loan_processor', 'kind' => 'submit'],
+        ['id' => 'mgr', 'name' => 'Branch Head', 'role' => 'manager', 'kind' => 'approve'],
+        ['id' => 'cash', 'name' => 'Teller', 'role' => 'cashier', 'kind' => 'release'],
+    ];
+
+    $this->putJson('/api/settings/approval-workflow', ['type' => 'normal', 'steps' => $steps])->assertSuccessful();
+
+    $rows = AuditLog::where('action', 'loan_approval_chain_updated')->get();
+    expect($rows)->toHaveCount(1);
+    expect($rows[0]->description)->toBe('Normal loan approval chain saved: Loan Processor (Loan Processor), Branch Head (Manager), Teller (Cashier). Before: the default chain, Loan Processor (Loan Processor), Manager (Manager), BOD Chairwoman (Bod1), General Bookkeeper (General Bookkeeper).');
+    expect($rows[0]->old_values['type'])->toBe('normal');
+    expect($rows[0]->old_values['is_default'])->toBeTrue();
+    expect(array_column($rows[0]->old_values['steps'], 'name'))->toBe(array_column(ApprovalWorkflowSetting::defaultStepsFor('normal'), 'name'));
+    expect($rows[0]->new_values['is_default'])->toBeFalse();
+    expect(array_column($rows[0]->new_values['steps'], 'role'))->toBe(['loan_processor', 'manager', 'cashier']);
+    expect($rows[0]->user_id)->toBe($this->admin->id);
+
+    // Saving the same chain again changes nothing and writes nothing.
+    $this->putJson('/api/settings/approval-workflow', ['type' => 'normal', 'steps' => $steps])->assertSuccessful();
+    expect(AuditLog::where('action', 'loan_approval_chain_updated')->count())->toBe(1);
+});
+
+it('audits resetting a saved loan chain, and writes nothing when none was saved', function () {
+    $this->deleteJson('/api/settings/approval-workflow?type=policy_exception')->assertSuccessful();
+    expect(AuditLog::where('action', 'loan_approval_chain_updated')->count())->toBe(0);
+
+    $this->putJson('/api/settings/approval-workflow', ['type' => 'policy_exception', 'steps' => [
+        ['id' => 'lp', 'name' => 'Loan Processor', 'role' => 'loan_processor', 'kind' => 'submit'],
+        ['id' => 'cash', 'name' => 'Cashier', 'role' => 'cashier', 'kind' => 'release'],
+    ]])->assertSuccessful();
+
+    $this->deleteJson('/api/settings/approval-workflow?type=policy_exception')->assertSuccessful();
+
+    $reset = AuditLog::where('action', 'loan_approval_chain_updated')->orderByDesc('id')->first();
+    expect(AuditLog::where('action', 'loan_approval_chain_updated')->count())->toBe(2);
+    expect($reset->description)->toStartWith('Policy exception loan approval chain reset to the default chain: Loan Processor (Loan Processor), Manager (Manager), ');
+    expect($reset->description)->toEndWith('. Before: Loan Processor (Loan Processor), Cashier (Cashier).');
+    expect(array_column($reset->old_values['steps'], 'name'))->toBe(['Loan Processor', 'Cashier']);
+    expect($reset->new_values['is_default'])->toBeTrue();
+    expect($reset->new_values['steps'])->toHaveCount(10);
 });

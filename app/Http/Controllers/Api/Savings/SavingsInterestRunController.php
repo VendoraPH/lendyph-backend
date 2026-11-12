@@ -90,7 +90,7 @@ class SavingsInterestRunController extends Controller
     #[OA\Post(
         path: '/api/savings/interest-runs/preview',
         summary: 'Preview a savings interest run',
-        description: 'Writes nothing. One draft-to-be per branch holding an account on the product, with every line\'s days, average daily balance, rate, gross, tax and net, or why it earns nothing (`skip_reason`: below_minimum_adb, no_balance, no_days, closed or no_rate). The period starts on a crediting-period start and runs to its end (a calendar month, quarter, half or year).',
+        description: 'Writes nothing. One draft-to-be per branch holding an account on the product, with every line\'s days, average daily balance, rate, gross, tax and net, or why it earns nothing (`skip_reason`: below_minimum_adb, below_earning_tier (every day stayed in a 0% tier below the first tier that pays), no_balance, no_days, closed or no_rate). The period starts on a crediting-period start and runs to its end (a calendar month, quarter, half or year).',
         tags: ['Savings'],
         security: [['sanctum' => []]],
         requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent(required: ['product_id', 'period_start'], properties: [

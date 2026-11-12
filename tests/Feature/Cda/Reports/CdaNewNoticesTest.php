@@ -109,4 +109,18 @@ class CdaNewNoticesTest extends TestCase
         $run('2027-01-30');
         $this->assertCount(2, $this->notices($preparer, DeadlineReminders::MISSING_TYPE), 'A complete report gets none.');
     }
+
+    public function test_the_command_line_counts_the_calendar_items_and_the_incomplete_report_notices(): void
+    {
+        $this->userWith(['branches:view_all', CdaAccess::VIEW, CdaAccess::PREPARE]);
+        $period = $this->openYear();
+        CdaReport::query()->where('period_id', $period->id)->update(['readiness' => 100, 'readiness_breakdown' => json_encode(['passed' => 4, 'total' => 4, 'failed' => []])]);
+        $this->report($period, 'capr')->forceFill(['readiness' => 92, 'readiness_breakdown' => ['passed' => 46, 'total' => 50, 'failed' => ['required:general.a']]])->save();
+
+        Carbon::setTestNow(Carbon::parse('2027-01-15 00:50:00', 'Asia/Manila'));
+
+        $this->artisan('cda:send-reminders')
+            ->expectsOutputToContain('0 calendar items checked, 1 incomplete-report notice sent.')
+            ->assertSuccessful();
+    }
 }

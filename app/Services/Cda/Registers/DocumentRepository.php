@@ -196,6 +196,27 @@ final class DocumentRepository
     }
 
     /**
+     * Adds `documents_count` to presented register rows (gap round B7): the
+     * active documents attached to each row (training, program or case) that
+     * the user may see under scopeVisible(). Withdrawn ones stay listed but
+     * aren't counted. One query for the whole page.
+     *
+     * @param  list<array<string, mixed>>  $rows  each with its `id`
+     * @return list<array<string, mixed>>
+     */
+    public function withDocumentsCount(array $rows, string $subjectType, User $user): array
+    {
+        $query = CdaDocument::query()
+            ->where('subject_type', $subjectType)
+            ->whereIn('subject_id', array_column($rows, 'id'))
+            ->where('status', 'active');
+        $this->scopeVisible($query, $user);
+        $counts = $query->groupBy('subject_id')->selectRaw('subject_id, COUNT(*) AS aggregate')->pluck('aggregate', 'subject_id');
+
+        return array_map(fn (array $row) => [...$row, 'documents_count' => (int) ($counts[$row['id']] ?? 0)], $rows);
+    }
+
+    /**
      * Narrows a document query to what the user may see, in SQL so a list
      * pages correctly.
      *

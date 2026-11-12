@@ -7,6 +7,7 @@ use App\Models\SavingsAccount;
 use App\Models\SavingsAutoCreditInstruction;
 use App\Models\SavingsAutoCreditPosting;
 use App\Models\SavingsAutoCreditRun;
+use App\Models\SavingsAutoCreditSkip;
 use App\Models\SavingsTransaction;
 use App\Models\User;
 use App\Services\Accounting\AutomaticPoster;
@@ -22,6 +23,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use LogicException;
 
@@ -47,7 +49,8 @@ use LogicException;
  *   account picked on the run, the bank by default / Cr 2050), dated today
  *   (a late run still records its cycle: the ledger takes no date before
  *   yesterday), counted as member activity, so it wakes a dormant account.
- *   One `savings_auto_credit_postings` row each.
+ *   One `savings_auto_credit_postings` row each, and one
+ *   `savings_auto_credit_skips` row per skipped instruction (gap round B7).
  * - **Locks:** process() takes its locks before any plain read: the due
  *   instruction rows, then all their accounts in one SavingsLocks::accounts()
  *   call, then reads the instructions and the cycle's postings again with
@@ -128,8 +131,19 @@ class AutoCreditRunner
             'posted_count' => count($plan['credits']),
             'posted_total' => SavingsMath::pesos($plan['credit_centavos']),
             'skipped_count' => count($plan['skipped']),
+            'skips_recorded' => true,
             'created_by' => $user->id,
         ]);
+
+        foreach ($plan['skipped'] as $skip) {
+            SavingsAutoCreditSkip::query()->create([
+                'run_id' => $run->id,
+                'instruction_id' => $skip['instruction_id'],
+                'account_id' => $skip['account_id'],
+                'amount' => $skip['amount'],
+                'reason' => Str::limit($skip['reason'], 500, ''),
+            ]);
+        }
 
         foreach ($plan['credits'] as $i => $credit) {
             $account = $accounts[$credit['account_id']];

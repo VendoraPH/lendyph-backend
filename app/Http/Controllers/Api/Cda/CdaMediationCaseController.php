@@ -7,7 +7,9 @@ use App\Http\Requests\Cda\Registers\CdaMediationCaseRequest;
 use App\Http\Resources\Cda\RegisterPresenter;
 use App\Models\CdaMediationCase;
 use App\Models\CdaReportingPeriod;
+use App\Models\User;
 use App\Services\Cda\CdaAccess;
+use App\Services\Cda\Registers\DocumentRepository;
 use App\Services\Cda\Registers\RegisterStaleness;
 use App\Services\GeneratedNumberWrite;
 use App\Services\LoanWriteTransaction;
@@ -42,6 +44,7 @@ class CdaMediationCaseController extends Controller
     public function __construct(
         private readonly CdaAccess $access,
         private readonly RegisterStaleness $staleness,
+        private readonly DocumentRepository $documents,
     ) {}
 
     #[OA\Get(
@@ -55,7 +58,7 @@ class CdaMediationCaseController extends Controller
             new OA\Parameter(name: 'half', in: 'query', schema: new OA\Schema(type: 'string', enum: ['h1', 'h2'])),
             new OA\Parameter(name: 'per_page', in: 'query', schema: new OA\Schema(type: 'integer', maximum: 100)),
         ],
-        responses: [new OA\Response(response: 200, description: '{success, data: case[], meta}'), new OA\Response(response: 403, description: 'Missing cda:view_mediation or branches:view_all'), new OA\Response(response: 404, description: 'No period for that year'), new OA\Response(response: 422, description: 'A half that isn\'t h1 or h2')],
+        responses: [new OA\Response(response: 200, description: '{success, data: case[], meta}; each row carries `documents_count` (its active documents the caller may see)'), new OA\Response(response: 403, description: 'Missing cda:view_mediation or branches:view_all'), new OA\Response(response: 404, description: 'No period for that year'), new OA\Response(response: 422, description: 'A half that isn\'t h1 or h2')],
     )]
     public function index(Request $request, int $year): JsonResponse
     {
@@ -70,7 +73,9 @@ class CdaMediationCaseController extends Controller
         $page = CdaMediationCase::query()->overlapping($from, $to)->orderBy('filed_on')->orderBy('id')
             ->paginate(RegisterPresenter::perPage($request->query('per_page')));
 
-        return RegisterPresenter::page($page, $page->getCollection()->map(fn (CdaMediationCase $case) => RegisterPresenter::mediationCase($case, $year))->all());
+        $rows = $page->getCollection()->map(fn (CdaMediationCase $case) => RegisterPresenter::mediationCase($case, $year))->values()->all();
+
+        return RegisterPresenter::page($page, $this->documents->withDocumentsCount($rows, 'case', $request->user()));
     }
 
     #[OA\Post(
@@ -107,7 +112,7 @@ class CdaMediationCaseController extends Controller
             return $case;
         }, GeneratedNumberWrite::MEDIATION_CONFLICT));
 
-        return RegisterPresenter::one(RegisterPresenter::mediationCase($case->refresh(), $year), 201, "Case {$case->case_number} recorded.");
+        return RegisterPresenter::one($this->withCount(RegisterPresenter::mediationCase($case->refresh(), $year), $request->user()), 201, "Case {$case->case_number} recorded.");
     }
 
     #[OA\Put(
@@ -137,7 +142,7 @@ class CdaMediationCaseController extends Controller
             return $locked;
         }, conflictMessage: self::CONFLICT));
 
-        return RegisterPresenter::one(RegisterPresenter::mediationCase($saved, $saved->filed_on->year), message: "Case {$saved->case_number} saved.");
+        return RegisterPresenter::one($this->withCount(RegisterPresenter::mediationCase($saved, $saved->filed_on->year), $request->user()), message: "Case {$saved->case_number} saved.");
     }
 
     #[OA\Delete(
@@ -199,5 +204,14 @@ class CdaMediationCaseController extends Controller
     private function touch(CdaMediationCase $case): void
     {
         $this->staleness->touch(RegisterStaleness::MEDIATION, $case->filed_on->toDateString(), $case->resolved_on?->toDateString());
+    }
+
+    /**
+     * @param  array<string, mixed>  $row
+     * @return array<string, mixed>
+     */
+    private function withCount(array $row, User $user): array
+    {
+        return $this->documents->withDocumentsCount([$row], 'case', $user)[0];
     }
 }
