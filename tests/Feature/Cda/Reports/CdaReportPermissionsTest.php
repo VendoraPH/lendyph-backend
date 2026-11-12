@@ -67,7 +67,7 @@ class CdaReportPermissionsTest extends TestCase
                 ->assertForbidden();
             $this->actingAs($this->userWith([$permission, CdaAccess::VIEW]))->json($method, $url, $body)
                 ->assertForbidden()
-                ->assertJsonPath('message', 'CDA reports cover the whole cooperative, so they need access to every branch (branches:view_all).');
+                ->assertJsonPath('message', 'CDA reports cover the whole cooperative, so this needs head-office access to all branches.');
             $allowed = $this->actingAs($this->userWith(['branches:view_all', CdaAccess::VIEW, $permission]))->json($method, $url, $body);
             $this->assertNotSame(403, $allowed->status(), "{$method} {$url} refused a holder of {$permission}: ".$allowed->getContent());
         }
@@ -82,7 +82,7 @@ class CdaReportPermissionsTest extends TestCase
 
         $this->actingAs($staff);
         $this->getJson("/api/cda/reports/{$fs->id}")->assertForbidden()
-            ->assertJsonPath('message', 'Audited Financial Statements is restricted: it needs the cda:view_audit permission.');
+            ->assertJsonPath('message', 'Audited Financial Statements is restricted: it needs the CDA audit reports view permission.');
         $this->getJson('/api/cda/periods/2026/reports/financial_statements')->assertForbidden();
         $this->getJson("/api/cda/reports/{$mediation->id}")->assertForbidden();
         $this->getJson('/api/cda/periods/2026/reports/mediation?part=h2')->assertForbidden();

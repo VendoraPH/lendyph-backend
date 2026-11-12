@@ -9,8 +9,13 @@ use App\Models\CdaReportApprovalStep;
 use App\Models\Role;
 use App\Models\User;
 use App\Services\Cda\CdaAccess;
+use Exception;
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use PDOException;
+use ReflectionProperty;
 use Spatie\Permission\PermissionRegistrar;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
@@ -71,9 +76,20 @@ class CdaReviewChainTest extends TestCase
         ]])->assertOk();
     }
 
+    /** A workflow action; an approve names the pending step (`step_id`), as the screen does. */
     private function act(CdaReport $report, string $action, User $as, array $body = [])
     {
+        if ($action === 'approve' && ! array_key_exists('step_id', $body)) {
+            $pending = $this->pendingStep($report);
+            $body += $pending === null ? [] : ['step_id' => $pending->id];
+        }
+
         return $this->actingAs($as)->postJson("/api/cda/reports/{$report->id}/workflow", ['action' => $action, ...$body]);
+    }
+
+    private function pendingStep(CdaReport $report): ?CdaReportApprovalStep
+    {
+        return CdaReportApprovalStep::query()->where('report_id', $report->id)->where('status', 'pending')->whereNull('closed_at')->first();
     }
 
     /** The test CAPR, filled in and submitted for review by the preparer. */
@@ -106,10 +122,18 @@ class CdaReviewChainTest extends TestCase
         $cdaSettings = $this->userWith(['settings:view', 'settings:update', 'branches:view_all', CdaAccess::SETTINGS]);
         $steps = [['name' => 'Manager review', 'role' => 'cda_manager']];
 
-        $this->actingAs($settingsOnly)->getJson('/api/settings/approval-workflow?type=cda')->assertOk()
+        $this->actingAs($settingsOnly)->getJson('/api/settings/approval-workflow?type=cda')->assertForbidden()
+            ->assertJsonPath('message', 'This needs the CDA view permission.');
+        $this->actingAs($this->userWith(['settings:view', CdaAccess::VIEW]))->getJson('/api/settings/approval-workflow?type=cda')->assertForbidden()
+            ->assertJsonPath('message', 'CDA reports cover the whole cooperative, so this needs head-office access to all branches.');
+        $this->actingAs($this->userWith(['settings:view', 'branches:view_all', CdaAccess::VIEW]))->getJson('/api/settings/approval-workflow?type=cda')->assertOk()
             ->assertJsonPath('data.steps', [])
             ->assertJsonPath('data.is_default', true);
-        $this->actingAs($settingsOnly)->putJson('/api/settings/approval-workflow', ['type' => 'cda', 'steps' => $steps])->assertForbidden();
+        $this->actingAs($settingsOnly)->getJson('/api/settings/approval-workflow?type=normal')->assertOk();
+        $this->actingAs($settingsOnly)->getJson('/api/settings/approval-workflow?type=savings')->assertStatus(422)
+            ->assertJsonPath('errors.type.0', 'Choose a loan approval chain (normal or policy exception) or the CDA review chain.');
+        $this->actingAs($settingsOnly)->putJson('/api/settings/approval-workflow', ['type' => 'cda', 'steps' => $steps])->assertForbidden()
+            ->assertJsonPath('message', 'This needs the CDA settings permission.');
         $this->actingAs($settingsOnly)->deleteJson('/api/settings/approval-workflow?type=cda')->assertForbidden();
 
         $this->actingAs($cdaSettings)->putJson('/api/settings/approval-workflow', ['type' => 'cda', 'steps' => [['name' => 'Prepare', 'role' => 'cda_manager', 'kind' => 'submit']]])
@@ -244,7 +268,8 @@ class CdaReviewChainTest extends TestCase
 
         $this->assertContains('return', $this->actingAs($manager)->getJson("/api/cda/reports/{$report->id}")->json('data.available_actions'));
         $this->assertNotContains('return', $this->actingAs($board)->getJson("/api/cda/reports/{$report->id}")->json('data.available_actions'));
-        $this->act($report, 'return', $board, ['reason' => 'Not my step'])->assertForbidden();
+        $this->act($report, 'return', $board, ['reason' => 'Not my step'])->assertForbidden()
+            ->assertJsonPath('message', 'Returning this report needs the CDA review permission or the CDA Manager role of its "Manager review" review step.');
 
         $this->act($report, 'return', $manager, ['reason' => 'The payroll is missing'])->assertOk()
             ->assertJsonPath('data.status', 'draft')
@@ -324,5 +349,87 @@ class CdaReviewChainTest extends TestCase
         $this->assertSame(['cda_approval_needed'], $this->noticesFor($board));
         $this->assertSame(['cda_approval_needed'], $this->noticesFor($manager), 'The approver of the step is not told again.');
         $this->assertSame([], $this->noticesFor($plainApprover));
+    }
+
+    public function test_an_approve_names_its_step_so_a_late_click_never_approves_the_next_one(): void
+    {
+        $this->saveTwoSteps();
+        $admin = $this->holder(['admin']);
+        $manager = $this->holder(['cda_manager']);
+        $report = $this->submitted();
+        $first = $this->pendingStep($report);
+        $post = fn (User $as, array $body) => $this->actingAs($as)->postJson("/api/cda/reports/{$report->id}/workflow", ['action' => 'approve', ...$body]);
+
+        $post($manager, [])->assertStatus(422)
+            ->assertJsonValidationErrors(['step_id'])
+            ->assertJsonPath('message', 'Say which review step you are approving: the report is at the "Manager review" step.');
+        $post($manager, ['step_id' => 'first'])->assertStatus(422)->assertJsonValidationErrors(['step_id']);
+        $post($manager, ['step_id' => $first->id])->assertOk();
+
+        $post($admin, ['step_id' => $first->id])->assertStatus(409)
+            ->assertJsonPath('message', 'That review step isn\'t waiting for approval any more: the report is now at the "Board sign-off" step. Reload it to see where it stands.');
+        $this->assertSame(['approved', 'pending'], $this->stepStatuses($report));
+        $this->assertSame('for_review', $report->refresh()->status);
+    }
+
+    public function test_a_saved_chain_that_cant_be_read_refuses_the_submit(): void
+    {
+        ApprovalWorkflowSetting::query()->create(['type' => 'cda', 'steps' => [['name' => 'Manager review']]]);
+        Log::spy();
+        $report = $this->caprWithTestTemplate();
+        $this->actingAs($this->preparer)->putJson("/api/cda/reports/{$report->id}", ['fields' => [['field_key' => 'employment.employees_regular', 'value' => 5]]])->assertOk();
+
+        $this->act($report, 'submit_for_review', $this->preparer)->assertStatus(422)
+            ->assertJsonPath('message', 'The CDA review chain in Settings can\'t be read. Fix it or reset it.');
+
+        $this->assertSame('draft', $report->refresh()->status);
+        $this->assertFalse(CdaReportApprovalStep::query()->where('report_id', $report->id)->exists());
+        Log::shouldHaveReceived('warning')->withArgs(fn (string $message) => str_contains($message, 'CDA review chain'))->once();
+    }
+
+    public function test_a_deadlock_while_closing_a_round_answers_409_and_changes_nothing(): void
+    {
+        $this->saveTwoSteps();
+        $manager = $this->holder(['cda_manager']);
+        $report = $this->submitted();
+        $fired = false;
+
+        DB::connection()->beforeExecuting(function (string $query, array $bindings) use (&$fired): void {
+            if ($fired || ! str_starts_with($query, 'update `cda_report_approval_steps`')) {
+                return;
+            }
+
+            $fired = true;
+            $pdo = new PDOException('SQLSTATE[40001]: Serialization failure: 1213 Deadlock found when trying to get lock; try restarting transaction');
+            $pdo->errorInfo = ['40001', 1213, 'Deadlock found when trying to get lock; try restarting transaction'];
+            (new ReflectionProperty(Exception::class, 'code'))->setValue($pdo, '40001');
+
+            throw new QueryException(DB::connection()->getName(), $query, $bindings, $pdo);
+        });
+
+        $this->act($report, 'return', $manager, ['reason' => 'The payroll is missing'])->assertStatus(409)
+            ->assertExactJson(['message' => 'Another change to this report was saved at the same time. Reload it and try again.']);
+
+        $this->assertSame('for_review', $report->refresh()->status);
+        $this->assertSame(['pending', 'waiting'], $this->stepStatuses($report));
+    }
+
+    public function test_an_approver_without_review_is_refused_a_return_before_any_other_answer(): void
+    {
+        $approverOnly = $this->userWith(['branches:view_all', CdaAccess::VIEW, CdaAccess::APPROVE]);
+        $report = $this->submitted();
+        $refusal = 'Returning this report needs the CDA review permission.';
+
+        $this->act($report, 'return', $approverOnly, ['reason' => 'Recount'])->assertForbidden()->assertJsonPath('message', $refusal);
+        $this->act($report, 'return', $approverOnly)->assertForbidden()->assertJsonPath('message', $refusal);
+        $this->assertNotContains('return', $this->actingAs($approverOnly)->getJson("/api/cda/reports/{$report->id}")->json('data.available_actions'));
+
+        $this->act($report, 'approve', $approverOnly)->assertOk()->assertJsonPath('data.status', 'approved');
+        $this->act($report, 'return', $approverOnly, ['reason' => 'Recount'])->assertForbidden()->assertJsonPath('message', $refusal);
+        $this->act($report, 'return', $approverOnly)->assertForbidden()->assertJsonPath('message', $refusal);
+        $this->assertSame('approved', $report->refresh()->status);
+
+        $this->act($report, 'return', $this->preparer, ['reason' => 'Recount'])->assertOk();
+        $this->act($report, 'return', $approverOnly, ['reason' => 'Recount'])->assertForbidden()->assertJsonPath('message', $refusal);
     }
 }

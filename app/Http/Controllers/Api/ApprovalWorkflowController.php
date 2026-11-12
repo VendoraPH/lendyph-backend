@@ -23,10 +23,18 @@ class ApprovalWorkflowController extends Controller
         ApprovalWorkflowSetting::TYPE_CDA,
     ];
 
+    /** The loan chains: the only types the loan chain save takes. */
+    private const LOAN_TYPES = [
+        ApprovalWorkflowSetting::TYPE_NORMAL,
+        ApprovalWorkflowSetting::TYPE_POLICY_EXCEPTION,
+    ];
+
+    private const TYPE_REFUSAL = 'Choose a loan approval chain (normal or policy exception) or the CDA review chain.';
+
     #[OA\Get(
         path: '/api/settings/approval-workflow',
         summary: 'Get approval workflow chain',
-        description: 'Returns the configured approval chain for `normal`, `policy_exception` or `cda` (the CDA report review chain). Falls back to defaults if not yet configured; the `cda` default is no steps (a single review).',
+        description: 'Returns the configured approval chain for `normal`, `policy_exception` or `cda` (the CDA report review chain). Falls back to defaults if not yet configured; the `cda` default is no steps (a single review). Needs `settings:view`; the `cda` chain also needs `cda:view` with `branches:view_all`.',
         tags: ['Settings'],
         security: [['sanctum' => []]],
         parameters: [
@@ -62,6 +70,10 @@ class ApprovalWorkflowController extends Controller
         $this->authorize('settings:view');
 
         $type = $this->resolveType($request);
+
+        if ($type === ApprovalWorkflowSetting::TYPE_CDA) {
+            app(CdaAccess::class)->authorize($request->user(), CdaAccess::VIEW);
+        }
 
         $setting = ApprovalWorkflowSetting::where('type', $type)->first();
         $steps = $setting?->steps ?? ApprovalWorkflowSetting::defaultStepsFor($type);
@@ -131,14 +143,14 @@ class ApprovalWorkflowController extends Controller
         }
 
         $validated = $request->validate([
-            'type' => ['required', Rule::in(self::VALID_TYPES)],
+            'type' => ['required', Rule::in(self::LOAN_TYPES)],
             'steps' => ['required', 'array', 'min:1'],
             'steps.*.id' => ['required', 'string', 'max:100'],
             'steps.*.name' => ['required', 'string', 'max:255'],
             'steps.*.role' => ['required', 'string', 'max:100'],
             'steps.*.kind' => ['required', Rule::in(['submit', 'approve', 'release'])],
             'steps.*.status' => ['nullable', 'string', 'max:100'],
-        ]);
+        ], ['type.required' => self::TYPE_REFUSAL, 'type.in' => self::TYPE_REFUSAL]);
 
         $this->validateChain($validated['steps']);
 
@@ -294,7 +306,7 @@ class ApprovalWorkflowController extends Controller
 
         if (! in_array($type, self::VALID_TYPES, true)) {
             throw ValidationException::withMessages([
-                'type' => 'Invalid type. Must be one of: '.implode(', ', self::VALID_TYPES),
+                'type' => self::TYPE_REFUSAL,
             ]);
         }
 

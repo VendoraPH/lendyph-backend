@@ -301,7 +301,7 @@ class ReportExportsTest extends TestCase
         $statements = CdaReport::query()->where('period_id', $this->capr->period_id)->where('report_type', 'financial_statements')->firstOrFail();
         $this->actingAs($this->exporter())->postJson("/api/cda/reports/{$statements->id}/exports", ['format' => 'pdf'])
             ->assertForbidden()
-            ->assertJsonPath('message', 'Audited Financial Statements is restricted: it needs the cda:view_audit permission.');
+            ->assertJsonPath('message', 'Audited Financial Statements is restricted: it needs the CDA audit reports view permission.');
         $this->actingAs($this->exporter())->getJson("/api/cda/reports/{$statements->id}/exports")->assertForbidden();
         $this->actingAs($this->exporter(['cda:view_audit']))->postJson("/api/cda/reports/{$statements->id}/exports", ['format' => 'pdf'])->assertCreated();
         $this->actingAs($this->exporter())->postJson('/api/cda/reports/999999/exports', ['format' => 'pdf'])->assertNotFound();

@@ -12,7 +12,6 @@ use App\Services\Cda\CdaAccess;
 use App\Services\LoanWriteTransaction;
 use App\Support\Sentence;
 use Illuminate\Http\Exceptions\HttpResponseException;
-use Illuminate\Support\Facades\DB;
 
 /**
  * The CDA report workflow (design §5). Every action locks the report row,
@@ -69,6 +68,11 @@ final class ReportWorkflow
         ]],
     ];
 
+    /** A deadlock, lock wait or step-order collision: someone else acted at the same moment. */
+    private const CONFLICT = 'Another change to this report was saved at the same time. Reload it and try again.';
+
+    private const STEP_ORDER_INDEX = 'cda_report_approval_steps_order_unique';
+
     /** The actions that need a reason. */
     public const NEED_REASON = ['return', 'mark_for_correction', 'reopen'];
 
@@ -95,7 +99,7 @@ final class ReportWorkflow
     /** @param  array<string, mixed>  $input */
     public function run(CdaReport $report, string $action, array $input, User $user): CdaReport
     {
-        $outcome = DB::transaction(function () use ($report, $action, $input, $user): array {
+        $outcome = LoanWriteTransaction::run(function () use ($report, $action, $input, $user): array {
             $locked = CdaReport::query()->with(['template', 'period', 'currentSnapshot'])->whereKey($report->id)->lockForUpdate()->firstOrFail();
 
             if (! in_array($locked->status, self::ACTIONS[$action]['from'], true)) {
@@ -110,15 +114,15 @@ final class ReportWorkflow
                 throw self::refused($locked->not_applicable_reason ?? 'This report doesn\'t apply to the cooperative for this period.');
             }
 
-            if ($action === 'return') {
-                $this->authorizeReturn($locked, $user);
+            if ($action === 'return' && ($refusal = self::returnRefusal($locked, $user)) !== null) {
+                throw CdaApprovalChain::forbidden($refusal);
             }
 
             return match ($action) {
                 'refresh', 'validate' => $this->refresh($locked, $user),
                 'submit_for_review' => $this->submitForReview($locked, $user),
                 'return' => $this->returnToDraft($locked, (string) $input['reason'], $user),
-                'approve' => $this->approve($locked, $user, isset($input['reason']) ? trim((string) $input['reason']) : null),
+                'approve' => $this->approve($locked, $user, isset($input['reason']) ? trim((string) $input['reason']) : null, $input['step_id'] ?? null),
                 'finalize' => $this->finalize($locked, (bool) ($input['confirm_warnings'] ?? false), $user),
                 'mark_submitted' => $this->markSubmitted($locked, (array) $input['submission'], $user),
                 'mark_accepted' => $this->markAccepted($locked, $user),
@@ -126,7 +130,7 @@ final class ReportWorkflow
                 'reopen' => $this->reopen($locked, (string) $input['reason'], $user),
                 'set_stage' => $this->setStage($locked, (string) $input['stage']),
             };
-        });
+        }, self::STEP_ORDER_INDEX, self::CONFLICT);
 
         if (isset($outcome['blocked'])) {
             throw self::refused($outcome['blocked'], $outcome['issues'] ?? []);
@@ -152,7 +156,7 @@ final class ReportWorkflow
             }
 
             $allowed = match ($action) {
-                'return' => $access->allows($user, CdaAccess::REVIEW) || ($step !== null && $chain->canReturnAt($step, $user)),
+                'return' => self::returnRefusal($report, $user) === null,
                 'approve' => $step === null
                     ? $access->allows($user, CdaAccess::APPROVE) && (int) $report->submitted_for_review_by !== (int) $user->id
                     : $chain->canApprove($report, $step, $user),
@@ -200,29 +204,32 @@ final class ReportWorkflow
     }
 
     /**
-     * A return needs `cda:review`, or `cda:approve` with the pending review
-     * step's role; the request let in holders of either permission.
+     * Why the user can't return the report, or null when they can: a return
+     * needs `cda:review`, or `cda:approve` with the pending review step's
+     * role. The request checks it before validation, so the refusal comes
+     * before any field error or stale-status answer; the workflow checks it
+     * again under the lock.
      */
-    private function authorizeReturn(CdaReport $report, User $user): void
+    public static function returnRefusal(CdaReport $report, User $user): ?string
     {
         $access = app(CdaAccess::class);
 
         if ($access->allows($user, CdaAccess::REVIEW)) {
-            return;
+            return null;
         }
 
-        $step = $this->chain->current($report);
+        $chain = app(CdaApprovalChain::class);
+        $step = $chain->current($report);
 
-        if ($step === null || ! $this->chain->canReturnAt($step, $user)) {
-            throw CdaApprovalChain::forbidden($step === null
-                ? 'Returning this report needs the cda:review permission.'
-                : "Returning this report needs the cda:review permission or the {$this->stepRole($step)} role of its \"{$step->name}\" review step.");
+        if ($step !== null && $chain->canReturnAt($step, $user)) {
+            return null;
         }
-    }
 
-    private function stepRole(CdaReportApprovalStep $step): string
-    {
-        return CdaApprovalChain::roleLabel($step->role);
+        $needs = 'Returning this report needs '.CdaAccess::words(CdaAccess::REVIEW);
+
+        return $step === null
+            ? $needs.'.'
+            : $needs.' or the '.CdaApprovalChain::roleLabel($step->role)." role of its \"{$step->name}\" review step.";
     }
 
     private function returnToDraft(CdaReport $report, string $reason, User $user): array
@@ -242,7 +249,13 @@ final class ReportWorkflow
         return ['report' => $report];
     }
 
-    private function approve(CdaReport $report, User $user, ?string $remarks): array
+    /**
+     * On a review chain the caller names the step it approves (`step_id`):
+     * one that isn't the pending step answers 409, so a late click never
+     * approves the next step, and a missing one answers 422 (after the
+     * permission refusals). A single review needs none.
+     */
+    private function approve(CdaReport $report, User $user, ?string $remarks, mixed $stepId): array
     {
         if ((int) $report->submitted_for_review_by === (int) $user->id) {
             throw new HttpResponseException(response()->json(['message' => 'You submitted this report for review, so someone else has to approve it.'], 403));
@@ -251,10 +264,20 @@ final class ReportWorkflow
         $step = $this->chain->current($report, true);
 
         if ($step !== null) {
+            if ($stepId !== null && (int) $stepId !== (int) $step->id) {
+                throw LoanWriteTransaction::conflict("That review step isn't waiting for approval any more: the report is now at the \"{$step->name}\" step. Reload it to see where it stands.");
+            }
+
             $refusal = $this->chain->refusal($report, $step, $user);
 
             if ($refusal !== null) {
                 throw CdaApprovalChain::forbidden($refusal);
+            }
+
+            if ($stepId === null) {
+                $message = "Say which review step you are approving: the report is at the \"{$step->name}\" step.";
+
+                throw new HttpResponseException(response()->json(['message' => $message, 'errors' => ['step_id' => [$message]]], 422));
             }
         }
 

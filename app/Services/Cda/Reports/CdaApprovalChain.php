@@ -12,6 +12,7 @@ use App\Models\User;
 use App\Services\Cda\CdaAccess;
 use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 /**
@@ -37,25 +38,37 @@ final class CdaApprovalChain
 
     public function __construct(private readonly CdaAccess $access) {}
 
+    public const UNREADABLE = 'The CDA review chain in Settings can\'t be read. Fix it or reset it.';
+
     /**
-     * The saved `cda` chain, cleaned: a malformed one counts as none, so a
-     * bad settings row never stops a submit.
+     * The saved `cda` chain, cleaned; [] when none is saved. A saved chain
+     * that can't be read (not a list, more than ten steps, or a step without
+     * a name or role) refuses the submit (422) with a warning in the log,
+     * never falling back to the single review on its own.
      *
      * @return list<array{name: string, role: string, status: ?string}>
+     *
+     * @throws HttpResponseException 422 when the saved chain can't be read
      */
     public function configured(): array
     {
-        $steps = ApprovalWorkflowSetting::query()->where('type', ApprovalWorkflowSetting::TYPE_CDA)->value('steps');
+        $setting = ApprovalWorkflowSetting::query()->where('type', ApprovalWorkflowSetting::TYPE_CDA)->first();
 
-        if (! is_array($steps)) {
+        if ($setting === null) {
             return [];
+        }
+
+        $steps = $setting->steps;
+
+        if (! is_array($steps) || ! array_is_list($steps) || count($steps) > self::MAX_STEPS) {
+            throw self::unreadable($setting);
         }
 
         $clean = [];
 
-        foreach (array_slice($steps, 0, self::MAX_STEPS) as $step) {
+        foreach ($steps as $step) {
             if (! is_array($step) || ! is_string($step['name'] ?? null) || trim($step['name']) === '' || ! is_string($step['role'] ?? null) || $step['role'] === '') {
-                return [];
+                throw self::unreadable($setting);
             }
 
             $clean[] = [
@@ -138,7 +151,7 @@ final class CdaApprovalChain
     public function refusal(CdaReport $report, CdaReportApprovalStep $step, User $user): ?string
     {
         if (! $this->access->allows($user, CdaAccess::APPROVE)) {
-            return 'Approving a CDA report needs the cda:approve permission.';
+            return 'Approving a CDA report needs '.CdaAccess::words(CdaAccess::APPROVE).'.';
         }
 
         if (! $this->holdsRole($step, $user)) {
@@ -196,14 +209,26 @@ final class CdaApprovalChain
         $this->close($report);
     }
 
-    /** Closes the report's open round: steps nobody acted on read cancelled. */
+    /**
+     * Closes the report's open round: steps nobody acted on read cancelled.
+     * The rows are found first and updated by primary key, so the update
+     * locks only them, never a range of the report index.
+     */
     public function close(CdaReport $report): void
     {
-        $open = CdaReportApprovalStep::query()->where('report_id', $report->id)->whereNull('closed_at');
+        $open = CdaReportApprovalStep::query()->where('report_id', $report->id)->whereNull('closed_at')->get(['id', 'status']);
 
-        (clone $open)->whereIn('status', [CdaReportApprovalStep::STATUS_PENDING, CdaReportApprovalStep::STATUS_WAITING])
-            ->update(['status' => CdaReportApprovalStep::STATUS_CANCELLED, 'updated_at' => now()]);
-        $open->update(['closed_at' => now(), 'updated_at' => now()]);
+        if ($open->isEmpty()) {
+            return;
+        }
+
+        $unacted = $open->whereIn('status', [CdaReportApprovalStep::STATUS_PENDING, CdaReportApprovalStep::STATUS_WAITING])->pluck('id')->all();
+
+        if ($unacted !== []) {
+            CdaReportApprovalStep::query()->whereKey($unacted)->update(['status' => CdaReportApprovalStep::STATUS_CANCELLED, 'updated_at' => now()]);
+        }
+
+        CdaReportApprovalStep::query()->whereKey($open->pluck('id')->all())->update(['closed_at' => now(), 'updated_at' => now()]);
     }
 
     /**
@@ -264,6 +289,13 @@ final class CdaApprovalChain
         $display = Role::query()->where('name', $role)->value('display_name');
 
         return is_string($display) && trim($display) !== '' ? $display : Str::headline($role);
+    }
+
+    private static function unreadable(ApprovalWorkflowSetting $setting): HttpResponseException
+    {
+        Log::warning('The saved CDA review chain can\'t be read, so a submit for review was refused.', ['approval_workflow_setting_id' => $setting->id]);
+
+        return new HttpResponseException(response()->json(['message' => self::UNREADABLE, 'errors' => ['action' => [self::UNREADABLE]]], 422));
     }
 
     /** A 403 in words. */
