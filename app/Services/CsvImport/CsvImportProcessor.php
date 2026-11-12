@@ -10,6 +10,7 @@ use App\Models\Loan;
 use App\Models\LoanProduct;
 use App\Services\AuditLogService;
 use App\Services\LoanTermSchedule;
+use App\Services\Penalties\PenaltyTerms;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -928,7 +929,7 @@ class CsvImportProcessor
             ),
             'total_deductions' => $this->pesos($totalDeductions),
             'net_proceeds' => $this->pesos($principal - $totalDeductions),
-            'penalty_rate' => $product->penalty_rate,
+            ...PenaltyTerms::forProduct($product),
             'grace_period_days' => $product->grace_period_days,
             /*
              * `ongoing`, not `released`.

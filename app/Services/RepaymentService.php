@@ -14,6 +14,8 @@ use App\Models\RepaymentAllocation;
 use App\Models\ShareCapitalLedger;
 use App\Models\User;
 use App\Services\Accounting\AutomaticPoster;
+use App\Services\Penalties\BracketRate;
+use App\Services\Penalties\PenaltyTerms;
 use Carbon\Carbon;
 use Closure;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
@@ -1393,7 +1395,7 @@ class RepaymentService
      */
     public function applyPenalties(Loan $loan, Carbon $asOfDate, bool $markOverdue = true): void
     {
-        if ((float) $loan->penalty_rate <= 0) {
+        if (! PenaltyTerms::chargesPenalty($loan)) {
             return;
         }
 
@@ -1470,7 +1472,7 @@ class RepaymentService
      */
     public function penaltyStateAsOf(Loan $loan, AmortizationSchedule $schedule, Carbon $asOf): ?array
     {
-        if ((float) $loan->penalty_rate <= 0
+        if (! PenaltyTerms::chargesPenalty($loan)
             || $schedule->isWaivedForGood()
             || ! in_array($schedule->status, ['pending', 'partial', 'overdue'], true)
             || ! $schedule->due_date->lt(AmortizationSchedule::pastGraceCutoff($loan->grace_period_days, $asOf))
@@ -1545,9 +1547,17 @@ class RepaymentService
      *   one at each full month after the switch date.
      * - Each charge is the penalty rate on the principal unpaid on its own
      *   day (principalUnpaidOn()), to the centavo.
+     * - The rate is the loan's `penalty_rate`, or, on a loan created under a
+     *   penalty configuration (`penalty_brackets`), the rate of the bracket
+     *   covering the charge's days past the due date (the day after it is
+     *   day 1). A day no bracket covers is no charge, and is left out; each
+     *   charge keeps its month number, and carries its `rate`. Bracket loans
+     *   are all created after the switch date, so they always take the
+     *   monthly rule, never the pre-switch branch.
      *
-     * None on a loan with no penalty rate, a period not late on `$asOf`, or
-     * one due before the loan's imported arrears baseline.
+     * None on a loan that charges no penalty (PenaltyTerms::chargesPenalty()),
+     * a period not late on `$asOf`, or one due before the loan's imported
+     * arrears baseline.
      *
      * `$asCharged` works each charge as it was charged on its day: a payment
      * voided since still counts as paid on the days before its void. The
@@ -1555,13 +1565,14 @@ class RepaymentService
      * it; every figure owed is worked without it, as if a void's payment never
      * was.
      *
-     * @return list<array{on: Carbon, centavos: int, number: int}>
+     * @return list<array{on: Carbon, centavos: int, number: int, rate?: float}>
      */
     public function penaltyCharges(Loan $loan, AmortizationSchedule $schedule, Carbon $asOf, bool $asCharged = false): array
     {
         $rate = (float) $loan->penalty_rate;
+        $brackets = PenaltyTerms::bracketsOf($loan);
 
-        if ($rate <= 0
+        if (! PenaltyTerms::chargesPenalty($loan)
             || ! $schedule->due_date->lt(AmortizationSchedule::pastGraceCutoff($loan->grace_period_days, $asOf))
             || ! AmortizationSchedule::isPenalisable($loan->imported_arrears_baseline, $schedule->due_date)) {
             return [];
@@ -1573,6 +1584,11 @@ class RepaymentService
 
         $dueDate = $schedule->due_date->copy()->startOfDay();
         $lateFrom = $dueDate->copy()->addDays(max(0, (int) $loan->grace_period_days) + 1);
+
+        if ($brackets !== null) {
+            return $this->bracketCharges($brackets, $unpaidOn, $dueDate, $lateFrom, $day);
+        }
+
         $switchDate = LatePenaltySetting::monthlyFrom();
 
         if ($switchDate !== null && $lateFrom->lt($switchDate)) {
@@ -1592,6 +1608,46 @@ class RepaymentService
             $on = $dueDate->copy()->addMonthsNoOverflow($month);
             $on = $on->lt($lateFrom) ? $lateFrom : $on;
             $charges[] = ['on' => $on, 'centavos' => $charge($on), 'number' => $month];
+        }
+
+        return $charges;
+    }
+
+    /**
+     * penaltyCharges() on a loan created under a penalty configuration: the
+     * same charge days (the first day past grace, then each full month after
+     * the due date) and the same base (the principal unpaid that day), each
+     * at the rate of the bracket covering its days past the due date. A day
+     * no bracket covers is no charge.
+     *
+     * @param  list<array{days_from: int, days_to: int|null, rate: float}>  $brackets
+     * @param  Closure(Carbon): int  $unpaidOn
+     * @return list<array{on: Carbon, centavos: int, number: int, rate: float}>
+     */
+    private function bracketCharges(array $brackets, Closure $unpaidOn, Carbon $dueDate, Carbon $lateFrom, Carbon $day): array
+    {
+        $days = [1 => $lateFrom];
+
+        for ($month = 2; $month <= self::fullMonthsBetween($dueDate, $day); $month++) {
+            $on = $dueDate->copy()->addMonthsNoOverflow($month);
+            $days[$month] = $on->lt($lateFrom) ? $lateFrom : $on;
+        }
+
+        $charges = [];
+
+        foreach ($days as $number => $on) {
+            $rate = BracketRate::rateFor($brackets, (int) $dueDate->diffInDays($on));
+
+            if ($rate === null) {
+                continue;
+            }
+
+            $charges[] = [
+                'on' => $on,
+                'centavos' => LoanService::toCentavos(round($unpaidOn($on) / 100 * ($rate / 100), 2)),
+                'number' => $number,
+                'rate' => $rate,
+            ];
         }
 
         return $charges;

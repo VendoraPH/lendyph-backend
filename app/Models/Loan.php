@@ -178,6 +178,12 @@ class Loan extends Model
         'net_proceeds',
         'scb_amount',
         'penalty_rate',
+        // The product's active penalty configuration, copied at creation
+        // (PenaltyTerms::forProduct()); null on a loan charged by
+        // `penalty_rate`.
+        'penalty_config_id',
+        'penalty_config_name',
+        'penalty_brackets',
         'grace_period_days',
         'policy_exception',
         'policy_exception_details',
@@ -231,6 +237,7 @@ class Loan extends Model
             'net_proceeds' => 'decimal:2',
             'scb_amount' => 'decimal:2',
             'penalty_rate' => 'decimal:4',
+            'penalty_brackets' => 'array',
             'policy_exception' => 'boolean',
             'start_date' => 'date',
             'maturity_date' => 'date',
@@ -317,6 +324,15 @@ class Loan extends Model
     public function borrower(): BelongsTo
     {
         return $this->belongsTo(Borrower::class);
+    }
+
+    /**
+     * The penalty configuration this loan was created under, if any. Charges
+     * read the loan's own copy (`penalty_brackets`), never this row.
+     */
+    public function penaltyConfig(): BelongsTo
+    {
+        return $this->belongsTo(PenaltyConfig::class);
     }
 
     public function loanProduct(): BelongsTo

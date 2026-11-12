@@ -9,6 +9,8 @@ use App\Models\LoanAdjustment;
 use App\Models\LoanLedgerEntry;
 use App\Models\Repayment;
 use App\Models\ShareCapitalLedger;
+use App\Services\Penalties\BracketRate;
+use App\Services\Penalties\PenaltyTerms;
 use Carbon\CarbonInterface;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Support\Carbon;
@@ -295,7 +297,7 @@ final class LoanLedgerService
                 $date = $line['on']->gt($today) ? $today : $line['on'];
                 $postedAt = $date->lt($releasedAt) ? $releasedAt : $date;
 
-                $events[] = $this->penaltyCharge($postedAt, $schedule->id, (int) $schedule->period_number, $line['centavos'], $line['number']);
+                $events[] = $this->penaltyCharge($postedAt, $schedule->id, (int) $schedule->period_number, $line['centavos'], $line['number'], $line['rate'] ?? null);
             }
         }
 
@@ -330,12 +332,22 @@ final class LoanLedgerService
      *   shows it), so the split is what was charged and the last of them
      *   takes any rounding.
      *
-     * @return list<array{on: Carbon, centavos: int, number: int}>
+     * On a loan created under a penalty configuration each line carries the
+     * rate of its charge (`rate`), for its wording; the single line takes the
+     * rate of the bracket covering its day.
+     *
+     * @return list<array{on: Carbon, centavos: int, number: int, rate?: float}>
      */
     private function penaltyLines(Loan $loan, AmortizationSchedule $schedule, int $charged, Carbon $today): array
     {
         $lateFrom = $schedule->due_date->copy()->addDays(max(0, (int) $loan->grace_period_days) + 1)->startOfDay();
-        $single = [['on' => $lateFrom, 'centavos' => $charged, 'number' => 1]];
+        $brackets = PenaltyTerms::bracketsOf($loan);
+        $single = [[
+            'on' => $lateFrom,
+            'centavos' => $charged,
+            'number' => 1,
+            ...($brackets === null ? [] : ['rate' => BracketRate::rateFor($brackets, (int) $schedule->due_date->copy()->startOfDay()->diffInDays($lateFrom))]),
+        ]];
         $months = (int) $schedule->penalty_months;
 
         if ($schedule->isWaivedForGood() || $months <= 1) {
@@ -407,14 +419,24 @@ final class LoanLedgerService
         return $lines === [] ? [[...$charges[0], 'centavos' => $total]] : $lines;
     }
 
-    /** @return array<string, mixed> */
-    private function penaltyCharge(CarbonInterface $postedAt, int $scheduleId, ?int $periodNumber, int $charged, int $number = 1): array
+    /**
+     * "Late penalty, period 2, month 3". A line of a loan created under a
+     * penalty configuration adds its bracket's rate, never rounded: "Late
+     * penalty, period 2, month 3, at 2.5%".
+     *
+     * @return array<string, mixed>
+     */
+    private function penaltyCharge(CarbonInterface $postedAt, int $scheduleId, ?int $periodNumber, int $charged, int $number = 1, ?float $rate = null): array
     {
         $description = match (true) {
             $periodNumber === null => 'Late penalty',
             $number > 1 => "Late penalty, period {$periodNumber}, month {$number}",
             default => "Late penalty, period {$periodNumber}",
         };
+
+        if ($periodNumber !== null && $rate !== null) {
+            $description .= ', at '.BracketRate::percent($rate);
+        }
 
         return $this->event($postedAt, $postedAt, 'penalty_charge', $scheduleId, [
             'kind' => 'penalty_charge',
