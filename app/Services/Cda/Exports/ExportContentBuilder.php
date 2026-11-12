@@ -37,6 +37,10 @@ use Carbon\CarbonImmutable;
  * Statements" until they are audited, even after finalize, and a sworn
  * statement's first export is what makes it "Generated".
  *
+ * The cooperative's logo isn't part of it: the PDF renderer reads it at
+ * render time (ExportLogo), drafts and finalized reports alike, while the
+ * name and address of a finalized report stay its snapshot's.
+ *
  * Field keys are "section.field"; a table section's rows are stored under the
  * section's key.
  */
