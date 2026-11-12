@@ -34,6 +34,7 @@ use App\Services\ContactVisibility;
 use App\Services\CreditScoring\PolicyFlags;
 use App\Services\LikePattern;
 use App\Services\LoanAdjustmentService;
+use App\Services\LoanApprovalChainService;
 use App\Services\LoanListTotals;
 use App\Services\LoanReleaseFeeService;
 use App\Services\LoanService;
@@ -256,7 +257,7 @@ DESC,
             new OA\Parameter(name: 'loan_product_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
             new OA\Parameter(name: 'date_from', in: 'query', required: false, description: 'Inclusive lower bound on created_at (YYYY-MM-DD).', schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'date_to', in: 'query', required: false, description: 'Inclusive upper bound on created_at, whole day (YYYY-MM-DD).', schema: new OA\Schema(type: 'string', format: 'date')),
-            new OA\Parameter(name: 'awaiting_me', in: 'query', required: false, description: 'When 1, only `for_review` loans whose current approval step (the one `current_approver` names) belongs to one of the signed-in user\'s active roles, by exact role name. No admin/super_admin bypass. `meta.total` is the badge count.', schema: new OA\Schema(type: 'boolean', default: false)),
+            new OA\Parameter(name: 'awaiting_me', in: 'query', required: false, description: 'When 1, only loans waiting on the signed-in user: `for_review` loans whose current approval step (the one `current_approver` names) was forwarded to them, or is unassigned and belongs to one of their active roles, by exact role name; and, for a user holding `loans:release`, `approved` loans whose pending release step is theirs by the same rule. A step whose assignee no longer holds it counts as unassigned. No admin/super_admin bypass. `meta.total` is the badge count.', schema: new OA\Schema(type: 'boolean', default: false)),
             new OA\Parameter(name: 'sort', in: 'query', required: false, schema: new OA\Schema(type: 'string', default: 'created_at', enum: self::SORT_KEYS)),
             new OA\Parameter(name: 'dir', in: 'query', required: false, schema: new OA\Schema(type: 'string', default: 'desc', enum: ['asc', 'desc'])),
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15, maximum: 100)),
@@ -347,6 +348,7 @@ DESC,
             ->when(filled($dateTo), fn ($q) => $q->where('loans.created_at', '<=', Carbon::parse($dateTo)->endOfDay()))
             ->when($awaitingMe, fn ($q) => $q->awaitingApprovalFromRoles(
                 request()->user()->activeRoles()->pluck('name')->all(),
+                request()->user(),
             ));
 
         $query = (clone $filtered)
@@ -770,15 +772,27 @@ DESC,
         parameters: [
             new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
         ],
+        requestBody: new OA\RequestBody(
+            required: false,
+            content: new OA\JsonContent(properties: [
+                new OA\Property(property: 'forward_to_user_id', type: 'integer', nullable: true, description: 'Forward the first approval step to this user (GET /loans/{loan}/approval/forward-candidates lists who). A user who can\'t be given it is a 422 on this field, in words, and the loan stays a draft.'),
+            ]),
+        ),
         responses: [
             new OA\Response(response: 200, description: 'Loan submitted for approval'),
             new OA\Response(response: 403, description: 'Missing loans:update, or loans:restructure for a restructure application'),
-            new OA\Response(response: 422, description: 'Invalid status transition'),
+            new OA\Response(response: 422, description: 'Invalid status transition, or a `forward_to_user_id` that can\'t be given the first step'),
         ],
     )]
-    public function submit(SubmitLoanRequest $request, Loan $loan): JsonResponse
+    public function submit(SubmitLoanRequest $request, Loan $loan, LoanApprovalChainService $chain): JsonResponse
     {
-        $this->loanService->submitForReview($loan, $request->user());
+        $forwardTo = $request->forwardToUserId();
+
+        if ($forwardTo === null) {
+            $this->loanService->submitForReview($loan, $request->user());
+        } else {
+            $chain->submitForwarding($loan, $request->user(), $forwardTo);
+        }
 
         return response()->json(['message' => 'Loan submitted for approval.', 'data' => new LoanResource($loan)]);
     }
@@ -870,12 +884,17 @@ DESC,
         ),
         responses: [
             new OA\Response(response: 200, description: 'Loan released'),
+            new OA\Response(response: 403, description: 'Missing loans:release, or the release step was forwarded to someone else who still holds it (admin and super_admin may release it anyway)'),
             new OA\Response(response: 409, description: 'The fee configuration changed since the preview this release quoted, or another change to this loan was saved at the same time; nothing was written. Reload and try again'),
             new OA\Response(response: 422, description: 'Invalid status transition, fees exceeding principal, a sent premium that is not the server\'s, a partial amount above the premium, insurance above the net proceeds, share capital withheld for a borrower who is not a member, an unknown `method` or a missing `reference_number`, or a restructure whose source was paid down after approval below its principal (on `principal_amount`)'),
         ],
     )]
-    public function release(ReleaseLoanRequest $request, Loan $loan): JsonResponse
+    public function release(ReleaseLoanRequest $request, Loan $loan, LoanApprovalChainService $chain): JsonResponse
     {
+        // A release step forwarded to a named user is theirs (or admin's) to
+        // release; checked before the release's transaction opens.
+        $chain->assertMayRelease($loan, $request->user());
+
         $loan = $this->loanService->release(
             $loan,
             $request->user(),
@@ -910,14 +929,17 @@ DESC,
         ),
         responses: [
             new OA\Response(response: 200, description: 'Restructure sent back; `data` is the loan, now `for_review`'),
-            new OA\Response(response: 403, description: 'Missing loans:release'),
+            new OA\Response(response: 403, description: 'Missing loans:release, or the release step was forwarded to someone else who still holds it (admin and super_admin may send it back anyway)'),
             new OA\Response(response: 404, description: 'No such loan, or outside the caller\'s branches'),
             new OA\Response(response: 409, description: 'The restructure was sent back, released or voided since it was read, or another change to it or its source was saved at the same time; nothing was written and nobody was notified. Message: "Another change to this loan was saved at the same time. Reload and try again."'),
             new OA\Response(response: 422, description: 'Missing or too long `reason`, or (on `status`) the loan is not a restructure or the restructure is not approved'),
         ],
     )]
-    public function sendBackApproved(SendBackApprovedLoanRequest $request, Loan $loan): JsonResponse
+    public function sendBackApproved(SendBackApprovedLoanRequest $request, Loan $loan, LoanApprovalChainService $chain): JsonResponse
     {
+        // The release step's assignee (or admin) decides, as for the release.
+        $chain->assertMayRelease($loan, $request->user());
+
         $this->loanService->sendBackApproved($loan, $request->user(), $request->reason());
 
         return response()->json(['message' => 'Restructure sent back for approval.', 'data' => new LoanResource($loan)]);
