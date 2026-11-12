@@ -29,6 +29,12 @@ class ApprovalWorkflowController extends Controller
         ApprovalWorkflowSetting::TYPE_POLICY_EXCEPTION,
     ];
 
+    /** A loan chain's type in words, for its audit row. */
+    private const LOAN_TYPE_WORDS = [
+        ApprovalWorkflowSetting::TYPE_NORMAL => 'Normal',
+        ApprovalWorkflowSetting::TYPE_POLICY_EXCEPTION => 'Policy exception',
+    ];
+
     private const TYPE_REFUSAL = 'Choose a loan approval chain (normal or policy exception) or the CDA review chain.';
 
     #[OA\Get(
@@ -90,7 +96,7 @@ class ApprovalWorkflowController extends Controller
     #[OA\Put(
         path: '/api/settings/approval-workflow',
         summary: 'Save approval workflow chain',
-        description: 'Upserts the chain for the given type. A loan chain must start with a `submit` step and end with a `release` step, and step ids must be unique. The `cda` chain also needs `cda:settings` with `branches:view_all`: 1 to 10 approve-only steps {name, role, status?}, each role an existing active role and each name used once; audited. Reset (DELETE) returns `cda` to a single review.',
+        description: 'Upserts the chain for the given type. A loan chain must start with a `submit` step and end with a `release` step, and step ids must be unique. The `cda` chain also needs `cda:settings` with `branches:view_all`: 1 to 10 approve-only steps {name, role, status?}, each role an existing active role and each name used once; audited. Reset (DELETE) returns `cda` to a single review. A loan chain that changes is audited too (`loan_approval_chain_updated`: the chain before and after, each step by name and role).',
         tags: ['Settings'],
         security: [['sanctum' => []]],
         requestBody: new OA\RequestBody(
@@ -154,10 +160,19 @@ class ApprovalWorkflowController extends Controller
 
         $this->validateChain($validated['steps']);
 
+        $saved = ApprovalWorkflowSetting::where('type', $validated['type'])->first();
         $setting = ApprovalWorkflowSetting::updateOrCreate(
             ['type' => $validated['type']],
             ['steps' => $validated['steps']],
         );
+
+        // Compared with sorted keys: the JSON column hands keys back in its own order.
+        if ($saved === null || self::sortedKeys($saved->steps ?? []) !== self::sortedKeys($setting->steps)) {
+            $old = $saved?->steps ?? ApprovalWorkflowSetting::defaultStepsFor($setting->type);
+            $this->auditLoanChain($setting, $old, $saved === null, $setting->steps, false,
+                self::LOAN_TYPE_WORDS[$setting->type].' loan approval chain saved: '.$this->stepsInWords($setting->steps)
+                .'. Before: '.($saved === null ? 'the default chain, ' : '').$this->stepsInWords($old).'.');
+        }
 
         return response()->json([
             'data' => [
@@ -171,7 +186,7 @@ class ApprovalWorkflowController extends Controller
     #[OA\Delete(
         path: '/api/settings/approval-workflow',
         summary: 'Reset approval workflow chain to default',
-        description: 'Deletes the custom chain for the given type. Subsequent GETs return the built-in default with `is_default: true`.',
+        description: 'Deletes the custom chain for the given type. Subsequent GETs return the built-in default with `is_default: true`. Resetting a saved chain is audited (a loan chain as `loan_approval_chain_updated`, the CDA chain as `cda_review_chain_updated`).',
         tags: ['Settings'],
         security: [['sanctum' => []]],
         parameters: [
@@ -197,7 +212,15 @@ class ApprovalWorkflowController extends Controller
                 $this->auditCda($setting->steps ?? [], [], 'CDA review chain reset to a single review.');
             }
         } else {
-            ApprovalWorkflowSetting::where('type', $type)->delete();
+            $setting = ApprovalWorkflowSetting::where('type', $type)->first();
+
+            if ($setting !== null) {
+                $setting->delete();
+                $default = ApprovalWorkflowSetting::defaultStepsFor($type);
+                $this->auditLoanChain($setting, $setting->steps ?? [], false, $default, true,
+                    self::LOAN_TYPE_WORDS[$type].' loan approval chain reset to the default chain: '.$this->stepsInWords($default)
+                    .'. Before: '.$this->stepsInWords($setting->steps ?? []).'.');
+            }
         }
 
         return response()->json([
@@ -298,6 +321,52 @@ class ApprovalWorkflowController extends Controller
     private function auditCda(array $old, array $new, string $description): void
     {
         AuditLogService::log('cda_review_chain_updated', CdaSetting::current(), ['steps' => $old], ['steps' => $new], $description);
+    }
+
+    /**
+     * A loan chain's audit row (`loan_approval_chain_updated`), filed under
+     * Loans: the chain in force before and after, each step by name and role,
+     * and whether each side is the built-in default. Saving the same chain
+     * again writes none.
+     *
+     * @param  array<int, mixed>  $old
+     * @param  array<int, mixed>  $new
+     */
+    private function auditLoanChain(ApprovalWorkflowSetting $setting, array $old, bool $oldIsDefault, array $new, bool $newIsDefault, string $description): void
+    {
+        AuditLogService::log(
+            'loan_approval_chain_updated',
+            $setting,
+            ['type' => $setting->type, 'is_default' => $oldIsDefault, 'steps' => $old],
+            ['type' => $setting->type, 'is_default' => $newIsDefault, 'steps' => $new],
+            $description,
+        );
+    }
+
+    /**
+     * @param  array<array-key, mixed>  $value
+     * @return array<array-key, mixed>
+     */
+    private static function sortedKeys(array $value): array
+    {
+        if (! array_is_list($value)) {
+            ksort($value);
+        }
+
+        return array_map(fn ($item) => is_array($item) ? self::sortedKeys($item) : $item, $value);
+    }
+
+    /** @param  array<int, mixed>  $steps "Manager (Manager), BOD Chairwoman (Bod1)" */
+    private function stepsInWords(array $steps): string
+    {
+        if ($steps === []) {
+            return 'no steps';
+        }
+
+        return implode(', ', array_map(
+            fn (array $step) => ($step['name'] ?? 'A step').' ('.CdaApprovalChain::roleLabel((string) ($step['role'] ?? '')).')',
+            array_values(array_filter($steps, 'is_array')),
+        ));
     }
 
     private function resolveType(Request $request): string

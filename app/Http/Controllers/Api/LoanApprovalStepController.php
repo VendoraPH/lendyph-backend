@@ -25,6 +25,12 @@ use OpenApi\Attributes as OA;
  */
 class LoanApprovalStepController extends Controller
 {
+    /** `step_id` refused in words. */
+    private const STEP_ID_MESSAGES = [
+        'step_id.integer' => 'Name the approval step by its number (`steps[].id`). Reload the loan.',
+        'step_id.min' => 'Name the approval step by its number (`steps[].id`). Reload the loan.',
+    ];
+
     public function __construct(private LoanApprovalChainService $chain) {}
 
     #[OA\Get(
@@ -93,6 +99,7 @@ class LoanApprovalStepController extends Controller
             content: new OA\JsonContent(
                 properties: [
                     new OA\Property(property: 'remarks', type: 'string', nullable: true, maxLength: 2000),
+                    new OA\Property(property: 'step_id', type: 'integer', nullable: true, description: 'The step the screen showed as pending (`steps[].id`, the same row as the URL). When sent and that step isn\'t the one waiting any more, 409 in words: "That approval step isn\'t waiting any more: the loan is now at the \"{step}\" step. Reload it." Absent: no check (older screens).'),
                     new OA\Property(property: 'forward_to_user_id', type: 'integer', nullable: true, description: 'Forward the next step to this user (GET /loans/{loan}/approval/forward-candidates lists who). Checked against the next step: active, holding its role (active) and `loans:view`, seeing the loan\'s branch, not the caller, not the restructure\'s creator on the last approve step, and holding `loans:release` on the release step. Otherwise 422 on this field, in words.'),
                 ],
             ),
@@ -102,7 +109,7 @@ class LoanApprovalStepController extends Controller
             new OA\Response(response: 401, description: 'Unauthenticated'),
             new OA\Response(response: 403, description: "Requesting user does not hold the step's role"),
             new OA\Response(response: 404, description: 'Step does not belong to this loan'),
-            new OA\Response(response: 409, description: 'Another decision on this loan (a step sign-off, a send-back, or a direct approve or reject) was saved at the same time, or the write deadlocked; nothing was written and nobody was notified. Message: "Another change to this loan was saved at the same time. Reload and try again."'),
+            new OA\Response(response: 409, description: 'Another decision on this loan (a step sign-off, a send-back, or a direct approve or reject) was saved at the same time, or the write deadlocked; nothing was written and nobody was notified. Message: "Another change to this loan was saved at the same time. Reload and try again." Also a sent `step_id` that isn\'t the step waiting any more, in words naming the step the loan is at now.'),
             new OA\Response(response: 422, description: 'Step is not pending, loan is not in for_review, or `forward_to_user_id` can\'t be given the next step'),
         ],
     )]
@@ -113,7 +120,8 @@ class LoanApprovalStepController extends Controller
         $validated = $request->validate([
             'remarks' => ['nullable', 'string', 'max:2000'],
             'forward_to_user_id' => ['nullable', 'integer', 'min:1'],
-        ]);
+            'step_id' => ['nullable', 'integer', 'min:1'],
+        ], self::STEP_ID_MESSAGES);
 
         $this->chain->approve(
             $loan,
@@ -121,6 +129,7 @@ class LoanApprovalStepController extends Controller
             $request->user(),
             $validated['remarks'] ?? null,
             isset($validated['forward_to_user_id']) ? (int) $validated['forward_to_user_id'] : null,
+            isset($validated['step_id']) ? (int) $validated['step_id'] : null,
         );
 
         return response()->json([
@@ -146,6 +155,7 @@ class LoanApprovalStepController extends Controller
                 properties: [
                     new OA\Property(property: 'target_step_order', type: 'integer', minimum: 0, description: 'Must be earlier than the acting step and exist in the chain.'),
                     new OA\Property(property: 'remarks', type: 'string', maxLength: 2000, description: 'Required — the reason the loan is going back.'),
+                    new OA\Property(property: 'step_id', type: 'integer', nullable: true, description: 'The step the screen showed as pending (`steps[].id`, the same row as the URL). When sent and that step isn\'t the one waiting any more, 409 in words: "That approval step isn\'t waiting any more: the loan is now at the \"{step}\" step. Reload it." Absent: no check (older screens).'),
                 ],
             ),
         ),
@@ -154,7 +164,7 @@ class LoanApprovalStepController extends Controller
             new OA\Response(response: 401, description: 'Unauthenticated'),
             new OA\Response(response: 403, description: "Requesting user does not hold the step's role"),
             new OA\Response(response: 404, description: 'Step does not belong to this loan'),
-            new OA\Response(response: 409, description: 'Another decision on this loan (a step sign-off, a send-back, or a direct approve or reject) was saved at the same time, or the write deadlocked; nothing was written and nobody was notified. Message: "Another change to this loan was saved at the same time. Reload and try again."'),
+            new OA\Response(response: 409, description: 'Another decision on this loan (a step sign-off, a send-back, or a direct approve or reject) was saved at the same time, or the write deadlocked; nothing was written and nobody was notified. Message: "Another change to this loan was saved at the same time. Reload and try again." Also a sent `step_id` that isn\'t the step waiting any more, in words naming the step the loan is at now.'),
             new OA\Response(response: 422, description: 'Missing remarks, bad target, non-pending step, or loan not in for_review'),
         ],
     )]
@@ -168,7 +178,8 @@ class LoanApprovalStepController extends Controller
         $validated = $request->validate([
             'target_step_order' => ['required', 'integer', 'min:0'],
             'remarks' => ['required', 'string', 'max:2000'],
-        ]);
+            'step_id' => ['nullable', 'integer', 'min:1'],
+        ], self::STEP_ID_MESSAGES);
 
         $this->chain->sendBack(
             $loan,
@@ -176,6 +187,7 @@ class LoanApprovalStepController extends Controller
             (int) $validated['target_step_order'],
             $request->user(),
             $validated['remarks'],
+            isset($validated['step_id']) ? (int) $validated['step_id'] : null,
         );
 
         return response()->json([

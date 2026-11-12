@@ -26,6 +26,7 @@ class SavingsAutoCreditRun extends Model
         'posted_count',
         'posted_total',
         'skipped_count',
+        'skips_recorded',
         'created_by',
     ];
 
@@ -37,12 +38,19 @@ class SavingsAutoCreditRun extends Model
             'posted_total' => 'decimal:2',
             'posted_count' => 'integer',
             'skipped_count' => 'integer',
+            'skips_recorded' => 'boolean',
         ];
     }
 
     public function postings(): HasMany
     {
         return $this->hasMany(SavingsAutoCreditPosting::class, 'run_id');
+    }
+
+    /** The instructions it skipped (runs since gap round B7: `skips_recorded`). */
+    public function skips(): HasMany
+    {
+        return $this->hasMany(SavingsAutoCreditSkip::class, 'run_id');
     }
 
     public function creator(): BelongsTo

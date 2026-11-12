@@ -65,7 +65,7 @@ class CdaTrainingController extends Controller
             new OA\Parameter(name: 'status', in: 'query', schema: new OA\Schema(type: 'string', enum: CdaOfficerTraining::STATUSES)),
             new OA\Parameter(name: 'per_page', in: 'query', schema: new OA\Schema(type: 'integer', maximum: 100)),
         ],
-        responses: [new OA\Response(response: 200, description: '{success, data: training[], meta}'), new OA\Response(response: 403, description: 'Missing cda:view or branches:view_all'), new OA\Response(response: 422, description: 'A filter that isn\'t valid')],
+        responses: [new OA\Response(response: 200, description: '{success, data: training[], meta}; each row carries `documents_count` (its active documents the caller may see)'), new OA\Response(response: 403, description: 'Missing cda:view or branches:view_all'), new OA\Response(response: 422, description: 'A filter that isn\'t valid')],
     )]
     public function index(Request $request): JsonResponse
     {
@@ -90,8 +90,10 @@ class CdaTrainingController extends Controller
         $certificates = $this->certificates($page->getCollection()->pluck('id')->all());
         $users = RegisterPresenter::usersFor($certificates);
 
-        return RegisterPresenter::page($page, $page->getCollection()
-            ->map(fn (CdaOfficerTraining $training) => RegisterPresenter::training($training, $certificates->get($training->id), $users))->all());
+        $rows = $page->getCollection()
+            ->map(fn (CdaOfficerTraining $training) => RegisterPresenter::training($training, $certificates->get($training->id), $users))->values()->all();
+
+        return RegisterPresenter::page($page, $this->documents->withDocumentsCount($rows, 'training', $request->user(), $this->periodIds($page->getCollection())));
     }
 
     #[OA\Post(
@@ -129,7 +131,7 @@ class CdaTrainingController extends Controller
             return $training;
         }, conflictMessage: self::CONFLICT);
 
-        return RegisterPresenter::one($this->present($training), 201, 'Training recorded.');
+        return RegisterPresenter::one($this->present($training, $request->user()), 201, 'Training recorded.');
     }
 
     #[OA\Put(
@@ -161,7 +163,7 @@ class CdaTrainingController extends Controller
             return $locked;
         }, conflictMessage: self::CONFLICT);
 
-        return RegisterPresenter::one($this->present($saved), message: 'Training saved.');
+        return RegisterPresenter::one($this->present($saved, $request->user()), message: 'Training saved.');
     }
 
     #[OA\Delete(
@@ -222,11 +224,25 @@ class CdaTrainingController extends Controller
     }
 
     /** @return array<string, mixed> */
-    private function present(CdaOfficerTraining $training): array
+    private function present(CdaOfficerTraining $training, User $user): array
     {
         $training->load('officer.member');
 
-        return RegisterPresenter::training($training, $this->certificates([$training->id])->get($training->id));
+        return $this->documents->withDocumentsCount([RegisterPresenter::training($training, $this->certificates([$training->id])->get($training->id))], 'training', $user, $this->periodIds(collect([$training])))[0];
+    }
+
+    /**
+     * Each training's own period: the one nearest its year (completed, else
+     * started, else this year), where its certificate is filed.
+     *
+     * @param  Collection<int, CdaOfficerTraining>  $trainings
+     * @return array<int, int|null>
+     */
+    private function periodIds(Collection $trainings): array
+    {
+        return $this->documents->nearestPeriodIds($trainings->mapWithKeys(fn (CdaOfficerTraining $training) => [
+            $training->id => ($training->completed_on ?? $training->started_on ?? now('Asia/Manila'))->year,
+        ])->all());
     }
 
     /**

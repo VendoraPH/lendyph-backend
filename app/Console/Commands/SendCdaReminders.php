@@ -6,6 +6,7 @@ use App\Services\Cda\Reminders\DeadlineReminders;
 use Illuminate\Console\Attributes\Description;
 use Illuminate\Console\Attributes\Signature;
 use Illuminate\Console\Command;
+use Illuminate\Support\Str;
 
 /**
  * Scheduled at 00:50 Manila (routes/console/cda/reminders.php). Sends the
@@ -20,7 +21,9 @@ class SendCdaReminders extends Command
     {
         $result = $reminders->run();
 
-        $this->info("CDA reminders: {$result['sent']} sent, {$result['already_sent']} already sent, {$result['reports']} open reports checked.");
+        $this->info("CDA reminders: {$result['sent']} sent, {$result['already_sent']} already sent, {$result['reports']} open reports checked, "
+            .$result['requirements'].' calendar '.Str::plural('item', $result['requirements']).' checked, '
+            .$result['missing_requirement'].' incomplete-report '.Str::plural('notice', $result['missing_requirement']).' sent.');
 
         return self::SUCCESS;
     }

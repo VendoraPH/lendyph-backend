@@ -137,7 +137,7 @@ class SavingsAutoCreditController extends Controller
     #[OA\Delete(
         path: '/api/savings/auto-credit/instructions/{instruction}',
         summary: 'Delete an auto-credit instruction that never credited',
-        description: 'Needs `savings:post`. One that has credited the account is kept for the record (422): deactivate it instead. Audited.',
+        description: 'Needs `savings:post`. One that has credited the account, or that a run skipped, is kept for the record (422): deactivate it instead. Audited.',
         tags: ['Savings'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'instruction', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],

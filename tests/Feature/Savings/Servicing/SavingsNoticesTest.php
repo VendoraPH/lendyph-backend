@@ -238,6 +238,8 @@ class SavingsNoticesTest extends TestCase
         $this->assertSame("A reactivation on {$dormant->account_number} (Maria Santos) is waiting for approval, requested by {$maker->full_name}.", $data['body']);
         $this->assertSame('/savings/approvals', $data['url']);
         $this->assertSame('reactivation', $data['data']['kind']);
+        $this->assertSame('first', $data['data']['stage']);
+        $this->assertSame('Savings approval waiting', $data['title']);
     }
 
     public function test_a_withdrawal_waiting_for_approval_names_its_amount(): void

@@ -69,11 +69,15 @@ class UserRouteRefusalAuditTest extends TestCase
         ];
     }
 
-    private function target(string $status = 'active'): User
+    /**
+     * @param  array{first_name?: string, last_name?: string}  $names
+     */
+    private function target(string $status = 'active', array $names = []): User
     {
         return User::factory()->create([
             'branch_id' => $this->branch->id,
             'status' => $status,
+            ...$names,
         ]);
     }
 
@@ -151,7 +155,10 @@ class UserRouteRefusalAuditTest extends TestCase
      */
     public function test_the_refusal_row_does_not_name_the_target(): void
     {
-        $target = $this->target();
+        // Fixed names no factory produces: a Faker first name shared with the
+        // actor (who the row does name) would fail the assertions below.
+        $target = $this->target(names: ['first_name' => 'Zephyrine', 'last_name' => 'Quillfeather']);
+        $this->assertNotSame($this->outsider->first_name, $target->first_name);
 
         $this->actingAs($this->outsider);
         $this->getJson("/api/users/{$target->id}")->assertNotFound();

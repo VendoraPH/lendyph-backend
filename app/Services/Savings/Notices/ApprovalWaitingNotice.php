@@ -17,12 +17,19 @@ use Throwable;
  * the large-transaction alert) is told in the app, never the maker. When a
  * two-checker request gets its first approval, the same holders except the
  * maker and the first checker are told it waits for a second checker
- * (`data.checkers_left` 1). Written after the write commits; a failure is
+ * (`data.checkers_left` 1). `data.stage` says which: `first` when it opens,
+ * `second` when one checker is left (gap round B7). Written after the write commits; a failure is
  * logged and never fails it.
  */
 class ApprovalWaitingNotice
 {
     public const TYPE = 'savings_approval_waiting';
+
+    /** `data.stage`: the approval has just opened (gap round B7). */
+    public const STAGE_FIRST = 'first';
+
+    /** `data.stage`: one checker has approved and one is left (gap round B7). */
+    public const STAGE_SECOND = 'second';
 
     /** Each kind in words, for the notice. */
     private const KIND_WORDS = [
@@ -99,6 +106,7 @@ class ApprovalWaitingNotice
                 'account_id' => $approval->account_id,
                 'time_deposit_id' => $approval->time_deposit_id,
                 'checkers_left' => $second ? 1 : $approval->required_checkers,
+                'stage' => $second ? self::STAGE_SECOND : self::STAGE_FIRST,
             ],
         ));
     }

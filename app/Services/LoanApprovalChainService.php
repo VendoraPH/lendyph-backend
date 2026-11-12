@@ -176,12 +176,13 @@ class LoanApprovalChainService
      * or a lock wait timeout, and the chain is left exactly as that request
      * left it.
      */
-    public function approve(Loan $loan, LoanApprovalStep $step, User $user, ?string $remarks = null, ?int $forwardToUserId = null): LoanApprovalStep
+    public function approve(Loan $loan, LoanApprovalStep $step, User $user, ?string $remarks = null, ?int $forwardToUserId = null, ?int $namedStepId = null): LoanApprovalStep
     {
+        $this->assertNamedStepWaiting($loan, $namedStepId, false);
         $this->assertActionable($loan, $step, $user);
 
-        return LoanWriteTransaction::run(function () use ($loan, $step, $user, $remarks, $forwardToUserId) {
-            [$loan, $step] = $this->lockAndGuard($loan, $step, $user);
+        return LoanWriteTransaction::run(function () use ($loan, $step, $user, $remarks, $forwardToUserId, $namedStepId) {
+            [$loan, $step] = $this->lockAndGuard($loan, $step, $user, $namedStepId);
 
             // Re-submitting after a send-back: a restructure's figures are
             // taken again from what its source owes now.
@@ -265,11 +266,13 @@ class LoanApprovalChainService
         int $targetStepOrder,
         User $user,
         string $remarks,
+        ?int $namedStepId = null,
     ): Collection {
+        $this->assertNamedStepWaiting($loan, $namedStepId, false);
         $this->assertActionable($loan, $step, $user);
 
-        return LoanWriteTransaction::run(function () use ($loan, $step, $targetStepOrder, $user, $remarks) {
-            [$loan, $step] = $this->lockAndGuard($loan, $step, $user);
+        return LoanWriteTransaction::run(function () use ($loan, $step, $targetStepOrder, $user, $remarks, $namedStepId) {
+            [$loan, $step] = $this->lockAndGuard($loan, $step, $user, $namedStepId);
 
             if ($targetStepOrder >= $step->step_order) {
                 throw ValidationException::withMessages([
@@ -837,10 +840,14 @@ class LoanApprovalChainService
      *
      * @throws HttpResponseException 409 when the loan or the step changed since it was read
      */
-    private function lockAndGuard(Loan $loan, LoanApprovalStep $step, User $user): array
+    private function lockAndGuard(Loan $loan, LoanApprovalStep $step, User $user, ?int $namedStepId = null): array
     {
         $lockedLoan = Loan::whereKey($loan->getKey())->lockForUpdate()->first();
         $lockedStep = LoanApprovalStep::whereKey($step->getKey())->lockForUpdate()->first();
+
+        if ($lockedLoan !== null) {
+            $this->assertNamedStepWaiting($lockedLoan, $namedStepId, true);
+        }
 
         if ($lockedLoan === null
             || $lockedStep === null
@@ -854,6 +861,39 @@ class LoanApprovalChainService
         $this->assertActionable($lockedLoan, $lockedStep, $user);
 
         return [$lockedLoan, $lockedStep];
+    }
+
+    /**
+     * The late click (gap round B7): a screen that names the step it showed
+     * as pending (`step_id`, the step row's id) gets a 409 in words naming
+     * the step the loan is at now when that step isn't the one waiting any
+     * more, before any other guard, so a stale screen never acts on the next
+     * step. Read again under the loan's lock ($locking). No name, no check:
+     * older screens keep today's answers.
+     *
+     * @throws HttpResponseException 409
+     */
+    private function assertNamedStepWaiting(Loan $loan, ?int $namedStepId, bool $locking): void
+    {
+        if ($namedStepId === null) {
+            return;
+        }
+
+        $pending = LoanApprovalStep::query()
+            ->where('loan_id', $loan->getKey())
+            ->where('round', $this->currentRound($loan))
+            ->where('status', LoanApprovalStep::STATUS_PENDING)
+            ->orderBy('step_order')
+            ->when($locking, fn ($query) => $query->lockForUpdate())
+            ->first();
+
+        if ($pending !== null && (int) $pending->getKey() === $namedStepId) {
+            return;
+        }
+
+        throw LoanWriteTransaction::conflict($pending === null
+            ? 'That approval step isn\'t waiting any more: no step of this loan\'s approval chain is waiting. Reload it.'
+            : "That approval step isn't waiting any more: the loan is now at the \"{$pending->name}\" step. Reload it.");
     }
 
     /**

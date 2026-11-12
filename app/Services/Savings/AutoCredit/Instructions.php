@@ -5,6 +5,7 @@ namespace App\Services\Savings\AutoCredit;
 use App\Models\SavingsAccount;
 use App\Models\SavingsAutoCreditInstruction;
 use App\Models\SavingsAutoCreditPosting;
+use App\Models\SavingsAutoCreditSkip;
 use App\Models\User;
 use App\Services\GeneratedNumberWrite;
 use App\Services\Savings\Api\AccountScope;
@@ -142,6 +143,11 @@ class Instructions
 
             if (SavingsAutoCreditPosting::query()->where('instruction_id', $locked->id)->exists()) {
                 Refuse::field('instruction', 'This instruction has already credited the account, so it is kept for the record. Deactivate it instead.');
+            }
+
+            // A run's skipped list names it too (gap round B7): kept, never a 500 from the foreign key.
+            if (SavingsAutoCreditSkip::query()->where('instruction_id', $locked->id)->exists()) {
+                Refuse::field('instruction', 'This instruction was skipped by an auto-credit run, so it is kept for the record. Deactivate it instead.');
             }
 
             $locked->delete();

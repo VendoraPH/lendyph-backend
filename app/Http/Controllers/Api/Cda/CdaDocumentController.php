@@ -46,7 +46,7 @@ class CdaDocumentController extends Controller
     #[OA\Get(
         path: '/api/cda/periods/{year}/documents',
         summary: 'A period\'s compliance documents',
-        description: 'Needs `cda:view` and `branches:view_all`. Documents the caller can\'t open (audit, tax, mediation) are left out. Filters: `category`, `status` (active, withdrawn), `report_id`, `subject_type`. Each row has `current_version` and `final_version` with a signed `url`. Paged (`per_page` up to 100).',
+        description: 'Needs `cda:view` and `branches:view_all`. Documents the caller can\'t open (audit, tax, mediation) are left out. Filters: `category`, `status` (active, withdrawn), `report_id`, `subject_type`, and `subject_id` with `subject_type` (one training, program, case or submission\'s documents; 422 without the type). Each row has `current_version` and `final_version` with a signed `url`. Paged (`per_page` up to 100).',
         tags: ['CDA'],
         security: [['sanctum' => []]],
         parameters: [
@@ -55,6 +55,7 @@ class CdaDocumentController extends Controller
             new OA\Parameter(name: 'status', in: 'query', schema: new OA\Schema(type: 'string', enum: CdaDocument::STATUSES)),
             new OA\Parameter(name: 'report_id', in: 'query', schema: new OA\Schema(type: 'integer')),
             new OA\Parameter(name: 'subject_type', in: 'query', schema: new OA\Schema(type: 'string', enum: CdaDocument::SUBJECT_TYPES)),
+            new OA\Parameter(name: 'subject_id', in: 'query', description: 'With `subject_type` only.', schema: new OA\Schema(type: 'integer')),
             new OA\Parameter(name: 'per_page', in: 'query', schema: new OA\Schema(type: 'integer', maximum: 100)),
         ],
         responses: [new OA\Response(response: 200, description: '{success, data: document[], meta}'), new OA\Response(response: 403, description: 'Missing cda:view or branches:view_all'), new OA\Response(response: 404, description: 'No period for that year')],
@@ -67,19 +68,24 @@ class CdaDocumentController extends Controller
             'category' => ['nullable', Rule::in(DocumentCategories::keys())],
             'status' => ['nullable', Rule::in(CdaDocument::STATUSES)],
             'report_id' => ['nullable', 'integer'],
-            'subject_type' => ['nullable', Rule::in(CdaDocument::SUBJECT_TYPES)],
+            'subject_type' => ['nullable', 'required_with:subject_id', Rule::in(CdaDocument::SUBJECT_TYPES)],
+            'subject_id' => ['nullable', 'integer', 'min:1'],
         ], [
             'category.in' => 'Choose a category from the list.',
             'status.in' => 'Choose active or withdrawn.',
             'report_id.integer' => 'Choose a report from the list.',
             'subject_type.in' => 'Choose training, program, case or submission.',
+            'subject_type.required_with' => 'Say which register the record belongs to (training, program, case or submission).',
+            'subject_id.integer' => 'Choose a record from the register.',
+            'subject_id.min' => 'Choose a record from the register.',
         ]);
 
         $query = CdaDocument::query()->where('period_id', $period->id)
             ->when($filters['category'] ?? null, fn ($q, $category) => $q->where('category', $category))
             ->when($filters['status'] ?? null, fn ($q, $status) => $q->where('status', $status))
             ->when($filters['report_id'] ?? null, fn ($q, $id) => $q->where('report_id', $id))
-            ->when($filters['subject_type'] ?? null, fn ($q, $type) => $q->where('subject_type', $type));
+            ->when($filters['subject_type'] ?? null, fn ($q, $type) => $q->where('subject_type', $type))
+            ->when($filters['subject_id'] ?? null, fn ($q, $id) => $q->where('subject_id', $id));
         $this->documents->scopeVisible($query, $request->user());
 
         $page = $query->with(['period', 'report', 'versions.file'])->orderBy('category')->orderByDesc('id')
