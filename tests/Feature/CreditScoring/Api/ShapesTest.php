@@ -26,7 +26,7 @@ const CREDIT_SCORE_KEYS = [
 
 const BORROWER_SCORE_ROW_KEYS = [
     'borrower_id', 'borrower_name', 'branch_id', 'branch_name', 'score', 'risk_level', 'score_trend', 'has_active_loan', 'past_due', 'calculated_at',
-    'borrower_code', 'status',
+    'borrower_code', 'status', 'outstanding',
 ];
 
 const HISTORY_ENTRY_KEYS = [
@@ -164,7 +164,7 @@ it('shapes the dashboard with all six risk levels once each, zeros included', fu
 
     $data = $this->actingAs($this->viewer)->getJson('/api/credit-scoring/dashboard')->assertOk()->json('data');
 
-    expectKeys($data, ['total_scored_borrowers', 'average_score', 'risk_distribution', 'recent_score_changes', 'insufficient_data_count']);
+    expectKeys($data, ['total_scored_borrowers', 'average_score', 'risk_distribution', 'recent_score_changes', 'insufficient_data_count', 'branch_risk', 'high_risk_outstanding', 'scores_due_for_review']);
     $score = CreditScore::query()->where('borrower_id', $this->member->id)->sole();
     expect(collect($data['risk_distribution'])->pluck('risk_level')->all())->toBe(['very_low', 'low', 'moderate', 'elevated', 'high', 'very_high'])
         ->and(collect($data['risk_distribution'])->sum('count'))->toBe(1)
@@ -222,7 +222,7 @@ it('shapes risk monitoring', function () {
     $data = $this->actingAs($this->viewer)->getJson('/api/credit-scoring/risk-monitoring')->assertOk()->json('data');
 
     expectKeys($data, ['summary', 'affected_borrowers', 'alerts', 'affected_total']);
-    expectKeys($data['summary'], ['total_borrowers', 'high_risk_count', 'score_declines_30d', 'new_hard_flags_30d']);
+    expectKeys($data['summary'], ['total_borrowers', 'high_risk_count', 'score_declines_30d', 'new_hard_flags_30d', 'past_due_borrowers', 'high_risk_exposure']);
     expectKeys($data['alerts'][0], RISK_ALERT_KEYS);
     expect($data['affected_borrowers'])->toBe([])
         ->and($data['affected_total'])->toBe(0)
@@ -252,7 +252,7 @@ it('shapes the scorecard configuration and the settings', function () {
 
     expectKeys($config, ['categories', 'factor_rules', 'policy_rules', 'risk_bands', 'version', 'validated']);
     expectKeys($config['categories'][0], ['key', 'label', 'weight_percent', 'description']);
-    expectKeys($config['factor_rules'][0], ['id', 'category_key', 'label', 'points', 'is_active']);
+    expectKeys($config['factor_rules'][0], ['id', 'category_key', 'label', 'points', 'is_active', 'rule', 'bands', 'otherwise', 'unit']);
     expectKeys($config['policy_rules'][0], ['id', 'label', 'description', 'is_active']);
     expectKeys($config['risk_bands'][0], ['key', 'label', 'min_score']);
     expect(array_sum(array_column($config['categories'], 'weight_percent')))->toBe(100)
