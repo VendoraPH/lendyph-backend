@@ -244,9 +244,12 @@ final class ProductRules
      * An approved or paid request leaves the count as its approval or posted
      * row joins it, under the same lock, so nothing counts twice.
      *
-     * With `$before`, only what was requested before that withdrawal counts:
-     * an earlier request time, or the same time and a lower id in the same
-     * table. Its own approval or portal request is left out.
+     * With `$before`, only what was requested before that withdrawal counts.
+     * Times are cut to the second, so a tie counts as before: posted rows and
+     * the other table's requests at the same second count, and within its
+     * own table a lower id breaks the tie. Its own approval or portal request
+     * is left out. A tie counted can only keep the stored fee, never raise it
+     * (WithdrawalFee::charging()).
      */
     public function withdrawalsInMonth(SavingsAccount $account, string $date, ?WithdrawalFee $before = null): int
     {
@@ -261,7 +264,7 @@ final class ProductRules
             ->whereNull('t.time_deposit_id')
             ->whereRaw('COALESCE(t.counted_on, t.date) BETWEEN ? AND ?', [$from, $to])
             ->whereNotExists(fn ($q) => $q->from('savings_transactions AS r')->whereColumn('r.reverses_transaction_id', 't.id'))
-            ->when($at !== null, fn ($q) => $q->whereRaw('COALESCE(t.requested_at, t.created_at) < ?', [$at]))
+            ->when($at !== null, fn ($q) => $q->whereRaw('COALESCE(t.requested_at, t.created_at) <= ?', [$at]))
             ->count();
 
         $pending = DB::table('savings_approvals AS a')
@@ -287,19 +290,24 @@ final class ProductRules
 
     /**
      * Narrow approvals or portal requests (`$alias`) to those requested
-     * before `$before`, leaving out its own row.
+     * before `$before`, leaving out its own row. In its own table a tie on
+     * the second is broken by id; in the other table a tie counts as before.
      */
     private function requestedBefore(QueryBuilder $query, string $alias, WithdrawalFee $before, string $source): QueryBuilder
     {
-        $own = $before->source === $source ? $before->sourceId : null;
+        $time = "COALESCE({$alias}.requested_at, {$alias}.created_at)";
+
+        if ($before->source !== $source || $before->sourceId === null) {
+            return $query->whereRaw("{$time} <= ?", [$before->requestedAt]);
+        }
+
+        $own = $before->sourceId;
 
         return $query
-            ->when($own !== null, fn ($q) => $q->where("{$alias}.id", '!=', $own))
+            ->where("{$alias}.id", '!=', $own)
             ->where(fn ($q) => $q
-                ->whereRaw("COALESCE({$alias}.requested_at, {$alias}.created_at) < ?", [$before->requestedAt])
-                ->when($own !== null, fn ($q) => $q->orWhere(fn ($q) => $q
-                    ->whereRaw("COALESCE({$alias}.requested_at, {$alias}.created_at) = ?", [$before->requestedAt])
-                    ->where("{$alias}.id", '<', $own))));
+                ->whereRaw("{$time} < ?", [$before->requestedAt])
+                ->orWhere(fn ($q) => $q->whereRaw("{$time} = ?", [$before->requestedAt])->where("{$alias}.id", '<', $own)));
     }
 
     /**

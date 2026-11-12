@@ -286,6 +286,19 @@ class ExcessWithdrawalFeeTest extends TestCase
         $this->postJson("/api/savings/approvals/{$second}/approve")->assertConflict();
     }
 
+    public function test_a_withdrawal_posted_in_the_same_second_still_counts_before_an_approval(): void
+    {
+        $this->rules(['free_withdrawals_per_month' => 1, 'excess_withdrawal_fee' => '25.00']);
+
+        // 10:00:00: a counter withdrawal (free), then approval B in the same second (₱25.00).
+        $this->withdraw('100.00')->assertCreated()->assertJsonPath('data.fee_amount', null);
+        $this->actingAs($this->teller());
+        $b = $this->withdraw('15000.00')->assertStatus(202)->assertJsonPath('data.approval.fee_amount', '25.00')->json('data.approval.id');
+
+        $this->assertSame('25.00', $this->approvedFee($b), 'The withdrawal in the same second used the free one.');
+        $this->assertSame('84875.00', $this->balanceOf($this->savings));
+    }
+
     public function test_a_free_count_or_fee_changed_since_the_request_answers_409_in_words(): void
     {
         $this->rules(['free_withdrawals_per_month' => 0, 'excess_withdrawal_fee' => '50.00']);

@@ -173,4 +173,29 @@ class PortalRulesTest extends TestCase
         $this->assertSame(1, $rules->withdrawalsInMonth($account->refresh(), '2026-11-10'));
         $this->assertSame(0, $rules->withdrawalsInMonth($account, '2026-12-01'));
     }
+
+    public function test_an_approval_in_the_same_second_still_counts_before_a_portal_request(): void
+    {
+        $account = $this->account();
+        $this->fund($account, 5_000_000);
+        $this->product->forceFill(['free_withdrawals_per_month' => 1, 'excess_withdrawal_fee' => '25.00'])->save();
+
+        // 10:00:00: approval A takes the free withdrawal, then portal request P in the same second.
+        $this->freshRequest();
+        $this->actingAs($this->userWith(['savings:view', 'savings:transact']));
+        $approval = $this->money("/api/savings/accounts/{$account->id}/withdrawals", ['amount' => '15000.00', 'date' => '2026-11-10', 'payment_method' => 'cash'])
+            ->assertStatus(202)->assertJsonPath('data.approval.fee_amount', '0.00')->json('data.approval.id');
+        $request = $this->submitted($this->submit($this->withdrawalBody($account, '100.00'))->assertCreated());
+        $this->assertSame('25.00', (string) $request->fee_amount);
+
+        $this->decide($request, ['decision' => 'approve', 'payout' => $this->payout()])->assertCreated();
+        $paid = SavingsTransaction::query()->findOrFail($request->refresh()->savings_transaction_id);
+        $this->assertSame('25.00', (string) SavingsTransaction::query()->where('fee_for_transaction_id', $paid->id)->value('debit'));
+
+        $this->freshRequest();
+        $this->actingAs($this->userWith(['savings:view', 'savings:approve']));
+        $this->postJson("/api/savings/approvals/{$approval}/approve")->assertOk();
+        $this->assertSame(1, SavingsTransaction::query()->where('account_id', $account->id)->where('type', 'fee')->count());
+        $this->assertSame('34875.00', $this->balanceOf($account));
+    }
 }
