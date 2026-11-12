@@ -195,6 +195,7 @@ class SavingsLedger
         if ($byMember && in_array($type, self::REACTIVATING_TYPES, true) && $locked->status === SavingsAccount::STATUS_DORMANT) {
             $changes['status'] = SavingsAccount::STATUS_ACTIVE;
             $changes['dormant_since'] = null;
+            $changes['reactivated_by_deposit_on'] = now()->toDateString();
         }
 
         DB::table('savings_accounts')->where('id', $locked->id)->update($changes);

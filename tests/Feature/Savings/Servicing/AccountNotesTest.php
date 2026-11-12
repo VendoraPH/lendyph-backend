@@ -56,8 +56,8 @@ class AccountNotesTest extends TestCase
             ->where('auditable_id', $this->savings->id)->orderBy('id')->first();
         $this->assertNotNull($audit);
         $this->assertSame($poster->id, $audit->user_id);
-        $this->assertSame('Member called about dormancy.', $audit->new_values['note']);
-        $this->assertSame("Note added to savings account {$this->savings->account_number} by {$poster->full_name}: Member called about dormancy.", $audit->description);
+        $this->assertEquals(['note_id' => $audit->new_values['note_id'], 'length' => 29], $audit->new_values);
+        $this->assertSame("Note #{$audit->new_values['note_id']} (29 characters) added to savings account {$this->savings->account_number} by {$poster->full_name}.", $audit->description);
     }
 
     public function test_note_permissions_and_validation(): void

@@ -12,6 +12,7 @@ use App\Http\Requests\Savings\Account\OpenSavingsAccountRequest;
 use App\Http\Requests\Savings\Account\SavingsMoneyRequest;
 use App\Http\Requests\Savings\Account\TransferSavingsRequest;
 use App\Models\SavingsAccount;
+use App\Models\SavingsApproval;
 use App\Models\SavingsTransaction;
 use App\Services\BranchAccess;
 use App\Services\GeneratedNumberWrite;
@@ -237,7 +238,7 @@ class SavingsAccountController extends Controller
     #[OA\Post(
         path: '/api/savings/accounts/{account}/withdrawals',
         summary: 'Withdraw',
-        description: 'Up to the available balance, from an active account. Up to tier 1 it posts (201, the transaction, Dr 2050 / Cr settlement); above it, it waits for approval and reserves the amount (202, `{approval}`). Needs an `Idempotency-Key` header.',
+        description: 'Up to the available balance, from an active account. Up to tier 1 it posts (201, the transaction, Dr 2050 / Cr settlement); above it, it waits for approval and reserves the amount (202, `{approval}`). On the day money paid in reactivated a dormant account, its first outflow waits for one checker whatever the amount (202, with `message` and the approval\'s `check_reason`). Needs an `Idempotency-Key` header.',
         tags: ['Savings'],
         security: [['sanctum' => []]],
         parameters: [
@@ -269,7 +270,7 @@ class SavingsAccountController extends Controller
             $result = $teller->withdraw($account, $data, $user);
 
             return $result['approval'] !== null
-                ? response()->json(['success' => true, 'data' => ['approval' => $this->presenter->approval($result['approval'])]], 202)
+                ? $this->sentForApproval($result['approval'])
                 : response()->json(['success' => true, 'data' => $this->presenter->transaction($result['transaction'])], 201);
         });
     }
@@ -371,7 +372,7 @@ class SavingsAccountController extends Controller
             $result = $closer->close($account, $data, $user);
 
             return $result['approval'] !== null
-                ? response()->json(['success' => true, 'data' => ['approval' => $this->presenter->approval($result['approval'])]], 202)
+                ? $this->sentForApproval($result['approval'])
                 : response()->json(['success' => true, 'data' => $this->presenter->account($result['account'])], 201);
         });
     }
@@ -406,6 +407,21 @@ class SavingsAccountController extends Controller
         return $result['approval'] !== null
             ? response()->json(['success' => true, 'message' => 'Reactivation sent for approval. The account stays dormant until a checker approves it.', 'data' => ['approval' => $this->presenter->approval($result['approval'])]], 202)
             : response()->json(['success' => true, 'data' => $this->presenter->account($result['account'])]);
+    }
+
+    /**
+     * 202 with `{approval}`; with `message` when it waits for a checker only
+     * because money paid in reactivated the account today (review M1).
+     */
+    private function sentForApproval(SavingsApproval $approval): JsonResponse
+    {
+        $reason = $approval->payload['check_reason'] ?? null;
+
+        return response()->json([
+            'success' => true,
+            ...($reason === null ? [] : ['message' => $reason]),
+            'data' => ['approval' => $this->presenter->approval($approval)],
+        ], 202);
     }
 
     /**

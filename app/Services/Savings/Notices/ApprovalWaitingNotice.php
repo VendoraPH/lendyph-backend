@@ -14,8 +14,11 @@ use Throwable;
 /**
  * "Approval waiting" (gap round S4): when a savings approval opens, every
  * active `savings:approve` holder who can see its branch (StaffRecipients, as
- * the large-transaction alert) is told in the app, never the maker. Written
- * after the request commits; a failure is logged and never fails it.
+ * the large-transaction alert) is told in the app, never the maker. When a
+ * two-checker request gets its first approval, the same holders except the
+ * maker and the first checker are told it waits for a second checker
+ * (`data.checkers_left` 1). Written after the write commits; a failure is
+ * logged and never fails it.
  */
 class ApprovalWaitingNotice
 {
@@ -54,7 +57,7 @@ class ApprovalWaitingNotice
     private function send(int $approvalId): void
     {
         $approval = SavingsApproval::query()
-            ->with(['account.borrower', 'timeDeposit.borrower', 'requester'])
+            ->with(['account.borrower', 'timeDeposit.borrower', 'requester', 'firstChecker'])
             ->find($approvalId);
 
         if ($approval === null || $approval->status !== 'pending') {
@@ -62,7 +65,9 @@ class ApprovalWaitingNotice
         }
 
         $holder = $approval->account ?? $approval->timeDeposit;
-        $recipients = $this->staff->holding('savings:approve', $holder?->branch_id, [(int) $approval->requested_by]);
+        $second = $approval->first_checker_id !== null;
+        $skip = array_values(array_filter([(int) $approval->requested_by, $second ? (int) $approval->first_checker_id : null]));
+        $recipients = $this->staff->holding('savings:approve', $holder?->branch_id, $skip);
 
         if ($recipients->isEmpty()) {
             return;
@@ -78,11 +83,14 @@ class ApprovalWaitingNotice
             .($on !== null ? " on {$on}" : '')
             .($member !== null ? " ({$member})" : '')
             .($amount > 0 ? ' for '.Refuse::peso($amount) : '')
-            ." is waiting for approval, requested by {$by}.";
+            .($second
+                ? ' has its first approval from '.($approval->firstChecker?->full_name ?? 'a checker').' and is waiting for a second checker'
+                : ' is waiting for approval')
+            .", requested by {$by}.";
 
         Notification::send($recipients, new StaffNotification(
             self::TYPE,
-            'Savings approval waiting',
+            $second ? 'Second savings approval waiting' : 'Savings approval waiting',
             $body,
             '/savings/approvals',
             [
@@ -90,6 +98,7 @@ class ApprovalWaitingNotice
                 'kind' => $approval->kind,
                 'account_id' => $approval->account_id,
                 'time_deposit_id' => $approval->time_deposit_id,
+                'checkers_left' => $second ? 1 : $approval->required_checkers,
             ],
         ));
     }

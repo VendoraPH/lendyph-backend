@@ -9,7 +9,6 @@ use App\Models\SavingsAccount;
 use App\Models\SavingsAccountNote;
 use App\Services\AuditLogService;
 use App\Services\Savings\Api\AccountScope;
-use App\Support\Sentence;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -20,7 +19,9 @@ use OpenApi\Attributes as OA;
  * Notes"). Reading needs `savings:view`, adding `savings:post`; both only on
  * an account in the caller's branches (another branch's answers 404). A note
  * is never edited or deleted, and each one added writes an audit row on its
- * account.
+ * account with the note's id and length only: the note itself is the
+ * permanent record, so its text (which may hold personal data) is never
+ * copied into the audit trail.
  */
 class SavingsAccountNoteController extends Controller
 {
@@ -68,7 +69,7 @@ class SavingsAccountNoteController extends Controller
     #[OA\Post(
         path: '/api/savings/accounts/{account}/notes',
         summary: 'Add a note',
-        description: 'Up to 1,000 characters, on an account in any status. Never edited or deleted. Audited on the account (`savings_account_note_added`).',
+        description: 'Up to 1,000 characters, on an account in any status. Never edited or deleted. Audited on the account (`savings_account_note_added`, with the note\'s id and length, never its text).',
         tags: ['Savings'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'account', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
@@ -92,12 +93,14 @@ class SavingsAccountNoteController extends Controller
         $note = DB::transaction(function () use ($account, $user, $text): SavingsAccountNote {
             $note = SavingsAccountNote::query()->create(['account_id' => $account->id, 'note' => $text, 'created_by' => $user->id]);
 
+            $length = mb_strlen($text);
+
             AuditLogService::log(
                 'savings_account_note_added',
                 $account,
                 null,
-                ['note_id' => $note->id, 'note' => $text],
-                "Note added to savings account {$account->account_number} by {$user->full_name}: ".Sentence::ended($text),
+                ['note_id' => $note->id, 'length' => $length],
+                "Note #{$note->id} ({$length} ".($length === 1 ? 'character' : 'characters').") added to savings account {$account->account_number} by {$user->full_name}.",
             );
 
             return $note;

@@ -7,8 +7,10 @@ use App\Models\SavingsApproval;
 use App\Models\User;
 use App\Services\AuditLogService;
 use App\Services\Savings\ApprovalGate;
+use App\Services\Savings\Notices\DormancyWindow;
 use App\Services\Savings\SavingsLocks;
 use App\Support\Sentence;
+use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
@@ -19,7 +21,9 @@ use Illuminate\Validation\ValidationException;
  * - **Freeze** an active or dormant account: nothing moves in or out until
  *   it is unfrozen (holds can still be placed).
  * - **Unfreeze** a frozen account: it goes back to dormant when it was
- *   dormant before it was frozen (`dormant_since` is kept), else active.
+ *   dormant before it was frozen (`dormant_since` is kept). One whose last
+ *   member activity is past the dormancy cut-off (it would have turned
+ *   dormant while frozen) becomes dormant from today; else it is active.
  * - **Reactivate** a dormant account (gap round S4, Savings TASK 20:
  *   "Reactivation requires approval"). Staff ask for it and a `reactivation`
  *   approval opens, with one checker who isn't the maker (ApprovalGate at
@@ -68,9 +72,14 @@ class StatusChanger
         }
 
         $wasDormant = $account->dormant_since !== null;
+        $lastActivity = ($account->last_member_activity_on ?? $account->opened_on)?->toDateString();
+        $window = DormancyWindow::current();
+        $pastCutoff = $lastActivity !== null && $lastActivity <= $window->cutoffOn($window->today);
         [$action, $changes, $words] = match (true) {
             $status === SavingsAccount::STATUS_FROZEN => ['savings_account_frozen', ['status' => $status], 'frozen'],
             $wasDormant => ['savings_account_unfrozen', ['status' => SavingsAccount::STATUS_DORMANT], 'unfrozen (dormant again)'],
+            $pastCutoff => ['savings_account_unfrozen', ['status' => SavingsAccount::STATUS_DORMANT, 'dormant_since' => $window->today->toDateString()],
+                'unfrozen (dormant: no member activity since '.CarbonImmutable::parse($lastActivity)->format('M j, Y').')'],
             default => ['savings_account_unfrozen', ['status' => SavingsAccount::STATUS_ACTIVE], 'unfrozen'],
         };
 

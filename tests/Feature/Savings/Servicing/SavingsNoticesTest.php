@@ -192,7 +192,7 @@ class SavingsNoticesTest extends TestCase
         $this->actingAs($this->teller());
         $this->postJson("/api/savings/accounts/{$account->id}/status", ['status' => 'frozen', 'reason' => 'Signature check'])->assertOk();
         $this->postJson("/api/savings/accounts/{$account->id}/status", ['status' => 'active', 'reason' => 'Resolved'])->assertOk();
-        $this->money("/api/savings/accounts/{$account->id}/close", ['date' => '2026-11-10', 'reason' => 'Member request', 'payout_method' => 'cash'])->assertCreated();
+        $this->on('2026-11-11', fn () => $this->money("/api/savings/accounts/{$account->id}/close", ['date' => '2026-11-11', 'reason' => 'Member request', 'payout_method' => 'cash'])->assertCreated());
 
         $titles = array_values(array_filter($this->memberTitles(), fn (string $title) => str_starts_with($title, 'Savings account')));
         $this->assertEqualsCanonicalizing(['Savings account dormant', 'Savings account active again', 'Savings account frozen', 'Savings account closed'], $titles);

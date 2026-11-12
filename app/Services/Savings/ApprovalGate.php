@@ -2,6 +2,7 @@
 
 namespace App\Services\Savings;
 
+use App\Models\SavingsAccount;
 use App\Models\SavingsApproval;
 use App\Models\SavingsSetting;
 use App\Models\User;
@@ -43,6 +44,9 @@ class ApprovalGate
      */
     public const DUAL_CHECKERS = 2;
 
+    /** Why a reactivated account's first outflow today waits for a checker (review M1). */
+    public const REACTIVATED_TODAY = 'This account was reactivated by today\'s deposit, so a checker must approve money going out today.';
+
     /** The unique index that keeps one live approval per thing. */
     public const LIVE_KEY_INDEX = 'savings_approvals_live_key_unique';
 
@@ -79,6 +83,52 @@ class ApprovalGate
     public function needsApproval(int $centavos, ?SavingsSetting $settings = null): bool
     {
         return $this->requiredCheckers($centavos, $settings) > 0;
+    }
+
+    /**
+     * Why money going out of `$account` today needs a checker whatever its
+     * amount (gap round S4, review M1), or null: money paid in (a deposit or
+     * a transfer in) reactivated the dormant account today
+     * (`reactivated_by_deposit_on`), and no outflow on it has been approved
+     * today yet. Only the first outflow that day is held for a checker.
+     */
+    public function uncheckedOutflowReason(SavingsAccount $account): ?string
+    {
+        $today = now()->toDateString();
+
+        if ($account->reactivated_by_deposit_on?->toDateString() !== $today) {
+            return null;
+        }
+
+        $checked = SavingsApproval::query()
+            ->where('account_id', $account->id)
+            ->whereIn('kind', SavingsApproval::OUTFLOW_KINDS)
+            ->where('status', 'approved')
+            ->where('decided_at', '>=', now()->startOfDay())
+            ->exists();
+
+        return $checked ? null : self::REACTIVATED_TODAY;
+    }
+
+    /** Whether an outflow of `$centavos` from `$account` must wait for a checker: its tier, or the M1 control. */
+    public function needsApprovalFor(SavingsAccount $account, int $centavos): bool
+    {
+        return $this->needsApproval($centavos) || $this->uncheckedOutflowReason($account) !== null;
+    }
+
+    /**
+     * Refuse (422 on `amount`) money moving out with no approval step (a
+     * transfer) while the M1 control holds the account's outflows.
+     *
+     * @throws ValidationException
+     */
+    public function assertNoUncheckedOutflow(SavingsAccount $account): void
+    {
+        if ($this->uncheckedOutflowReason($account) !== null) {
+            throw ValidationException::withMessages(['amount' => [
+                self::REACTIVATED_TODAY.' A transfer has no approval step: make a withdrawal for a checker to approve, or transfer tomorrow.',
+            ]]);
+        }
     }
 
     /**
@@ -122,6 +172,18 @@ class ApprovalGate
             ? $attributes['fee']->columns()
             : ['fee_amount' => SavingsMath::pesos((int) ($attributes['fee_amount'] ?? 0))];
 
+        $payload = $attributes['payload'] ?? null;
+        $tierCentavos = max($centavos, (int) ($attributes['tier_centavos'] ?? 0));
+
+        if (in_array($kind, SavingsApproval::OUTFLOW_KINDS, true) && isset($attributes['account_id']) && ! $this->needsApproval($tierCentavos)) {
+            $account = SavingsAccount::query()->find($attributes['account_id']);
+            $reason = $account === null ? null : $this->uncheckedOutflowReason($account);
+
+            if ($reason !== null) {
+                $payload = [...($payload ?? []), 'check_reason' => $reason];
+            }
+        }
+
         return SavingsApproval::query()->create([
             ...$fee,
             'kind' => $kind,
@@ -129,8 +191,8 @@ class ApprovalGate
             'time_deposit_id' => $attributes['time_deposit_id'] ?? null,
             'target_transaction_id' => $attributes['target_transaction_id'] ?? null,
             'amount' => SavingsMath::pesos($centavos),
-            'payload' => $attributes['payload'] ?? null,
-            'required_checkers' => max(1, $this->requiredCheckers(max($centavos, (int) ($attributes['tier_centavos'] ?? 0)))),
+            'payload' => $payload,
+            'required_checkers' => max(1, $this->requiredCheckers($tierCentavos)),
             'status' => 'pending',
             'requested_by' => $requestedBy,
             'expires_at' => now()->endOfDay(),
