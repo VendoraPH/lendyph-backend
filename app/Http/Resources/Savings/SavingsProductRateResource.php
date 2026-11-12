@@ -9,7 +9,9 @@ use Illuminate\Http\Resources\Json\JsonResource;
 /**
  * One row of a product's rate history (the frontend's `SavingsProductRate`):
  * the rate (a four-decimal percent string, never rounded), its term (null on
- * a regular product), the date it starts, and who added it as `{id, name}`.
+ * a regular product), its tier's minimum balance (`min_balance`, a
+ * two-decimal string; null for the base tier), the date it starts, and who
+ * added it as `{id, name}`.
  * Load `creator` first.
  *
  * @mixin SavingsProductRate
@@ -24,6 +26,7 @@ class SavingsProductRateResource extends JsonResource
             'product_id' => $this->product_id,
             'term_days' => $this->term_days,
             'annual_rate' => $this->annual_rate,
+            'min_balance' => $this->min_balance,
             'effective_from' => $this->effective_from->toDateString(),
             'created_by' => SavingsUserRef::from($this->creator),
             'created_at' => $this->created_at,
