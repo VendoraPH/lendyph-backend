@@ -15,6 +15,7 @@ use App\Services\Accounting\AutomaticPoster;
 use App\Services\Accounting\LedgerGapsReport;
 use App\Services\Savings\IdempotentWrite;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Tests\Feature\Savings\Accounts\SavingsAccountsTestHelpers;
 use Tests\TestCase;
@@ -308,5 +309,38 @@ class ShareCapitalTransferTest extends TestCase
 
         $gaps = app(LedgerGapsReport::class)->page(['kind' => 'share_capital'], null, 1);
         $this->assertSame(0, $gaps['total']);
+    }
+
+    public function test_a_large_transfer_alerts_the_approvers_but_not_its_maker_or_checkers(): void
+    {
+        $account = $this->account();
+        $this->fund($account, 60_000_000);
+        DB::table('notifications')->delete();
+        $watcher = $this->checker();
+        $this->actingAs($maker = $this->officer());
+
+        $approval = $this->transfer($account->id, '500000.00')->assertStatus(202)->json('data.approval');
+        $this->assertSame([], $this->alerted());
+
+        $this->actingAs($first = $this->checker());
+        $this->postJson("/api/savings/approvals/{$approval['id']}/approve")->assertOk();
+        $this->actingAs($second = $this->checker());
+        $this->postJson("/api/savings/approvals/{$approval['id']}/approve")->assertOk()->assertJsonPath('data.status', 'approved');
+
+        $told = $this->alerted();
+        $this->assertContains($watcher->id, $told);
+        foreach ([$maker->id, $first->id, $second->id] as $actor) {
+            $this->assertNotContains($actor, $told);
+        }
+
+        $data = json_decode(DB::table('notifications')->where('type', 'savings_large_transaction')->where('notifiable_id', $watcher->id)->sole()->data, true);
+        $this->assertStringContainsString('Transfer to share capital of ₱500,000.00', $data['body']);
+    }
+
+    /** @return list<int> who got a large-transaction alert */
+    private function alerted(): array
+    {
+        return DB::table('notifications')->where('type', 'savings_large_transaction')
+            ->where('notifiable_type', User::class)->orderBy('notifiable_id')->pluck('notifiable_id')->map(fn ($id) => (int) $id)->all();
     }
 }

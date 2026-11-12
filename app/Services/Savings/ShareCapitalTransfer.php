@@ -12,6 +12,7 @@ use App\Models\User;
 use App\Services\Accounting\AutomaticPoster;
 use App\Services\Accounting\PeriodGuard;
 use App\Services\AuditLogService;
+use App\Services\Savings\Api\LargeTransactionAlert;
 use App\Services\Savings\Api\Refuse;
 use App\Services\Savings\Api\Teller;
 use Illuminate\Validation\ValidationException;
@@ -61,6 +62,7 @@ class ShareCapitalTransfer
         private readonly PeriodGuard $periods,
         private readonly Teller $teller,
         private readonly ProductRules $rules,
+        private readonly LargeTransactionAlert $alert,
     ) {}
 
     /**
@@ -128,14 +130,17 @@ class ShareCapitalTransfer
 
     /**
      * Write the savings debit and the share capital credit, then the one
-     * journal, and audit it. The money was checked by the caller.
+     * journal, and audit it. The money was checked by the caller. ₱500,000.00
+     * or more sends the large-transaction alert, to everyone but the maker,
+     * the poster and `$otherDeciders` (a first checker), as a withdrawal does.
      *
      * @param  array{date: string, remarks?: string|null}  $data
+     * @param  list<int|null>  $otherDeciders
      * @return array{transaction: SavingsTransaction, entry: ShareCapitalLedger}
      *
      * @throws ValidationException
      */
-    public function post(SavingsAccount $account, int $centavos, array $data, int $makerId, ?int $approvalId, int $posterId): array
+    public function post(SavingsAccount $account, int $centavos, array $data, int $makerId, ?int $approvalId, int $posterId, array $otherDeciders = []): array
     {
         $row = $this->ledger->debit($account, 'share_capital_transfer', $centavos, [
             'date' => $data['date'],
@@ -167,6 +172,8 @@ class ShareCapitalTransfer
             Refuse::peso($centavos)." moved from savings account {$account->account_number} to share capital ({$row->reference}, share capital {$entry->reference}).",
             $posterId,
         );
+
+        $this->alert->afterPosting($row, [$makerId, $posterId, ...$otherDeciders]);
 
         return ['transaction' => $row, 'entry' => $entry];
     }

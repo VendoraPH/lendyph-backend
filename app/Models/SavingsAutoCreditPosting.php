@@ -6,8 +6,9 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 /**
- * One instruction credited for one cycle (gap round S3), linked to its
- * deposit. Unique per (instruction, cycle), so a re-run posts nothing.
+ * One account credited for one cycle (gap round S3), naming the instruction
+ * it followed and its deposit. Unique per (account, cycle), so a re-run, or a
+ * new instruction on the same slot, posts nothing.
  *
  * @property int $id
  * @property int $instruction_id
@@ -17,8 +18,12 @@ class SavingsAutoCreditPosting extends Model
 {
     public const UPDATED_AT = null;
 
+    /** The unique index that credits an account once per cycle. */
+    public const CYCLE_INDEX = 'savings_auto_credit_postings_cycle_unique';
+
     protected $fillable = [
         'instruction_id',
+        'account_id',
         'run_id',
         'cycle_date',
         'transaction_id',
@@ -36,6 +41,11 @@ class SavingsAutoCreditPosting extends Model
     public function instruction(): BelongsTo
     {
         return $this->belongsTo(SavingsAutoCreditInstruction::class, 'instruction_id');
+    }
+
+    public function account(): BelongsTo
+    {
+        return $this->belongsTo(SavingsAccount::class, 'account_id');
     }
 
     public function run(): BelongsTo

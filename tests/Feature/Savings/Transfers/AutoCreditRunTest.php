@@ -14,6 +14,7 @@ use App\Models\SavingsProduct;
 use App\Models\SavingsTransaction;
 use App\Services\Accounting\AccountMap;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\DB;
 use Tests\Feature\Savings\Accounts\SavingsAccountsTestHelpers;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
@@ -247,5 +248,96 @@ class AutoCreditRunTest extends TestCase
         $this->actingAs($this->admin);
         $this->postJson('/api/savings/auto-credit/process', ['cycle_date' => '2026-11-15'])->assertUnprocessable()->assertJsonValidationErrors('idempotency_key');
         $this->assertSame(0, SavingsAutoCreditPosting::query()->count());
+    }
+
+    public function test_a_run_that_loses_a_race_to_another_run_answers_409_and_posts_nothing(): void
+    {
+        $account = $this->account();
+        $instruction = $this->instruct($account, '500.00');
+        $other = $this->fund($this->newAccount(), 10_000, '2026-11-15');
+
+        // Another run commits this cycle's posting on the account between this
+        // run's plan and its write.
+        SavingsAutoCreditPosting::creating(function (SavingsAutoCreditPosting $posting) use ($account, $instruction, $other): void {
+            if (DB::table('savings_auto_credit_postings')->where('account_id', $account->id)->exists()) {
+                return;
+            }
+
+            DB::table('savings_auto_credit_postings')->insert([
+                'instruction_id' => $instruction->id, 'account_id' => $account->id, 'run_id' => $posting->run_id,
+                'cycle_date' => '2026-11-15', 'transaction_id' => $other->id, 'amount' => '100.00', 'created_at' => now(),
+            ]);
+        });
+
+        $this->process()->assertStatus(409)
+            ->assertJsonPath('message', 'This cycle was just run by someone else. Refresh to see what was credited.');
+
+        $this->assertSame('0.00', $this->balanceOf($account));
+        $this->assertSame(0, SavingsAutoCreditRun::query()->count());
+        $this->assertSame(0, SavingsAutoCreditPosting::query()->count());
+    }
+
+    public function test_a_second_run_uses_the_instructions_as_they_are_now(): void
+    {
+        $account = $this->account();
+        $instruction = $this->instruct($account, '500.00');
+        $this->getJson('/api/savings/auto-credit/preview?cycle_date=2026-11-15')->assertOk()->assertJsonPath('data.totals.credit_amount', '500.00');
+
+        $this->putJson("/api/savings/auto-credit/instructions/{$instruction->id}", ['amount' => '125.00'])->assertOk();
+        $this->process()->assertCreated()->assertJsonPath('data.totals.credit_amount', '125.00');
+        $this->process()->assertCreated()->assertJsonPath('data.totals.credit_count', 0)->assertJsonPath('data.totals.already_credited_count', 1);
+
+        $this->assertSame('125.00', $this->balanceOf($account));
+    }
+
+    public function test_an_account_is_credited_once_per_cycle_even_through_a_new_instruction(): void
+    {
+        $account = $this->account();
+        $first = $this->instruct($account, '500.00');
+        $this->process()->assertCreated()->assertJsonPath('data.totals.credit_count', 1);
+
+        $this->putJson("/api/savings/auto-credit/instructions/{$first->id}", ['active' => false])->assertOk();
+        $second = $this->postJson('/api/savings/auto-credit/instructions', [
+            'account_id' => $account->id, 'amount' => '700.00', 'schedule' => '15', 'authorised_on' => '2026-11-15', 'authorised_by' => 'The member',
+        ])->assertCreated()->json('data.id');
+
+        $this->process()->assertCreated()
+            ->assertJsonPath('data.totals.credit_count', 0)
+            ->assertJsonPath('data.already_credited.0.instruction_id', $second)
+            ->assertJsonPath('data.already_credited.0.amount', '500.00');
+
+        $this->assertSame('500.00', $this->balanceOf($account));
+        $this->assertSame(1, SavingsAutoCreditPosting::query()->count());
+    }
+
+    public function test_a_reversed_auto_credit_reads_credited_then_reversed_and_is_not_credited_again(): void
+    {
+        $account = $this->account();
+        $this->instruct($account, '500.00');
+        $id = $this->process()->assertCreated()->json('data.credits.0.transaction_id');
+
+        $approval = $this->money("/api/savings/transactions/{$id}/reverse", ['reason' => 'Payroll file was wrong'])->assertStatus(202)->json('data.approval');
+        $this->actingAs($this->checker());
+        $this->postJson("/api/savings/approvals/{$approval['id']}/approve")->assertOk();
+        $this->actingAs($this->admin);
+
+        $this->getJson('/api/savings/auto-credit/preview?cycle_date=2026-11-15')->assertOk()
+            ->assertJsonPath('data.totals.credit_count', 0)
+            ->assertJsonPath('data.already_credited.0.status', 'reversed')
+            ->assertJsonPath('data.already_credited.0.status_label', 'Credited, then reversed');
+        $this->process()->assertCreated()->assertJsonPath('data.credits', [])
+            ->assertJsonPath('data.already_credited.0.status_label', 'Credited, then reversed');
+
+        $this->assertSame('0.00', $this->balanceOf($account));
+    }
+
+    public function test_an_unreversed_auto_credit_reads_credited(): void
+    {
+        $this->instruct($this->account(), '500.00');
+        $this->process()->assertCreated();
+
+        $this->getJson('/api/savings/auto-credit/preview?cycle_date=2026-11-15')->assertOk()
+            ->assertJsonPath('data.already_credited.0.status', 'credited')
+            ->assertJsonPath('data.already_credited.0.status_label', 'Credited');
     }
 }

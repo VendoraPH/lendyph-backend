@@ -6,9 +6,11 @@ use App\Models\SavingsAccount;
 use App\Models\SavingsAutoCreditInstruction;
 use App\Models\SavingsAutoCreditPosting;
 use App\Models\User;
+use App\Services\GeneratedNumberWrite;
 use App\Services\Savings\Api\AccountScope;
 use App\Services\Savings\Api\Refuse;
 use App\Services\Savings\SavingsLocks;
+use Closure;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -17,7 +19,9 @@ use Illuminate\Validation\ValidationException;
  * Writes savings auto-credit instructions (gap round S3): create, edit and
  * delete, each in one transaction under the account's row lock, so the rule
  * of one active instruction per account per slot (the 15th, the 30th) is
- * exact, and a run, which takes the same lock, never sees half an edit.
+ * exact, and a run, which takes the same locks, never sees half an edit. An
+ * edit or delete locks the instruction row first, then the account, the
+ * order a run takes them in.
  * Audited by the model (Auditable).
  *
  * - The account must be in the caller's branches (422 on `account_id`,
@@ -27,6 +31,8 @@ use Illuminate\Validation\ValidationException;
  */
 class Instructions
 {
+    public const CONFLICT = 'Someone else changed this account\'s auto-credit at the same moment. Submit again.';
+
     public function __construct(
         private readonly AccountScope $scope,
         private readonly SavingsLocks $locks,
@@ -61,7 +67,7 @@ class Instructions
             Refuse::field('account_id', 'That savings account does not exist.');
         }
 
-        return DB::transaction(function () use ($accountId, $data, $user): SavingsAutoCreditInstruction {
+        return $this->write(function () use ($accountId, $data, $user): SavingsAutoCreditInstruction {
             $account = $this->locks->account($accountId);
 
             if ($account->isClosed()) {
@@ -95,9 +101,9 @@ class Instructions
      */
     public function update(SavingsAutoCreditInstruction $instruction, array $data, User $user): SavingsAutoCreditInstruction
     {
-        return DB::transaction(function () use ($instruction, $data, $user): SavingsAutoCreditInstruction {
-            $account = $this->locks->account($instruction->account_id);
+        return $this->write(function () use ($instruction, $data, $user): SavingsAutoCreditInstruction {
             $locked = SavingsAutoCreditInstruction::query()->whereKey($instruction->id)->lockForUpdate()->firstOrFail();
+            $account = $this->locks->account($locked->account_id);
 
             $schedule = $data['schedule'] ?? $locked->schedule;
             $active = array_key_exists('active', $data) ? (bool) $data['active'] : $locked->active;
@@ -127,9 +133,9 @@ class Instructions
     /** @throws ValidationException */
     public function delete(SavingsAutoCreditInstruction $instruction): void
     {
-        DB::transaction(function () use ($instruction): void {
-            $this->locks->account($instruction->account_id);
+        $this->write(function () use ($instruction): void {
             $locked = SavingsAutoCreditInstruction::query()->whereKey($instruction->id)->lockForUpdate()->firstOrFail();
+            $this->locks->account($locked->account_id);
 
             if (SavingsAutoCreditPosting::query()->where('instruction_id', $locked->id)->exists()) {
                 Refuse::field('instruction', 'This instruction has already credited the account, so it is kept for the record. Deactivate it instead.');
@@ -137,6 +143,21 @@ class Instructions
 
             $locked->delete();
         });
+    }
+
+    /**
+     * One write in its own transaction. A deadlock with a run (which locks
+     * instruction rows, then accounts) is tried again; a lock wait timeout
+     * answers 409 (GeneratedNumberWrite).
+     *
+     * @template T
+     *
+     * @param  Closure(): T  $write
+     * @return T
+     */
+    private function write(Closure $write): mixed
+    {
+        return GeneratedNumberWrite::run(fn () => DB::transaction($write), self::CONFLICT);
     }
 
     /**

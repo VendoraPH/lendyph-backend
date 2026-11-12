@@ -7,6 +7,7 @@ use App\Models\SavingsAccount;
 use App\Models\SavingsAutoCreditInstruction;
 use App\Models\SavingsAutoCreditPosting;
 use App\Models\SavingsAutoCreditRun;
+use App\Models\SavingsTransaction;
 use App\Models\User;
 use App\Services\Accounting\AutomaticPoster;
 use App\Services\AuditLogService;
@@ -18,6 +19,7 @@ use App\Services\Savings\SavingsLedger;
 use App\Services\Savings\SavingsLocks;
 use App\Services\Savings\SavingsMath;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -30,9 +32,12 @@ use LogicException;
  * - **Due:** every active instruction on an account in the caller's branches
  *   whose schedule covers the cycle's slot (the 15th or the month end) and
  *   that was authorised on or before the cycle.
- * - **Already credited:** an instruction with a posting for this cycle is
- *   listed apart and posts nothing (`unique(instruction_id, cycle_date)`),
- *   so a re-run of a cycle posts nothing.
+ * - **Already credited:** an account with a posting for this cycle, whichever
+ *   instruction made it, is listed apart and posts nothing
+ *   (`unique(account_id, cycle_date)`), so a re-run of a cycle, or a new
+ *   instruction on the same slot, posts nothing. A credit later reversed
+ *   reads "Credited, then reversed" and is never credited again by a run:
+ *   staff post a deposit by hand if it is still owed.
  * - **Skipped, in words:** a withdrawn or deceased member, a closed or frozen
  *   account, and an amount the product's rules refuse (ProductRules: allow
  *   deposits, the deposit limits, the maximum balance).
@@ -41,16 +46,26 @@ use LogicException;
  *   (a late run still records its cycle: the ledger takes no date before
  *   yesterday), counted as member activity, so it wakes a dormant account.
  *   One `savings_auto_credit_postings` row each.
- * - **Locks:** process() reads the due accounts plainly, locks them all in
- *   one SavingsLocks::accounts() call, then plans again under the lock, so
- *   preview() (the same plan, unlocked, writing nothing) shows exactly what
- *   process() posts when nothing moved in between.
+ * - **Locks:** process() takes its locks before any plain read: the due
+ *   instruction rows, then all their accounts in one SavingsLocks::accounts()
+ *   call, then reads the instructions and the cycle's postings again with
+ *   locking reads, so a second run waiting behind a first plans on what the
+ *   first committed. A run that still loses the race on the unique index
+ *   answers 409 in words. preview() is the same plan, unlocked, writing
+ *   nothing, so it shows exactly what process() posts when nothing moved in
+ *   between.
  *
  * Every figure is the server's, in whole centavos, sent as 2-decimal strings.
  */
 class AutoCreditRunner
 {
     public const DEFAULT_METHOD = 'bank_transfer';
+
+    /** The 409 for a run that lost a race to another run of the same cycle. */
+    public const RAN_ALREADY = 'This cycle was just run by someone else. Refresh to see what was credited.';
+
+    /** An already-credited line's status, in words. */
+    public const CREDITED_WORDS = ['credited' => 'Credited', 'reversed' => 'Credited, then reversed'];
 
     /** The settlement accounts a run can be picked through (as share capital auto-credit). */
     public const METHODS = ['bank_transfer', 'cash', 'gcash', 'maya'];
@@ -74,7 +89,7 @@ class AutoCreditRunner
         $instructions = $this->dueInstructions($cycleDate, $user)->get();
         $accounts = SavingsAccount::query()->with('product')->whereIn('id', $instructions->pluck('account_id')->unique())->get()->keyBy('id');
 
-        return $this->present(null, $cycleDate, $method, $reference, $this->plan($cycleDate, $instructions, $accounts));
+        return $this->present(null, $cycleDate, $method, $reference, $this->plan($cycleDate, $instructions, $accounts, false));
     }
 
     /**
@@ -90,11 +105,17 @@ class AutoCreditRunner
             throw new LogicException('An auto-credit run is posted only inside a transaction.');
         }
 
-        $accounts = $this->locks->accounts($this->dueInstructions($cycleDate, $user)->pluck('account_id')->unique()->all());
+        // Locks first, no plain read before them: the due instruction rows,
+        // then their accounts in one id-ordered statement, then the
+        // instructions and the cycle's postings again with locking reads, so
+        // a run that waited behind another one plans on what that one
+        // committed (never a stale snapshot).
+        $due = $this->dueInstructions($cycleDate, $user)->lockForUpdate()->get(['id', 'account_id']);
+        $accounts = $this->locks->accounts($due->pluck('account_id')->unique()->all());
         $accounts->load('product');
 
-        $instructions = $this->dueInstructions($cycleDate, $user)->whereIn('account_id', $accounts->keys())->get();
-        $plan = $this->plan($cycleDate, $instructions, $accounts);
+        $instructions = $this->dueInstructions($cycleDate, $user)->whereIn('account_id', $accounts->keys())->lockForUpdate()->get();
+        $plan = $this->plan($cycleDate, $instructions, $accounts, true);
         $today = now()->toDateString();
 
         $run = SavingsAutoCreditRun::query()->create([
@@ -119,8 +140,9 @@ class AutoCreditRunner
             ]);
             $this->poster->savingsTransaction($row, $user->id);
 
-            SavingsAutoCreditPosting::query()->create([
+            $this->recordPosting([
                 'instruction_id' => $credit['instruction_id'],
+                'account_id' => $account->id,
                 'run_id' => $run->id,
                 'cycle_date' => $cycleDate,
                 'transaction_id' => $row->id,
@@ -152,6 +174,26 @@ class AutoCreditRunner
     }
 
     /**
+     * One account credited for the cycle. Another run that credited it first
+     * (the unique index on account and cycle) answers 409 in words, never
+     * 500, and this whole run rolls back.
+     *
+     * @param  array<string, mixed>  $attributes
+     */
+    private function recordPosting(array $attributes): void
+    {
+        try {
+            SavingsAutoCreditPosting::query()->create($attributes);
+        } catch (UniqueConstraintViolationException $e) {
+            if ($e->index !== SavingsAutoCreditPosting::CYCLE_INDEX) {
+                throw $e;
+            }
+
+            Refuse::conflict(self::RAN_ALREADY);
+        }
+    }
+
+    /**
      * The instructions due on a cycle, oldest first, on accounts the caller
      * can see.
      *
@@ -172,16 +214,24 @@ class AutoCreditRunner
     /**
      * @param  Collection<int, SavingsAutoCreditInstruction>  $instructions
      * @param  Collection<int, SavingsAccount>  $accounts  keyed by id
+     * @param  bool  $locking  read the cycle's postings with a locking read (process)
      * @return array{credits: list<array<string, mixed>>, skipped: list<array<string, mixed>>, already: list<array<string, mixed>>, credit_centavos: int, skipped_centavos: int}
      */
-    private function plan(string $cycleDate, Collection $instructions, Collection $accounts): array
+    private function plan(string $cycleDate, Collection $instructions, Collection $accounts, bool $locking): array
     {
+        // Any posting on the account for this cycle counts, whichever
+        // instruction made it: an account is credited once per cycle.
         $posted = SavingsAutoCreditPosting::query()
             ->with('transaction:id,reference')
-            ->where('cycle_date', $cycleDate)
-            ->whereIn('instruction_id', $instructions->pluck('id'))
+            ->whereDate('cycle_date', $cycleDate)
+            ->whereIn('account_id', $instructions->pluck('account_id')->unique())
+            ->when($locking, fn ($q) => $q->lockForUpdate())
             ->get()
-            ->keyBy('instruction_id');
+            ->keyBy('account_id');
+        $reversed = SavingsTransaction::query()
+            ->whereIn('reverses_transaction_id', $posted->pluck('transaction_id'))
+            ->pluck('reverses_transaction_id')
+            ->flip();
         $members = Borrower::query()->whereIn('id', $accounts->pluck('borrower_id')->unique())->get()->keyBy('id');
 
         $plan = ['credits' => [], 'skipped' => [], 'already' => [], 'credit_centavos' => 0, 'skipped_centavos' => 0];
@@ -198,9 +248,17 @@ class AutoCreditRunner
                 'amount' => SavingsMath::pesos($centavos),
             ];
 
-            if ($posted->has($instruction->id)) {
-                $posting = $posted[$instruction->id];
-                $plan['already'][] = [...$line, 'amount' => SavingsMath::pesos(SavingsMath::centavos($posting->amount)), 'transaction_id' => $posting->transaction_id, 'reference' => $posting->transaction?->reference];
+            if ($posted->has($account->id)) {
+                $posting = $posted[$account->id];
+                $status = $reversed->has($posting->transaction_id) ? 'reversed' : 'credited';
+                $plan['already'][] = [
+                    ...$line,
+                    'amount' => SavingsMath::pesos(SavingsMath::centavos($posting->amount)),
+                    'transaction_id' => $posting->transaction_id,
+                    'reference' => $posting->transaction?->reference,
+                    'status' => $status,
+                    'status_label' => self::CREDITED_WORDS[$status],
+                ];
 
                 continue;
             }

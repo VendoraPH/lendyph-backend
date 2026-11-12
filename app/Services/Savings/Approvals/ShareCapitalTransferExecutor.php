@@ -53,6 +53,6 @@ class ShareCapitalTransferExecutor implements ApprovalExecutor
         return $this->transfer->post($account, $centavos, [
             'date' => (string) $payload['date'],
             'remarks' => $payload['remarks'] ?? null,
-        ], $approval->requested_by, $approval->id, $checker->id)['transaction'];
+        ], $approval->requested_by, $approval->id, $checker->id, [$approval->first_checker_id])['transaction'];
     }
 }

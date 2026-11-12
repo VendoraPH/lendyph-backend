@@ -15,9 +15,11 @@ use Illuminate\Support\Facades\Schema;
  * - `savings_auto_credit_runs`: one row per processed run (its cycle, the
  *   date it posted, the settlement method and the figures), the record its
  *   audit row names.
- * - `savings_auto_credit_postings`: one row per instruction per cycle,
- *   linked to its deposit. `unique(instruction_id, cycle_date)` makes a
- *   re-run of the same cycle post nothing.
+ * - `savings_auto_credit_postings`: one row per account per cycle, naming
+ *   the instruction it followed and its deposit. `unique(account_id,
+ *   cycle_date)` credits an account once per cycle, whichever instruction
+ *   asks (one deactivated and a new one on the same slot included), so a
+ *   re-run of the same cycle posts nothing.
  *
  * Money is `decimal(12,2)` pesos (run totals `decimal(15,2)`), as in the
  * other savings tables. Each create is skipped when its table exists, so
@@ -65,12 +67,13 @@ return new class extends Migration
             Schema::create('savings_auto_credit_postings', function (Blueprint $table): void {
                 $table->id();
                 $table->foreignId('instruction_id')->constrained('savings_auto_credit_instructions')->restrictOnDelete();
+                $table->foreignId('account_id')->constrained('savings_accounts')->restrictOnDelete();
                 $table->foreignId('run_id')->constrained('savings_auto_credit_runs')->restrictOnDelete();
                 $table->date('cycle_date');
                 $table->foreignId('transaction_id')->unique()->constrained('savings_transactions')->restrictOnDelete();
                 $table->decimal('amount', 12, 2);
                 $table->timestamp('created_at')->nullable();
-                $table->unique(['instruction_id', 'cycle_date'], 'savings_auto_credit_postings_cycle_unique');
+                $table->unique(['account_id', 'cycle_date'], 'savings_auto_credit_postings_cycle_unique');
             });
         }
     }
