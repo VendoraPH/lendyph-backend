@@ -37,7 +37,9 @@ use LogicException;
  *   (`unique(account_id, cycle_date)`), so a re-run of a cycle, or a new
  *   instruction on the same slot, posts nothing. A credit later reversed
  *   reads "Credited, then reversed" and is never credited again by a run:
- *   staff post a deposit by hand if it is still owed.
+ *   staff post a deposit by hand if it is still owed. Two due instructions
+ *   on one account (only a direct write can leave them) never block the run:
+ *   the oldest credits it and the other is skipped with words.
  * - **Skipped, in words:** a withdrawn or deceased member, a closed or frozen
  *   account, and an amount the product's rules refuse (ProductRules: allow
  *   deposits, the deposit limits, the maximum balance).
@@ -235,6 +237,8 @@ class AutoCreditRunner
         $members = Borrower::query()->whereIn('id', $accounts->pluck('borrower_id')->unique())->get()->keyBy('id');
 
         $plan = ['credits' => [], 'skipped' => [], 'already' => [], 'credit_centavos' => 0, 'skipped_centavos' => 0];
+        // The instruction (oldest first) that takes each account this cycle.
+        $takenBy = [];
 
         foreach ($instructions as $instruction) {
             $account = $accounts[$instruction->account_id];
@@ -263,7 +267,9 @@ class AutoCreditRunner
                 continue;
             }
 
-            $reason = $this->skipReason($account, $member, $centavos);
+            $reason = isset($takenBy[$account->id])
+                ? "{$account->account_number} is credited once a cycle, and auto-credit instruction #{$takenBy[$account->id]} already credits it for this one."
+                : $this->skipReason($account, $member, $centavos);
 
             if ($reason !== null) {
                 $plan['skipped'][] = [...$line, 'reason' => $reason];
@@ -272,6 +278,7 @@ class AutoCreditRunner
                 continue;
             }
 
+            $takenBy[$account->id] = $instruction->id;
             $plan['credits'][] = [...$line, 'centavos' => $centavos, 'transaction_id' => null, 'reference' => null];
             $plan['credit_centavos'] += $centavos;
         }

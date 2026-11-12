@@ -21,7 +21,10 @@ use Illuminate\Validation\ValidationException;
  * of one active instruction per account per slot (the 15th, the 30th) is
  * exact, and a run, which takes the same locks, never sees half an edit. An
  * edit or delete locks the instruction row first, then the account, the
- * order a run takes them in.
+ * order a run takes them in. A create locks the account and then inserts the
+ * instruction, so it can deadlock with a run's lock on the instruction rows;
+ * each write is tried again on a deadlock (GeneratedNumberWrite), so the
+ * create goes through once the run has committed.
  * Audited by the model (Auditable).
  *
  * - The account must be in the caller's branches (422 on `account_id`,

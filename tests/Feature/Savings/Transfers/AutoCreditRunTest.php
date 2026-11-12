@@ -340,4 +340,32 @@ class AutoCreditRunTest extends TestCase
             ->assertJsonPath('data.already_credited.0.status', 'credited')
             ->assertJsonPath('data.already_credited.0.status_label', 'Credited');
     }
+
+    public function test_two_due_instructions_on_one_account_credit_it_once_and_skip_the_other_with_words(): void
+    {
+        $account = $this->account();
+        // Only a direct write can leave two active instructions on one slot;
+        // the instruction desk refuses the second.
+        $first = $this->instruct($account, '500.00', '15');
+        $second = $this->instruct($account, '300.00', '15/30');
+
+        $preview = $this->getJson('/api/savings/auto-credit/preview?cycle_date=2026-11-15')->assertOk()->json('data');
+        $run = $this->process()->assertCreated()->json('data');
+
+        foreach ([$preview, $run] as $data) {
+            $this->assertSame([$first->id], array_column($data['credits'], 'instruction_id'));
+            $this->assertSame([[
+                'instruction_id' => $second->id,
+                'account_id' => $account->id,
+                'account_number' => $account->account_number,
+                'borrower_name' => 'Maria Santos',
+                'amount' => '300.00',
+                'reason' => "{$account->account_number} is credited once a cycle, and auto-credit instruction #{$first->id} already credits it for this one.",
+            ]], $data['skipped']);
+            $this->assertSame(['credit_count' => 1, 'credit_amount' => '500.00', 'skipped_count' => 1, 'skipped_amount' => '300.00', 'already_credited_count' => 0], $data['totals']);
+        }
+
+        $this->assertSame('500.00', $this->balanceOf($account));
+        $this->assertSame(1, SavingsAutoCreditPosting::query()->count());
+    }
 }
