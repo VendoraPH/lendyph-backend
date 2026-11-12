@@ -80,6 +80,8 @@ class Presenter
             'opened_on' => $this->day($a->opened_on),
             'last_member_activity_on' => $this->day($a->last_member_activity_on),
             'dormant_since' => $this->day($a->dormant_since),
+            // Money paid in reactivated it, so every outflow waits for a checker until one is approved (gap round S4; shown since B7).
+            'outflow_hold' => $a->outflow_check_required_since === null ? null : ['since' => $this->day($a->outflow_check_required_since)],
             'closed_on' => $this->day($a->closed_on),
             'close_reason' => $a->close_reason,
             'remarks' => $a->remarks,

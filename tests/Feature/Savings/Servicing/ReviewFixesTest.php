@@ -75,6 +75,8 @@ class ReviewFixesTest extends TestCase
     {
         $this->reactivateByDeposit();
         $this->assertSame('2026-11-10', $this->dormant->outflow_check_required_since->toDateString());
+        // The staff account page reads the hold, so it can warn before an outflow (gap round B7).
+        $this->getJson("/api/savings/accounts/{$this->dormant->id}")->assertOk()->assertJsonPath('data.outflow_hold', ['since' => '2026-11-10']);
 
         $approval = $this->withdrawal($this->dormant)->assertStatus(202)
             ->assertJsonPath('message', self::HOLD_MESSAGE)
@@ -88,6 +90,7 @@ class ReviewFixesTest extends TestCase
         $this->actingAs($checker)->postJson("/api/savings/approvals/{$approval['id']}/approve")->assertOk();
         $this->assertSame('4500.00', $this->balanceOf($this->dormant));
         $this->assertNull($this->dormant->refresh()->outflow_check_required_since);
+        $this->getJson("/api/savings/accounts/{$this->dormant->id}")->assertOk()->assertJsonPath('data.outflow_hold', null);
         $this->assertStringContainsString(
             "The hold on money going out of savings account {$this->dormant->account_number} after its reactivation by a deposit was lifted when {$checker->full_name} approved request #{$approval['id']}.",
             (string) AuditLog::query()->where('action', 'savings_outflow_hold_lifted')->where('auditable_id', $this->dormant->id)->value('description'),
@@ -279,6 +282,10 @@ class ReviewFixesTest extends TestCase
 
         $latest = $rows[$second->id]->map(fn ($row) => json_decode($row->data, true))->firstWhere('data.checkers_left', 1);
         $this->assertSame("A withdrawal on {$account->account_number} (Ana Cruz) for ₱60,000.00 has its first approval from {$first->full_name} and is waiting for a second checker, requested by {$maker->full_name}.", $latest['body']);
+        $this->assertSame('second', $latest['data']['stage']);
+        $this->assertSame('Second savings approval waiting', $latest['title']);
+        $opened = $rows[$second->id]->map(fn ($row) => json_decode($row->data, true))->firstWhere('data.checkers_left', 2);
+        $this->assertSame('first', $opened['data']['stage']);
     }
 
     private function told(User $user): int

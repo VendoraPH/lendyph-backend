@@ -51,7 +51,7 @@ class AccountListsTest extends TestCase
             ->assertJsonPath('meta.totals.account_count', 2)
             ->assertJsonPath('meta.totals.total_balance', '1500.50');
 
-        $this->assertSame(['id', 'account_number', 'borrower_id', 'borrower_name', 'borrower_code', 'branch_id', 'branch_name', 'product', 'status', 'balance', 'hold_amount', 'held_for_requests', 'pending_amount', 'available_balance', 'accrued_interest', 'interest_credited_through', 'opened_on', 'last_member_activity_on', 'dormant_since', 'closed_on', 'close_reason', 'remarks', 'account_officer', 'source_of_funds', 'source_of_funds_other', 'source_of_funds_label', 'beneficiary'], array_keys($response->json('data.0')));
+        $this->assertSame(['id', 'account_number', 'borrower_id', 'borrower_name', 'borrower_code', 'branch_id', 'branch_name', 'product', 'status', 'balance', 'hold_amount', 'held_for_requests', 'pending_amount', 'available_balance', 'accrued_interest', 'interest_credited_through', 'opened_on', 'last_member_activity_on', 'dormant_since', 'outflow_hold', 'closed_on', 'close_reason', 'remarks', 'account_officer', 'source_of_funds', 'source_of_funds_other', 'source_of_funds_label', 'beneficiary'], array_keys($response->json('data.0')));
 
         $this->getJson('/api/savings/accounts?search=rizal')->assertJsonPath('meta.total', 1)->assertJsonPath('data.0.borrower_name', 'Jose Rizal');
         $this->getJson('/api/savings/accounts?search='.$a->account_number)->assertJsonPath('meta.total', 1);
