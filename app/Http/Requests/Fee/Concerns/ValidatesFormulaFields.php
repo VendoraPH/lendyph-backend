@@ -32,6 +32,8 @@ trait ValidatesFormulaFields
 
     private const PERCENTAGE_RATE_NEEDED_MESSAGE = 'Enter the rate when a fee written as a formula changes to a percentage.';
 
+    private const FIXED_AMOUNT_NEEDED_MESSAGE = 'Enter the amount when a fee written as a formula changes to a fixed amount.';
+
     protected function feeTypeRule(): string
     {
         return 'in:'.implode(',', FeeAmount::TYPES);
@@ -89,10 +91,19 @@ trait ValidatesFormulaFields
             }
 
             // A written formula stored its rate as 0: going back to the
-            // recipe, or over to a percentage, needs a rate, or the fee would
-            // charge nothing.
-            if (in_array($type, ['formula', 'percentage'], true) && ! $writesFormula && filled($existing?->formula_expression) && ! $this->has('value')) {
-                $v->errors()->add('value', $type === 'formula' ? self::RATE_NEEDED_MESSAGE : self::PERCENTAGE_RATE_NEEDED_MESSAGE);
+            // recipe, or over to a percentage or a fixed amount, needs a new
+            // value, or the fee would charge nothing.
+            if (! $writesFormula && filled($existing?->formula_expression) && ! $this->has('value')) {
+                $message = match ($type) {
+                    'formula' => self::RATE_NEEDED_MESSAGE,
+                    'percentage' => self::PERCENTAGE_RATE_NEEDED_MESSAGE,
+                    'fixed' => self::FIXED_AMOUNT_NEEDED_MESSAGE,
+                    default => null,
+                };
+
+                if ($message !== null) {
+                    $v->errors()->add('value', $message);
+                }
             }
 
             if ($v->errors()->hasAny(['min_amount', 'max_amount'])) {

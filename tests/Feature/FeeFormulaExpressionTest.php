@@ -176,6 +176,19 @@ class FeeFormulaExpressionTest extends TestCase
             ->assertOk()->assertJsonPath('data.value', 1.5)->assertJsonPath('data.formula_expression', null);
     }
 
+    public function test_a_switch_from_a_written_formula_to_fixed_needs_an_amount(): void
+    {
+        $fee = Fee::create(['name' => 'Written', 'type' => 'formula', 'value' => 0, 'formula_expression' => 'Loan Amount * 1%']);
+
+        $this->putJson("/api/fees/{$fee->id}", ['type' => 'fixed'])
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.value', ['Enter the amount when a fee written as a formula changes to a fixed amount.']);
+        $this->assertSame('formula', $fee->fresh()->type);
+
+        $this->putJson("/api/fees/{$fee->id}", ['type' => 'fixed', 'value' => 150])
+            ->assertOk()->assertJsonPath('data.value', 150)->assertJsonPath('data.formula_expression', null);
+    }
+
     /**
      * @return array<string, array{string, string}>
      */
