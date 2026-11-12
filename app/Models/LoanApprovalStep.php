@@ -35,6 +35,10 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'acted_at', type: 'string', format: 'date-time', nullable: true),
         new OA\Property(property: 'acted_by', type: 'string', nullable: true, description: 'Display NAME of the actor, rendered directly by the UI'),
         new OA\Property(property: 'acted_by_id', type: 'integer', nullable: true),
+        new OA\Property(property: 'assigned_to', type: 'object', nullable: true, description: 'The named user the step was forwarded to, `{id, name}`, or null when it is for its role. Only they (or admin and super_admin) may act on it while they still hold it; otherwise it falls back to the role.', properties: [
+            new OA\Property(property: 'id', type: 'integer'),
+            new OA\Property(property: 'name', type: 'string'),
+        ]),
         new OA\Property(property: 'can_act', type: 'boolean', description: 'Whether the REQUESTING user may act on this step right now'),
     ],
 )]
@@ -75,6 +79,7 @@ class LoanApprovalStep extends Model
         'name',
         'status_label',
         'role',
+        'assigned_to',
         'kind',
         'status',
         'acted_by',
@@ -89,6 +94,7 @@ class LoanApprovalStep extends Model
             'round' => 'integer',
             'step_order' => 'integer',
             'sent_back_to_step_order' => 'integer',
+            'assigned_to' => 'integer',
             'acted_at' => 'datetime',
         ];
     }
@@ -101,6 +107,14 @@ class LoanApprovalStep extends Model
     public function actedByUser(): BelongsTo
     {
         return $this->belongsTo(User::class, 'acted_by');
+    }
+
+    /**
+     * The named user the step was forwarded to (ApprovalAssignees).
+     */
+    public function assignee(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'assigned_to');
     }
 
     /**
