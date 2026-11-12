@@ -9,6 +9,7 @@ use App\Models\SavingsTransaction;
 use App\Models\TimeDeposit;
 use App\Services\Savings\AccruedInterest;
 use App\Services\Savings\AvailableBalance;
+use App\Services\Savings\Notices\DormancyWindow;
 use App\Services\Savings\SavingsMath;
 use App\Services\Savings\TimeDeposits\Settlement;
 use Carbon\CarbonImmutable;
@@ -372,17 +373,77 @@ class SavingsReports
         ];
     }
 
-    /** @return array<string, int|string> */
+    /**
+     * The dormant report's totals: the dormant accounts and their balance, the
+     * accounts approaching dormancy and their balance, and the accounts
+     * reactivated this month (Savings TASK 20's dashboard).
+     *
+     * @return array<string, int|string>
+     */
     public function dormantTotals(array $filters): array
     {
         $sums = $this->dormantQuery($filters)->reorder()->toBase()
+            ->selectRaw('COUNT(*) AS rows_count, COALESCE(SUM(ledger_balance), 0) AS balance')
+            ->first();
+        $approaching = $this->approachingQuery($filters)->reorder()->toBase()
             ->selectRaw('COUNT(*) AS rows_count, COALESCE(SUM(ledger_balance), 0) AS balance')
             ->first();
 
         return [
             'account_count' => (int) $sums->rows_count,
             'total_balance' => $this->money($sums->balance),
+            'approaching_count' => (int) $approaching->rows_count,
+            'approaching_balance' => $this->money($approaching->balance),
+            'reactivated_this_month' => $this->reactivatedThisMonth($filters),
         ];
+    }
+
+    /**
+     * Active accounts that turn dormant within `dormancy_warning_days`
+     * (DormancyWindow, the nightly job's own rule), soonest first.
+     *
+     * @return Builder<SavingsAccount>
+     */
+    public function approachingQuery(array $filters, ?DormancyWindow $window = null): Builder
+    {
+        return ($window ?? DormancyWindow::current())->approaching($this->accounts($filters));
+    }
+
+    /** @return array<string, mixed> */
+    public function approachingRow(SavingsAccount $account, DormancyWindow $window): array
+    {
+        return [
+            ...$this->accountFields($account),
+            'balance' => $this->money($account->ledger_balance),
+            'last_member_activity_on' => ($account->last_member_activity_on ?? $account->opened_on)?->toDateString(),
+            'dormant_on' => $window->dormantOn($account)->toDateString(),
+            'days_left' => $window->daysLeft($account),
+        ];
+    }
+
+    /**
+     * Accounts reactivated in this Manila calendar month, however it happened
+     * (an approved reactivation, a deposit, a transfer in, a payout), counted
+     * once each from their `savings_account_reactivated` audit rows, in the
+     * caller's branches and the branch filter (the account's branch).
+     */
+    public function reactivatedThisMonth(array $filters): int
+    {
+        $query = DB::table('audit_logs')
+            ->join('savings_accounts', 'savings_accounts.id', '=', 'audit_logs.auditable_id')
+            ->where('audit_logs.auditable_type', SavingsAccount::class)
+            ->where('audit_logs.action', 'savings_account_reactivated')
+            ->whereBetween('audit_logs.created_at', [now()->startOfMonth(), now()->endOfMonth()]);
+
+        if (array_key_exists('branch_ids', $filters) && $filters['branch_ids'] !== null) {
+            $filters['branch_ids'] === [] ? $query->whereRaw('1 = 0') : $query->whereIn('savings_accounts.branch_id', $filters['branch_ids']);
+        }
+
+        if ($filters['branch_id'] ?? null) {
+            $query->where('savings_accounts.branch_id', $filters['branch_id']);
+        }
+
+        return (int) $query->distinct()->count('audit_logs.auditable_id');
     }
 
     // ── Shared ──

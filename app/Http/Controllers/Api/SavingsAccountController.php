@@ -379,7 +379,7 @@ class SavingsAccountController extends Controller
     #[OA\Post(
         path: '/api/savings/accounts/{account}/status',
         summary: 'Freeze, unfreeze or reactivate',
-        description: '`frozen` freezes an active or dormant account; `active` unfreezes a frozen one (back to dormant when it was dormant before) or reactivates a dormant one (which counts as member activity today). Audited with the reason. A closed account keeps its status (422). A lock wait answers 409.',
+        description: '`frozen` freezes an active or dormant account; `active` unfreezes a frozen one (back to dormant when it was dormant before). `active` on a dormant account asks for its reactivation: 202 with `{approval}` (kind `reactivation`, one checker who isn\'t the maker); once approved it becomes active, counting as member activity that day. Audited with the reason. A closed account keeps its status (422). A reactivation already waiting, or a lock wait, answers 409.',
         tags: ['Savings'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'account', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
@@ -389,6 +389,7 @@ class SavingsAccountController extends Controller
         ])),
         responses: [
             new OA\Response(response: 200, description: 'The account'),
+            new OA\Response(response: 202, description: '`{approval}`: a reactivation sent for approval'),
             new OA\Response(response: 403, description: 'Missing savings:close'),
             new OA\Response(response: 404, description: 'No such account in the caller\'s branches'),
             new OA\Response(response: 422, description: 'Already in that status, or closed'),
@@ -397,12 +398,14 @@ class SavingsAccountController extends Controller
     public function status(ChangeSavingsStatusRequest $request, StatusChanger $changer, int $account): JsonResponse
     {
         $data = $request->validated();
-        $changed = GeneratedNumberWrite::run(
-            fn (): SavingsAccount => DB::transaction(fn (): SavingsAccount => $changer->change($account, $data['status'], $data['reason'], $request->user())),
+        $result = GeneratedNumberWrite::run(
+            fn (): array => DB::transaction(fn (): array => $changer->change($account, $data['status'], $data['reason'], $request->user())),
             GeneratedNumberWrite::SAVINGS_CONFLICT,
         );
 
-        return response()->json(['success' => true, 'data' => $this->presenter->account($changed)]);
+        return $result['approval'] !== null
+            ? response()->json(['success' => true, 'message' => 'Reactivation sent for approval. The account stays dormant until a checker approves it.', 'data' => ['approval' => $this->presenter->approval($result['approval'])]], 202)
+            : response()->json(['success' => true, 'data' => $this->presenter->account($result['account'])]);
     }
 
     /**

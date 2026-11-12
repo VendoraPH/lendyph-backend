@@ -2,11 +2,13 @@
 
 namespace Tests\Feature\Savings\Rules;
 
+use App\Models\Borrower;
 use App\Models\SavingsApproval;
 use App\Models\SavingsTransaction;
 use App\Services\Accounting\AutomaticPoster;
 use App\Services\Savings\Api\Reverser;
 use App\Services\Savings\ApprovalGate;
+use App\Services\Savings\Approvals\ApprovalExecutor;
 use App\Services\Savings\SavingsLedger;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -67,15 +69,26 @@ class SavingsRegistriesTest extends TestCase
 
     public function test_an_approval_of_a_kind_with_no_executor_yet_answers_422_and_stays_pending(): void
     {
-        $account = $this->account();
-        $this->fund($account, 100_000);
-        $approval = DB::transaction(fn () => app(ApprovalGate::class)->open('share_capital_transfer', 30_000, ['account_id' => $account->id], $this->admin->id));
+        $this->assertTrue(ApprovalGate::hasExecutor('reactivation'));
+        $missing = array_values(array_filter(SavingsApproval::KINDS, fn (string $kind) => ! ApprovalGate::hasExecutor($kind)));
 
-        $this->getJson("/api/savings/accounts/{$account->id}")->assertJsonPath('data.pending_amount', '300.00');
+        foreach (array_diff(SavingsApproval::KINDS, $missing) as $kind) {
+            $this->assertInstanceOf(ApprovalExecutor::class, app(ApprovalGate::class)->executor($kind));
+        }
 
-        $this->actingAs($this->checker());
-        $this->postJson("/api/savings/approvals/{$approval->id}/approve")->assertUnprocessable()
-            ->assertJsonPath('errors.approval.0', 'A share capital transfer request can\'t be carried out yet: this version has no way to complete it. Reject or cancel it instead.');
-        $this->assertSame('pending', $approval->refresh()->status);
+        foreach ($missing as $kind) {
+            $account = $this->account(['borrower_id' => Borrower::factory()->create(['branch_id' => $this->branch->id])->id]);
+            $this->fund($account, 100_000);
+            $approval = DB::transaction(fn () => app(ApprovalGate::class)->open($kind, 30_000, ['account_id' => $account->id], $this->admin->id));
+            $this->getJson("/api/savings/accounts/{$account->id}")
+                ->assertJsonPath('data.pending_amount', in_array($kind, SavingsApproval::OUTFLOW_KINDS, true) ? '300.00' : '0.00');
+
+            $this->actingAs($this->checker());
+            $words = str_replace('_', ' ', $kind);
+            $this->postJson("/api/savings/approvals/{$approval->id}/approve")->assertUnprocessable()
+                ->assertJsonPath('errors.approval.0', "A {$words} request can't be carried out yet: this version has no way to complete it. Reject or cancel it instead.");
+            $this->assertSame('pending', $approval->refresh()->status);
+            $this->actingAs($this->admin);
+        }
     }
 }

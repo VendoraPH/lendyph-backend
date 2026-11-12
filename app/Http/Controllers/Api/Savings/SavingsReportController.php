@@ -11,6 +11,7 @@ use App\Models\SavingsInterestRun;
 use App\Models\SavingsTransaction;
 use App\Models\TimeDeposit;
 use App\Services\BranchAccess;
+use App\Services\Savings\Notices\DormancyWindow;
 use App\Services\Savings\Reports\GlControl;
 use App\Services\Savings\Reports\SavingsReports;
 use App\Services\Savings\Reports\StatementBuilder;
@@ -18,6 +19,7 @@ use Closure;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Pagination\LengthAwarePaginator;
+use Illuminate\Support\Facades\Validator;
 use OpenApi\Attributes as OA;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
@@ -154,10 +156,14 @@ class SavingsReportController extends Controller
     #[OA\Get(
         path: '/api/reports/savings/dormant',
         summary: 'Dormant Savings Accounts',
-        description: 'Accounts dormant today. `totals`: account_count, total_balance.',
+        description: 'Accounts dormant today, or with `list=approaching` the active accounts that turn dormant within `dormancy_warning_days` (each with `dormant_on`, the day it turns dormant without member activity, and `days_left`), soonest first. `totals` (the same for both lists): account_count and total_balance (dormant), approaching_count and approaching_balance, and reactivated_this_month (accounts reactivated in this Manila month, in the caller\'s branches).',
         tags: ['Savings Reports'],
         security: [['sanctum' => []]],
-        parameters: [new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')), new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', maximum: 1000))],
+        parameters: [
+            new OA\Parameter(name: 'list', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['dormant', 'approaching'])),
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
+            new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', maximum: 1000)),
+        ],
         responses: [
             new OA\Response(response: 200, description: 'A page of accounts with totals'),
             new OA\Response(response: 403, description: 'Missing reports:view or savings:view, or another branch'),
@@ -167,9 +173,25 @@ class SavingsReportController extends Controller
     public function dormant(SavingsReportRequest $request): JsonResponse
     {
         $filters = $request->filters();
+        $list = Validator::make($request->query(), ['list' => ['nullable', 'string', 'in:dormant,approaching']], [
+            'list.string' => 'Choose the dormant accounts or the ones approaching dormancy.',
+            'list.in' => 'Choose the dormant accounts or the ones approaching dormancy.',
+        ])->validate()['list'] ?? 'dormant';
+        $extra = ['as_of' => now()->toDateString(), 'list' => $list];
+
+        if ($list === 'approaching') {
+            $window = DormancyWindow::current();
+            $page = $this->reports->approachingQuery($filters, $window)->paginate($this->perPage($filters));
+
+            return $this->list($page, $page->getCollection()->map(fn (SavingsAccount $account) => $this->reports->approachingRow($account, $window))->all(), $this->reports->dormantTotals($filters), [
+                ...$extra,
+                'dormancy_warning_days' => $window->warningDays,
+            ]);
+        }
+
         $page = $this->reports->dormantQuery($filters)->paginate($this->perPage($filters));
 
-        return $this->list($page, $page->getCollection()->map(fn (SavingsAccount $account) => $this->reports->dormantRow($account))->all(), $this->reports->dormantTotals($filters), ['as_of' => now()->toDateString()]);
+        return $this->list($page, $page->getCollection()->map(fn (SavingsAccount $account) => $this->reports->dormantRow($account))->all(), $this->reports->dormantTotals($filters), $extra);
     }
 
     #[OA\Get(

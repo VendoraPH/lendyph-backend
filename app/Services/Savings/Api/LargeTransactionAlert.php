@@ -2,15 +2,13 @@
 
 namespace App\Services\Savings\Api;
 
-use App\Models\Role;
 use App\Models\SavingsAccount;
 use App\Models\SavingsSetting;
 use App\Models\SavingsTransaction;
 use App\Models\User;
 use App\Notifications\StaffNotification;
-use App\Services\BranchAccess;
+use App\Services\Savings\Notices\StaffRecipients;
 use App\Services\Savings\SavingsMath;
-use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -38,7 +36,7 @@ class LargeTransactionAlert
     /** The rows that move cash in or out, in words. */
     private const ALERTED = ['deposit' => 'Deposit', 'withdrawal' => 'Withdrawal', 'closing' => 'Closing payout'];
 
-    public function __construct(private readonly BranchAccess $branches) {}
+    public function __construct(private readonly StaffRecipients $staff) {}
 
     /**
      * @param  list<int|null>  $actorIds  who made or approved it (never told)
@@ -93,29 +91,15 @@ class LargeTransactionAlert
     }
 
     /**
-     * Active users holding `savings:approve` through an active role (admin and
-     * super_admin always count) or directly, narrowed in SQL as
-     * Notifications::permissionHolders() does, then to those who can see the
-     * account's branch.
+     * Active users holding `savings:approve` who can see the account's branch
+     * (StaffRecipients), never the people who made or approved it.
      *
      * @param  list<int>  $skip
      * @return Collection<int, User>
      */
     private function recipients(SavingsAccount $account, array $skip): Collection
     {
-        $grants = fn (Builder $permissions) => $permissions->where('name', 'savings:approve');
-
-        return User::query()->active()
-            ->whereNotIn('id', $skip)
-            ->where(fn (Builder $users) => $users
-                ->whereHas('roles', fn (Builder $roles) => $roles
-                    ->where(fn (Builder $active) => $active->where('roles.is_active', true)->orWhereIn('roles.name', Role::PROTECTED_KEYS))
-                    ->whereHas('permissions', $grants))
-                ->orWhereHas('permissions', $grants))
-            ->orderBy('id')
-            ->get()
-            ->filter(fn (User $user) => $this->branches->canSee($user, $account->branch_id))
-            ->values();
+        return $this->staff->holding('savings:approve', $account->branch_id, $skip);
     }
 
     private function logFailure(SavingsTransaction $row, Throwable $e): void
