@@ -87,6 +87,8 @@ final class TrainingDocumentRefiler
             $document->save();
         }
 
+        // Inside the caller's transaction: a throw above rolls every move back,
+        // so there is nothing to mark then.
         if ($touched !== []) {
             $this->markStale([...$touched, $periodId]);
         }
@@ -109,8 +111,29 @@ final class TrainingDocumentRefiler
         $trainingIds = CdaDocument::query()->where('subject_type', 'training')->whereNull('report_id')
             ->distinct()->orderBy('subject_id')->pluck('subject_id');
 
-        foreach ($trainingIds->chunk(200) as $chunk) {
-            $trainings = CdaOfficerTraining::query()->whereIn('id', $chunk->all())->get()->keyBy('id');
+        try {
+            $this->moveAll($trainingIds->all(), $dryRun, $years->all(), $result, $touched);
+        } finally {
+            // Each move commits on its own, so the drafts of the moves already
+            // made are marked even when a later one throws.
+            if ($touched !== []) {
+                $this->markStale($touched);
+            }
+        }
+
+        return $result;
+    }
+
+    /**
+     * @param  list<int>  $trainingIds
+     * @param  array<int, int>  $years  period id => year
+     * @param  array{moved: list<array{document_id: int, training_id: int, from: int, to: int}>, skipped: list<array{training_id: int, reason: string}>}  $result
+     * @param  list<int>  $touched  period ids a committed move left or entered
+     */
+    private function moveAll(array $trainingIds, bool $dryRun, array $years, array &$result, array &$touched): void
+    {
+        foreach (array_chunk($trainingIds, 200) as $chunk) {
+            $trainings = CdaOfficerTraining::query()->whereIn('id', $chunk)->get()->keyBy('id');
 
             foreach ($chunk as $trainingId) {
                 $training = $trainings->get($trainingId);
@@ -155,12 +178,6 @@ final class TrainingDocumentRefiler
                 }
             }
         }
-
-        if ($touched !== []) {
-            $this->markStale($touched);
-        }
-
-        return $result;
     }
 
     /**

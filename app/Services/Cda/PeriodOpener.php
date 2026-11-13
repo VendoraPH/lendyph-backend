@@ -75,6 +75,7 @@ final class PeriodOpener
         [$period, $opened] = $this->openIfMissing($year);
 
         if ($opened) {
+            $this->refileTrainingDocuments();
             $this->refreshReports($period);
         }
 
@@ -85,7 +86,8 @@ final class PeriodOpener
      * The year's period, opened (as the system) when there is none, without
      * computing it: whether this call opened it comes back with it, so a
      * caller that writes more onto the period first (the year-end capture)
-     * runs refreshReports() once that has committed.
+     * runs refileTrainingDocuments() and refreshReports() once that has
+     * committed.
      *
      * @return array{0: CdaReportingPeriod, 1: bool} the period, and whether this call opened it
      */
@@ -98,14 +100,10 @@ final class PeriodOpener
         }
 
         try {
-            $period = DB::transaction(fn () => $this->create($year, null));
+            return [DB::transaction(fn () => $this->create($year, null)), true];
         } catch (UniqueConstraintViolationException) {
             return [CdaReportingPeriod::query()->where('year', $year)->firstOrFail(), false];
         }
-
-        $this->refileTrainingDocuments();
-
-        return [$period, true];
     }
 
     /**
@@ -115,7 +113,7 @@ final class PeriodOpener
      * committed; a failure is logged and never undoes the opening, and the
      * next opening or `cda:refile-training-documents` finishes the move.
      */
-    private function refileTrainingDocuments(): void
+    public function refileTrainingDocuments(): void
     {
         try {
             $this->trainingDocuments->run(false);

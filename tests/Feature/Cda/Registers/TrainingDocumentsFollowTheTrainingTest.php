@@ -6,6 +6,7 @@ use App\Models\AuditLog;
 use App\Models\CdaDocument;
 use App\Models\CdaOfficerTraining;
 use App\Models\CdaReport;
+use App\Models\CdaReportingPeriod;
 use App\Services\Cda\CdaAccess;
 use App\Services\Cda\PeriodOpener;
 use App\Services\Cda\Registers\TrainingDocumentRefiler;
@@ -245,6 +246,53 @@ class TrainingDocumentsFollowTheTrainingTest extends TestCase
         app(TrainingDocumentRefiler::class)->refile($moved->fill(['completed_on' => '2025-02-01']));
         $this->assertSame($this->period(2025)->id, $document->fresh()->period_id);
         $this->assertNotNull($officers()->stale_at);
+    }
+
+    public function test_a_move_that_throws_partway_still_marks_the_moves_already_made_stale(): void
+    {
+        [, $moved] = $this->mismatch();
+        $later = CdaOfficerTraining::factory()->create(['completed_on' => '2025-08-01']);
+        $failing = $this->attach($later, 2026);
+        CdaReport::query()->update(['stale_at' => null]);
+
+        CdaDocument::updating(function (CdaDocument $document) use ($failing): void {
+            if ($document->id === $failing->id) {
+                throw new \RuntimeException('The database went away.');
+            }
+        });
+
+        try {
+            app(TrainingDocumentRefiler::class)->run(false);
+            $this->fail('The second move should have thrown.');
+        } catch (\RuntimeException) {
+        }
+
+        $this->assertSame($this->period(2025)->id, $moved->fresh()->period_id, 'The first move committed.');
+        $this->assertSame($this->period(2026)->id, $failing->fresh()->period_id);
+        $this->assertNotNull(
+            CdaReport::query()->where('period_id', $this->period(2026)->id)->where('report_type', 'officers_trainings')->firstOrFail()->stale_at,
+            'The period the committed move left is marked stale.',
+        );
+    }
+
+    public function test_the_year_end_capture_refiles_after_it_stores_the_capture(): void
+    {
+        // Only 2025 and 2026 are open, so a 2027 training files under 2026.
+        $training = CdaOfficerTraining::factory()->create(['completed_on' => '2027-03-01']);
+        $document = $this->attach($training, 2026);
+
+        $capturedWhenMoved = null;
+        CdaDocument::updating(function (CdaDocument $moving) use ($document, &$capturedWhenMoved): void {
+            if ($moving->id === $document->id) {
+                $capturedWhenMoved = CdaReportingPeriod::query()->where('year', 2027)->value('year_end_captured_at') !== null;
+            }
+        });
+
+        Carbon::setTestNow(Carbon::parse('2027-12-31 23:58:00', 'Asia/Manila'));
+        $this->artisan('cda:capture-year-end', ['--date' => '2027-12-31'])->assertSuccessful();
+
+        $this->assertSame($this->period(2027)->id, $document->fresh()->period_id);
+        $this->assertTrue($capturedWhenMoved, 'The refile runs once the capture is stored, not between opening the period and storing it.');
     }
 
     public function test_a_dry_run_marks_nothing_stale(): void
