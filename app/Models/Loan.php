@@ -156,6 +156,20 @@ class Loan extends Model
      */
     public const VIRTUAL_STATUS_CURRENT = 'current';
 
+    /**
+     * How a loan's schedule rounds each period's interest
+     * (`schedule_rounding`). Every loan released before the follow-ups batch
+     * is `legacy`, a float factor (LoanTermSchedule::rateForDays()), and keeps
+     * it in every recomputation. Release stamps `exact`
+     * (LoanTermSchedule::interestFor()), and so does the CSV importer; a draft
+     * or a preview has none and is worked out exactly, so it equals its
+     * release. A released loan with none reads as legacy
+     * (roundsInterestExactly()).
+     */
+    public const SCHEDULE_ROUNDING_LEGACY = 'legacy';
+
+    public const SCHEDULE_ROUNDING_EXACT = 'exact';
+
     protected $fillable = [
         'loan_account_number',
         'external_loan_no',
@@ -227,6 +241,8 @@ class Loan extends Model
         'restructure_capitalised_interest',
         'restructure_capitalised_penalty',
         'restructure_written_off_principal',
+        // self::SCHEDULE_ROUNDING_*; null until release.
+        'schedule_rounding',
     ];
 
     protected function casts(): array
@@ -716,6 +732,26 @@ class Loan extends Model
     public function ledgerEntries(): HasMany
     {
         return $this->hasMany(LoanLedgerEntry::class)->orderBy('entry_date')->orderBy('id');
+    }
+
+    /**
+     * Whether its schedules round each period's interest exactly
+     * (LoanTermSchedule::interestFor()): a loan marked `exact`, or one with
+     * no marker that was never released (a draft or a preview). A loan marked
+     * `legacy`, or released with no marker (by code older than the marker, or
+     * before its migration ran), keeps the float rounding: one with a
+     * `released_at` or a saved schedule. replicate() copies the marker and
+     * `released_at`, so a Ledger rebuild or an adjustment's temporary loan
+     * rounds as the loan was released.
+     */
+    public function roundsInterestExactly(): bool
+    {
+        return match ($this->schedule_rounding) {
+            self::SCHEDULE_ROUNDING_EXACT => true,
+            self::SCHEDULE_ROUNDING_LEGACY => false,
+            default => $this->released_at === null
+                && ! ($this->exists && $this->amortizationSchedules()->exists()),
+        };
     }
 
     /**

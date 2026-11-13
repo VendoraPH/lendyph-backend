@@ -477,6 +477,8 @@ class LoanScheduleReconstructor
             ...LoanTermSchedule::fromPeriodCount($term, $input->frequency),
             'start_date' => $input->dateReleased,
             'maturity_date' => $input->maturityDate,
+            // As the imported loan is saved (CsvImportProcessor).
+            'schedule_rounding' => Loan::SCHEDULE_ROUNDING_EXACT,
         ]);
     }
 
