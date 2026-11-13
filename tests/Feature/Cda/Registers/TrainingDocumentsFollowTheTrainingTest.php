@@ -8,6 +8,7 @@ use App\Models\CdaOfficerTraining;
 use App\Models\CdaReport;
 use App\Services\Cda\CdaAccess;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
@@ -130,6 +131,7 @@ class TrainingDocumentsFollowTheTrainingTest extends TestCase
             ->where('action', 'updated')->latest('id')->first();
         $this->assertNotNull($row);
         $this->assertNull($row->user_id, 'A data fix is a system change.');
+        $this->assertNull($row->ip_address);
         $this->assertSame(['period_id' => $this->period(2026)->id], $row->old_values);
         $this->assertSame(['period_id' => $this->period(2025)->id], $row->new_values);
         $this->assertStringContainsString('2025 reporting period', (string) $row->description);
@@ -140,6 +142,36 @@ class TrainingDocumentsFollowTheTrainingTest extends TestCase
             ->expectsOutputToContain('Moved 0 document(s)')
             ->assertSuccessful();
         $this->assertSame($before, AuditLog::query()->count());
+    }
+
+    public function test_the_migration_runs_the_same_fix_and_a_second_run_changes_nothing(): void
+    {
+        [$training, $misfiled, $linked] = $this->mismatch();
+        $undated = CdaOfficerTraining::factory()->create(['completed_on' => null, 'started_on' => null]);
+        $undatedDocument = $this->attach($undated, 2025);
+        $migration = require database_path('migrations/2026_11_14_110000_refile_cda_training_documents.php');
+
+        Log::spy();
+        $migration->up();
+
+        $this->assertSame($this->period(2025)->id, $misfiled->fresh()->period_id);
+        $this->assertSame($this->period(2026)->id, $linked->fresh()->period_id, 'A report-linked document stays.');
+        $this->assertSame($this->period(2025)->id, $undatedDocument->fresh()->period_id, 'An undated training is uncertain and left alone.');
+        Log::shouldHaveReceived('warning')->with("CDA training #{$undated->id} documents left as they are: it has no completed or started date, so its year is not known.")->once();
+
+        $rows = AuditLog::query()->where('auditable_type', CdaDocument::class)->where('action', 'updated')->get();
+        $this->assertCount(1, $rows);
+        $this->assertSame($misfiled->id, $rows[0]->auditable_id);
+        $this->assertNull($rows[0]->user_id);
+        $this->assertSame(['period_id' => $this->period(2025)->id], $rows[0]->new_values);
+
+        $before = AuditLog::query()->count();
+        $migration->up();
+        $this->assertSame($before, AuditLog::query()->count());
+        $this->assertSame($this->period(2025)->id, $misfiled->fresh()->period_id);
+
+        $migration->down();
+        $this->assertSame($this->period(2025)->id, $misfiled->fresh()->period_id, 'down() undoes nothing.');
     }
 
     /**

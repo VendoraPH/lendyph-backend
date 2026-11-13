@@ -2,6 +2,7 @@
 
 namespace App\Services\Cda\Registers;
 
+use App\Models\AuditLog;
 use App\Models\CdaDocument;
 use App\Models\CdaOfficerTraining;
 use App\Models\CdaReportingPeriod;
@@ -20,11 +21,14 @@ use Illuminate\Support\Facades\Log;
  * writes its own audit row. A document linked to a report is never moved: it
  * belongs to that report's period.
  *
- * `cda:refile-training-documents` runs the same rule over trainings already
- * saved with a mismatch, as a system change (no user), with `--dry-run` to
- * preview. A moved document is in its training's period, so running it again
- * changes nothing. A training with no completed or started date is left
- * alone and listed: its period would follow today's date.
+ * The data fix (run()) applies the same rule to trainings already saved with
+ * a mismatch, as a system change: one audit row per move, with no user and
+ * no address. The 2026_11_14_110000 migration runs it on each deployment, and
+ * `cda:refile-training-documents --dry-run` previews a database first. A
+ * moved document is in its training's period, so running it again changes
+ * nothing. A training with no completed or started date is left alone and
+ * listed (its period would follow today's date), as is a document that
+ * changes while the fix runs.
  */
 final class TrainingDocumentRefiler
 {
@@ -146,14 +150,17 @@ final class TrainingDocumentRefiler
                 $document->save();
             });
 
-            AuditLogService::log(
-                'updated',
-                $document,
-                ['period_id' => $fromPeriodId],
-                ['period_id' => $toPeriodId],
-                "Filed under the {$toYear} reporting period with its training (system correction).",
-                asSystem: true,
-            );
+            AuditLog::query()->create([
+                'user_id' => null,
+                'action' => 'updated',
+                'auditable_type' => $document->getMorphClass(),
+                'auditable_id' => $document->id,
+                'old_values' => ['period_id' => $fromPeriodId],
+                'new_values' => ['period_id' => $toPeriodId],
+                'ip_address' => null,
+                'user_agent' => null,
+                'description' => "System change: the document was filed under the {$toYear} reporting period with its training.",
+            ]);
 
             return true;
         });
