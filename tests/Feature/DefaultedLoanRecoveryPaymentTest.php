@@ -242,6 +242,44 @@ class DefaultedLoanRecoveryPaymentTest extends TestCase
         $this->assertSame('defaulted', $loan->fresh()->status);
     }
 
+    public function test_voiding_the_last_two_of_three_recovery_payments_leaves_the_period_as_after_the_first(): void
+    {
+        [$loan, $afterA, $b, $c] = $this->threeRecoveryPaymentsOnPeriodOne();
+
+        $this->void($c);
+        $this->void($b);
+
+        $this->assertSame($afterA, $this->periodOne($loan));
+        $this->assertSame('defaulted', $loan->fresh()->status);
+    }
+
+    public function test_a_payment_voided_before_the_next_was_recorded_counts_as_never_recorded(): void
+    {
+        $loan = $this->loanWithThreeChargesOnPeriodOne();
+        $this->payLoan($loan, 9500.00, '2026-03-01');
+        $afterA = $this->periodOne($loan);
+        $this->void($this->payLoan($loan, 1050.00, '2026-04-15'));
+        $this->assertSame($afterA, $this->periodOne($loan), 'setup: voiding B alone leaves the period as after A');
+
+        $c = $this->payLoan($loan, 500.00, '2026-05-15');
+        $this->void($c);
+
+        $this->assertSame($afterA, $this->periodOne($loan));
+    }
+
+    public function test_a_payment_voided_while_a_later_one_stood_counts_as_never_recorded(): void
+    {
+        [$loan, $afterA, $b, $c] = $this->threeRecoveryPaymentsOnPeriodOne();
+
+        // B is voided while C still stands, so the period is read as if B was
+        // never recorded; C's own before-values hold the state after B.
+        $this->void($b);
+        $this->void($c);
+
+        $this->assertSame($afterA, $this->periodOne($loan));
+        $this->assertSame('defaulted', $loan->fresh()->status);
+    }
+
     public function test_voiding_a_backdated_payment_on_an_ongoing_loan_is_unchanged(): void
     {
         $this->travelTo(Carbon::parse('2026-01-10 09:00'));
@@ -452,6 +490,36 @@ class DefaultedLoanRecoveryPaymentTest extends TestCase
         $this->travelTo(Carbon::parse('2026-07-20 09:00'));
 
         return $loan;
+    }
+
+    /**
+     * Three recovery payments on period 1 of loanWithThreeChargesOnPeriodOne(),
+     * each paying some principal, so each leaves the open period a different
+     * penalty: A (2026-03-01, ₱9,500.00: ₱200.00 penalty, all the interest,
+     * ₱7,500.00 principal), B (2026-04-15, ₱1,050.00) and C (2026-05-15,
+     * ₱500.00).
+     *
+     * @return array{0: Loan, 1: array<string, mixed>, 2: Repayment, 3: Repayment}
+     */
+    private function threeRecoveryPaymentsOnPeriodOne(): array
+    {
+        $loan = $this->loanWithThreeChargesOnPeriodOne();
+        $this->payLoan($loan, 9500.00, '2026-03-01');
+        $afterA = $this->periodOne($loan);
+        $b = $this->payLoan($loan, 1050.00, '2026-04-15');
+        $afterB = $this->periodOne($loan);
+        $c = $this->payLoan($loan, 500.00, '2026-05-15');
+
+        $this->assertNotSame($afterA['penalty_amount'], $afterB['penalty_amount'], 'setup: B changed the period\'s penalty');
+        $this->assertNotSame($afterB['penalty_amount'], $this->periodOne($loan)['penalty_amount'], 'setup: C changed it again');
+        $this->assertSame('partial', $this->periodOne($loan)['status'], 'setup: the period is still open');
+
+        return [$loan, $afterA, $b, $c];
+    }
+
+    private function void(Repayment $repayment): void
+    {
+        $this->patchJson("/api/repayments/{$repayment->id}/void", ['void_reason' => 'Keyed in error'])->assertOk();
     }
 
     /** @return array<string, mixed> */
