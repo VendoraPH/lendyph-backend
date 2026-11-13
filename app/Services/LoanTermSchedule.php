@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Enums\InterestRateFrequency;
 use App\Enums\TermUnit;
 use Brick\Math\BigRational;
+use Brick\Math\RoundingMode;
 use Carbon\Carbon;
 
 /**
@@ -205,6 +206,10 @@ final class LoanTermSchedule
      * the result becomes a float, so 18% a year on 30 days is 0.015, the
      * figure 1.5% a month gives. The other periods keep the arithmetic every
      * existing loan was charged with.
+     *
+     * Since the follow-ups batch, only the diminishing instalment amount (the
+     * PMT) and loans released before it (`legacy`) use this factor; each
+     * period's interest is otherwise interestFor().
      */
     public static function rateForDays(float $ratePercent, string $rateFrequency, int $days): float
     {
@@ -219,6 +224,26 @@ final class LoanTermSchedule
         $factor = $days === $rateDays ? 1 : $days / $rateDays;
 
         return $ratePercent / 100 * $factor;
+    }
+
+    /**
+     * The interest on `$amount` pesos for `$days` days at `$ratePercent` per
+     * `$rateFrequency`, as a 2-decimal string: amount × rate × days ÷ (100 ×
+     * the rate period's days), worked out exactly and rounded half up to the
+     * centavo, so ₱48,334.50 at 1% a month for 10 days (exactly ₱161.115) is
+     * ₱161.12. A year is 360 days, as in rateForDays().
+     *
+     * The interest of every loan released from the follow-ups batch on, and
+     * of every draft and preview (Loan::roundsInterestExactly()). A loan
+     * released before keeps the float factor of rateForDays().
+     */
+    public static function interestFor(string $amount, string $ratePercent, string $rateFrequency, int $days): string
+    {
+        return (string) BigRational::of($amount)
+            ->multipliedBy($ratePercent)
+            ->multipliedBy($days)
+            ->dividedBy(100 * self::PERIOD_DAYS[$rateFrequency])
+            ->toScale(2, RoundingMode::HalfUp);
     }
 
     /**
