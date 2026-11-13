@@ -236,7 +236,9 @@ class DefaultedLoanRecoveryPaymentTest extends TestCase
 
         $history = PaymentHistory::from(MemberCreditData::load($recovered->borrower_id));
 
-        $this->assertSame(1, $history->defaultedLoans);
+        // Ended badly, but not defaulted now (CreditScoring/Engine/RecoveredFromDefaultTest).
+        $this->assertSame(1, $history->recoveredFromDefaultLoans);
+        $this->assertSame(0, $history->defaultedLoans);
 
         // A loan completed without a default counts as none.
         $this->travelTo(Carbon::parse('2026-01-10 09:00'));
@@ -244,7 +246,9 @@ class DefaultedLoanRecoveryPaymentTest extends TestCase
         $this->payLoan($clean, (float) $this->summaryOf($clean)['payoff_amount']);
         $this->assertSame('completed', $clean->fresh()->status);
 
-        $this->assertSame(0, PaymentHistory::from(MemberCreditData::load($clean->borrower_id))->defaultedLoans);
+        $cleanHistory = PaymentHistory::from(MemberCreditData::load($clean->borrower_id));
+        $this->assertSame(0, $cleanHistory->defaultedLoans);
+        $this->assertSame(0, $cleanHistory->recoveredFromDefaultLoans);
     }
 
     public function test_the_receipt_and_the_collection_journal_are_the_same_as_on_an_ongoing_loan(): void
