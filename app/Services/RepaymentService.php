@@ -372,7 +372,15 @@ class RepaymentService
         ]);
 
         // What went on each period, so a void can take back exactly that.
-        $repayment->allocations()->createMany($allocations);
+        // On a defaulted loan, also the penalty each period held before this
+        // payment, which a void puts back (reverseAllocation()).
+        $repayment->allocations()->createMany($penaltyCeilings === null ? $allocations : array_map(
+            fn (array $row): array => $row + [
+                'penalty_amount_before' => $penaltyCeilings[$row['amortization_schedule_id']]['amount'],
+                'penalty_months_before' => $penaltyCeilings[$row['amortization_schedule_id']]['months'],
+            ],
+            $allocations,
+        ));
 
         // And what it took of the premium owed, which the void puts back from
         // `insurance_applied`.
@@ -409,6 +417,13 @@ class RepaymentService
 
         if ($paymentDate->lt($today)) {
             $this->applyPenalties($loan, $today, markOverdue: false, ceilings: $penaltyCeilings);
+        }
+
+        // On a defaulted loan a payment changes the penalty only of the
+        // periods it paid: any other period its penalty step read as of the
+        // payment date holds exactly what it held before.
+        if ($penaltyCeilings !== null) {
+            $this->restoreUnpaidPeriodsPenalty($loan, $penaltyCeilings, array_column($allocations, 'amortization_schedule_id'));
         }
 
         // Share capital build-up: on an SCB-bearing loan, whatever the
@@ -1641,6 +1656,58 @@ class RepaymentService
     }
 
     /**
+     * Put back `$ceilings` (penaltyCeilings(), read before the payment) on
+     * every period of the loan the payment took no money for.
+     *
+     * @param  array<int, array{amount: float, months: int}>  $ceilings
+     * @param  list<int>  $paidIds
+     */
+    private function restoreUnpaidPeriodsPenalty(Loan $loan, array $ceilings, array $paidIds): void
+    {
+        $loan->amortizationSchedules()->whereNotIn('id', $paidIds)->get()
+            ->each(function (AmortizationSchedule $schedule) use ($ceilings): void {
+                $ceiling = $ceilings[$schedule->id] ?? null;
+
+                if ($ceiling === null
+                    || (LoanService::toCentavos((float) $schedule->penalty_amount) === LoanService::toCentavos($ceiling['amount'])
+                        && (int) $schedule->penalty_months === $ceiling['months'])) {
+                    return;
+                }
+
+                $schedule->update(['penalty_amount' => $ceiling['amount'], 'penalty_months' => $ceiling['months']]);
+            });
+    }
+
+    /**
+     * The penalty `$schedule` held before `$repayment`, a payment being voided,
+     * as if every payment voided since the last still-posted one before it on
+     * this period had never been recorded: the earliest such payment's
+     * `penalty_amount_before` and `penalty_months_before`. Null when none was
+     * recorded (a payment made while the loan wasn't defaulted, or before
+     * these were kept).
+     *
+     * @return array{amount: float, months: int}|null
+     */
+    private function penaltyBeforeVoided(Repayment $repayment, AmortizationSchedule $schedule): ?array
+    {
+        $lastPostedBefore = (int) RepaymentAllocation::query()
+            ->where('amortization_schedule_id', $schedule->id)
+            ->where('repayment_id', '<', $repayment->id)
+            ->whereHas('repayment', fn ($posted) => $posted->where('status', 'posted'))
+            ->max('repayment_id');
+
+        $row = RepaymentAllocation::query()
+            ->where('amortization_schedule_id', $schedule->id)
+            ->where('repayment_id', '>', $lastPostedBefore)
+            ->where('repayment_id', '<=', $repayment->id)
+            ->whereNotNull('penalty_amount_before')
+            ->orderBy('repayment_id')
+            ->first();
+
+        return $row === null ? null : ['amount' => (float) $row->penalty_amount_before, 'months' => (int) $row->penalty_months_before];
+    }
+
+    /**
      * A waiver's checkpoint (option b): charge `$schedule` up to `$on` and
      * keep `$keep` (what was paid, the charge the waiver leaves) with the
      * number of charges so far, so later months are added from there. Sets
@@ -2035,7 +2102,9 @@ class RepaymentService
      * penalty below what the loan owed until the next run.
      *
      * `$penaltyFrozen` (a defaulted loan, or one the void returns to
-     * defaulted) leaves each period's charge as it stands instead.
+     * defaulted) puts back instead what the period held before the payment,
+     * when the payment recorded it (penaltyBeforeVoided()), else leaves the
+     * charge as it stands: see penaltyAfterFrozenVoid().
      */
     private function reverseAllocation(Repayment $repayment, bool $penaltyFrozen = false): void
     {
@@ -2113,10 +2182,42 @@ class RepaymentService
                     $schedule->penalty_amount = 0;
                     $schedule->penalty_months = 0;
                 }
+            } elseif ($penaltyFrozen && ($before = $this->penaltyBeforeVoided($repayment, $schedule)) !== null) {
+                $state = $this->penaltyAfterFrozenVoid($loan, $schedule, $repayment, $before, $today);
+                $schedule->penalty_amount = $state['amount'];
+                $schedule->penalty_months = $state['months'];
             }
 
             $schedule->save();
         }
+    }
+
+    /**
+     * A defaulted loan's period penalty after voiding `$repayment`, which
+     * recorded `$before` (penaltyBeforeVoided()) on it.
+     *
+     * - No later posted payment reached the period: exactly `$before`, what
+     *   it held before the voided payment.
+     * - A later posted payment reached it too: the period is open again, and
+     *   reads as if the voided payment was never recorded, by the frozen rule
+     *   (frozenState()) as of `$today` with `$before` as the ceiling: the
+     *   monthly rule on the principal the remaining payments left unpaid on
+     *   each charge day, never above `$before` and never below what was paid.
+     *
+     * @param  array{amount: float, months: int}  $before
+     * @return array{amount: float, months: int}
+     */
+    private function penaltyAfterFrozenVoid(Loan $loan, AmortizationSchedule $schedule, Repayment $repayment, array $before, Carbon $today): array
+    {
+        $laterPayment = RepaymentAllocation::query()
+            ->where('amortization_schedule_id', $schedule->id)
+            ->where('repayment_id', '>', $repayment->id)
+            ->whereHas('repayment', fn ($posted) => $posted->where('status', 'posted'))
+            ->exists();
+
+        $monthly = $laterPayment ? $this->monthlyPenaltyStateAsOf($loan, $schedule, $today) : null;
+
+        return $monthly === null ? $before : $this->frozenState($schedule, $monthly, $before);
     }
 
     /**

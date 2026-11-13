@@ -165,6 +165,100 @@ class DefaultedLoanRecoveryPaymentTest extends TestCase
         $this->assertSame('defaulted', $loan->fresh()->status);
     }
 
+    public function test_voiding_a_backdated_recovery_that_paid_a_period_restores_its_penalty_exactly(): void
+    {
+        $loan = $this->loanWithThreeChargesOnPeriodOne();
+        $before = $this->penaltyState($loan);
+        $this->assertSame(['600.00', 3], $before[1], 'setup: three monthly charges on period 1 before the default');
+
+        // Dated 2026-03-01, before charges 2 and 3: it pays period 1 with the
+        // one charge owed then, ₱200.00, plus ₱11,800.00.
+        $repayment = $this->payLoan($loan, 12000.00, '2026-03-01');
+        $this->assertSame('paid', AmortizationSchedule::where('loan_id', $loan->id)->where('period_number', 1)->value('status'));
+        $this->assertSame(['200.00', 1], $this->penaltyState($loan)[1]);
+
+        $this->patchJson("/api/repayments/{$repayment->id}/void", ['void_reason' => 'Keyed in error'])->assertOk();
+
+        // No charge lost: the period owes its three charges again.
+        $this->assertSame($before, $this->penaltyState($loan));
+        $this->assertSame('defaulted', $loan->fresh()->status);
+        $this->assertSummaryAgreesWithThePreview($loan, 1400.00);
+    }
+
+    public function test_voiding_a_backdated_recovery_that_completed_the_loan_restores_defaulted_and_every_penalty(): void
+    {
+        $loan = $this->loanWithThreeChargesOnPeriodOne();
+        $before = $this->penaltyState($loan);
+        $owed = (float) $this->postJson("/api/loans/{$loan->id}/repayments/preview", [
+            'amount_paid' => 99999.99,
+            'payment_date' => '2026-03-01',
+        ])->assertOk()->json('data.total_outstanding_before');
+
+        $repayment = $this->payLoan($loan, $owed, '2026-03-01');
+        $this->assertSame('completed', $loan->fresh()->status, 'setup: the backdated recovery completed the loan');
+
+        $this->patchJson("/api/repayments/{$repayment->id}/void", ['void_reason' => 'Keyed in error'])->assertOk();
+
+        $this->assertSame('defaulted', $loan->fresh()->status);
+        $this->assertSame($before, $this->penaltyState($loan));
+        $this->assertSummaryAgreesWithThePreview($loan, 1400.00);
+    }
+
+    public function test_voiding_the_later_of_two_recovery_payments_on_a_period_leaves_it_as_after_the_first(): void
+    {
+        $loan = $this->loanWithThreeChargesOnPeriodOne();
+        $this->payLoan($loan, 1000.37, '2026-03-01');
+        $afterFirst = $this->periodOne($loan);
+        $this->assertSame(['600.00', 3], [$afterFirst['penalty_amount'], $afterFirst['penalty_months']], 'setup: the open period keeps its three charges');
+
+        // Dated 2026-03-05, it pays the rest of period 1 as of then.
+        $second = $this->payLoan($loan, 10999.63, '2026-03-05');
+        $this->assertSame('paid', $this->periodOne($loan)['status']);
+
+        $this->patchJson("/api/repayments/{$second->id}/void", ['void_reason' => 'Keyed in error'])->assertOk();
+
+        $this->assertSame($afterFirst, $this->periodOne($loan));
+        $this->assertSame('defaulted', $loan->fresh()->status);
+    }
+
+    public function test_voiding_the_earlier_of_two_recovery_payments_reads_the_period_as_if_it_was_never_recorded(): void
+    {
+        $loan = $this->loanWithThreeChargesOnPeriodOne();
+        $first = $this->payLoan($loan, 1000.37, '2026-03-01');
+        $this->payLoan($loan, 10999.63, '2026-03-05');
+
+        $this->patchJson("/api/repayments/{$first->id}/void", ['void_reason' => 'Keyed in error'])->assertOk();
+
+        // What the later payment paid stays: interest ₱999.63 and the
+        // principal, on 2026-03-05. Without the voided payment, the period owes
+        // the charge of 2026-02-14 on ₱10,000.00 (₱200.00); its charges of
+        // 2026-04-10 and 2026-05-10 fall on no unpaid principal (₱0.00 each).
+        // Never above the ₱600.00 charged before the default.
+        $period = $this->periodOne($loan);
+        $this->assertSame(['200.00', 3, '0.00', '999.63', '10000.00', 'partial'], [
+            $period['penalty_amount'], $period['penalty_months'], $period['penalty_paid'],
+            $period['interest_paid'], $period['principal_paid'], $period['status'],
+        ]);
+        $this->assertSame('defaulted', $loan->fresh()->status);
+    }
+
+    public function test_voiding_a_backdated_payment_on_an_ongoing_loan_is_unchanged(): void
+    {
+        $this->travelTo(Carbon::parse('2026-01-10 09:00'));
+        $loan = $this->releasedLoanFor(startDate: '2026-01-10');
+        foreach (['2026-02-20', '2026-04-20', '2026-05-20'] as $day) {
+            $this->travelTo(Carbon::parse($day.' 09:00'));
+            app(RepaymentService::class)->applyPenalties($loan->fresh(), Carbon::today());
+        }
+        $this->travelTo(Carbon::parse('2026-07-20 09:00'));
+        $repayment = $this->payLoan($loan, 12000.00, '2026-03-01');
+
+        $this->patchJson("/api/repayments/{$repayment->id}/void", ['void_reason' => 'Keyed in error'])->assertOk();
+
+        // As before: the reopened period is charged as of the void, 5 months.
+        $this->assertSame(['1000.00', 5], $this->penaltyState($loan)[1]);
+    }
+
     public function test_a_backdated_payment_on_an_ongoing_loan_is_unchanged(): void
     {
         $this->travelTo(Carbon::parse('2026-01-10 09:00'));
@@ -344,6 +438,47 @@ class DefaultedLoanRecoveryPaymentTest extends TestCase
         $this->travelTo(Carbon::parse(self::RECOVERY_DAY.' 09:00'));
 
         return $loan->fresh();
+    }
+
+    /**
+     * The default loan run through the nightly penalty on 2026-02-20,
+     * 2026-04-20 and 2026-05-20, then defaulted: period 1 holds ₱600.00 over 3
+     * charges (2026-02-14, 2026-04-10, 2026-05-10), period 2 ₱400.00, periods 3
+     * and 4 ₱200.00 each. The clock left on 2026-07-20.
+     */
+    private function loanWithThreeChargesOnPeriodOne(): Loan
+    {
+        $loan = $this->defaultedLoan(chargedOn: ['2026-02-20', '2026-04-20', '2026-05-20']);
+        $this->travelTo(Carbon::parse('2026-07-20 09:00'));
+
+        return $loan;
+    }
+
+    /** @return array<string, mixed> */
+    private function periodOne(Loan $loan): array
+    {
+        $period = AmortizationSchedule::where('loan_id', $loan->id)->where('period_number', 1)->firstOrFail();
+
+        return [
+            'penalty_amount' => number_format((float) $period->penalty_amount, 2, '.', ''),
+            'penalty_months' => (int) $period->penalty_months,
+            'penalty_paid' => number_format((float) $period->penalty_paid, 2, '.', ''),
+            'interest_paid' => number_format((float) $period->interest_paid, 2, '.', ''),
+            'principal_paid' => number_format((float) $period->principal_paid, 2, '.', ''),
+            'status' => $period->status,
+        ];
+    }
+
+    private function assertSummaryAgreesWithThePreview(Loan $loan, float $penaltyOwed): void
+    {
+        $summary = $this->summaryOf($loan);
+        $preview = $this->postJson("/api/loans/{$loan->id}/repayments/preview", [
+            'amount_paid' => 1.00,
+            'payment_date' => now()->toDateString(),
+        ])->assertOk()->json('data');
+
+        $this->assertEqualsWithDelta($penaltyOwed, (float) $summary['outstanding_penalty'], 0.001);
+        $this->assertEqualsWithDelta((float) $summary['payoff_amount'], (float) $preview['total_outstanding_before'], 0.001);
     }
 
     /** @return array<int, array{0: string, 1: int}> period => [penalty_amount, penalty_months] */
