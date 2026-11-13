@@ -181,7 +181,7 @@ final class Scorer
         $residence = $profile?->years_at_residence;
         $memberSince = Carbon::parse($data->member->approved_at ?? $data->member->created_at);
         $membershipYears = $this->yearsBetween($memberSince, $asOf);
-        $troubled = $history->defaultedLoans + $history->writtenOffLoans + $history->restructuredLoans > 0;
+        $troubled = $history->defaultedLoans + $history->recoveredFromDefaultLoans + $history->writtenOffLoans + $history->restructuredLoans > 0;
         $hasCompletionData = $history->completedLoans > 0 || $troubled;
         $mobile = PhilippineMobile::normalise($data->member->contact_number) !== null;
 
@@ -204,9 +204,12 @@ final class Scorer
             ],
             'defaults_restructures' => ! $hasHistory && ! $troubled ? null : [
                 'value' => $history->restructuredLoans,
-                'defaulted' => $history->defaultedLoans + $history->writtenOffLoans > 0,
+                // A loan in default since paid scores like a default; only a
+                // loan defaulted now reads "has" (and raises existing_default).
+                'defaulted' => $history->defaultedLoans + $history->recoveredFromDefaultLoans + $history->writtenOffLoans > 0,
                 'detail' => match (true) {
                     $history->defaultedLoans > 0 => 'The member has a defaulted loan.',
+                    $history->recoveredFromDefaultLoans > 0 => 'The member had a loan in default (since paid).',
                     $history->writtenOffLoans > 0 => 'Part of a previous loan was written off.',
                     $history->restructuredLoans === 0 => 'No defaults or restructures.',
                     $history->restructuredLoans === 1 => '1 loan was restructured.',
@@ -400,6 +403,7 @@ final class Scorer
             'completed_loans' => $history->completedLoans,
             'clean_completed_loans' => $history->cleanCompletedLoans,
             'defaulted_loans' => $history->defaultedLoans,
+            'recovered_from_default_loans' => $history->recoveredFromDefaultLoans,
             'written_off_loans' => $history->writtenOffLoans,
             'restructured_loans' => $history->restructuredLoans,
             'active_loans' => $exposure->activeLoans,

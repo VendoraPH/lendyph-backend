@@ -38,6 +38,7 @@ class Repayment extends Model
         'balance_after',
         'payment_type',
         'status',
+        'loan_status_before',
         'void_reason',
         'voided_by',
         'voided_at',

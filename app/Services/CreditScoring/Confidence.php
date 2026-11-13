@@ -34,7 +34,7 @@ final class Confidence
 
     public static function assess(PaymentHistory $history, Capacity $capacity, bool $incomeVerified): self
     {
-        $endedBadly = $history->defaultedLoans + $history->writtenOffLoans + $history->restructuredLoans > 0;
+        $endedBadly = $history->defaultedLoans + $history->recoveredFromDefaultLoans + $history->writtenOffLoans + $history->restructuredLoans > 0;
 
         if ($history->completedLoans === 0 && ! $endedBadly) {
             return new self(self::LOW, 'Limited History: the member has no completed Lendy loan yet, so confidence is low.', true);

@@ -267,7 +267,18 @@ class LoanWriteCollisionTest extends TestCase
         ];
     }
 
-    #[DataProvider('closedStatuses')]
+    /**
+     * The statuses a payment refuses: closedStatuses() less `defaulted`, which
+     * takes recovery payments (DefaultedLoanRecoveryPaymentTest).
+     *
+     * @return array<string, array{0: string}>
+     */
+    public static function paymentClosedStatuses(): array
+    {
+        return array_diff_key(self::closedStatuses(), ['defaulted' => true]);
+    }
+
+    #[DataProvider('paymentClosedStatuses')]
     public function test_a_payment_on_a_loan_closed_after_it_was_read_answers_409_and_writes_nothing(string $status): void
     {
         $loan = $this->createReleasedLoan();
@@ -281,6 +292,21 @@ class LoanWriteCollisionTest extends TestCase
         $this->assertConflict(fn () => app(RepaymentService::class)->processRepayment($requestsCopy, 5000, now()->toDateString(), $this->admin));
 
         $this->assertSame($before, $this->state());
+    }
+
+    public function test_a_payment_on_a_loan_defaulted_after_it_was_read_is_recorded_and_the_loan_stays_defaulted(): void
+    {
+        $loan = $this->createReleasedLoan();
+
+        // The request read the loan as released; a default landed before the
+        // payment's transaction took its lock. A recovery payment is accepted.
+        $requestsCopy = Loan::findOrFail($loan->id);
+        DB::table('loans')->where('id', $loan->id)->update(['status' => 'defaulted']);
+
+        $repayment = app(RepaymentService::class)->processRepayment($requestsCopy, 5000, now()->toDateString(), $this->admin);
+
+        $this->assertSame('defaulted', $repayment->loan_status_before);
+        $this->assertSame('defaulted', $loan->fresh()->status);
     }
 
     public function test_a_payment_on_a_loan_that_was_never_active_is_still_a_422(): void

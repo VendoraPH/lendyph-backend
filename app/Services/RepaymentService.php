@@ -66,14 +66,14 @@ class RepaymentService
         string $method = 'cash',
         ?string $referenceNumber = null,
     ): Repayment {
-        if (! in_array($loan->status, Loan::ACTIVE_STATUSES, true)) {
+        if (! in_array($loan->status, Loan::COLLECTIBLE_STATUSES, true)) {
             throw ValidationException::withMessages([
-                'loan' => 'Repayments can only be recorded for released or ongoing loans.',
+                'loan' => 'Payments can only be recorded for released, ongoing or defaulted loans.',
             ]);
         }
 
         return LoanWriteTransaction::run(function () use ($loan, $amountPaid, $paymentDate, $user, $remarks, $method, $referenceNumber): Repayment {
-            $this->lockLoanForPayment($loan);
+            $this->lockLoanForPayment($loan, Loan::COLLECTIBLE_STATUSES);
 
             return $this->recordRepaymentOnLockedLoan($loan, $amountPaid, $paymentDate, $user, $remarks, $method, $referenceNumber);
         }, racedUniqueIndex: Repayment::RECEIPT_NUMBER_INDEX);
@@ -86,7 +86,8 @@ class RepaymentService
      *
      * `$amountUnderLock` gets the locked loan and returns what to pay, read
      * from what is committed once the lock is held, so a payment that landed
-     * after the caller first read the periods is seen. Late penalties are
+     * after the caller first read the periods is seen. Released and ongoing
+     * loans only: auto-pay never charges a defaulted loan. Late penalties are
      * applied first (applyPenalties()), so the amount covers the penalty the
      * payment charges. When it returns 0 or less nothing is recorded and null
      * is returned. For AutoPayService.
@@ -109,7 +110,7 @@ class RepaymentService
         }
 
         return LoanWriteTransaction::run(function () use ($loan, $amountUnderLock, $paymentDate, $user, $remarks, $method, $referenceNumber): ?Repayment {
-            $this->lockLoanForPayment($loan);
+            $this->lockLoanForPayment($loan, Loan::ACTIVE_STATUSES);
 
             // The payment's own first step, run before the amount is worked out
             // so it includes the late penalty the payment will charge (waived
@@ -128,23 +129,28 @@ class RepaymentService
     }
 
     /**
-     * Lock the loan a payment is recorded on and refuse with a 409 unless it
-     * is still released or ongoing.
+     * Lock the loan a payment is recorded on and refuse with a 409 unless its
+     * status is still one of `$statuses`: Loan::COLLECTIBLE_STATUSES for a
+     * payment staff record (a defaulted loan takes recovery payments),
+     * Loan::ACTIVE_STATUSES for auto-pay.
      *
      * A locking read, and the first statement of the transaction, so it fixes
      * no snapshot: every plain read after it sees what is committed once the
      * lock is held. No collateral rows: a payment moves a loan from `released`
-     * to `ongoing` or out to `completed`, never INTO Loan::PLEDGING_STATUSES
+     * to `ongoing` or out to `completed` (a defaulted loan stays defaulted
+     * until it is paid in full), never INTO Loan::PLEDGING_STATUSES
      * from outside it, so it has no pledge to guard. `$loan` is refreshed from
      * the locked row.
      *
+     * @param  list<string>  $statuses
+     *
      * @throws HttpResponseException 409 when the loan was closed since it was read
      */
-    private function lockLoanForPayment(Loan $loan): void
+    private function lockLoanForPayment(Loan $loan, array $statuses): void
     {
         $locked = Loan::whereKey($loan->getKey())->lockForUpdate()->first();
 
-        if ($locked === null || ! in_array($locked->status, Loan::ACTIVE_STATUSES, true)) {
+        if ($locked === null || ! in_array($locked->status, $statuses, true)) {
             throw LoanWriteTransaction::conflict();
         }
 
@@ -175,8 +181,17 @@ class RepaymentService
     ): Repayment {
         $paymentDate = Carbon::parse($paymentDate);
 
+        // The loan's status as locked, kept on the payment so a void puts back
+        // exactly that (voidRepayment()).
+        $loanStatusBefore = $loan->status;
+
+        // On a defaulted loan, the penalty each period was charged before the
+        // default: the most this payment, and the re-charge after it, may
+        // leave owed (penaltyStateAsOf()).
+        $penaltyCeilings = self::penaltyIsFrozen($loan) ? $this->penaltyCeilings($loan) : null;
+
         // Step 1: Compute penalties on overdue schedules
-        $this->applyPenalties($loan, $paymentDate);
+        $this->applyPenalties($loan, $paymentDate, ceilings: $penaltyCeilings);
 
         // Capture outstanding principal balance before payment
         $balanceBefore = (float) $loan->amortizationSchedules()
@@ -348,6 +363,7 @@ class RepaymentService
             'balance_after' => $balanceAfterCentavos / 100,
             'payment_type' => $paymentType,
             'status' => 'posted',
+            'loan_status_before' => $loanStatusBefore,
             'received_by' => $user->id,
             'remarks' => $remarks,
             // A preview numbers its rolled-back row with a placeholder and
@@ -356,7 +372,15 @@ class RepaymentService
         ]);
 
         // What went on each period, so a void can take back exactly that.
-        $repayment->allocations()->createMany($allocations);
+        // On a defaulted loan, also the penalty each period held before this
+        // payment, which a void puts back (reverseAllocation()).
+        $repayment->allocations()->createMany($penaltyCeilings === null ? $allocations : array_map(
+            fn (array $row): array => $row + [
+                'penalty_amount_before' => $penaltyCeilings[$row['amortization_schedule_id']]['amount'],
+                'penalty_months_before' => $penaltyCeilings[$row['amortization_schedule_id']]['months'],
+            ],
+            $allocations,
+        ));
 
         // And what it took of the premium owed, which the void puts back from
         // `insurance_applied`.
@@ -365,7 +389,9 @@ class RepaymentService
         }
 
         // Step 6: Loan status lifecycle
-        // released → ongoing on first payment, → completed when all schedules paid
+        // released → ongoing on first payment, → completed when all schedules paid.
+        // A defaulted loan stays defaulted until it is paid in full: a partial
+        // recovery doesn't cure the default.
         $unpaidCount = $loan->amortizationSchedules()
             ->whereIn('status', ['pending', 'partial', 'overdue'])
             ->count();
@@ -390,7 +416,14 @@ class RepaymentService
         $today = Carbon::today();
 
         if ($paymentDate->lt($today)) {
-            $this->applyPenalties($loan, $today, markOverdue: false);
+            $this->applyPenalties($loan, $today, markOverdue: false, ceilings: $penaltyCeilings);
+        }
+
+        // On a defaulted loan a payment changes the penalty only of the
+        // periods it paid: any other period its penalty step read as of the
+        // payment date holds exactly what it held before.
+        if ($penaltyCeilings !== null) {
+            $this->restoreUnpaidPeriodsPenalty($loan, $penaltyCeilings, array_column($allocations, 'amortization_schedule_id'));
         }
 
         // Share capital build-up: on an SCB-bearing loan, whatever the
@@ -492,9 +525,9 @@ class RepaymentService
         string $paymentDate,
         User $user,
     ): array {
-        if (! in_array($loan->status, Loan::ACTIVE_STATUSES, true)) {
+        if (! in_array($loan->status, Loan::COLLECTIBLE_STATUSES, true)) {
             throw ValidationException::withMessages([
-                'loan' => 'Repayment preview is only available for released or ongoing loans.',
+                'loan' => 'Payment previews are only available for released, ongoing or defaulted loans.',
             ]);
         }
 
@@ -559,7 +592,7 @@ class RepaymentService
                 'allocations' => $allocations,
                 'is_preview' => true,
             ];
-        });
+        }, Loan::COLLECTIBLE_STATUSES);
     }
 
     /**
@@ -642,15 +675,20 @@ class RepaymentService
      * which reads what the extension would collect under this lock, as
      * extendLoan() does under its own.
      *
+     * `$statuses` are the loan statuses the lock accepts (a 409 otherwise):
+     * released and ongoing by default, as an extension needs; the payment
+     * preview passes Loan::COLLECTIBLE_STATUSES, as recording a payment does.
+     *
      * @template TResult
      *
      * @param  Closure(Loan): TResult  $read
+     * @param  list<string>  $statuses
      * @return TResult
      */
-    public function rolledBackUnderPaymentLock(Loan $loan, Closure $read): mixed
+    public function rolledBackUnderPaymentLock(Loan $loan, Closure $read, array $statuses = Loan::ACTIVE_STATUSES): mixed
     {
-        return LoanWriteTransaction::rolledBack(function () use ($loan, $read): mixed {
-            $this->lockLoanForPayment($loan);
+        return LoanWriteTransaction::rolledBack(function () use ($loan, $read, $statuses): mixed {
+            $this->lockLoanForPayment($loan, $statuses);
 
             return $read($loan);
         });
@@ -904,7 +942,13 @@ class RepaymentService
             // Then the loan, then this payment, each re-read under its lock.
             $this->lockVoidRows($repayment, $loan);
 
-            $this->reverseAllocation($repayment);
+            // A completed loan goes back to Defaulted when the payment that
+            // completed it was made while it was defaulted (a recovery), read
+            // before this payment is voided. Its penalty stays frozen, as on
+            // any defaulted loan.
+            $reopensDefaulted = $loan->status === 'completed' && $this->completedWhileDefaulted($loan);
+
+            $this->reverseAllocation($repayment, penaltyFrozen: self::penaltyIsFrozen($loan) || $reopensDefaulted);
 
             // The insurance premium this payment collected is owed again,
             // exactly that much, on the loan row locked above.
@@ -977,7 +1021,13 @@ class RepaymentService
                 // un-complete it into an unenforceable state.
                 CollateralPledgeGuard::assertNoDoublePledge($lockedCollateralIds, $loan);
 
-                $loan->update(['status' => $remainingPayments > 0 ? 'ongoing' : 'released']);
+                if ($reopensDefaulted) {
+                    // A recovery that is voided leaves the default in place;
+                    // nothing moves a defaulted loan back to ongoing.
+                    $loan->update(['status' => 'defaulted']);
+                } else {
+                    $loan->update(['status' => $remainingPayments > 0 ? 'ongoing' : 'released']);
+                }
             }
 
             // Sent once the void commits; a void that rolls back tells nobody.
@@ -985,6 +1035,21 @@ class RepaymentService
 
             return $repayment;
         });
+    }
+
+    /**
+     * Whether the payment that completed `$loan` was recorded while the loan
+     * was defaulted: its latest recorded posted payment (by id, not payment
+     * date, which can be backdated), since a completed loan takes no more.
+     * Payments recorded before `loan_status_before` existed read null, and
+     * none of them could be made on a defaulted loan.
+     */
+    private function completedWhileDefaulted(Loan $loan): bool
+    {
+        return $loan->repayments()
+            ->where('status', 'posted')
+            ->reorder('id', 'desc')
+            ->value('loan_status_before') === 'defaulted';
     }
 
     /**
@@ -1165,7 +1230,7 @@ class RepaymentService
 
         // Loan::owedCentavos(), the rule LoanResource states the same figures by.
         $owed = $loan->owedCentavos($schedules);
-        $takesPayments = in_array($loan->status, Loan::ACTIVE_STATUSES, true);
+        $takesPayments = in_array($loan->status, Loan::COLLECTIBLE_STATUSES, true);
 
         // Late, not merely due — same cutoff and same helper as
         // LoanResource's `overdue_amount`, so the loans list and the loan
@@ -1218,7 +1283,7 @@ class RepaymentService
             'total_outstanding' => $owed['total'] / 100,
             // Deprecated alias of `total_outstanding`, kept one release.
             'outstanding_balance' => $owed['total'] / 100,
-            // Only for a loan that takes payments (Loan::ACTIVE_STATUSES); a
+            // Only for a loan that takes payments (Loan::COLLECTIBLE_STATUSES); a
             // payment on any other is refused, so there is nothing to preset.
             'advance_presets' => $takesPayments ? $this->advancePresets($loan, $schedules, $today) : [],
             // Null, too, on a loan with a Share Capital Build-Up: one payment
@@ -1392,12 +1457,22 @@ class RepaymentService
      * one day charges the month once. `$markOverdue` false leaves each
      * period's status as it is: the re-charge to today after a backdated
      * payment (recordRepaymentOnLockedLoan()).
+     *
+     * On a defaulted loan (penaltyIsFrozen()) it charges nothing new and
+     * leaves each status as it is: each period owes the lesser of its
+     * `$ceilings` entry (penaltyCeilings(), what it was charged before the
+     * default; the stored charge without one) and the charge as of
+     * `$asOfDate`, never below what was paid.
+     *
+     * @param  array<int, array{amount: float, months: int}>|null  $ceilings  by schedule id
      */
-    public function applyPenalties(Loan $loan, Carbon $asOfDate, bool $markOverdue = true): void
+    public function applyPenalties(Loan $loan, Carbon $asOfDate, bool $markOverdue = true, ?array $ceilings = null): void
     {
         if (! PenaltyTerms::chargesPenalty($loan)) {
             return;
         }
+
+        $markOverdue = $markOverdue && ! self::penaltyIsFrozen($loan);
 
         $lateBefore = AmortizationSchedule::pastGraceCutoff($loan->grace_period_days, $asOfDate);
 
@@ -1406,8 +1481,8 @@ class RepaymentService
             ->whereIn('status', ['pending', 'partial', 'overdue'])
             ->whereRaw(AmortizationSchedule::stillChargeableSql())
             ->with(['principalChanges', 'postedPrincipalPayments'])
-            ->each(function (AmortizationSchedule $schedule) use ($loan, $asOfDate, $markOverdue) {
-                $state = $this->penaltyStateAsOf($loan, $schedule, $asOfDate);
+            ->each(function (AmortizationSchedule $schedule) use ($loan, $asOfDate, $markOverdue, $ceilings) {
+                $state = $this->penaltyStateAsOf($loan, $schedule, $asOfDate, $ceilings[$schedule->id] ?? null);
 
                 if ($state === null) {
                     return;
@@ -1436,7 +1511,9 @@ class RepaymentService
     /**
      * The penalty a late period owes on `$asOf` and the number of monthly
      * charges counted in it (`penalty_months`), or null where penaltyAsOf()
-     * is. One charge of the loan's `penalty_rate` percent of the principal
+     * is. On a defaulted loan (penaltyIsFrozen()) it is frozenState(): never
+     * more than was charged before the default. One charge of the loan's
+     * `penalty_rate` percent of the principal
      * then unpaid on it, to the centavo, for each month it is late (owner's
      * answer, Arvin, 2026-11-11).
      *
@@ -1468,9 +1545,24 @@ class RepaymentService
      * payments would leave a receipt carrying penalty the period no longer
      * says was owed.
      *
+     * @param  array{amount: float, months: int}|null  $ceiling  a defaulted loan's charge before the default (frozenState())
      * @return array{amount: float, months: int}|null
      */
-    public function penaltyStateAsOf(Loan $loan, AmortizationSchedule $schedule, Carbon $asOf): ?array
+    public function penaltyStateAsOf(Loan $loan, AmortizationSchedule $schedule, Carbon $asOf, ?array $ceiling = null): ?array
+    {
+        $state = $this->monthlyPenaltyStateAsOf($loan, $schedule, $asOf);
+
+        return $state !== null && self::penaltyIsFrozen($loan)
+            ? $this->frozenState($schedule, $state, $ceiling)
+            : $state;
+    }
+
+    /**
+     * penaltyStateAsOf() by the monthly rule alone, whatever the loan's status.
+     *
+     * @return array{amount: float, months: int}|null
+     */
+    private function monthlyPenaltyStateAsOf(Loan $loan, AmortizationSchedule $schedule, Carbon $asOf): ?array
     {
         if (! PenaltyTerms::chargesPenalty($loan)
             || $schedule->isWaivedForGood()
@@ -1502,6 +1594,117 @@ class RepaymentService
             'amount' => max($charged / 100, (float) $schedule->penalty_paid),
             'months' => $months,
         ];
+    }
+
+    /**
+     * Whether a loan's late penalty is frozen: a defaulted loan is charged no
+     * new penalty (round Y, until the owner decides whether penalty keeps
+     * running on defaulted loans). The nightly run already skips defaulted
+     * loans, and this keeps a recovery payment from charging the missed months
+     * in one go, so its preview, the payment and the summary agree. Penalty
+     * charged before the default stays owed.
+     *
+     * The one rule: penaltyStateAsOf() gives such a loan's periods
+     * frozenState(), so applyPenalties() never charges more than was charged
+     * before the default and penaltyAsOf() readers agree with the payment;
+     * voidRepayment() keeps the stored charge for a loan the void returns to
+     * defaulted.
+     */
+    public static function penaltyIsFrozen(Loan $loan): bool
+    {
+        return $loan->status === 'defaulted';
+    }
+
+    /**
+     * A defaulted loan's period penalty as of a date: the lesser of what it
+     * was charged before the default (`$ceiling`, else its stored charge) and
+     * `$monthly`, what the monthly rule gives as of that date, never below
+     * what was paid. So a payment dated before a charge the period already
+     * holds doesn't pay that charge, which stays owed, and nothing is charged
+     * past the default.
+     *
+     * @param  array{amount: float, months: int}  $monthly
+     * @param  array{amount: float, months: int}|null  $ceiling
+     * @return array{amount: float, months: int}
+     */
+    private function frozenState(AmortizationSchedule $schedule, array $monthly, ?array $ceiling): array
+    {
+        $ceiling ??= ['amount' => (float) $schedule->penalty_amount, 'months' => (int) $schedule->penalty_months];
+        $paid = (float) $schedule->penalty_paid;
+
+        if (LoanService::toCentavos($monthly['amount']) >= LoanService::toCentavos($ceiling['amount'])) {
+            return ['amount' => max($ceiling['amount'], $paid), 'months' => $ceiling['months']];
+        }
+
+        return ['amount' => max($monthly['amount'], $paid), 'months' => min($monthly['months'], $ceiling['months'])];
+    }
+
+    /**
+     * Each period's penalty as stored now, by schedule id: on a defaulted
+     * loan, what it was charged before the default (the nightly run skips
+     * defaulted loans), read before a payment's own penalty step moves it.
+     *
+     * @return array<int, array{amount: float, months: int}>
+     */
+    private function penaltyCeilings(Loan $loan): array
+    {
+        return $loan->amortizationSchedules()->get(['id', 'penalty_amount', 'penalty_months'])
+            ->mapWithKeys(fn (AmortizationSchedule $schedule): array => [
+                $schedule->id => ['amount' => (float) $schedule->penalty_amount, 'months' => (int) $schedule->penalty_months],
+            ])
+            ->all();
+    }
+
+    /**
+     * Put back `$ceilings` (penaltyCeilings(), read before the payment) on
+     * every period of the loan the payment took no money for.
+     *
+     * @param  array<int, array{amount: float, months: int}>  $ceilings
+     * @param  list<int>  $paidIds
+     */
+    private function restoreUnpaidPeriodsPenalty(Loan $loan, array $ceilings, array $paidIds): void
+    {
+        $loan->amortizationSchedules()->whereNotIn('id', $paidIds)->get()
+            ->each(function (AmortizationSchedule $schedule) use ($ceilings): void {
+                $ceiling = $ceilings[$schedule->id] ?? null;
+
+                if ($ceiling === null
+                    || (LoanService::toCentavos((float) $schedule->penalty_amount) === LoanService::toCentavos($ceiling['amount'])
+                        && (int) $schedule->penalty_months === $ceiling['months'])) {
+                    return;
+                }
+
+                $schedule->update(['penalty_amount' => $ceiling['amount'], 'penalty_months' => $ceiling['months']]);
+            });
+    }
+
+    /**
+     * The penalty `$schedule` held before `$repayment`, a payment being voided,
+     * as if every payment voided since the last still-posted one before it on
+     * this period had never been recorded: the earliest such payment's
+     * `penalty_amount_before` and `penalty_months_before`. Null when none was
+     * recorded (a payment made while the loan wasn't defaulted, or before
+     * these were kept).
+     *
+     * @return array{amount: float, months: int}|null
+     */
+    private function penaltyBeforeVoided(Repayment $repayment, AmortizationSchedule $schedule): ?array
+    {
+        $lastPostedBefore = (int) RepaymentAllocation::query()
+            ->where('amortization_schedule_id', $schedule->id)
+            ->where('repayment_id', '<', $repayment->id)
+            ->whereHas('repayment', fn ($posted) => $posted->where('status', 'posted'))
+            ->max('repayment_id');
+
+        $row = RepaymentAllocation::query()
+            ->where('amortization_schedule_id', $schedule->id)
+            ->where('repayment_id', '>', $lastPostedBefore)
+            ->where('repayment_id', '<=', $repayment->id)
+            ->whereNotNull('penalty_amount_before')
+            ->orderBy('repayment_id')
+            ->first();
+
+        return $row === null ? null : ['amount' => (float) $row->penalty_amount_before, 'months' => (int) $row->penalty_months_before];
     }
 
     /**
@@ -1897,8 +2100,13 @@ class RepaymentService
      * principal unpaid again, the months after the payment go back up.
      * Winding the charge back to the payment's own date left the stored
      * penalty below what the loan owed until the next run.
+     *
+     * `$penaltyFrozen` (a defaulted loan, or one the void returns to
+     * defaulted) puts back instead what the period held before the payment,
+     * when the payment recorded it (penaltyBeforeVoided()), else leaves the
+     * charge as it stands: see penaltyAfterFrozenVoid().
      */
-    private function reverseAllocation(Repayment $repayment): void
+    private function reverseAllocation(Repayment $repayment, bool $penaltyFrozen = false): void
     {
         $loan = $repayment->loan;
         $today = Carbon::today();
@@ -1960,7 +2168,11 @@ class RepaymentService
             // the charge the waiver kept stands, owed again now that the
             // payment that covered it is void. A waiver made since keeps that
             // charge through its checkpoint (penaltyStateAsOf()).
-            if (! $schedule->isWaivedForGood()) {
+            //
+            // And except on a loan whose penalty is frozen (penaltyIsFrozen()),
+            // or one this void returns to defaulted: the charge stands as it
+            // was, so reopening a period charges no missed months.
+            if (! $schedule->isWaivedForGood() && ! $penaltyFrozen) {
                 $state = $this->penaltyStateAsOf($loan, $schedule, $today);
 
                 if ($state !== null) {
@@ -1970,10 +2182,42 @@ class RepaymentService
                     $schedule->penalty_amount = 0;
                     $schedule->penalty_months = 0;
                 }
+            } elseif ($penaltyFrozen && ($before = $this->penaltyBeforeVoided($repayment, $schedule)) !== null) {
+                $state = $this->penaltyAfterFrozenVoid($loan, $schedule, $repayment, $before, $today);
+                $schedule->penalty_amount = $state['amount'];
+                $schedule->penalty_months = $state['months'];
             }
 
             $schedule->save();
         }
+    }
+
+    /**
+     * A defaulted loan's period penalty after voiding `$repayment`, which
+     * recorded `$before` (penaltyBeforeVoided()) on it.
+     *
+     * - No later posted payment reached the period: exactly `$before`, what
+     *   it held before the voided payment.
+     * - A later posted payment reached it too: the period is open again, and
+     *   reads as if the voided payment was never recorded, by the frozen rule
+     *   (frozenState()) as of `$today` with `$before` as the ceiling: the
+     *   monthly rule on the principal the remaining payments left unpaid on
+     *   each charge day, never above `$before` and never below what was paid.
+     *
+     * @param  array{amount: float, months: int}  $before
+     * @return array{amount: float, months: int}
+     */
+    private function penaltyAfterFrozenVoid(Loan $loan, AmortizationSchedule $schedule, Repayment $repayment, array $before, Carbon $today): array
+    {
+        $laterPayment = RepaymentAllocation::query()
+            ->where('amortization_schedule_id', $schedule->id)
+            ->where('repayment_id', '>', $repayment->id)
+            ->whereHas('repayment', fn ($posted) => $posted->where('status', 'posted'))
+            ->exists();
+
+        $monthly = $laterPayment ? $this->monthlyPenaltyStateAsOf($loan, $schedule, $today) : null;
+
+        return $monthly === null ? $before : $this->frozenState($schedule, $monthly, $before);
     }
 
     /**

@@ -291,8 +291,8 @@ class RepaymentController extends Controller
         ),
         responses: [
             new OA\Response(response: 201, description: 'Repayment recorded'),
-            new OA\Response(response: 409, description: 'The loan was closed (completed, restructured, voided or defaulted) since it was read, or the write deadlocked; nothing was recorded. Reload and try again'),
-            new OA\Response(response: 422, description: 'Validation error (including an `amount_paid` with more than two decimals, or a `payment_date` before the loan\'s release date, read in the app timezone), or the loan is not released or ongoing (on `loan`)'),
+            new OA\Response(response: 409, description: 'The loan was closed (completed, restructured or voided) since it was read, or the write deadlocked; nothing was recorded. Reload and try again'),
+            new OA\Response(response: 422, description: 'Validation error (including an `amount_paid` with more than two decimals, or a `payment_date` before the loan\'s release date, read in the app timezone), or the loan is not released, ongoing or defaulted (on `loan`)'),
         ],
     )]
     public function store(StoreRepaymentRequest $request, Loan $loan): JsonResponse
@@ -397,11 +397,11 @@ class RepaymentController extends Controller
                     new OA\Property(property: 'outstanding_principal', type: 'number', description: 'Unpaid principal only'),
                     new OA\Property(property: 'insurance_owed', type: 'number'),
                     new OA\Property(property: 'outstanding_balance', type: 'number', deprecated: true, description: 'Deprecated alias of `total_outstanding`, kept one release'),
-                    new OA\Property(property: 'advance_presets', type: 'array', description: 'One entry per open period, in allocation order. `amount` is what a payment today must be to leave the first `periods` open periods paid: the premium owed, then each period\'s penalty as the payment charges it, its remaining interest and principal, in whole centavos. Empty, too, when the loan is not released or ongoing (payments are refused there). On a loan with a Share Capital Build-Up only the 1-period entry is sent (the allocation turns money past the current period into share capital), and it adds that period\'s build-up when the period is the one the allocation treats as current and the borrower is a member, as `amount_due_now` does: paying it leaves the period paid and credits exactly the build-up. Empty when no period is open.', items: new OA\Items(properties: [
+                    new OA\Property(property: 'advance_presets', type: 'array', description: 'One entry per open period, in allocation order. `amount` is what a payment today must be to leave the first `periods` open periods paid: the premium owed, then each period\'s penalty as the payment charges it, its remaining interest and principal, in whole centavos. Empty, too, when the loan is not released, ongoing or defaulted (payments are refused there). On a loan with a Share Capital Build-Up only the 1-period entry is sent (the allocation turns money past the current period into share capital), and it adds that period\'s build-up when the period is the one the allocation treats as current and the borrower is a member, as `amount_due_now` does: paying it leaves the period paid and credits exactly the build-up. Empty when no period is open.', items: new OA\Items(properties: [
                         new OA\Property(property: 'periods', type: 'integer'),
                         new OA\Property(property: 'amount', type: 'number'),
                     ])),
-                    new OA\Property(property: 'payoff_amount', type: 'number', nullable: true, description: 'Everything owed today: `total_outstanding`, plus the penalty of any period that fell late past its grace since penalties were last stamped. It equals the last `advance_presets` amount (when a period is open), and recording it settles the loan. Null when the loan is not released or ongoing (payments are refused there), and null on a loan with a Share Capital Build-Up (`scb_amount` above zero): there one payment can\'t settle the loan, because the allocation stops after the current period and turns the rest into share capital. The page hides "Pay all remaining" whenever this is null.'),
+                    new OA\Property(property: 'payoff_amount', type: 'number', nullable: true, description: 'Everything owed today: `total_outstanding`, plus the penalty of any period that fell late past its grace since penalties were last stamped (none on a defaulted loan, whose penalty is frozen). It equals the last `advance_presets` amount (when a period is open), and recording it settles the loan. Null when the loan is not released, ongoing or defaulted (payments are refused there), and null on a loan with a Share Capital Build-Up (`scb_amount` above zero): there one payment can\'t settle the loan, because the allocation stops after the current period and turns the rest into share capital. The page hides "Pay all remaining" whenever this is null.'),
                 ]),
             ])),
             new OA\Response(response: 404, description: 'Loan not found'),
@@ -446,7 +446,7 @@ class RepaymentController extends Controller
                     new OA\Property(property: 'total_outstanding_after', type: 'number', description: 'Everything owed after the payment: `total_outstanding_before` less what the payment applies (an overpayment or share capital credit lowers neither)'),
                 ]),
             ])),
-            new OA\Response(response: 409, description: 'The loan was closed (completed, restructured, voided or defaulted) since it was read. Reload and try again'),
+            new OA\Response(response: 409, description: 'The loan was closed (completed, restructured or voided) since it was read. Reload and try again'),
             new OA\Response(response: 422, description: 'Validation error, including an `amount_paid` with more than two decimals or a `payment_date` before the loan\'s release date (read in the app timezone)'),
             new OA\Response(response: 404, description: 'Loan not found'),
         ],

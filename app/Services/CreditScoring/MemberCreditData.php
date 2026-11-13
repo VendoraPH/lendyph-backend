@@ -22,6 +22,9 @@ use Illuminate\Support\Facades\DB;
  *   defaulted, restructured).
  * - `inPlaceRestructuredLoanIds`: those of them restructured in place (an
  *   applied restructure adjustment), which keep their own status.
+ * - `recoveredFromDefaultLoanIds`: those of them with a posted payment
+ *   recorded while the loan was defaulted (`repayments.loan_status_before`),
+ *   so a loan a recovery completed still counts as having ended badly.
  * - `periods`: their schedule rows, each with `allocations`, the principal
  *   and interest each posted payment put on it, in payment order.
  * - `profile`: the application details the score reads, counting only a
@@ -44,6 +47,7 @@ final class MemberCreditData
      * @param  Collection<int, object>  $loans
      * @param  Collection<int, object>  $periods
      * @param  list<int>  $inPlaceRestructuredLoanIds
+     * @param  list<int>  $recoveredFromDefaultLoanIds
      */
     public function __construct(
         public readonly object $member,
@@ -56,6 +60,7 @@ final class MemberCreditData
         public readonly Carbon $asOf,
         public readonly bool $noticeAcknowledged = false,
         public readonly ?string $noticeVersion = null,
+        public readonly array $recoveredFromDefaultLoanIds = [],
     ) {}
 
     public static function load(int $borrowerId, ?Loan $applicationLoan = null, ?Carbon $asOf = null): self
@@ -93,6 +98,15 @@ final class MemberCreditData
             ->map(fn ($id) => (int) $id)
             ->all();
 
+        $recoveredFromDefault = DB::table('repayments')
+            ->whereIn('loan_id', $loans->pluck('id')->all())
+            ->where('status', 'posted')
+            ->where('loan_status_before', 'defaulted')
+            ->distinct()
+            ->pluck('loan_id')
+            ->map(fn ($id) => (int) $id)
+            ->all();
+
         $own = $applicationLoan === null ? null : CreditApplicationProfile::query()->where('loan_id', $applicationLoan->id)->first();
 
         $hasValidId = DB::table('documents')
@@ -112,6 +126,7 @@ final class MemberCreditData
             $asOf,
             $own?->notice_acknowledged_at !== null,
             $own?->notice_acknowledged_at === null ? null : $own->notice_version,
+            recoveredFromDefaultLoanIds: $recoveredFromDefault,
         );
     }
 

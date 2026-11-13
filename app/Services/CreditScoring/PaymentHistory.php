@@ -52,6 +52,7 @@ final class PaymentHistory
         public readonly int $completedLoans,
         public readonly int $cleanCompletedLoans,
         public readonly int $defaultedLoans,
+        public readonly int $recoveredFromDefaultLoans,
         public readonly int $writtenOffLoans,
         public readonly int $restructuredLoans,
         public readonly int $everReleasedLoans,
@@ -135,6 +136,11 @@ final class PaymentHistory
             completedLoans: $completed,
             cleanCompletedLoans: $clean,
             defaultedLoans: $data->loans->where('status', 'defaulted')->count(),
+            // Completed by a payment recorded while the loan was defaulted: it
+            // ended badly, but it isn't defaulted now, so it never counts in
+            // `defaultedLoans` (no loan counts in both).
+            recoveredFromDefaultLoans: $data->loans->where('status', 'completed')
+                ->whereIn('id', $data->recoveredFromDefaultLoanIds)->count(),
             writtenOffLoans: $data->loans->filter(fn (object $loan) => (float) $loan->write_off_amount > 0)->count(),
             restructuredLoans: $data->loans->where('status', 'restructured')->pluck('id')->map(fn ($id) => (int) $id)
                 ->merge($data->inPlaceRestructuredLoanIds)->unique()->count(),
