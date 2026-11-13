@@ -1546,6 +1546,9 @@ class LoanService
                 'released_at' => now(),
                 'release_method' => $method,
                 'release_reference' => $reference,
+                // Its schedule, built below, and every rebuild of it round
+                // each period's interest exactly (Loan::roundsInterestExactly()).
+                'schedule_rounding' => Loan::SCHEDULE_ROUNDING_EXACT,
             ]);
 
             // The fee rules configured in Settings, charged here and nowhere
@@ -2943,9 +2946,15 @@ class LoanService
 
         // A months term accrues a month's interest for each month; a days term
         // accrues for exactly its days.
-        $totalInterest = $loan->term_unit === TermUnit::Months
-            ? round($principal * $this->rateFor($loan, LoanTermSchedule::DAYS_PER_MONTH) * $term, 2)
-            : round($principal * $this->rateFor($loan, $term), 2);
+        if (! $loan->roundsInterestExactly()) {
+            $totalInterest = $loan->term_unit === TermUnit::Months
+                ? round($principal * $this->rateFor($loan, LoanTermSchedule::DAYS_PER_MONTH) * $term, 2)
+                : round($principal * $this->rateFor($loan, $term), 2);
+        } else {
+            $totalInterest = $this->periodInterest($loan, $principal, $loan->term_unit === TermUnit::Months
+                ? LoanTermSchedule::DAYS_PER_MONTH * $term
+                : $term);
+        }
 
         return [
             [
@@ -2977,7 +2986,7 @@ class LoanService
             // Flat: interest on the ORIGINAL principal, for the days this
             // instalment covers — a short final instalment is charged less.
             $pDue = ($i === $count) ? $balance : $principalPerPeriod;
-            $iDue = round($principal * $this->rateFor($loan, $instalment['days']), 2);
+            $iDue = $this->periodInterest($loan, $principal, $instalment['days']);
             $balance = round($balance - $pDue, 2);
 
             $schedule[] = [
@@ -3017,7 +3026,7 @@ class LoanService
         foreach ($instalments as $index => $instalment) {
             $i = $index + 1;
 
-            $interestDue = round($balance * $this->rateFor($loan, $instalment['days']), 2);
+            $interestDue = $this->periodInterest($loan, $balance, $instalment['days']);
             $principalDue = ($i === $count) ? $balance : round($payment - $interestDue, 2);
             $totalDue = round($principalDue + $interestDue, 2);
             $balance = round($balance - $principalDue, 2);
@@ -3052,7 +3061,7 @@ class LoanService
                 $isLast = ($i === $count);
 
                 $pDue = $isLast ? $principal : 0;
-                $iDue = round($principal * $this->rateFor($loan, $instalment['days']), 2);
+                $iDue = $this->periodInterest($loan, $principal, $instalment['days']);
                 $balance = $isLast ? 0 : $principal;
 
                 $schedule[] = [
@@ -3070,7 +3079,7 @@ class LoanService
         }
 
         // Single-period: lump sum at maturity
-        $totalInterest = round($principal * $this->rateFor($loan, $instalments[0]['days']), 2);
+        $totalInterest = $this->periodInterest($loan, $principal, $instalments[0]['days']);
 
         return [
             [
@@ -3096,6 +3105,28 @@ class LoanService
             $loan->term_unit->value,
             $loan->frequency,
             $anchorDay,
+        );
+    }
+
+    /**
+     * The interest on `$amount` pesos (a principal or a balance) for `$days`
+     * days at the loan's quoted rate, rounded to the centavo: worked out
+     * exactly and half up (LoanTermSchedule::interestFor()), or on a loan
+     * released before that change, by its float factor (rateFor()) as it
+     * always was. Also the extension's one-cycle interest
+     * (LoanAdjustmentService::extensionFigures()).
+     */
+    public function periodInterest(Loan $loan, float $amount, int $days): float
+    {
+        if (! $loan->roundsInterestExactly()) {
+            return round($amount * $this->rateFor($loan, $days), 2);
+        }
+
+        return (float) LoanTermSchedule::interestFor(
+            number_format($amount, 2, '.', ''),
+            (string) $loan->interest_rate,
+            $loan->interest_rate_frequency->value,
+            $days,
         );
     }
 

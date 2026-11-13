@@ -711,11 +711,7 @@ class LoanAdjustmentService
         $latestOpenDueDate = Carbon::parse($openSchedules->max('due_date'));
         ['due_date' => $newDueDate, 'cycles' => $cycles] = $this->nextCycleDueDate($loan, $latestOpenDueDate, $extensionDate);
 
-        $oneCycleCentavos = LoanService::toCentavos(round($carryPrincipal * LoanTermSchedule::rateForDays(
-            (float) $loan->interest_rate,
-            $loan->interest_rate_frequency->value,
-            LoanTermSchedule::DAYS_PER_MONTH,
-        ), 2));
+        $oneCycleCentavos = LoanService::toCentavos($this->loanService->periodInterest($loan, $carryPrincipal, LoanTermSchedule::DAYS_PER_MONTH));
         $freshInterest = round($cycles * $oneCycleCentavos / 100, 2);
         $newInterestDue = round($carryInterest + $freshInterest, 2);
 

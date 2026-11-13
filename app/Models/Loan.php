@@ -156,6 +156,18 @@ class Loan extends Model
      */
     public const VIRTUAL_STATUS_CURRENT = 'current';
 
+    /**
+     * How a loan's schedule rounds each period's interest
+     * (`schedule_rounding`). Every loan released before the follow-ups batch
+     * is `legacy`, a float factor (LoanTermSchedule::rateForDays()), and keeps
+     * it in every recomputation. Release stamps `exact`
+     * (LoanTermSchedule::interestFor()); a draft or a preview has none and is
+     * worked out exactly, so it equals its release.
+     */
+    public const SCHEDULE_ROUNDING_LEGACY = 'legacy';
+
+    public const SCHEDULE_ROUNDING_EXACT = 'exact';
+
     protected $fillable = [
         'loan_account_number',
         'external_loan_no',
@@ -227,6 +239,8 @@ class Loan extends Model
         'restructure_capitalised_interest',
         'restructure_capitalised_penalty',
         'restructure_written_off_principal',
+        // self::SCHEDULE_ROUNDING_*; null until release.
+        'schedule_rounding',
     ];
 
     protected function casts(): array
@@ -716,6 +730,17 @@ class Loan extends Model
     public function ledgerEntries(): HasMany
     {
         return $this->hasMany(LoanLedgerEntry::class)->orderBy('entry_date')->orderBy('id');
+    }
+
+    /**
+     * Whether its schedules round each period's interest exactly
+     * (LoanTermSchedule::interestFor()): every loan but one released before
+     * the change. replicate() copies the marker, so a Ledger rebuild or an
+     * adjustment's temporary loan rounds as the loan was released.
+     */
+    public function roundsInterestExactly(): bool
+    {
+        return $this->schedule_rounding !== self::SCHEDULE_ROUNDING_LEGACY;
     }
 
     /**
