@@ -11,6 +11,7 @@ use App\Services\CsvImport\ErrorReportBuilder;
 use App\Services\CsvImport\ProductMappingResolver;
 use App\Services\LoanTermSchedule;
 use Illuminate\Support\Facades\Artisan;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 use Tests\Traits\StagesCsvImportRuns;
 
@@ -278,6 +279,35 @@ class OutOfProductBoundsCategoryTest extends TestCase
         $this->assertSame(['rate_above_max'], ProductMappingResolver::boundsBreaches($product, 5000000, 12, '0.75', 'weekly'));
         // 0.4% a week is 1.7142…% a month: below the floor.
         $this->assertSame(['rate_below_min'], ProductMappingResolver::boundsBreaches($product, 5000000, 12, '0.4', 'weekly'));
+    }
+
+    /**
+     * @return array<string, array{0: string, 1: string, 2: string, 3: list<string>}>
+     */
+    public static function ratePairs(): array
+    {
+        return [
+            // product, CSV rate, CSV payment frequency, expected breaches
+            'daily 0.1% equals 3% a month' => ['monthly', '0.1', 'daily', []],
+            'daily 0.1001% is above 3% a month' => ['monthly', '0.1001', 'daily', ['rate_above_max']],
+            'daily 0.0666% is below 2% a month' => ['monthly', '0.0666', 'daily', ['rate_below_min']],
+            'bi-weekly 1.4% equals 3% a month' => ['monthly', '1.4', 'bi_weekly', []],
+            'bi-weekly 1.41% is above 3% a month' => ['monthly', '1.41', 'bi_weekly', ['rate_above_max']],
+            'bi-weekly 0.9333% is just below 2% a month' => ['monthly', '0.9333', 'bi_weekly', ['rate_below_min']],
+            'daily 0.1% equals 36% a year' => ['annual', '0.1', 'daily', []],
+            'bi-weekly 1% is inside 24-36% a year' => ['annual', '1', 'bi_weekly', []],
+            'semi-monthly 1% equals 24% a year' => ['annual', '1', 'semi_monthly', []],
+            'semi-monthly 0.99% is below 24% a year' => ['annual', '0.99', 'semi_monthly', ['rate_below_min']],
+        ];
+    }
+
+    /** @param  list<string>  $expected */
+    #[DataProvider('ratePairs')]
+    public function test_rate_pairs_compare_exactly_in_like_periods(string $productPeriod, string $rate, string $frequency, array $expected): void
+    {
+        $product = $productPeriod === 'annual' ? $this->annualProduct() : $this->regularProduct();
+
+        $this->assertSame($expected, ProductMappingResolver::boundsBreaches($product, 5000000, 12, $rate, $frequency));
     }
 
     public function test_the_rate_check_is_skipped_when_the_rate_period_is_unknown(): void

@@ -7,6 +7,8 @@ use App\Models\CdaDocument;
 use App\Models\CdaOfficerTraining;
 use App\Models\CdaReport;
 use App\Services\Cda\CdaAccess;
+use App\Services\Cda\PeriodOpener;
+use App\Services\Cda\Registers\TrainingDocumentRefiler;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
@@ -172,6 +174,87 @@ class TrainingDocumentsFollowTheTrainingTest extends TestCase
 
         $migration->down();
         $this->assertSame($this->period(2025)->id, $misfiled->fresh()->period_id, 'down() undoes nothing.');
+    }
+
+    public function test_opening_a_nearer_period_refiles_the_documents_filed_under_another(): void
+    {
+        // Only 2025 and 2026 are open, so a 2024 training files under 2025.
+        $training = CdaOfficerTraining::factory()->create(['completed_on' => '2024-05-10']);
+        $document = $this->attach($training, 2025);
+        $older = CdaOfficerTraining::factory()->create(['completed_on' => '2023-05-10']);
+        $olderDocument = $this->attach($older, 2025);
+
+        $user = $this->cdaUser([CdaAccess::VIEW, CdaAccess::MANAGE_OFFICERS]);
+        $this->actingAs($user);
+        $this->assertSame(1, $this->documentsCount($training));
+
+        $opened = app(PeriodOpener::class)->open(2024, $user);
+
+        $this->assertSame($opened->id, $document->fresh()->period_id);
+        $this->assertSame($opened->id, $olderDocument->fresh()->period_id, 'Nearest to 2023 is now 2024.');
+        $this->assertSame(1, $this->documentsCount($training));
+
+        $row = AuditLog::query()->where('auditable_type', CdaDocument::class)->where('auditable_id', $document->id)
+            ->where('action', 'updated')->latest('id')->first();
+        $this->assertNotNull($row);
+        $this->assertNull($row->user_id, 'A refile on opening a period is a system change.');
+
+        // The system opener (the Dec 31 capture) refiles too.
+        app(PeriodOpener::class)->ensure(2023);
+        $this->assertSame($this->period(2023)->id, $olderDocument->fresh()->period_id);
+        $this->assertSame($opened->id, $document->fresh()->period_id);
+    }
+
+    public function test_clearing_both_dates_moves_nothing(): void
+    {
+        $training = CdaOfficerTraining::factory()->create(['completed_on' => '2025-06-15', 'status' => 'incomplete']);
+        $document = $this->attach($training, 2025);
+
+        $this->actingAs($this->cdaUser([CdaAccess::VIEW, CdaAccess::MANAGE_OFFICERS]))
+            ->putJson("/api/cda/trainings/{$training->id}", ['completed_on' => null, 'started_on' => null, 'status' => 'incomplete'])
+            ->assertOk();
+
+        $this->assertSame($this->period(2025)->id, $document->fresh()->period_id, 'An undated training\'s year is not known.');
+    }
+
+    public function test_a_refile_marks_stale_the_drafts_of_the_period_it_left_and_the_one_it_entered(): void
+    {
+        // Templates start in 2026, so only the 2026 drafts read a register.
+        $officers = fn (): CdaReport => CdaReport::query()->where('period_id', $this->period(2026)->id)->where('report_type', 'officers_trainings')->firstOrFail();
+
+        // Left 2026 (a 2025 training filed under 2026).
+        [, $misfiled] = $this->mismatch();
+        CdaReport::query()->update(['stale_at' => null]);
+        $this->artisan('cda:refile-training-documents')->assertSuccessful();
+        $this->assertSame($this->period(2025)->id, $misfiled->fresh()->period_id);
+        $this->assertNotNull($officers()->stale_at);
+
+        // Entered 2026 (a 2026 training filed under 2025).
+        $training = CdaOfficerTraining::factory()->create(['completed_on' => '2026-02-01']);
+        $entering = $this->attach($training, 2025);
+        CdaReport::query()->update(['stale_at' => null]);
+        $this->artisan('cda:refile-training-documents')->assertSuccessful();
+        $this->assertSame($this->period(2026)->id, $entering->fresh()->period_id);
+        $this->assertNotNull($officers()->stale_at);
+        $this->assertNull(CdaReport::query()->where('period_id', $this->period(2026)->id)->where('report_type', 'mediation')->first()?->stale_at, 'Only drafts reading the officers register.');
+
+        // The refile a training update runs marks them too.
+        $moved = CdaOfficerTraining::factory()->create(['completed_on' => '2026-02-01']);
+        $document = $this->attach($moved, 2026);
+        CdaReport::query()->update(['stale_at' => null]);
+        app(TrainingDocumentRefiler::class)->refile($moved->fill(['completed_on' => '2025-02-01']));
+        $this->assertSame($this->period(2025)->id, $document->fresh()->period_id);
+        $this->assertNotNull($officers()->stale_at);
+    }
+
+    public function test_a_dry_run_marks_nothing_stale(): void
+    {
+        $this->mismatch();
+        CdaReport::query()->update(['stale_at' => null]);
+
+        $this->artisan('cda:refile-training-documents', ['--dry-run' => true])->assertSuccessful();
+
+        $this->assertSame(0, CdaReport::query()->whereNotNull('stale_at')->count());
     }
 
     /**

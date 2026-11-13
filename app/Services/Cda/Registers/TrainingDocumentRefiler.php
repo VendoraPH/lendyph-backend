@@ -19,25 +19,42 @@ use Illuminate\Support\Facades\Log;
  * reads that period. When the year changes, each document of the training
  * not linked to a report moves to the new period, one by one, so each move
  * writes its own audit row. A document linked to a report is never moved: it
- * belongs to that report's period.
+ * belongs to that report's period. A training whose dates are both cleared
+ * keeps its documents where they are: its year is not known.
  *
- * The data fix (run()) applies the same rule to trainings already saved with
- * a mismatch, as a system change: one audit row per move, with no user and
- * no address. The 2026_11_14_110000 migration runs it on each deployment, and
- * `cda:refile-training-documents --dry-run` previews a database first. A
- * moved document is in its training's period, so running it again changes
+ * The data fix (run()) applies the same rule to every training saved with a
+ * mismatch, as a system change: one audit row per move, with no user and no
+ * address. It runs:
+ * - once on deploy, through the 2026_11_14_110000 migration
+ *   (`cda:refile-training-documents --dry-run` previews a database first);
+ * - each time a reporting period is opened (PeriodOpener), since a new period
+ *   can be nearer a training's year than the one its documents were filed
+ *   under.
+ *
+ * A moved document is in its training's period, so running it again changes
  * nothing. A training with no completed or started date is left alone and
  * listed (its period would follow today's date), as is a document that
- * changes while the fix runs.
+ * changes while the fix runs. Any move marks the draft reports of the periods
+ * it left and entered that read the officers register as stale, as a
+ * training write does (RegisterStaleness).
  */
 final class TrainingDocumentRefiler
 {
-    public function __construct(private readonly DocumentRepository $documents) {}
+    public function __construct(
+        private readonly DocumentRepository $documents,
+        private readonly RegisterStaleness $staleness,
+    ) {}
 
     /** The year a training is filed under: completed, else started, else this year. */
     public static function year(CdaOfficerTraining $training): int
     {
         return ($training->completed_on ?? $training->started_on ?? now('Asia/Manila'))->year;
+    }
+
+    /** Whether the training's year is known: it has a completed or a started date. */
+    public static function hasYear(CdaOfficerTraining $training): bool
+    {
+        return $training->completed_on !== null || $training->started_on !== null;
     }
 
     /** The training's own period id, or null when no period exists. */
@@ -49,27 +66,32 @@ final class TrainingDocumentRefiler
     /**
      * Move the training's unlinked documents into its own period, each with
      * its Auditable row (the signed-in user). Run inside the caller's
-     * transaction, with the training row locked.
+     * transaction, with the training row locked. Nothing moves when its year
+     * isn't known or no period exists.
      *
      * @return int how many documents moved
      */
     public function refile(CdaOfficerTraining $training): int
     {
-        $periodId = $this->periodIdFor($training);
+        $periodId = self::hasYear($training) ? $this->periodIdFor($training) : null;
 
         if ($periodId === null) {
             return 0;
         }
 
-        $moved = 0;
+        $touched = [];
 
         foreach ($this->misfiled($training->id, $periodId)->orderBy('id')->lockForUpdate()->get() as $document) {
+            $touched[] = (int) $document->period_id;
             $document->period_id = $periodId;
             $document->save();
-            $moved++;
         }
 
-        return $moved;
+        if ($touched !== []) {
+            $this->markStale([...$touched, $periodId]);
+        }
+
+        return count($touched);
     }
 
     /**
@@ -81,6 +103,7 @@ final class TrainingDocumentRefiler
     public function run(bool $dryRun): array
     {
         $result = ['moved' => [], 'skipped' => []];
+        $touched = [];
         $years = CdaReportingPeriod::query()->pluck('year', 'id');
 
         $trainingIds = CdaDocument::query()->where('subject_type', 'training')->whereNull('report_id')
@@ -96,7 +119,7 @@ final class TrainingDocumentRefiler
                     continue;
                 }
 
-                if ($training->completed_on === null && $training->started_on === null) {
+                if (! self::hasYear($training)) {
                     $result['skipped'][] = ['training_id' => (int) $training->id, 'reason' => 'it has no completed or started date, so its year is not known'];
 
                     continue;
@@ -111,10 +134,18 @@ final class TrainingDocumentRefiler
                 }
 
                 foreach ($this->misfiled($training->id, $periodId)->orderBy('id')->get(['id', 'period_id']) as $document) {
-                    $move = ['document_id' => (int) $document->id, 'training_id' => (int) $training->id, 'from' => (int) $years[$document->period_id], 'to' => (int) $years[$periodId]];
+                    $from = (int) $document->period_id;
+                    $move = ['document_id' => (int) $document->id, 'training_id' => (int) $training->id, 'from' => (int) $years[$from], 'to' => (int) $years[$periodId]];
 
-                    if ($dryRun || $this->moveAsSystem((int) $document->id, (int) $training->id, (int) $document->period_id, $periodId, (int) $years[$periodId])) {
+                    if ($dryRun) {
                         $result['moved'][] = $move;
+
+                        continue;
+                    }
+
+                    if ($this->moveAsSystem((int) $document->id, (int) $training->id, $from, $periodId, (int) $years[$periodId])) {
+                        $result['moved'][] = $move;
+                        array_push($touched, $from, $periodId);
 
                         continue;
                     }
@@ -123,6 +154,10 @@ final class TrainingDocumentRefiler
                     Log::warning('A training document changed while the refile ran; it was left as it is.', ['document' => (int) $document->id, 'training' => (int) $training->id]);
                 }
             }
+        }
+
+        if ($touched !== []) {
+            $this->markStale($touched);
         }
 
         return $result;
@@ -140,7 +175,7 @@ final class TrainingDocumentRefiler
             $training = CdaOfficerTraining::query()->whereKey($trainingId)->lockForUpdate()->first();
             $document = CdaDocument::query()->whereKey($documentId)->lockForUpdate()->first();
 
-            if ($training === null || $document === null || $document->report_id !== null
+            if ($training === null || $document === null || $document->report_id !== null || ! self::hasYear($training)
                 || $document->period_id !== $fromPeriodId || $this->periodIdFor($training) !== $toPeriodId) {
                 return false;
             }
@@ -164,6 +199,19 @@ final class TrainingDocumentRefiler
 
             return true;
         });
+    }
+
+    /**
+     * The draft reports of each period that read the officers register (the
+     * trainings and their documents) are marked stale.
+     *
+     * @param  list<int>  $periodIds
+     */
+    private function markStale(array $periodIds): void
+    {
+        foreach (array_values(array_unique($periodIds)) as $periodId) {
+            $this->staleness->touchPeriod(RegisterStaleness::OFFICERS, $periodId);
+        }
     }
 
     /** @return Builder<CdaDocument> */

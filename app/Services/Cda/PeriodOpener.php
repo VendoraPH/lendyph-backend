@@ -7,6 +7,7 @@ use App\Models\CdaReport;
 use App\Models\CdaReportingPeriod;
 use App\Models\CdaSetting;
 use App\Models\User;
+use App\Services\Cda\Registers\TrainingDocumentRefiler;
 use App\Services\Cda\Reports\ReportEngine;
 use App\Services\LoanWriteTransaction;
 use Illuminate\Database\UniqueConstraintViolationException;
@@ -32,6 +33,10 @@ use Throwable;
  * period stays open. ensure() refreshes only a year it opened itself; the
  * year-end capture opens with openIfMissing() and refreshes after its own
  * capture commits, so the reports read the capture.
+ *
+ * Opening a period, by either path, also moves the documents of trainings
+ * whose nearest period is now the new one (TrainingDocumentRefiler::run(),
+ * a system change, audited), so their `documents_count` keeps reading them.
  */
 final class PeriodOpener
 {
@@ -42,6 +47,7 @@ final class PeriodOpener
         private readonly TemplateSelector $templates,
         private readonly Applicability $applicability,
         private readonly ReportEngine $engine,
+        private readonly TrainingDocumentRefiler $trainingDocuments,
     ) {}
 
     /** @throws HttpResponseException 409 when the year is open already */
@@ -57,6 +63,7 @@ final class PeriodOpener
             throw LoanWriteTransaction::conflict(self::DUPLICATE);
         }
 
+        $this->refileTrainingDocuments();
         $this->refreshReports($period, $user);
 
         return $period;
@@ -91,9 +98,29 @@ final class PeriodOpener
         }
 
         try {
-            return [DB::transaction(fn () => $this->create($year, null)), true];
+            $period = DB::transaction(fn () => $this->create($year, null));
         } catch (UniqueConstraintViolationException) {
             return [CdaReportingPeriod::query()->where('year', $year)->firstOrFail(), false];
+        }
+
+        $this->refileTrainingDocuments();
+
+        return [$period, true];
+    }
+
+    /**
+     * A period just opened can be nearer a training's year than the one its
+     * documents were filed under, so they move to it, each audited as a
+     * system change (TrainingDocumentRefiler::run()). Once the period has
+     * committed; a failure is logged and never undoes the opening, and the
+     * next opening or `cda:refile-training-documents` finishes the move.
+     */
+    private function refileTrainingDocuments(): void
+    {
+        try {
+            $this->trainingDocuments->run(false);
+        } catch (Throwable $e) {
+            report($e);
         }
     }
 

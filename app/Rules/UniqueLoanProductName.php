@@ -11,14 +11,21 @@ use Illuminate\Contracts\Validation\ValidationRule;
  *
  * Staff pick products by name on the loan form, the reports and the CSV
  * import mapping, so two products that read alike are easy to confuse. Both
- * sides are normalised first (trimmed, whitespace runs collapsed to one
- * space, lowercased), so "Regular Loan", "regular loan" and
- * "  REGULAR   loan " are one name.
+ * sides are normalised first (whitespace runs, Unicode spaces such as the
+ * non-breaking space included, collapsed to one space, then trimmed, then
+ * lowercased), so "Regular Loan", "regular loan" and "  REGULAR   loan " are
+ * one name.
  *
  * On an update, pass the product's stored name: the check runs only when the
  * normalised name changes, so a product that already shares its name with
  * another (saved before names were unique) still saves. There is no database
  * index, because those existing duplicates would break it.
+ *
+ * Without an index, this is a check, not a guarantee: two creates with the
+ * same name sent at the same moment can both pass it, since each reads the
+ * table before the other has saved. Products are created rarely, by admins
+ * only, so that race is accepted; such a pair is an existing duplicate the
+ * next rename resolves.
  */
 class UniqueLoanProductName implements ValidationRule
 {
@@ -34,7 +41,9 @@ class UniqueLoanProductName implements ValidationRule
             return null;
         }
 
-        return mb_strtolower((string) preg_replace('/\s+/u', ' ', trim($value)));
+        $collapsed = (string) preg_replace('/\s+/u', ' ', $value);
+
+        return mb_strtolower((string) preg_replace('/^\s+|\s+$/u', '', $collapsed));
     }
 
     public function validate(string $attribute, mixed $value, Closure $fail): void
