@@ -997,12 +997,16 @@ class CsvImportProcessor
          * their own file. The reconstructed period count is a different number
          * in a different unit and comparing it here would report breaches that
          * are not there for every non-monthly loan.
+         *
+         * The payment frequency names the period the rate is stored in, so
+         * the rate is compared with the product's range in like periods.
          */
         $breaches = ProductMappingResolver::boundsBreaches(
             $product,
             $principal,
             $normalized->value('term_in_months'),
             $normalized->value('interest_rate'),
+            $normalized->value('payment_frequency'),
         );
 
         $messages = $warnings === [] ? [] : [$this->joinNotes($warnings)];

@@ -836,6 +836,38 @@ class CsvImportProcessorTest extends TestCase
     }
 
     /**
+     * A semi-monthly loan's rate is stored per half-month, so it is compared
+     * with a monthly product's range as a half-month rate. 1.5% per half-month
+     * is 3% a month, inside the product's 3% ceiling, and must not be flagged
+     * as below the floor.
+     */
+    public function test_a_non_monthly_loans_rate_is_compared_in_its_own_period(): void
+    {
+        $this->seedForImport();
+
+        $product = $this->salaryLoanProduct();
+        $run = $this->makeRun(['product_mapping' => ['Salary Loan' => $product->id]]);
+
+        $this->makeFile($run, 'customers', [$this->customerRow('A-001'), $this->customerRow('A-002')]);
+        $this->makeFile($run, 'loans', [
+            $this->loanRow('A-001', 'L-1', ['interest_rate' => '1.5', 'payment_frequency' => 'Semi-Monthly']),
+            // 2% per half-month is 4% a month: above the ceiling.
+            $this->loanRow('A-002', 'L-2', ['interest_rate' => '2', 'payment_frequency' => 'Semi-Monthly']),
+        ]);
+
+        $this->runToIdle($run);
+
+        $inside = CsvImportRow::where('loan_id', Loan::where('external_loan_no', 'L-1')->value('id'))->firstOrFail();
+        $this->assertSame('imported', $inside->result);
+        $this->assertNotSame(CsvImportProcessor::CATEGORY_OUT_OF_PRODUCT_BOUNDS, $inside->result_category);
+        $this->assertStringNotContainsString('rate_below_min', (string) $inside->result_message);
+
+        $above = CsvImportRow::where('loan_id', Loan::where('external_loan_no', 'L-2')->value('id'))->firstOrFail();
+        $this->assertSame(CsvImportProcessor::CATEGORY_OUT_OF_PRODUCT_BOUNDS, $above->result_category);
+        $this->assertStringContainsString('rate_above_max', (string) $above->result_message);
+    }
+
+    /**
      * One member's distinctive cells, so an assertion that they are absent is
      * about those cells and not about a common word.
      *

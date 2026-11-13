@@ -13,10 +13,20 @@ it('reports which commit and branch the deployment is serving', function () {
     $response = $this->getJson('/api/health');
 
     $response->assertOk()
-        ->assertJsonStructure(['status', 'timestamp', 'commit', 'branch', 'env']);
+        ->assertJsonStructure(['status', 'timestamp', 'commit', 'branch', 'env', 'gd']);
 
     expect($response->json('status'))->toBe('ok')
         ->and($response->json('env'))->toBe('testing');
+});
+
+/**
+ * The CDA report logo needs GD, so the health check says whether it is
+ * loaded, and staging and production can be checked without server access.
+ */
+it('reports whether the GD extension is loaded', function () {
+    $response = $this->getJson('/api/health')->assertOk();
+
+    expect($response->json('gd'))->toBe(extension_loaded('gd'));
 });
 
 it('reports a short commit sha', function () {

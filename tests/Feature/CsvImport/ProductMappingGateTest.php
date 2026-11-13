@@ -245,6 +245,40 @@ class ProductMappingGateTest extends TestCase
         $this->assertSame(1, $totals['rows_outside_product_bounds']);
     }
 
+    public function test_the_rate_forecast_compares_each_rows_rate_in_the_products_own_rate_period(): void
+    {
+        // 24–36% a year: the same range as 2–3% a month.
+        LoanProduct::factory()->create([
+            'name' => 'Annual Loan',
+            'interest_method' => 'straight',
+            'interest_rate' => 36.0,
+            'min_interest_rate' => 24.0,
+            'interest_rate_frequency' => 'annual',
+            'term' => 30,
+            'min_term' => 1,
+            'max_term' => 30,
+            'frequency' => 'monthly',
+            'min_amount' => 1000,
+            'max_amount' => 75000,
+        ]);
+
+        $file = $this->makeImportFile($this->run, 'loans');
+
+        // 3% a month and 0.5% a week (2.14…% a month) are both inside 24–36% a year.
+        $this->stageRow($file, 2, $this->loanValues(['loan_no' => 'L-1', 'loan_product' => 'Annual Loan', 'interest_rate' => '3']));
+        $this->stageRow($file, 3, $this->loanValues(['loan_no' => 'L-2', 'loan_product' => 'Annual Loan', 'interest_rate' => '0.5', 'payment_frequency' => 'weekly']));
+        // 1% a week is about 4.29% a month: above 36% a year.
+        $this->stageRow($file, 4, $this->loanValues(['loan_no' => 'L-3', 'loan_product' => 'Annual Loan', 'interest_rate' => '1', 'payment_frequency' => 'weekly']));
+
+        $entry = collect($this->getJson("/api/imports/{$this->run->id}/product-mapping")->json('data.csv_products'))
+            ->firstWhere('csv_value', 'Annual Loan');
+
+        $bounds = $entry['compatibility']['out_of_bounds'];
+        $this->assertSame(0, $bounds['rate_below_min']);
+        $this->assertSame(1, $bounds['rate_above_max']);
+        $this->assertSame(1, $bounds['rows']);
+    }
+
     public function test_compatibility_counts_only_rows_that_can_actually_be_imported(): void
     {
         $file = $this->makeImportFile($this->run, 'loans');

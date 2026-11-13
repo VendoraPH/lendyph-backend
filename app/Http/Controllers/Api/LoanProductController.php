@@ -93,7 +93,7 @@ class LoanProductController extends Controller
         ),
         responses: [
             new OA\Response(response: 201, description: 'Loan product created'),
-            new OA\Response(response: 422, description: 'Validation error, or `custom_fees` sent with any fee: "Additional fees are retired. Set fees up in Settings → Fees, scoped to this product."'),
+            new OA\Response(response: 422, description: 'Validation error; a `name` that reads as another product\'s, ignoring case and extra spaces: "Another loan product is already named “Regular Loan”."; or `custom_fees` sent with any fee: "Additional fees are retired. Set fees up in Settings → Fees, scoped to this product."'),
         ],
     )]
     public function store(StoreLoanProductRequest $request): JsonResponse
@@ -143,7 +143,7 @@ class LoanProductController extends Controller
         )),
         responses: [
             new OA\Response(response: 200, description: 'Loan product updated'),
-            new OA\Response(response: 422, description: 'Validation error, or `custom_fees` that differs from the stored list: "Additional fees are retired. Set fees up in Settings → Fees, scoped to this product."'),
+            new OA\Response(response: 422, description: 'Validation error; a changed `name` that reads as another product\'s, ignoring case and extra spaces: "Another loan product is already named “Regular Loan”." (a name kept as it is, or changed only in case or spacing, is never refused, so an existing duplicate still saves); or `custom_fees` that differs from the stored list: "Additional fees are retired. Set fees up in Settings → Fees, scoped to this product."'),
         ],
     )]
     public function update(UpdateLoanProductRequest $request, LoanProduct $loanProduct): LoanProductResource
