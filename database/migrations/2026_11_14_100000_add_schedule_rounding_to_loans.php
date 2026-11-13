@@ -16,10 +16,11 @@ use Illuminate\Support\Facades\Schema;
  * always did. A loan not yet released stays empty and is worked out exactly.
  * Nothing else is written, and no figure changes.
  *
- * Runs safely twice: the column is added only when missing, and the marking
- * runs only while no loan has been released since the change (no `exact`
- * marker yet), so a second run never marks a newer loan `legacy`. A string,
- * not an ENUM, so a later rounding needs no DDL; not a datetime, so
+ * Runs safely twice: the column is added only when missing, and only empty
+ * markers are set, so a loan released since (`exact`) is never touched and a
+ * run that stopped half-way is finished by the next. Until then a released
+ * loan with no marker already reads as legacy (Loan::roundsInterestExactly()).
+ * A string, not an ENUM, so a later rounding needs no DDL; not a datetime, so
  * TimezoneShift has nothing to register.
  */
 return new class extends Migration
@@ -30,10 +31,6 @@ return new class extends Migration
             Schema::table('loans', function (Blueprint $table): void {
                 $table->string('schedule_rounding', 16)->nullable();
             });
-        }
-
-        if (DB::table('loans')->where('schedule_rounding', 'exact')->exists()) {
-            return;
         }
 
         DB::table('loans')

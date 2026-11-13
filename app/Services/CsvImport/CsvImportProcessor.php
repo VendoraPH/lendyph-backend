@@ -950,6 +950,9 @@ class CsvImportProcessor
             // user of this system released it.
             'released_at' => Carbon::parse((string) $normalized->value('date_released'))->startOfDay(),
             'created_by' => $run->initiated_by,
+            // Its principal ladder came from the exact engine
+            // (LoanScheduleReconstructor::stubLoan()), so any rebuild matches.
+            'schedule_rounding' => Loan::SCHEDULE_ROUNDING_EXACT,
         ]);
 
         $now = now();

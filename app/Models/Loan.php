@@ -161,8 +161,10 @@ class Loan extends Model
      * (`schedule_rounding`). Every loan released before the follow-ups batch
      * is `legacy`, a float factor (LoanTermSchedule::rateForDays()), and keeps
      * it in every recomputation. Release stamps `exact`
-     * (LoanTermSchedule::interestFor()); a draft or a preview has none and is
-     * worked out exactly, so it equals its release.
+     * (LoanTermSchedule::interestFor()), and so does the CSV importer; a draft
+     * or a preview has none and is worked out exactly, so it equals its
+     * release. A released loan with none reads as legacy
+     * (roundsInterestExactly()).
      */
     public const SCHEDULE_ROUNDING_LEGACY = 'legacy';
 
@@ -734,13 +736,22 @@ class Loan extends Model
 
     /**
      * Whether its schedules round each period's interest exactly
-     * (LoanTermSchedule::interestFor()): every loan but one released before
-     * the change. replicate() copies the marker, so a Ledger rebuild or an
-     * adjustment's temporary loan rounds as the loan was released.
+     * (LoanTermSchedule::interestFor()): a loan marked `exact`, or one with
+     * no marker that was never released (a draft or a preview). A loan marked
+     * `legacy`, or released with no marker (by code older than the marker, or
+     * before its migration ran), keeps the float rounding: one with a
+     * `released_at` or a saved schedule. replicate() copies the marker and
+     * `released_at`, so a Ledger rebuild or an adjustment's temporary loan
+     * rounds as the loan was released.
      */
     public function roundsInterestExactly(): bool
     {
-        return $this->schedule_rounding !== self::SCHEDULE_ROUNDING_LEGACY;
+        return match ($this->schedule_rounding) {
+            self::SCHEDULE_ROUNDING_EXACT => true,
+            self::SCHEDULE_ROUNDING_LEGACY => false,
+            default => $this->released_at === null
+                && ! ($this->exists && $this->amortizationSchedules()->exists()),
+        };
     }
 
     /**

@@ -6,11 +6,13 @@ use App\Models\AmortizationSchedule;
 use App\Models\Borrower;
 use App\Models\Loan;
 use App\Models\LoanProduct;
+use App\Services\CsvImport\CsvImportProcessor;
 use App\Services\LoanService;
 use App\Services\LoanTermSchedule;
 use Illuminate\Support\Facades\DB;
 use Tests\Feature\Ledger\Release\ReleasesLoans;
 use Tests\TestCase;
+use Tests\Traits\BuildsCsvImports;
 use Tests\Traits\PostsJournals;
 use Tests\Traits\SetupLendyPH;
 
@@ -28,7 +30,7 @@ use Tests\Traits\SetupLendyPH;
  */
 class ExactInterestRoundingTest extends TestCase
 {
-    use PostsJournals, ReleasesLoans, SetupLendyPH;
+    use BuildsCsvImports, PostsJournals, ReleasesLoans, SetupLendyPH;
 
     /** Diminishing, semi-monthly, 100 days at 1% a month: the last period is 10 days on ₱48,334.50. */
     private const TIE_PRODUCT = [
@@ -129,27 +131,133 @@ class ExactInterestRoundingTest extends TestCase
 
     public function test_the_migration_marks_every_saved_loan_legacy_and_runs_safely_twice(): void
     {
-        $released = $this->createReleasedLoan();
-        $draft = $this->tieDraft();
+        $saved = [
+            'released' => $this->createReleasedLoan(),
+            'completed' => $this->createReleasedLoan(),
+            'defaulted' => $this->createReleasedLoan(),
+            'restructured' => $this->createReleasedLoan(),
+            'imported' => $this->createReleasedLoan(),
+        ];
+        foreach (['completed', 'defaulted', 'restructured'] as $status) {
+            DB::table('loans')->where('id', $saved[$status]->id)->update(['status' => $status]);
+        }
+        // As the CSV importer leaves one: ongoing, released on its own date by
+        // no user, with its saved schedule and no LN number.
+        DB::table('loans')->where('id', $saved['imported']->id)->update([
+            'status' => 'ongoing', 'released_by' => null, 'loan_account_number' => null,
+            'external_loan_no' => 'L-OLD-1', 'released_at' => '2025-06-01 00:00:00',
+        ]);
+        $drafts = [$this->tieDraft(), $this->tieDraft()];
+        DB::table('loans')->where('id', $drafts[1]->id)->update(['status' => 'approved']);
         $migration = require database_path('migrations/2026_11_14_100000_add_schedule_rounding_to_loans.php');
 
-        // As the loans stood before the change.
+        // As the loans stood before the change, then a first run that stopped
+        // after adding the column, with a loan released since.
         DB::table('loans')->update(['schedule_rounding' => null]);
-        $migration->up();
-
-        $this->assertSame('legacy', $released->fresh()->schedule_rounding);
-        $this->assertNull($draft->fresh()->schedule_rounding);
-
-        // A loan released since the change keeps `exact`, and a second run
-        // marks nothing more.
         $new = $this->createReleasedLoan();
         $this->assertSame('exact', $new->schedule_rounding);
-        DB::table('loans')->where('id', $draft->id)->update(['released_at' => now()]);
-        $migration->up();
 
-        $this->assertSame('exact', $new->fresh()->schedule_rounding);
-        $this->assertNull($draft->fresh()->schedule_rounding);
-        $this->assertSame('legacy', $released->fresh()->schedule_rounding);
+        foreach ([1, 2] as $run) {
+            $migration->up();
+
+            foreach ($saved as $name => $loan) {
+                $this->assertSame('legacy', $loan->fresh()->schedule_rounding, "run {$run}: {$name}");
+            }
+            foreach ($drafts as $draft) {
+                $this->assertNull($draft->fresh()->schedule_rounding, "run {$run}: {$draft->status}");
+            }
+            $this->assertSame('exact', $new->fresh()->schedule_rounding, "run {$run}: released since");
+        }
+    }
+
+    public function test_a_released_loan_with_no_marker_reads_as_legacy(): void
+    {
+        $loan = $this->createReleasedLoan(['product' => self::TIE_PRODUCT, 'principal_amount' => self::TIE_PRINCIPAL]);
+        $this->makeLegacy($loan, null);
+        $loan->refresh();
+
+        $this->assertNull($loan->schedule_rounding);
+        $this->assertFalse($loan->roundsInterestExactly());
+        $this->assertFalse($loan->replicate()->roundsInterestExactly());
+        $this->assertSame(161.11, app(LoanService::class)->buildAmortizationPreview($loan)[6]['interest_due']);
+
+        // A saved schedule alone counts as released.
+        DB::table('loans')->where('id', $loan->id)->update(['released_at' => null]);
+        $this->assertFalse($loan->fresh()->roundsInterestExactly());
+
+        // Never released: a draft and a preview are exact.
+        $this->assertTrue($this->tieDraft()->roundsInterestExactly());
+        $this->assertTrue($this->stub()->roundsInterestExactly());
+    }
+
+    public function test_a_released_loan_with_no_marker_keeps_its_figures_after_a_rebuild(): void
+    {
+        $source = $this->createReleasedLoan(['product' => self::TIE_PRODUCT, 'principal_amount' => self::TIE_PRINCIPAL]);
+        $this->makeLegacy($source, null);
+        $legacyInterest = $this->savedInterest($source);
+        $before = $this->figures($source);
+
+        $this->assertSame($legacyInterest, LoanService::toCentavos((float) $before['ledger_release']['interest']));
+
+        $new = $this->approvedRestructureOf($source, $this->owed($source) / 100);
+        $this->patchJson("/api/loans/{$new->id}/release")->assertOk();
+
+        $this->assertNotNull($source->fresh()->restructured_at, 'setup: the source was rebuilt');
+        $this->assertSame($before, $this->figures($source));
+    }
+
+    /**
+     * A restructure or term extension applied to the loan itself builds its
+     * new periods by the loan's own rounding, and a balance adjustment keeps
+     * each open period's interest. ₱48,334.50 at 3% straight charges exactly
+     * ₱1,450.035 a period: ₱1,450.03 on a legacy loan.
+     */
+    public function test_adjustments_applied_to_a_legacy_loan_keep_its_rounding(): void
+    {
+        foreach ([
+            'restructure' => ['term' => 6],
+            'term_extension' => ['additional_terms' => 2],
+            'balance_adjustment' => ['adjustment_amount' => -1000],
+        ] as $type => $newValues) {
+            $loan = $this->createReleasedLoan(['principal_amount' => 48334.50]);
+            $this->makeLegacy($loan);
+            $before = $this->figures($loan);
+
+            $this->assertEquals([1450.03], $this->openInterest($loan), "{$type}: setup");
+
+            $id = $this->postJson("/api/loans/{$loan->id}/adjustments", [
+                'adjustment_type' => $type,
+                'new_values' => $newValues,
+            ])->assertCreated()->json('data.id');
+            $this->patchJson("/api/loan-adjustments/{$id}/approve")->assertOk();
+            $this->patchJson("/api/loan-adjustments/{$id}/apply")->assertOk();
+
+            $this->assertSame('legacy', $loan->fresh()->schedule_rounding, $type);
+            $this->assertEquals([1450.03], $this->openInterest($loan), $type);
+            $this->assertSame($before['ledger_release'], $this->figures($loan)['ledger_release'], $type);
+        }
+    }
+
+    public function test_an_imported_loan_is_marked_exact(): void
+    {
+        LoanProduct::factory()->create([
+            'name' => 'Salary Loan', 'interest_rate' => 3.0, 'interest_method' => 'straight', 'term' => 6,
+            'frequency' => 'monthly', 'penalty_rate' => 3.0, 'grace_period_days' => 0, 'min_amount' => 1000, 'max_amount' => 1000000,
+        ]);
+        $this->seedForImport();
+        $run = $this->makeRun(['product_mapping' => ['Salary Loan' => LoanProduct::where('name', 'Salary Loan')->value('id')]]);
+        $this->makeFile($run, 'customers', [$this->customerRow('A-001')]);
+        $this->makeFile($run, 'loans', [$this->loanRow('A-001', 'L-0001')]);
+
+        $processor = new CsvImportProcessor;
+        for ($i = 0; $i < 200 && ! $processor->advance($run)->idle; $i++) {
+            $run->refresh();
+        }
+
+        $loan = Loan::where('external_loan_no', 'L-0001')->firstOrFail();
+
+        $this->assertSame('exact', $loan->schedule_rounding);
+        $this->assertTrue($loan->roundsInterestExactly());
     }
 
     public function test_a_legacy_loan_keeps_its_ledger_interest_contract_total_and_statement_after_a_rebuild(): void
@@ -168,8 +276,7 @@ class ExactInterestRoundingTest extends TestCase
             LoanService::toCentavos((float) $before['contract_total']),
         );
 
-        $owed = $source->amortizationSchedules()->get()->sum(fn (AmortizationSchedule $s): int => LoanService::toCentavos((float) $s->total_due));
-        $new = $this->approvedRestructureOf($source, $owed / 100);
+        $new = $this->approvedRestructureOf($source, $this->owed($source) / 100);
         $this->patchJson("/api/loans/{$new->id}/release")->assertOk();
 
         $this->assertNotNull($source->fresh()->restructured_at, 'setup: the source was rebuilt');
@@ -230,17 +337,40 @@ class ExactInterestRoundingTest extends TestCase
         ], $this->admin)->fresh();
     }
 
-    /** As a loan released before the change stands: marked legacy, its saved schedule built by the float path. */
-    private function makeLegacy(Loan $loan): void
+    /**
+     * As a loan released before the change stands: its saved schedule built by
+     * the float path, and marked `legacy` (or, released by code older than the
+     * marker, with none).
+     */
+    private function makeLegacy(Loan $loan, ?string $marker = 'legacy'): void
     {
-        DB::table('loans')->where('id', $loan->id)->update(['schedule_rounding' => 'legacy']);
+        $legacy = $loan->fresh();
+        $legacy->schedule_rounding = 'legacy';
+        DB::table('loans')->where('id', $loan->id)->update(['schedule_rounding' => $marker]);
 
-        foreach (app(LoanService::class)->buildAmortizationPreview($loan->fresh()) as $row) {
+        foreach (app(LoanService::class)->buildAmortizationPreview($legacy) as $row) {
             DB::table('amortization_schedules')
                 ->where('loan_id', $loan->id)
                 ->where('period_number', $row['period_number'])
                 ->update(['interest_due' => $row['interest_due'], 'total_due' => $row['total_due']]);
         }
+    }
+
+    private function owed(Loan $loan): int
+    {
+        return $loan->amortizationSchedules()->get()->sum(fn (AmortizationSchedule $s): int => LoanService::toCentavos((float) $s->total_due));
+    }
+
+    /** @return list<float> each distinct interest on the loan's open periods */
+    private function openInterest(Loan $loan): array
+    {
+        return $loan->amortizationSchedules()
+            ->whereIn('status', AmortizationSchedule::UNPAID_STATUSES)
+            ->pluck('interest_due')
+            ->map(fn (mixed $interest): float => (float) $interest)
+            ->unique()
+            ->values()
+            ->all();
     }
 
     private function savedInterest(Loan $loan): int

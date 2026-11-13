@@ -2951,7 +2951,7 @@ class LoanService
                 ? round($principal * $this->rateFor($loan, LoanTermSchedule::DAYS_PER_MONTH) * $term, 2)
                 : round($principal * $this->rateFor($loan, $term), 2);
         } else {
-            $totalInterest = $this->periodInterest($loan, $principal, $loan->term_unit === TermUnit::Months
+            $totalInterest = $this->interestOn($loan, true, $principal, $loan->term_unit === TermUnit::Months
                 ? LoanTermSchedule::DAYS_PER_MONTH * $term
                 : $term);
         }
@@ -2972,6 +2972,7 @@ class LoanService
     private function buildStraight(Loan $loan, ?int $anchorDay): array
     {
         $principal = (float) $loan->principal_amount;
+        $exact = $loan->roundsInterestExactly();
         $instalments = $this->instalmentsFor($loan, $anchorDay);
         $count = count($instalments);
 
@@ -2986,7 +2987,7 @@ class LoanService
             // Flat: interest on the ORIGINAL principal, for the days this
             // instalment covers — a short final instalment is charged less.
             $pDue = ($i === $count) ? $balance : $principalPerPeriod;
-            $iDue = $this->periodInterest($loan, $principal, $instalment['days']);
+            $iDue = $this->interestOn($loan, $exact, $principal, $instalment['days']);
             $balance = round($balance - $pDue, 2);
 
             $schedule[] = [
@@ -3006,6 +3007,7 @@ class LoanService
     private function buildDiminishing(Loan $loan, ?int $anchorDay): array
     {
         $principal = (float) $loan->principal_amount;
+        $exact = $loan->roundsInterestExactly();
         $instalments = $this->instalmentsFor($loan, $anchorDay);
         $count = count($instalments);
 
@@ -3026,7 +3028,7 @@ class LoanService
         foreach ($instalments as $index => $instalment) {
             $i = $index + 1;
 
-            $interestDue = $this->periodInterest($loan, $balance, $instalment['days']);
+            $interestDue = $this->interestOn($loan, $exact, $balance, $instalment['days']);
             $principalDue = ($i === $count) ? $balance : round($payment - $interestDue, 2);
             $totalDue = round($principalDue + $interestDue, 2);
             $balance = round($balance - $principalDue, 2);
@@ -3048,6 +3050,7 @@ class LoanService
     private function buildUponMaturity(Loan $loan, ?int $anchorDay): array
     {
         $principal = (float) $loan->principal_amount;
+        $exact = $loan->roundsInterestExactly();
         $instalments = $this->instalmentsFor($loan, $anchorDay);
         $count = count($instalments);
 
@@ -3061,7 +3064,7 @@ class LoanService
                 $isLast = ($i === $count);
 
                 $pDue = $isLast ? $principal : 0;
-                $iDue = $this->periodInterest($loan, $principal, $instalment['days']);
+                $iDue = $this->interestOn($loan, $exact, $principal, $instalment['days']);
                 $balance = $isLast ? 0 : $principal;
 
                 $schedule[] = [
@@ -3079,7 +3082,7 @@ class LoanService
         }
 
         // Single-period: lump sum at maturity
-        $totalInterest = $this->periodInterest($loan, $principal, $instalments[0]['days']);
+        $totalInterest = $this->interestOn($loan, $exact, $principal, $instalments[0]['days']);
 
         return [
             [
@@ -3118,7 +3121,16 @@ class LoanService
      */
     public function periodInterest(Loan $loan, float $amount, int $days): float
     {
-        if (! $loan->roundsInterestExactly()) {
+        return $this->interestOn($loan, $loan->roundsInterestExactly(), $amount, $days);
+    }
+
+    /**
+     * periodInterest(), with the loan's rounding read once per schedule
+     * (Loan::roundsInterestExactly() can read the loan's saved periods).
+     */
+    private function interestOn(Loan $loan, bool $exact, float $amount, int $days): float
+    {
+        if (! $exact) {
             return round($amount * $this->rateFor($loan, $days), 2);
         }
 
