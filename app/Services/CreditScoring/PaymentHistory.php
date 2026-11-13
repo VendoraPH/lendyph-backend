@@ -134,7 +134,10 @@ final class PaymentHistory
             daysPastDueNow: $daysPastDueNow,
             completedLoans: $completed,
             cleanCompletedLoans: $clean,
-            defaultedLoans: $data->loans->where('status', 'defaulted')->count(),
+            // Defaulted now, or recovered from a default by a payment made
+            // while it was defaulted: either way the loan ended badly. Once each.
+            defaultedLoans: $data->loans->where('status', 'defaulted')->pluck('id')->map(fn ($id) => (int) $id)
+                ->merge($data->recoveredFromDefaultLoanIds)->unique()->count(),
             writtenOffLoans: $data->loans->filter(fn (object $loan) => (float) $loan->write_off_amount > 0)->count(),
             restructuredLoans: $data->loans->where('status', 'restructured')->pluck('id')->map(fn ($id) => (int) $id)
                 ->merge($data->inPlaceRestructuredLoanIds)->unique()->count(),

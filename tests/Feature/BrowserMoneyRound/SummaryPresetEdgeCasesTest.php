@@ -96,8 +96,10 @@ class SummaryPresetEdgeCasesTest extends TestCase
 
     public function test_a_loan_that_takes_no_payments_gets_no_presets(): void
     {
+        // A defaulted loan takes recovery payments now
+        // (DefaultedLoanRecoveryPaymentTest); a restructured one still takes none.
         $loan = $this->releasedLoanFor(principal: self::PRINCIPAL);
-        $loan->update(['status' => 'defaulted']);
+        $loan->update(['status' => 'restructured']);
 
         $summary = $this->summaryOf($loan);
 

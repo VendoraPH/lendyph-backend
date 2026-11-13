@@ -71,6 +71,10 @@ class Loan extends Model
      * restructure work — including its backfill of the damaged rows to
      * released/ongoing — has to land before this line does, or those live loans
      * disappear from every delinquency report.
+     *
+     * It is also the set that takes payments (RepaymentService): a defaulted
+     * loan takes recovery payments and stays defaulted until it is paid in
+     * full. Auto-pay, extensions and adjustments keep to ACTIVE_STATUSES.
      */
     public const COLLECTIBLE_STATUSES = ['released', 'ongoing', 'defaulted'];
 
@@ -127,6 +131,17 @@ class Loan extends Model
      * once, and a hardcoded list on the client goes stale silently.
      */
     public const VIRTUAL_STATUS_ACTIVE = 'active';
+
+    /**
+     * Virtual `status` value standing for the whole of
+     * self::COLLECTIBLE_STATUSES: the loans that can take a payment.
+     *
+     * Like VIRTUAL_STATUS_ACTIVE it is a query-string shorthand, never written
+     * to a row, and it expands to a `whereIn` on `loans.status`. Payment Entry
+     * sends it so a defaulted loan's recovery payment can be recorded from the
+     * same list as the active loans.
+     */
+    public const VIRTUAL_STATUS_COLLECTIBLE = 'collectible';
 
     /**
      * Virtual `status` value standing for self::scopePastDue().
@@ -1059,12 +1074,14 @@ class Loan extends Model
      * once (self::ACTIVE_STATUSES) and has to render from ONE request, not one
      * per status. A single value still behaves exactly as it did.
      *
-     * Three virtual values are accepted alongside the real statuses:
+     * Four virtual values are accepted alongside the real statuses:
      *
      * - `active` (self::VIRTUAL_STATUS_ACTIVE) expands to
      *   self::ACTIVE_STATUSES, so a caller may send it or spell the statuses
      *   out and get the same rows — either way the page total agrees with
      *   `meta.stats.active`.
+     * - `collectible` (self::VIRTUAL_STATUS_COLLECTIBLE) expands to
+     *   self::COLLECTIBLE_STATUSES (released, ongoing and defaulted).
      * - `past_due` (self::VIRTUAL_STATUS_PAST_DUE) resolves to
      *   self::scopePastDue() and agrees with `meta.stats.past_due` the same
      *   way.
@@ -1074,7 +1091,7 @@ class Loan extends Model
      * Prefer the shorthands: the sets are defined in one place here, and a list
      * pinned in the client cannot follow them.
      *
-     * Note that only `active` can be flattened into the `whereIn` below.
+     * Note that only `active` and `collectible` can be flattened into the `whereIn` below.
      * `past_due` and `current` are schedule-derived, so they are subqueries, not
      * statuses — they have to be branched on rather than mapped into it. A list
      * mixing them stays an OR, which is what a comma already means here, so
@@ -1105,9 +1122,11 @@ class Loan extends Model
 
         $statuses = $requested
             ->reject(fn (string $value) => in_array($value, [self::VIRTUAL_STATUS_PAST_DUE, self::VIRTUAL_STATUS_CURRENT], true))
-            ->flatMap(fn (string $value) => $value === self::VIRTUAL_STATUS_ACTIVE
-                ? self::ACTIVE_STATUSES
-                : [$value])
+            ->flatMap(fn (string $value) => match ($value) {
+                self::VIRTUAL_STATUS_ACTIVE => self::ACTIVE_STATUSES,
+                self::VIRTUAL_STATUS_COLLECTIBLE => self::COLLECTIBLE_STATUSES,
+                default => [$value],
+            })
             ->unique()
             ->values();
 

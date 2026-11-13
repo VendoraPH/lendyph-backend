@@ -103,7 +103,7 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'insurance_payment_type', type: 'string', nullable: true, enum: ['full', 'partial']),
         new OA\Property(property: 'insurance_partial_amount', type: 'number', nullable: true),
         new OA\Property(property: 'insurance_remaining_balance', type: 'number'),
-        new OA\Property(property: 'amount_due_now', type: 'object', nullable: true, description: 'What a payment must be today to clear the insurance premium owed and every open period due on or before today in full (the first open period when none is due yet), in the order the allocation takes money, plus the share capital build-up the payment credits. Null unless the loan is released or ongoing. `period_number` and `schedule_id` are the first of those periods and `last_period_number` the last; all null when no period is open.', properties: [
+        new OA\Property(property: 'amount_due_now', type: 'object', nullable: true, description: 'What a payment must be today to clear the insurance premium owed and every open period due on or before today in full (the first open period when none is due yet), in the order the allocation takes money, plus the share capital build-up the payment credits. Null unless the loan is released, ongoing or defaulted. `period_number` and `schedule_id` are the first of those periods and `last_period_number` the last; all null when no period is open.', properties: [
             new OA\Property(property: 'amount', type: 'number'),
             new OA\Property(property: 'insurance', type: 'number'),
             new OA\Property(property: 'principal', type: 'number'),
@@ -349,13 +349,14 @@ class LoanResource extends JsonResource
             // What a payment must be today to clear the insurance premium owed
             // and every open period due by today, from the server
             // (RepaymentService::amountDueNow()). Only for a loan that takes
-            // payments, and only where the periods were loaded.
+            // payments (released, ongoing or defaulted), and only where the
+            // periods were loaded.
             // The restructure cap (LoanService::restructurableCentavos()),
             // where the periods were loaded.
             'restructurable_balance' => $this->relationLoaded('amortizationSchedules')
                 ? LoanService::restructurableCentavos($this->amortizationSchedules) / 100
                 : null,
-            'amount_due_now' => $this->relationLoaded('amortizationSchedules') && in_array($this->status, Loan::ACTIVE_STATUSES, true)
+            'amount_due_now' => $this->relationLoaded('amortizationSchedules') && in_array($this->status, Loan::COLLECTIBLE_STATUSES, true)
                 ? app(RepaymentService::class)->amountDueNow($this->resource, $this->amortizationSchedules, now())
                 : null,
             // What the loan page's Auto-Pay card shows, so it is right after a
@@ -577,7 +578,7 @@ class LoanResource extends JsonResource
             'next_due_date' => $figures['next_due_date'],
             'next_due_amount' => $figures['current_due'],
             'current_due' => $figures['current_due'],
-            'amount_due_now' => in_array($this->status, Loan::ACTIVE_STATUSES, true)
+            'amount_due_now' => in_array($this->status, Loan::COLLECTIBLE_STATUSES, true)
                 ? app(RepaymentService::class)->amountDueNow($this->resource, $open, now())
                 : null,
             'total_outstanding' => $owed['total'] / 100,
