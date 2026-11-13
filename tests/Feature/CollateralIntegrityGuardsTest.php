@@ -880,9 +880,12 @@ it('has no path writing an active loan status outside the ones that are accounte
     // Scoped to app/ on purpose. database/seeders legitimately mints demo loans
     // in every status and has no invariant to keep; the rule is about code that
     // MOVES a live loan.
-    $arrayWrite = '/["\']status["\']\s*=>\s*[^,\n]*["\'](?:released|ongoing)["\']/';
-    $propertyWrite = '/->status\s*=\s*["\'](?:released|ongoing)["\']/';
-    $rawWrite = '/DB::(?:update|statement|unprepared)\(.*(?:released|ongoing)/';
+    // `defaulted` too: it is in Loan::PLEDGING_STATUSES, so a write into it
+    // from outside that set (a void returning a completed loan to defaulted)
+    // can add a second holder exactly as released or ongoing can.
+    $arrayWrite = '/["\']status["\']\s*=>\s*[^,\n]*["\'](?:released|ongoing|defaulted)["\']/';
+    $propertyWrite = '/->status\s*=\s*["\'](?:released|ongoing|defaulted)["\']/';
+    $rawWrite = '/DB::(?:update|statement|unprepared)\(.*(?:released|ongoing|defaulted)/';
 
     $occurrences = [];
 
@@ -910,6 +913,11 @@ it('has no path writing an active loan status outside the ones that are accounte
     sort($occurrences);
 
     expect($occurrences)->toBe([
+        // loans:check-defaulted: released/ongoing → defaulted. Deliberately
+        // UNGUARDED, like released → ongoing below: all three are in
+        // Loan::PLEDGING_STATUSES, so the loan already holds whatever it holds
+        // and this write cannot add a holder.
+        'app/Console/Commands/CheckDefaultedLoans.php:105 — $loan->update([\'status\' => \'defaulted\']);',
         // CsvImportProcessor::importLoanRow(): a migrated loan is INSERTED
         // straight as `ongoing`. Deliberately UNGUARDED, and it is the one case
         // where that is provable rather than argued: this is a Loan::create(),
@@ -928,15 +936,16 @@ it('has no path writing an active loan status outside the ones that are accounte
         // that assertion, so the assertion is still the transaction's last
         // statement — which is what this entry is really asserting.
         'app/Services/LoanService.php:1543 — \'status\' => \'released\',',
-        // voidRepayment(): completed → ongoing/released (or defaulted, after a
-        // recovery). Guarded before the status write, off a lock taken at the
-        // top of the transaction. The journal reversal is written before this
+        // voidRepayment(): completed → defaulted (a voided recovery, :1012) or
+        // ongoing/released (:1014). Both guarded before the status write, off a
+        // lock taken at the top of the transaction. The journal reversal is written before this
         // block and does not move either the lock or the assertion relative to
-        // the write. (Sorted as text, so :1009 comes before :396.)
-        'app/Services/RepaymentService.php:1009 — $loan->update([\'status\' => $remainingPayments > 0 ? \'ongoing\' : \'released\']);',
+        // the write. (Sorted as text, so :1014 comes before :401.)
+        'app/Services/RepaymentService.php:1012 — $loan->update([\'status\' => \'defaulted\']);',
+        'app/Services/RepaymentService.php:1014 — $loan->update([\'status\' => $remainingPayments > 0 ? \'ongoing\' : \'released\']);',
         // recordRepaymentOnLockedLoan(), which records every payment: released
         // → ongoing. Deliberately UNGUARDED — both are already active, so it
         // cannot add a holder.
-        'app/Services/RepaymentService.php:396 — $loan->update([\'status\' => \'ongoing\']);',
+        'app/Services/RepaymentService.php:401 — $loan->update([\'status\' => \'ongoing\']);',
     ], 'a new writer of an active loan status appeared; open its transaction with CollateralPledgeGuard::lockCollateralsOf() and call CollateralPledgeGuard::assertNoDoublePledge() before the write, or account for it here and say why it cannot add a second active holder');
 });

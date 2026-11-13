@@ -138,6 +138,51 @@ class DefaultedLoanRecoveryPaymentTest extends TestCase
         $this->assertEqualsWithDelta(0.00, (float) $this->summaryOf($loan)['outstanding_penalty'], 0.001);
     }
 
+    public function test_a_backdated_recovery_payment_takes_no_penalty_charged_after_its_date(): void
+    {
+        // Period 1 (due 2026-02-10) was charged on 2026-02-14 and again on
+        // 2026-04-10 before the default: ₱400.00 over 2 months.
+        $loan = $this->defaultedLoan(chargedOn: ['2026-02-20', '2026-04-20']);
+        $this->assertSame(['400.00', 2], $this->penaltyState($loan)[1], 'setup: two monthly charges before the default');
+
+        // Dated 2026-03-01: only the 2026-02-14 charge was owed then.
+        $payment = ['amount_paid' => 1000.37, 'payment_date' => '2026-03-01'];
+        $preview = $this->postJson("/api/loans/{$loan->id}/repayments/preview", $payment)->assertOk()->json('data');
+        $repayment = Repayment::findOrFail($this->postJson("/api/loans/{$loan->id}/repayments", $payment)->assertCreated()->json('data.id'));
+
+        $this->assertEqualsWithDelta(200.00, (float) $repayment->penalty_applied, 0.001);
+        $this->assertEqualsWithDelta(800.37, (float) $repayment->interest_applied, 0.001);
+        $this->assertEqualsWithDelta((float) $preview['total_penalty'], (float) $repayment->penalty_applied, 0.001);
+        $this->assertEqualsWithDelta((float) $preview['total_interest'], (float) $repayment->interest_applied, 0.001);
+
+        // The 2026-04-10 charge stays owed, never more than was charged before
+        // the default, and a later payment pays it first.
+        $this->assertSame(['400.00', 2], $this->penaltyState($loan)[1]);
+        // ₱200.00 left on period 1, plus ₱200.00 each charged on periods 2 and 3.
+        $this->assertEqualsWithDelta(600.00, (float) $this->summaryOf($loan)['outstanding_penalty'], 0.001);
+        $later = $this->payLoan($loan, 300.00, self::RECOVERY_DAY);
+        $this->assertEqualsWithDelta(200.00, (float) $later->penalty_applied, 0.001);
+        $this->assertSame('defaulted', $loan->fresh()->status);
+    }
+
+    public function test_a_backdated_payment_on_an_ongoing_loan_is_unchanged(): void
+    {
+        $this->travelTo(Carbon::parse('2026-01-10 09:00'));
+        $loan = $this->releasedLoanFor(startDate: '2026-01-10');
+        foreach (['2026-02-20', '2026-04-20'] as $day) {
+            $this->travelTo(Carbon::parse($day.' 09:00'));
+            app(RepaymentService::class)->applyPenalties($loan->fresh(), Carbon::today());
+        }
+        $this->travelTo(Carbon::parse(self::RECOVERY_DAY.' 09:00'));
+
+        $repayment = $this->payLoan($loan, 1000.37, '2026-03-01');
+
+        // As of its date the payment takes the 2026-02-14 charge; the period is
+        // then charged again as of today: 3 monthly charges of ₱200.00.
+        $this->assertEqualsWithDelta(200.00, (float) $repayment->penalty_applied, 0.001);
+        $this->assertSame(['600.00', 3], $this->penaltyState($loan)[1]);
+    }
+
     public function test_voiding_the_payment_that_completed_a_defaulted_loan_restores_defaulted(): void
     {
         $loan = $this->defaultedLoan();
@@ -273,11 +318,13 @@ class DefaultedLoanRecoveryPaymentTest extends TestCase
     }
 
     /**
-     * The default loan, released on 2026-01-10, charged one month of penalty
-     * on period 1 on 2026-02-20, then defaulted; the clock left on the
-     * recovery day, 2026-05-20.
+     * The default loan, released on 2026-01-10, run through the nightly
+     * penalty on `$chargedOn` (by default 2026-02-20: one month on period 1),
+     * then defaulted; the clock left on the recovery day, 2026-05-20.
+     *
+     * @param  list<string>  $chargedOn
      */
-    private function defaultedLoan(?\Closure $beforeDefault = null): Loan
+    private function defaultedLoan(?\Closure $beforeDefault = null, array $chargedOn = ['2026-02-20']): Loan
     {
         $this->travelTo(Carbon::parse('2026-01-10 09:00'));
         $loan = $this->releasedLoanFor(startDate: '2026-01-10');
@@ -287,8 +334,11 @@ class DefaultedLoanRecoveryPaymentTest extends TestCase
             $beforeDefault($loan);
         }
 
-        $this->travelTo(Carbon::parse('2026-02-20 09:00'));
-        app(RepaymentService::class)->applyPenalties($loan->fresh(), Carbon::today());
+        // The nightly penalty run, on each of these days.
+        foreach ($chargedOn as $day) {
+            $this->travelTo(Carbon::parse($day.' 09:00'));
+            app(RepaymentService::class)->applyPenalties($loan->fresh(), Carbon::today());
+        }
         $loan->fresh()->update(['status' => 'defaulted']);
 
         $this->travelTo(Carbon::parse(self::RECOVERY_DAY.' 09:00'));

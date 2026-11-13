@@ -291,7 +291,7 @@ class RepaymentController extends Controller
         ),
         responses: [
             new OA\Response(response: 201, description: 'Repayment recorded'),
-            new OA\Response(response: 409, description: 'The loan was closed (completed, restructured, voided or defaulted) since it was read, or the write deadlocked; nothing was recorded. Reload and try again'),
+            new OA\Response(response: 409, description: 'The loan was closed (completed, restructured or voided) since it was read, or the write deadlocked; nothing was recorded. Reload and try again'),
             new OA\Response(response: 422, description: 'Validation error (including an `amount_paid` with more than two decimals, or a `payment_date` before the loan\'s release date, read in the app timezone), or the loan is not released, ongoing or defaulted (on `loan`)'),
         ],
     )]
@@ -446,7 +446,7 @@ class RepaymentController extends Controller
                     new OA\Property(property: 'total_outstanding_after', type: 'number', description: 'Everything owed after the payment: `total_outstanding_before` less what the payment applies (an overpayment or share capital credit lowers neither)'),
                 ]),
             ])),
-            new OA\Response(response: 409, description: 'The loan was closed (completed, restructured, voided or defaulted) since it was read. Reload and try again'),
+            new OA\Response(response: 409, description: 'The loan was closed (completed, restructured or voided) since it was read. Reload and try again'),
             new OA\Response(response: 422, description: 'Validation error, including an `amount_paid` with more than two decimals or a `payment_date` before the loan\'s release date (read in the app timezone)'),
             new OA\Response(response: 404, description: 'Loan not found'),
         ],
