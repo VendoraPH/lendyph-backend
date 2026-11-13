@@ -7,6 +7,7 @@ use App\Enums\LoanFrequency;
 use App\Enums\TermUnit;
 use App\Http\Requests\LoanProduct\Concerns\GuardsAgainstFeeCatalogOverlap;
 use App\Http\Requests\LoanProduct\Concerns\RefusesTermOutsideItsRange;
+use App\Rules\UniqueLoanProductName;
 use Illuminate\Contracts\Validation\Validator;
 use Illuminate\Foundation\Http\FormRequest;
 
@@ -22,7 +23,7 @@ class StoreLoanProductRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'name' => ['required', 'string', 'max:255'],
+            'name' => ['required', 'string', 'max:255', new UniqueLoanProductName],
             'description' => ['nullable', 'string', 'max:2000'],
             'interest_rate' => ['required', 'numeric', 'min:0', 'max:100', 'decimal:0,4'],
             'min_interest_rate' => ['nullable', 'numeric', 'min:0', 'max:100', 'decimal:0,4'],

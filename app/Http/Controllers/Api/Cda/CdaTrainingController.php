@@ -14,6 +14,7 @@ use App\Services\Cda\CdaAccess;
 use App\Services\Cda\Registers\DocumentCategories;
 use App\Services\Cda\Registers\DocumentRepository;
 use App\Services\Cda\Registers\RegisterStaleness;
+use App\Services\Cda\Registers\TrainingDocumentRefiler;
 use App\Services\LoanWriteTransaction;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
@@ -35,7 +36,9 @@ use OpenApi\Attributes as OA;
  * new version of it, never overwriting the last; `certificate.url` is a
  * signed link. Deleting a training withdraws its certificate and keeps the
  * file. A certificate files under the period of the year it was completed,
- * else the nearest one; with no period at all it is refused (422). A write
+ * else the nearest one; with no period at all it is refused (422). When a
+ * change moves the training to another period, its documents not linked to a
+ * report move with it, each move audited (TrainingDocumentRefiler). A write
  * marks the draft reports reading officers as stale, and a collision answers
  * 409, never 500.
  */
@@ -51,6 +54,7 @@ class CdaTrainingController extends Controller
         private readonly CdaAccess $access,
         private readonly DocumentRepository $documents,
         private readonly RegisterStaleness $staleness,
+        private readonly TrainingDocumentRefiler $refiler,
     ) {}
 
     #[OA\Get(
@@ -137,7 +141,7 @@ class CdaTrainingController extends Controller
     #[OA\Put(
         path: '/api/cda/trainings/{id}',
         summary: 'Change a training, or add a new certificate version',
-        description: 'Needs `cda:manage_officers` and `branches:view_all`. Every field is optional; the rules apply to the result. To send a new `certificate`, use multipart POST with `_method=PUT`: it is added as a new version, never replacing the last. Audited.',
+        description: 'Needs `cda:manage_officers` and `branches:view_all`. Every field is optional; the rules apply to the result. To send a new `certificate`, use multipart POST with `_method=PUT`: it is added as a new version, never replacing the last. A date change that moves the training to another reporting period moves its documents not linked to a report with it, so `documents_count` stays. Audited.',
         tags: ['CDA'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
@@ -151,11 +155,17 @@ class CdaTrainingController extends Controller
             abort_if($locked === null, 404, 'There is no such training.');
 
             $this->touch($locked);
+            $periodBefore = $this->refiler->periodIdFor($locked);
             $locked->fill($request->trainingData());
+            $datesChanged = $locked->isDirty(['completed_on', 'started_on']);
 
             if ($locked->isDirty()) {
                 $locked->save();
                 $this->touch($locked);
+            }
+
+            if ($datesChanged && $this->refiler->periodIdFor($locked) !== $periodBefore) {
+                $this->refiler->refile($locked);
             }
 
             $this->attach($locked, $request->file('certificate'), $request->user());

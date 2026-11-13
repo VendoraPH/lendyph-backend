@@ -2,11 +2,14 @@
 
 namespace Tests\Feature\CsvImport;
 
+use App\Enums\LoanFrequency;
 use App\Models\CsvImportFile;
 use App\Models\CsvImportRun;
 use App\Models\LoanProduct;
+use App\Services\CsvImport\CsvRatePeriod;
 use App\Services\CsvImport\ErrorReportBuilder;
 use App\Services\CsvImport\ProductMappingResolver;
+use App\Services\LoanTermSchedule;
 use Illuminate\Support\Facades\Artisan;
 use Tests\TestCase;
 use Tests\Traits\StagesCsvImportRuns;
@@ -183,15 +186,15 @@ class OutOfProductBoundsCategoryTest extends TestCase
         // 120,000 over 36 months at 4% breaks the maximum of all three.
         $this->assertSame(
             ['amount_above_max', 'term_above_max', 'rate_above_max'],
-            ProductMappingResolver::boundsBreaches($product, 12000000, 36, 4.0),
+            ProductMappingResolver::boundsBreaches($product, 12000000, 36, 4.0, 'monthly'),
         );
 
         $this->assertSame(
             ['amount_below_min'],
-            ProductMappingResolver::boundsBreaches($product, 50000, 12, 3.0),
+            ProductMappingResolver::boundsBreaches($product, 50000, 12, 3.0, 'monthly'),
         );
 
-        $this->assertSame([], ProductMappingResolver::boundsBreaches($product, 5000000, 12, 3.0));
+        $this->assertSame([], ProductMappingResolver::boundsBreaches($product, 5000000, 12, 3.0, 'monthly'));
     }
 
     public function test_the_bounds_check_reads_the_staged_string_form_identically(): void
@@ -205,8 +208,8 @@ class OutOfProductBoundsCategoryTest extends TestCase
         $product = $this->regularProduct();
 
         $this->assertSame(
-            ProductMappingResolver::boundsBreaches($product, 12000000, 36, 4.0),
-            ProductMappingResolver::boundsBreaches($product, '12000000', '36', '4'),
+            ProductMappingResolver::boundsBreaches($product, 12000000, 36, 4.0, 'monthly'),
+            ProductMappingResolver::boundsBreaches($product, '12000000', '36', '4', 'monthly'),
         );
     }
 
@@ -219,7 +222,85 @@ class OutOfProductBoundsCategoryTest extends TestCase
          * and counting it as a breach would pad the list an operator reviews with
          * rows they cannot act on from here.
          */
-        $this->assertSame([], ProductMappingResolver::boundsBreaches($product, null, null, null));
-        $this->assertSame([], ProductMappingResolver::boundsBreaches($product, 'n/a', 'twelve', 'three'));
+        $this->assertSame([], ProductMappingResolver::boundsBreaches($product, null, null, null, null));
+        $this->assertSame([], ProductMappingResolver::boundsBreaches($product, 'n/a', 'twelve', 'three', 'monthly'));
+    }
+
+    // ── the rate is compared in like periods ─────────────────────────────
+
+    private function annualProduct(): LoanProduct
+    {
+        // 24–36% a year: the same range as 2–3% a month.
+        return LoanProduct::factory()->create([
+            'name' => 'Annual Loan',
+            'interest_method' => 'diminishing',
+            'interest_rate' => 36.0,
+            'min_interest_rate' => 24.0,
+            'interest_rate_frequency' => 'annual',
+            'term' => 30,
+            'min_term' => 1,
+            'max_term' => 30,
+            'frequency' => 'monthly',
+            'min_amount' => 1000,
+            'max_amount' => 75000,
+        ]);
+    }
+
+    public function test_a_monthly_csv_rate_is_compared_with_an_annual_products_range_in_like_periods(): void
+    {
+        $product = $this->annualProduct();
+
+        // 3% a month is 36% a year: exactly the ceiling, so inside it. 2% a
+        // month is exactly the floor. Neither is "below 24".
+        $this->assertSame([], ProductMappingResolver::boundsBreaches($product, 5000000, 12, '3', 'monthly'));
+        $this->assertSame([], ProductMappingResolver::boundsBreaches($product, 5000000, 12, '2', 'monthly'));
+        $this->assertSame([], ProductMappingResolver::boundsBreaches($product, 5000000, 12, '2.5', 'upon_maturity'));
+
+        // Just past either end, with no rounding to hide it.
+        $this->assertSame(['rate_above_max'], ProductMappingResolver::boundsBreaches($product, 5000000, 12, '3.0001', 'monthly'));
+        $this->assertSame(['rate_below_min'], ProductMappingResolver::boundsBreaches($product, 5000000, 12, '1.9999', 'monthly'));
+    }
+
+    public function test_a_weekly_csv_rate_is_compared_with_a_monthly_products_range_in_like_periods(): void
+    {
+        $product = $this->regularProduct();
+
+        /*
+         * A weekly loan's CSV rate is stored per week. 2–3% a month is
+         * 14/30–21/30% a week (about 0.4667–0.7%), so 0.7% a week is the
+         * ceiling exactly and 0.5% is inside.
+         */
+        $this->assertSame([], ProductMappingResolver::boundsBreaches($product, 5000000, 12, '0.7', 'weekly'));
+        $this->assertSame([], ProductMappingResolver::boundsBreaches($product, 5000000, 12, '0.5', 'weekly'));
+        $this->assertSame([], ProductMappingResolver::boundsBreaches($product, 5000000, 12, '1.5', 'semi_monthly'));
+
+        // 0.75% a week is 3.2142…% a month: above the ceiling.
+        $this->assertSame(['rate_above_max'], ProductMappingResolver::boundsBreaches($product, 5000000, 12, '0.75', 'weekly'));
+        // 0.4% a week is 1.7142…% a month: below the floor.
+        $this->assertSame(['rate_below_min'], ProductMappingResolver::boundsBreaches($product, 5000000, 12, '0.4', 'weekly'));
+    }
+
+    public function test_the_rate_check_is_skipped_when_the_rate_period_is_unknown(): void
+    {
+        $product = $this->regularProduct();
+
+        // Uncomparable, as for a malformed rate. The amount and term are still checked.
+        $this->assertSame([], ProductMappingResolver::boundsBreaches($product, 5000000, 12, '99', null));
+        $this->assertSame([], ProductMappingResolver::boundsBreaches($product, 5000000, 12, '99', 'fortnightly'));
+        $this->assertSame(['amount_above_max'], ProductMappingResolver::boundsBreaches($product, 12000000, 12, '99', ''));
+    }
+
+    public function test_the_csv_rate_period_is_the_one_the_importer_stores_the_rate_in(): void
+    {
+        foreach (LoanFrequency::values() as $frequency) {
+            $this->assertSame(
+                LoanTermSchedule::fromPeriodCount(1, $frequency)['interest_rate_frequency'],
+                CsvRatePeriod::forPaymentFrequency($frequency),
+                "The CSV rate period for {$frequency} must be the period the imported loan's rate is stored in.",
+            );
+        }
+
+        $this->assertNull(CsvRatePeriod::forPaymentFrequency(null));
+        $this->assertNull(CsvRatePeriod::forPaymentFrequency('annual'));
     }
 }

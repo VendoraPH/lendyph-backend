@@ -8,6 +8,7 @@ use App\Enums\TermUnit;
 use App\Http\Requests\LoanProduct\Concerns\GuardsAgainstFeeCatalogOverlap;
 use App\Http\Requests\LoanProduct\Concerns\RefusesTermOutsideItsRange;
 use App\Models\LoanProduct;
+use App\Rules\UniqueLoanProductName;
 use Illuminate\Contracts\Validation\Validator;
 use Illuminate\Foundation\Http\FormRequest;
 
@@ -30,8 +31,14 @@ class UpdateLoanProductRequest extends FormRequest
 
     public function rules(): array
     {
+        $product = $this->route('loan_product');
+
         return [
-            'name' => ['sometimes', 'string', 'max:255'],
+            // Checked only when the normalised name changes, so an existing duplicate still saves.
+            'name' => ['sometimes', 'string', 'max:255', new UniqueLoanProductName(
+                $product instanceof LoanProduct ? $product->id : null,
+                $product instanceof LoanProduct ? $product->name : null,
+            )],
             'description' => ['nullable', 'string', 'max:2000'],
             'interest_rate' => ['sometimes', 'numeric', 'min:0', 'max:100', 'decimal:0,4'],
             'min_interest_rate' => ['nullable', 'numeric', 'min:0', 'max:100', 'decimal:0,4'],
