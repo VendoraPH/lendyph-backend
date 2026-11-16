@@ -115,6 +115,70 @@ jobs:
           done
           exit 1
 
+      # Linda's AI key (staging only; Arvin, 2026-11-16, after the owner's privacy
+      # sign-off). Delivered exactly like the proxy secret: over this SSH session's
+      # STDIN into a 0600 file in the deploy user's home, never in a command line or
+      # a log. The deploy step exports it before deploy.sh, so config:cache bakes it
+      # in. No secret means off: the box's copy is removed and Linda answers with
+      # its matcher only. Never fatal.
+      - name: Deliver Linda's AI key (staging only)
+        id: linda_key
+        if: env.TARGET == 'staging'
+        continue-on-error: true
+        env:
+          LINDA_KEY: ${{ secrets.LINDA_ANTHROPIC_API_KEY_STAGING }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          key="$RUNNER_TEMP/vps_key_linda"
+          trap 'rm -f "$key"' EXIT
+          printf '%s\n' "$VPS_SSH_KEY" > "$key"
+          # Pin the box's host key, as the proxy secret step does. No key, no connection.
+          known="$RUNNER_TEMP/known_hosts_linda"
+          printf '%s\n' "${VPS_KNOWN_HOSTS:-}" | awk -v h="$VPS_HOST" 'NF >= 3 && $1 !~ /^#/ { print h, $2, $3 }' > "$known"
+          if [ ! -s "$known" ]; then
+            echo "::warning title=Host key missing::VPS_KNOWN_HOSTS holds no key; Linda's key was neither delivered nor removed."
+            exit 1
+          fi
+          box() {
+            ssh -i "$key" -o BatchMode=yes -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known" -o GlobalKnownHostsFile=/dev/null \
+              -o ConnectTimeout=60 "$VPS_USER@$VPS_HOST" "$1"
+          }
+          # No secret means off: remove the box's copy (paths only, nothing on stdin).
+          if [ -z "$LINDA_KEY" ]; then
+            for attempt in 1 2 3; do
+              if box "rm -f \"\$HOME/.lendyph-linda-key/binhs-coop-backend-staging\" \"\$HOME/.lendyph-linda-key/binhs-coop-backend-staging.tmp\"; echo 'linda key removed'" < /dev/null; then
+                echo "::warning title=Linda key removed::LINDA_ANTHROPIC_API_KEY_STAGING is not set; the box's key was removed and Linda answers with its matcher only."
+                exit 0
+              fi
+              echo "attempt $attempt to remove Linda's key failed"
+              [ "$attempt" -lt 3 ] && sleep 60
+            done
+            exit 1
+          fi
+          # An API, personal or service account key on one line (sk-ant-api03-..., sk-ant-usr...,
+          # sk-ant-svc...). Admin keys, sign-in tokens and anything multi-line are refused.
+          key_format='^sk-ant-(api[0-9]{2}|usr[0-9]*|svc[0-9]*)-[A-Za-z0-9_-]{20,}$'
+          if ! [[ $LINDA_KEY =~ $key_format ]]; then
+            echo "::warning title=Linda key not delivered::LINDA_ANTHROPIC_API_KEY_STAGING is not an API, personal or service account key on one line; the box keeps its last one, if any."
+            exit 1
+          fi
+          # Only paths in the remote command; the value is read from stdin by cat.
+          remote="set -eu; umask 077; d=\"\$HOME/.lendyph-linda-key\"; mkdir -p \"\$d\"; chmod 700 \"\$d\"; f=\"\$d/binhs-coop-backend-staging\"; cat > \"\$f.tmp\"; if [ ! -s \"\$f.tmp\" ]; then rm -f \"\$f.tmp\"; exit 1; fi; chmod 600 \"\$f.tmp\"; mv -f \"\$f.tmp\" \"\$f\"; echo 'linda key delivered'"
+          for attempt in 1 2 3; do
+            if printf '%s\n' "$LINDA_KEY" | box "$remote"; then
+              exit 0
+            fi
+            echo "attempt $attempt to deliver Linda's key failed"
+            [ "$attempt" -lt 3 ] && sleep 60
+          done
+          exit 1
+
       - name: Deploy to VPS via SSH
         id: deploy
         uses: appleboy/ssh-action@v1
@@ -172,6 +236,18 @@ jobs:
               # its default (none), so no question leaves the server until the owner signs off on
               # privacy. Exported so config:cache (inside deploy.sh) bakes it in.
               export LINDA_ENABLED=true
+              # Linda's AI key, delivered by the step above (staging only). Exported so
+              # config:cache bakes it in; never echoed, never on a command line. Without it
+              # Linda answers with its matcher only (LINDA_DRIVER stays none).
+              LINDA_KEY_FILE="$HOME/.lendyph-linda-key/binhs-coop-backend-staging"
+              if [ -s "$LINDA_KEY_FILE" ]; then
+                LINDA_ANTHROPIC_API_KEY="$(sed -n 1p "$LINDA_KEY_FILE")"
+                export LINDA_ANTHROPIC_API_KEY
+                export LINDA_DRIVER=anthropic
+                echo "linda key: loaded"
+              else
+                echo "NOTE: no Linda key on the box; Linda answers with its matcher only."
+              fi
             fi
 
             bash "$DEPLOY_DIR/deploy.sh"
@@ -326,6 +402,18 @@ jobs:
               # its default (none), so no question leaves the server until the owner signs off on
               # privacy. Exported so config:cache (inside deploy.sh) bakes it in.
               export LINDA_ENABLED=true
+              # Linda's AI key, delivered by the step above (staging only). Exported so
+              # config:cache bakes it in; never echoed, never on a command line. Without it
+              # Linda answers with its matcher only (LINDA_DRIVER stays none).
+              LINDA_KEY_FILE="$HOME/.lendyph-linda-key/binhs-coop-backend-staging"
+              if [ -s "$LINDA_KEY_FILE" ]; then
+                LINDA_ANTHROPIC_API_KEY="$(sed -n 1p "$LINDA_KEY_FILE")"
+                export LINDA_ANTHROPIC_API_KEY
+                export LINDA_DRIVER=anthropic
+                echo "linda key: loaded"
+              else
+                echo "NOTE: no Linda key on the box; Linda answers with its matcher only."
+              fi
             fi
 
             bash "$DEPLOY_DIR/deploy.sh"
@@ -539,3 +627,6 @@ jobs:
       - name: Warn if the proxy secret was not delivered
         if: ${{ !cancelled() && steps.proxy_secret.outcome == 'failure' }}
         run: echo "::warning title=Proxy secret not delivered::The deploy ran with the box's previous proxy secret, or none (X-Forwarded-For stays untrusted)."
+      - name: Warn if Linda's key was not delivered
+        if: ${{ !cancelled() && steps.linda_key.outcome == 'failure' }}
+        run: echo "::warning title=Linda key not delivered::The box keeps its previous Linda key, if any, and Linda's AI stays on with it; with none, Linda answers with its matcher only."
