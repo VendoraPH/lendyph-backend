@@ -269,12 +269,13 @@ jobs:
                   echo "::warning title=Config cache folder left open::www-data reaches it only as other ($owner:$group)"
                   return 0
                 fi
-                if [ "$me" != root ] && [ "$me" != "$owner" ] && ! id -nG "$me" 2>/dev/null | tr ' ' '\n' | grep -qx "$group"; then
+                if [ "$me" != root ] && [ "$me" != "$owner" ] && ! id -nG "$me" 2>/dev/null | tr ' ' '\n' | grep -qxF "$group"; then
                   echo "::warning title=Config cache folder left open::$me reaches it only as other ($owner:$group)"
                   return 0
                 fi
                 if chmod o-rwx "$d" 2>/dev/null; then
                   echo "config cache folder: closed to other users ($owner:$group)"
+                  cache_sealed=1
                 else
                   echo "::warning title=Config cache folder left open::could not chmod it as $me"
                 fi
@@ -285,6 +286,15 @@ jobs:
             bash "$DEPLOY_DIR/deploy.sh"
             # Staging: put config.php back to 0640 at once, not only when this script exits.
             if declare -F protect_config_cache >/dev/null; then protect_config_cache; fi
+            # Did the folder stay closed while deploy.sh ran? Some deploy steps reset
+            # modes; say so instead of claiming the window was covered.
+            if [ "${cache_sealed:-}" = 1 ]; then
+              mode="$(stat -c %A "$DEPLOY_DIR/bootstrap/cache" 2>/dev/null || true)"
+              case "$mode" in
+                *---) echo "config cache folder: still closed to other users ($mode)" ;;
+                *) echo "::warning title=Config cache folder reopened::deploy.sh changed it to $mode; config.php was reachable until the reset" ;;
+              esac
+            fi
 
             # --- Did this deploy actually land? -----------------------------------------
             # Nothing here used to assert the OUTCOME of a deploy. A green job proved that
@@ -469,12 +479,13 @@ jobs:
                   echo "::warning title=Config cache folder left open::www-data reaches it only as other ($owner:$group)"
                   return 0
                 fi
-                if [ "$me" != root ] && [ "$me" != "$owner" ] && ! id -nG "$me" 2>/dev/null | tr ' ' '\n' | grep -qx "$group"; then
+                if [ "$me" != root ] && [ "$me" != "$owner" ] && ! id -nG "$me" 2>/dev/null | tr ' ' '\n' | grep -qxF "$group"; then
                   echo "::warning title=Config cache folder left open::$me reaches it only as other ($owner:$group)"
                   return 0
                 fi
                 if chmod o-rwx "$d" 2>/dev/null; then
                   echo "config cache folder: closed to other users ($owner:$group)"
+                  cache_sealed=1
                 else
                   echo "::warning title=Config cache folder left open::could not chmod it as $me"
                 fi
@@ -485,6 +496,15 @@ jobs:
             bash "$DEPLOY_DIR/deploy.sh"
             # Staging: put config.php back to 0640 at once, not only when this script exits.
             if declare -F protect_config_cache >/dev/null; then protect_config_cache; fi
+            # Did the folder stay closed while deploy.sh ran? Some deploy steps reset
+            # modes; say so instead of claiming the window was covered.
+            if [ "${cache_sealed:-}" = 1 ]; then
+              mode="$(stat -c %A "$DEPLOY_DIR/bootstrap/cache" 2>/dev/null || true)"
+              case "$mode" in
+                *---) echo "config cache folder: still closed to other users ($mode)" ;;
+                *) echo "::warning title=Config cache folder reopened::deploy.sh changed it to $mode; config.php was reachable until the reset" ;;
+              esac
+            fi
 
             # --- Did this deploy actually land? -----------------------------------------
             # Nothing here used to assert the OUTCOME of a deploy. A green job proved that
